@@ -1,0 +1,33 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  lint-and-test:
+    name: Ruff + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+      - name: Run Ruff
+        run: uv run ruff check .
+      - name: Run unit tests
+        run: uv run pytest -q
