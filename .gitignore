@@ -1,6 +1,5 @@
 uv.lock
 .venv
 settings.local.json
-.python-version
 *.pyc
 .idea
