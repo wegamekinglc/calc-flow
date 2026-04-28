@@ -2,9 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pyarrow as pa
-
-from calc_flow.batch import Batch
 from calc_flow.engine.base import Engine
 from calc_flow.expression import split_assignment
 
@@ -12,70 +9,81 @@ from calc_flow.expression import split_assignment
 class ArrayEngine(Engine):
     """Base class for array-backed engines using the Python array API standard."""
 
+    @property
+    def xp(self) -> Any:
+        raise NotImplementedError
 
-def _column_arrays(batch: Batch, namespace: Any) -> dict[str, Any]:
-    return {
-        name: namespace.asarray(
-            batch.table[name].combine_chunks().to_numpy(zero_copy_only=False)
-        )
-        for name in batch.schema.names
-    }
+    def add(self, left: Any, right: Any) -> Any:
+        return self.xp.add(self.xp.asarray(left), self.xp.asarray(right))
+
+    def subtract(self, left: Any, right: Any) -> Any:
+        return self.xp.subtract(self.xp.asarray(left), self.xp.asarray(right))
+
+    def multiply(self, left: Any, right: Any) -> Any:
+        return self.xp.multiply(self.xp.asarray(left), self.xp.asarray(right))
+
+    def divide(self, left: Any, right: Any) -> Any:
+        return self.xp.divide(self.xp.asarray(left), self.xp.asarray(right))
+
+    def matmul(self, left: Any, right: Any) -> Any:
+        return self.xp.matmul(self.xp.asarray(left), self.xp.asarray(right))
+
+    def sum(self, data: Any, *, axis: int | None = None) -> Any:
+        return self.xp.asarray(self.xp.sum(self.xp.asarray(data), axis=axis))
+
+    def mean(self, data: Any, *, axis: int | None = None) -> Any:
+        return self.xp.asarray(self.xp.mean(self.xp.asarray(data), axis=axis))
+
+    def max(self, data: Any, *, axis: int | None = None) -> Any:
+        return self.xp.asarray(self.xp.max(self.xp.asarray(data), axis=axis))
+
+    def min(self, data: Any, *, axis: int | None = None) -> Any:
+        return self.xp.asarray(self.xp.min(self.xp.asarray(data), axis=axis))
+
+    def transpose(self, data: Any, *, axes: tuple[int, ...] | None = None) -> Any:
+        arr = self.xp.asarray(data)
+        if axes is None:
+            axes = tuple(range(arr.ndim - 1, -1, -1))
+        return self.xp.permute_dims(arr, axes=axes)
+
+    def reshape(self, data: Any, shape: int | tuple[int, ...]) -> Any:
+        return self.xp.reshape(self.xp.asarray(data), shape)
 
 
-def _to_arrow_array(value: Any, rows: int) -> pa.Array:
-    if hasattr(value, "tolist"):
-        value = value.tolist()
-    if not isinstance(value, list):
-        value = [value] * rows
-    return pa.array(value)
-
-
-def _evaluate_expression(expression: str, batch: Batch, namespace: Any) -> Batch:
+def _evaluate_expression(expression: str, data: Any, namespace: Any) -> Any:
     assignment = split_assignment(expression)
     value_expression = assignment[1] if assignment is not None else expression
 
-    if batch.is_array:
-        array = namespace.asarray(batch.array)
-        scope = {"array": array, "x": array, "xp": namespace}
-        result = eval(value_expression, {"__builtins__": {}}, scope)
-        if assignment is None:
-            return Batch(result)
-        column, _ = assignment
-        return Batch.from_arrays({column: result})
-
-    scope = _column_arrays(batch, namespace)
-    scope["xp"] = namespace
-    result = eval(value_expression, {"__builtins__": {}}, scope)
-    result_array = _to_arrow_array(result, batch.num_rows)
-
-    if assignment is None:
-        return Batch(pa.table({"result": result_array}))
-
-    column, _ = assignment
-    table = batch.table
-    index = table.schema.get_field_index(column)
-    if index == -1:
-        return Batch(table.append_column(column, result_array))
-    return Batch(table.set_column(index, column, result_array))
+    arr = namespace.asarray(data)
+    scope = {"x": arr, "xp": namespace}
+    return eval(value_expression, {"__builtins__": {}}, scope)
 
 
 class NumpyEngine(ArrayEngine):
     """NumPy-backed computation engine via array API standard."""
 
-    def evaluate(self, expression: str, batch: Batch, **kwargs: Any) -> Batch:
+    @property
+    def xp(self) -> Any:
         import numpy as np
 
-        return _evaluate_expression(expression, batch, np)
+        return np
+
+    def evaluate(self, expression: str, data: Any, **kwargs: Any) -> Any:
+        return _evaluate_expression(expression, data, self.xp)
 
 
 class JaxEngine(ArrayEngine):
     """JAX-backed computation engine via array API standard."""
 
-    def evaluate(self, expression: str, batch: Batch, **kwargs: Any) -> Batch:
+    @property
+    def xp(self) -> Any:
         try:
             import jax.numpy as jnp
         except ImportError as exc:
             msg = "JaxEngine requires the 'jax' package"
             raise ImportError(msg) from exc
 
-        return _evaluate_expression(expression, batch, jnp)
+        return jnp
+
+    def evaluate(self, expression: str, data: Any, **kwargs: Any) -> Any:
+        return _evaluate_expression(expression, data, self.xp)

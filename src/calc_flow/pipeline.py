@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 
-from calc_flow.batch import Batch
+import pyarrow as pa
+
 from calc_flow.context import Context
 from calc_flow.operator import Operator
 
 
 class Pipeline:
-    """An ordered DAG of operators that process batches of data."""
+    """An ordered DAG of operators that process data in sequence."""
 
     def __init__(self, name: str = "pipeline") -> None:
         self.name = name
@@ -24,9 +26,9 @@ class Pipeline:
         self._operators.append(operator)
         return self
 
-    def apply(self, batch: Batch) -> Batch:
-        """Apply all operators to a single batch in sequence."""
-        result = batch
+    def apply(self, data: pa.Table | Any) -> pa.Table | Any:
+        """Apply all operators to data in sequence."""
+        result = data
         for op in self._operators:
             result = op.apply(result)
         return result

@@ -3,16 +3,18 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from calc_flow.batch import Batch
+import pyarrow as pa
 
 
 class Engine(ABC):
     """Abstract interface for a computation engine.
 
-    An engine evaluates expressions against data held in Calc Flow batches.
-    Implementations may use dataframe libraries (pandas, polars, datafusion)
-    or array libraries (numpy, jax).
+    An engine evaluates expressions against data. Implementations may use
+    dataframe libraries (pandas, polars, datafusion) which accept Arrow
+    tables, or array libraries (numpy, jax) which accept Array API arrays.
     """
 
     @abstractmethod
-    def evaluate(self, expression: str, batch: Batch, **kwargs: Any) -> Batch: ...
+    def evaluate(
+        self, expression: str, data: pa.Table | Any, **kwargs: Any
+    ) -> pa.Table | Any: ...
