@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import tempfile
 
-from calc_flow.batch import Batch
+import pyarrow as pa
+
+from calc_flow.checkpoint import CheckpointManager
 from calc_flow.operator import StatefulOperator
 from calc_flow.pipeline import Pipeline
 from calc_flow.runtime.micro_batch import MicroBatchRunner
 
 
 class _RowCounter(StatefulOperator):
-    def apply(self, batch: Batch) -> Batch:
-        self._state["total_rows"] = self._state.get("total_rows", 0) + batch.num_rows
-        return batch
+    def apply(self, data: pa.Table) -> pa.Table:
+        self._state["total_rows"] = self._state.get("total_rows", 0) + len(data)
+        return data
 
 
 def test_micro_batch_runner() -> None:
@@ -26,7 +28,7 @@ def test_micro_batch_runner() -> None:
             checkpoint_dir=tmpdir,
         )
 
-        batches = [Batch.from_pylist([{"x": i}] * 3) for i in range(10)]
+        batches = [pa.Table.from_pylist([{"x": i}] * 3) for i in range(10)]
         runner.run(iter(batches))
 
         assert op.snapshot()["total_rows"] == 30
@@ -44,10 +46,8 @@ def test_micro_batch_runner_checkpoint_saved() -> None:
             checkpoint_dir=tmpdir,
         )
 
-        batches = [Batch.from_pylist([{"x": i}] * 10) for i in range(5)]
+        batches = [pa.Table.from_pylist([{"x": i}] * 10) for i in range(5)]
         runner.run(iter(batches))
-
-        from calc_flow.checkpoint import CheckpointManager
 
         mgr = CheckpointManager(tmpdir)
         cp = mgr.load("test")
@@ -61,9 +61,9 @@ def test_micro_batch_runner_reset_clears_checkpoint() -> None:
         p = Pipeline("test").add(op)
         runner = MicroBatchRunner(p, checkpoint_every=1, checkpoint_dir=tmpdir)
 
-        runner.run(iter([Batch.from_pylist([{"x": 1}])]))
+        runner.run(iter([pa.Table.from_pylist([{"x": 1}])]))
         runner.reset()
-        runner.run(iter([Batch.from_pylist([{"x": 2}])]))
+        runner.run(iter([pa.Table.from_pylist([{"x": 2}])]))
 
         assert op.snapshot()["total_rows"] == 1
 

@@ -3,18 +3,17 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 Calc Flow is a micro-batch / streaming stateful calculation engine. Data flows
-through pipelines as `Batch` objects; computation is delegated to pluggable
-dataframe or array engines. See `docs/introduction.md` for requirements and data
-flow. This project lives under `workspace/calc-flow/` in the parent repo — git
-conventions (branch naming, commit messages, PR titles) are inherited from the
-parent repo's `CLAUDE.md`.
+through pipelines as raw Apache Arrow tables or Array API arrays; computation is
+delegated to pluggable dataframe or array engines. See `docs/introduction.md` for
+requirements and data flow. This project lives under `workspace/calc-flow/` in
+the parent repo — git conventions (branch naming, commit messages, PR titles)
+are inherited from the parent repo's `CLAUDE.md`.
 
 ## Commands
 
 ```bash
 uv sync                                  # install dependencies
 uv run pytest                            # run all tests
-uv run pytest tests/calc_flow/test_batch.py
 uv run pytest -k checkpoint
 uv run ruff check .
 uv run ruff format --check .
@@ -33,39 +32,36 @@ to reserve future structure. See `.claude/rules/code-style.md`.
 
 ## Architecture
 
-### Batch (`batch.py`)
-
-Dual-mode container: stores either Arrow data (`_kind == "dataframe"`) or an
-Array API array (`_kind == "array"`). Dataframe operations (`table`, `schema`,
-`to_pandas`, `to_polars`) raise `TypeError` on array batches — guard with
-`is_dataframe`/`is_array` or call `_require_dataframe()`.
-
-Construct via `Batch.from_pylist`, `from_pandas`, `from_polars`, `from_arrays`
-(columns → Arrow table), `from_array` (Array API array), or directly with a
-`pa.RecordBatch | pa.Table`.
+Data flows through the system as raw `pa.Table` (for dataframe operations) or
+Array API arrays (for array computation). Construct Arrow tables with
+`pa.Table.from_pylist`, `pa.table`, or `pa.Table.from_pandas`; pass arrays
+directly to array engines.
 
 ### Operator, Pipeline, Checkpoint cycle
 
-- **`Operator`** (ABC) — `apply(batch) -> Batch` is the sole abstract method.
-  `snapshot() -> dict`, `restore(dict)`, `reset()` form the checkpoint lifecycle.
+- **`Operator`** (ABC) — `apply(data) -> pa.Table | Any` is the sole abstract
+  method. `snapshot() -> dict`, `restore(dict)`, `reset()` form the checkpoint
+  lifecycle.
 - **`StatelessOperator`** — pure transform. Construct with a `fn` callable, or
   subclass and override `apply`.
-- **`StatefulOperator`** — maintains `self._state: dict` across batches.
+- **`StatefulOperator`** — maintains `self._state: dict` across items.
   `snapshot/restore/reset` operate on this dict. Subclass must implement `apply`.
 - **`Pipeline`** — ordered operator sequence. `add()` enforces unique operator
-  names (checkpoints key by name). `apply(batch)` chains operators sequentially.
+  names (checkpoints key by name). `apply(data)` chains operators sequentially.
   `restore(checkpoint)` calls each operator's `restore` if present in the
   checkpoint, otherwise `reset()`.
 - **`Checkpoint`** — value object: `(pipeline_name, offset, state)`. Has
   `to_dict/from_dict`.
 - **`CheckpointManager`** — persists JSON to `{dir}/{pipeline_name}.json`.
   Atomic writes (write `.tmp`, rename). `recover()` restores state and returns
-  batch offset, or 0 if no checkpoint exists. `clear()` deletes the file.
+  offset, or 0 if no checkpoint exists. `clear()` deletes the file.
 
 ### Engines (`engine/`)
 
-- **`Engine`** (ABC) — single abstract method: `evaluate(expression: str, batch: Batch) -> Batch`.
-- **`DataFrameEngine`** adds `sql(query, tables: dict[str, Batch]) -> Batch`
+- **`Engine`** (ABC) — `evaluate(expression, data, **kwargs) -> pa.Table | Any`.
+  Dataframe engines accept and return `pa.Table`; array engines accept and return
+  Array API arrays.
+- **`DataFrameEngine`** adds `sql(query, tables: dict[str, pa.Table]) -> pa.Table`
   (default: `NotImplementedError`).
 
 Expression handling is centralized in `expression.py`:
@@ -79,26 +75,25 @@ Expression handling is centralized in `expression.py`:
 
 Engine implementations:
 
-| Engine             | `evaluate`                                            | `sql`                                                 |
-|--------------------|-------------------------------------------------------|-------------------------------------------------------|
-| `PandasEngine`     | `df.eval()` with result-type handling                 | —                                                     |
-| `PolarsEngine`     | Via `pl.SQLContext` + `sql_projection`                | `pl.SQLContext` with named tables                     |
-| `DataFusionEngine` | Delegates to `self.sql()`                             | `datafusion.SessionContext`, registers record batches |
-| `NumpyEngine`      | `eval()` in scope with column arrays + `xp` namespace | —                                                     |
-| `JaxEngine`        | Same as NumpyEngine but with `jax.numpy`              | —                                                     |
+| Engine             | `evaluate`                                              | `sql`                                                 |
+|--------------------|---------------------------------------------------------|-------------------------------------------------------|
+| `PandasEngine`     | `df.eval()` with result-type handling                   | —                                                     |
+| `PolarsEngine`     | Via `pl.SQLContext` + `sql_projection`                  | `pl.SQLContext` with named tables                     |
+| `DataFusionEngine` | Delegates to `self.sql()`                               | `datafusion.SessionContext`, registers record batches |
+| `NumpyEngine`      | `eval()` in scope with `{"x": arr, "xp": namespace}`    | —                                                     |
+| `JaxEngine`        | Same as NumpyEngine but with `jax.numpy`                | —                                                     |
 
-Array engines evaluate expressions by building a scope dict with column-name →
-array mappings plus `xp` (the namespace module) and `array`/`x` (for array
-batches). Assignment `"c = a + b"` appends or replaces an Arrow column; bare
-expression `"a + b"` produces a `"result"` column.
+Array engines also expose a set of programmatic operation methods: `add`,
+`subtract`, `multiply`, `divide`, `matmul`, `sum`, `mean`, `max`, `min`,
+`transpose`, `reshape`. All accept and return raw Array API arrays.
 
 ### Runtime modes (`runtime/`)
 
-- **`MicroBatchRunner`** — iterates a `source: Iterator[Batch]`, applies
+- **`MicroBatchRunner`** — iterates a `source: Iterator[pa.Table | Any]`, applies
   pipeline to each, checkpoints at `checkpoint_every` intervals. On `run()`,
   recovers from last checkpoint offset first. `reset()` clears pipeline state and
   deletes the checkpoint file.
-- **`StreamingRunner`** — one batch per `step()` call. Recovers once on first
+- **`StreamingRunner`** — one item per `step()` call. Recovers once on first
   `step()` (via `_recover_once`). Saves checkpoint after every step. `reset()`
   clears state and checkpoint, allows a fresh recovery on next `step()`.
 

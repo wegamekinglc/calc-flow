@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from calc_flow.batch import Batch
+from typing import Any
+
+import pyarrow as pa
+
 from calc_flow.checkpoint import CheckpointManager
 from calc_flow.pipeline import Pipeline
 
@@ -9,7 +12,7 @@ class StreamingRunner:
     """Runs a pipeline in streaming mode.
 
     Processes one batch per round — each invocation of ``step()`` consumes
-    a single batch through the full pipeline. Suitable for real-time or
+    a single item through the full pipeline. Suitable for real-time or
     near-real-time workloads.
     """
 
@@ -23,10 +26,10 @@ class StreamingRunner:
         self._round: int = 0
         self._recovered = False
 
-    def step(self, batch: Batch) -> Batch:
-        """Process a single batch and return the result."""
+    def step(self, data: pa.Table | Any) -> pa.Table | Any:
+        """Process a single data item and return the result."""
         self._recover_once()
-        result = self.pipeline.apply(batch)
+        result = self.pipeline.apply(data)
         self._round += 1
         self._checkpoints.save(self.pipeline, self._round)
         return result

@@ -18,7 +18,12 @@ It supports both micro-batch (dozens to tens of thousands) and streaming (one ba
 ## Calculation Engine
 
 1. dataframe engine for apache arrow table/record batch;
+
+for dataframe we should support an expression engine;
+
 2. array engine for array.
+
+for array we should define a set of apis to do the array and matrix calculation.
 
 ## Key Requirements
 
@@ -27,4 +32,5 @@ It supports both micro-batch (dozens to tens of thousands) and streaming (one ba
 * input data can be apache arrow table, record batches or a compatible array;
 * should at least support pandas, polars and datafusion as the dataframe calculation engines;
 * should at least support numpy, jax as the array calculation engines;
-* should have a builtin mechanism for states recovery, e.g. checkpoints.
+* should have a builtin mechanism for states recovery, e.g. checkpoints;
+* calc flow is a pure functional library.

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import pyarrow as pa
 import pytest
 
-from calc_flow.batch import Batch
 from calc_flow.operator import StatefulOperator, StatelessOperator
 from calc_flow.pipeline import Pipeline
 
@@ -13,11 +13,11 @@ class _AddCol(StatelessOperator):
         self._col = col
         self._val = val
 
-    def apply(self, batch: Batch) -> Batch:
-        rows = batch.to_pylist()
+    def apply(self, data: pa.Table) -> pa.Table:
+        rows = data.to_pylist()
         for r in rows:
             r[self._col] = self._val
-        return Batch.from_pylist(rows)
+        return pa.Table.from_pylist(rows)
 
 
 def test_pipeline_apply() -> None:
@@ -25,8 +25,8 @@ def test_pipeline_apply() -> None:
     p.add(_AddCol("step1", "b", 10))
     p.add(_AddCol("step2", "c", 20))
 
-    batch = Batch.from_pylist([{"a": 1}, {"a": 2}])
-    result = p.apply(batch)
+    table = pa.Table.from_pylist([{"a": 1}, {"a": 2}])
+    result = p.apply(table)
 
     rows = result.to_pylist()
     assert rows == [{"a": 1, "b": 10, "c": 20}, {"a": 2, "b": 10, "c": 20}]
@@ -34,14 +34,14 @@ def test_pipeline_apply() -> None:
 
 def test_pipeline_snapshot_restore() -> None:
     class Accum(StatefulOperator):
-        def apply(self, batch: Batch) -> Batch:
-            self._state["n"] = self._state.get("n", 0) + batch.num_rows
-            return batch
+        def apply(self, data: pa.Table) -> pa.Table:
+            self._state["n"] = self._state.get("n", 0) + len(data)
+            return data
 
     p1 = Pipeline("test")
     acc = Accum("tracker")
     p1.add(acc)
-    p1.apply(Batch.from_pylist([{"x": 1}] * 7))
+    p1.apply(pa.Table.from_pylist([{"x": 1}] * 7))
 
     snap = p1.snapshot()
     assert snap == {"tracker": {"n": 7}}
@@ -49,19 +49,19 @@ def test_pipeline_snapshot_restore() -> None:
     p2 = Pipeline("test")
     p2.add(Accum("tracker"))
     p2.restore(snap)
-    p2.apply(Batch.from_pylist([{"x": 1}] * 3))
+    p2.apply(pa.Table.from_pylist([{"x": 1}] * 3))
     assert p2.snapshot()["tracker"]["n"] == 10
 
 
 def test_pipeline_restore_resets_missing_operator_state() -> None:
     class Accum(StatefulOperator):
-        def apply(self, batch: Batch) -> Batch:
-            self._state["n"] = self._state.get("n", 0) + batch.num_rows
-            return batch
+        def apply(self, data: pa.Table) -> pa.Table:
+            self._state["n"] = self._state.get("n", 0) + len(data)
+            return data
 
     op = Accum("tracker")
     p = Pipeline("test").add(op)
-    p.apply(Batch.from_pylist([{"x": 1}] * 7))
+    p.apply(pa.Table.from_pylist([{"x": 1}] * 7))
 
     p.restore({})
 
@@ -84,13 +84,13 @@ def test_pipeline_iter() -> None:
 
 def test_pipeline_reset() -> None:
     class S(StatefulOperator):
-        def apply(self, batch: Batch) -> Batch:
+        def apply(self, data: pa.Table) -> pa.Table:
             self._state["called"] = True
-            return batch
+            return data
 
     op = S("s")
     p = Pipeline("test").add(op)
-    p.apply(Batch.from_pylist([{"x": 0}]))
+    p.apply(pa.Table.from_pylist([{"x": 0}]))
 
     assert op.snapshot() == {"called": True}
     p.reset()

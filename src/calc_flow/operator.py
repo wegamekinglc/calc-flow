@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Any
 
-from calc_flow.batch import Batch
+import pyarrow as pa
 
 
 class Operator(ABC):
@@ -14,7 +14,7 @@ class Operator(ABC):
         self.name = name
 
     @abstractmethod
-    def apply(self, batch: Batch) -> Batch: ...
+    def apply(self, data: pa.Table | Any) -> pa.Table | Any: ...
 
     def reset(self) -> None:
         """Reset any internal state (called on recovery)."""
@@ -39,13 +39,17 @@ class StatelessOperator(Operator):
     ``apply`` override.
     """
 
-    def __init__(self, name: str, fn: Callable[[Batch], Batch] | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        fn: Callable[[pa.Table | Any], pa.Table | Any] | None = None,
+    ) -> None:
         super().__init__(name)
         self._fn = fn
 
-    def apply(self, batch: Batch) -> Batch:
+    def apply(self, data: pa.Table | Any) -> pa.Table | Any:
         if self._fn is not None:
-            return self._fn(batch)
+            return self._fn(data)
         msg = f"{type(self).__name__} must override apply or provide fn"
         raise NotImplementedError(msg)
 
@@ -58,7 +62,7 @@ class StatefulOperator(Operator):
         self._state: dict[str, Any] = {}
 
     @abstractmethod
-    def apply(self, batch: Batch) -> Batch: ...
+    def apply(self, data: pa.Table | Any) -> pa.Table | Any: ...
 
     def snapshot(self) -> dict[str, Any]:
         return dict(self._state)

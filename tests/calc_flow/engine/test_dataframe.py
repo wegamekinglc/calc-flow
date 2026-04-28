@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from calc_flow.batch import Batch
+import pyarrow as pa
+
 from calc_flow.engine.base import Engine
 from calc_flow.engine.dataframe import (
     DataFrameEngine,
@@ -19,8 +20,8 @@ def test_all_dataframe_engines_are_engines() -> None:
 
 def test_pandas_engine_evaluate() -> None:
     engine = PandasEngine()
-    batch = Batch.from_pylist([{"a": 1, "b": 10}, {"a": 2, "b": 20}])
-    result = engine.evaluate("c = a + b", batch)
+    table = pa.Table.from_pylist([{"a": 1, "b": 10}, {"a": 2, "b": 20}])
+    result = engine.evaluate("c = a + b", table)
     assert result.schema.names == ["a", "b", "c"]
     assert result.to_pylist() == [
         {"a": 1, "b": 10, "c": 11},
@@ -30,16 +31,16 @@ def test_pandas_engine_evaluate() -> None:
 
 def test_pandas_engine_evaluate_expression_result() -> None:
     engine = PandasEngine()
-    batch = Batch.from_pylist([{"a": 1, "b": 10}, {"a": 2, "b": 20}])
-    result = engine.evaluate("a + b", batch)
+    table = pa.Table.from_pylist([{"a": 1, "b": 10}, {"a": 2, "b": 20}])
+    result = engine.evaluate("a + b", table)
     assert result.schema.names == ["result"]
     assert result.to_pylist() == [{"result": 11}, {"result": 22}]
 
 
 def test_polars_engine_evaluate() -> None:
     engine = PolarsEngine()
-    batch = Batch.from_pylist([{"a": 1, "b": 10}, {"a": 2, "b": 20}])
-    result = engine.evaluate("c = a + b", batch)
+    table = pa.Table.from_pylist([{"a": 1, "b": 10}, {"a": 2, "b": 20}])
+    result = engine.evaluate("c = a + b", table)
     assert result.to_pylist() == [
         {"a": 1, "b": 10, "c": 11},
         {"a": 2, "b": 20, "c": 22},
@@ -48,8 +49,8 @@ def test_polars_engine_evaluate() -> None:
 
 def test_polars_engine_sql() -> None:
     engine = PolarsEngine()
-    left = Batch.from_pylist([{"id": 1, "a": 10}, {"id": 2, "a": 20}])
-    right = Batch.from_pylist([{"id": 1, "b": 3}, {"id": 2, "b": 4}])
+    left = pa.Table.from_pylist([{"id": 1, "a": 10}, {"id": 2, "a": 20}])
+    right = pa.Table.from_pylist([{"id": 1, "b": 3}, {"id": 2, "b": 4}])
     result = engine.sql(
         "select l.id, l.a + r.b as total "
         "from left_table l join right_table r on l.id = r.id",
@@ -60,8 +61,8 @@ def test_polars_engine_sql() -> None:
 
 def test_datafusion_engine_evaluate() -> None:
     engine = DataFusionEngine()
-    batch = Batch.from_pylist([{"a": 1, "b": 10}, {"a": 2, "b": 20}])
-    result = engine.evaluate("c = a + b", batch)
+    table = pa.Table.from_pylist([{"a": 1, "b": 10}, {"a": 2, "b": 20}])
+    result = engine.evaluate("c = a + b", table)
     assert result.to_pylist() == [
         {"a": 1, "b": 10, "c": 11},
         {"a": 2, "b": 20, "c": 22},
@@ -70,8 +71,8 @@ def test_datafusion_engine_evaluate() -> None:
 
 def test_datafusion_engine_sql() -> None:
     engine = DataFusionEngine()
-    batch = Batch.from_pylist([{"a": 1, "b": 10}, {"a": 2, "b": 20}])
-    result = engine.sql("select a, b, a + b as c from input", {"input": batch})
+    table = pa.Table.from_pylist([{"a": 1, "b": 10}, {"a": 2, "b": 20}])
+    result = engine.sql("select a, b, a + b as c from input", {"input": table})
     assert result.to_pylist() == [
         {"a": 1, "b": 10, "c": 11},
         {"a": 2, "b": 20, "c": 22},
@@ -79,11 +80,9 @@ def test_datafusion_engine_sql() -> None:
 
 
 def test_datafusion_engine_sql_accepts_empty_tables() -> None:
-    import pyarrow as pa
-
     engine = DataFusionEngine()
-    batch = Batch(pa.table({"a": pa.array([], type=pa.int64())}))
+    table = pa.table({"a": pa.array([], type=pa.int64())})
 
-    result = engine.sql("select count(*) as n from input", {"input": batch})
+    result = engine.sql("select count(*) as n from input", {"input": table})
 
     assert result.to_pylist() == [{"n": 0}]

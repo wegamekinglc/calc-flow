@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 
-from calc_flow.batch import Batch
+import pyarrow as pa
+
 from calc_flow.checkpoint import CheckpointManager
 from calc_flow.pipeline import Pipeline
 
@@ -32,16 +34,16 @@ class MicroBatchRunner:
         self.checkpoint_every = checkpoint_every
         self._checkpoints = CheckpointManager(checkpoint_dir)
 
-    def run(self, source: Iterator[Batch]) -> None:
-        """Process all batches from the source iterator."""
+    def run(self, source: Iterator[pa.Table | Any]) -> None:
+        """Process all data from the source iterator."""
         offset = self._checkpoints.recover(self.pipeline)
         last_processed_offset = offset
 
-        for i, batch in enumerate(source):
+        for i, data in enumerate(source):
             if i < offset:
                 continue
 
-            self.pipeline.apply(batch)
+            self.pipeline.apply(data)
             last_processed_offset = i + 1
 
             if last_processed_offset % self.checkpoint_every == 0:

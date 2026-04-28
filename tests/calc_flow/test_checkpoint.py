@@ -3,16 +3,17 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from calc_flow.batch import Batch
+import pyarrow as pa
+
 from calc_flow.checkpoint import Checkpoint, CheckpointManager
 from calc_flow.operator import StatefulOperator
 from calc_flow.pipeline import Pipeline
 
 
 class _CountingOp(StatefulOperator):
-    def apply(self, batch: Batch) -> Batch:
-        self._state["count"] = self._state.get("count", 0) + batch.num_rows
-        return batch
+    def apply(self, data: pa.Table) -> pa.Table:
+        self._state["count"] = self._state.get("count", 0) + len(data)
+        return data
 
 
 def test_checkpoint_to_dict() -> None:
@@ -28,7 +29,7 @@ def test_checkpoint_manager_save_load() -> None:
         p = Pipeline("test")
         op = _CountingOp("cnt")
         p.add(op)
-        p.apply(Batch.from_pylist([{"x": 1}] * 5))
+        p.apply(pa.Table.from_pylist([{"x": 1}] * 5))
 
         mgr.save(p, batch_offset=3)
 
@@ -54,7 +55,7 @@ def test_checkpoint_manager_recover() -> None:
 
         p1 = Pipeline("test")
         p1.add(_CountingOp("cnt"))
-        p1.apply(Batch.from_pylist([{"x": 1}] * 5))
+        p1.apply(pa.Table.from_pylist([{"x": 1}] * 5))
         mgr.save(p1, batch_offset=5)
 
         p2 = Pipeline("test")
