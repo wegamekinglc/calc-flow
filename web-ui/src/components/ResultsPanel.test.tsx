@@ -1,0 +1,49 @@
+import { render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+
+import { ResultsPanel } from './ResultsPanel';
+import type { RunResponse } from '../types';
+
+describe('ResultsPanel', () => {
+  it('shows output rows, node timing, and DataFusion plans', () => {
+    const run: RunResponse = {
+      id: 'run',
+      project_id: 'demo',
+      status: 'completed',
+      created_at: '2026-01-01T00:00:00Z',
+      result: {
+        outputs: {
+          output: {
+            kind: 'table',
+            total_rows: 1,
+            schema: [{ name: 'total', type: 'int64', nullable: true }],
+            rows: [{ total: 3 }],
+          },
+        },
+        warnings: [],
+        node_timings: {
+          calculate: { duration_ns: 2_000_000, input_rows: { input: 1 }, output_rows: { output: 1 } },
+        },
+        datafusion_metrics: [
+          {
+            node_id: 'calculate',
+            planning_ns: 1_000_000,
+            execution_ns: 2_000_000,
+            output_rows: 1,
+            logical_plan: 'Projection: total',
+            physical_plan: 'ProjectionExec',
+          },
+        ],
+        metadata: {},
+      },
+    };
+
+    render(<ResultsPanel validation={null} run={run} onCancel={vi.fn()} />);
+
+    expect(screen.getByText('output')).toBeInTheDocument();
+    expect(screen.getByText('total')).toBeInTheDocument();
+    expect(screen.getByText('3')).toBeInTheDocument();
+    expect(screen.getByText('calculate')).toBeInTheDocument();
+    expect(screen.getByText('Logical plan')).toBeInTheDocument();
+  });
+});

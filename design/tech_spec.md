@@ -1,5 +1,9 @@
 # Tech Spec: Array Engine API Surface
 
+> This document records the v0.1 array API work. The DataFusion-only table
+> architecture and the remaining v0.2 changes are defined in
+> `design/v0.2-refactor-plan.md`.
+
 ## Motivation
 
 `docs/introduction.md` specifies two distinct requirements for the calculation engines:
@@ -7,7 +11,8 @@
 > 1. dataframe engine — "should support an expression engine"
 > 2. array engine — "should define a **set of apis** to do the array and matrix calculation"
 
-Requirement (1) is covered: `PandasEngine.evaluate()`, `PolarsEngine.evaluate()` + `sql()`, `DataFusionEngine.evaluate()` + `sql()` all support expression evaluation.
+Requirement (1) is covered by `DataFusionEngine.evaluate()` and
+`DataFusionEngine.sql()`. DataFusion is the sole table engine in v0.2.
 
 Requirement (2) is **not** covered. The array engines (`NumpyEngine`, `JaxEngine`) currently expose only `evaluate(expression, batch)` — a single string-based expression evaluator, identical in shape to the dataframe approach. The Python Array API standard defines a rich namespace of functions (`add`, `matmul`, `sum`, `transpose`, etc.), but the engine does not surface them as first-class methods.
 

@@ -1,0 +1,54 @@
+name: Benchmarks
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      scale:
+        description: Dataset scale
+        required: true
+        default: standard
+        type: choice
+        options:
+          - overhead
+          - small
+          - standard
+          - nightly
+permissions:
+  contents: read
+concurrency:
+  group: benchmarks-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  benchmark:
+    name: Informational ${{ inputs.scale || 'nightly' }} benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CALC_FLOW_BENCHMARK_SCALE: ${{ inputs.scale || 'nightly' }}
+      JAX_PLATFORMS: cpu
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - name: Install benchmark dependencies
+        run: uv sync --extra benchmark
+      - name: Run benchmark matrix
+        run: |
+          mkdir -p benchmark-results
+          uv run pytest benchmarks -q --benchmark-only \
+            --benchmark-json="benchmark-results/${CALC_FLOW_BENCHMARK_SCALE}.json"
+      - name: Upload benchmark report
+        uses: actions/upload-artifact@v7
+        with:
+          name: benchmark-${{ env.CALC_FLOW_BENCHMARK_SCALE }}-${{ github.run_id }}
+          path: benchmark-results/*.json
+          if-no-files-found: error
+          retention-days: 90
