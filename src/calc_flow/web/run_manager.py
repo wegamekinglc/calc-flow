@@ -230,10 +230,13 @@ def _result_payload(result: Any, *, output_rows: int) -> dict[str, JSONValue]:
             }
         else:
             array = batch.array_payload
+            shape = getattr(array, "shape", ())
+            limited = array[:output_rows] if shape else array
             outputs[name] = {
                 "kind": "array",
                 "total_rows": batch.num_rows,
-                "data": _json_safe(array.tolist()),
+                "truncated": batch.num_rows > output_rows,
+                "data": _json_safe(limited.tolist()),
             }
 
     return {
@@ -369,6 +372,11 @@ class RunManager:
         return self._registry
 
     def submit(self, project: ProjectConfig, request: RunRequest) -> RunResponse:
+        # Reserve the worker slot atomically with the capacity check. If the
+        # check and the handle insertion were separate critical sections, two
+        # concurrent submissions could both pass the check before either
+        # registered its run and exceed max_workers. prepare_run and worker
+        # construction run outside the lock; on failure we release the slot.
         with self._lock:
             active = sum(
                 handle.status in {RunStatus.PENDING, RunStatus.RUNNING}
@@ -377,54 +385,59 @@ class RunManager:
             if active >= self._max_workers:
                 msg = "all local preview workers are busy"
                 raise RunManagerError(msg)
-        batches, options = prepare_run(project, request, udf_registry=self._registry)
-        run_id = uuid4().hex
-        created_at = datetime.now(UTC)
-        handle = _RunHandle(
-            id=run_id,
-            project_id=project.id,
-            status=RunStatus.PENDING,
-            created_at=created_at,
-        )
-        self._event(handle, "created", "Run accepted")
-        worker_payload = cloudpickle.dumps(
-            (
-                project.model_dump(mode="json", by_alias=True),
-                batches,
-                options.model_dump(mode="json"),
-                self._registry,
+            run_id = uuid4().hex
+            handle = _RunHandle(
+                id=run_id,
+                project_id=project.id,
+                status=RunStatus.PENDING,
+                created_at=datetime.now(UTC),
             )
-        )
-
-        if self._use_processes:
-            output_queue = self._process_context.Queue(maxsize=1)
-            worker = self._process_context.Process(
-                target=_execute_worker,
-                args=(
-                    worker_payload,
-                    output_queue,
-                    True,
-                ),
-                daemon=True,
-                name=f"calc-flow-{run_id[:8]}",
+            self._runs[run_id] = handle
+            self._event(handle, "created", "Run accepted")
+        try:
+            batches, options = prepare_run(
+                project, request, udf_registry=self._registry
             )
-        else:
-            output_queue = queue.Queue(maxsize=1)
-            worker = Thread(
-                target=_execute_worker,
-                args=(
-                    worker_payload,
-                    output_queue,
-                    False,
-                ),
-                daemon=True,
-                name=f"calc-flow-{run_id[:8]}",
+            worker_payload = cloudpickle.dumps(
+                (
+                    project.model_dump(mode="json", by_alias=True),
+                    batches,
+                    options.model_dump(mode="json"),
+                    self._registry,
+                )
             )
-        handle.worker = worker
-        handle.output_queue = output_queue
+            if self._use_processes:
+                output_queue = self._process_context.Queue(maxsize=1)
+                worker = self._process_context.Process(
+                    target=_execute_worker,
+                    args=(
+                        worker_payload,
+                        output_queue,
+                        True,
+                    ),
+                    daemon=True,
+                    name=f"calc-flow-{run_id[:8]}",
+                )
+            else:
+                output_queue = queue.Queue(maxsize=1)
+                worker = Thread(
+                    target=_execute_worker,
+                    args=(
+                        worker_payload,
+                        output_queue,
+                        False,
+                    ),
+                    daemon=True,
+                    name=f"calc-flow-{run_id[:8]}",
+                )
+        except BaseException:
+            with self._lock:
+                self._runs.pop(run_id, None)
+            raise
         with self._lock:
             self._prune_history()
-            self._runs[run_id] = handle
+            handle.worker = worker
+            handle.output_queue = output_queue
             handle.status = RunStatus.RUNNING
             handle.started_at = datetime.now(UTC)
             self._event(handle, "running", "Worker started")

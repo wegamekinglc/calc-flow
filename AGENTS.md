@@ -86,7 +86,7 @@ pass raw tables or arrays to pipelines, operators, runners, or engines.
 - **`CheckpointStore` / `FileCheckpointStore`** — protocol plus atomic local
   JSON implementation. Pipeline names are hashed into safe filenames.
 
-### Engines (`engine/`)
+### Engines (`src/calc_flow/engine/`)
 
 - **`Engine`** (ABC) — `evaluate(expression, data: Batch) -> Batch`.
 - **`DataFusionEngine`** is the sole table engine. `evaluate()` handles
@@ -124,7 +124,7 @@ Array engines also expose programmatic operations: `add`, `subtract`,
 `reshape`. They accept an array `Batch` as the primary operand and return an
 array `Batch` while preserving metadata.
 
-### Runtime modes (`runtime/`)
+### Runtime modes (`src/calc_flow/runtime/`)
 
 - **`Source`** — implements `read(cursor=None) -> Iterator[Batch]`.
   **`BatchingSource`** groups records by row/byte limits. **`Sink`** implements

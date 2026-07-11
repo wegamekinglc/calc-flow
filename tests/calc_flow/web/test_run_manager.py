@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import base64
+import threading
 import time
+from datetime import UTC, datetime
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
 
+from calc_flow.batch import Batch
 from calc_flow.config import (
     DataSourceConfig,
     NodeConfig,
@@ -15,9 +18,15 @@ from calc_flow.config import (
     RunOptions,
     UdfReferenceConfig,
 )
+from calc_flow.pipeline import RunMetadata, RunResult
 from calc_flow.udf import UdfRegistry
 from calc_flow.web.models import InputPayload, RunRequest, RunStatus
-from calc_flow.web.run_manager import RunManager, RunManagerError, prepare_run
+from calc_flow.web.run_manager import (
+    RunManager,
+    RunManagerError,
+    _result_payload,
+    prepare_run,
+)
 
 
 def _project(
@@ -297,3 +306,95 @@ def test_run_manager_rejects_unknown_run() -> None:
     manager = RunManager(use_processes=False)
     with pytest.raises(KeyError, match="does not exist"):
         manager.get("missing")
+
+
+class _FakeArray:
+    """Minimal Array API surface that _result_payload and Batch touch."""
+
+    def __init__(self, values: list[int]) -> None:
+        self._values = list(values)
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return (len(self._values),)
+
+    def __array_namespace__(self) -> None:
+        return None
+
+    def __getitem__(self, key: slice) -> _FakeArray:
+        return _FakeArray(self._values[key])
+
+    def tolist(self) -> list[int]:
+        return list(self._values)
+
+
+def test_result_payload_truncates_array_outputs_to_output_rows() -> None:
+    batch = Batch.array(_FakeArray(list(range(10))))
+    result = RunResult(
+        outputs={"output": batch},
+        warnings=(),
+        node_timings={},
+        datafusion_metrics=(),
+        metadata=RunMetadata(
+            run_id="rid",
+            pipeline_name="Main",
+            pipeline_fingerprint="fp",
+            started_at=datetime(2024, 1, 1, tzinfo=UTC),
+            finished_at=datetime(2024, 1, 1, tzinfo=UTC),
+        ),
+    )
+
+    payload = _result_payload(result, output_rows=3)
+    output = payload["outputs"]["output"]
+
+    assert output["kind"] == "array"
+    assert output["total_rows"] == 10
+    assert output["truncated"] is True
+    assert output["data"] == [0, 1, 2]
+
+
+def test_submit_caps_concurrent_submissions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A submission racing with one already mid-prepare must still honor max_workers."""
+    import calc_flow.web.run_manager as module
+
+    gate = threading.Event()
+    entered = threading.Event()
+    real_prepare = module.prepare_run
+
+    def blocking_prepare(*args: object, **kwargs: object) -> object:
+        entered.set()
+        gate.wait(timeout=5)
+        return real_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(module, "prepare_run", blocking_prepare)
+
+    manager = RunManager(use_processes=False, max_workers=1)
+    request = RunRequest(
+        inputs={"input": InputPayload(format="inline_json", data=[{"value": 1}])}
+    )
+    outcomes: dict[str, object] = {}
+
+    def submit_one(label: str) -> None:
+        try:
+            run = manager.submit(_project(), request)
+        except RunManagerError as error:
+            outcomes[label] = error
+        else:
+            outcomes[label] = run.id
+
+    first = threading.Thread(target=submit_one, args=("first",))
+    first.start()
+    assert entered.wait(timeout=2)
+
+    # The second submission runs on this thread while the first is still
+    # blocked inside prepare_run (lock released). With the slot reserved
+    # atomically, the capacity check must reject it before prepare_run.
+    submit_one("second")
+    gate.set()
+    first.join(timeout=5)
+
+    first_id = outcomes["first"]
+    assert isinstance(first_id, str)
+    assert isinstance(outcomes["second"], RunManagerError)
+    _wait(manager, first_id)
+    manager.shutdown()
