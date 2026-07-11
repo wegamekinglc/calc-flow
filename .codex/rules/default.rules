@@ -1,0 +1,46 @@
+# Require confirmation before commands that mutate remote state or synchronize
+# the dependency environment are run outside the sandbox.
+
+prefix_rule(
+    pattern = ["git", "push"],
+    decision = "prompt",
+    justification = "Pushing changes modifies a remote repository.",
+    match = [
+        "git push",
+        "git push -u origin agent/example",
+        "git push origin main",
+    ],
+    not_match = [
+        "git status",
+        "git pull",
+    ],
+)
+
+prefix_rule(
+    pattern = ["gh", "pr", ["create", "edit"]],
+    decision = "prompt",
+    justification = "Creating or editing a pull request changes GitHub state.",
+    match = [
+        "gh pr create --draft --fill",
+        "gh pr edit 3 --title example",
+    ],
+    not_match = [
+        "gh pr view 3",
+        "gh issue create",
+    ],
+)
+
+prefix_rule(
+    pattern = ["uv", "sync"],
+    decision = "prompt",
+    justification = "Synchronizing dependencies can access the network and change the environment.",
+    match = [
+        "uv sync",
+        "uv sync --extra dev",
+        "uv sync --frozen",
+    ],
+    not_match = [
+        "uv run pytest",
+        "uv lock",
+    ],
+)
