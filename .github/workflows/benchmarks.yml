@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scale: [overhead, small, standard]
+        scale: [overhead, small, standard, nightly]
     env:
       CALC_FLOW_BENCHMARK_SCALE: ${{ matrix.scale }}
       JAX_PLATFORMS: cpu
