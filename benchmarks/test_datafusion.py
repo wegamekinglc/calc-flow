@@ -6,6 +6,7 @@ import pytest
 
 from benchmarks.support import (
     BenchmarkFixture,
+    benchmark_group,
     record_benchmark,
     selected_scale,
     table_inputs,
@@ -25,7 +26,9 @@ def _input() -> Batch:
     return table_inputs(selected_scale().table_rows).fact
 
 
-@pytest.mark.benchmark(group="datafusion-expression", min_rounds=3, max_time=0.5)
+@pytest.mark.benchmark(
+    group=benchmark_group("datafusion-expression"), min_rounds=3, max_time=0.5
+)
 def test_projection_and_calculated_column(benchmark: BenchmarkFixture) -> None:
     batch = _input()
     plan = (
@@ -51,7 +54,9 @@ def test_projection_and_calculated_column(benchmark: BenchmarkFixture) -> None:
     )
 
 
-@pytest.mark.benchmark(group="datafusion-filter", min_rounds=3, max_time=0.5)
+@pytest.mark.benchmark(
+    group=benchmark_group("datafusion-filter"), min_rounds=3, max_time=0.5
+)
 def test_filter_selectivity(benchmark: BenchmarkFixture) -> None:
     batch = _input()
     plan = (
@@ -78,7 +83,9 @@ def test_filter_selectivity(benchmark: BenchmarkFixture) -> None:
     )
 
 
-@pytest.mark.benchmark(group="datafusion-aggregate", min_rounds=3, max_time=0.5)
+@pytest.mark.benchmark(
+    group=benchmark_group("datafusion-aggregate"), min_rounds=3, max_time=0.5
+)
 def test_group_by_aggregation(benchmark: BenchmarkFixture) -> None:
     batch = _input()
     plan = (
@@ -105,7 +112,9 @@ def test_group_by_aggregation(benchmark: BenchmarkFixture) -> None:
     )
 
 
-@pytest.mark.benchmark(group="datafusion-join", min_rounds=3, max_time=0.5)
+@pytest.mark.benchmark(
+    group=benchmark_group("datafusion-join"), min_rounds=3, max_time=0.5
+)
 def test_join_cardinality(benchmark: BenchmarkFixture) -> None:
     inputs = table_inputs(selected_scale().table_rows)
     plan = (
@@ -136,7 +145,9 @@ def test_join_cardinality(benchmark: BenchmarkFixture) -> None:
     )
 
 
-@pytest.mark.benchmark(group="datafusion-window", min_rounds=3, max_time=0.5)
+@pytest.mark.benchmark(
+    group=benchmark_group("datafusion-window"), min_rounds=3, max_time=0.5
+)
 def test_window_function(benchmark: BenchmarkFixture) -> None:
     batch = _input()
     plan = (
@@ -165,7 +176,9 @@ def test_window_function(benchmark: BenchmarkFixture) -> None:
 
 
 @pytest.mark.parametrize("implementation", ("builtin", "registered_udf"))
-@pytest.mark.benchmark(group="datafusion-udf", min_rounds=3, max_time=0.5)
+@pytest.mark.benchmark(
+    group=benchmark_group("datafusion-udf"), min_rounds=3, max_time=0.5
+)
 def test_builtin_versus_registered_udf(
     benchmark: BenchmarkFixture, implementation: str
 ) -> None:
@@ -208,7 +221,9 @@ def test_builtin_versus_registered_udf(
     ("batch_size", "target_partitions"),
     ((1024, 1), (8192, 2)),
 )
-@pytest.mark.benchmark(group="datafusion-config", min_rounds=3, max_time=0.5)
+@pytest.mark.benchmark(
+    group=benchmark_group("datafusion-config"), min_rounds=3, max_time=0.5
+)
 def test_execution_configuration(
     benchmark: BenchmarkFixture,
     batch_size: int,
@@ -239,7 +254,9 @@ def test_execution_configuration(
     )
 
 
-@pytest.mark.benchmark(group="datafusion-session", min_rounds=3, max_time=0.5)
+@pytest.mark.benchmark(
+    group=benchmark_group("datafusion-session"), min_rounds=3, max_time=0.5
+)
 def test_warm_session_context(benchmark: BenchmarkFixture) -> None:
     batch = _input()
     runtime = DataFusionRuntime()

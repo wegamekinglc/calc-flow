@@ -5,7 +5,12 @@ from typing import Any
 import numpy as np
 import pytest
 
-from benchmarks.support import BenchmarkFixture, record_benchmark, selected_scale
+from benchmarks.support import (
+    BenchmarkFixture,
+    benchmark_group,
+    record_benchmark,
+    selected_scale,
+)
 from calc_flow import Batch, UdfReference, UdfRegistry
 from calc_flow.engine import JaxEngine, NumpyEngine
 from calc_flow.engine.array import ArrayEngine
@@ -48,7 +53,9 @@ def _benchmark_array(
 
 
 @pytest.mark.parametrize("backend", ("numpy", "jax"))
-@pytest.mark.benchmark(group="array-elementwise", min_rounds=3, max_time=0.5)
+@pytest.mark.benchmark(
+    group=benchmark_group("array-elementwise"), min_rounds=3, max_time=0.5
+)
 def test_elementwise_expression(benchmark: BenchmarkFixture, backend: str) -> None:
     scale = selected_scale()
     engine = _engine(backend)
@@ -71,7 +78,9 @@ def test_elementwise_expression(benchmark: BenchmarkFixture, backend: str) -> No
 
 
 @pytest.mark.parametrize("backend", ("numpy", "jax"))
-@pytest.mark.benchmark(group="array-reduction", min_rounds=3, max_time=0.5)
+@pytest.mark.benchmark(
+    group=benchmark_group("array-reduction"), min_rounds=3, max_time=0.5
+)
 def test_reduction(benchmark: BenchmarkFixture, backend: str) -> None:
     scale = selected_scale()
     engine = _engine(backend)
@@ -94,7 +103,9 @@ def test_reduction(benchmark: BenchmarkFixture, backend: str) -> None:
 
 
 @pytest.mark.parametrize("backend", ("numpy", "jax"))
-@pytest.mark.benchmark(group="array-matmul", min_rounds=3, max_time=0.5)
+@pytest.mark.benchmark(
+    group=benchmark_group("array-matmul"), min_rounds=3, max_time=0.5
+)
 def test_matrix_multiplication(benchmark: BenchmarkFixture, backend: str) -> None:
     dimension = selected_scale().matrix_dimension
     engine = _engine(backend)
@@ -119,7 +130,7 @@ def test_matrix_multiplication(benchmark: BenchmarkFixture, backend: str) -> Non
 
 
 @pytest.mark.parametrize("backend", ("numpy", "jax"))
-@pytest.mark.benchmark(group="array-udf", min_rounds=3, max_time=0.5)
+@pytest.mark.benchmark(group=benchmark_group("array-udf"), min_rounds=3, max_time=0.5)
 def test_registered_array_udf(benchmark: BenchmarkFixture, backend: str) -> None:
     scale = selected_scale()
     registry = UdfRegistry()
