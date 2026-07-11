@@ -55,6 +55,24 @@ def selected_scale() -> BenchmarkScale:
         ) from error
 
 
+def scale_spec(scale: BenchmarkScale | None = None) -> str:
+    """One-line description of the active problem scale.
+
+    Embedded in benchmark group headers so each results section names the
+    data size its timings were measured at.
+    """
+    scale = scale or selected_scale()
+    return (
+        f"{scale.name} rows={scale.table_rows} "
+        f"array={scale.array_elements} matmul={scale.matrix_dimension}"
+    )
+
+
+def benchmark_group(base: str) -> str:
+    """Tag a benchmark group with the active problem scale."""
+    return f"{base} [{scale_spec()}]"
+
+
 @lru_cache(maxsize=4)
 def table_inputs(rows: int) -> TableInputs:
     rng = np.random.default_rng(SEED)
@@ -96,6 +114,9 @@ def record_benchmark(
         {
             "scenario": scenario,
             "scale": scale.name,
+            "table_rows": scale.table_rows,
+            "array_elements": scale.array_elements,
+            "matrix_dimension": scale.matrix_dimension,
             "input_rows": input_rows,
             "output_rows": output_rows,
             "process_rss_bytes": psutil.Process().memory_info().rss,
