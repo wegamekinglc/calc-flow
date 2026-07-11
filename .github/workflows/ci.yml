@@ -26,8 +26,147 @@ jobs:
         with:
           enable-cache: true
       - name: Install dependencies
-        run: uv sync --all-extras --dev
+        run: uv sync --extra dev
       - name: Run Ruff
         run: uv run ruff check .
-      - name: Run unit tests
-        run: uv run pytest -q
+      - name: Run unit, property, and coverage tests
+        env:
+          PYTEST_XDIST_AUTO_NUM_WORKERS: 2
+        run: >-
+          uv run pytest -q -n auto --dist load -p no:benchmark
+          --cov=calc_flow --cov-report=term-missing --cov-report=xml
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-coverage
+          path: coverage.xml
+          if-no-files-found: error
+          retention-days: 14
+  frontend:
+    name: Studio build + tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web-ui
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20.20.0
+          cache: npm
+          cache-dependency-path: web-ui/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Build studio
+        run: npm run build
+      - name: Run frontend tests
+        run: npm test
+      - name: Audit production dependencies
+        run: npm audit --omit=dev
+  browser-e2e:
+    name: Studio browser workflow
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web-ui
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - name: Install backend
+        working-directory: .
+        run: uv sync --extra web
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20.20.0
+          cache: npm
+          cache-dependency-path: web-ui/package-lock.json
+      - name: Install frontend
+        run: npm ci
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Run browser workflow
+        run: npm run test:e2e
+  package:
+    name: Build + isolated wheel smoke test
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - name: Build wheel and source distribution
+        run: uv build
+      - name: Install and execute the wheel in isolation
+        run: |
+          wheel="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
+          test -n "${wheel}"
+          uv venv /tmp/calc-flow-wheel
+          uv pip install --python /tmp/calc-flow-wheel/bin/python "${wheel}"
+          /tmp/calc-flow-wheel/bin/python - <<'PY'
+          import pyarrow as pa
+          from calc_flow import Batch, ExpressionOperator, Pipeline
+
+          result = (
+              Pipeline("wheel-smoke")
+              .then(ExpressionOperator("calculate", "total = a + b"))
+              .execute({"input": Batch.table(pa.table({"a": [1], "b": [2]}))})
+          )
+          assert result.output.table_payload["total"].to_pylist() == [3]
+          PY
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-distributions
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+  benchmark-smoke:
+    name: Informational benchmark smoke
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - name: Install benchmark dependencies
+        run: uv sync --extra benchmark
+      - name: Run deterministic overhead benchmarks
+        env:
+          CALC_FLOW_BENCHMARK_SCALE: overhead
+          JAX_PLATFORMS: cpu
+        run: |
+          mkdir -p benchmark-results
+          uv run pytest benchmarks -q --benchmark-only \
+            --benchmark-json=benchmark-results/smoke.json
+      - name: Upload benchmark report
+        uses: actions/upload-artifact@v7
+        with:
+          name: benchmark-smoke
+          path: benchmark-results/smoke.json
+          if-no-files-found: error
+          retention-days: 30

@@ -1,80 +1,111 @@
 from __future__ import annotations
 
-import tempfile
-
 import pyarrow as pa
+import pytest
 
+from calc_flow.batch import Batch, BatchMetadata
+from calc_flow.checkpoint import FileCheckpointStore
 from calc_flow.operator import StatefulOperator
 from calc_flow.pipeline import Pipeline
 from calc_flow.runtime.streaming import StreamingRunner
 
 
 class _RunningMax(StatefulOperator):
-    def apply(self, data: pa.Table) -> pa.Table:
-        for row in data.to_pylist():
-            cur = self._state.get("max", float("-inf"))
-            self._state["max"] = max(cur, row["val"])
-        return data
+    def process(self, inputs, context):
+        batch = inputs["input"]
+        for value in batch.table_payload["value"].to_pylist():
+            current = self._state.get("max", float("-inf"))
+            self._state["max"] = max(current, value)
+        return {"output": batch}
 
 
-def test_streaming_runner_step() -> None:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        op = _RunningMax("max_tracker")
-        p = Pipeline("test").add(op)
-        runner = StreamingRunner(p, checkpoint_dir=tmpdir)
+class _CollectSink:
+    def __init__(self) -> None:
+        self.batches: list[Batch] = []
 
-        runner.step(pa.Table.from_pylist([{"val": 5}, {"val": 3}]))
-        assert op.snapshot()["max"] == 5
-
-        runner.step(pa.Table.from_pylist([{"val": 10}, {"val": 8}]))
-        assert op.snapshot()["max"] == 10
+    def write(self, batch: Batch) -> None:
+        self.batches.append(batch)
 
 
-def test_streaming_runner_step_returns_result() -> None:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        p = Pipeline("test")
-        runner = StreamingRunner(p, checkpoint_dir=tmpdir)
-
-        data = pa.Table.from_pylist([{"a": 1}])
-        result = runner.step(data)
-        assert result is data
+class _FailingSink:
+    def write(self, batch: Batch) -> None:
+        raise RuntimeError("sink failed")
 
 
-def test_streaming_runner_reset() -> None:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        op = _RunningMax("max_tracker")
-        p = Pipeline("test").add(op)
-        runner = StreamingRunner(p, checkpoint_dir=tmpdir)
-
-        runner.step(pa.Table.from_pylist([{"val": 10}]))
-        runner.reset()
-        assert op.snapshot() == {}
+def _batch(*values: int, cursor: int | None = None) -> Batch:
+    return Batch.table(
+        pa.table({"value": values}),
+        metadata=BatchMetadata(cursor=cursor),
+    )
 
 
-def test_streaming_runner_reset_clears_checkpoint() -> None:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        op = _RunningMax("max_tracker")
-        p = Pipeline("test").add(op)
-        runner = StreamingRunner(p, checkpoint_dir=tmpdir)
+def test_streaming_runner_returns_run_result_and_delivers_sink(tmp_path) -> None:
+    store = FileCheckpointStore(tmp_path)
+    operator = _RunningMax("max")
+    sink = _CollectSink()
+    runner = StreamingRunner(Pipeline("test").then(operator), checkpoint_store=store)
 
-        runner.step(pa.Table.from_pylist([{"val": 10}]))
-        runner.reset()
-        runner.step(pa.Table.from_pylist([{"val": 2}]))
+    result = runner.step(_batch(5, 3, cursor=1), sink)
 
-        assert op.snapshot()["max"] == 2
+    assert result.output.table_payload["value"].to_pylist() == [5, 3]
+    assert operator.snapshot() == {"max": 5}
+    assert sink.batches == [result.output]
+    checkpoint = store.load("test")
+    assert checkpoint is not None
+    assert checkpoint.sequence == 0
+    assert checkpoint.source_cursor == 1
 
 
-def test_streaming_runner_recovers_checkpoint_once() -> None:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        first_op = _RunningMax("max_tracker")
-        first_pipeline = Pipeline("test").add(first_op)
-        first_runner = StreamingRunner(first_pipeline, checkpoint_dir=tmpdir)
-        first_runner.step(pa.Table.from_pylist([{"val": 10}]))
+def test_streaming_runner_recovers_state_once(tmp_path) -> None:
+    store = FileCheckpointStore(tmp_path)
+    first_operator = _RunningMax("max")
+    first = StreamingRunner(
+        Pipeline("test").then(first_operator), checkpoint_store=store
+    )
+    first.step(_batch(10, cursor=1))
 
-        recovered_op = _RunningMax("max_tracker")
-        recovered_pipeline = Pipeline("test").add(recovered_op)
-        recovered_runner = StreamingRunner(recovered_pipeline, checkpoint_dir=tmpdir)
-        recovered_runner.step(pa.Table.from_pylist([{"val": 5}]))
-        recovered_runner.step(pa.Table.from_pylist([{"val": 7}]))
+    recovered_operator = _RunningMax("max")
+    recovered = StreamingRunner(
+        Pipeline("test").then(recovered_operator), checkpoint_store=store
+    )
+    recovered.step(_batch(5, cursor=2))
+    recovered.step(_batch(7, cursor=3))
 
-        assert recovered_op.snapshot()["max"] == 10
+    assert recovered_operator.snapshot() == {"max": 10}
+    checkpoint = store.load("test")
+    assert checkpoint is not None
+    assert checkpoint.sequence == 2
+
+
+def test_streaming_runner_rolls_back_failed_sink(tmp_path) -> None:
+    store = FileCheckpointStore(tmp_path)
+    operator = _RunningMax("max")
+    runner = StreamingRunner(Pipeline("test").then(operator), checkpoint_store=store)
+
+    with pytest.raises(RuntimeError, match="sink failed"):
+        runner.step(_batch(10, cursor=1), _FailingSink())
+
+    assert operator.snapshot() == {}
+    assert store.load("test") is None
+
+
+def test_streaming_runner_reset_clears_state_and_checkpoint(tmp_path) -> None:
+    store = FileCheckpointStore(tmp_path)
+    operator = _RunningMax("max")
+    runner = StreamingRunner(Pipeline("test").then(operator), checkpoint_store=store)
+    runner.step(_batch(10, cursor=1))
+
+    runner.reset()
+
+    assert operator.snapshot() == {}
+    assert store.load("test") is None
+
+
+def test_streaming_runner_rejects_raw_batch(tmp_path) -> None:
+    runner = StreamingRunner(
+        Pipeline("test").then(_RunningMax("max")),
+        checkpoint_store=FileCheckpointStore(tmp_path),
+    )
+
+    with pytest.raises(TypeError, match="requires a Batch"):
+        runner.step(pa.table({"value": [1]}))  # type: ignore[arg-type]

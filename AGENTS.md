@@ -1,19 +1,28 @@
 # Repository Guidance
 
 Calc Flow is a micro-batch and streaming stateful calculation engine. Data
-flows through pipelines as raw Apache Arrow tables or Array API arrays, and
-computation is delegated to pluggable dataframe or array engines. See
-`docs/introduction.md` for requirements and data flow.
+flows through compiled graphs in immutable `Batch` envelopes. Apache DataFusion
+is the only table query/calculation engine; NumPy and JAX are optional array
+engines. See `docs/introduction.md` for requirements and data flow.
 
 ## Commands
 
 ```bash
 uv sync --extra dev                      # install runtime and development dependencies
 uv run pytest                            # run all tests
+uv run pytest -n auto                    # run tests across available CPU workers
+uv run pytest --cov=calc_flow            # enforce the 90% core coverage floor
 uv run pytest -k checkpoint              # run checkpoint-focused tests
 uv run ruff check .                      # lint
 uv run ruff format --check .             # check formatting
 uv run ruff format .                     # apply formatting
+CALC_FLOW_BENCHMARK_SCALE=overhead uv run --extra benchmark pytest benchmarks --benchmark-only
+cd web-ui && npm ci                      # install locked frontend dependencies
+cd web-ui && npm run build               # type-check and build the studio
+cd web-ui && npm test                    # run Vitest
+cd web-ui && npm run test:e2e            # run the Playwright browser workflow
+./scripts/start_web_ui.sh                 # start the local API and Vite studio
+./scripts/stop_web_ui.sh                  # stop both managed process groups
 ```
 
 ## Git conventions
@@ -39,7 +48,7 @@ uv run ruff format .                     # apply formatting
   `A | B`.
 - Prefer small, explicit modules over compatibility shims, duplicate abstraction
   layers, or placeholder abstractions.
-- Keep dataframe behavior Arrow-backed and array behavior Array API-backed,
+- Keep table behavior Arrow-backed and array behavior Array API-backed,
   matching `docs/introduction.md`.
 - Do not add incomplete stubs, unused fixtures, unused CLIs, or placeholder
   modules merely to reserve future structure.
@@ -49,40 +58,57 @@ dashes span the full column width, including the spaces around cell content.
 
 ## Architecture
 
-Data flows through the system as raw `pa.Table` values for dataframe operations
-or Array API arrays for array computation. Construct Arrow tables with
-`pa.Table.from_pylist`, `pa.table`, or `pa.Table.from_pandas`; pass arrays
-directly to array engines.
+Data flows through the system in immutable `Batch` envelopes. Table batches
+contain `pa.Table` payloads and are calculated exclusively with DataFusion.
+Array batches contain Python Array API objects owned by NumPy or JAX. Never
+pass raw tables or arrays to pipelines, operators, runners, or engines.
 
 ### Operator, Pipeline, Checkpoint cycle
 
-- **`Operator`** (ABC) — `apply(data) -> pa.Table | Any` is the sole abstract
-  method. `snapshot() -> dict`, `restore(dict)`, and `reset()` form the
-  checkpoint lifecycle.
-- **`StatelessOperator`** — pure transform. Construct with a `fn` callable, or
-  subclass and override `apply`.
+- **`Port`** — named operator boundary with a `BatchKind`, required flag, and
+  optional exact Arrow schema.
+- **`Operator`** (ABC) — declares input/output ports and implements
+  `process(inputs, context) -> Mapping[str, Batch]`. `snapshot()`, `restore()`,
+  and `reset()` form the checkpoint lifecycle.
+- **`StatelessOperator`** — pure mapping transform. Construct with a callable or
+  subclass and override `process`.
 - **`StatefulOperator`** — maintains `self._state: dict` across items.
-  `snapshot`, `restore`, and `reset` operate on this dict. Subclasses must
-  implement `apply`.
-- **`Pipeline`** — ordered operator sequence. `add()` enforces unique operator
-  names because checkpoints key state by name. `apply(data)` chains operators
-  sequentially. `restore(checkpoint)` calls each operator's `restore` when the
-  checkpoint contains its name and otherwise calls `reset()`.
-- **`Checkpoint`** — value object containing `pipeline_name`, `offset`, and
-  `state`, with `to_dict` and `from_dict` methods.
-- **`CheckpointManager`** — persists JSON to `{dir}/{pipeline_name}.json`.
-  Writes atomically through a `.tmp` file and rename. `recover()` restores state
-  and returns the offset, or `0` when no checkpoint exists. `clear()` deletes
-  the file.
+  `snapshot`, `restore`, and `reset` deep-copy this dict. Subclasses implement
+  `process`.
+- **`Pipeline`** — mutable graph builder. `add_node()` and `connect()` construct
+  a DAG; `then()` and `add()` are single-port linear sugar. `compile()` checks
+  endpoints, kinds, schemas, single-writer inputs, and cycles.
+- **`ExecutionPlan`** — immutable compiled topology. `execute(inputs)` creates a
+  `RunContext`, restores state on failure, and returns a `RunResult` with named
+  outputs, node timings, DataFusion metrics, and run metadata.
+- **`Checkpoint`** — versioned value containing pipeline name/fingerprint,
+  source cursor/sequence, node-keyed JSON state, and creation time.
+- **`CheckpointStore` / `FileCheckpointStore`** — protocol plus atomic local
+  JSON implementation. Pipeline names are hashed into safe filenames.
 
 ### Engines (`engine/`)
 
-- **`Engine`** (ABC) — `evaluate(expression, data, **kwargs) -> pa.Table | Any`.
-  Dataframe engines accept and return `pa.Table`; array engines accept and
-  return Array API arrays.
-- **`DataFrameEngine`** adds
-  `sql(query, tables: dict[str, pa.Table]) -> pa.Table`, whose default raises
-  `NotImplementedError`.
+- **`Engine`** (ABC) — `evaluate(expression, data: Batch) -> Batch`.
+- **`DataFusionEngine`** is the sole table engine. `evaluate()` handles
+  expressions and assignments; `sql()` executes a single `SELECT` or CTE over
+  named table batches.
+- **`DataFusionRuntime`** owns one `SessionContext` per graph run, cleans up
+  temporary table aliases, rejects DDL/DML/utility SQL, and collects query plans
+  and timings.
+- **`ExpressionOperator`** performs DataFusion calculations, projections, and
+  filtering. **`SqlOperator`** performs multi-input table queries.
+- **`NumpyEngine`** and **`JaxEngine`** are optional array engines. Their
+  expression evaluator interprets an allowlisted AST and must not use Python
+  `eval`.
+- **`UdfRegistry`** owns trusted implementations. DataFusion scalar UDFs declare
+  Arrow fields and volatility; array UDFs declare argument count and must retain
+  the active backend. Operators use serializable `UdfReference(name, version)`
+  values. Never put callable objects, source, or import paths in configuration.
+- **`UdfRegistrySnapshot`** is captured at compile time. Compilation rejects
+  unknown versions and conflicting DataFusion versions; each run registers only
+  selected scalar UDFs. Catalog output must remain JSON-compatible metadata.
+- **`ArrayExpressionOperator`** is the DAG operator for restricted NumPy/JAX
+  expressions and explicitly referenced array UDFs.
 
 Expression handling is centralized in `expression.py`:
 
@@ -93,30 +119,37 @@ Expression handling is centralized in `expression.py`:
   `"SELECT *, (a + b) AS c FROM input"`. For a non-assignment expression it
   returns `"SELECT (expr) AS result FROM input"`.
 
-Engine implementations:
-
-| Engine             | `evaluate`                                              | `sql`                                                 |
-| ------------------ | ------------------------------------------------------- | ----------------------------------------------------- |
-| `PandasEngine`     | `df.eval()` with result-type handling                   | —                                                     |
-| `PolarsEngine`     | Via `pl.SQLContext` and `sql_projection`                | `pl.SQLContext` with named tables                     |
-| `DataFusionEngine` | Delegates to `self.sql()`                               | `datafusion.SessionContext`, registers record batches |
-| `NumpyEngine`      | `eval()` in scope with `{"x": arr, "xp": namespace}`    | —                                                     |
-| `JaxEngine`        | Same as NumpyEngine but with `jax.numpy`                | —                                                     |
-
 Array engines also expose programmatic operations: `add`, `subtract`,
 `multiply`, `divide`, `matmul`, `sum`, `mean`, `max`, `min`, `transpose`,
-`reshape`. All accept and return raw Array API arrays.
+`reshape`. They accept an array `Batch` as the primary operand and return an
+array `Batch` while preserving metadata.
 
 ### Runtime modes (`runtime/`)
 
-- **`MicroBatchRunner`** — iterates a `source: Iterator[pa.Table | Any]`, applies
-  the pipeline to each item, and checkpoints at `checkpoint_every` intervals.
-  `run()` first recovers from the last checkpoint offset. `reset()` clears
-  pipeline state and deletes the checkpoint file.
-- **`StreamingRunner`** — processes one item per `step()` call. It recovers once
-  on the first `step()` through `_recover_once` and saves a checkpoint after
-  every step. `reset()` clears state and the checkpoint and permits fresh
-  recovery on the next `step()`.
+- **`Source`** — implements `read(cursor=None) -> Iterator[Batch]`.
+  **`BatchingSource`** groups records by row/byte limits. **`Sink`** implements
+  `write(batch)`.
+- **`MicroBatchRunner`** — recovers a source cursor, yields every `RunResult`,
+  writes configured sinks, and periodically checkpoints only after sink success.
+- **`StreamingRunner`** — processes one formed batch into a `RunResult` and
+  checkpoints after successful sinks. Both runners provide at-least-once
+  delivery and roll back in-memory state when delivery fails.
+
+### Configuration and local web service
+
+- **`ProjectConfig`** and related strict Pydantic models are the canonical
+  data-only graph format. `compile_project()` must produce the same plan as the
+  Python builder. Table nodes never expose a backend selector.
+- **`FileProjectStore`** stores sorted formatted JSON atomically under hashed
+  IDs. YAML is safe import/export only. Never deserialize executable objects.
+- **`calc_flow.web`** is optional behind the `web` extra. Its FastAPI routes live
+  under `/api/v1`; `serve()` must reject non-loopback hosts.
+- **`RunManager`** decodes bounded Arrow inputs in the parent, then uses spawned
+  worker processes with timeout, CPU, resident-memory, output, cancellation,
+  and lifecycle controls.
+- **`web-ui/`** is React, TypeScript, Vite, and React Flow. API types are
+  generated from `web-ui/openapi.json`; regenerate them after route/model
+  changes. Keep React Flow node type maps outside render functions.
 
 ## Tests
 
@@ -136,4 +169,6 @@ Before considering a change complete, run:
 uv run pytest
 uv run ruff check .
 uv run ruff format --check .
+cd web-ui && npm run build && npm test && npm run test:e2e
+cd web-ui && npm audit --omit=dev
 ```

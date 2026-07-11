@@ -1,448 +1,136 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import numpy as np
+import pyarrow as pa
 import pytest
 
+from calc_flow.batch import Batch, BatchKind, BatchMetadata
 from calc_flow.engine.array import ArrayEngine, JaxEngine, NumpyEngine
 from calc_flow.engine.base import Engine
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
 
+@pytest.fixture(params=["numpy", "jax"])
+def engine(request: pytest.FixtureRequest) -> Iterator[ArrayEngine]:
+    if request.param == "jax":
+        pytest.importorskip("jax")
+        yield JaxEngine()
+    else:
+        yield NumpyEngine()
+
+
+def _batch(engine: ArrayEngine, value: object) -> Batch:
+    return Batch.array(
+        engine.xp.asarray(value), metadata=BatchMetadata(source_id="array-source")
+    )
+
+
+def _assert_array(result: Batch, expected: object) -> None:
+    assert result.kind is BatchKind.ARRAY
+    assert result.array_payload.tolist() == expected
+
+
+def test_array_engines_are_engines(engine: ArrayEngine) -> None:
+    assert isinstance(engine, Engine)
+    assert engine.input_kind is BatchKind.ARRAY
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("x * 2", [2, 4, 6]),
+        ("c = x + 3", [4, 5, 6]),
+        ("xp.maximum(x, 2)", [2, 2, 3]),
+        ("xp.where(x > 1, x, 0)", [0, 2, 3]),
+        ("x[1:]", [2, 3]),
+    ],
+)
+def test_array_engine_evaluate(
+    engine: ArrayEngine, expression: str, expected: object
+) -> None:
+    result = engine.evaluate(expression, _batch(engine, [1, 2, 3]))
+    _assert_array(result, expected)
+    assert result.metadata.source_id == "array-source"
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "__import__('os')",
+        "x.__class__",
+        "[item for item in x]",
+        "lambda value: value",
+        "open('/tmp/file')",
+        "xp.__dict__",
+    ],
+)
+def test_array_engine_rejects_unsafe_expressions(
+    engine: ArrayEngine, expression: str
+) -> None:
+    with pytest.raises(ValueError):
+        engine.evaluate(expression, _batch(engine, [1, 2, 3]))
+
+
+@pytest.mark.parametrize(
+    ("method", "left", "right", "expected"),
+    [
+        ("add", [1, 2], [10, 20], [11, 22]),
+        ("subtract", [10, 20], [1, 2], [9, 18]),
+        ("multiply", [1, 2], 10, [10, 20]),
+        ("divide", [10.0, 20.0], 2.0, [5.0, 10.0]),
+        ("matmul", [[1, 2], [3, 4]], [[5, 6], [7, 8]], [[19, 22], [43, 50]]),
+    ],
+)
+def test_array_binary_operations(
+    engine: ArrayEngine,
+    method: str,
+    left: object,
+    right: object,
+    expected: object,
+) -> None:
+    left_batch = _batch(engine, left)
+    right_value = _batch(engine, right) if isinstance(right, list) else right
+
+    result = getattr(engine, method)(left_batch, right_value)
+
+    _assert_array(result, expected)
+    assert result.metadata is left_batch.metadata
+
+
+@pytest.mark.parametrize(
+    ("method", "axis", "expected"),
+    [
+        ("sum", None, 10.0),
+        ("sum", 0, [4.0, 6.0]),
+        ("mean", None, 2.5),
+        ("max", 0, [3.0, 4.0]),
+        ("min", 0, [1.0, 2.0]),
+    ],
+)
+def test_array_reductions(
+    engine: ArrayEngine, method: str, axis: int | None, expected: object
+) -> None:
+    batch = _batch(engine, [[1.0, 2.0], [3.0, 4.0]])
 
-def _assert_array(result: object, expected: object) -> None:
-    assert hasattr(result, "__array_namespace__")
-    assert result.tolist() == expected  # type: ignore[union-attr]
+    result = getattr(engine, method)(batch, axis=axis)
 
+    _assert_array(result, expected)
 
-# ---------------------------------------------------------------------------
-# existing evaluate tests (adapted for raw arrays)
-# ---------------------------------------------------------------------------
 
+def test_array_shape_operations(engine: ArrayEngine) -> None:
+    batch = _batch(engine, [1, 2, 3, 4])
 
-def test_all_array_engines_are_engines() -> None:
-    for cls in [NumpyEngine, JaxEngine]:
-        engine = cls()
-        assert isinstance(engine, Engine)
-        assert isinstance(engine, ArrayEngine)
+    reshaped = engine.reshape(batch, (2, 2))
+    transposed = engine.transpose(reshaped)
 
+    _assert_array(reshaped, [[1, 2], [3, 4]])
+    _assert_array(transposed, [[1, 3], [2, 4]])
 
-def test_numpy_engine_evaluate_expression() -> None:
-    engine = NumpyEngine()
-    arr = np.asarray([1, 2, 3])
 
-    result = engine.evaluate("x * 2", arr)
+def test_array_engine_rejects_raw_or_table_input(engine: ArrayEngine) -> None:
+    with pytest.raises(TypeError, match="requires a Batch"):
+        engine.evaluate("x", np.asarray([1]))  # type: ignore[arg-type]
 
-    _assert_array(result, [2, 4, 6])
-
-
-def test_numpy_engine_evaluate_scalar_expression() -> None:
-    engine = NumpyEngine()
-    arr = np.asarray([[1, 2], [3, 4]])
-
-    result = engine.evaluate("xp.maximum(x[0], x[1])", arr)
-
-    _assert_array(result, [3, 4])
-
-
-def test_numpy_engine_evaluate_with_assignment() -> None:
-    engine = NumpyEngine()
-    arr = np.asarray([1, 2, 3])
-
-    result = engine.evaluate("c = x * 2", arr)
-
-    _assert_array(result, [2, 4, 6])
-
-
-def test_jax_engine_evaluate() -> None:
-    jnp = pytest.importorskip("jax.numpy")
-
-    engine = JaxEngine()
-    arr = jnp.asarray([1, 2, 3])
-
-    result = engine.evaluate("x * 2", arr)
-
-    _assert_array(result, [2, 4, 6])
-
-
-def test_jax_engine_evaluate_array_batch() -> None:
-    jnp = pytest.importorskip("jax.numpy")
-
-    engine = JaxEngine()
-    arr = jnp.asarray([1, 2, 3])
-
-    result = engine.evaluate("x * 2", arr)
-
-    assert hasattr(result, "__array_namespace__")
-    assert result.tolist() == [2, 4, 6]
-
-
-# ---------------------------------------------------------------------------
-# element-wise binary operations — NumpyEngine
-# ---------------------------------------------------------------------------
-
-
-def test_numpy_add_two_arrays() -> None:
-    engine = NumpyEngine()
-    a = engine.xp.asarray([1, 2, 3])
-    b = engine.xp.asarray([10, 20, 30])
-
-    result = engine.add(a, b)
-
-    _assert_array(result, [11, 22, 33])
-
-
-def test_numpy_add_array_and_scalar() -> None:
-    engine = NumpyEngine()
-    a = engine.xp.asarray([1, 2, 3])
-
-    result = engine.add(a, 10)
-
-    _assert_array(result, [11, 12, 13])
-
-
-def test_numpy_add_array_and_raw_array() -> None:
-    engine = NumpyEngine()
-    a = engine.xp.asarray([1, 2, 3])
-
-    result = engine.add(a, np.asarray([10, 20, 30]))
-
-    _assert_array(result, [11, 22, 33])
-
-
-def test_numpy_subtract() -> None:
-    engine = NumpyEngine()
-    a = engine.xp.asarray([10, 20, 30])
-    b = engine.xp.asarray([1, 2, 3])
-
-    result = engine.subtract(a, b)
-
-    _assert_array(result, [9, 18, 27])
-
-
-def test_numpy_multiply() -> None:
-    engine = NumpyEngine()
-    a = engine.xp.asarray([1, 2, 3])
-
-    result = engine.multiply(a, 10)
-
-    _assert_array(result, [10, 20, 30])
-
-
-def test_numpy_divide() -> None:
-    engine = NumpyEngine()
-    a = engine.xp.asarray([10.0, 20.0, 30.0])
-
-    result = engine.divide(a, 2.0)
-
-    _assert_array(result, [5.0, 10.0, 15.0])
-
-
-# ---------------------------------------------------------------------------
-# matmul — NumpyEngine
-# ---------------------------------------------------------------------------
-
-
-def test_numpy_matmul_two_arrays() -> None:
-    engine = NumpyEngine()
-    a = engine.xp.asarray([[1, 2], [3, 4]])
-    b = engine.xp.asarray([[5, 6], [7, 8]])
-
-    result = engine.matmul(a, b)
-
-    _assert_array(result, [[19, 22], [43, 50]])
-
-
-def test_numpy_matmul_array_and_raw_array() -> None:
-    engine = NumpyEngine()
-    a = engine.xp.asarray([[1, 2], [3, 4]])
-
-    result = engine.matmul(a, np.asarray([[5, 6], [7, 8]]))
-
-    _assert_array(result, [[19, 22], [43, 50]])
-
-
-# ---------------------------------------------------------------------------
-# reductions — NumpyEngine
-# ---------------------------------------------------------------------------
-
-
-def test_numpy_sum_axis_none() -> None:
-    engine = NumpyEngine()
-    a = engine.xp.asarray([[1, 2], [3, 4]])
-
-    result = engine.sum(a)
-
-    _assert_array(result, 10)
-
-
-def test_numpy_sum_axis_zero() -> None:
-    engine = NumpyEngine()
-    a = engine.xp.asarray([[1, 2], [3, 4]])
-
-    result = engine.sum(a, axis=0)
-
-    _assert_array(result, [4, 6])
-
-
-def test_numpy_mean_axis_none() -> None:
-    engine = NumpyEngine()
-    a = engine.xp.asarray([[1.0, 2.0], [3.0, 4.0]])
-
-    result = engine.mean(a)
-
-    _assert_array(result, 2.5)
-
-
-def test_numpy_mean_axis_zero() -> None:
-    engine = NumpyEngine()
-    a = engine.xp.asarray([[1.0, 2.0], [3.0, 4.0]])
-
-    result = engine.mean(a, axis=0)
-
-    _assert_array(result, [2.0, 3.0])
-
-
-def test_numpy_max_axis_none() -> None:
-    engine = NumpyEngine()
-    a = engine.xp.asarray([3, 1, 4, 1, 5])
-
-    result = engine.max(a)
-
-    _assert_array(result, 5)
-
-
-def test_numpy_max_axis_zero() -> None:
-    engine = NumpyEngine()
-    a = engine.xp.asarray([[3, 1], [4, 1]])
-
-    result = engine.max(a, axis=0)
-
-    _assert_array(result, [4, 1])
-
-
-def test_numpy_min_axis_none() -> None:
-    engine = NumpyEngine()
-    a = engine.xp.asarray([3, 1, 4, 1, 5])
-
-    result = engine.min(a)
-
-    _assert_array(result, 1)
-
-
-def test_numpy_min_axis_zero() -> None:
-    engine = NumpyEngine()
-    a = engine.xp.asarray([[3, 1], [4, 1]])
-
-    result = engine.min(a, axis=0)
-
-    _assert_array(result, [3, 1])
-
-
-# ---------------------------------------------------------------------------
-# shape / transform — NumpyEngine
-# ---------------------------------------------------------------------------
-
-
-def test_numpy_transpose_default() -> None:
-    engine = NumpyEngine()
-    a = engine.xp.asarray([[1, 2], [3, 4]])
-
-    result = engine.transpose(a)
-
-    _assert_array(result, [[1, 3], [2, 4]])
-
-
-def test_numpy_transpose_explicit_axes() -> None:
-    engine = NumpyEngine()
-    a = engine.xp.asarray([[1, 2], [3, 4]])
-
-    result = engine.transpose(a, axes=(0, 1))
-
-    _assert_array(result, [[1, 2], [3, 4]])
-
-
-def test_numpy_reshape() -> None:
-    engine = NumpyEngine()
-    a = engine.xp.asarray([1, 2, 3, 4])
-
-    result = engine.reshape(a, (2, 2))
-
-    _assert_array(result, [[1, 2], [3, 4]])
-
-
-# ---------------------------------------------------------------------------
-# backend coercion
-# ---------------------------------------------------------------------------
-
-
-def test_numpy_add_coerces_scalar_input() -> None:
-    engine = NumpyEngine()
-    a = engine.xp.asarray([1, 2, 3])
-
-    result = engine.add(a, 10)
-
-    _assert_array(result, [11, 12, 13])
-
-
-def test_jax_add_coerces_numpy_input() -> None:
-    pytest.importorskip("jax")
-
-    engine = JaxEngine()
-    a = engine.xp.asarray([1, 2, 3])
-
-    result = engine.add(a, np.asarray([10, 20, 30]))
-
-    _assert_array(result, [11, 22, 33])
-
-
-# ---------------------------------------------------------------------------
-# JaxEngine operation tests
-# ---------------------------------------------------------------------------
-
-
-def test_jax_add() -> None:
-    pytest.importorskip("jax")
-
-    engine = JaxEngine()
-    a = engine.xp.asarray([1, 2, 3])
-    b = engine.xp.asarray([10, 20, 30])
-
-    result = engine.add(a, b)
-
-    _assert_array(result, [11, 22, 33])
-
-
-def test_jax_subtract() -> None:
-    pytest.importorskip("jax")
-
-    engine = JaxEngine()
-    a = engine.xp.asarray([10, 20, 30])
-    b = engine.xp.asarray([1, 2, 3])
-
-    result = engine.subtract(a, b)
-
-    _assert_array(result, [9, 18, 27])
-
-
-def test_jax_multiply() -> None:
-    pytest.importorskip("jax")
-
-    engine = JaxEngine()
-    a = engine.xp.asarray([1, 2, 3])
-
-    result = engine.multiply(a, 10)
-
-    _assert_array(result, [10, 20, 30])
-
-
-def test_jax_divide() -> None:
-    pytest.importorskip("jax")
-
-    engine = JaxEngine()
-    a = engine.xp.asarray([10.0, 20.0, 30.0])
-
-    result = engine.divide(a, 2.0)
-
-    _assert_array(result, [5.0, 10.0, 15.0])
-
-
-def test_jax_matmul() -> None:
-    pytest.importorskip("jax")
-
-    engine = JaxEngine()
-    a = engine.xp.asarray([[1, 2], [3, 4]])
-    b = engine.xp.asarray([[5, 6], [7, 8]])
-
-    result = engine.matmul(a, b)
-
-    _assert_array(result, [[19, 22], [43, 50]])
-
-
-def test_jax_sum_axis_none() -> None:
-    pytest.importorskip("jax")
-
-    engine = JaxEngine()
-    a = engine.xp.asarray([[1, 2], [3, 4]])
-
-    result = engine.sum(a)
-
-    _assert_array(result, 10)
-
-
-def test_jax_sum_axis_zero() -> None:
-    pytest.importorskip("jax")
-
-    engine = JaxEngine()
-    a = engine.xp.asarray([[1, 2], [3, 4]])
-
-    result = engine.sum(a, axis=0)
-
-    _assert_array(result, [4, 6])
-
-
-def test_jax_mean_axis_none() -> None:
-    pytest.importorskip("jax")
-
-    engine = JaxEngine()
-    a = engine.xp.asarray([[1.0, 2.0], [3.0, 4.0]])
-
-    result = engine.mean(a)
-
-    _assert_array(result, 2.5)
-
-
-def test_jax_max_axis_none() -> None:
-    pytest.importorskip("jax")
-
-    engine = JaxEngine()
-    a = engine.xp.asarray([3, 1, 4, 1, 5])
-
-    result = engine.max(a)
-
-    _assert_array(result, 5)
-
-
-def test_jax_min_axis_none() -> None:
-    pytest.importorskip("jax")
-
-    engine = JaxEngine()
-    a = engine.xp.asarray([3, 1, 4, 1, 5])
-
-    result = engine.min(a)
-
-    _assert_array(result, 1)
-
-
-def test_jax_transpose() -> None:
-    pytest.importorskip("jax")
-
-    engine = JaxEngine()
-    a = engine.xp.asarray([[1, 2], [3, 4]])
-
-    result = engine.transpose(a)
-
-    _assert_array(result, [[1, 3], [2, 4]])
-
-
-def test_jax_reshape() -> None:
-    pytest.importorskip("jax")
-
-    engine = JaxEngine()
-    a = engine.xp.asarray([1, 2, 3, 4])
-
-    result = engine.reshape(a, (2, 2))
-
-    _assert_array(result, [[1, 2], [3, 4]])
-
-
-def test_jax_evaluate_expression() -> None:
-    pytest.importorskip("jax")
-
-    engine = JaxEngine()
-    arr = engine.xp.asarray([1, 2, 3])
-
-    result = engine.evaluate("x * 2", arr)
-
-    _assert_array(result, [2, 4, 6])
+    with pytest.raises(TypeError, match="requires array batches"):
+        engine.evaluate("x", Batch.table(pa.table({"x": [1]})))

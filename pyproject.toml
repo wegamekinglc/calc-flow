@@ -1,20 +1,44 @@
 [project]
 name = "calc-flow"
-version = "0.1.0"
-description = "Composable calculation pipelines with pluggable engines"
+version = "0.2.0"
+description = "DataFusion-first batch and streaming calculation pipelines"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "cloudpickle>=3.1",
     "datafusion>=53.0.0",
-    "jax>=0.4",
-    "numpy>=2.0.0",
-    "pandas>=3.0.2",
-    "polars>=1.40.1",
+    "pydantic>=2.12.0,<3",
     "pyarrow>=24.0.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.14"]
+numpy = ["numpy>=2.0.0"]
+jax = ["jax>=0.4"]
+array = ["jax>=0.4", "numpy>=2.0.0"]
+web = ["fastapi>=0.116", "pyyaml>=6.0", "uvicorn>=0.35"]
+benchmark = [
+    "jax>=0.4",
+    "numpy>=2.0.0",
+    "psutil>=6.1",
+    "pytest>=8",
+    "pytest-benchmark>=5.2",
+]
+dev = [
+    "fastapi>=0.116",
+    "hypothesis>=6.100",
+    "httpx2>=2.5",
+    "jax>=0.4",
+    "numpy>=2.0.0",
+    "pytest>=8",
+    "pytest-cov>=7.1",
+    "pytest-xdist>=3.6",
+    "pyyaml>=6.0",
+    "ruff>=0.14",
+    "uvicorn>=0.35",
+]
+
+[project.scripts]
+calc-flow-web = "calc_flow.web:serve"
 
 [build-system]
 requires = ["hatchling"]
@@ -25,6 +49,15 @@ packages = ["src/calc_flow"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["calc_flow"]
+omit = ["*/calc_flow/web/*"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = true
 
 [tool.ruff]
 target-version = "py313"
