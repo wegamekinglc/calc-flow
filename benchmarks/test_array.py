@@ -56,7 +56,10 @@ def _benchmark_array(
 @pytest.mark.benchmark(
     group=benchmark_group("array-elementwise"), min_rounds=3, max_time=0.5
 )
-def test_elementwise_expression(benchmark: BenchmarkFixture, backend: str) -> None:
+@pytest.mark.parametrize("_scale", [selected_scale().name])
+def test_elementwise_expression(
+    benchmark: BenchmarkFixture, backend: str, _scale: str
+) -> None:
     scale = selected_scale()
     engine = _engine(backend)
     values = Batch.array(engine.xp.asarray(np.arange(scale.array_elements)))
@@ -81,7 +84,8 @@ def test_elementwise_expression(benchmark: BenchmarkFixture, backend: str) -> No
 @pytest.mark.benchmark(
     group=benchmark_group("array-reduction"), min_rounds=3, max_time=0.5
 )
-def test_reduction(benchmark: BenchmarkFixture, backend: str) -> None:
+@pytest.mark.parametrize("_scale", [selected_scale().name])
+def test_reduction(benchmark: BenchmarkFixture, backend: str, _scale: str) -> None:
     scale = selected_scale()
     engine = _engine(backend)
     values = Batch.array(engine.xp.asarray(np.arange(scale.array_elements)))
@@ -106,7 +110,10 @@ def test_reduction(benchmark: BenchmarkFixture, backend: str) -> None:
 @pytest.mark.benchmark(
     group=benchmark_group("array-matmul"), min_rounds=3, max_time=0.5
 )
-def test_matrix_multiplication(benchmark: BenchmarkFixture, backend: str) -> None:
+@pytest.mark.parametrize("_scale", [selected_scale().name])
+def test_matrix_multiplication(
+    benchmark: BenchmarkFixture, backend: str, _scale: str
+) -> None:
     dimension = selected_scale().matrix_dimension
     engine = _engine(backend)
     matrix = Batch.array(
@@ -131,7 +138,10 @@ def test_matrix_multiplication(benchmark: BenchmarkFixture, backend: str) -> Non
 
 @pytest.mark.parametrize("backend", ("numpy", "jax"))
 @pytest.mark.benchmark(group=benchmark_group("array-udf"), min_rounds=3, max_time=0.5)
-def test_registered_array_udf(benchmark: BenchmarkFixture, backend: str) -> None:
+@pytest.mark.parametrize("_scale", [selected_scale().name])
+def test_registered_array_udf(
+    benchmark: BenchmarkFixture, backend: str, _scale: str
+) -> None:
     scale = selected_scale()
     registry = UdfRegistry()
 

@@ -29,7 +29,8 @@ def identity(inputs: Mapping[str, Batch], _context: RunContext) -> Mapping[str, 
 
 
 @pytest.mark.benchmark(group=benchmark_group("dag"), min_rounds=3, max_time=0.5)
-def test_graph_fan_out(benchmark: BenchmarkFixture) -> None:
+@pytest.mark.parametrize("_scale", [selected_scale().name])
+def test_graph_fan_out(benchmark: BenchmarkFixture, _scale: str) -> None:
     batch = table_inputs(selected_scale().table_rows).fact
     plan = (
         Pipeline("benchmark-fan-out")
@@ -68,7 +69,10 @@ def _checkpoint() -> Checkpoint:
 
 
 @pytest.mark.benchmark(group=benchmark_group("checkpoint"), min_rounds=5, max_time=0.5)
-def test_checkpoint_json_serialization(benchmark: BenchmarkFixture) -> None:
+@pytest.mark.parametrize("_scale", [selected_scale().name])
+def test_checkpoint_json_serialization(
+    benchmark: BenchmarkFixture, _scale: str
+) -> None:
     checkpoint = _checkpoint()
 
     document = benchmark(json.dumps, checkpoint.to_dict(), sort_keys=True)
@@ -83,7 +87,10 @@ def test_checkpoint_json_serialization(benchmark: BenchmarkFixture) -> None:
 
 
 @pytest.mark.benchmark(group=benchmark_group("checkpoint"), min_rounds=5, max_time=0.5)
-def test_checkpoint_atomic_write(benchmark: BenchmarkFixture, tmp_path) -> None:
+@pytest.mark.parametrize("_scale", [selected_scale().name])
+def test_checkpoint_atomic_write(
+    benchmark: BenchmarkFixture, tmp_path, _scale: str
+) -> None:
     checkpoint = _checkpoint()
     store = FileCheckpointStore(tmp_path)
 
@@ -99,7 +106,10 @@ def test_checkpoint_atomic_write(benchmark: BenchmarkFixture, tmp_path) -> None:
 
 
 @pytest.mark.benchmark(group=benchmark_group("checkpoint"), min_rounds=5, max_time=0.5)
-def test_checkpoint_recovery_load(benchmark: BenchmarkFixture, tmp_path) -> None:
+@pytest.mark.parametrize("_scale", [selected_scale().name])
+def test_checkpoint_recovery_load(
+    benchmark: BenchmarkFixture, tmp_path, _scale: str
+) -> None:
     checkpoint = _checkpoint()
     store = FileCheckpointStore(tmp_path)
     store.save(checkpoint)

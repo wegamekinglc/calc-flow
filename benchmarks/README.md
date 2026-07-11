@@ -22,14 +22,17 @@ Available scales:
 | `standard` |    100,000 |        100,000 |              256 |
 | `nightly`  |  1,000,000 |      1,000,000 |              512 |
 
-Each benchmark group header reports the active problem scale, for example
-`datafusion-expression [overhead rows=100 array=1000 matmul=16]`, so every
-results section names the data size its timings were measured at. The JSON
-`extra_info` for every case records the scenario, scale, scale dimensions
-(table rows, array elements, matrix dimension), input/output rows, process
-RSS, and active array backend. DataFusion cases additionally record planning
-time, execution time, and query count reported by the runtime. JAX benchmarks
-warm the operation and synchronize device results inside the timed call.
+Each benchmark reports the active problem scale in two places: the group
+header carries the full spec (for example
+`datafusion-expression [overhead rows=100 array=1000 matmul=16]`), and each
+test ID / results-table row carries the scale name (for example
+`test_group_by_aggregation[overhead]`), so a result names its data size
+whether read in context or in isolation. The JSON `extra_info` for every case
+records the scenario, scale, scale dimensions (table rows, array elements,
+matrix dimension), input/output rows, process RSS, and active array backend.
+DataFusion cases additionally record planning time, execution time, and query
+count reported by the runtime. JAX benchmarks warm the operation and
+synchronize device results inside the timed call.
 
 Compare saved reports with `pytest-benchmark` after collecting compatible
 runner samples. Do not compare results across different machines, dependency
