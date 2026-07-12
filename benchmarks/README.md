@@ -17,7 +17,7 @@ Available scales:
 
 | Scale      | Table rows | Array elements | Matrix dimension |
 | ---------- | ---------: | -------------: | ---------------: |
-| `overhead` |        100 |          1,000 |               16 |
+| `overhead` |      1,000 |          1,000 |               16 |
 | `small`    |     10,000 |         10,000 |               64 |
 | `standard` |    100,000 |        100,000 |              256 |
 | `nightly`  |  1,000,000 |      1,000,000 |              512 |
