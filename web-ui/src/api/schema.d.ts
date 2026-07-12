@@ -528,6 +528,38 @@ export interface components {
              */
             run_options: components["schemas"]["RunOptions"];
         };
+        /** ProjectCreateRequest */
+        ProjectCreateRequest: {
+            /**
+             * Data Sources
+             * @default []
+             */
+            data_sources: components["schemas"]["DataSourceConfig-Input"][];
+            /**
+             * Description
+             * @default
+             */
+            description: string;
+            /**
+             * Format Version
+             * @default 1
+             * @constant
+             */
+            format_version: "1";
+            /** Name */
+            name: string;
+            pipeline: components["schemas"]["PipelineConfig"];
+            /**
+             * @default {
+             *       "max_input_bytes": 10485760,
+             *       "max_rows": 100000,
+             *       "memory_limit_mb": 512,
+             *       "output_rows": 1000,
+             *       "timeout_seconds": 30
+             *     }
+             */
+            run_options: components["schemas"]["RunOptions"];
+        };
         /** ProjectSummary */
         ProjectSummary: {
             /** Description */
@@ -717,7 +749,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ProjectConfig-Input"];
+                "application/json": components["schemas"]["ProjectCreateRequest"];
             };
         };
         responses: {
@@ -1094,7 +1126,9 @@ export interface operations {
     get_run_events_api_v1_runs__run_id__events_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "Last-Event-ID"?: number | null;
+            };
             path: {
                 run_id: string;
             };

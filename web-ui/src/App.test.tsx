@@ -53,15 +53,18 @@ describe('Calc Flow Studio', () => {
     expect(screen.getByLabelText('DataFusion SQL')).toHaveValue('SELECT * FROM input');
   });
 
-  it('saves and validates the edited graph', async () => {
+  it('creates an unsaved draft before validating it', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path.endsWith('/catalog')) return response(catalog);
       if (path.endsWith('/projects') && !init?.method) return response([]);
-      if (path.endsWith('/projects/untitled') && init?.method === 'PUT') {
-        return response(JSON.parse(String(init.body)));
+      if (path.endsWith('/projects') && init?.method === 'POST') {
+        return response(
+          { ...JSON.parse(String(init.body)), id: 'project_generated' },
+          201,
+        );
       }
-      if (path.endsWith('/projects/untitled/validate')) {
+      if (path.endsWith('/projects/project_generated/validate')) {
         return response({
           valid: true,
           errors: [],
@@ -80,6 +83,10 @@ describe('Calc Flow Studio', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Validate' }));
 
     expect(await screen.findByText('Graph is valid')).toBeInTheDocument();
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
+    const createCall = fetchMock.mock.calls.find(
+      ([path, init]) => String(path).endsWith('/projects') && init?.method === 'POST',
+    );
+    expect(JSON.parse(String(createCall?.[1]?.body))).not.toHaveProperty('id');
   });
 });

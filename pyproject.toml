@@ -15,7 +15,7 @@ dependencies = [
 numpy = ["numpy>=2.0.0"]
 jax = ["jax>=0.4"]
 array = ["jax>=0.4", "numpy>=2.0.0"]
-web = ["fastapi>=0.116", "pyyaml>=6.0", "uvicorn>=0.35"]
+yaml = ["pyyaml>=6.0"]
 benchmark = [
     "jax>=0.4",
     "numpy>=2.0.0",
@@ -24,9 +24,7 @@ benchmark = [
     "pytest-benchmark>=5.2",
 ]
 dev = [
-    "fastapi>=0.116",
     "hypothesis>=6.100",
-    "httpx2>=2.5",
     "jax>=0.4",
     "numpy>=2.0.0",
     "psutil>=6.1",
@@ -35,11 +33,7 @@ dev = [
     "pytest-xdist>=3.6",
     "pyyaml>=6.0",
     "ruff>=0.14",
-    "uvicorn>=0.35",
 ]
-
-[project.scripts]
-calc-flow-web = "calc_flow.web:serve"
 
 [build-system]
 requires = ["hatchling"]
@@ -48,12 +42,17 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/calc_flow"]
 
+[tool.hatch.build.targets.sdist]
+exclude = ["/web-ui"]
+
+[tool.uv.workspace]
+members = ["web-ui/backend"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
 [tool.coverage.run]
 source = ["calc_flow"]
-omit = ["*/calc_flow/web/*"]
 
 [tool.coverage.report]
 fail_under = 90

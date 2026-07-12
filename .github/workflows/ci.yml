@@ -65,6 +65,47 @@ jobs:
         run: npm test
       - name: Audit production dependencies
         run: npm audit --omit=dev
+  studio-backend:
+    name: Studio backend tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20.20.0
+          cache: npm
+          cache-dependency-path: web-ui/package-lock.json
+      - name: Install studio dependencies
+        run: |
+          uv sync --package calc-flow-studio --extra dev
+          cd web-ui && npm ci
+      - name: Run studio backend coverage
+        working-directory: web-ui/backend
+        run: >-
+          uv run --project . --extra dev pytest -q
+          --cov=calc_flow_studio --cov-report=term-missing --cov-report=xml
+      - name: Verify generated API contract
+        run: |
+          cd web-ui
+          npm run sync:api
+          git diff --exit-code -- openapi.json src/api/schema.d.ts
+      - name: Upload studio coverage report
+        uses: actions/upload-artifact@v7
+        with:
+          name: studio-python-coverage
+          path: web-ui/backend/coverage.xml
+          if-no-files-found: error
+          retention-days: 14
   browser-e2e:
     name: Studio browser workflow
     runs-on: ubuntu-latest
@@ -84,7 +125,7 @@ jobs:
           enable-cache: true
       - name: Install backend
         working-directory: .
-        run: uv sync --extra web
+        run: uv sync --package calc-flow-studio
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
@@ -113,7 +154,9 @@ jobs:
         with:
           enable-cache: true
       - name: Build wheel and source distribution
-        run: uv build
+        run: |
+          uv build
+          ! tar -tzf dist/calc_flow-*.tar.gz | grep -E 'web-ui|calc_flow/web'
       - name: Install and execute the wheel in isolation
         run: |
           wheel="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
@@ -135,6 +178,67 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: python-distributions
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+  studio-package:
+    name: Build + isolated studio wheel smoke test
+    needs:
+      - frontend
+      - studio-backend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20.20.0
+          cache: npm
+          cache-dependency-path: web-ui/package-lock.json
+      - name: Build core and studio wheels
+        run: |
+          uv build
+          cd web-ui
+          npm ci
+          npm run build:wheel
+      - name: Install and inspect studio wheels
+        run: |
+          uv venv /tmp/calc-flow-studio-wheel
+          uv pip install --python /tmp/calc-flow-studio-wheel/bin/python \
+            dist/calc_flow-*.whl dist/calc_flow_studio-*.whl
+          test -x /tmp/calc-flow-studio-wheel/bin/calc-flow-web
+          /tmp/calc-flow-studio-wheel/bin/python - <<'PY'
+          from importlib.metadata import requires
+          from pathlib import Path
+
+          import calc_flow
+          import calc_flow_studio
+
+          app = calc_flow_studio.create_app()
+          paths = [route.path for route in app.routes]
+          assert "/api/v1/catalog" in app.openapi()["paths"]
+          assert "/" in paths
+          assert "/assets" in paths
+          assert not hasattr(calc_flow, "web")
+          core_requirements = requires("calc-flow") or []
+          assert not any("fastapi" in item.lower() for item in core_requirements)
+          assert not any("uvicorn" in item.lower() for item in core_requirements)
+          index = next(route for route in app.routes if route.path == "/").endpoint()
+          assert Path(index.path).is_file()
+          PY
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: studio-python-distributions
           path: dist/*
           if-no-files-found: error
           retention-days: 30

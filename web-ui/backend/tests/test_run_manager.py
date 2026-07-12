@@ -3,12 +3,13 @@ from __future__ import annotations
 import base64
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from enum import Enum
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
-
 from calc_flow.batch import Batch
 from calc_flow.config import (
     DataSourceConfig,
@@ -20,10 +21,13 @@ from calc_flow.config import (
 )
 from calc_flow.pipeline import RunMetadata, RunResult
 from calc_flow.udf import UdfRegistry
-from calc_flow.web.models import InputPayload, RunRequest, RunStatus
-from calc_flow.web.run_manager import (
+
+from calc_flow_studio.models import InputPayload, RunRequest, RunStatus
+from calc_flow_studio.run_manager import (
     RunManager,
     RunManagerError,
+    _decode_table,
+    _json_safe,
     _result_payload,
     prepare_run,
 )
@@ -140,6 +144,56 @@ def test_prepare_run_enforces_names_rows_and_bytes() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (InputPayload(format="inline_json", data=[1]), "record objects"),
+        (InputPayload(format="inline_json", data=1), "records or a column"),
+        (InputPayload(format="csv", data=[{"value": 1}]), "must be text"),
+        (InputPayload(format="json", data="not-json"), "array, object"),
+        (InputPayload(format="arrow_ipc", data="not-base64!"), "valid base64"),
+        (
+            InputPayload(
+                format="arrow_ipc",
+                data=base64.b64encode(b"not arrow").decode(),
+            ),
+            "neither a stream nor file",
+        ),
+    ],
+)
+def test_decode_table_rejects_invalid_preview_payloads(
+    payload: InputPayload,
+    message: str,
+) -> None:
+    with pytest.raises(RunManagerError, match=message):
+        _decode_table(payload, max_bytes=1000)
+
+
+def test_decode_table_accepts_column_mappings() -> None:
+    table, _ = _decode_table(
+        InputPayload(format="inline_json", data={"value": [1, 2]}),
+        max_bytes=1000,
+    )
+
+    assert table.to_pylist() == [{"value": 1}, {"value": 2}]
+
+
+def test_json_safe_normalizes_non_json_result_scalars() -> None:
+    class Value(Enum):
+        ITEM = "item"
+
+    class Scalar:
+        def item(self) -> Decimal:
+            return Decimal("1.25")
+
+    assert _json_safe(float("inf")) is None
+    assert _json_safe(Decimal("2.50")) == "2.50"
+    assert _json_safe(date(2026, 1, 2)) == "2026-01-02"
+    assert _json_safe(b"data") == "ZGF0YQ=="
+    assert _json_safe(Value.ITEM) == "item"
+    assert _json_safe({1: (Scalar(),)}) == {"1": ["1.25"]}
+
+
 def test_thread_run_manager_returns_results_plans_and_metrics() -> None:
     manager = RunManager(use_processes=False)
     run = manager.submit(
@@ -167,6 +221,34 @@ def test_thread_run_manager_returns_results_plans_and_metrics() -> None:
         "running",
         "completed",
     ]
+    manager.shutdown()
+
+
+def test_wait_for_events_replays_after_sequence_and_reports_terminal_status() -> None:
+    manager = RunManager(use_processes=False)
+    run = manager.submit(
+        _project(),
+        RunRequest(
+            inputs={"input": InputPayload(format="inline_json", data=[{"value": 1}])}
+        ),
+    )
+    assert _wait(manager, run.id) is RunStatus.COMPLETED
+
+    events, status = manager.wait_for_events(
+        run.id,
+        after_sequence=0,
+        timeout=0.01,
+    )
+    repeated, repeated_status = manager.wait_for_events(
+        run.id,
+        after_sequence=events[-1].sequence,
+        timeout=0.01,
+    )
+
+    assert [event.type for event in events] == ["running", "completed"]
+    assert status is RunStatus.COMPLETED
+    assert repeated == ()
+    assert repeated_status is RunStatus.COMPLETED
     manager.shutdown()
 
 
@@ -355,7 +437,7 @@ def test_result_payload_truncates_array_outputs_to_output_rows() -> None:
 
 def test_submit_caps_concurrent_submissions(monkeypatch: pytest.MonkeyPatch) -> None:
     """A submission racing with one already mid-prepare must still honor max_workers."""
-    import calc_flow.web.run_manager as module
+    import calc_flow_studio.run_manager as module
 
     gate = threading.Event()
     entered = threading.Event()

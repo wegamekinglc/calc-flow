@@ -5,11 +5,7 @@ import json
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-
-from fastapi import FastAPI, HTTPException, Query, Request, Response, status
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from uuid import uuid4
 
 from calc_flow.checkpoint import CheckpointError, FileCheckpointStore
 from calc_flow.config import (
@@ -34,14 +30,21 @@ from calc_flow.project_store import (
     load_project_document,
 )
 from calc_flow.udf import UdfRegistry, UdfRegistrySnapshot
-from calc_flow.web.models import (
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+
+from calc_flow_studio.models import (
     CatalogResponse,
     CheckpointSummary,
+    ProjectCreateRequest,
     ProjectSummary,
     RunRequest,
     RunResponse,
+    RunStatus,
 )
-from calc_flow.web.run_manager import RunManager, RunManagerError
+from calc_flow_studio.run_manager import RunManager, RunManagerError
 
 
 def _project_summary(project: ProjectConfig) -> ProjectSummary:
@@ -58,11 +61,8 @@ def _not_found(error: Exception) -> HTTPException:
 
 
 def _default_frontend_directory() -> Path | None:
-    candidates = (
-        Path(__file__).with_name("static"),
-        Path(__file__).parents[3] / "web-ui" / "dist",
-    )
-    return next((path for path in candidates if (path / "index.html").is_file()), None)
+    static = Path(__file__).with_name("static")
+    return static if (static / "index.html").is_file() else None
 
 
 def create_app(
@@ -149,14 +149,18 @@ def create_app(
         response_model=ProjectConfig,
         status_code=status.HTTP_201_CREATED,
     )
-    def create_project(project: ProjectConfig) -> ProjectConfig:
-        try:
-            store.create(project)
-        except ProjectConflictError as error:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT, detail=str(error)
-            ) from error
-        return project
+    def create_project(request: ProjectCreateRequest) -> ProjectConfig:
+        for _ in range(3):
+            project = request.to_project(f"project_{uuid4().hex}")
+            try:
+                store.create(project)
+            except ProjectConflictError:
+                continue
+            return project
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="could not allocate a unique project ID",
+        )
 
     @app.post(
         "/api/v1/projects/import",
@@ -224,7 +228,13 @@ def create_app(
         except ProjectFormatError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         media_type = "application/json" if format == "json" else "application/yaml"
-        return PlainTextResponse(document, media_type=media_type)
+        return PlainTextResponse(
+            document,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{project_id}.{format}"'
+            },
+        )
 
     @app.post(
         "/api/v1/projects/{project_id}/validate",
@@ -315,22 +325,55 @@ def create_app(
             raise _not_found(error) from error
 
     @app.get("/api/v1/runs/{run_id}/events")
-    def get_run_events(run_id: str) -> StreamingResponse:
+    def get_run_events(
+        run_id: str,
+        last_event_id: int | None = Header(default=None, alias="Last-Event-ID"),
+    ) -> StreamingResponse:
         try:
-            events = manager.events(run_id)
+            manager.get(run_id)
         except KeyError as error:
             raise _not_found(error) from error
 
         def stream() -> Iterator[str]:
-            for event in events:
-                payload = json.dumps(
-                    event.model_dump(mode="json"), separators=(",", ":")
+            after_sequence = last_event_id if last_event_id is not None else -1
+            terminal = {
+                RunStatus.COMPLETED,
+                RunStatus.FAILED,
+                RunStatus.CANCELLED,
+                RunStatus.TIMED_OUT,
+            }
+            yield "retry: 500\n\n"
+            while True:
+                events, run_status = manager.wait_for_events(
+                    run_id,
+                    after_sequence=after_sequence,
+                    timeout=10.0,
                 )
-                yield (
-                    f"id: {event.sequence}\nevent: {event.type}\ndata: {payload}\n\n"
-                )
+                if not events:
+                    if run_status in terminal:
+                        return
+                    yield ": keep-alive\n\n"
+                    continue
+                for event in events:
+                    payload = json.dumps(
+                        event.model_dump(mode="json"), separators=(",", ":")
+                    )
+                    yield (
+                        f"id: {event.sequence}\nevent: {event.type}\n"
+                        f"data: {payload}\n\n"
+                    )
+                    after_sequence = event.sequence
+                if run_status in terminal:
+                    return
 
-        return StreamingResponse(stream(), media_type="text/event-stream")
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.delete("/api/v1/runs/{run_id}", response_model=RunResponse)
     def cancel_run(run_id: str) -> RunResponse:

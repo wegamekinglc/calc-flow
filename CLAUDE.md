@@ -26,8 +26,8 @@ cd web-ui && npm ci
 cd web-ui && npm run build
 cd web-ui && npm test
 cd web-ui && npm run test:e2e
-./scripts/start_web_ui.sh                 # start the local API and Vite studio
-./scripts/stop_web_ui.sh                  # stop both managed process groups
+./web-ui/scripts/start_web_ui.sh          # start the local API and Vite studio
+./web-ui/scripts/stop_web_ui.sh           # stop both managed process groups
 ```
 
 ## Coding style
@@ -118,8 +118,9 @@ return an array `Batch` while preserving metadata.
   format. `compile_project()` maps them to runtime operators and ports.
 - **`FileProjectStore`** atomically stores canonical JSON under hashed IDs; YAML
   uses safe import/export only.
-- **`calc_flow.web`** provides the optional loopback-only FastAPI `/api/v1`
-  service and bounded spawned preview workers.
+- **`web-ui/backend/`** provides the separate loopback-only
+  `calc-flow-studio` FastAPI `/api/v1` service and bounded spawned preview
+  workers.
 - **`web-ui/`** contains the React/TypeScript/Vite/React Flow studio. Its API
   types are generated from the checked-in OpenAPI document. Run its build and
   Vitest suite for UI changes.

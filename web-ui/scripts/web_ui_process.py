@@ -19,8 +19,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-ROOT = Path(__file__).resolve().parents[1]
-WEB_UI = ROOT / "web-ui"
+ROOT = Path(__file__).resolve().parents[2]
+WEB_UI = Path(__file__).resolve().parents[1]
 DEFAULT_RUNTIME_DIRECTORY = Path(
     os.environ.get("CALC_FLOW_WEB_RUNTIME_DIR", ROOT / ".calc-flow-web")
 )
@@ -366,7 +366,7 @@ def start(runtime_directory: Path, timeout: float) -> None:
     try:
         api_process, api_service = _spawn_service(
             name="api",
-            command=[uv, "run", "--extra", "web", "calc-flow-web"],
+            command=[uv, "run", "--package", "calc-flow-studio", "calc-flow-web"],
             cwd=ROOT,
             environment=environment,
             url="http://127.0.0.1:8765/api/v1/catalog",

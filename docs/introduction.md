@@ -156,11 +156,11 @@ safe parser and is import/export only; it is never the canonical stored form.
 
 ## Local API and web UI
 
-The optional `web` extra provides a FastAPI service under `/api/v1`. It exposes
-the operator/UDF catalog, project CRUD and import/export, graph validation,
-preview runs, event streams, cancellation, and runner-checkpoint inspection and
-reset. The service binds only to loopback and is intentionally single-user and
-unauthenticated.
+The separate `calc-flow-studio` package under `web-ui/backend/` provides a
+FastAPI service under `/api/v1`. It exposes the operator/UDF catalog, project
+CRUD and import/export, graph validation, preview runs, event streams,
+cancellation, and runner-checkpoint inspection and reset. The service binds
+only to loopback and is intentionally single-user and unauthenticated.
 
 Preview inputs accept inline records, CSV, JSON/NDJSON, and base64 Arrow IPC.
 They are parsed directly into Arrow without a dataframe library. The API checks

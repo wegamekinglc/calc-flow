@@ -21,8 +21,9 @@ cd web-ui && npm ci                      # install locked frontend dependencies
 cd web-ui && npm run build               # type-check and build the studio
 cd web-ui && npm test                    # run Vitest
 cd web-ui && npm run test:e2e            # run the Playwright browser workflow
-./scripts/start_web_ui.sh                 # start the local API and Vite studio
-./scripts/stop_web_ui.sh                  # stop both managed process groups
+./web-ui/scripts/start_web_ui.sh          # start the local API and Vite studio
+./web-ui/scripts/stop_web_ui.sh           # stop both managed process groups
+cd web-ui/backend && uv run --project . --extra dev pytest --cov=calc_flow_studio
 ```
 
 ## Git conventions
@@ -142,8 +143,8 @@ array `Batch` while preserving metadata.
   Python builder. Table nodes never expose a backend selector.
 - **`FileProjectStore`** stores sorted formatted JSON atomically under hashed
   IDs. YAML is safe import/export only. Never deserialize executable objects.
-- **`calc_flow.web`** is optional behind the `web` extra. Its FastAPI routes live
-  under `/api/v1`; `serve()` must reject non-loopback hosts.
+- **`web-ui/backend/`** is the separate `calc-flow-studio` Python package. Its
+  FastAPI routes live under `/api/v1`; `serve()` must reject non-loopback hosts.
 - **`RunManager`** decodes bounded Arrow inputs in the parent, then uses spawned
   worker processes with timeout, CPU, resident-memory, output, cancellation,
   and lifecycle controls.
@@ -160,6 +161,8 @@ array `Batch` while preserving metadata.
 - Add focused tests for public behavior, regressions, and state-recovery paths.
   Avoid tests that only preserve unused scaffolding.
 - Define fixtures locally in test files; do not add a shared `conftest.py`.
+- Studio backend tests live under `web-ui/backend/tests/` and use that package's
+  independent 85% coverage floor.
 
 ## Verification
 
@@ -169,6 +172,7 @@ Before considering a change complete, run:
 uv run pytest
 uv run ruff check .
 uv run ruff format --check .
+cd web-ui/backend && uv run --project . --extra dev pytest --cov=calc_flow_studio
 cd web-ui && npm run build && npm test && npm run test:e2e
 cd web-ui && npm audit --omit=dev
 ```

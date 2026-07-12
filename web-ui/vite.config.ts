@@ -3,6 +3,10 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   plugins: [react()],
+  build: {
+    outDir: 'backend/src/calc_flow_studio/static',
+    emptyOutDir: true,
+  },
   server: {
     host: '127.0.0.1',
     proxy: {

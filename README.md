@@ -239,13 +239,13 @@ selectors are rejected.
 Start the API and Vite development server together from the repository root:
 
 ```bash
-./scripts/start_web_ui.sh
+./web-ui/scripts/start_web_ui.sh
 ```
 
 Open `http://127.0.0.1:5173`, then stop both managed process groups with:
 
 ```bash
-./scripts/stop_web_ui.sh
+./web-ui/scripts/stop_web_ui.sh
 ```
 
 The start script installs locked frontend dependencies when `node_modules` is
@@ -253,10 +253,11 @@ missing, waits for both health endpoints, and records process IDs and logs under
 `.calc-flow-web/`. Start and stop are idempotent, and stale process records are
 cleaned up on the next start.
 
-For a production-style local build, run `npm ci && npm run build` in `web-ui/`,
-then run `uv run --extra web calc-flow-web` from the repository root and open
-`http://127.0.0.1:8765`. The server refuses non-loopback bind addresses and has
-no public-hosting or authentication mode in v0.2.
+For a production-style local build, run `npm ci && npm run build:wheel` in
+`web-ui/`, then run `uv run --package calc-flow-studio calc-flow-web` from the
+repository root and open `http://127.0.0.1:8765`. The core `calc-flow` package
+contains no FastAPI service or studio assets. The server refuses non-loopback
+bind addresses and has no public-hosting or authentication mode in v0.2.
 
 During frontend development, Vite proxies `/api` to the loopback API. The
 studio supports visual fan-out/fan-in editing, DataFusion expression and SQL
