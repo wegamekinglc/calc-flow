@@ -110,27 +110,28 @@ def record_benchmark(
     backend: str | None = None,
 ) -> None:
     scale = selected_scale()
-    benchmark.extra_info.update(
+    backend_info = {"backend": backend} if backend is not None else {}
+    metric_info = (
         {
-            "scenario": scenario,
-            "scale": scale.name,
-            "table_rows": scale.table_rows,
-            "array_elements": scale.array_elements,
-            "matrix_dimension": scale.matrix_dimension,
-            "input_rows": input_rows,
-            "output_rows": output_rows,
-            "process_rss_bytes": psutil.Process().memory_info().rss,
+            "datafusion_planning_ns": sum(metric.planning_ns for metric in metrics),
+            "datafusion_execution_ns": sum(metric.execution_ns for metric in metrics),
+            "datafusion_query_count": len(metrics),
         }
+        if metrics
+        else {}
     )
-    if backend is not None:
-        benchmark.extra_info["backend"] = backend
-    if metrics:
-        benchmark.extra_info.update(
-            {
-                "datafusion_planning_ns": sum(metric.planning_ns for metric in metrics),
-                "datafusion_execution_ns": sum(
-                    metric.execution_ns for metric in metrics
-                ),
-                "datafusion_query_count": len(metrics),
-            }
-        )
+    # pytest-benchmark exposes this attribute as its metadata output boundary.
+    # Replace the mapping so no caller-owned dictionary is changed in place.
+    benchmark.extra_info = {
+        **benchmark.extra_info,
+        "scenario": scenario,
+        "scale": scale.name,
+        "table_rows": scale.table_rows,
+        "array_elements": scale.array_elements,
+        "matrix_dimension": scale.matrix_dimension,
+        "input_rows": input_rows,
+        "output_rows": output_rows,
+        "process_rss_bytes": psutil.Process().memory_info().rss,
+        **backend_info,
+        **metric_info,
+    }

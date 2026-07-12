@@ -4,12 +4,22 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { RunResponse } from '../types';
 import { useRunEvents } from './useRunEvents';
 
+const eventTypes = [
+  'created',
+  'running',
+  'completed',
+  'failed',
+  'cancelled',
+  'timed_out',
+];
+
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
 
   readonly close = vi.fn();
-  onerror: (() => void) | null = null;
-  onopen: (() => void) | null = null;
+  readonly removeEventListener = vi.fn(
+    (type: string, listener: () => void) => this.listeners.get(type)?.delete(listener),
+  );
   private readonly listeners = new Map<string, Set<() => void>>();
 
   constructor(readonly url: string) {
@@ -81,11 +91,23 @@ describe('useRunEvents', () => {
     renderHook(() => useRunEvents('run-1', onUpdate));
     const source = FakeEventSource.instances[0];
     act(() => {
-      source.onerror?.();
-      source.onerror?.();
+      source.emit('error');
+      source.emit('error');
     });
 
     await waitFor(() => expect(onUpdate).toHaveBeenCalledWith(run('completed')));
     expect(source.close).toHaveBeenCalledOnce();
+  });
+
+  it('removes every stream listener when the owner unmounts', () => {
+    vi.stubGlobal('EventSource', FakeEventSource);
+    const { unmount } = renderHook(() => useRunEvents('run-1', vi.fn()));
+    const source = FakeEventSource.instances[0];
+
+    unmount();
+
+    expect(source.removeEventListener).toHaveBeenCalledTimes(eventTypes.length + 2);
+    expect(source.removeEventListener).toHaveBeenCalledWith('open', expect.any(Function));
+    expect(source.removeEventListener).toHaveBeenCalledWith('error', expect.any(Function));
   });
 });

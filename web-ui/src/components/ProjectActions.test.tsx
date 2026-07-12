@@ -54,4 +54,25 @@ describe('ProjectActions', () => {
     expect(screen.getByRole('button', { name: 'Export JSON' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Export YAML' })).toBeDisabled();
   });
+
+  it('replaces the file input after importing without mutating the event target', () => {
+    const onImport = vi.fn();
+    render(
+      <ProjectActions
+        persisted
+        busy={false}
+        onNew={vi.fn()}
+        onDelete={vi.fn()}
+        onExport={vi.fn()}
+        onImport={onImport}
+      />,
+    );
+    const input = screen.getByLabelText('Import project');
+    const file = new File(['{}'], 'project.json', { type: 'application/json' });
+
+    fireEvent.change(input, { target: { files: [file] } });
+
+    expect(onImport).toHaveBeenCalledWith(file);
+    expect(screen.getByLabelText('Import project')).not.toBe(input);
+  });
 });

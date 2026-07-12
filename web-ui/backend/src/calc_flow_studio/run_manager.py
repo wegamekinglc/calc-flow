@@ -8,7 +8,7 @@ import multiprocessing
 import os
 import queue
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -333,7 +333,7 @@ class _RunHandle:
     finished_at: datetime | None = None
     error: str | None = None
     result: dict[str, JSONValue] | None = None
-    events: list[RunEvent] = field(default_factory=list)
+    events: tuple[RunEvent, ...] = ()
     worker: Any = None
     output_queue: Any = None
     cancel_requested: bool = False
@@ -394,7 +394,7 @@ class RunManager:
                 created_at=datetime.now(UTC),
             )
             self._runs[run_id] = handle
-            self._event(handle, "created", "Run accepted")
+            self._event(handle.id, "created", "Run accepted")
         try:
             batches, options = prepare_run(
                 project, request, udf_registry=self._registry
@@ -441,7 +441,7 @@ class RunManager:
             handle.output_queue = output_queue
             handle.status = RunStatus.RUNNING
             handle.started_at = datetime.now(UTC)
-            self._event(handle, "running", "Worker started")
+            self._event(handle.id, "running", "Worker started")
         worker.start()
         Thread(
             target=self._monitor,
@@ -500,10 +500,10 @@ class RunManager:
             }:
                 return self._response(handle)
             handle.cancel_requested = True
-            self._stop_worker(handle)
+            self._stop_worker(handle.id)
             handle.status = RunStatus.CANCELLED
             handle.finished_at = datetime.now(UTC)
-            self._event(handle, "cancelled", "Run cancelled")
+            self._event(handle.id, "cancelled", "Run cancelled")
             return self._response(handle)
 
     def shutdown(self) -> None:
@@ -511,10 +511,10 @@ class RunManager:
             for handle in self._runs.values():
                 if handle.status in {RunStatus.PENDING, RunStatus.RUNNING}:
                     handle.cancel_requested = True
-                    self._stop_worker(handle)
+                    self._stop_worker(handle.id)
                     handle.status = RunStatus.CANCELLED
                     handle.finished_at = datetime.now(UTC)
-                    self._event(handle, "cancelled", "Server shut down")
+                    self._event(handle.id, "cancelled", "Server shut down")
 
     def _monitor(self, run_id: str, options: RunOptions) -> None:
         started = monotonic()
@@ -533,22 +533,22 @@ class RunManager:
                 with self._lock:
                     handle = self._require(run_id)
                     if handle.status is RunStatus.RUNNING:
-                        self._stop_worker(handle)
+                        self._stop_worker(handle.id)
                         handle.status = RunStatus.FAILED
                         handle.finished_at = datetime.now(UTC)
                         handle.error = "run exceeded its preview memory limit"
-                        self._event(handle, "failed", handle.error)
+                        self._event(handle.id, "failed", handle.error)
                 return
             remaining = options.timeout_seconds - (monotonic() - started)
             if remaining <= 0:
                 with self._lock:
                     handle = self._require(run_id)
                     if handle.status is RunStatus.RUNNING:
-                        self._stop_worker(handle)
+                        self._stop_worker(handle.id)
                         handle.status = RunStatus.TIMED_OUT
                         handle.finished_at = datetime.now(UTC)
                         handle.error = "run exceeded its preview timeout"
-                        self._event(handle, "timed_out", handle.error)
+                        self._event(handle.id, "timed_out", handle.error)
                 return
             try:
                 message = output_queue.get(timeout=min(0.05, remaining))
@@ -561,7 +561,7 @@ class RunManager:
                             handle.status = RunStatus.FAILED
                             handle.finished_at = datetime.now(UTC)
                             handle.error = "worker exited without a result"
-                            self._event(handle, "failed", handle.error)
+                            self._event(handle.id, "failed", handle.error)
                     return
                 continue
 
@@ -573,40 +573,44 @@ class RunManager:
                 if message.get("ok"):
                     handle.status = RunStatus.COMPLETED
                     handle.result = message["result"]
-                    self._event(handle, "completed", "Run completed")
+                    self._event(handle.id, "completed", "Run completed")
                 else:
                     handle.status = RunStatus.FAILED
                     handle.error = str(message.get("error", "run failed"))
-                    self._event(handle, "failed", handle.error)
-                self._join_worker(handle)
+                    self._event(handle.id, "failed", handle.error)
+                self._join_worker(handle.id)
             return
 
-    def _event(self, handle: _RunHandle, event_type: str, message: str) -> None:
-        handle.events.append(
+    def _event(self, run_id: str, event_type: str, message: str) -> None:
+        handle = self._require(run_id)
+        handle.events = (
+            *handle.events,
             RunEvent(
                 sequence=len(handle.events),
                 timestamp=datetime.now(UTC),
                 type=event_type,
                 message=message,
-            )
+            ),
         )
         self._event_condition.notify_all()
 
     def _prune_history(self) -> None:
         if len(self._runs) < self._max_history:
             return
-        terminal = [
-            handle
-            for handle in self._runs.values()
-            if handle.status
-            in {
-                RunStatus.COMPLETED,
-                RunStatus.FAILED,
-                RunStatus.CANCELLED,
-                RunStatus.TIMED_OUT,
-            }
-        ]
-        terminal.sort(key=lambda handle: handle.created_at)
+        terminal = sorted(
+            (
+                handle
+                for handle in self._runs.values()
+                if handle.status
+                in {
+                    RunStatus.COMPLETED,
+                    RunStatus.FAILED,
+                    RunStatus.CANCELLED,
+                    RunStatus.TIMED_OUT,
+                }
+            ),
+            key=lambda handle: handle.created_at,
+        )
         for handle in terminal[: max(0, len(self._runs) - self._max_history + 1)]:
             self._runs.pop(handle.id, None)
 
@@ -629,13 +633,15 @@ class RunManager:
             result=handle.result,
         )
 
-    def _stop_worker(self, handle: _RunHandle) -> None:
+    def _stop_worker(self, run_id: str) -> None:
+        handle = self._require(run_id)
         worker = handle.worker
         if self._use_processes and worker is not None and worker.is_alive():
             worker.terminate()
             worker.join(timeout=1)
 
-    def _join_worker(self, handle: _RunHandle) -> None:
+    def _join_worker(self, run_id: str) -> None:
+        handle = self._require(run_id)
         worker = handle.worker
         if worker is not None:
             worker.join(timeout=1)

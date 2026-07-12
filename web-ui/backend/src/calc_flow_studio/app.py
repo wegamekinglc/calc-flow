@@ -34,6 +34,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, st
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 from calc_flow_studio.models import (
     CatalogResponse,
@@ -63,6 +64,21 @@ def _not_found(error: Exception) -> HTTPException:
 def _default_frontend_directory() -> Path | None:
     static = Path(__file__).with_name("static")
     return static if (static / "index.html").is_file() else None
+
+
+def _import_project_document(
+    store: FileProjectStore,
+    content: bytes,
+    *,
+    format: str,
+    replace: bool,
+) -> ProjectConfig:
+    project = load_project_document(content, format=format)
+    if replace:
+        store.put(project)
+    else:
+        store.create(project)
+    return project
 
 
 def create_app(
@@ -174,11 +190,13 @@ def create_app(
     ) -> ProjectConfig:
         content = await request.body()
         try:
-            project = load_project_document(content, format=format)
-            if replace:
-                store.put(project)
-            else:
-                store.create(project)
+            project = await run_in_threadpool(
+                _import_project_document,
+                store,
+                content,
+                format=format,
+                replace=replace,
+            )
         except ProjectConflictError as error:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail=str(error)

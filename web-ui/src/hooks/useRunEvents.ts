@@ -60,21 +60,26 @@ export function useRunEvents(
     };
 
     const refreshFromEvent = () => void refresh();
-    eventTypes.forEach((type) => source.addEventListener(type, refreshFromEvent));
-    source.onopen = () => {
+    const handleOpen = () => {
       consecutiveErrors = 0;
     };
-    source.onerror = () => {
+    const handleError = () => {
       consecutiveErrors += 1;
       if (consecutiveErrors < 2) return;
       closeSource();
       void poll();
     };
+    eventTypes.forEach((type) => source.addEventListener(type, refreshFromEvent));
+    source.addEventListener('open', handleOpen);
+    source.addEventListener('error', handleError);
 
     return () => {
       active = false;
       closeSource();
       if (pollTimer !== undefined) window.clearTimeout(pollTimer);
+      eventTypes.forEach((type) => source.removeEventListener(type, refreshFromEvent));
+      source.removeEventListener('open', handleOpen);
+      source.removeEventListener('error', handleError);
     };
   }, [onUpdate, runId]);
 }

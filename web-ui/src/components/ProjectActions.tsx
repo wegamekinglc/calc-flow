@@ -1,3 +1,5 @@
+import { useState } from 'react';
+
 interface ProjectActionsProps {
   persisted: boolean;
   busy: boolean;
@@ -15,6 +17,8 @@ export function ProjectActions({
   onImport,
   onExport,
 }: ProjectActionsProps) {
+  const [importKey, setImportKey] = useState(0);
+
   return (
     <div className="project-actions">
       <button className="ghost-button" type="button" disabled={busy} onClick={onNew}>
@@ -23,14 +27,16 @@ export function ProjectActions({
       <label className="ghost-button file-button">
         Import
         <input
+          key={importKey}
           aria-label="Import project"
           type="file"
           accept=".json,.yaml,.yml,application/json,application/yaml"
           disabled={busy}
           onChange={(event) => {
             const file = event.target.files?.[0];
-            if (file) onImport(file);
-            event.target.value = '';
+            if (!file) return;
+            onImport(file);
+            setImportKey((current) => current + 1);
           }}
         />
       </label>
