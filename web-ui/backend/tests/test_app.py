@@ -7,8 +7,6 @@ from datetime import UTC, datetime
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
-from fastapi.testclient import TestClient
-
 from calc_flow.checkpoint import Checkpoint, FileCheckpointStore
 from calc_flow.config import (
     DataSourceConfig,
@@ -20,8 +18,11 @@ from calc_flow.config import (
     compile_project,
 )
 from calc_flow.udf import UdfRegistry
-from calc_flow.web.app import create_app, validate_bind_host
-from calc_flow.web.run_manager import RunManager
+from fastapi.testclient import TestClient
+
+from calc_flow_studio.app import create_app, validate_bind_host
+from calc_flow_studio.models import RunEvent, RunResponse, RunStatus
+from calc_flow_studio.run_manager import RunManager
 
 
 def _registry() -> UdfRegistry:
@@ -178,6 +179,15 @@ def _wait_for_run(client: TestClient, run_id: str) -> dict:
     raise AssertionError("run did not finish")
 
 
+def _import_project(client: TestClient, project: dict) -> None:
+    response = client.post(
+        "/api/v1/projects/import?format=json",
+        content=json.dumps(project),
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 201
+
+
 def test_catalog_exposes_datafusion_nodes_udfs_and_limits(tmp_path) -> None:
     with _client(tmp_path) as client:
         response = client.get("/api/v1/catalog")
@@ -196,26 +206,40 @@ def test_catalog_exposes_datafusion_nodes_udfs_and_limits(tmp_path) -> None:
     assert catalog["limits"]["max_rows"] == 100_000
 
 
-def test_project_crud_validation_and_conflicts(tmp_path) -> None:
+def test_project_crud_uses_server_generated_ids(tmp_path) -> None:
     project = _project().model_dump(mode="json", by_alias=True)
+    draft = {key: value for key, value in project.items() if key != "id"}
     with _client(tmp_path) as client:
-        created = client.post("/api/v1/projects", json=project)
-        duplicate = client.post("/api/v1/projects", json=project)
+        created = client.post("/api/v1/projects", json=draft)
+        project_id = created.json()["id"]
+        duplicate = client.post("/api/v1/projects", json=draft)
         listed = client.get("/api/v1/projects")
-        fetched = client.get("/api/v1/projects/branching")
-        validation = client.post("/api/v1/projects/branching/validate")
+        fetched = client.get(f"/api/v1/projects/{project_id}")
+        updated_document = {**created.json(), "name": "Updated"}
+        updated = client.put(
+            f"/api/v1/projects/{project_id}",
+            json=updated_document,
+        )
+        validation = client.post(f"/api/v1/projects/{project_id}/validate")
+        checkpoint = client.get(f"/api/v1/projects/{project_id}/checkpoint")
         mismatch = client.put(
             "/api/v1/projects/other",
-            json=project,
+            json=created.json(),
         )
-        deleted = client.delete("/api/v1/projects/branching")
-        missing = client.get("/api/v1/projects/branching")
+        deleted = client.delete(f"/api/v1/projects/{project_id}")
+        missing = client.get(f"/api/v1/projects/{project_id}")
 
     assert created.status_code == 201
-    assert duplicate.status_code == 409
+    assert project_id.startswith("project_")
+    assert len(project_id) == len("project_") + 32
+    assert duplicate.status_code == 201
+    assert duplicate.json()["id"] != project_id
+    assert len(listed.json()) == 2
     assert listed.json()[0]["node_count"] == 3
     assert fetched.json()["pipeline"]["nodes"][0]["kind"] == "expression"
+    assert updated.json()["name"] == "Updated"
     assert validation.json()["valid"] is True
+    assert checkpoint.json()["exists"] is False
     assert validation.json()["graph_outputs"] == ["left.output", "right.output"]
     assert mismatch.status_code == 409
     assert deleted.status_code == 204
@@ -230,6 +254,16 @@ def test_project_import_and_export_json_and_yaml(tmp_path) -> None:
             content=json.dumps(project),
             headers={"Content-Type": "application/json"},
         )
+        conflict = client.post(
+            "/api/v1/projects/import?format=json",
+            content=json.dumps(project),
+            headers={"Content-Type": "application/json"},
+        )
+        replaced = client.post(
+            "/api/v1/projects/import?format=json&replace=true",
+            content=json.dumps({**project, "name": "Replaced"}),
+            headers={"Content-Type": "application/json"},
+        )
         json_export = client.get("/api/v1/projects/branching/export?format=json")
         yaml_export = client.get("/api/v1/projects/branching/export?format=yaml")
         unsafe = client.post(
@@ -238,7 +272,13 @@ def test_project_import_and_export_json_and_yaml(tmp_path) -> None:
         )
 
     assert imported.status_code == 201
+    assert conflict.status_code == 409
+    assert replaced.status_code == 201
+    assert replaced.json()["name"] == "Replaced"
     assert json_export.status_code == 200
+    assert json_export.headers["content-disposition"] == (
+        'attachment; filename="branching.json"'
+    )
     assert json_export.json()["id"] == "branching"
     assert yaml_export.status_code == 200
     assert "format_version: '1'" in yaml_export.text
@@ -248,11 +288,14 @@ def test_project_import_and_export_json_and_yaml(tmp_path) -> None:
 def test_run_api_executes_branching_registered_udf_project(tmp_path) -> None:
     project = _project().model_dump(mode="json", by_alias=True)
     with _client(tmp_path) as client:
-        assert client.post("/api/v1/projects", json=project).status_code == 201
+        _import_project(client, project)
         submitted = client.post("/api/v1/projects/branching/runs", json={})
         assert submitted.status_code == 202
         run = _wait_for_run(client, submitted.json()["id"])
-        events = client.get(f"/api/v1/runs/{run['id']}/events")
+        events = client.get(
+            f"/api/v1/runs/{run['id']}/events",
+            headers={"Last-Event-ID": "1"},
+        )
 
     assert run["status"] == "completed"
     assert run["result"]["outputs"]["left.output"]["rows"] == [
@@ -262,14 +305,65 @@ def test_run_api_executes_branching_registered_udf_project(tmp_path) -> None:
     assert run["result"]["outputs"]["right.output"]["rows"][0]["right_value"] == 40
     assert run["result"]["datafusion_metrics"]
     assert events.status_code == 200
+    assert "retry: 500" in events.text
     assert "event: completed" in events.text
+    assert "event: running" not in events.text
     assert "data:" in events.text
+    assert events.headers["cache-control"] == "no-cache"
+
+
+def test_run_event_stream_emits_heartbeat_before_terminal_event(tmp_path) -> None:
+    class EventManager:
+        udf_registry = _registry().snapshot()
+
+        def __init__(self) -> None:
+            self.waits = 0
+
+        def get(self, run_id: str) -> RunResponse:
+            return RunResponse(
+                id=run_id,
+                project_id="project",
+                status=RunStatus.RUNNING,
+                created_at=datetime.now(UTC),
+            )
+
+        def wait_for_events(self, run_id, *, after_sequence, timeout):
+            self.waits += 1
+            if self.waits == 1:
+                return (), RunStatus.RUNNING
+            return (
+                (
+                    RunEvent(
+                        sequence=0,
+                        timestamp=datetime.now(UTC),
+                        type="completed",
+                        message="Run completed",
+                    ),
+                ),
+                RunStatus.COMPLETED,
+            )
+
+        def shutdown(self) -> None:
+            return None
+
+    manager = EventManager()
+    app = create_app(
+        project_directory=tmp_path / "projects",
+        run_manager=manager,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/runs/run/events")
+
+    assert response.status_code == 200
+    assert ": keep-alive\n\n" in response.text
+    assert "event: completed" in response.text
 
 
 def test_run_api_executes_udf_multi_input_sql_and_fan_out(tmp_path) -> None:
     project = _join_project().model_dump(mode="json", by_alias=True)
     with _client(tmp_path) as client:
-        assert client.post("/api/v1/projects", json=project).status_code == 201
+        _import_project(client, project)
         validation = client.post("/api/v1/projects/join_project/validate")
         submitted = client.post("/api/v1/projects/join_project/runs", json={})
         run = _wait_for_run(client, submitted.json()["id"])
@@ -285,10 +379,7 @@ def test_run_api_executes_udf_multi_input_sql_and_fan_out(tmp_path) -> None:
 def test_run_api_rejects_wrong_inputs_and_unknown_resources(tmp_path) -> None:
     project = _project().model_copy(update={"data_sources": ()})
     with _client(tmp_path) as client:
-        client.post(
-            "/api/v1/projects",
-            json=project.model_dump(mode="json", by_alias=True),
-        )
+        _import_project(client, project.model_dump(mode="json", by_alias=True))
         bad_run = client.post(
             "/api/v1/projects/branching/runs",
             json={
@@ -302,10 +393,21 @@ def test_run_api_rejects_wrong_inputs_and_unknown_resources(tmp_path) -> None:
         )
         missing_project = client.get("/api/v1/projects/missing")
         missing_run = client.get("/api/v1/runs/missing")
+        missing_responses = [
+            client.delete("/api/v1/projects/missing"),
+            client.get("/api/v1/projects/missing/export"),
+            client.post("/api/v1/projects/missing/validate"),
+            client.get("/api/v1/projects/missing/checkpoint"),
+            client.delete("/api/v1/projects/missing/checkpoint"),
+            client.post("/api/v1/projects/missing/runs", json={}),
+            client.get("/api/v1/runs/missing/events"),
+            client.delete("/api/v1/runs/missing"),
+        ]
 
     assert bad_run.status_code == 422
     assert missing_project.status_code == 404
     assert missing_run.status_code == 404
+    assert all(response.status_code == 404 for response in missing_responses)
 
 
 def test_openapi_contains_versioned_project_and_run_endpoints(tmp_path) -> None:
@@ -365,7 +467,7 @@ def test_checkpoint_api_inspects_compatibility_and_resets_state(tmp_path) -> Non
 
     with _client(tmp_path) as client:
         document = project.model_dump(mode="json", by_alias=True)
-        assert client.post("/api/v1/projects", json=document).status_code == 201
+        _import_project(client, document)
         inspected = client.get("/api/v1/projects/branching/checkpoint")
         reset = client.delete("/api/v1/projects/branching/checkpoint")
         missing = client.get("/api/v1/projects/missing/checkpoint")
@@ -400,10 +502,7 @@ def test_checkpoint_api_reports_stale_fingerprint(tmp_path) -> None:
     )
 
     with _client(tmp_path) as client:
-        client.post(
-            "/api/v1/projects",
-            json=project.model_dump(mode="json", by_alias=True),
-        )
+        _import_project(client, project.model_dump(mode="json", by_alias=True))
         inspected = client.get("/api/v1/projects/branching/checkpoint")
 
     assert inspected.status_code == 200

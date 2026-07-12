@@ -770,6 +770,56 @@
         "title": "ProjectConfig",
         "type": "object"
       },
+      "ProjectCreateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "data_sources": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/DataSourceConfig-Input"
+            },
+            "title": "Data Sources",
+            "type": "array"
+          },
+          "description": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Description",
+            "type": "string"
+          },
+          "format_version": {
+            "const": "1",
+            "default": "1",
+            "title": "Format Version",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "pipeline": {
+            "$ref": "#/components/schemas/PipelineConfig"
+          },
+          "run_options": {
+            "$ref": "#/components/schemas/RunOptions",
+            "default": {
+              "max_input_bytes": 10485760,
+              "max_rows": 100000,
+              "memory_limit_mb": 512,
+              "output_rows": 1000,
+              "timeout_seconds": 30.0
+            }
+          }
+        },
+        "required": [
+          "name",
+          "pipeline"
+        ],
+        "title": "ProjectCreateRequest",
+        "type": "object"
+      },
       "ProjectSummary": {
         "additionalProperties": false,
         "properties": {
@@ -1154,7 +1204,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ProjectConfig-Input"
+                "$ref": "#/components/schemas/ProjectCreateRequest"
               }
             }
           },
@@ -1650,6 +1700,22 @@
             "schema": {
               "title": "Run Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Last-Event-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last-Event-Id"
             }
           }
         ],

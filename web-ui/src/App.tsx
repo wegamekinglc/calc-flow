@@ -23,11 +23,14 @@ import {
 import { BenchmarkComparison } from './components/BenchmarkComparison';
 import { CheckpointControl } from './components/CheckpointControl';
 import { NodeInspector } from './components/NodeInspector';
+import { ProjectActions } from './components/ProjectActions';
 import { ResultsPanel } from './components/ResultsPanel';
+import { useRunEvents } from './hooks/useRunEvents';
 import {
   blankProject,
   type CatalogResponse,
   type CheckpointSummary,
+  type EditableProject,
   type JSONValue,
   type NodeConfig,
   type ProjectConfig,
@@ -39,8 +42,6 @@ import {
 type FlowNode = CalculationFlowNode;
 
 const nodeTypes: NodeTypes = { calculation: CalculationNode };
-
-const terminalStatuses = new Set(['completed', 'failed', 'cancelled', 'timed_out']);
 
 const nodeColor = (node: FlowNode) => {
   if (node.data.kind === 'sql') return '#ef9456';
@@ -106,7 +107,7 @@ const fileToBase64 = async (file: File): Promise<string> => {
 export default function App() {
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
-  const [project, setProject] = useState<ProjectConfig>(() => blankProject());
+  const [project, setProject] = useState<EditableProject>(() => blankProject());
   const [selectedNodeId, setSelectedNodeId] = useState<string>('calculate');
   const [validation, setValidation] = useState<ValidationReport | null>(null);
   const [run, setRun] = useState<RunResponse | null>(null);
@@ -136,12 +137,14 @@ export default function App() {
       .catch((error: Error) => setMessage(error.message));
   }, [refreshProjects]);
 
-  const updateProject = useCallback((next: ProjectConfig) => {
+  const updateProject = useCallback((next: EditableProject) => {
     setProject(next);
     setValidation(null);
     setRun(null);
     setCheckpoint(null);
   }, []);
+
+  useRunEvents(run?.id ?? null, setRun);
 
   const flowNodes = useMemo<FlowNode[]>(
     () =>
@@ -242,12 +245,22 @@ export default function App() {
 
   const selectedNode = project.pipeline.nodes.find((node) => node.id === selectedNodeId) ?? null;
 
+  const persistProject = async (): Promise<ProjectConfig> => {
+    const saved = 'id' in project
+      ? await api.saveProject(project)
+      : await api.createProject(project);
+    setProject(saved);
+    await refreshProjects();
+    return saved;
+  };
+
   const save = async () => {
     setBusy(true);
     try {
-      await api.saveProject(project);
-      await refreshProjects();
+      await persistProject();
       setMessage('Project saved');
+    } catch (error) {
+      setMessage((error as Error).message);
     } finally {
       setBusy(false);
     }
@@ -256,8 +269,8 @@ export default function App() {
   const validate = async () => {
     setBusy(true);
     try {
-      await api.saveProject(project);
-      const report = await api.validateProject(project.id);
+      const saved = await persistProject();
+      const report = await api.validateProject(saved.id);
       setValidation(report);
       setMessage(report.valid ? 'Graph compiled successfully' : 'Validation failed');
     } catch (error) {
@@ -267,29 +280,19 @@ export default function App() {
     }
   };
 
-  const pollRun = async (runId: string) => {
-    for (;;) {
-      const current = await api.run(runId);
-      setRun(current);
-      if (terminalStatuses.has(current.status)) return;
-      await new Promise((resolve) => window.setTimeout(resolve, 120));
-    }
-  };
-
   const execute = async () => {
     setBusy(true);
     setMessage('');
     try {
-      await api.saveProject(project);
+      const saved = await persistProject();
       let data: JSONValue = sampleData;
       if (sampleFormat === 'inline_json') data = JSON.parse(sampleData) as JSONValue;
-      const submitted = await api.runProject(project.id, {
+      const submitted = await api.runProject(saved.id, {
         inputs: {
           [sampleInputName]: { format: sampleFormat, data, source_id: 'browser-preview' },
         },
       });
       setRun(submitted);
-      await pollRun(submitted.id);
     } catch (error) {
       setMessage((error as Error).message);
     } finally {
@@ -300,8 +303,8 @@ export default function App() {
   const inspectCheckpoint = async () => {
     setBusy(true);
     try {
-      await api.saveProject(project);
-      setCheckpoint(await api.checkpoint(project.id));
+      const saved = await persistProject();
+      setCheckpoint(await api.checkpoint(saved.id));
     } catch (error) {
       setMessage((error as Error).message);
     } finally {
@@ -310,10 +313,102 @@ export default function App() {
   };
 
   const resetCheckpoint = async () => {
+    if (!('id' in project)) return;
     setBusy(true);
     try {
       setCheckpoint(await api.resetCheckpoint(project.id));
       setMessage('Runner checkpoint reset');
+    } catch (error) {
+      setMessage((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const newProject = () => {
+    const fresh = blankProject();
+    setProject(fresh);
+    setSelectedNodeId(fresh.pipeline.nodes[0].id);
+    setValidation(null);
+    setRun(null);
+    setCheckpoint(null);
+    setMessage('');
+  };
+
+  const importProject = async (file: File) => {
+    const extension = file.name.toLowerCase().split('.').pop();
+    const format = extension === 'yaml' || extension === 'yml'
+      ? 'yaml'
+      : extension === 'json'
+        ? 'json'
+        : null;
+    if (!format) {
+      setMessage('Project import requires a .json, .yaml, or .yml file');
+      return;
+    }
+    setBusy(true);
+    try {
+      const document = await file.text();
+      let imported: ProjectConfig;
+      try {
+        imported = await api.importProject(document, format);
+      } catch (error) {
+        if (
+          !(error instanceof Error)
+          || !('status' in error)
+          || error.status !== 409
+          || !window.confirm('Replace the existing project with this import?')
+        ) {
+          throw error;
+        }
+        imported = await api.importProject(document, format, true);
+      }
+      setProject(imported);
+      setSelectedNodeId(imported.pipeline.nodes[0]?.id ?? '');
+      setValidation(null);
+      setRun(null);
+      setCheckpoint(null);
+      await refreshProjects();
+      setMessage('Project imported');
+    } catch (error) {
+      setMessage((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const exportProject = async (format: 'json' | 'yaml') => {
+    if (!('id' in project)) return;
+    setBusy(true);
+    try {
+      const exported = await api.exportProject(project.id, format);
+      const url = URL.createObjectURL(
+        new Blob([exported.document], {
+          type: format === 'json' ? 'application/json' : 'application/yaml',
+        }),
+      );
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = exported.filename ?? `${project.id}.${format}`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setMessage(`Project exported as ${format.toUpperCase()}`);
+    } catch (error) {
+      setMessage((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteProject = async () => {
+    if (!('id' in project) || !window.confirm(`Delete ${project.name}?`)) return;
+    setBusy(true);
+    try {
+      await api.deleteProject(project.id);
+      const remaining = await refreshProjects();
+      if (remaining.length) await loadProject(remaining[0].id);
+      else newProject();
+      setMessage('Project deleted');
     } catch (error) {
       setMessage((error as Error).message);
     } finally {
@@ -358,12 +453,7 @@ export default function App() {
 
   const loadProject = async (id: string) => {
     if (!id) {
-      const fresh = blankProject();
-      setProject(fresh);
-      setSelectedNodeId(fresh.pipeline.nodes[0].id);
-      setValidation(null);
-      setRun(null);
-      setCheckpoint(null);
+      newProject();
       return;
     }
     const loaded = await api.project(id);
@@ -382,13 +472,21 @@ export default function App() {
           <div><strong>Calc Flow</strong><small>DataFusion studio</small></div>
         </div>
         <div className="project-switcher">
-          <select aria-label="Project" value={projects.some((item) => item.id === project.id) ? project.id : ''} onChange={(event) => void loadProject(event.target.value)}>
+          <select aria-label="Project" value={'id' in project && projects.some((item) => item.id === project.id) ? project.id : ''} onChange={(event) => void loadProject(event.target.value)}>
             <option value="">New project</option>
             {projects.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
           </select>
           <input aria-label="Project name" value={project.name} onChange={(event) => updateProject({ ...project, name: event.target.value })} />
         </div>
         <div className="topbar-actions">
+          <ProjectActions
+            persisted={'id' in project}
+            busy={busy}
+            onNew={newProject}
+            onImport={(file) => void importProject(file)}
+            onExport={(format) => void exportProject(format)}
+            onDelete={() => void deleteProject()}
+          />
           <button className="ghost-button" type="button" disabled={busy} onClick={() => void save()}>Save</button>
           <button className="ghost-button" type="button" disabled={busy} onClick={() => void validate()}>Validate</button>
           <button className="run-button" type="button" disabled={busy} onClick={() => void execute()}><span>▶</span> Run preview</button>

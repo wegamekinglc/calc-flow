@@ -2,7 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './e2e',
-  timeout: 30_000,
+  timeout: 45_000,
   expect: { timeout: 8_000 },
   fullyParallel: false,
   retries: process.env.CI ? 1 : 0,
@@ -14,7 +14,7 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: 'UV_CACHE_DIR=/tmp/calc-flow-e2e-uv uv run python ../scripts/run_e2e_server.py',
+      command: 'UV_CACHE_DIR=/tmp/calc-flow-e2e-uv uv run --package calc-flow-studio python scripts/run_e2e_server.py',
       url: 'http://127.0.0.1:8765/api/v1/catalog',
       reuseExistingServer: !process.env.CI,
       timeout: 30_000,

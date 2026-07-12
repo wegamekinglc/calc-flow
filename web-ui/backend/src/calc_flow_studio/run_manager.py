@@ -14,7 +14,7 @@ from decimal import Decimal
 from enum import Enum
 from io import BytesIO
 from pathlib import Path
-from threading import RLock, Thread
+from threading import Condition, RLock, Thread
 from time import monotonic
 from typing import Any
 from uuid import uuid4
@@ -23,7 +23,6 @@ import cloudpickle
 import pyarrow as pa
 import pyarrow.csv as pa_csv
 import pyarrow.json as pa_json
-
 from calc_flow.batch import Batch, BatchKind, BatchMetadata, JSONValue
 from calc_flow.config import (
     InputFormat,
@@ -32,7 +31,8 @@ from calc_flow.config import (
     compile_project,
 )
 from calc_flow.udf import UdfRegistry, UdfRegistrySnapshot
-from calc_flow.web.models import (
+
+from calc_flow_studio.models import (
     InputPayload,
     RunEvent,
     RunRequest,
@@ -358,6 +358,7 @@ class RunManager:
         else:
             self._registry = udf_registry or UdfRegistrySnapshot()
         self._lock = RLock()
+        self._event_condition = Condition(self._lock)
         self._runs: dict[str, _RunHandle] = {}
         self._use_processes = use_processes
         self._max_workers = max_workers
@@ -458,6 +459,35 @@ class RunManager:
     def events(self, run_id: str) -> tuple[RunEvent, ...]:
         with self._lock:
             return tuple(self._require(run_id).events)
+
+    def wait_for_events(
+        self,
+        run_id: str,
+        *,
+        after_sequence: int,
+        timeout: float,
+    ) -> tuple[tuple[RunEvent, ...], RunStatus]:
+        terminal = {
+            RunStatus.COMPLETED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+            RunStatus.TIMED_OUT,
+        }
+
+        def ready() -> bool:
+            handle = self._require(run_id)
+            return (
+                any(event.sequence > after_sequence for event in handle.events)
+                or handle.status in terminal
+            )
+
+        with self._event_condition:
+            self._event_condition.wait_for(ready, timeout=timeout)
+            handle = self._require(run_id)
+            events = tuple(
+                event for event in handle.events if event.sequence > after_sequence
+            )
+            return events, handle.status
 
     def cancel(self, run_id: str) -> RunResponse:
         with self._lock:
@@ -560,6 +590,7 @@ class RunManager:
                 message=message,
             )
         )
+        self._event_condition.notify_all()
 
     def _prune_history(self) -> None:
         if len(self._runs) < self._max_history:

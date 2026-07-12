@@ -2,11 +2,19 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-
-from pydantic import Field
+from typing import Literal, Self
 
 from calc_flow.batch import JSONValue
-from calc_flow.config import InputFormat, RunOptions, StrictModel
+from calc_flow.config import (
+    CONFIG_FORMAT_VERSION,
+    DataSourceConfig,
+    InputFormat,
+    PipelineConfig,
+    ProjectConfig,
+    RunOptions,
+    StrictModel,
+)
+from pydantic import Field, model_validator
 
 
 class RunStatus(StrEnum):
@@ -27,6 +35,23 @@ class InputPayload(StrictModel):
 class RunRequest(StrictModel):
     inputs: dict[str, InputPayload] = Field(default_factory=dict)
     options: RunOptions | None = None
+
+
+class ProjectCreateRequest(StrictModel):
+    format_version: Literal[CONFIG_FORMAT_VERSION] = CONFIG_FORMAT_VERSION
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=2000)
+    pipeline: PipelineConfig
+    data_sources: tuple[DataSourceConfig, ...] = ()
+    run_options: RunOptions = RunOptions()
+
+    @model_validator(mode="after")
+    def validate_project_content(self) -> Self:
+        ProjectConfig(id="project_validation", **self.model_dump())
+        return self
+
+    def to_project(self, project_id: str) -> ProjectConfig:
+        return ProjectConfig(id=project_id, **self.model_dump())
 
 
 class ProjectSummary(StrictModel):

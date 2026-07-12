@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).parents[1]
-PROCESS_MANAGER = ROOT / "scripts" / "web_ui_process.py"
+WEB_UI = Path(__file__).parents[2]
+PROCESS_MANAGER = WEB_UI / "scripts" / "web_ui_process.py"
 
 
 @pytest.mark.parametrize("name", ("start_web_ui.sh", "stop_web_ui.sh"))
 def test_web_ui_shell_wrapper_is_executable_and_valid(name: str) -> None:
-    wrapper = ROOT / "scripts" / name
+    wrapper = WEB_UI / "scripts" / name
 
     assert os.access(wrapper, os.X_OK)
     subprocess.run(["bash", "-n", wrapper], check=True)
@@ -53,3 +53,19 @@ def test_web_ui_stop_is_idempotent(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert "already stopped" in result.stdout
+
+
+def test_web_ui_process_manager_launches_workspace_backend() -> None:
+    source = PROCESS_MANAGER.read_text(encoding="utf-8")
+
+    assert 'WEB_UI = ROOT / "web-ui"' not in source
+    assert '"--package", "calc-flow-studio"' in source
+    assert '"--extra", "web"' not in source
+
+
+@pytest.mark.parametrize("name", ("export_openapi.py", "run_e2e_server.py"))
+def test_web_ui_python_script_imports_studio_package(name: str) -> None:
+    source = (WEB_UI / "scripts" / name).read_text(encoding="utf-8")
+
+    assert "calc_flow_studio" in source
+    assert "calc_flow.web" not in source

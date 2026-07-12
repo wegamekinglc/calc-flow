@@ -6,14 +6,14 @@ It uses React Flow 12 and types generated from `openapi.json`.
 Start the API and Vite server together from the repository root:
 
 ```bash
-./scripts/start_web_ui.sh
+./web-ui/scripts/start_web_ui.sh
 ```
 
 Open `http://127.0.0.1:5173`. Logs and PID state are written to
 `.calc-flow-web/`. Stop both managed process groups with:
 
 ```bash
-./scripts/stop_web_ui.sh
+./web-ui/scripts/stop_web_ui.sh
 ```
 
 Vite binds to `127.0.0.1` and proxies `/api` to
@@ -33,24 +33,23 @@ runner checkpoints.
 To run the two development processes manually, use separate terminals:
 
 ```bash
-uv run --extra web calc-flow-web
+uv run --package calc-flow-studio calc-flow-web
 cd web-ui && npm ci && npm run dev
 ```
 
 A production build can be served by the Python service:
 
 ```bash
-npm run build
+npm run build:wheel
 cd ..
-uv run --extra web calc-flow-web
+uv run --package calc-flow-studio calc-flow-web
 ```
 
 Regenerate the checked-in API contract after backend route or model changes:
 
 ```bash
-uv run python scripts/export_openapi.py
 cd web-ui
-npm run generate:api
+npm run sync:api
 ```
 
 Verification:
@@ -61,4 +60,6 @@ npm test
 npx playwright install chromium
 npm run test:e2e
 npm audit --omit=dev
+cd backend
+uv run --project . --extra dev pytest --cov=calc_flow_studio
 ```

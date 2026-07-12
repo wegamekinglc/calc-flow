@@ -6,6 +6,7 @@ settings.json
 .idea
 web-ui/coverage
 web-ui/dist
+web-ui/backend/src/calc_flow_studio/static
 web-ui/node_modules
 web-ui/*.tsbuildinfo
 web-ui/playwright-report

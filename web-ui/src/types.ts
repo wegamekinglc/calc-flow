@@ -1,6 +1,8 @@
 import type { components } from './api/schema';
 
 export type ProjectConfig = components['schemas']['ProjectConfig-Input'];
+export type ProjectCreateRequest = components['schemas']['ProjectCreateRequest'];
+export type EditableProject = ProjectConfig | ProjectCreateRequest;
 export type ProjectSummary = components['schemas']['ProjectSummary'];
 export type NodeConfig = components['schemas']['NodeConfig'];
 export type EdgeConfig = components['schemas']['EdgeConfig'];
@@ -45,9 +47,8 @@ export interface RunResultPreview {
   metadata: Record<string, JSONValue>;
 }
 
-export const blankProject = (): ProjectConfig => ({
+export const blankProject = (): ProjectCreateRequest => ({
   format_version: '1',
-  id: 'untitled',
   name: 'Untitled flow',
   description: '',
   pipeline: {

@@ -127,14 +127,15 @@ only. Unknown fields and executable configuration values are rejected.
 
 ## Local HTTP API
 
-Install the `web` extra and run `calc-flow-web`. The unauthenticated service
-binds only to loopback and exposes these routes under `/api/v1`:
+The separate `calc-flow-studio` workspace package owns the `calc-flow-web`
+command. The unauthenticated service binds only to loopback and exposes these
+routes under `/api/v1`:
 
 | Method                 | Route                       | Purpose                                                    |
 | ---------------------- | --------------------------- | ---------------------------------------------------------- |
 | `GET`                  | `/catalog`                  | Operators, UDF metadata, Arrow types, and preview limits.  |
 | `GET`                  | `/schema/project`           | JSON Schema for `ProjectConfig`.                           |
-| `GET`, `POST`          | `/projects`                 | List or create projects.                                   |
+| `GET`, `POST`          | `/projects`                 | List projects or create one with a server-assigned ID.     |
 | `POST`                 | `/projects/import`          | Safely import JSON or YAML.                                |
 | `GET`, `PUT`, `DELETE` | `/projects/{id}`            | Read, replace, or delete a project.                        |
 | `GET`                  | `/projects/{id}/export`     | Export canonical JSON or safe YAML.                        |

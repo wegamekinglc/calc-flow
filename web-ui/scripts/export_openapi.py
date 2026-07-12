@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from calc_flow.web.app import create_app
-from calc_flow.web.run_manager import RunManager
+from calc_flow_studio.app import create_app
+from calc_flow_studio.run_manager import RunManager
 
 
 def main() -> None:
-    output = Path(__file__).parents[1] / "web-ui" / "openapi.json"
+    output = Path(__file__).parents[1] / "openapi.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     app = create_app(run_manager=RunManager(use_processes=False))
     output.write_text(
