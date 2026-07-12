@@ -30,7 +30,7 @@ class BenchmarkScale:
 
 
 SCALES = {
-    "overhead": BenchmarkScale("overhead", 100, 1_000, 16),
+    "overhead": BenchmarkScale("overhead", 1_000, 1_000, 16),
     "small": BenchmarkScale("small", 10_000, 10_000, 64),
     "standard": BenchmarkScale("standard", 100_000, 100_000, 256),
     "nightly": BenchmarkScale("nightly", 1_000_000, 1_000_000, 512),
