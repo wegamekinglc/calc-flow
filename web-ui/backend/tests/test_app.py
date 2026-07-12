@@ -20,6 +20,7 @@ from calc_flow.config import (
 from calc_flow.udf import UdfRegistry
 from fastapi.testclient import TestClient
 
+import calc_flow_studio.app as app_module
 from calc_flow_studio.app import create_app, validate_bind_host
 from calc_flow_studio.models import RunEvent, RunResponse, RunStatus
 from calc_flow_studio.run_manager import RunManager
@@ -283,6 +284,29 @@ def test_project_import_and_export_json_and_yaml(tmp_path) -> None:
     assert yaml_export.status_code == 200
     assert "format_version: '1'" in yaml_export.text
     assert unsafe.status_code == 422
+
+
+def test_project_import_runs_blocking_store_work_in_threadpool(
+    tmp_path, monkeypatch
+) -> None:
+    calls: list[object] = []
+
+    async def run_in_threadpool(function, *args, **kwargs):
+        calls.append(function)
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "run_in_threadpool", run_in_threadpool)
+    project = _project().model_dump(mode="json", by_alias=True)
+
+    with _client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/projects/import?format=json",
+            content=json.dumps(project),
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert response.status_code == 201
+    assert calls == [app_module._import_project_document]
 
 
 def test_run_api_executes_branching_registered_udf_project(tmp_path) -> None:

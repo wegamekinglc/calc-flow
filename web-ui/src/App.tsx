@@ -49,14 +49,22 @@ const nodeColor = (node: FlowNode) => {
   return '#56d5b2';
 };
 
-const nextId = (kind: NodeConfig['kind'], nodes: NodeConfig[]) => {
+const nextId = (
+  kind: NodeConfig['kind'],
+  nodes: readonly NodeConfig[],
+  index = nodes.length + 1,
+): string => {
   const prefix = kind === 'array_expression' ? 'array' : kind;
-  let index = nodes.length + 1;
-  while (nodes.some((node) => node.id === `${prefix}_${index}`)) index += 1;
-  return `${prefix}_${index}`;
+  const candidate = `${prefix}_${index}`;
+  return nodes.some((node) => node.id === candidate)
+    ? nextId(kind, nodes, index + 1)
+    : candidate;
 };
 
-const makeNode = (kind: NodeConfig['kind'], nodes: NodeConfig[]): NodeConfig => {
+const makeNode = (
+  kind: NodeConfig['kind'],
+  nodes: readonly NodeConfig[],
+): NodeConfig => {
   const id = nextId(kind, nodes);
   const shared = {
     id,
@@ -125,17 +133,29 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    Promise.all([api.catalog(), refreshProjects()])
-      .then(async ([loadedCatalog, loadedProjects]) => {
+    const controller = new AbortController();
+    const initialize = async () => {
+      try {
+        const [loadedCatalog, loadedProjects] = await Promise.all([
+          api.catalog(),
+          api.projects(),
+        ]);
+        if (controller.signal.aborted) return;
         setCatalog(loadedCatalog);
+        setProjects(loadedProjects);
         if (loadedProjects.length) {
           const loaded = await api.project(loadedProjects[0].id);
+          if (controller.signal.aborted) return;
           setProject(loaded);
           setSelectedNodeId(loaded.pipeline.nodes[0]?.id ?? '');
         }
-      })
-      .catch((error: Error) => setMessage(error.message));
-  }, [refreshProjects]);
+      } catch (error) {
+        if (!controller.signal.aborted) setMessage((error as Error).message);
+      }
+    };
+    void initialize();
+    return () => controller.abort();
+  }, []);
 
   const updateProject = useCallback((next: EditableProject) => {
     setProject(next);
@@ -322,6 +342,26 @@ export default function App() {
       setMessage((error as Error).message);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const loadSampleFile = async (file: File) => {
+    try {
+      const data = sampleFormat === 'arrow_ipc'
+        ? await fileToBase64(file)
+        : await file.text();
+      setSampleData(data);
+    } catch (error) {
+      setMessage((error as Error).message);
+    }
+  };
+
+  const cancelRun = async () => {
+    if (!run) return;
+    try {
+      setRun(await api.cancelRun(run.id));
+    } catch (error) {
+      setMessage((error as Error).message);
     }
   };
 
@@ -512,8 +552,7 @@ export default function App() {
             <label className="file-button">Load file<input type="file" accept=".json,.jsonl,.csv,.arrow,.ipc" onChange={(event) => {
               const file = event.target.files?.[0];
               if (!file) return;
-              if (sampleFormat === 'arrow_ipc') void fileToBase64(file).then(setSampleData);
-              else void file.text().then(setSampleData);
+              void loadSampleFile(file);
             }} /></label>
           </div>
           <CheckpointControl
@@ -560,7 +599,7 @@ export default function App() {
       <ResultsPanel
         validation={validation}
         run={run}
-        onCancel={() => run && void api.cancelRun(run.id).then(setRun)}
+        onCancel={() => void cancelRun()}
       />
       <BenchmarkComparison />
     </main>

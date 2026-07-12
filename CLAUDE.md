@@ -35,10 +35,20 @@ cd web-ui && npm run test:e2e
 Target Python 3.13 or newer. Use four-space indentation, double quotes, and
 modern type syntax (`list[str]`, `dict[str, Any]`, `A | B`). Keep `from
 __future__ import annotations` in Python modules unless the project removes it
-consistently. Prefer small, explicit modules over placeholder abstractions.
-Keep table behavior Arrow-backed and array behavior Array API-backed. Do not
-add incomplete stubs, unused fixtures, unused CLIs, or placeholder modules just
-to reserve future structure. See `.claude/rules/code-style.md`.
+consistently. Prefer pure functions for transformations, validation, parsing,
+and calculations, and prefer functions over classes unless identity, lifecycle,
+polymorphism, resource ownership, or explicit state requires a class. Never
+mutate function input parameters or caller-owned objects; return new values and
+confine necessary mutation to clearly owned stateful boundaries. Prefer small,
+explicit modules over placeholder abstractions. Keep table behavior Arrow-backed
+and array behavior Array API-backed. Do not add incomplete stubs, unused
+fixtures, unused CLIs, or placeholder modules just to reserve future structure.
+
+Apply the same functional and immutability rules under `web-ui/`. Keep network,
+file, stream, and process I/O asynchronous where supported without making pure
+CPU-local functions artificially asynchronous. Do not block FastAPI's event
+loop or the browser main thread; update React state immutably and clean up owned
+asynchronous resources. See `.claude/rules/code-style.md`.
 
 ## Architecture
 

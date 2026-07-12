@@ -47,12 +47,37 @@ cd web-ui/backend && uv run --project . --extra dev pytest --cov=calc_flow_studi
   removes it consistently.
 - Use modern built-in type syntax such as `list[str]`, `dict[str, Any]`, and
   `A | B`.
+- Prefer a functional style for transformations, validation, parsing, and
+  calculations. Keep functions pure whenever behavior does not require owned
+  state, identity, or lifecycle management.
+- Never mutate a function's input parameters or objects owned by the caller.
+  Treat inputs as read-only and return a new value, using a defensive copy when
+  an underlying library requires mutation.
+- Prefer functions over classes. Introduce a class only when identity,
+  lifecycle, polymorphism, protocol implementation, resource ownership, or
+  explicitly stateful behavior makes it the clearer boundary.
+- Confine necessary mutation to clearly owned stateful boundaries such as
+  `StatefulOperator`, runners, stores, and lifecycle managers. This exception
+  never permits mutating caller-owned inputs.
 - Prefer small, explicit modules over compatibility shims, duplicate abstraction
   layers, or placeholder abstractions.
 - Keep table behavior Arrow-backed and array behavior Array API-backed,
   matching `docs/introduction.md`.
 - Do not add incomplete stubs, unused fixtures, unused CLIs, or placeholder
   modules merely to reserve future structure.
+
+### Web code
+
+- Apply the same functional-first, input-immutability, and function-over-class
+  rules to the Python backend and TypeScript frontend under `web-ui/`.
+- Keep web I/O asynchronous whenever the framework or library supports it.
+  Await network, file, stream, and process operations; do not block FastAPI's
+  event loop or the browser main thread.
+- Keep pure, CPU-local transformations synchronous. Do not add `async` merely
+  for style when a function performs no asynchronous work.
+- In React, update state immutably and use functional state updates when the new
+  value depends on the previous value. Clean up streams, timers, requests, and
+  other asynchronous resources when their owning component or run ends.
 
 For Markdown tables, align columns with pipes and pad each separator row so its
 dashes span the full column width, including the spaces around cell content.
