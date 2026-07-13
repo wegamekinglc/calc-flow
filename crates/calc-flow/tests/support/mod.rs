@@ -1,5 +1,8 @@
+#![allow(dead_code)]
+
 use std::{
     collections::BTreeMap,
+    collections::VecDeque,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -9,8 +12,9 @@ use std::{
 
 use async_trait::async_trait;
 use calc_flow::{
-    Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken, JsonMap, Operator,
-    OperatorContext, Port, Result,
+    Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken, Checkpoint, CheckpointStore,
+    Edge, JsonMap, Operator, OperatorContext, PipelineBuilder, Port, PortEndpoint, Result,
+    RunContext, Sink, Source, SourceItem, UdfRegistry,
 };
 use datafusion::arrow::{
     array::{Int64Array, StringArray},
@@ -93,6 +97,7 @@ pub struct TestOperator {
     state: i64,
     mutate_state: bool,
     fail_restore: bool,
+    fail_reset: bool,
 }
 
 impl TestOperator {
@@ -106,6 +111,7 @@ impl TestOperator {
             state: 0,
             mutate_state: false,
             fail_restore: false,
+            fail_reset: false,
         }
     }
 
@@ -125,6 +131,7 @@ impl TestOperator {
             state: 0,
             mutate_state: false,
             fail_restore: false,
+            fail_reset: false,
         }
     }
 
@@ -135,6 +142,11 @@ impl TestOperator {
 
     pub const fn failing_restore(mut self) -> Self {
         self.fail_restore = true;
+        self
+    }
+
+    pub const fn failing_reset(mut self) -> Self {
+        self.fail_reset = true;
         self
     }
 }
@@ -227,6 +239,11 @@ impl Operator for TestOperator {
 
     fn reset(&mut self) -> Result<()> {
         self.probe.resets.fetch_add(1, Ordering::SeqCst);
+        if self.fail_reset {
+            return Err(CalcFlowError::Format {
+                message: format!("{} reset injected", self.name),
+            });
+        }
         self.state = 0;
         Ok(())
     }
@@ -276,4 +293,206 @@ pub fn string_batch(values: &[&str]) -> Batch {
     let record =
         RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(values.to_vec()))]).unwrap();
     Batch::table(vec![record], BatchMetadata::default()).unwrap()
+}
+
+pub fn stateful_plan(name: &str, probe: Arc<Probe>) -> Arc<calc_flow::ExecutionPlan> {
+    Arc::new(
+        PipelineBuilder::new(name)
+            .unwrap()
+            .add_node(
+                "node",
+                Box::new(TestOperator::transform("node", Action::Pass, probe).stateful()),
+            )
+            .unwrap()
+            .compile(&UdfRegistry::new().snapshot())
+            .unwrap(),
+    )
+}
+
+pub fn partially_failing_reset_plan(
+    name: &str,
+    first_probe: Arc<Probe>,
+    second_probe: Arc<Probe>,
+) -> Arc<calc_flow::ExecutionPlan> {
+    Arc::new(
+        PipelineBuilder::new(name)
+            .unwrap()
+            .add_node(
+                "first",
+                Box::new(TestOperator::transform("first", Action::Pass, first_probe).stateful()),
+            )
+            .unwrap()
+            .add_node(
+                "second",
+                Box::new(
+                    TestOperator::transform("second", Action::Pass, second_probe)
+                        .stateful()
+                        .failing_reset(),
+                ),
+            )
+            .unwrap()
+            .connect(Edge::new(
+                PortEndpoint::new("first", "output").unwrap(),
+                PortEndpoint::new("second", "input").unwrap(),
+            ))
+            .unwrap()
+            .compile(&UdfRegistry::new().snapshot())
+            .unwrap(),
+    )
+}
+
+#[derive(Default)]
+pub struct MemoryCheckpointStore {
+    checkpoint: Mutex<Option<Checkpoint>>,
+    saves: AtomicUsize,
+    deletes: AtomicUsize,
+    fail_saves: AtomicUsize,
+    fail_deletes: AtomicUsize,
+}
+
+impl MemoryCheckpointStore {
+    pub fn with_checkpoint(checkpoint: Checkpoint) -> Self {
+        Self {
+            checkpoint: Mutex::new(Some(checkpoint)),
+            ..Self::default()
+        }
+    }
+
+    pub fn fail_next_saves(&self, count: usize) {
+        self.fail_saves.store(count, Ordering::SeqCst);
+    }
+
+    pub fn fail_next_deletes(&self, count: usize) {
+        self.fail_deletes.store(count, Ordering::SeqCst);
+    }
+
+    pub fn checkpoint(&self) -> Option<Checkpoint> {
+        self.checkpoint.lock().unwrap().clone()
+    }
+
+    pub fn saves(&self) -> usize {
+        self.saves.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl CheckpointStore for MemoryCheckpointStore {
+    async fn load(&self, _pipeline_name: &str) -> Result<Option<Checkpoint>> {
+        Ok(self.checkpoint())
+    }
+
+    async fn save(&self, checkpoint: &Checkpoint) -> Result<()> {
+        self.saves.fetch_add(1, Ordering::SeqCst);
+        if self
+            .fail_saves
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                (remaining > 0).then(|| remaining - 1)
+            })
+            .is_ok()
+        {
+            return Err(CalcFlowError::Format {
+                message: "save injected".into(),
+            });
+        }
+        *self.checkpoint.lock().unwrap() = Some(checkpoint.clone());
+        Ok(())
+    }
+
+    async fn delete(&self, _pipeline_name: &str) -> Result<()> {
+        self.deletes.fetch_add(1, Ordering::SeqCst);
+        if self
+            .fail_deletes
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                (remaining > 0).then(|| remaining - 1)
+            })
+            .is_ok()
+        {
+            return Err(CalcFlowError::Format {
+                message: "delete injected".into(),
+            });
+        }
+        *self.checkpoint.lock().unwrap() = None;
+        Ok(())
+    }
+}
+
+pub struct QueueSource {
+    items: VecDeque<SourceItem>,
+    opens: Arc<Mutex<Vec<Option<Value>>>>,
+}
+
+impl QueueSource {
+    pub fn new(items: Vec<SourceItem>) -> (Self, Arc<Mutex<Vec<Option<Value>>>>) {
+        let opens = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                items: items.into(),
+                opens: Arc::clone(&opens),
+            },
+            opens,
+        )
+    }
+}
+
+#[async_trait]
+impl Source for QueueSource {
+    async fn open(&mut self, cursor: Option<Value>) -> Result<()> {
+        self.opens.lock().unwrap().push(cursor);
+        Ok(())
+    }
+
+    async fn next(&mut self) -> Result<Option<SourceItem>> {
+        Ok(self.items.pop_front())
+    }
+}
+
+pub fn source_item(values: &[i64], cursor: Value, sequence: u64) -> SourceItem {
+    SourceItem {
+        batch: int_batch(values),
+        cursor: Some(cursor),
+        sequence,
+    }
+}
+
+pub struct RecordingSink {
+    label: String,
+    calls: Arc<Mutex<Vec<(String, String, usize)>>>,
+    failures: Arc<AtomicUsize>,
+}
+
+impl RecordingSink {
+    pub fn new(
+        label: &str,
+        calls: Arc<Mutex<Vec<(String, String, usize)>>>,
+        failures: Arc<AtomicUsize>,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            calls,
+            failures,
+        }
+    }
+}
+
+#[async_trait]
+impl Sink for RecordingSink {
+    async fn write(&mut self, batch: &Batch, context: &RunContext) -> Result<()> {
+        self.calls.lock().unwrap().push((
+            self.label.clone(),
+            context.run_id().into(),
+            batch.num_rows(),
+        ));
+        if self
+            .failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                (remaining > 0).then(|| remaining - 1)
+            })
+            .is_ok()
+        {
+            return Err(CalcFlowError::Format {
+                message: format!("{} injected", self.label),
+            });
+        }
+        Ok(())
+    }
 }

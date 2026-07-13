@@ -7,10 +7,12 @@ mod context;
 mod datafusion;
 mod error;
 mod expression;
+mod io;
 mod json;
 mod operator;
 mod pipeline;
 mod project_store;
+mod runtime;
 mod udf;
 
 pub use batch::{Batch, BatchKind, BatchMetadata, ExternalPayload, TableBatch};
@@ -27,6 +29,7 @@ pub use context::{CancellationToken, RunContext};
 pub use datafusion::{DataFusionConfig, DataFusionQueryMetric, DataFusionRuntime};
 pub use error::{CalcFlowError, Result};
 pub use expression::{split_assignment, sql_projection, validate_select_query};
+pub use io::{BatchingSource, Sink, Source, SourceItem};
 pub use json::{JsonMap, MAX_JSON_DEPTH, canonical_json};
 pub use operator::{
     ExpressionOperator, ExternalOperatorFactory, ExternalOperatorSpec, Operator, OperatorContext,
@@ -41,6 +44,7 @@ pub use project_store::{
     export_project_yaml, import_project_json, import_project_json_with_limit, import_project_yaml,
     import_project_yaml_with_limit,
 };
+pub use runtime::{MicroBatchRunner, SinkRouter, StreamingRunner};
 pub use udf::{
     UdfCatalogEntry, UdfKind, UdfReference, UdfRegistry, UdfRegistrySnapshot,
     validate_selected_udfs,

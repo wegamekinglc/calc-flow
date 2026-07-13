@@ -46,6 +46,17 @@ pub struct RunResult {
     pub node_timings: BTreeMap<String, NodeTiming>,
     pub datafusion_metrics: Vec<DataFusionQueryMetric>,
     pub metadata: RunMetadata,
+    context: RunContext,
+}
+
+impl RunResult {
+    /// Returns the exact context used to execute this run.
+    ///
+    /// Sinks use this accessor so delivery observes the same run identity,
+    /// settings, deadline, and cancellation token as operators.
+    pub const fn context(&self) -> &RunContext {
+        &self.context
+    }
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -148,6 +159,28 @@ impl ExecutionPlan {
         &self.external_outputs
     }
 
+    /// Returns the only external input name accepted by a runner.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] unless the compiled graph
+    /// exposes exactly one external input.
+    pub fn single_external_input(&self) -> Result<&str> {
+        if self.external_inputs.len() != 1 {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "plan.external_inputs".into(),
+                message: "runners require exactly one external input".into(),
+            });
+        }
+        self.external_inputs
+            .keys()
+            .next()
+            .map(String::as_str)
+            .ok_or_else(|| CalcFlowError::Internal {
+                message: "single external input disappeared after validation".into(),
+            })
+    }
+
     /// Executes one run while owning the plan's state lifecycle lock.
     ///
     /// # Errors
@@ -238,6 +271,7 @@ impl ExecutionPlan {
                 pipeline_name: self.name.clone(),
                 pipeline_fingerprint: self.fingerprint.clone(),
             },
+            context,
         })
     }
 
