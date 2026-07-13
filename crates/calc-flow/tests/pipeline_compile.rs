@@ -2,8 +2,8 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use calc_flow::{
-    Batch, BatchKind, CalcFlowError, Edge, JsonMap, Operator, OperatorContext, PipelineBuilder,
-    Port, PortEndpoint, Result, UdfKind, UdfReference, UdfRegistry,
+    Batch, BatchKind, CalcFlowError, Edge, ExpressionOperator, JsonMap, Operator, OperatorContext,
+    PipelineBuilder, Port, PortEndpoint, Result, UdfKind, UdfReference, UdfRegistry,
 };
 use datafusion::{
     arrow::datatypes::{DataType, Field},
@@ -555,6 +555,84 @@ fn fingerprints_change_with_pipeline_node_configuration_and_ports() {
         baseline,
         configurable_graph("pipeline", "node", json!(1), "renamed")
     );
+}
+
+#[test]
+fn dictionary_schemas_compile_with_deterministic_fingerprints() {
+    let build = || {
+        PipelineBuilder::new("dictionary schema")
+            .unwrap()
+            .add_node(
+                "source",
+                Box::new(TestOperator::new(
+                    "source",
+                    vec![],
+                    vec![typed_table_port(
+                        "output",
+                        "category",
+                        DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+                    )],
+                )),
+            )
+            .unwrap()
+            .compile(&UdfRegistry::new().snapshot())
+            .unwrap()
+            .fingerprint()
+            .to_owned()
+    };
+
+    assert_eq!(build(), build());
+}
+
+#[test]
+fn fingerprint_treats_built_in_udf_references_as_a_set() {
+    let first = UdfReference::new("python", "normalize", "1", UdfKind::ExternalScalar).unwrap();
+    let second = UdfReference::new("python", "score", "1", UdfKind::ExternalScalar).unwrap();
+    let mut registry = UdfRegistry::new();
+    registry.register_external(first.clone(), 1).unwrap();
+    registry.register_external(second.clone(), 1).unwrap();
+    let build = |udfs| {
+        PipelineBuilder::new("canonical references")
+            .unwrap()
+            .add_node(
+                "calculate",
+                Box::new(
+                    ExpressionOperator::new("calculate", "value", vec![], None, udfs).unwrap(),
+                ),
+            )
+            .unwrap()
+            .compile(&registry.snapshot())
+            .unwrap()
+            .fingerprint()
+            .to_owned()
+    };
+
+    assert_eq!(
+        build(vec![first.clone(), second.clone(), first.clone()]),
+        build(vec![second, first])
+    );
+}
+
+#[test]
+fn fingerprint_preserves_arbitrary_external_configuration_array_order() {
+    let build = |steps: [&str; 2]| {
+        PipelineBuilder::new("ordered external configuration")
+            .unwrap()
+            .add_node(
+                "external",
+                Box::new(
+                    TestOperator::new("external", vec![], vec![table_port("output", true)])
+                        .with_configuration(BTreeMap::from([("udfs".into(), json!(steps))])),
+                ),
+            )
+            .unwrap()
+            .compile(&UdfRegistry::new().snapshot())
+            .unwrap()
+            .fingerprint()
+            .to_owned()
+    };
+
+    assert_ne!(build(["prepare", "score"]), build(["score", "prepare"]));
 }
 
 #[test]

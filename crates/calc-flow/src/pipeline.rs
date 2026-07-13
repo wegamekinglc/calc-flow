@@ -3,7 +3,10 @@ use std::{
     sync::Arc,
 };
 
-use datafusion::arrow::{datatypes::SchemaRef, ipc::convert::IpcSchemaEncoder};
+use datafusion::arrow::{
+    datatypes::SchemaRef,
+    ipc::{convert::IpcSchemaEncoder, writer::DictionaryTracker},
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -487,12 +490,19 @@ fn graph_fingerprint(
     let node_values = nodes
         .iter()
         .map(|(node_id, node)| {
+            let declared_udfs = node.operator.udf_references();
+            let canonical_udfs = canonical_udf_references(&declared_udfs);
+            let configuration = fingerprint_configuration(
+                node.operator.configuration(),
+                &declared_udfs,
+                &canonical_udfs,
+            );
             Ok(json!({
-                "configuration": node.operator.configuration(),
+                "configuration": configuration,
                 "input_ports": port_values(node.operator.input_ports()),
                 "node_id": node_id,
                 "output_ports": port_values(node.operator.output_ports()),
-                "udf_references": node.operator.udf_references(),
+                "udf_references": canonical_udfs,
             }))
         })
         .collect::<Result<Vec<Value>>>()?;
@@ -512,6 +522,33 @@ fn graph_fingerprint(
     Ok(hex::encode(Sha256::digest(canonical.as_bytes())))
 }
 
+fn canonical_udf_references(references: &[UdfReference]) -> Vec<UdfReference> {
+    references
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Canonicalizes only the conventional projection of declared UDF references.
+/// An arbitrary configuration array retains its order unless `configuration.udfs`
+/// exactly mirrors the operator's declared references in their original order.
+fn fingerprint_configuration(
+    mut configuration: BTreeMap<String, Value>,
+    declared_udfs: &[UdfReference],
+    canonical_udfs: &[UdfReference],
+) -> BTreeMap<String, Value> {
+    let declared_projection = Value::Array(declared_udfs.iter().map(|udf| json!(udf)).collect());
+    if configuration.get("udfs") == Some(&declared_projection) {
+        configuration.insert(
+            "udfs".into(),
+            Value::Array(canonical_udfs.iter().map(|udf| json!(udf)).collect()),
+        );
+    }
+    configuration
+}
+
 fn port_values(ports: &[Port]) -> Vec<Value> {
     let mut ports = ports.iter().collect::<Vec<_>>();
     ports.sort_by_key(|port| port.name());
@@ -529,7 +566,9 @@ fn port_values(ports: &[Port]) -> Vec<Value> {
 }
 
 fn schema_value(schema: &SchemaRef) -> Value {
+    let mut dictionary_tracker = DictionaryTracker::new(true);
     let bytes = IpcSchemaEncoder::new()
+        .with_dictionary_tracker(&mut dictionary_tracker)
         .schema_to_fb(schema)
         .finished_data()
         .to_vec();
