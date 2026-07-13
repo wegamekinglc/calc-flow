@@ -55,6 +55,16 @@ fn values(batch: &Batch, name: &str) -> Vec<i64> {
         .collect()
 }
 
+const INVALID_PORTABLE_IDENTIFIERS: [&str; 7] = [
+    "",
+    " ",
+    "\t",
+    "line\nbreak",
+    "with/slash",
+    "naïve",
+    "bad!value",
+];
+
 #[test]
 fn port_construction_validates_names_and_array_schema_rules() {
     for invalid in ["", " ", "not-valid", "9input"] {
@@ -352,7 +362,7 @@ impl ExternalOperatorFactory for PassthroughFactory {
         outputs: Vec<Port>,
     ) -> Result<Box<dyn Operator>> {
         Ok(Box::new(PassthroughOperator {
-            name: spec.name.clone(),
+            name: spec.name().into(),
             marker: self.marker,
             inputs,
             outputs,
@@ -405,12 +415,13 @@ impl Operator for PassthroughOperator {
 
 #[test]
 fn external_operator_spec_is_strict_data_only_configuration() {
-    let spec = ExternalOperatorSpec {
-        provider: "numpy".into(),
-        name: "expression".into(),
-        version: "1".into(),
-        options: BTreeMap::from([("expression".into(), json!("x + 1"))]),
-    };
+    let spec = ExternalOperatorSpec::new(
+        "numpy",
+        "expression",
+        "1",
+        BTreeMap::from([("expression".into(), json!("x + 1"))]),
+    )
+    .unwrap();
     let value = serde_json::to_value(&spec).unwrap();
     assert_eq!(
         value,
@@ -422,8 +433,10 @@ fn external_operator_spec_is_strict_data_only_configuration() {
         })
     );
     let restored: ExternalOperatorSpec = serde_json::from_value(value).unwrap();
-    assert_eq!(restored.provider, "numpy");
-    assert_eq!(restored.options["expression"], "x + 1");
+    assert_eq!(restored.provider(), "numpy");
+    assert_eq!(restored.name(), "expression");
+    assert_eq!(restored.version(), "1");
+    assert_eq!(restored.options()["expression"], "x + 1");
     assert!(
         serde_json::from_value::<ExternalOperatorSpec>(json!({
             "provider": "python",
@@ -434,6 +447,114 @@ fn external_operator_spec_is_strict_data_only_configuration() {
         }))
         .is_err()
     );
+}
+
+#[test]
+fn external_operator_spec_deserialization_rejects_invalid_identity_components() {
+    for (field, index) in [("provider", 0), ("name", 1), ("version", 2)] {
+        for invalid in INVALID_PORTABLE_IDENTIFIERS {
+            let mut identity = ["python", "expression", "1"];
+            identity[index] = invalid;
+            assert!(matches!(
+                ExternalOperatorSpec::new(identity[0], identity[1], identity[2], BTreeMap::new()),
+                Err(CalcFlowError::InvalidArgument { field: actual, .. }) if actual == field
+            ));
+
+            let mut value = json!({
+                "provider": "python",
+                "name": "expression",
+                "version": "1",
+                "options": {}
+            });
+            value[field] = json!(invalid);
+
+            assert!(
+                serde_json::from_value::<ExternalOperatorSpec>(value).is_err(),
+                "accepted invalid {field} {invalid:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn external_operator_spec_and_registry_round_trip_portable_identities() {
+    let value = json!({
+        "provider": "python-3",
+        "name": "_array.expression",
+        "version": "1.2_rc-1",
+        "options": {"expression": "x + 1"}
+    });
+    let spec: ExternalOperatorSpec = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(spec.provider(), "python-3");
+    assert_eq!(spec.name(), "_array.expression");
+    assert_eq!(spec.version(), "1.2_rc-1");
+    assert_eq!(spec.options()["expression"], "x + 1");
+    assert_eq!(serde_json::to_value(&spec).unwrap(), value);
+
+    let registry = ProviderRegistry::default();
+    let factory: Arc<dyn ExternalOperatorFactory> =
+        Arc::new(PassthroughFactory { marker: "portable" });
+    registry
+        .register(
+            "python-3",
+            "_array.expression",
+            "1.2_rc-1",
+            Arc::clone(&factory),
+        )
+        .unwrap();
+    let resolved = registry
+        .resolve("python-3", "_array.expression", "1.2_rc-1")
+        .unwrap();
+    assert!(Arc::ptr_eq(&resolved, &factory));
+}
+
+#[test]
+fn provider_registry_rejects_invalid_registration_without_replacement() {
+    let registry = ProviderRegistry::default();
+    let original: Arc<dyn ExternalOperatorFactory> =
+        Arc::new(PassthroughFactory { marker: "original" });
+    registry
+        .register("python", "passthrough", "1", Arc::clone(&original))
+        .unwrap();
+
+    for (field, index) in [("provider", 0), ("name", 1), ("version", 2)] {
+        for invalid in INVALID_PORTABLE_IDENTIFIERS {
+            let mut identity = ["python", "passthrough", "1"];
+            identity[index] = invalid;
+            let rejected: Arc<dyn ExternalOperatorFactory> =
+                Arc::new(PassthroughFactory { marker: "rejected" });
+
+            assert!(matches!(
+                registry.register(identity[0], identity[1], identity[2], rejected),
+                Err(CalcFlowError::InvalidArgument { field: actual, .. }) if actual == field
+            ));
+            let resolved = registry.resolve("python", "passthrough", "1").unwrap();
+            assert!(Arc::ptr_eq(&resolved, &original));
+        }
+    }
+}
+
+#[test]
+fn provider_registry_validates_resolution_before_lookup() {
+    let registry = ProviderRegistry::default();
+
+    for (field, index) in [("provider", 0), ("name", 1), ("version", 2)] {
+        for invalid in INVALID_PORTABLE_IDENTIFIERS {
+            let mut identity = ["python", "passthrough", "1"];
+            identity[index] = invalid;
+
+            assert!(matches!(
+                registry.resolve(identity[0], identity[1], identity[2]),
+                Err(CalcFlowError::InvalidArgument { field: actual, .. }) if actual == field
+            ));
+        }
+    }
+
+    assert!(matches!(
+        registry.resolve("python", "unavailable", "1"),
+        Err(CalcFlowError::Compile { message })
+            if message.contains("python:unavailable@1")
+    ));
 }
 
 #[tokio::test]
@@ -459,12 +580,7 @@ async fn provider_registry_resolves_factory_without_replacing_duplicates() {
             if message.contains("numpy:expression@1")
     ));
 
-    let spec = ExternalOperatorSpec {
-        provider: "python".into(),
-        name: "passthrough".into(),
-        version: "1".into(),
-        options: BTreeMap::new(),
-    };
+    let spec = ExternalOperatorSpec::new("python", "passthrough", "1", BTreeMap::new()).unwrap();
     let ports = || vec![Port::new("input", BatchKind::Table, true, None).unwrap()];
     let mut operator = resolved
         .create(

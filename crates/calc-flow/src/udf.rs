@@ -4,7 +4,7 @@ use datafusion::logical_expr::ScalarUDF;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
-use crate::{CalcFlowError, Result};
+use crate::{CalcFlowError, Result, json::validate_portable_identifier};
 
 #[derive(
     Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, JsonSchema,
@@ -34,19 +34,7 @@ impl UdfReference {
     /// is empty or contains characters outside the portable identifier set.
     pub fn new(provider: &str, name: &str, version: &str, kind: UdfKind) -> Result<Self> {
         for (field, value) in [("provider", provider), ("name", name), ("version", version)] {
-            if value.is_empty()
-                || !value.chars().all(|character| {
-                    character == '-'
-                        || character == '_'
-                        || character == '.'
-                        || character.is_ascii_alphanumeric()
-                })
-            {
-                return Err(CalcFlowError::InvalidArgument {
-                    field: field.into(),
-                    message: "must be a non-empty portable identifier".into(),
-                });
-            }
+            validate_portable_identifier(field, value)?;
         }
         Ok(Self {
             provider: provider.into(),

@@ -6,6 +6,24 @@ use crate::{CalcFlowError, Result};
 
 pub type JsonMap = BTreeMap<String, Value>;
 
+pub(crate) fn validate_portable_identifier(field: &str, value: &str) -> Result<()> {
+    if value.is_empty()
+        || !value.chars().all(|character| {
+            character == '-'
+                || character == '_'
+                || character == '.'
+                || character.is_ascii_alphanumeric()
+        })
+    {
+        Err(CalcFlowError::InvalidArgument {
+            field: field.into(),
+            message: "must be a non-empty portable identifier".into(),
+        })
+    } else {
+        Ok(())
+    }
+}
+
 /// Serializes a JSON value with recursively sorted mapping keys.
 ///
 /// # Errors

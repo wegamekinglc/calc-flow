@@ -6,12 +6,12 @@ use std::{
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{Field, Schema, SchemaRef};
 use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::{Value, json};
 
 use crate::{
     Batch, BatchKind, CalcFlowError, DataFusionRuntime, JsonMap, Result, RunContext, UdfReference,
-    sql_projection,
+    json::validate_portable_identifier, sql_projection,
 };
 
 #[derive(Clone, Debug)]
@@ -468,13 +468,71 @@ fn udf_configuration(reference: &UdfReference) -> Value {
     })
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ExternalOperatorSpec {
-    pub provider: String,
-    pub name: String,
-    pub version: String,
-    pub options: JsonMap,
+    provider: String,
+    name: String,
+    version: String,
+    options: JsonMap,
+}
+
+impl ExternalOperatorSpec {
+    /// Creates a validated, data-only external operator specification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] when an identity component
+    /// is not a non-empty portable identifier.
+    pub fn new(provider: &str, name: &str, version: &str, options: JsonMap) -> Result<Self> {
+        validate_provider_identity(provider, name, version)?;
+        Ok(Self {
+            provider: provider.into(),
+            name: name.into(),
+            version: version.into(),
+            options,
+        })
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    pub const fn options(&self) -> &JsonMap {
+        &self.options
+    }
+}
+
+impl<'de> Deserialize<'de> for ExternalOperatorSpec {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            provider: String,
+            name: String,
+            version: String,
+            options: JsonMap,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        Self::new(
+            &fields.provider,
+            &fields.name,
+            &fields.version,
+            fields.options,
+        )
+        .map_err(D::Error::custom)
+    }
 }
 
 pub trait ExternalOperatorFactory: Send + Sync {
@@ -504,8 +562,9 @@ impl ProviderRegistry {
     ///
     /// # Errors
     ///
-    /// Returns [`CalcFlowError::InvalidArgument`] when the key is already
-    /// registered. A rejected duplicate leaves the original factory intact.
+    /// Returns [`CalcFlowError::InvalidArgument`] when an identity component
+    /// is invalid or the key is already registered. A rejected registration
+    /// leaves the registry unchanged.
     pub fn register(
         &self,
         provider: &str,
@@ -513,6 +572,7 @@ impl ProviderRegistry {
         version: &str,
         factory: Arc<dyn ExternalOperatorFactory>,
     ) -> Result<()> {
+        validate_provider_identity(provider, name, version)?;
         let key = (provider.into(), name.into(), version.into());
         match self.factories.write().entry(key) {
             Entry::Vacant(entry) => {
@@ -530,13 +590,16 @@ impl ProviderRegistry {
     ///
     /// # Errors
     ///
-    /// Returns [`CalcFlowError::Compile`] when the provider is unavailable.
+    /// Returns [`CalcFlowError::InvalidArgument`] when an identity component
+    /// is invalid, or [`CalcFlowError::Compile`] when the provider is
+    /// unavailable.
     pub fn resolve(
         &self,
         provider: &str,
         name: &str,
         version: &str,
     ) -> Result<Arc<dyn ExternalOperatorFactory>> {
+        validate_provider_identity(provider, name, version)?;
         self.factories
             .read()
             .get(&(provider.into(), name.into(), version.into()))
@@ -545,4 +608,11 @@ impl ProviderRegistry {
                 message: format!("provider {provider}:{name}@{version} is unavailable"),
             })
     }
+}
+
+fn validate_provider_identity(provider: &str, name: &str, version: &str) -> Result<()> {
+    for (field, value) in [("provider", provider), ("name", name), ("version", version)] {
+        validate_portable_identifier(field, value)?;
+    }
+    Ok(())
 }
