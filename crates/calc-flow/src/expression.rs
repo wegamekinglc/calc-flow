@@ -17,13 +17,6 @@ pub fn split_assignment(expression: &str) -> Option<(&str, &str)> {
             .expect("constant regex is valid")
     });
     let captures = regex.captures(expression)?;
-    if expression.contains("==")
-        || expression.contains("!=")
-        || expression.contains("<=")
-        || expression.contains(">=")
-    {
-        return None;
-    }
     Some((captures.get(1)?.as_str(), captures.get(2)?.as_str().trim()))
 }
 
