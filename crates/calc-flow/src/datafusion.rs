@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -11,6 +11,7 @@ use datafusion::{
     arrow::record_batch::RecordBatch,
     datasource::MemTable,
     execution::context::{SessionConfig, SessionContext},
+    logical_expr::ScalarUDF,
     physical_plan::displayable,
 };
 use parking_lot::Mutex;
@@ -93,9 +94,9 @@ impl DataFusionRuntime {
     ///
     /// # Errors
     ///
-    /// Returns an error when the runtime is closed, selected versions conflict,
+    /// Returns an error when the runtime is closed, selected SQL names collide,
     /// or a selected native reference is absent from the snapshot. Resolution
-    /// completes before the shared session is mutated.
+    /// and namespace validation complete before the shared session is mutated.
     pub fn register_udfs(
         &mut self,
         snapshot: &UdfRegistrySnapshot,
@@ -105,10 +106,17 @@ impl DataFusionRuntime {
         validate_selected_udfs(references)?;
         let selected = references
             .iter()
-            .filter(|reference| reference.kind == UdfKind::DataFusionScalar)
-            .map(|reference| snapshot.resolve_native(reference))
+            .filter(|reference| reference.kind() == UdfKind::DataFusionScalar)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|reference| {
+                snapshot
+                    .resolve_native(reference)
+                    .map(|udf| (reference, udf))
+            })
             .collect::<Result<Vec<_>>>()?;
-        for udf in selected {
+        validate_udf_sql_namespace(&selected)?;
+        for (_, udf) in selected {
             self.context.register_udf(udf.as_ref().clone());
         }
         Ok(())
@@ -212,6 +220,36 @@ impl DataFusionRuntime {
             Ok(())
         }
     }
+}
+
+fn validate_udf_sql_namespace(selected: &[(&UdfReference, Arc<ScalarUDF>)]) -> Result<()> {
+    let mut owners: BTreeMap<&str, &UdfReference> = BTreeMap::new();
+    for (reference, udf) in selected {
+        let reference = *reference;
+        for sql_name in std::iter::once(udf.name()).chain(udf.aliases().iter().map(String::as_str))
+        {
+            if let Some(&owner) = owners.get(sql_name) {
+                if owner != reference {
+                    return Err(CalcFlowError::Compile {
+                        message: format!(
+                            "DataFusion SQL name '{sql_name}' collides between {}:{}@{} ({:?}) and {}:{}@{} ({:?})",
+                            owner.provider(),
+                            owner.name(),
+                            owner.version(),
+                            owner.kind(),
+                            reference.provider(),
+                            reference.name(),
+                            reference.version(),
+                            reference.kind()
+                        ),
+                    });
+                }
+            } else {
+                owners.insert(sql_name, reference);
+            }
+        }
+    }
+    Ok(())
 }
 
 struct TableRegistrations<'a> {

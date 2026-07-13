@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use datafusion::logical_expr::ScalarUDF;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::{CalcFlowError, Result};
 
@@ -16,12 +16,13 @@ pub enum UdfKind {
     ExternalArray,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UdfReference {
-    pub provider: String,
-    pub name: String,
-    pub version: String,
-    pub kind: UdfKind,
+    provider: String,
+    name: String,
+    version: String,
+    kind: UdfKind,
 }
 
 impl UdfReference {
@@ -53,6 +54,42 @@ impl UdfReference {
             version: version.into(),
             kind,
         })
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    pub const fn kind(&self) -> UdfKind {
+        self.kind
+    }
+}
+
+impl<'de> Deserialize<'de> for UdfReference {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            provider: String,
+            name: String,
+            version: String,
+            kind: UdfKind,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        Self::new(&fields.provider, &fields.name, &fields.version, fields.kind)
+            .map_err(D::Error::custom)
     }
 }
 
@@ -94,7 +131,7 @@ impl UdfRegistry {
         udf: Arc<ScalarUDF>,
         argument_count: usize,
     ) -> Result<()> {
-        if reference.kind != UdfKind::DataFusionScalar || udf.name() != reference.name {
+        if reference.kind() != UdfKind::DataFusionScalar || udf.name() != reference.name() {
             return Err(CalcFlowError::InvalidArgument {
                 field: "udf".into(),
                 message: "reference kind and DataFusion name must match".into(),
@@ -116,7 +153,7 @@ impl UdfRegistry {
         reference: UdfReference,
         argument_count: usize,
     ) -> Result<()> {
-        if reference.kind == UdfKind::DataFusionScalar {
+        if reference.kind() == UdfKind::DataFusionScalar {
             return Err(CalcFlowError::InvalidArgument {
                 field: "udf.kind".into(),
                 message: "external registration requires an external kind".into(),
@@ -140,10 +177,10 @@ impl UdfRegistry {
             });
         }
         let entry = UdfCatalogEntry {
-            provider: reference.provider.clone(),
-            name: reference.name.clone(),
-            version: reference.version.clone(),
-            kind: reference.kind,
+            provider: reference.provider().into(),
+            name: reference.name().into(),
+            version: reference.version().into(),
+            kind: reference.kind(),
             argument_count,
         };
         self.catalog.insert(reference, entry);
@@ -165,7 +202,9 @@ impl UdfRegistrySnapshot {
             .ok_or_else(|| CalcFlowError::Compile {
                 message: format!(
                     "unknown UDF {}:{}@{}",
-                    reference.provider, reference.name, reference.version
+                    reference.provider(),
+                    reference.name(),
+                    reference.version()
                 ),
             })
     }
@@ -175,27 +214,43 @@ impl UdfRegistrySnapshot {
     }
 }
 
-/// Rejects different selected versions that would share one `DataFusion` SQL
-/// function name.
+/// Rejects distinct native references that would share one `DataFusion` SQL
+/// function name while allowing exact duplicate selections.
 ///
 /// # Errors
 ///
-/// Returns [`CalcFlowError::Compile`] when two selected native references use
-/// the same `DataFusion` name with different versions.
+/// Returns [`CalcFlowError::Compile`] when two distinct selected native
+/// references use the same primary `DataFusion` name.
 pub fn validate_selected_udfs(references: &[UdfReference]) -> Result<()> {
-    let mut versions = BTreeMap::new();
+    let mut owners: BTreeMap<&str, &UdfReference> = BTreeMap::new();
     for reference in references
         .iter()
-        .filter(|reference| reference.kind == UdfKind::DataFusionScalar)
+        .filter(|reference| reference.kind() == UdfKind::DataFusionScalar)
     {
-        if versions
-            .insert(reference.name.clone(), reference.version.clone())
-            .is_some_and(|version| version != reference.version)
-        {
-            return Err(CalcFlowError::Compile {
-                message: format!("conflicting versions selected for {}", reference.name),
-            });
+        if let Some(&owner) = owners.get(reference.name()) {
+            if owner != reference {
+                return Err(CalcFlowError::Compile {
+                    message: format!(
+                        "DataFusion SQL name '{}' collides between {} and {}",
+                        reference.name(),
+                        describe_reference(owner),
+                        describe_reference(reference)
+                    ),
+                });
+            }
+        } else {
+            owners.insert(reference.name(), reference);
         }
     }
     Ok(())
+}
+
+fn describe_reference(reference: &UdfReference) -> String {
+    format!(
+        "{}:{}@{} ({:?})",
+        reference.provider(),
+        reference.name(),
+        reference.version(),
+        reference.kind()
+    )
 }
