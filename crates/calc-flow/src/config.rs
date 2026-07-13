@@ -5,6 +5,7 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::{Value, json};
 
+use crate::operator::expression_query;
 use crate::{
     BatchKind, CalcFlowError, DataFusionConfig, Edge, ExecutionPlan, ExpressionOperator,
     ExternalOperatorSpec, JsonMap, PipelineBuilder, Port, PortEndpoint, ProviderRegistry, Result,
@@ -201,19 +202,26 @@ pub fn validate_project(
     providers: &ProviderRegistry,
     udfs: &UdfRegistrySnapshot,
 ) -> ValidationReport {
-    let mut issues = semantic_issues(project, providers, udfs);
+    let issues = semantic_issues(project, providers, udfs);
+    if !issues.is_empty() {
+        return ValidationReport {
+            valid: false,
+            issues,
+            fingerprint: None,
+        };
+    }
+    let mut issues = Vec::new();
     let mut fingerprint = None;
     match build_project(project, providers, udfs) {
         Ok(plan) => {
             validate_source_coverage(project, &plan, &mut issues);
             fingerprint = issues.is_empty().then(|| plan.fingerprint().into());
         }
-        Err(error) if issues.is_empty() => issues.push(issue(
+        Err(error) => issues.push(issue(
             graph_error_path(project, &error),
             "graph_compile",
             error.to_string(),
         )),
-        Err(_) => {}
     }
     ValidationReport {
         valid: issues.is_empty(),
@@ -404,16 +412,19 @@ fn semantic_issues(
             "pipeline requires at least one node",
         ));
     }
-    validate_range(
+    if let Err(CalcFlowError::InvalidArgument { field, message }) =
+        project.pipeline.datafusion.validate()
+    {
+        issues.push(issue(format!("pipeline.{field}"), "out_of_range", message));
+    }
+    validate_maximum(
         project.pipeline.datafusion.batch_size,
-        1,
         MAX_BATCH_SIZE,
         "pipeline.datafusion.batch_size",
         &mut issues,
     );
-    validate_range(
+    validate_maximum(
         project.pipeline.datafusion.target_partitions,
-        1,
         MAX_TARGET_PARTITIONS,
         "pipeline.datafusion.target_partitions",
         &mut issues,
@@ -490,17 +501,23 @@ fn validate_operator(
         OperatorSpec::Expression {
             expression,
             select,
+            filter,
             udfs: references,
-            ..
         } => {
-            if expression.trim().is_empty() == select.is_empty()
-                || select.iter().any(|value| value.trim().is_empty())
-            {
+            let invalid_mode = expression.trim().is_empty() == select.is_empty()
+                || select.iter().any(|value| value.trim().is_empty());
+            if invalid_mode {
                 issues.push(issue(
                     &base,
                     "invalid_operator",
                     "expression requires exactly one expression or non-empty select list",
                 ));
+            } else if let Err(error) = expression_query(
+                (!expression.trim().is_empty()).then_some(expression.as_str()),
+                select,
+                filter.as_deref(),
+            ) {
+                issues.push(issue(&base, "invalid_operator", error.to_string()));
             }
             validate_udfs(references, &base, udfs, issues);
             (Some(vec!["input"]), Some(vec!["output"]))
@@ -516,6 +533,8 @@ fn validate_operator(
                     "invalid_operator",
                     "SQL requires a query and at least one alias",
                 ));
+            } else if let Err(error) = crate::validate_select_query(query) {
+                issues.push(issue(&base, "invalid_operator", error.to_string()));
             }
             let unique = aliases.iter().collect::<BTreeSet<_>>();
             if unique.len() != aliases.len() {
@@ -557,6 +576,7 @@ fn validate_operator(
             &node.input_ports,
             &names,
             &format!("pipeline.nodes[{index}].input_ports"),
+            true,
             issues,
         );
     }
@@ -565,6 +585,7 @@ fn validate_operator(
             &node.output_ports,
             &names,
             &format!("pipeline.nodes[{index}].output_ports"),
+            false,
             issues,
         );
     }
@@ -604,6 +625,7 @@ fn validate_builtin_port_specs(
     ports: &[PortSpec],
     expected_names: &[&str],
     path: &str,
+    inputs_must_be_required: bool,
     issues: &mut Vec<ValidationIssue>,
 ) {
     if ports.is_empty() {
@@ -613,7 +635,10 @@ fn validate_builtin_port_specs(
         .iter()
         .map(|port| port.name.as_str())
         .collect::<Vec<_>>();
-    if actual != expected_names || ports.iter().any(|port| port.kind != BatchKind::Table) {
+    if actual != expected_names
+        || ports.iter().any(|port| port.kind != BatchKind::Table)
+        || (inputs_must_be_required && ports.iter().any(|port| !port.required))
+    {
         issues.push(issue(
             path,
             "invalid_ports",
@@ -682,7 +707,32 @@ fn validate_edges(project: &ProjectSpec, issues: &mut Vec<ValidationIssue>) {
         .iter()
         .map(|node| node.id.as_str())
         .collect::<BTreeSet<_>>();
+    let mut unique = BTreeSet::new();
+    let mut writers = BTreeMap::new();
     for (index, edge) in project.pipeline.edges.iter().enumerate() {
+        let edge_key = (
+            edge.source_node.as_str(),
+            edge.source_port.as_str(),
+            edge.target_node.as_str(),
+            edge.target_port.as_str(),
+        );
+        let duplicate = !unique.insert(edge_key);
+        if duplicate {
+            issues.push(issue(
+                format!("pipeline.edges[{index}]"),
+                "duplicate_edge",
+                "duplicates an earlier edge",
+            ));
+        } else if let Some(previous) = writers.insert(
+            (edge.target_node.as_str(), edge.target_port.as_str()),
+            index,
+        ) {
+            issues.push(issue(
+                format!("pipeline.edges[{index}]"),
+                "multiple_writers",
+                format!("target input already has a writer at pipeline.edges[{previous}]"),
+            ));
+        }
         if !nodes.contains(edge.source_node.as_str()) || !nodes.contains(edge.target_node.as_str())
         {
             issues.push(issue(
@@ -806,6 +856,19 @@ fn validate_range<T>(
             path,
             "out_of_range",
             format!("must be between {minimum} and {maximum}; received {value}"),
+        ));
+    }
+}
+
+fn validate_maximum<T>(value: T, maximum: T, path: &str, issues: &mut Vec<ValidationIssue>)
+where
+    T: Copy + Ord + std::fmt::Display,
+{
+    if value > maximum {
+        issues.push(issue(
+            path,
+            "out_of_range",
+            format!("must be at most {maximum}; received {value}"),
         ));
     }
 }

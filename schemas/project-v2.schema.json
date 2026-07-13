@@ -31,20 +31,18 @@
       "additionalProperties": false,
       "properties": {
         "batch_size": {
+          "default": 8192,
           "format": "uint",
           "minimum": 0,
           "type": "integer"
         },
         "target_partitions": {
+          "default": 1,
           "format": "uint",
           "minimum": 0,
           "type": "integer"
         }
       },
-      "required": [
-        "batch_size",
-        "target_partitions"
-      ],
       "type": "object"
     },
     "DataSourceSpec": {

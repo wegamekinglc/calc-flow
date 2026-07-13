@@ -1,4 +1,10 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use async_trait::async_trait;
 use calc_flow::{
@@ -178,6 +184,36 @@ fn defaults_round_trip_canonically() {
 }
 
 #[test]
+fn datafusion_config_accepts_strict_partial_defaults() {
+    let defaults = DataFusionConfig::default();
+    for (value, expected) in [
+        (json!({}), defaults),
+        (
+            json!({"batch_size": 4_096}),
+            DataFusionConfig {
+                batch_size: 4_096,
+                ..defaults
+            },
+        ),
+        (
+            json!({"target_partitions": 2}),
+            DataFusionConfig {
+                target_partitions: 2,
+                ..defaults
+            },
+        ),
+    ] {
+        assert_eq!(
+            serde_json::from_value::<DataFusionConfig>(value).unwrap(),
+            expected
+        );
+    }
+    assert!(
+        serde_json::from_value::<DataFusionConfig>(json!({"batch_size": 1, "extra": 2})).is_err()
+    );
+}
+
+#[test]
 fn validate_rejects_invalid_constructed_identity_positions_and_limits() {
     let (providers, udfs) = empty_registries();
     let mut value = project(expression_node("node"));
@@ -295,16 +331,20 @@ fn validate_requires_exact_supported_data_source_coverage() {
     value.data_sources.push(DataSourceSpec {
         id: "source".into(),
         input: "wrong".into(),
-        format: "pickle".into(),
+        format: "json".into(),
         data: Value::Null,
     });
+    let report = validate_project(&value, &providers, &udfs);
+    assert_issue(&report, "data_sources", "source_input_mismatch");
+
+    value.data_sources[0].format = "pickle".into();
     let report = validate_project(&value, &providers, &udfs);
     assert_issue(
         &report,
         "data_sources[0].format",
         "unsupported_source_format",
     );
-    assert_issue(&report, "data_sources", "source_input_mismatch");
+    assert!(report.fingerprint.is_none());
 }
 
 #[test]
@@ -317,7 +357,7 @@ fn compile_expression_uses_exact_configured_ports_and_schemas() {
     }];
     let mut value = project(expression_node("node"));
     value.pipeline.nodes[0].input_ports =
-        vec![port("input", BatchKind::Table, false, fields.clone())];
+        vec![port("input", BatchKind::Table, true, fields.clone())];
     value.pipeline.nodes[0].output_ports = vec![port("output", BatchKind::Table, true, fields)];
     let plan = compile_project(&value, &providers, &udfs).unwrap();
     assert_eq!(plan.external_inputs()["input"].node_id, "node");
@@ -334,7 +374,7 @@ fn compile_expression_uses_exact_configured_ports_and_schemas() {
                         Port::new(
                             "input",
                             BatchKind::Table,
-                            false,
+                            true,
                             Some(vec![datafusion::arrow::datatypes::Field::new(
                                 "value",
                                 DataType::Int64,
@@ -393,6 +433,44 @@ fn datafusion_config_is_preserved_and_changes_the_fingerprint() {
         .compile(&udfs)
         .unwrap();
     assert_eq!(changed_plan.fingerprint(), direct.fingerprint());
+}
+
+#[test]
+fn direct_pipeline_compile_validates_core_datafusion_config() {
+    let (_, udfs) = empty_registries();
+    for config in [
+        DataFusionConfig {
+            batch_size: 0,
+            target_partitions: 1,
+        },
+        DataFusionConfig {
+            batch_size: 8_192,
+            target_partitions: 0,
+        },
+    ] {
+        assert!(matches!(
+            PipelineBuilder::new("pipeline")
+                .unwrap()
+                .with_datafusion_config(config)
+                .add_node(
+                    "node",
+                    Box::new(
+                        ExpressionOperator::new(
+                            "node",
+                            "result = value + 1",
+                            Vec::new(),
+                            None,
+                            Vec::new(),
+                        )
+                        .unwrap(),
+                    ),
+                )
+                .unwrap()
+                .compile(&udfs),
+            Err(calc_flow::CalcFlowError::InvalidArgument { field, .. })
+                if field.starts_with("datafusion.")
+        ));
+    }
 }
 
 #[test]
@@ -496,6 +574,58 @@ impl ExternalOperatorFactory for PassthroughFactory {
         ));
         Ok(Box::new(PassthroughOperator { inputs, outputs }))
     }
+}
+
+struct CountingFactory {
+    creations: Arc<AtomicUsize>,
+}
+
+impl ExternalOperatorFactory for CountingFactory {
+    fn create(
+        &self,
+        _spec: &ExternalOperatorSpec,
+        inputs: Vec<Port>,
+        outputs: Vec<Port>,
+    ) -> Result<Box<dyn Operator>> {
+        self.creations.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(PassthroughOperator { inputs, outputs }))
+    }
+}
+
+#[test]
+fn semantic_validation_does_not_create_external_operators() {
+    let (providers, udfs) = empty_registries();
+    let creations = Arc::new(AtomicUsize::new(0));
+    providers
+        .register(
+            "acme",
+            "passthrough",
+            "1",
+            Arc::new(CountingFactory {
+                creations: Arc::clone(&creations),
+            }),
+        )
+        .unwrap();
+    let mut value = project(NodeSpec {
+        id: "external".into(),
+        operator: OperatorSpec::External {
+            provider: "acme".into(),
+            name: "passthrough".into(),
+            version: "1".into(),
+            options: BTreeMap::new(),
+        },
+        input_ports: vec![port("input", BatchKind::Table, false, Vec::new())],
+        output_ports: vec![port("output", BatchKind::Table, true, Vec::new())],
+        position: None,
+    });
+    value.format_version = 1;
+
+    assert_issue(
+        &validate_project(&value, &providers, &udfs),
+        "format_version",
+        "unsupported_version",
+    );
+    assert_eq!(creations.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -631,6 +761,112 @@ fn constructed_operator_modes_are_validated_without_deserialization() {
         &validate_project(&value, &providers, &udfs),
         "pipeline.nodes[0].operator",
         "invalid_operator",
+    );
+}
+
+#[test]
+fn builtin_config_inputs_must_be_required() {
+    let (providers, udfs) = empty_registries();
+    let mut expression = project(expression_node("node"));
+    expression.pipeline.nodes[0].input_ports =
+        vec![port("input", BatchKind::Table, false, Vec::new())];
+    assert_issue(
+        &validate_project(&expression, &providers, &udfs),
+        "pipeline.nodes[0].input_ports",
+        "invalid_ports",
+    );
+
+    let mut sql = project(NodeSpec {
+        id: "sql".into(),
+        operator: OperatorSpec::Sql {
+            query: "SELECT * FROM input".into(),
+            aliases: vec!["input".into()],
+            udfs: Vec::new(),
+        },
+        input_ports: vec![port("input", BatchKind::Table, false, Vec::new())],
+        output_ports: Vec::new(),
+        position: None,
+    });
+    sql.data_sources[0].input = "input".into();
+    assert_issue(
+        &validate_project(&sql, &providers, &udfs),
+        "pipeline.nodes[0].input_ports",
+        "invalid_ports",
+    );
+}
+
+#[test]
+fn invalid_query_syntax_has_stable_operator_issue_paths() {
+    let (providers, udfs) = empty_registries();
+    let mut sql = project(NodeSpec {
+        id: "sql".into(),
+        operator: OperatorSpec::Sql {
+            query: "DELETE FROM input".into(),
+            aliases: vec!["input".into()],
+            udfs: Vec::new(),
+        },
+        input_ports: Vec::new(),
+        output_ports: Vec::new(),
+        position: None,
+    });
+    sql.data_sources[0].input = "input".into();
+    assert_issue(
+        &validate_project(&sql, &providers, &udfs),
+        "pipeline.nodes[0].operator",
+        "invalid_operator",
+    );
+
+    let mut expression = project(expression_node("node"));
+    let OperatorSpec::Expression { filter, .. } = &mut expression.pipeline.nodes[0].operator else {
+        unreachable!()
+    };
+    *filter = Some("(".into());
+    assert_issue(
+        &validate_project(&expression, &providers, &udfs),
+        "pipeline.nodes[0].operator",
+        "invalid_operator",
+    );
+}
+
+#[test]
+fn duplicate_edges_and_writers_report_the_later_edge_index() {
+    let (providers, udfs) = empty_registries();
+    let mut duplicate = project(expression_node("source"));
+    duplicate.pipeline.nodes.push(expression_node("target"));
+    let edge = EdgeSpec {
+        source_node: "source".into(),
+        source_port: "output".into(),
+        target_node: "target".into(),
+        target_port: "input".into(),
+    };
+    duplicate.pipeline.edges = vec![edge.clone(), edge];
+    assert_issue(
+        &validate_project(&duplicate, &providers, &udfs),
+        "pipeline.edges[1]",
+        "duplicate_edge",
+    );
+
+    let mut writers = project(expression_node("first"));
+    writers.pipeline.nodes.push(expression_node("second"));
+    writers.pipeline.nodes.push(expression_node("target"));
+    writers.pipeline.edges = vec![
+        EdgeSpec {
+            source_node: "first".into(),
+            source_port: "output".into(),
+            target_node: "target".into(),
+            target_port: "input".into(),
+        },
+        EdgeSpec {
+            source_node: "second".into(),
+            source_port: "output".into(),
+            target_node: "target".into(),
+            target_port: "input".into(),
+        },
+    ];
+    assert_issue(
+        &validate_project(&writers, &providers, &udfs),
+        "pipeline.edges[1]",
+        "multiple_writers",
     );
 }
 

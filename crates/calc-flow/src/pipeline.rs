@@ -614,6 +614,7 @@ impl PipelineBuilder {
     /// Returns [`CalcFlowError::Compile`] for an invalid graph or selected UDF
     /// catalog.
     pub fn compile(self, udfs: &UdfRegistrySnapshot) -> Result<ExecutionPlan> {
+        self.datafusion_config.validate()?;
         validate_nodes(&self.nodes)?;
         validate_edges(&self.nodes, &self.edges)?;
         let order = topological_order(&self.nodes, &self.edges)?;

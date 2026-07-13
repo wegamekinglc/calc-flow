@@ -25,7 +25,7 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct DataFusionConfig {
     pub batch_size: usize,
     pub target_partitions: usize,
@@ -37,6 +37,24 @@ impl Default for DataFusionConfig {
             batch_size: 8_192,
             target_partitions: 1,
         }
+    }
+}
+
+impl DataFusionConfig {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.batch_size == 0 {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "datafusion.batch_size".into(),
+                message: "must be positive".into(),
+            });
+        }
+        if self.target_partitions == 0 {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "datafusion.target_partitions".into(),
+                message: "must be positive".into(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -67,12 +85,7 @@ impl DataFusionRuntime {
     /// Returns [`CalcFlowError::InvalidArgument`] when either configuration
     /// value is zero.
     pub fn new(config: DataFusionConfig) -> Result<Self> {
-        if config.batch_size == 0 || config.target_partitions == 0 {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "datafusion".into(),
-                message: "batch_size and target_partitions must be positive".into(),
-            });
-        }
+        config.validate()?;
         let session = SessionConfig::new()
             .with_batch_size(config.batch_size)
             .with_target_partitions(config.target_partitions);

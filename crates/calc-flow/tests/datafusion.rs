@@ -300,7 +300,7 @@ fn config_rejects_zero_batch_size_and_target_partitions() {
     ] {
         assert!(matches!(
             DataFusionRuntime::new(config),
-            Err(CalcFlowError::InvalidArgument { field, .. }) if field == "datafusion"
+            Err(CalcFlowError::InvalidArgument { field, .. }) if field.starts_with("datafusion.")
         ));
     }
 }

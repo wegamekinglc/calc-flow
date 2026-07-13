@@ -197,6 +197,70 @@ fn sql_operator_aliases_are_unique_required_table_ports() {
     ));
 }
 
+#[test]
+fn built_in_with_ports_rejects_optional_inputs() {
+    let expression = ExpressionOperator::new("calc", "a + 1", vec![], None, vec![]).unwrap();
+    assert!(matches!(
+        expression.with_ports(
+            Port::new("input", BatchKind::Table, false, None).unwrap(),
+            Port::new("output", BatchKind::Table, true, None).unwrap(),
+        ),
+        Err(CalcFlowError::InvalidArgument { field, .. })
+            if field == "operator.input_ports"
+    ));
+
+    let sql = SqlOperator::new("sql", "SELECT * FROM input", vec!["input".into()], vec![]).unwrap();
+    assert!(matches!(
+        sql.with_ports(
+            vec![Port::new("input", BatchKind::Table, false, None).unwrap()],
+            Port::new("output", BatchKind::Table, true, None).unwrap(),
+        ),
+        Err(CalcFlowError::InvalidArgument { field, .. })
+            if field == "operator.input_ports"
+    ));
+}
+
+#[test]
+fn operators_reject_invalid_queries_during_construction() {
+    for query in [
+        "DELETE FROM input",
+        "CREATE TABLE bad AS SELECT 1",
+        "SELECT 1; SELECT 2",
+        "SELECT FROM",
+    ] {
+        assert!(matches!(
+            SqlOperator::new("sql", query, vec!["input".into()], vec![]),
+            Err(CalcFlowError::InvalidArgument { field, .. }) if field == "query"
+        ));
+    }
+
+    for operator in [
+        ExpressionOperator::new("calc", "result = (", vec![], None, vec![]),
+        ExpressionOperator::new("calc", "", vec!["(".into()], None, vec![]),
+        ExpressionOperator::new("calc", "", vec!["value".into()], Some("(".into()), vec![]),
+    ] {
+        let diagnostic = format!("{operator:?}");
+        assert!(
+            matches!(
+                operator,
+                Err(CalcFlowError::InvalidArgument { field, .. }) if field == "query"
+            ),
+            "{diagnostic}"
+        );
+    }
+}
+
+#[test]
+fn sql_operator_configuration_preserves_the_validated_source_query() {
+    let query = "  SELECT * FROM input;  ";
+    let operator = SqlOperator::new("sql", query, vec!["input".into()], vec![]).unwrap();
+
+    assert_eq!(
+        operator.configuration()["query"],
+        Value::String(query.into())
+    );
+}
+
 #[tokio::test]
 async fn expression_operator_processes_assignment_with_real_datafusion() {
     let input = table(vec![("a", vec![1, 2])]);

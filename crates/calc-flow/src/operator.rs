@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use crate::{
     Batch, BatchKind, CalcFlowError, DataFusionRuntime, JsonMap, Result, RunContext, UdfReference,
-    json::validate_portable_identifier, sql_projection,
+    json::validate_portable_identifier, sql_projection, validate_select_query,
 };
 
 #[derive(Clone, Debug)]
@@ -175,6 +175,7 @@ pub struct ExpressionOperator {
     expression: Option<String>,
     select: Vec<String>,
     filter_expression: Option<String>,
+    query: String,
     udfs: Vec<UdfReference>,
     input_ports: [Port; 1],
     output_ports: [Port; 1],
@@ -189,7 +190,8 @@ impl ExpressionOperator {
     /// # Errors
     ///
     /// Returns [`CalcFlowError::InvalidArgument`] when the name is empty,
-    /// exactly one calculation mode is not supplied, or a projection is empty.
+    /// exactly one calculation mode is not supplied, a projection is empty,
+    /// or the generated read-only query is malformed.
     pub fn new(
         name: &str,
         expression: &str,
@@ -212,11 +214,14 @@ impl ExpressionOperator {
                 message: "projection expressions must not be empty".into(),
             });
         }
+        let expression = has_expression.then(|| expression.into());
+        let query = expression_query(expression.as_deref(), &select, filter_expression.as_deref())?;
         Ok(Self {
             name: name.into(),
-            expression: has_expression.then(|| expression.into()),
+            expression,
             select,
             filter_expression,
+            query,
             udfs,
             input_ports: [table_port("input")?],
             output_ports: [table_port("output")?],
@@ -243,24 +248,11 @@ impl ExpressionOperator {
     /// built-in `input` and `output` table boundaries.
     pub fn with_ports(mut self, input: Port, output: Port) -> Result<Self> {
         validate_builtin_port(&input, "input", "operator.input_ports")?;
+        validate_required_input(&input, "operator.input_ports")?;
         validate_builtin_port(&output, "output", "operator.output_ports")?;
         self.input_ports = [input];
         self.output_ports = [output];
         Ok(self)
-    }
-
-    fn query(&self) -> Result<String> {
-        let mut query = if let Some(expression) = &self.expression {
-            sql_projection(expression, "input")?
-        } else {
-            format!("SELECT {} FROM input", self.select.join(", "))
-        };
-        if let Some(filter) = &self.filter_expression {
-            query.push_str(" WHERE (");
-            query.push_str(filter);
-            query.push(')');
-        }
-        Ok(query)
     }
 }
 
@@ -318,7 +310,7 @@ impl Operator for ExpressionOperator {
         let tables = BTreeMap::from([("input".into(), input.clone())]);
         let output = context
             .datafusion
-            .sql(&self.query()?, &tables, context.run.node_id())
+            .sql(&self.query, &tables, context.run.node_id())
             .await?;
         context.run.check_cancelled()?;
         Ok(BTreeMap::from([("output".into(), output)]))
@@ -341,7 +333,8 @@ impl SqlOperator {
     /// # Errors
     ///
     /// Returns [`CalcFlowError::InvalidArgument`] when the operator name is
-    /// empty or the aliases are empty, duplicate, or invalid port names.
+    /// empty, the query is not one valid `SELECT`/CTE, or the aliases are
+    /// empty, duplicate, or invalid port names.
     pub fn new(
         name: &str,
         query: &str,
@@ -366,6 +359,7 @@ impl SqlOperator {
             .iter()
             .map(|alias| table_port(alias))
             .collect::<Result<Vec<_>>>()?;
+        validate_select_query(query)?;
         Ok(Self {
             name: name.into(),
             query: query.into(),
@@ -396,10 +390,9 @@ impl SqlOperator {
     /// aliases in order and the output is the built-in `output` port.
     pub fn with_ports(mut self, inputs: Vec<Port>, output: Port) -> Result<Self> {
         if inputs.len() != self.aliases.len()
-            || inputs
-                .iter()
-                .zip(&self.aliases)
-                .any(|(port, alias)| port.name() != alias || port.kind() != BatchKind::Table)
+            || inputs.iter().zip(&self.aliases).any(|(port, alias)| {
+                port.name() != alias || port.kind() != BatchKind::Table || !port.required()
+            })
         {
             return Err(CalcFlowError::InvalidArgument {
                 field: "operator.input_ports".into(),
@@ -489,6 +482,34 @@ fn validate_builtin_port(port: &Port, name: &str, field: &str) -> Result<()> {
         });
     }
     Ok(())
+}
+
+fn validate_required_input(port: &Port, field: &str) -> Result<()> {
+    if !port.required() {
+        return Err(CalcFlowError::InvalidArgument {
+            field: field.into(),
+            message: "built-in input ports must be required".into(),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn expression_query(
+    expression: Option<&str>,
+    select: &[String],
+    filter_expression: Option<&str>,
+) -> Result<String> {
+    let mut query = if let Some(expression) = expression {
+        sql_projection(expression, "input")?
+    } else {
+        format!("SELECT {} FROM input", select.join(", "))
+    };
+    if let Some(filter) = filter_expression {
+        query.push_str(" WHERE (");
+        query.push_str(filter);
+        query.push(')');
+    }
+    validate_select_query(&query)
 }
 
 fn table_port(name: &str) -> Result<Port> {
