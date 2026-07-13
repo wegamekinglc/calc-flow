@@ -1,9 +1,11 @@
 //! Calc Flow's Rust-native v2 calculation engine.
 
+mod batch;
 mod context;
 mod error;
 mod json;
 
+pub use batch::{Batch, BatchKind, BatchMetadata, ExternalPayload, TableBatch};
 pub use context::{CancellationToken, RunContext};
 pub use error::{CalcFlowError, Result};
 pub use json::{JsonMap, canonical_json};
