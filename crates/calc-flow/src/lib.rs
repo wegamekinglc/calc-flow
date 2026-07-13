@@ -7,6 +7,7 @@ mod error;
 mod expression;
 mod json;
 mod operator;
+mod pipeline;
 mod udf;
 
 pub use batch::{Batch, BatchKind, BatchMetadata, ExternalPayload, TableBatch};
@@ -19,6 +20,7 @@ pub use operator::{
     ExpressionOperator, ExternalOperatorFactory, ExternalOperatorSpec, Operator, OperatorContext,
     Port, ProviderRegistry, SqlOperator,
 };
+pub use pipeline::{Edge, ExecutionPlan, PipelineBuilder, PortEndpoint};
 pub use udf::{
     UdfCatalogEntry, UdfKind, UdfReference, UdfRegistry, UdfRegistrySnapshot,
     validate_selected_udfs,
