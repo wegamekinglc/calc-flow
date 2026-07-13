@@ -18,7 +18,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::{Batch, BatchMetadata, CalcFlowError, Result, sql_projection, validate_select_query};
+use crate::{
+    Batch, BatchMetadata, CalcFlowError, Result, UdfKind, UdfReference, UdfRegistrySnapshot,
+    sql_projection, validate_select_query, validate_selected_udfs,
+};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct DataFusionConfig {
@@ -78,6 +81,37 @@ impl DataFusionRuntime {
             next_query: AtomicU64::new(1),
             closed: AtomicBool::new(false),
         })
+    }
+
+    /// Registers the selected native UDFs during runtime setup.
+    ///
+    /// This method intentionally requires exclusive runtime access. Call it
+    /// before the run-scoped runtime is shared or any queries are started, so
+    /// the session's function catalog remains stable throughout query awaits.
+    /// External UDF references remain catalog metadata and are not registered
+    /// with `DataFusion`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the runtime is closed, selected versions conflict,
+    /// or a selected native reference is absent from the snapshot. Resolution
+    /// completes before the shared session is mutated.
+    pub fn register_udfs(
+        &mut self,
+        snapshot: &UdfRegistrySnapshot,
+        references: &[UdfReference],
+    ) -> Result<()> {
+        self.ensure_open()?;
+        validate_selected_udfs(references)?;
+        let selected = references
+            .iter()
+            .filter(|reference| reference.kind == UdfKind::DataFusionScalar)
+            .map(|reference| snapshot.resolve_native(reference))
+            .collect::<Result<Vec<_>>>()?;
+        for udf in selected {
+            self.context.register_udf(udf.as_ref().clone());
+        }
+        Ok(())
     }
 
     /// Evaluates an expression or assignment over one table batch.
