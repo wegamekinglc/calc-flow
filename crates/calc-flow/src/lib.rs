@@ -20,7 +20,10 @@ pub use operator::{
     ExpressionOperator, ExternalOperatorFactory, ExternalOperatorSpec, Operator, OperatorContext,
     Port, ProviderRegistry, SqlOperator,
 };
-pub use pipeline::{Edge, ExecutionPlan, PipelineBuilder, PortEndpoint};
+pub use pipeline::{
+    Edge, ExecutionOptions, ExecutionPlan, NodeTiming, PipelineBuilder, PortEndpoint, RunMetadata,
+    RunResult,
+};
 pub use udf::{
     UdfCatalogEntry, UdfKind, UdfReference, UdfRegistry, UdfRegistrySnapshot,
     validate_selected_udfs,

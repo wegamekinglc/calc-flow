@@ -1,8 +1,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
+    time::{Duration, Instant},
 };
 
+use chrono::{DateTime, Utc};
 use datafusion::arrow::{
     datatypes::SchemaRef,
     ipc::{convert::IpcSchemaEncoder, writer::DictionaryTracker},
@@ -12,9 +14,39 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CalcFlowError, Operator, Port, Result, UdfCatalogEntry, UdfReference, UdfRegistrySnapshot,
-    canonical_json, validate_selected_udfs,
+    Batch, CalcFlowError, CancellationToken, DataFusionConfig, DataFusionQueryMetric,
+    DataFusionRuntime, JsonMap, Operator, OperatorContext, Port, Result, RunContext,
+    UdfCatalogEntry, UdfReference, UdfRegistrySnapshot, canonical_json, validate_selected_udfs,
 };
+
+#[derive(Clone, Debug, Default)]
+pub struct ExecutionOptions {
+    pub settings: JsonMap,
+    pub deadline: Option<DateTime<Utc>>,
+    pub cancellation: CancellationToken,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct NodeTiming {
+    pub duration_ns: u64,
+    pub input_rows: BTreeMap<String, usize>,
+    pub output_rows: BTreeMap<String, usize>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RunMetadata {
+    pub run_id: String,
+    pub pipeline_name: String,
+    pub pipeline_fingerprint: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct RunResult {
+    pub outputs: BTreeMap<String, Batch>,
+    pub node_timings: BTreeMap<String, NodeTiming>,
+    pub datafusion_metrics: Vec<DataFusionQueryMetric>,
+    pub metadata: RunMetadata,
+}
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct PortEndpoint {
@@ -79,10 +111,9 @@ pub struct ExecutionPlan {
     pub(crate) external_inputs: BTreeMap<String, PortEndpoint>,
     pub(crate) external_outputs: BTreeMap<String, PortEndpoint>,
     pub(crate) fingerprint: String,
-    #[allow(dead_code)]
     pub(crate) run_lock: tokio::sync::Mutex<()>,
-    #[allow(dead_code)]
     pub(crate) udfs: UdfRegistrySnapshot,
+    pub(crate) selected_udfs: Vec<UdfReference>,
 }
 
 impl ExecutionPlan {
@@ -107,6 +138,384 @@ impl ExecutionPlan {
 
     pub const fn external_outputs(&self) -> &BTreeMap<String, PortEndpoint> {
         &self.external_outputs
+    }
+
+    /// Executes one run while owning the plan's state lifecycle lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid external inputs, cancellation, operator or
+    /// runtime failures, invalid operator outputs, or a failed rollback.
+    pub async fn execute(
+        &self,
+        inputs: BTreeMap<String, Batch>,
+        options: ExecutionOptions,
+    ) -> Result<RunResult> {
+        let _run_guard = self.run_lock.lock().await;
+        self.validate_external_inputs(&inputs).await?;
+        let before = self.snapshot_unlocked().await?;
+        let result = self.execute_unlocked(inputs, options).await;
+        match result {
+            Ok(result) => Ok(result),
+            Err(original) => match self.restore_unlocked(&before).await {
+                Ok(()) => Err(original),
+                Err(rollback) => Err(CalcFlowError::Internal {
+                    message: format!(
+                        "run failed with {original}; rollback also failed with {rollback}"
+                    ),
+                }),
+            },
+        }
+    }
+
+    /// Captures every node's JSON state under the plan's run lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any operator cannot capture its state.
+    pub async fn snapshot(&self) -> Result<BTreeMap<String, Value>> {
+        let _run_guard = self.run_lock.lock().await;
+        self.snapshot_unlocked().await
+    }
+
+    /// Restores an exact node-keyed state map under the plan's run lock.
+    ///
+    /// Node IDs are validated before any operator is mutated. Once validated,
+    /// every node is given its state even if another node rejects restoration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::CheckpointMismatch`] for missing or extra node
+    /// IDs, or an error summarizing operator restore failures.
+    pub async fn restore(&self, state: &BTreeMap<String, Value>) -> Result<()> {
+        let _run_guard = self.run_lock.lock().await;
+        self.restore_unlocked(state).await
+    }
+
+    /// Resets every node under the plan's run lock.
+    ///
+    /// All nodes are attempted even if one reset fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error summarizing operator reset failures.
+    pub async fn reset(&self) -> Result<()> {
+        let _run_guard = self.run_lock.lock().await;
+        let mut failures = Vec::new();
+        for node in &self.nodes {
+            if let Err(error) = node.operator.lock().await.reset() {
+                failures.push(format!("{}: {error}", node.node_id));
+            }
+        }
+        lifecycle_result("reset", &failures)
+    }
+
+    async fn execute_unlocked(
+        &self,
+        inputs: BTreeMap<String, Batch>,
+        options: ExecutionOptions,
+    ) -> Result<RunResult> {
+        let context = RunContext::new(options.settings, options.deadline, options.cancellation)?;
+        let mut runtime = DataFusionRuntime::new(DataFusionConfig::default())?;
+        runtime.register_udfs(&self.udfs, &self.selected_udfs)?;
+        let execution = self.execute_nodes(&inputs, &context, &runtime).await;
+        runtime.close();
+        let (outputs, node_timings) = execution?;
+        Ok(RunResult {
+            outputs,
+            node_timings,
+            datafusion_metrics: runtime.metrics(),
+            metadata: RunMetadata {
+                run_id: context.run_id().into(),
+                pipeline_name: self.name.clone(),
+                pipeline_fingerprint: self.fingerprint.clone(),
+            },
+        })
+    }
+
+    async fn validate_external_inputs(&self, inputs: &BTreeMap<String, Batch>) -> Result<()> {
+        let unknown = inputs
+            .keys()
+            .filter(|name| !self.external_inputs.contains_key(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unknown.is_empty() {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "inputs".into(),
+                message: format!("unknown graph inputs: {unknown:?}"),
+            });
+        }
+        for (name, endpoint) in &self.external_inputs {
+            let node = self.node(&endpoint.node_id)?;
+            let operator = node.operator.lock().await;
+            let port = operator
+                .input_ports()
+                .iter()
+                .find(|port| port.name() == endpoint.port)
+                .ok_or_else(|| CalcFlowError::Internal {
+                    message: format!("compiled external input {name} has no matching port"),
+                })?;
+            match inputs.get(name) {
+                Some(batch) => port.validate(
+                    batch,
+                    &format!(
+                        "graph input {name:?} ({}.{})",
+                        endpoint.node_id, endpoint.port
+                    ),
+                )?,
+                None if port.required() => {
+                    return Err(CalcFlowError::InvalidArgument {
+                        field: "inputs".into(),
+                        message: format!("missing required graph input {name:?}"),
+                    });
+                }
+                None => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn execute_nodes(
+        &self,
+        inputs: &BTreeMap<String, Batch>,
+        context: &RunContext,
+        runtime: &DataFusionRuntime,
+    ) -> Result<(BTreeMap<String, Batch>, BTreeMap<String, NodeTiming>)> {
+        let external_names = self
+            .external_inputs
+            .iter()
+            .map(|(name, endpoint)| (endpoint.clone(), name.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut values = self
+            .external_inputs
+            .iter()
+            .filter_map(|(name, endpoint)| {
+                inputs
+                    .get(name)
+                    .cloned()
+                    .map(|batch| (endpoint.clone(), batch))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut timings = BTreeMap::new();
+
+        context.check_cancelled()?;
+        for node in &self.nodes {
+            let node_context = context.for_node(&node.node_id)?;
+            let mut operator = node.operator.lock().await;
+            let operator_inputs =
+                gather_node_inputs(node, operator.as_ref(), &values, &external_names)?;
+
+            node_context.check_cancelled()?;
+            let started = Instant::now();
+            let process_result = operator
+                .process(
+                    &operator_inputs,
+                    &OperatorContext {
+                        run: &node_context,
+                        datafusion: runtime,
+                    },
+                )
+                .await;
+            let duration_ns = nanos(started.elapsed());
+            node_context.check_cancelled()?;
+            let operator_outputs = process_result?;
+            validate_and_store_outputs(node, operator.as_ref(), &operator_outputs, &mut values)?;
+            timings.insert(
+                node.node_id.clone(),
+                NodeTiming {
+                    duration_ns,
+                    input_rows: row_counts(&operator_inputs),
+                    output_rows: row_counts(&operator_outputs),
+                },
+            );
+        }
+
+        let outputs = self
+            .external_outputs
+            .iter()
+            .filter_map(|(name, endpoint)| {
+                values
+                    .get(endpoint)
+                    .cloned()
+                    .map(|batch| (name.clone(), batch))
+            })
+            .collect();
+        Ok((outputs, timings))
+    }
+
+    async fn snapshot_unlocked(&self) -> Result<BTreeMap<String, Value>> {
+        let mut state = BTreeMap::new();
+        for node in &self.nodes {
+            state.insert(node.node_id.clone(), node.operator.lock().await.snapshot()?);
+        }
+        Ok(state)
+    }
+
+    async fn restore_unlocked(&self, state: &BTreeMap<String, Value>) -> Result<()> {
+        let expected = self
+            .nodes
+            .iter()
+            .map(|node| node.node_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let actual = state.keys().map(String::as_str).collect::<BTreeSet<_>>();
+        if actual != expected {
+            let missing = expected.difference(&actual).copied().collect::<Vec<_>>();
+            let extra = actual.difference(&expected).copied().collect::<Vec<_>>();
+            return Err(CalcFlowError::CheckpointMismatch {
+                message: format!(
+                    "state node IDs do not match the plan; missing={missing:?}, extra={extra:?}"
+                ),
+            });
+        }
+        let mut failures = Vec::new();
+        for node in &self.nodes {
+            if let Err(error) = node.operator.lock().await.restore(&state[&node.node_id]) {
+                failures.push(format!("{}: {error}", node.node_id));
+            }
+        }
+        lifecycle_result("restore", &failures)
+    }
+
+    fn node(&self, node_id: &str) -> Result<&CompiledNode> {
+        self.nodes
+            .iter()
+            .find(|node| node.node_id == node_id)
+            .ok_or_else(|| CalcFlowError::Internal {
+                message: format!("compiled plan has no node {node_id}"),
+            })
+    }
+}
+
+fn row_counts(batches: &BTreeMap<String, Batch>) -> BTreeMap<String, usize> {
+    batches
+        .iter()
+        .map(|(name, batch)| (name.clone(), batch.num_rows()))
+        .collect()
+}
+
+fn gather_node_inputs(
+    node: &CompiledNode,
+    operator: &dyn Operator,
+    values: &BTreeMap<PortEndpoint, Batch>,
+    external_names: &BTreeMap<PortEndpoint, String>,
+) -> Result<BTreeMap<String, Batch>> {
+    let mut inputs = BTreeMap::new();
+    for port in operator.input_ports() {
+        let target = PortEndpoint {
+            node_id: node.node_id.clone(),
+            port: port.name().into(),
+        };
+        let source = node.inbound.get(port.name());
+        let batch = source
+            .and_then(|endpoint| values.get(endpoint))
+            .or_else(|| source.is_none().then(|| values.get(&target)).flatten());
+        match batch {
+            Some(batch) => {
+                port.validate(batch, &format!("input {}.{}", node.node_id, port.name()))?;
+                inputs.insert(port.name().into(), batch.clone());
+            }
+            None if port.required() => {
+                return Err(missing_node_input(
+                    node,
+                    port,
+                    source,
+                    external_names,
+                    &target,
+                ));
+            }
+            None => {}
+        }
+    }
+    Ok(inputs)
+}
+
+fn missing_node_input(
+    node: &CompiledNode,
+    port: &Port,
+    source: Option<&PortEndpoint>,
+    external_names: &BTreeMap<PortEndpoint, String>,
+    target: &PortEndpoint,
+) -> CalcFlowError {
+    let label = source.map_or_else(
+        || {
+            external_names.get(target).map_or_else(
+                || format!("{target:?}"),
+                |name| format!("graph input {name:?}"),
+            )
+        },
+        |source| {
+            format!(
+                "required input {}.{} from optional output {}.{}",
+                node.node_id,
+                port.name(),
+                source.node_id,
+                source.port
+            )
+        },
+    );
+    CalcFlowError::Operator {
+        node_id: node.node_id.clone(),
+        message: format!("{label} is missing"),
+    }
+}
+
+fn validate_and_store_outputs(
+    node: &CompiledNode,
+    operator: &dyn Operator,
+    outputs: &BTreeMap<String, Batch>,
+    values: &mut BTreeMap<PortEndpoint, Batch>,
+) -> Result<()> {
+    let output_ports = operator
+        .output_ports()
+        .iter()
+        .map(|port| (port.name(), port))
+        .collect::<BTreeMap<_, _>>();
+    let unknown = outputs
+        .keys()
+        .filter(|name| !output_ports.contains_key(name.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown.is_empty() {
+        return Err(CalcFlowError::Operator {
+            node_id: node.node_id.clone(),
+            message: format!("returned unknown outputs: {unknown:?}"),
+        });
+    }
+    let missing = output_ports
+        .values()
+        .filter(|port| port.required() && !outputs.contains_key(port.name()))
+        .map(|port| port.name())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(CalcFlowError::Operator {
+            node_id: node.node_id.clone(),
+            message: format!("omitted required outputs: {missing:?}"),
+        });
+    }
+    for (name, batch) in outputs {
+        output_ports[name.as_str()].validate(batch, &format!("output {}.{name}", node.node_id))?;
+        values.insert(
+            PortEndpoint {
+                node_id: node.node_id.clone(),
+                port: name.clone(),
+            },
+            batch.clone(),
+        );
+    }
+    Ok(())
+}
+
+fn nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn lifecycle_result(action: &str, failures: &[String]) -> Result<()> {
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(CalcFlowError::Internal {
+            message: format!("operator {action} failed: {}", failures.join("; ")),
+        })
     }
 }
 
@@ -189,6 +598,10 @@ impl PipelineBuilder {
         validate_edges(&self.nodes, &self.edges)?;
         let order = topological_order(&self.nodes, &self.edges)?;
         let selected_catalog = selected_udf_catalog(&self.nodes, udfs)?;
+        let selected_udfs = selected_catalog
+            .iter()
+            .map(|(reference, _)| reference.clone())
+            .collect();
         let (external_inputs, external_outputs) = external_ports(&self.nodes, &self.edges)?;
         let fingerprint =
             graph_fingerprint(&self.name, &self.nodes, &self.edges, &selected_catalog)?;
@@ -199,6 +612,7 @@ impl PipelineBuilder {
             external_outputs,
             fingerprint,
             udfs.clone(),
+            selected_udfs,
         ))
     }
 }
@@ -582,6 +996,7 @@ fn build_plan(
     external_outputs: BTreeMap<String, PortEndpoint>,
     fingerprint: String,
     udfs: UdfRegistrySnapshot,
+    selected_udfs: Vec<UdfReference>,
 ) -> ExecutionPlan {
     let inbound = builder
         .edges
@@ -626,5 +1041,6 @@ fn build_plan(
         fingerprint,
         run_lock: tokio::sync::Mutex::new(()),
         udfs,
+        selected_udfs,
     }
 }
