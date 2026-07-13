@@ -6,6 +6,7 @@ mod datafusion;
 mod error;
 mod expression;
 mod json;
+mod operator;
 mod udf;
 
 pub use batch::{Batch, BatchKind, BatchMetadata, ExternalPayload, TableBatch};
@@ -14,6 +15,10 @@ pub use datafusion::{DataFusionConfig, DataFusionQueryMetric, DataFusionRuntime}
 pub use error::{CalcFlowError, Result};
 pub use expression::{split_assignment, sql_projection, validate_select_query};
 pub use json::{JsonMap, canonical_json};
+pub use operator::{
+    ExpressionOperator, ExternalOperatorFactory, ExternalOperatorSpec, Operator, OperatorContext,
+    Port, ProviderRegistry, SqlOperator,
+};
 pub use udf::{
     UdfCatalogEntry, UdfKind, UdfReference, UdfRegistry, UdfRegistrySnapshot,
     validate_selected_udfs,
