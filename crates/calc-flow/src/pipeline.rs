@@ -102,6 +102,8 @@ pub struct PipelineBuilder {
 pub(crate) struct CompiledNode {
     pub(crate) node_id: String,
     pub(crate) operator: Arc<tokio::sync::Mutex<Box<dyn Operator>>>,
+    pub(crate) input_ports: Vec<Port>,
+    pub(crate) output_ports: Vec<Port>,
     pub(crate) inbound: BTreeMap<String, PortEndpoint>,
 }
 
@@ -152,7 +154,7 @@ impl ExecutionPlan {
         options: ExecutionOptions,
     ) -> Result<RunResult> {
         let _run_guard = self.run_lock.lock().await;
-        self.validate_external_inputs(&inputs).await?;
+        self.validate_external_inputs(&inputs)?;
         let before = self.snapshot_unlocked().await?;
         let result = self.execute_unlocked(inputs, options).await;
         match result {
@@ -233,7 +235,7 @@ impl ExecutionPlan {
         })
     }
 
-    async fn validate_external_inputs(&self, inputs: &BTreeMap<String, Batch>) -> Result<()> {
+    fn validate_external_inputs(&self, inputs: &BTreeMap<String, Batch>) -> Result<()> {
         let unknown = inputs
             .keys()
             .filter(|name| !self.external_inputs.contains_key(*name))
@@ -247,9 +249,8 @@ impl ExecutionPlan {
         }
         for (name, endpoint) in &self.external_inputs {
             let node = self.node(&endpoint.node_id)?;
-            let operator = node.operator.lock().await;
-            let port = operator
-                .input_ports()
+            let port = node
+                .input_ports
                 .iter()
                 .find(|port| port.name() == endpoint.port)
                 .ok_or_else(|| CalcFlowError::Internal {
@@ -286,7 +287,7 @@ impl ExecutionPlan {
             .iter()
             .map(|(name, endpoint)| (endpoint.clone(), name.clone()))
             .collect::<BTreeMap<_, _>>();
-        let mut values = self
+        let external_values = self
             .external_inputs
             .iter()
             .filter_map(|(name, endpoint)| {
@@ -296,6 +297,7 @@ impl ExecutionPlan {
                     .map(|batch| (endpoint.clone(), batch))
             })
             .collect::<BTreeMap<_, _>>();
+        let mut produced_values = BTreeMap::new();
         let mut timings = BTreeMap::new();
 
         context.check_cancelled()?;
@@ -303,7 +305,7 @@ impl ExecutionPlan {
             let node_context = context.for_node(&node.node_id)?;
             let mut operator = node.operator.lock().await;
             let operator_inputs =
-                gather_node_inputs(node, operator.as_ref(), &values, &external_names)?;
+                gather_node_inputs(node, &produced_values, &external_values, &external_names)?;
 
             node_context.check_cancelled()?;
             let started = Instant::now();
@@ -319,7 +321,7 @@ impl ExecutionPlan {
             let duration_ns = nanos(started.elapsed());
             node_context.check_cancelled()?;
             let operator_outputs = process_result?;
-            validate_and_store_outputs(node, operator.as_ref(), &operator_outputs, &mut values)?;
+            validate_and_store_outputs(node, &operator_outputs, &mut produced_values)?;
             timings.insert(
                 node.node_id.clone(),
                 NodeTiming {
@@ -334,7 +336,7 @@ impl ExecutionPlan {
             .external_outputs
             .iter()
             .filter_map(|(name, endpoint)| {
-                values
+                produced_values
                     .get(endpoint)
                     .cloned()
                     .map(|batch| (name.clone(), batch))
@@ -395,20 +397,25 @@ fn row_counts(batches: &BTreeMap<String, Batch>) -> BTreeMap<String, usize> {
 
 fn gather_node_inputs(
     node: &CompiledNode,
-    operator: &dyn Operator,
-    values: &BTreeMap<PortEndpoint, Batch>,
+    produced_values: &BTreeMap<PortEndpoint, Batch>,
+    external_values: &BTreeMap<PortEndpoint, Batch>,
     external_names: &BTreeMap<PortEndpoint, String>,
 ) -> Result<BTreeMap<String, Batch>> {
     let mut inputs = BTreeMap::new();
-    for port in operator.input_ports() {
+    for port in &node.input_ports {
         let target = PortEndpoint {
             node_id: node.node_id.clone(),
             port: port.name().into(),
         };
         let source = node.inbound.get(port.name());
         let batch = source
-            .and_then(|endpoint| values.get(endpoint))
-            .or_else(|| source.is_none().then(|| values.get(&target)).flatten());
+            .and_then(|endpoint| produced_values.get(endpoint))
+            .or_else(|| {
+                source
+                    .is_none()
+                    .then(|| external_values.get(&target))
+                    .flatten()
+            });
         match batch {
             Some(batch) => {
                 port.validate(batch, &format!("input {}.{}", node.node_id, port.name()))?;
@@ -461,12 +468,11 @@ fn missing_node_input(
 
 fn validate_and_store_outputs(
     node: &CompiledNode,
-    operator: &dyn Operator,
     outputs: &BTreeMap<String, Batch>,
     values: &mut BTreeMap<PortEndpoint, Batch>,
 ) -> Result<()> {
-    let output_ports = operator
-        .output_ports()
+    let output_ports = node
+        .output_ports
         .iter()
         .map(|port| (port.name(), port))
         .collect::<BTreeMap<_, _>>();
@@ -1015,9 +1021,9 @@ fn build_plan(
                 .nodes
                 .remove(&node_id)
                 .expect("topology contains every validated node exactly once");
-            let node_inbound = definition
-                .operator
-                .input_ports()
+            let input_ports = definition.operator.input_ports().to_vec();
+            let output_ports = definition.operator.output_ports().to_vec();
+            let node_inbound = input_ports
                 .iter()
                 .filter_map(|port| {
                     inbound
@@ -1029,6 +1035,8 @@ fn build_plan(
             CompiledNode {
                 node_id: definition.node_id,
                 operator: Arc::new(tokio::sync::Mutex::new(definition.operator)),
+                input_ports,
+                output_ports,
                 inbound: node_inbound,
             }
         })

@@ -2,12 +2,14 @@ mod support;
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+use async_trait::async_trait;
 use calc_flow::{
-    CalcFlowError, CancellationToken, Edge, ExecutionOptions, ExpressionOperator, PipelineBuilder,
-    PortEndpoint, UdfKind, UdfReference, UdfRegistry,
+    Batch, BatchKind, CalcFlowError, CancellationToken, Edge, ExecutionOptions, ExpressionOperator,
+    JsonMap, Operator, OperatorContext, PipelineBuilder, Port, PortEndpoint, UdfKind, UdfReference,
+    UdfRegistry,
 };
 use datafusion::{
-    arrow::datatypes::DataType,
+    arrow::datatypes::{DataType, Field},
     common::ScalarValue,
     logical_expr::{ColumnarValue, Volatility, create_udf},
 };
@@ -34,8 +36,58 @@ fn one_node(action: Action, probe: Arc<Probe>) -> calc_flow::ExecutionPlan {
         .unwrap()
 }
 
-fn inputs() -> BTreeMap<String, calc_flow::Batch> {
+fn inputs() -> BTreeMap<String, Batch> {
     BTreeMap::from([("input".into(), int_batch(&[1, 2, 3]))])
+}
+
+struct DriftingOutputOperator {
+    input_ports: Vec<Port>,
+    output_ports: Vec<Port>,
+}
+
+impl DriftingOutputOperator {
+    fn new() -> Self {
+        Self {
+            input_ports: vec![table_port("input", true)],
+            output_ports: vec![table_port("output", true)],
+        }
+    }
+}
+
+#[async_trait]
+impl Operator for DriftingOutputOperator {
+    fn name(&self) -> &'static str {
+        "drifting-output"
+    }
+
+    fn input_ports(&self) -> &[Port] {
+        &self.input_ports
+    }
+
+    fn output_ports(&self) -> &[Port] {
+        &self.output_ports
+    }
+
+    fn configuration(&self) -> JsonMap {
+        BTreeMap::new()
+    }
+
+    async fn process(
+        &mut self,
+        _inputs: &BTreeMap<String, Batch>,
+        _context: &OperatorContext<'_>,
+    ) -> calc_flow::Result<BTreeMap<String, Batch>> {
+        self.output_ports = vec![Port::new(
+            "output",
+            BatchKind::Table,
+            true,
+            Some(vec![Field::new("value", DataType::Utf8, false)]),
+        )?];
+        Ok(BTreeMap::from([(
+            "output".into(),
+            support::string_batch(&["drifted"]),
+        )]))
+    }
 }
 
 #[tokio::test]
@@ -128,6 +180,122 @@ async fn optional_external_input_may_be_absent_but_unknown_names_are_rejected() 
         .is_err()
     );
     assert_eq!(probe.calls(), 1);
+}
+
+#[tokio::test]
+async fn omitted_same_name_output_does_not_echo_the_external_input() {
+    let probe = Arc::new(Probe::default());
+    let operator = TestOperator::ports(
+        "same-name",
+        vec![untyped_table_port("shared", false)],
+        vec![untyped_table_port("shared", false)],
+        Action::MissingOutput,
+        Arc::clone(&probe),
+    );
+    let plan = PipelineBuilder::new("same-name omitted output")
+        .unwrap()
+        .add_node("same-name", Box::new(operator))
+        .unwrap()
+        .compile(&UdfRegistry::new().snapshot())
+        .unwrap();
+
+    let result = plan
+        .execute(
+            BTreeMap::from([("shared".into(), int_batch(&[1, 2, 3]))]),
+            ExecutionOptions::default(),
+        )
+        .await
+        .unwrap();
+
+    assert!(result.outputs.is_empty());
+    assert_eq!(probe.calls(), 1);
+}
+
+#[tokio::test]
+async fn connected_same_name_output_must_be_produced_before_routing_downstream() {
+    let probe = Arc::new(Probe::default());
+    let producer = TestOperator::ports(
+        "producer",
+        vec![table_port("shared", false)],
+        vec![table_port("shared", false)],
+        Action::MissingOutput,
+        Arc::clone(&probe),
+    );
+    let consumer = TestOperator::transform("consumer", Action::Pass, Arc::clone(&probe));
+    let plan = PipelineBuilder::new("connected same-name output")
+        .unwrap()
+        .add_node("producer", Box::new(producer))
+        .unwrap()
+        .add_node("consumer", Box::new(consumer))
+        .unwrap()
+        .connect(Edge::new(
+            endpoint("producer", "shared"),
+            endpoint("consumer", "input"),
+        ))
+        .unwrap()
+        .compile(&UdfRegistry::new().snapshot())
+        .unwrap();
+
+    let error = plan
+        .execute(
+            BTreeMap::from([("shared".into(), int_batch(&[1, 2, 3]))]),
+            ExecutionOptions::default(),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("required input consumer.input"));
+    assert_eq!(probe.order(), vec!["producer"]);
+}
+
+#[tokio::test]
+async fn produced_same_name_output_replaces_neither_input_nor_route_identity() {
+    let probe = Arc::new(Probe::default());
+    let operator = TestOperator::ports(
+        "same-name",
+        vec![untyped_table_port("shared", true)],
+        vec![untyped_table_port("shared", true)],
+        Action::Pass,
+        Arc::clone(&probe),
+    );
+    let plan = PipelineBuilder::new("same-name produced output")
+        .unwrap()
+        .add_node("same-name", Box::new(operator))
+        .unwrap()
+        .compile(&UdfRegistry::new().snapshot())
+        .unwrap();
+
+    let result = plan
+        .execute(
+            BTreeMap::from([("shared".into(), int_batch(&[1, 2, 3]))]),
+            ExecutionOptions::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.outputs["shared"].num_rows(), 3);
+    assert_eq!(probe.calls(), 1);
+}
+
+#[tokio::test]
+async fn execution_validates_outputs_against_compile_time_port_snapshot() {
+    let plan = PipelineBuilder::new("compile-time ports")
+        .unwrap()
+        .add_node("drift", Box::new(DriftingOutputOperator::new()))
+        .unwrap()
+        .compile(&UdfRegistry::new().snapshot())
+        .unwrap();
+
+    let error = plan
+        .execute(inputs(), ExecutionOptions::default())
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("output drift.output schema mismatch")
+    );
 }
 
 #[tokio::test]
