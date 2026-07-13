@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use calc_flow::{
     CHECKPOINT_FORMAT_VERSION, CalcFlowError, Checkpoint, CheckpointStore, FileCheckpointStore,
+    MAX_JSON_DEPTH,
 };
 use chrono::{TimeZone, Utc};
 use serde_json::{Value, json};
@@ -35,6 +36,10 @@ fn json_files(directory: &Path) -> Vec<std::path::PathBuf> {
                 .is_some_and(|extension| extension == "json")
         })
         .collect()
+}
+
+fn nested_arrays(depth: usize) -> Value {
+    (0..depth).fold(Value::Null, |value, _| Value::Array(vec![value]))
 }
 
 #[test]
@@ -81,6 +86,42 @@ fn checkpoint_constructor_and_deserializer_enforce_v2_invariants() {
     );
 
     let valid = serde_json::to_value(checkpoint("pipeline", 1)).unwrap();
+    for field in [
+        "format_version",
+        "pipeline_name",
+        "pipeline_fingerprint",
+        "source_cursor",
+        "sequence",
+        "state",
+        "created_at",
+    ] {
+        let mut missing = valid.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(
+            serde_json::from_value::<Checkpoint>(missing).is_err(),
+            "missing field {field} was accepted"
+        );
+    }
+    let mut null_cursor = valid.clone();
+    null_cursor["source_cursor"] = Value::Null;
+    assert_eq!(
+        serde_json::from_value::<Checkpoint>(null_cursor)
+            .unwrap()
+            .source_cursor,
+        None
+    );
+    for (field, invalid) in [
+        ("pipeline_name", json!("")),
+        ("pipeline_fingerprint", json!("")),
+        ("state", json!({"": {}})),
+    ] {
+        let mut value = valid.clone();
+        value[field] = invalid;
+        assert!(
+            serde_json::from_value::<Checkpoint>(value).is_err(),
+            "invalid field {field} was accepted"
+        );
+    }
     let mut v1 = valid.clone();
     v1["format_version"] = json!(1);
     assert!(matches!(
@@ -90,6 +131,43 @@ fn checkpoint_constructor_and_deserializer_enforce_v2_invariants() {
     let mut unknown = valid;
     unknown["unexpected"] = json!(true);
     assert!(serde_json::from_value::<Checkpoint>(unknown).is_err());
+}
+
+#[test]
+fn checkpoint_values_enforce_the_json_depth_limit_before_serialization() {
+    assert!(
+        Checkpoint::new(
+            "pipeline",
+            "fingerprint",
+            Some(nested_arrays(MAX_JSON_DEPTH)),
+            0,
+            BTreeMap::from([("node".into(), nested_arrays(MAX_JSON_DEPTH - 1))]),
+            Utc::now(),
+        )
+        .is_ok()
+    );
+    assert!(matches!(
+        Checkpoint::new(
+            "pipeline",
+            "fingerprint",
+            Some(nested_arrays(MAX_JSON_DEPTH + 1)),
+            0,
+            BTreeMap::new(),
+            Utc::now(),
+        ),
+        Err(CalcFlowError::Format { .. })
+    ));
+    assert!(matches!(
+        Checkpoint::new(
+            "pipeline",
+            "fingerprint",
+            None,
+            0,
+            BTreeMap::from([("node".into(), nested_arrays(MAX_JSON_DEPTH))]),
+            Utc::now(),
+        ),
+        Err(CalcFlowError::Format { .. })
+    ));
 }
 
 #[tokio::test]
@@ -175,6 +253,92 @@ async fn checkpoint_load_rejects_corruption_shape_version_size_and_key_mismatch(
         vec![b' '; calc_flow::MAX_CHECKPOINT_DOCUMENT_BYTES + 1],
     )
     .unwrap();
+    assert!(matches!(
+        store.load("orders").await,
+        Err(CalcFlowError::Format { .. })
+    ));
+}
+
+#[tokio::test]
+async fn checkpoint_load_rejects_invalid_fields_and_recursive_duplicate_keys_as_format() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = FileCheckpointStore::new(directory.path()).await.unwrap();
+    let path = hashed_path(directory.path(), "orders");
+    let valid = serde_json::to_value(checkpoint("orders", 1)).unwrap();
+
+    for (field, invalid) in [
+        ("pipeline_name", json!("")),
+        ("pipeline_fingerprint", json!("")),
+        ("state", json!({"": {}})),
+    ] {
+        let mut value = valid.clone();
+        value[field] = invalid;
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(
+            matches!(
+                store.load("orders").await,
+                Err(CalcFlowError::Format { .. })
+            ),
+            "invalid field {field} was not reported as a format error"
+        );
+    }
+
+    let documents = [
+        r#"{"format_version":2,"pipeline_name":"orders","pipeline_name":"other","pipeline_fingerprint":"fp","source_cursor":null,"sequence":0,"state":{},"created_at":"2026-07-14T01:02:03Z"}"#,
+        r#"{"format_version":2,"pipeline_name":"orders","pipeline_fingerprint":"fp","source_cursor":{"nested":{"offset":1,"offset":2}},"sequence":0,"state":{},"created_at":"2026-07-14T01:02:03Z"}"#,
+        r#"{"format_version":2,"pipeline_name":"orders","pipeline_fingerprint":"fp","source_cursor":null,"sequence":0,"state":{"node":{},"node":{}},"created_at":"2026-07-14T01:02:03Z"}"#,
+        r#"{"format_version":2,"pipeline_name":"orders","pipeline_fingerprint":"fp","source_cursor":null,"sequence":0,"state":{"node":{"total":1,"total":2}},"created_at":"2026-07-14T01:02:03Z"}"#,
+    ];
+    for document in documents {
+        std::fs::write(&path, document).unwrap();
+        assert!(
+            matches!(
+                store.load("orders").await,
+                Err(CalcFlowError::Format { .. })
+            ),
+            "duplicate key was accepted in {document}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_save_enforces_the_full_wire_document_depth_limit() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = FileCheckpointStore::new(directory.path()).await.unwrap();
+    let boundary = Checkpoint::new(
+        "orders",
+        "fingerprint",
+        Some(nested_arrays(MAX_JSON_DEPTH - 1)),
+        0,
+        BTreeMap::new(),
+        Utc::now(),
+    )
+    .unwrap();
+    store.save(&boundary).await.unwrap();
+
+    let too_deep = Checkpoint::new(
+        "orders",
+        "fingerprint",
+        Some(nested_arrays(MAX_JSON_DEPTH)),
+        0,
+        BTreeMap::new(),
+        Utc::now(),
+    )
+    .unwrap();
+    assert!(matches!(
+        store.save(&too_deep).await,
+        Err(CalcFlowError::Format { .. })
+    ));
+}
+
+#[tokio::test]
+async fn checkpoint_load_enforces_the_full_wire_document_depth_limit() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = FileCheckpointStore::new(directory.path()).await.unwrap();
+    let path = hashed_path(directory.path(), "orders");
+    let mut value = serde_json::to_value(checkpoint("orders", 1)).unwrap();
+    value["source_cursor"] = nested_arrays(MAX_JSON_DEPTH);
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
     assert!(matches!(
         store.load("orders").await,
         Err(CalcFlowError::Format { .. })

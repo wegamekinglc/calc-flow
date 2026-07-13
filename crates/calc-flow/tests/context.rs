@@ -1,7 +1,11 @@
 use std::collections::BTreeMap;
 
-use calc_flow::{CalcFlowError, CancellationToken, RunContext, canonical_json};
-use serde_json::json;
+use calc_flow::{CalcFlowError, CancellationToken, MAX_JSON_DEPTH, RunContext, canonical_json};
+use serde_json::{Value, json};
+
+fn nested_arrays(depth: usize) -> Value {
+    (0..depth).fold(Value::Null, |value, _| Value::Array(vec![value]))
+}
 
 #[test]
 fn canonical_json_sorts_mapping_keys() {
@@ -9,6 +13,15 @@ fn canonical_json_sorts_mapping_keys() {
         canonical_json(&json!({"z": 1, "a": 2})).unwrap(),
         "{\"a\":2,\"z\":1}"
     );
+}
+
+#[test]
+fn canonical_json_enforces_an_inclusive_iterative_depth_limit() {
+    assert!(canonical_json(&nested_arrays(MAX_JSON_DEPTH)).is_ok());
+    assert!(matches!(
+        canonical_json(&nested_arrays(MAX_JSON_DEPTH + 1)),
+        Err(CalcFlowError::Format { .. })
+    ));
 }
 
 #[tokio::test]

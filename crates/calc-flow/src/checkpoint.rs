@@ -9,6 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::json::{parse_json_value, validate_json_depth, validate_json_depth_at};
 use crate::project_store::{WriteMode, atomic_write, bounded_read, delete_file};
 use crate::{CalcFlowError, Result};
 
@@ -18,10 +19,8 @@ pub const CHECKPOINT_FORMAT_VERSION: u32 = 2;
 pub const MAX_CHECKPOINT_DOCUMENT_BYTES: usize = 10 * 1024 * 1024;
 
 /// Durable state committed after source data has reached every sink.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Checkpoint {
-    #[serde(deserialize_with = "deserialize_checkpoint_version")]
     pub format_version: u32,
     pub pipeline_name: String,
     pub pipeline_fingerprint: String,
@@ -89,8 +88,70 @@ impl Checkpoint {
                 message: "node IDs must not be empty".into(),
             });
         }
+        if let Some(source_cursor) = &self.source_cursor {
+            validate_json_depth(source_cursor, "checkpoint source cursor")?;
+        }
+        for (node_id, state) in &self.state {
+            validate_json_depth_at(state, &format!("checkpoint state for node {node_id:?}"), 1)?;
+        }
         Ok(())
     }
+}
+
+impl<'de> Deserialize<'de> for Checkpoint {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            #[serde(deserialize_with = "deserialize_checkpoint_version")]
+            format_version: u32,
+            pipeline_name: String,
+            pipeline_fingerprint: String,
+            #[serde(default, deserialize_with = "deserialize_present_nullable_value")]
+            source_cursor: NullableValueField,
+            sequence: u64,
+            state: BTreeMap<String, Value>,
+            created_at: DateTime<Utc>,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        let source_cursor = match fields.source_cursor {
+            NullableValueField::Missing => {
+                return Err(D::Error::missing_field("source_cursor"));
+            }
+            NullableValueField::Present(value) => value,
+        };
+        let checkpoint = Self {
+            format_version: fields.format_version,
+            pipeline_name: fields.pipeline_name,
+            pipeline_fingerprint: fields.pipeline_fingerprint,
+            source_cursor,
+            sequence: fields.sequence,
+            state: fields.state,
+            created_at: fields.created_at,
+        };
+        checkpoint.validate().map_err(D::Error::custom)?;
+        Ok(checkpoint)
+    }
+}
+
+fn deserialize_present_nullable_value<'de, D>(
+    deserializer: D,
+) -> std::result::Result<NullableValueField, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<Value>::deserialize(deserializer).map(NullableValueField::Present)
+}
+
+#[derive(Default)]
+enum NullableValueField {
+    #[default]
+    Missing,
+    Present(Option<Value>),
 }
 
 /// Asynchronous checkpoint persistence contract.
@@ -140,8 +201,7 @@ impl CheckpointStore for FileCheckpointStore {
         let Some(bytes) = bounded_read(path, MAX_CHECKPOINT_DOCUMENT_BYTES).await? else {
             return Ok(None);
         };
-        let value: Value =
-            serde_json::from_slice(&bytes).map_err(|error| format_error(error.to_string()))?;
+        let value = parse_json_value(&bytes, "checkpoint document")?;
         if !value.is_object() {
             return Err(format_error(
                 "checkpoint document must contain an object".into(),

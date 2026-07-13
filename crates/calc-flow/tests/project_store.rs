@@ -1,9 +1,10 @@
-use std::{path::Path, sync::Arc};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use calc_flow::{
-    CalcFlowError, DataFusionConfig, FileProjectStore, PipelineSpec, ProjectSpec, ProjectStore,
-    RunOptions, export_project_json, export_project_yaml, import_project_json,
-    import_project_json_with_limit, import_project_yaml, import_project_yaml_with_limit,
+    CalcFlowError, DataFusionConfig, FileProjectStore, MAX_JSON_DEPTH, NodeSpec, OperatorSpec,
+    PipelineSpec, ProjectSpec, ProjectStore, RunOptions, export_project_json, export_project_yaml,
+    import_project_json, import_project_json_with_limit, import_project_yaml,
+    import_project_yaml_with_limit,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -30,6 +31,10 @@ fn hashed_path(directory: &Path, key: &str) -> std::path::PathBuf {
         "{}.json",
         hex::encode(Sha256::digest(key.as_bytes()))
     ))
+}
+
+fn nested_arrays(depth: usize) -> Value {
+    (0..depth).fold(Value::Null, |value, _| Value::Array(vec![value]))
 }
 
 #[test]
@@ -122,6 +127,94 @@ fn yaml_import_rejects_v1_unknown_alias_tag_include_bomb_and_multiple_documents(
     let deeply_nested = format!("{}deep: {}0{}\n", valid, "[".repeat(40), "]".repeat(40));
     assert!(matches!(
         import_project_yaml(deeply_nested.as_bytes()),
+        Err(CalcFlowError::Format { .. })
+    ));
+}
+
+#[test]
+fn project_json_import_rejects_duplicate_keys_at_every_extensible_depth() {
+    let documents = [
+        r#"{"format_version":2,"id":"demo","id":"other","name":"Demo","pipeline":{"name":"pipeline","nodes":[]}}"#,
+        r#"{"format_version":2,"id":"demo","name":"Demo","pipeline":{"name":"pipeline","nodes":[{"id":"node","operator":{"kind":"external","provider":"python","name":"custom","version":"1","options":{"nested":{"value":1,"value":2}}}}]}}"#,
+        r#"{"format_version":2,"id":"demo","name":"Demo","pipeline":{"name":"pipeline","nodes":[]},"data_sources":[{"id":"source","input":"input","format":"inline_json","data":{"nested":{"value":1,"value":2}}}]}"#,
+    ];
+    for document in documents {
+        assert!(
+            matches!(
+                import_project_json(document.as_bytes()),
+                Err(CalcFlowError::Format { .. })
+            ),
+            "duplicate key was accepted in {document}"
+        );
+    }
+}
+
+#[test]
+fn project_json_import_enforces_the_full_document_depth_limit() {
+    let mut boundary = serde_json::to_value(project("demo", "Demo")).unwrap();
+    boundary["data_sources"] = json!([{
+        "id": "source",
+        "input": "input",
+        "format": "inline_json",
+        "data": nested_arrays(MAX_JSON_DEPTH - 3),
+    }]);
+    assert!(import_project_json(&serde_json::to_vec(&boundary).unwrap()).is_ok());
+
+    boundary["data_sources"][0]["data"] = nested_arrays(MAX_JSON_DEPTH - 2);
+    assert!(matches!(
+        import_project_json(&serde_json::to_vec(&boundary).unwrap()),
+        Err(CalcFlowError::Format { .. })
+    ));
+}
+
+#[test]
+fn yaml_import_rejects_duplicate_keys_and_merge_keys() {
+    let duplicate = b"format_version: 2\nid: demo\nid: other\nname: Demo\npipeline:\n  name: pipeline\n  nodes: []\n";
+    let nested_duplicate = b"format_version: 2\nid: demo\nname: Demo\npipeline:\n  name: pipeline\n  name: other\n  nodes: []\n";
+    let merge = b"format_version: 2\nid: demo\nname: Demo\n<<: {description: merged}\npipeline:\n  name: pipeline\n  nodes: []\n";
+    for document in [
+        duplicate.as_slice(),
+        nested_duplicate.as_slice(),
+        merge.as_slice(),
+    ] {
+        assert!(matches!(
+            import_project_yaml(document),
+            Err(CalcFlowError::Format { .. })
+        ));
+    }
+}
+
+#[test]
+fn project_export_preflights_external_json_values_and_wire_document_depth() {
+    let mut boundary = project("demo", "Demo");
+    boundary.data_sources.push(calc_flow::DataSourceSpec {
+        id: "source".into(),
+        input: "input".into(),
+        format: "inline_json".into(),
+        data: nested_arrays(MAX_JSON_DEPTH - 3),
+    });
+    assert!(export_project_json(&boundary).is_ok());
+    boundary.data_sources[0].data = nested_arrays(MAX_JSON_DEPTH - 2);
+    assert!(matches!(
+        export_project_json(&boundary),
+        Err(CalcFlowError::Format { .. })
+    ));
+
+    let mut external = project("external", "External");
+    external.pipeline.nodes.push(NodeSpec {
+        id: "node".into(),
+        operator: OperatorSpec::External {
+            provider: "python".into(),
+            name: "custom".into(),
+            version: "1".into(),
+            options: BTreeMap::from([("deep".into(), nested_arrays(MAX_JSON_DEPTH + 1))]),
+        },
+        input_ports: Vec::new(),
+        output_ports: Vec::new(),
+        position: None,
+    });
+    assert!(matches!(
+        export_project_json(&external),
         Err(CalcFlowError::Format { .. })
     ));
 }

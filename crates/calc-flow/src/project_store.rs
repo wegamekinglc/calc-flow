@@ -8,7 +8,10 @@ use async_trait::async_trait;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{CalcFlowError, PROJECT_FORMAT_VERSION, ProjectSpec, Result, canonical_json};
+use crate::json::{parse_json_value, validate_json_depth, validate_json_depth_at};
+use crate::{
+    CalcFlowError, OperatorSpec, PROJECT_FORMAT_VERSION, ProjectSpec, Result, canonical_json,
+};
 
 /// Maximum accepted size of one stored or imported project document.
 pub const MAX_PROJECT_DOCUMENT_BYTES: usize = 10 * 1024 * 1024;
@@ -206,6 +209,7 @@ impl ProjectStore for FileProjectStore {
 /// Returns [`CalcFlowError::Format`] if the project cannot round-trip through `ProjectSpec`.
 pub fn export_project_json(project: &ProjectSpec) -> Result<String> {
     validate_project_identity(project)?;
+    validate_project_json_values(project)?;
     let value = serde_json::to_value(project).map_err(|error| format_error(error.to_string()))?;
     let normalized: ProjectSpec =
         serde_json::from_value(value.clone()).map_err(|error| format_error(error.to_string()))?;
@@ -244,8 +248,7 @@ pub fn import_project_json(document: &[u8]) -> Result<ProjectSpec> {
 /// Returns [`CalcFlowError::Format`] for malformed, non-object, or oversized documents.
 pub fn import_project_json_with_limit(document: &[u8], max_bytes: usize) -> Result<ProjectSpec> {
     check_document_size(document, max_bytes, "project JSON")?;
-    let value: Value =
-        serde_json::from_slice(document).map_err(|error| format_error(error.to_string()))?;
+    let value = parse_json_value(document, "project JSON")?;
     if !value.is_object() {
         return Err(format_error(
             "project document must contain an object".into(),
@@ -254,6 +257,7 @@ pub fn import_project_json_with_limit(document: &[u8], max_bytes: usize) -> Resu
     reject_project_version(&value)?;
     let project = serde_json::from_value(value).map_err(|error| format_error(error.to_string()))?;
     validate_project_identity(&project)?;
+    validate_project_json_values(&project)?;
     Ok(project)
 }
 
@@ -313,7 +317,29 @@ pub fn import_project_yaml_with_limit(document: &[u8], max_bytes: usize) -> Resu
     // typed parse has established finite depth, event, node, and alias bounds.
     reject_yaml_tags(text)?;
     validate_project_identity(&project)?;
+    validate_project_json_values(&project)?;
     Ok(project)
+}
+
+fn validate_project_json_values(project: &ProjectSpec) -> Result<()> {
+    for source in &project.data_sources {
+        validate_json_depth(
+            &source.data,
+            &format!("project data source {:?} data", source.id),
+        )?;
+    }
+    for node in &project.pipeline.nodes {
+        if let OperatorSpec::External { options, .. } = &node.operator {
+            for (key, value) in options {
+                validate_json_depth_at(
+                    value,
+                    &format!("project node {:?} option {key:?}", node.id),
+                    1,
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn yaml_options(max_bytes: usize) -> serde_saphyr::Options {
