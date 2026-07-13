@@ -179,6 +179,71 @@ async fn registration_error_deregisters_aliases_registered_so_far() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn overlapping_evaluations_isolate_the_input_alias() {
+    let runtime = Arc::new(
+        DataFusionRuntime::new(DataFusionConfig {
+            batch_size: 8_192,
+            target_partitions: 4,
+        })
+        .unwrap(),
+    );
+    let first_input = Arc::new(input((0..524_288).rev().collect()));
+    let second_input = Arc::new(input((0..131_072).rev().collect()));
+    let start = Arc::new(tokio::sync::Barrier::new(3));
+
+    // The bounded window sorts keep both real DataFusion calls active after a
+    // barrier releases their separate runtime workers onto the shared alias.
+    let evaluate = |input: Arc<Batch>, node_id| {
+        let runtime = Arc::clone(&runtime);
+        let start = Arc::clone(&start);
+        tokio::spawn(async move {
+            start.wait().await;
+            runtime
+                .evaluate("row_number() OVER (ORDER BY a)", &input, Some(node_id))
+                .await
+        })
+    };
+    let first = evaluate(Arc::clone(&first_input), "first");
+    let second = evaluate(Arc::clone(&second_input), "second");
+
+    start.wait().await;
+    let (first, second) = tokio::join!(first, second);
+    let first = first.unwrap().unwrap();
+    let second = second.unwrap().unwrap();
+
+    assert_eq!(first.num_rows(), 524_288);
+    assert_eq!(second.num_rows(), 131_072);
+    assert_eq!(runtime.metrics().len(), 2);
+}
+
+#[tokio::test]
+async fn registration_error_names_the_alias_and_node_without_input_data() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let tables = BTreeMap::from([(
+        "sensitive_alias".into(),
+        Batch::external(Arc::new(TestArray), BatchMetadata::default()).unwrap(),
+    )]);
+
+    let error = runtime
+        .sql(
+            "SELECT * FROM sensitive_alias",
+            &tables,
+            Some("array_reader"),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        &error,
+        CalcFlowError::DataFusion {
+            node_id: Some(node_id),
+            message,
+        } if node_id == "array_reader" && message.contains("sensitive_alias")
+    ));
+    assert!(!error.to_string().contains("TestArray"));
+}
+
 #[tokio::test]
 async fn runtime_rejects_mutation_sql_empty_inputs_and_invalid_aliases() {
     let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();

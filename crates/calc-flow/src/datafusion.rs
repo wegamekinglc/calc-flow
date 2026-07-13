@@ -16,6 +16,7 @@ use datafusion::{
 use parking_lot::Mutex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{Batch, BatchMetadata, CalcFlowError, Result, sql_projection, validate_select_query};
 
@@ -47,6 +48,7 @@ pub struct DataFusionQueryMetric {
 
 pub struct DataFusionRuntime {
     context: SessionContext,
+    query_lock: AsyncMutex<()>,
     metrics: Mutex<Vec<DataFusionQueryMetric>>,
     next_query: AtomicU64,
     closed: AtomicBool,
@@ -71,6 +73,7 @@ impl DataFusionRuntime {
             .with_target_partitions(config.target_partitions);
         Ok(Self {
             context: SessionContext::new_with_config(session),
+            query_lock: AsyncMutex::new(()),
             metrics: Mutex::new(Vec::new()),
             next_query: AtomicU64::new(1),
             closed: AtomicBool::new(false),
@@ -115,6 +118,9 @@ impl DataFusionRuntime {
             });
         }
         let query = validate_select_query(query)?;
+        // Declared before registrations so alias cleanup runs before unlock.
+        let _query_guard = self.query_lock.lock().await;
+        self.ensure_open()?;
         let mut registrations = TableRegistrations::new(&self.context);
         for (alias, batch) in tables {
             registrations.register(alias, batch, node_id)?;
@@ -189,18 +195,21 @@ impl<'a> TableRegistrations<'a> {
 
     fn register(&mut self, alias: &str, batch: &Batch, node_id: Option<&str>) -> Result<()> {
         if !is_identifier(alias) {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "tables".into(),
-                message: format!("input alias {alias:?} must be a SQL identifier"),
-            });
+            return Err(registration_error(
+                alias,
+                node_id,
+                "alias must be a SQL identifier",
+            ));
         }
-        let table = batch.table_payload()?;
+        let table = batch
+            .table_payload()
+            .map_err(|error| registration_error(alias, node_id, error))?;
         let provider =
             MemTable::try_new(Arc::clone(table.schema()), vec![table.batches().to_vec()])
-                .map_err(|error| datafusion_error(node_id, error))?;
+                .map_err(|error| registration_error(alias, node_id, error))?;
         self.context
             .register_table(alias, Arc::new(provider))
-            .map_err(|error| datafusion_error(node_id, error))?;
+            .map_err(|error| registration_error(alias, node_id, error))?;
         self.aliases.push(alias.to_owned());
         Ok(())
     }
@@ -219,6 +228,17 @@ fn datafusion_error(node_id: Option<&str>, error: impl std::fmt::Display) -> Cal
         node_id: node_id.map(str::to_owned),
         message: error.to_string(),
     }
+}
+
+fn registration_error(
+    alias: &str,
+    node_id: Option<&str>,
+    error: impl std::fmt::Display,
+) -> CalcFlowError {
+    datafusion_error(
+        node_id,
+        format!("failed to register table alias {alias:?}: {error}"),
+    )
 }
 
 fn merged_metadata(tables: &BTreeMap<String, Batch>) -> BatchMetadata {
