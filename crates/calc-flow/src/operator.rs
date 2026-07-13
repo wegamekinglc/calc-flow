@@ -235,6 +235,20 @@ impl ExpressionOperator {
         &self.output_ports
     }
 
+    /// Returns this operator with exact configuration-defined table ports.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] unless the ports are the
+    /// built-in `input` and `output` table boundaries.
+    pub fn with_ports(mut self, input: Port, output: Port) -> Result<Self> {
+        validate_builtin_port(&input, "input", "operator.input_ports")?;
+        validate_builtin_port(&output, "output", "operator.output_ports")?;
+        self.input_ports = [input];
+        self.output_ports = [output];
+        Ok(self)
+    }
+
     fn query(&self) -> Result<String> {
         let mut query = if let Some(expression) = &self.expression {
             sql_projection(expression, "input")?
@@ -373,6 +387,30 @@ impl SqlOperator {
     pub const fn output_ports(&self) -> &[Port] {
         &self.output_ports
     }
+
+    /// Returns this operator with exact configuration-defined table ports.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] unless inputs match the SQL
+    /// aliases in order and the output is the built-in `output` port.
+    pub fn with_ports(mut self, inputs: Vec<Port>, output: Port) -> Result<Self> {
+        if inputs.len() != self.aliases.len()
+            || inputs
+                .iter()
+                .zip(&self.aliases)
+                .any(|(port, alias)| port.name() != alias || port.kind() != BatchKind::Table)
+        {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "operator.input_ports".into(),
+                message: "ports must be table ports matching SQL aliases in order".into(),
+            });
+        }
+        validate_builtin_port(&output, "output", "operator.output_ports")?;
+        self.input_ports = inputs;
+        self.output_ports = [output];
+        Ok(self)
+    }
 }
 
 #[async_trait]
@@ -441,6 +479,16 @@ fn validate_operator_name(name: &str) -> Result<()> {
     } else {
         Ok(())
     }
+}
+
+fn validate_builtin_port(port: &Port, name: &str, field: &str) -> Result<()> {
+    if port.name() != name || port.kind() != BatchKind::Table {
+        return Err(CalcFlowError::InvalidArgument {
+            field: field.into(),
+            message: format!("must contain the {name:?} table port"),
+        });
+    }
+    Ok(())
 }
 
 fn table_port(name: &str) -> Result<Port> {

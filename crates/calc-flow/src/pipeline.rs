@@ -94,6 +94,7 @@ struct NodeDefinition {
 
 pub struct PipelineBuilder {
     name: String,
+    datafusion_config: DataFusionConfig,
     nodes: BTreeMap<String, NodeDefinition>,
     edges: Vec<Edge>,
 }
@@ -113,6 +114,7 @@ pub struct ExecutionPlan {
     pub(crate) external_inputs: BTreeMap<String, PortEndpoint>,
     pub(crate) external_outputs: BTreeMap<String, PortEndpoint>,
     pub(crate) fingerprint: String,
+    pub(crate) datafusion_config: DataFusionConfig,
     pub(crate) run_lock: tokio::sync::Mutex<()>,
     pub(crate) udfs: UdfRegistrySnapshot,
     pub(crate) selected_udfs: Vec<UdfReference>,
@@ -125,6 +127,10 @@ impl ExecutionPlan {
 
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
+    }
+
+    pub const fn datafusion_config(&self) -> DataFusionConfig {
+        self.datafusion_config
     }
 
     pub fn topological_order(&self) -> Vec<&str> {
@@ -218,7 +224,7 @@ impl ExecutionPlan {
         options: ExecutionOptions,
     ) -> Result<RunResult> {
         let context = RunContext::new(options.settings, options.deadline, options.cancellation)?;
-        let mut runtime = DataFusionRuntime::new(DataFusionConfig::default())?;
+        let mut runtime = DataFusionRuntime::new(self.datafusion_config)?;
         runtime.register_udfs(&self.udfs, &self.selected_udfs)?;
         let execution = self.execute_nodes(&inputs, &context, &runtime).await;
         runtime.close();
@@ -540,9 +546,17 @@ impl PipelineBuilder {
         }
         Ok(Self {
             name: name.into(),
+            datafusion_config: DataFusionConfig::default(),
             nodes: BTreeMap::new(),
             edges: Vec::new(),
         })
+    }
+
+    /// Returns this builder with the run-scoped `DataFusion` configuration.
+    #[must_use]
+    pub const fn with_datafusion_config(mut self, config: DataFusionConfig) -> Self {
+        self.datafusion_config = config;
+        self
     }
 
     /// Returns a new builder that owns the added operator.
@@ -609,8 +623,13 @@ impl PipelineBuilder {
             .map(|(reference, _)| reference.clone())
             .collect();
         let (external_inputs, external_outputs) = external_ports(&self.nodes, &self.edges)?;
-        let fingerprint =
-            graph_fingerprint(&self.name, &self.nodes, &self.edges, &selected_catalog)?;
+        let fingerprint = graph_fingerprint(
+            &self.name,
+            self.datafusion_config,
+            &self.nodes,
+            &self.edges,
+            &selected_catalog,
+        )?;
         Ok(build_plan(
             self,
             order,
@@ -903,6 +922,7 @@ fn catalog_matches(entry: &UdfCatalogEntry, reference: &UdfReference) -> bool {
 
 fn graph_fingerprint(
     name: &str,
+    datafusion_config: DataFusionConfig,
     nodes: &BTreeMap<String, NodeDefinition>,
     edges: &[Edge],
     selected_catalog: &[(UdfReference, UdfCatalogEntry)],
@@ -933,6 +953,7 @@ fn graph_fingerprint(
         .map(|(reference, entry)| json!({"reference": reference, "catalog": entry}))
         .collect::<Vec<_>>();
     let value = json!({
+        "datafusion": datafusion_config,
         "edges": sorted_edges,
         "name": name,
         "nodes": node_values,
@@ -1043,6 +1064,7 @@ fn build_plan(
         .collect();
     ExecutionPlan {
         name: builder.name,
+        datafusion_config: builder.datafusion_config,
         nodes,
         external_inputs,
         external_outputs,

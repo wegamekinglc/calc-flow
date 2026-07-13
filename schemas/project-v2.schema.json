@@ -1,0 +1,433 @@
+{
+  "$defs": {
+    "ArrowFieldSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "data_type": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "nullable": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "data_type"
+      ],
+      "type": "object"
+    },
+    "BatchKind": {
+      "enum": [
+        "table",
+        "array"
+      ],
+      "type": "string"
+    },
+    "DataFusionConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "batch_size": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target_partitions": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "batch_size",
+        "target_partitions"
+      ],
+      "type": "object"
+    },
+    "DataSourceSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "data": true,
+        "format": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "input": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "input",
+        "format",
+        "data"
+      ],
+      "type": "object"
+    },
+    "EdgeSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "source_node": {
+          "type": "string"
+        },
+        "source_port": {
+          "default": "output",
+          "type": "string"
+        },
+        "target_node": {
+          "type": "string"
+        },
+        "target_port": {
+          "default": "input",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_node",
+        "target_node"
+      ],
+      "type": "object"
+    },
+    "NodeSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "input_ports": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PortSpec"
+          },
+          "type": "array"
+        },
+        "operator": {
+          "$ref": "#/$defs/OperatorSpec"
+        },
+        "output_ports": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PortSpec"
+          },
+          "type": "array"
+        },
+        "position": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositionSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "operator"
+      ],
+      "type": "object"
+    },
+    "OperatorSpec": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "expression": {
+              "default": "",
+              "type": "string"
+            },
+            "filter": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "expression",
+              "type": "string"
+            },
+            "select": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "udfs": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/UdfReference"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "aliases": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "sql",
+              "type": "string"
+            },
+            "query": {
+              "type": "string"
+            },
+            "udfs": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/UdfReference"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "query",
+            "aliases"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "external",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "options": {
+              "additionalProperties": true,
+              "default": {},
+              "type": "object"
+            },
+            "provider": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "provider",
+            "name",
+            "version"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PipelineSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "datafusion": {
+          "$ref": "#/$defs/DataFusionConfig",
+          "default": {
+            "batch_size": 8192,
+            "target_partitions": 1
+          }
+        },
+        "edges": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EdgeSpec"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/NodeSpec"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "nodes"
+      ],
+      "type": "object"
+    },
+    "PortSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/BatchKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "required": {
+          "default": true,
+          "type": "boolean"
+        },
+        "schema": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ArrowFieldSpec"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "PositionSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "x": {
+          "format": "double",
+          "type": "number"
+        },
+        "y": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "type": "object"
+    },
+    "RunOptions": {
+      "additionalProperties": false,
+      "properties": {
+        "max_input_bytes": {
+          "default": 10485760,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_rows": {
+          "default": 100000,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "memory_limit_mb": {
+          "default": 512,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "output_rows": {
+          "default": 1000,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "timeout_seconds": {
+          "default": 30,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "UdfKind": {
+      "enum": [
+        "data_fusion_scalar",
+        "external_scalar",
+        "external_array"
+      ],
+      "type": "string"
+    },
+    "UdfReference": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/UdfKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "name",
+        "version",
+        "kind"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "data_sources": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/DataSourceSpec"
+      },
+      "type": "array"
+    },
+    "description": {
+      "default": "",
+      "type": "string"
+    },
+    "format_version": {
+      "const": 2,
+      "type": "integer"
+    },
+    "id": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "pipeline": {
+      "$ref": "#/$defs/PipelineSpec"
+    },
+    "run_options": {
+      "$ref": "#/$defs/RunOptions",
+      "default": {
+        "max_input_bytes": 10485760,
+        "max_rows": 100000,
+        "memory_limit_mb": 512,
+        "output_rows": 1000,
+        "timeout_seconds": 30
+      }
+    }
+  },
+  "required": [
+    "format_version",
+    "id",
+    "name",
+    "pipeline"
+  ],
+  "title": "Calc Flow Project V2",
+  "type": "object"
+}

@@ -1,6 +1,7 @@
 //! Calc Flow's Rust-native v2 calculation engine.
 
 mod batch;
+mod config;
 mod context;
 mod datafusion;
 mod error;
@@ -11,6 +12,11 @@ mod pipeline;
 mod udf;
 
 pub use batch::{Batch, BatchKind, BatchMetadata, ExternalPayload, TableBatch};
+pub use config::{
+    ArrowFieldSpec, DataSourceSpec, EdgeSpec, NodeSpec, OperatorSpec, PROJECT_FORMAT_VERSION,
+    PipelineSpec, PortSpec, PositionSpec, ProjectSpec, RunOptions, ValidationIssue,
+    ValidationReport, compile_project, project_json_schema, validate_project,
+};
 pub use context::{CancellationToken, RunContext};
 pub use datafusion::{DataFusionConfig, DataFusionQueryMetric, DataFusionRuntime};
 pub use error::{CalcFlowError, Result};

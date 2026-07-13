@@ -24,7 +24,8 @@ use crate::{
     sql_projection, validate_select_query, validate_selected_udfs,
 };
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DataFusionConfig {
     pub batch_size: usize,
     pub target_partitions: usize,
