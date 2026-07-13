@@ -28,6 +28,10 @@ pub enum CalcFlowError {
     CheckpointMismatch { message: String },
     #[error("stored document is invalid: {message}")]
     Format { message: String },
+    #[error("{resource} {key:?} already exists")]
+    Conflict { resource: String, key: String },
+    #[error("{resource} {key:?} was not found")]
+    NotFound { resource: String, key: String },
     #[error("I/O failed for {path}: {source}")]
     Io {
         path: String,

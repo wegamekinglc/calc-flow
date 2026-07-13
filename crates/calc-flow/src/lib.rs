@@ -1,6 +1,7 @@
 //! Calc Flow's Rust-native v2 calculation engine.
 
 mod batch;
+mod checkpoint;
 mod config;
 mod context;
 mod datafusion;
@@ -9,9 +10,14 @@ mod expression;
 mod json;
 mod operator;
 mod pipeline;
+mod project_store;
 mod udf;
 
 pub use batch::{Batch, BatchKind, BatchMetadata, ExternalPayload, TableBatch};
+pub use checkpoint::{
+    CHECKPOINT_FORMAT_VERSION, Checkpoint, CheckpointStore, FileCheckpointStore,
+    MAX_CHECKPOINT_DOCUMENT_BYTES,
+};
 pub use config::{
     ArrowFieldSpec, DataSourceSpec, EdgeSpec, NodeSpec, OperatorSpec, PROJECT_FORMAT_VERSION,
     PipelineSpec, PortSpec, PositionSpec, ProjectSpec, RunOptions, ValidationIssue,
@@ -29,6 +35,11 @@ pub use operator::{
 pub use pipeline::{
     Edge, ExecutionOptions, ExecutionPlan, NodeTiming, PipelineBuilder, PortEndpoint, RunMetadata,
     RunResult,
+};
+pub use project_store::{
+    FileProjectStore, MAX_PROJECT_DOCUMENT_BYTES, ProjectStore, export_project_json,
+    export_project_yaml, import_project_json, import_project_json_with_limit, import_project_yaml,
+    import_project_yaml_with_limit,
 };
 pub use udf::{
     UdfCatalogEntry, UdfKind, UdfReference, UdfRegistry, UdfRegistrySnapshot,
