@@ -5,6 +5,11 @@ data is carried in immutable `Batch` envelopes backed by Apache Arrow and is
 queried exclusively with Apache DataFusion. Array data remains backed by a
 Python Array API implementation such as NumPy or JAX.
 
+Python v1 is frozen at the `v1-python-final` tag. This document and the
+committed semantic corpus are behavioral references for the Python v1
+implementation; they are not a promise that Rust v2 will preserve Python API
+compatibility.
+
 ## Installation
 
 Install the core Arrow and DataFusion runtime:
