@@ -21,3 +21,4 @@ web-ui/test-results
 benchmark-results/
 coverage.xml
 htmlcov/
+.worktrees/
