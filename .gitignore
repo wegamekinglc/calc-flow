@@ -22,3 +22,5 @@ benchmark-results/
 coverage.xml
 htmlcov/
 .worktrees/
+/target/
+/.superpowers/
