@@ -68,6 +68,38 @@ impl PyBatch {
             .clone()
             .ok_or_else(|| PyRuntimeError::new_err(CLEARED_BATCH_MESSAGE))
     }
+
+    pub(crate) fn from_inner_python(py: Python<'_>, inner: calc_flow::Batch) -> PyResult<Self> {
+        Ok(Self::from_inner(rehome_python_payload(py, inner)?))
+    }
+}
+
+pub(crate) fn python_payload_root(batch: &calc_flow::Batch) -> Option<&Py<PyAny>> {
+    batch
+        .external_payload()
+        .ok()?
+        .as_any()
+        .downcast_ref::<PythonPayload>()
+        .map(|payload| &payload.object)
+}
+
+pub(crate) fn rehome_python_payload(
+    py: Python<'_>,
+    batch: calc_flow::Batch,
+) -> PyResult<calc_flow::Batch> {
+    let Ok(payload) = batch.external_payload() else {
+        return Ok(batch);
+    };
+    let Some(payload) = payload.as_any().downcast_ref::<PythonPayload>() else {
+        return Ok(batch);
+    };
+    let payload = PythonPayload {
+        object: payload.object.clone_ref(py),
+        backend: payload.backend.clone(),
+        len: payload.len,
+    };
+    calc_flow::Batch::external(Arc::new(payload), batch.metadata().clone())
+        .map_err(crate::error::to_py_err)
 }
 
 #[pymethods]

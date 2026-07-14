@@ -1,15 +1,164 @@
 use std::sync::Arc;
 
 use parking_lot::RwLock;
-use pyo3::{exceptions::PyRuntimeError, prelude::*};
+use pyo3::{PyTraverseError, PyVisit, exceptions::PyRuntimeError, prelude::*, types::PyAny};
 
 use crate::pipeline::PyExecutionPlan;
 
+const CLEARED_RUNTIME_MESSAGE: &str = "Runtime has been cleared by garbage collection";
+
+/// The single Python reference shared by an opaque Rust implementation and GC.
+///
+/// Provider factories and UDF closures must retain this same `Arc` instead of
+/// cloning the contained `Py`. That keeps the number of references reported by
+/// `__traverse__` equal to the number actually owned by the native object.
+pub(crate) struct PythonRoot {
+    object: Py<PyAny>,
+}
+
+impl PythonRoot {
+    #[allow(
+        dead_code,
+        reason = "Tasks 18 and 19 construct shared roots before registering Python callbacks"
+    )]
+    pub(crate) const fn new(object: Py<PyAny>) -> Self {
+        Self { object }
+    }
+
+    pub(crate) const fn object(&self) -> &Py<PyAny> {
+        &self.object
+    }
+}
+
+struct RuntimeState {
+    providers: Arc<calc_flow::ProviderRegistry>,
+    udfs: Arc<RwLock<calc_flow::UdfRegistry>>,
+    tokio: Arc<tokio::runtime::Runtime>,
+    roots: Vec<Arc<PythonRoot>>,
+}
+
+struct RuntimeSnapshot {
+    providers: Arc<calc_flow::ProviderRegistry>,
+    udfs: calc_flow::UdfRegistrySnapshot,
+    tokio: Arc<tokio::runtime::Runtime>,
+}
+
 #[pyclass(name = "Runtime", frozen, module = "calc_flow._native")]
 pub(crate) struct PyRuntime {
-    pub(crate) providers: Arc<calc_flow::ProviderRegistry>,
-    pub(crate) udfs: Arc<RwLock<calc_flow::UdfRegistry>>,
-    pub(crate) tokio: Arc<tokio::runtime::Runtime>,
+    state: RwLock<Option<RuntimeState>>,
+}
+
+impl PyRuntime {
+    fn from_tokio(tokio: Arc<tokio::runtime::Runtime>) -> Self {
+        Self {
+            state: RwLock::new(Some(RuntimeState {
+                providers: Arc::new(calc_flow::ProviderRegistry::default()),
+                udfs: Arc::new(RwLock::new(calc_flow::UdfRegistry::new())),
+                tokio,
+                roots: Vec::new(),
+            })),
+        }
+    }
+
+    fn snapshot(&self) -> PyResult<RuntimeSnapshot> {
+        let state = self.state.read();
+        let state = state
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err(CLEARED_RUNTIME_MESSAGE))?;
+        let udfs = state.udfs.read().snapshot();
+        Ok(RuntimeSnapshot {
+            providers: Arc::clone(&state.providers),
+            udfs,
+            tokio: Arc::clone(&state.tokio),
+        })
+    }
+
+    #[allow(
+        dead_code,
+        reason = "Task 18 registers Python-hosted provider factories through this GC-safe seam"
+    )]
+    /// Registers a factory that retains the same `root` allocation.
+    pub(crate) fn register_provider(
+        &self,
+        provider: &str,
+        name: &str,
+        version: &str,
+        factory: &Arc<dyn calc_flow::ExternalOperatorFactory>,
+        root: Arc<PythonRoot>,
+    ) -> PyResult<()> {
+        let providers = {
+            let state = self.state.read();
+            let state = state
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err(CLEARED_RUNTIME_MESSAGE))?;
+            Arc::clone(&state.providers)
+        };
+        providers
+            .register(provider, name, version, Arc::clone(factory))
+            .map_err(crate::error::to_py_err)?;
+        let mut state = self.state.write();
+        let state = state
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err(CLEARED_RUNTIME_MESSAGE))?;
+        state.roots.push(root);
+        Ok(())
+    }
+
+    #[allow(
+        dead_code,
+        reason = "Task 19 registers Python scalar UDFs through this GC-safe seam"
+    )]
+    /// Registers a UDF whose implementation retains the same `root` allocation.
+    pub(crate) fn register_datafusion_udf(
+        &self,
+        reference: calc_flow::UdfReference,
+        udf: &Arc<datafusion::logical_expr::ScalarUDF>,
+        argument_count: usize,
+        root: Arc<PythonRoot>,
+    ) -> PyResult<()> {
+        let udfs = {
+            let state = self.state.read();
+            let state = state
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err(CLEARED_RUNTIME_MESSAGE))?;
+            Arc::clone(&state.udfs)
+        };
+        let registration = {
+            let mut registry = udfs.write();
+            registry.register_datafusion(reference, Arc::clone(udf), argument_count)
+        };
+        registration.map_err(crate::error::to_py_err)?;
+        let mut state = self.state.write();
+        let state = state
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err(CLEARED_RUNTIME_MESSAGE))?;
+        state.roots.push(root);
+        Ok(())
+    }
+
+    #[allow(
+        dead_code,
+        reason = "Task 19 reads the data-only UDF catalog through this guarded snapshot"
+    )]
+    pub(crate) fn udf_snapshot(&self) -> PyResult<calc_flow::UdfRegistrySnapshot> {
+        let state = self.state.read();
+        let state = state
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err(CLEARED_RUNTIME_MESSAGE))?;
+        Ok(state.udfs.read().snapshot())
+    }
+
+    #[allow(
+        dead_code,
+        reason = "Task 20 reuses the runtime for store and runner blocking facades"
+    )]
+    pub(crate) fn clone_tokio(&self) -> PyResult<Arc<tokio::runtime::Runtime>> {
+        let state = self.state.read();
+        state
+            .as_ref()
+            .map(|state| Arc::clone(&state.tokio))
+            .ok_or_else(|| PyRuntimeError::new_err(CLEARED_RUNTIME_MESSAGE))
+    }
 }
 
 #[pymethods]
@@ -18,23 +167,45 @@ impl PyRuntime {
     fn new() -> PyResult<Self> {
         let tokio = tokio::runtime::Runtime::new()
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-        Ok(Self {
-            providers: Arc::new(calc_flow::ProviderRegistry::default()),
-            udfs: Arc::new(RwLock::new(calc_flow::UdfRegistry::new())),
-            tokio: Arc::new(tokio),
-        })
+        Ok(Self::from_tokio(Arc::new(tokio)))
     }
 
-    fn compile_project(&self, project_json: &str) -> PyResult<PyExecutionPlan> {
+    fn compile_project(
+        slf: PyRef<'_, Self>,
+        py: Python<'_>,
+        project_json: &str,
+    ) -> PyResult<PyExecutionPlan> {
+        let runtime = slf.snapshot()?;
         let project = calc_flow::import_project_json(project_json.as_bytes())
             .map_err(crate::error::to_py_err)?;
-        let udfs = self.udfs.read().snapshot();
-        let plan = calc_flow::compile_project(&project, &self.providers, &udfs)
+        let plan = calc_flow::compile_project(&project, &runtime.providers, &runtime.udfs)
             .map_err(crate::error::to_py_err)?;
-        Ok(PyExecutionPlan::new(
+        let owner = slf.into_pyobject(py)?.into_any().unbind();
+        Ok(PyExecutionPlan::new_with_owner(
             Arc::new(plan),
-            Arc::clone(&self.tokio),
+            runtime.tokio,
+            owner,
         ))
+    }
+
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "PyO3's garbage-collector protocol requires PyVisit by value"
+    )]
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        let state = self.state.read();
+        let Some(state) = state.as_ref() else {
+            return Ok(());
+        };
+        for root in &state.roots {
+            visit.call(root.object())?;
+        }
+        Ok(())
+    }
+
+    fn __clear__(&self) {
+        let state = self.state.write().take();
+        drop(state);
     }
 }
 
@@ -71,9 +242,43 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use datafusion::{
+        common::ScalarValue,
+        logical_expr::{ColumnarValue, Volatility, create_udf},
+    };
     use pyo3::types::PyDict;
 
     use super::*;
+
+    struct RootedFactory {
+        _callback: Arc<PythonRoot>,
+    }
+
+    impl calc_flow::ExternalOperatorFactory for RootedFactory {
+        fn create(
+            &self,
+            _spec: &calc_flow::ExternalOperatorSpec,
+            _inputs: Vec<calc_flow::Port>,
+            _outputs: Vec<calc_flow::Port>,
+        ) -> calc_flow::Result<Box<dyn calc_flow::Operator>> {
+            unreachable!("the GC ownership test never compiles this provider")
+        }
+    }
+
+    fn rooted_udf(name: &str, root: Arc<PythonRoot>) -> Arc<datafusion::logical_expr::ScalarUDF> {
+        Arc::new(create_udf(
+            name,
+            vec![],
+            datafusion::arrow::datatypes::DataType::Int64,
+            Volatility::Immutable,
+            Arc::new(move |_: &[ColumnarValue]| {
+                let _keep_hidden_callback_alive = &root;
+                Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(1))))
+            }),
+        ))
+    }
 
     const PROJECT: &str = r#"{
         "format_version": 2,
@@ -93,21 +298,43 @@ mod tests {
 
     #[test]
     fn runtime_compiles_strict_projects_and_helpers_are_canonical() {
-        let runtime = PyRuntime::new().unwrap();
-        let plan = runtime.compile_project(PROJECT).unwrap();
-        assert_eq!(plan.inner.name(), "demo");
-        assert!(runtime.compile_project("not JSON").is_err());
+        Python::initialize();
+        Python::attach(|py| {
+            let runtime = Py::new(py, PyRuntime::new().unwrap()).unwrap();
+            let plan = runtime
+                .bind(py)
+                .call_method1("compile_project", (PROJECT,))
+                .unwrap();
+            let plan = plan.extract::<PyRef<'_, PyExecutionPlan>>().unwrap();
+            assert_eq!(plan.clone_inner().unwrap().name(), "demo");
+            assert!(plan.clone_tokio().is_ok());
+            assert!(runtime.borrow(py).clone_tokio().is_ok());
+            assert!(
+                runtime
+                    .borrow(py)
+                    .udf_snapshot()
+                    .unwrap()
+                    .catalog()
+                    .is_empty()
+            );
+            assert!(
+                runtime
+                    .bind(py)
+                    .call_method1("compile_project", ("not JSON",))
+                    .is_err()
+            );
 
-        let canonical = validate_project_json(PROJECT).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&canonical).unwrap();
-        assert_eq!(value["description"], "");
-        assert_eq!(value["run_options"]["timeout_seconds"], 30);
-        assert_eq!(canonical, calc_flow::canonical_json(&value).unwrap());
+            let canonical = validate_project_json(PROJECT).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&canonical).unwrap();
+            assert_eq!(value["description"], "");
+            assert_eq!(value["run_options"]["timeout_seconds"], 30);
+            assert_eq!(canonical, calc_flow::canonical_json(&value).unwrap());
 
-        let schema: serde_json::Value =
-            serde_json::from_str(&project_json_schema().unwrap()).unwrap();
-        assert_eq!(schema["title"], "Calc Flow Project V2");
-        assert_eq!(schema["properties"]["format_version"]["const"], 2);
+            let schema: serde_json::Value =
+                serde_json::from_str(&project_json_schema().unwrap()).unwrap();
+            assert_eq!(schema["title"], "Calc Flow Project V2");
+            assert_eq!(schema["properties"]["format_version"]["const"], 2);
+        });
     }
 
     #[test]
@@ -140,6 +367,188 @@ mod tests {
                 .extract()
                 .unwrap();
             assert_eq!(value, 1);
+        });
+    }
+
+    #[test]
+    fn cleared_runtime_rejects_public_and_extension_access() {
+        Python::initialize();
+        Python::attach(|py| {
+            let runtime = Py::new(py, PyRuntime::new().unwrap()).unwrap();
+            runtime.borrow(py).__clear__();
+
+            let compile = runtime
+                .bind(py)
+                .call_method1("compile_project", (PROJECT,))
+                .unwrap_err();
+            assert_eq!(compile.value(py).to_string(), CLEARED_RUNTIME_MESSAGE);
+            let tokio_error = match runtime.borrow(py).clone_tokio() {
+                Ok(_) => panic!("a cleared runtime must not expose its Tokio runtime"),
+                Err(error) => error,
+            };
+            let udf_error = match runtime.borrow(py).udf_snapshot() {
+                Ok(_) => panic!("a cleared runtime must not expose its UDF registry"),
+                Err(error) => error,
+            };
+            for error in [tokio_error, udf_error] {
+                assert_eq!(error.value(py).to_string(), CLEARED_RUNTIME_MESSAGE);
+            }
+            runtime.borrow(py).__clear__();
+        });
+    }
+
+    #[test]
+    fn runtime_gc_collects_cycles_hidden_in_provider_and_udf_registries() {
+        Python::initialize();
+        Python::attach(|py| {
+            let weakref = py.import("weakref").unwrap().getattr("ref").unwrap();
+            let tokio = Arc::new(tokio::runtime::Runtime::new().unwrap());
+            let mut references = Vec::new();
+
+            for _ in 0..1_000 {
+                let runtime = Py::new(py, PyRuntime::from_tokio(Arc::clone(&tokio))).unwrap();
+                let provider = py
+                    .eval(pyo3::ffi::c_str!("type('Holder', (), {})()"), None, None)
+                    .unwrap();
+                let udf = py
+                    .eval(pyo3::ffi::c_str!("type('Holder', (), {})()"), None, None)
+                    .unwrap();
+
+                let provider_root = Arc::new(PythonRoot::new(provider.clone().unbind()));
+                let factory: Arc<dyn calc_flow::ExternalOperatorFactory> =
+                    Arc::new(RootedFactory {
+                        _callback: Arc::clone(&provider_root),
+                    });
+                runtime
+                    .borrow(py)
+                    .register_provider("python", "array", "1", &factory, provider_root)
+                    .unwrap();
+
+                let udf_root = Arc::new(PythonRoot::new(udf.clone().unbind()));
+                let native = rooted_udf("rooted", Arc::clone(&udf_root));
+                runtime
+                    .borrow(py)
+                    .register_datafusion_udf(
+                        calc_flow::UdfReference::new(
+                            "python",
+                            "rooted",
+                            "1",
+                            calc_flow::UdfKind::DataFusionScalar,
+                        )
+                        .unwrap(),
+                        &native,
+                        0,
+                        udf_root,
+                    )
+                    .unwrap();
+
+                provider.setattr("owner", runtime.bind(py)).unwrap();
+                udf.setattr("owner", runtime.bind(py)).unwrap();
+                references.push(weakref.call1((&provider,)).unwrap().unbind());
+                references.push(weakref.call1((&udf,)).unwrap().unbind());
+            }
+
+            py.import("gc")
+                .unwrap()
+                .getattr("collect")
+                .unwrap()
+                .call0()
+                .unwrap();
+            let alive = references
+                .iter()
+                .filter(|reference| !reference.call0(py).unwrap().is_none(py))
+                .count();
+            assert_eq!(alive, 0);
+        });
+    }
+
+    #[test]
+    fn rejected_registrations_drop_reentrant_callbacks_after_unlocking() {
+        Python::initialize();
+        Python::attach(|py| {
+            let runtime = Py::new(py, PyRuntime::new().unwrap()).unwrap();
+            let inert_provider = Arc::new(PythonRoot::new(py.None()));
+            let inert_factory: Arc<dyn calc_flow::ExternalOperatorFactory> =
+                Arc::new(RootedFactory {
+                    _callback: Arc::clone(&inert_provider),
+                });
+            runtime
+                .borrow(py)
+                .register_provider("python", "array", "1", &inert_factory, inert_provider)
+                .unwrap();
+            let inert_udf = Arc::new(PythonRoot::new(py.None()));
+            let inert_native = rooted_udf("rooted", Arc::clone(&inert_udf));
+            runtime
+                .borrow(py)
+                .register_datafusion_udf(
+                    calc_flow::UdfReference::new(
+                        "python",
+                        "rooted",
+                        "1",
+                        calc_flow::UdfKind::DataFusionScalar,
+                    )
+                    .unwrap(),
+                    &inert_native,
+                    0,
+                    inert_udf,
+                )
+                .unwrap();
+
+            let locals = PyDict::new(py);
+            locals.set_item("runtime", runtime.bind(py)).unwrap();
+            py.run(
+                pyo3::ffi::c_str!(
+                    "events = []\nclass Callback:\n    def __init__(self, owner):\n        self.owner = owner\n    def __del__(self):\n        try:\n            self.owner.compile_project('not JSON')\n        except Exception:\n            events.append('reentered')"
+                ),
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+            let callback_type = locals.get_item("Callback").unwrap().unwrap();
+
+            let provider_callback = callback_type.call1((runtime.bind(py),)).unwrap();
+            let provider_root = Arc::new(PythonRoot::new(provider_callback.unbind()));
+            let rejected_factory: Arc<dyn calc_flow::ExternalOperatorFactory> =
+                Arc::new(RootedFactory {
+                    _callback: Arc::clone(&provider_root),
+                });
+            assert!(
+                runtime
+                    .borrow(py)
+                    .register_provider("python", "array", "1", &rejected_factory, provider_root,)
+                    .is_err()
+            );
+            drop(rejected_factory);
+
+            let udf_callback = callback_type.call1((runtime.bind(py),)).unwrap();
+            let udf_root = Arc::new(PythonRoot::new(udf_callback.unbind()));
+            let rejected_udf = rooted_udf("rooted", Arc::clone(&udf_root));
+            assert!(
+                runtime
+                    .borrow(py)
+                    .register_datafusion_udf(
+                        calc_flow::UdfReference::new(
+                            "python",
+                            "rooted",
+                            "1",
+                            calc_flow::UdfKind::DataFusionScalar,
+                        )
+                        .unwrap(),
+                        &rejected_udf,
+                        0,
+                        udf_root,
+                    )
+                    .is_err()
+            );
+            drop(rejected_udf);
+
+            let events = locals
+                .get_item("events")
+                .unwrap()
+                .unwrap()
+                .extract::<Vec<String>>()
+                .unwrap();
+            assert_eq!(events, ["reentered", "reentered"]);
         });
     }
 }

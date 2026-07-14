@@ -135,6 +135,16 @@ def test_runtime_compiles_strict_json_and_plan_outlives_runtime() -> None:
         Runtime().compile_project('{"format_version":2,"format_version":2}')
 
 
+def test_runtime_plan_and_result_are_visible_to_cyclic_gc() -> None:
+    runtime = Runtime()
+    plan = PipelineBuilder("tracked").expression("calc", "b = a + 1").compile(runtime)
+    result = plan.execute({"input": _batch(a=[1])})
+
+    assert gc.is_tracked(runtime._inner)
+    assert gc.is_tracked(plan._inner)
+    assert gc.is_tracked(result)
+
+
 def test_project_json_helpers_are_canonical_strict_and_defaulted() -> None:
     schema = json.loads(project_json_schema())
     assert schema["title"] == "Calc Flow Project V2"
