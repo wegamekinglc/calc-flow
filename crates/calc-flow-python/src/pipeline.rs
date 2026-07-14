@@ -20,6 +20,42 @@ struct PlanState {
     roots: Vec<Arc<crate::config::PythonRoot>>,
 }
 
+/// A core execution plan paired with the Python wrapper that exposes its roots.
+///
+/// Tasks that retain or execute the core plan must retain this whole value. A
+/// Python class storing it must report [`Self::owner`] from `__traverse__`.
+pub(crate) struct ExecutionPlanOwner {
+    inner: Arc<calc_flow::ExecutionPlan>,
+    tokio: Arc<tokio::runtime::Runtime>,
+    owner: Py<PyAny>,
+}
+
+impl ExecutionPlanOwner {
+    #[allow(
+        dead_code,
+        reason = "Task 20 passes the owned core plan to native runner construction"
+    )]
+    pub(crate) const fn inner(&self) -> &Arc<calc_flow::ExecutionPlan> {
+        &self.inner
+    }
+
+    #[allow(
+        dead_code,
+        reason = "Task 20 uses the plan's Tokio runtime for guarded blocking facades"
+    )]
+    pub(crate) const fn tokio(&self) -> &Arc<tokio::runtime::Runtime> {
+        &self.tokio
+    }
+
+    #[allow(
+        dead_code,
+        reason = "Task 20 reports the retained plan wrapper from runner __traverse__"
+    )]
+    pub(crate) const fn owner(&self) -> &Py<PyAny> {
+        &self.owner
+    }
+}
+
 #[pyclass(name = "ExecutionPlan", frozen, module = "calc_flow._native")]
 pub(crate) struct PyExecutionPlan {
     state: RwLock<Option<PlanState>>,
@@ -40,7 +76,7 @@ impl PyExecutionPlan {
                 inner,
                 tokio,
                 owners: Vec::new(),
-                roots,
+                roots: crate::config::deduplicate_python_roots(roots),
             })),
         }
     }
@@ -70,24 +106,18 @@ impl PyExecutionPlan {
         Ok((Arc::clone(&state.inner), Arc::clone(&state.tokio)))
     }
 
-    pub(crate) fn clone_inner(&self) -> PyResult<Arc<calc_flow::ExecutionPlan>> {
-        let state = self.state.read();
-        state
-            .as_ref()
-            .map(|state| Arc::clone(&state.inner))
-            .ok_or_else(|| PyRuntimeError::new_err(CLEARED_PLAN_MESSAGE))
-    }
-
-    #[allow(
-        dead_code,
-        reason = "Task 20 reuses the plan runtime for blocking runner facades"
-    )]
-    pub(crate) fn clone_tokio(&self) -> PyResult<Arc<tokio::runtime::Runtime>> {
-        let state = self.state.read();
-        state
-            .as_ref()
-            .map(|state| Arc::clone(&state.tokio))
-            .ok_or_else(|| PyRuntimeError::new_err(CLEARED_PLAN_MESSAGE))
+    /// Clones native handles together with a real Python owner.
+    ///
+    /// The owner is what keeps callback roots traversable while native state is
+    /// retained by a future or a Task 20 runner.
+    pub(crate) fn owned(slf: PyRef<'_, Self>, py: Python<'_>) -> PyResult<ExecutionPlanOwner> {
+        let (inner, tokio) = slf.execution_handles()?;
+        let owner = slf.into_pyobject(py)?.into_any().unbind();
+        Ok(ExecutionPlanOwner {
+            inner,
+            tokio,
+            owner,
+        })
     }
 }
 
@@ -105,18 +135,20 @@ impl PyExecutionPlan {
     }
 
     fn execute_async<'py>(
-        &self,
+        slf: PyRef<'py, Self>,
         py: Python<'py>,
         inputs: &Bound<'py, PyDict>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inputs = extract_inputs(inputs)?;
-        let plan = self.clone_inner()?;
+        let ExecutionPlanOwner { inner, owner, .. } = Self::owned(slf, py)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result = plan
+            let result = inner
                 .execute(inputs, calc_flow::ExecutionOptions::default())
                 .await
                 .map_err(crate::error::to_py_err)?;
-            Python::attach(|py| PyRunResult::from_inner(py, result))
+            let result = Python::attach(|py| PyRunResult::from_inner(py, result));
+            drop(owner);
+            result
         })
     }
 
@@ -148,6 +180,34 @@ struct ResultState {
     inner: calc_flow::RunResult,
 }
 
+/// A cloned core result paired with the Python wrapper that traverses payloads.
+///
+/// Long-lived Python-owned native state must retain this whole value and visit
+/// [`Self::owner`]. Cloning only the core result would share `PythonPayload`
+/// references without giving cyclic GC a corresponding visible owner.
+pub(crate) struct RunResultOwner {
+    inner: calc_flow::RunResult,
+    owner: Py<PyAny>,
+}
+
+impl RunResultOwner {
+    #[allow(
+        dead_code,
+        reason = "Task 20 consumes runner results while retaining their Python owner"
+    )]
+    pub(crate) const fn inner(&self) -> &calc_flow::RunResult {
+        &self.inner
+    }
+
+    #[allow(
+        dead_code,
+        reason = "Task 20 reports retained result wrappers from __traverse__"
+    )]
+    pub(crate) const fn owner(&self) -> &Py<PyAny> {
+        &self.owner
+    }
+}
+
 #[pyclass(name = "RunResult", frozen, module = "calc_flow._native")]
 pub(crate) struct PyRunResult {
     state: RwLock<Option<ResultState>>,
@@ -163,12 +223,22 @@ impl PyRunResult {
         })
     }
 
-    pub(crate) fn clone_inner(&self) -> PyResult<calc_flow::RunResult> {
+    fn snapshot_inner(&self) -> PyResult<calc_flow::RunResult> {
         let state = self.state.read();
         state
             .as_ref()
             .map(|state| state.inner.clone())
             .ok_or_else(|| PyRuntimeError::new_err(CLEARED_RESULT_MESSAGE))
+    }
+
+    #[allow(
+        dead_code,
+        reason = "Task 20 retains Python result wrappers around cloned native runner results"
+    )]
+    pub(crate) fn owned(slf: PyRef<'_, Self>, py: Python<'_>) -> PyResult<RunResultOwner> {
+        let inner = slf.snapshot_inner()?;
+        let owner = slf.into_pyobject(py)?.into_any().unbind();
+        Ok(RunResultOwner { inner, owner })
     }
 }
 
@@ -176,7 +246,7 @@ impl PyRunResult {
 impl PyRunResult {
     #[getter]
     fn outputs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let inner = self.clone_inner()?;
+        let inner = self.snapshot_inner()?;
         let outputs = PyDict::new(py);
         for (name, batch) in inner.outputs {
             outputs.set_item(name, Py::new(py, PyBatch::from_inner_python(py, batch)?)?)?;
@@ -186,7 +256,7 @@ impl PyRunResult {
 
     #[getter]
     fn metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.clone_inner()?;
+        let inner = self.snapshot_inner()?;
         let encoded = serde_json::to_string(&inner.metadata)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         crate::config::json_to_python(py, &encoded)
@@ -194,7 +264,7 @@ impl PyRunResult {
 
     #[getter]
     fn node_timings<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.clone_inner()?;
+        let inner = self.snapshot_inner()?;
         let encoded = serde_json::to_string(&inner.node_timings)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         crate::config::json_to_python(py, &encoded)
@@ -202,7 +272,7 @@ impl PyRunResult {
 
     #[getter]
     fn datafusion_metrics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.clone_inner()?;
+        let inner = self.snapshot_inner()?;
         let encoded = serde_json::to_string(&inner.datafusion_metrics)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         crate::config::json_to_python(py, &encoded)
@@ -232,6 +302,7 @@ impl PyRunResult {
 }
 
 fn extract_inputs(inputs: &Bound<'_, PyDict>) -> PyResult<BTreeMap<String, calc_flow::Batch>> {
+    let py = inputs.py();
     inputs
         .iter()
         .map(|(name, value)| {
@@ -242,7 +313,8 @@ fn extract_inputs(inputs: &Bound<'_, PyDict>) -> PyResult<BTreeMap<String, calc_
             let batch = value.extract::<PyRef<'_, PyBatch>>().map_err(|_| {
                 PyTypeError::new_err(format!("input {name:?} must contain a calc_flow.Batch"))
             })?;
-            Ok((name, batch.clone_inner()?))
+            let inner = crate::batch::rehome_python_payload(py, batch.clone_inner()?)?;
+            Ok((name, inner))
         })
         .collect()
 }
@@ -314,6 +386,64 @@ mod tests {
         output: Vec<calc_flow::Port>,
     }
 
+    struct GatedPythonPassthrough {
+        callback: Arc<crate::config::PythonRoot>,
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        calls: Arc<AtomicUsize>,
+        validations: Arc<AtomicUsize>,
+        input: Vec<calc_flow::Port>,
+        output: Vec<calc_flow::Port>,
+    }
+
+    #[async_trait]
+    impl calc_flow::Operator for GatedPythonPassthrough {
+        fn name(&self) -> &'static str {
+            "python_gate"
+        }
+
+        fn input_ports(&self) -> &[calc_flow::Port] {
+            &self.input
+        }
+
+        fn output_ports(&self) -> &[calc_flow::Port] {
+            &self.output
+        }
+
+        fn configuration(&self) -> calc_flow::JsonMap {
+            BTreeMap::new()
+        }
+
+        async fn process(
+            &mut self,
+            inputs: &BTreeMap<String, calc_flow::Batch>,
+            _context: &calc_flow::OperatorContext<'_>,
+        ) -> calc_flow::Result<BTreeMap<String, calc_flow::Batch>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.started.notify_one();
+            self.release.notified().await;
+            Python::attach(|py| -> PyResult<()> {
+                let marker: String = self
+                    .callback
+                    .object()
+                    .call_method0(py, "touch")?
+                    .extract(py)?;
+                assert_eq!(marker, "callback-alive");
+                let payload = crate::batch::python_payload_root(&inputs["input"])
+                    .expect("the gated input must remain a Python payload");
+                let value: usize = payload.getattr(py, "value")?.extract(py)?;
+                assert_eq!(value, 41);
+                Ok(())
+            })
+            .map_err(|error| calc_flow::CalcFlowError::Operator {
+                node_id: "python_gate".into(),
+                message: error.to_string(),
+            })?;
+            self.validations.fetch_add(1, Ordering::SeqCst);
+            Ok(BTreeMap::from([("output".into(), inputs["input"].clone())]))
+        }
+    }
+
     #[async_trait]
     impl calc_flow::Operator for GatedPassthrough {
         fn name(&self) -> &'static str {
@@ -348,6 +478,18 @@ mod tests {
     #[pyclass]
     struct StartSignal {
         started: Arc<tokio::sync::Notify>,
+    }
+
+    #[pyclass]
+    struct ReleaseSignal {
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[pymethods]
+    impl ReleaseSignal {
+        fn fire(&self) {
+            self.release.notify_one();
+        }
     }
 
     #[pymethods]
@@ -411,6 +553,37 @@ mod tests {
         )
     }
 
+    fn gated_python_plan(
+        root: Arc<crate::config::PythonRoot>,
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        calls: Arc<AtomicUsize>,
+        validations: Arc<AtomicUsize>,
+    ) -> Arc<calc_flow::ExecutionPlan> {
+        let input = calc_flow::Port::new("input", calc_flow::BatchKind::Array, true, None).unwrap();
+        let output =
+            calc_flow::Port::new("output", calc_flow::BatchKind::Array, true, None).unwrap();
+        Arc::new(
+            calc_flow::PipelineBuilder::new("python_gate")
+                .unwrap()
+                .add_node(
+                    "python_gate",
+                    Box::new(GatedPythonPassthrough {
+                        callback: root,
+                        started,
+                        release,
+                        calls,
+                        validations,
+                        input: vec![input],
+                        output: vec![output],
+                    }),
+                )
+                .unwrap()
+                .compile(&calc_flow::UdfRegistry::new().snapshot())
+                .unwrap(),
+        )
+    }
+
     fn batch() -> PyBatch {
         let schema = Arc::new(Schema::new(vec![Field::new(
             "value",
@@ -444,6 +617,49 @@ mod tests {
                     .unwrap_err()
                     .is_instance_of::<PyTypeError>(py)
             );
+        });
+    }
+
+    #[test]
+    fn input_extraction_rehomes_python_payloads_for_opaque_execution() {
+        Python::initialize();
+        Python::attach(|py| {
+            let metadata = PyDict::new(py);
+            let payload = PyDict::new(py);
+            let batch = py
+                .get_type::<PyBatch>()
+                .call_method1("_from_external", (&payload, "test", 1, &metadata))
+                .unwrap();
+            let original = batch
+                .extract::<PyRef<'_, PyBatch>>()
+                .unwrap()
+                .clone_inner()
+                .unwrap();
+            let inputs = PyDict::new(py);
+            inputs.set_item("input", &batch).unwrap();
+
+            let extracted = extract_inputs(&inputs).unwrap();
+
+            assert!(!Arc::ptr_eq(
+                original.external_payload().unwrap(),
+                extracted["input"].external_payload().unwrap(),
+            ));
+        });
+    }
+
+    #[test]
+    fn execution_plan_deduplicates_explicit_python_roots() {
+        Python::initialize();
+        Python::attach(|py| {
+            let root = Arc::new(crate::config::PythonRoot::new(py.None()));
+            let plan = PyExecutionPlan::new(
+                rooted_plan(Arc::clone(&root), calc_flow::BatchKind::Array),
+                Arc::new(tokio::runtime::Runtime::new().unwrap()),
+                vec![Arc::clone(&root), root],
+            );
+
+            let state = plan.state.read();
+            assert_eq!(state.as_ref().unwrap().roots.len(), 1);
         });
     }
 
@@ -507,6 +723,80 @@ mod tests {
                     .extract::<String>()
                     .unwrap(),
                 "pipeline"
+            );
+        });
+    }
+
+    #[test]
+    fn active_async_execution_owns_python_state_through_cancel_and_recovery() {
+        Python::initialize();
+        Python::attach(|py| {
+            let locals = PyDict::new(py);
+            py.run(
+                pyo3::ffi::c_str!(
+                    "class Callback:\n    def __init__(self):\n        self.calls = 0\n    def touch(self):\n        self.calls += 1\n        return 'callback-alive'\nclass Payload:\n    def __init__(self):\n        self.value = 41\ncallback = Callback()\npayload = Payload()"
+                ),
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+            let callback = locals.get_item("callback").unwrap().unwrap();
+            let payload = locals.get_item("payload").unwrap().unwrap();
+            let root = Arc::new(crate::config::PythonRoot::new(callback.clone().unbind()));
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let calls = Arc::new(AtomicUsize::new(0));
+            let validations = Arc::new(AtomicUsize::new(0));
+            let plan = PyExecutionPlan::new(
+                gated_python_plan(
+                    Arc::clone(&root),
+                    Arc::clone(&started),
+                    Arc::clone(&release),
+                    Arc::clone(&calls),
+                    Arc::clone(&validations),
+                ),
+                Arc::new(tokio::runtime::Runtime::new().unwrap()),
+                vec![root],
+            );
+            let metadata = PyDict::new(py);
+            let batch = py
+                .get_type::<PyBatch>()
+                .call_method1("_from_external", (&payload, "test", 1, &metadata))
+                .unwrap();
+            locals.set_item("plan", Py::new(py, plan).unwrap()).unwrap();
+            locals.set_item("batch", &batch).unwrap();
+            locals
+                .set_item("started", Py::new(py, StartSignal { started }).unwrap())
+                .unwrap();
+            locals
+                .set_item("release", Py::new(py, ReleaseSignal { release }).unwrap())
+                .unwrap();
+            drop(callback);
+            drop(payload);
+            drop(batch);
+
+            py.run(
+                &CString::new(
+                    "import asyncio, gc, weakref\nasync def run():\n    owned_plan = plan\n    owned_batch = batch\n    owned_callback = callback\n    owned_payload = payload\n    owned_callback.owner = owned_plan\n    owned_payload.owner = owned_batch\n    callback_ref = weakref.ref(owned_callback)\n    payload_ref = weakref.ref(owned_payload)\n    task = asyncio.ensure_future(owned_plan.execute_async({'input': owned_batch}))\n    globals().pop('plan')\n    globals().pop('batch')\n    globals().pop('callback')\n    globals().pop('payload')\n    del owned_plan, owned_batch, owned_callback, owned_payload\n    await started.wait()\n    gc.collect()\n    assert callback_ref() is not None\n    assert payload_ref() is not None\n    task.cancel()\n    try:\n        await task\n    except asyncio.CancelledError:\n        pass\n    recovered_callback = callback_ref()\n    recovered_payload = payload_ref()\n    assert recovered_callback is not None\n    assert recovered_payload is not None\n    recovered_plan = recovered_callback.owner\n    recovered_batch = recovered_payload.owner\n    recovered = asyncio.ensure_future(recovered_plan.execute_async({'input': recovered_batch}))\n    del recovered_plan, recovered_batch, recovered_callback, recovered_payload\n    await started.wait()\n    gc.collect()\n    assert callback_ref() is not None\n    assert payload_ref() is not None\n    release.fire()\n    return await recovered\nresult = asyncio.run(run())",
+                )
+                .unwrap(),
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            assert_eq!(validations.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                locals
+                    .get_item("result")
+                    .unwrap()
+                    .unwrap()
+                    .getattr("outputs")
+                    .unwrap()
+                    .len()
+                    .unwrap(),
+                1
             );
         });
     }
@@ -628,12 +918,12 @@ mod tests {
     fn cleared_plan_and_result_reject_access() {
         Python::initialize();
         Python::attach(|py| {
-            let plan = plan();
+            let plan = Py::new(py, plan()).unwrap();
             let inputs = PyDict::new(py);
             inputs
                 .set_item("input", Py::new(py, batch()).unwrap())
                 .unwrap();
-            let result = plan.execute(py, &inputs).unwrap();
+            let result = plan.borrow(py).execute(py, &inputs).unwrap();
 
             result.__clear__();
             let result_errors = [
@@ -641,7 +931,7 @@ mod tests {
                 result.metadata(py).unwrap_err(),
                 result.node_timings(py).unwrap_err(),
                 result.datafusion_metrics(py).unwrap_err(),
-                match result.clone_inner() {
+                match result.snapshot_inner() {
                     Ok(_) => panic!("a cleared result must not expose its core value"),
                     Err(error) => error,
                 },
@@ -653,19 +943,17 @@ mod tests {
             );
             result.__clear__();
 
-            plan.__clear__();
+            plan.borrow(py).__clear__();
             let plan_errors = [
-                match plan.execute(py, &inputs) {
+                match plan.borrow(py).execute(py, &inputs) {
                     Ok(_) => panic!("a cleared plan must reject blocking execution"),
                     Err(error) => error,
                 },
-                plan.execute_async(py, &inputs).unwrap_err(),
-                match plan.clone_inner() {
-                    Ok(_) => panic!("a cleared plan must not expose its core plan"),
-                    Err(error) => error,
-                },
-                match plan.clone_tokio() {
-                    Ok(_) => panic!("a cleared plan must not expose its Tokio runtime"),
+                plan.bind(py)
+                    .call_method1("execute_async", (&inputs,))
+                    .unwrap_err(),
+                match plan.borrow(py).execution_handles() {
+                    Ok(_) => panic!("a cleared plan must not expose execution handles"),
                     Err(error) => error,
                 },
             ];
@@ -674,7 +962,7 @@ mod tests {
                     .iter()
                     .all(|error| error.value(py).to_string() == CLEARED_PLAN_MESSAGE)
             );
-            plan.__clear__();
+            plan.borrow(py).__clear__();
         });
     }
 

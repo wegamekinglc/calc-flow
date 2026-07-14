@@ -30,6 +30,17 @@ impl PythonRoot {
     }
 }
 
+pub(crate) fn deduplicate_python_roots(
+    roots: impl IntoIterator<Item = Arc<PythonRoot>>,
+) -> Vec<Arc<PythonRoot>> {
+    roots.into_iter().fold(Vec::new(), |mut unique, root| {
+        if !unique.iter().any(|existing| Arc::ptr_eq(existing, &root)) {
+            unique.push(root);
+        }
+        unique
+    })
+}
+
 struct RuntimeState {
     providers: Arc<calc_flow::ProviderRegistry>,
     udfs: Arc<RwLock<calc_flow::UdfRegistry>>,
@@ -100,7 +111,13 @@ impl PyRuntime {
         let state = state
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err(CLEARED_RUNTIME_MESSAGE))?;
-        state.roots.push(root);
+        if !state
+            .roots
+            .iter()
+            .any(|existing| Arc::ptr_eq(existing, &root))
+        {
+            state.roots.push(root);
+        }
         Ok(())
     }
 
@@ -132,7 +149,13 @@ impl PyRuntime {
         let state = state
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err(CLEARED_RUNTIME_MESSAGE))?;
-        state.roots.push(root);
+        if !state
+            .roots
+            .iter()
+            .any(|existing| Arc::ptr_eq(existing, &root))
+        {
+            state.roots.push(root);
+        }
         Ok(())
     }
 
@@ -306,8 +329,9 @@ mod tests {
                 .call_method1("compile_project", (PROJECT,))
                 .unwrap();
             let plan = plan.extract::<PyRef<'_, PyExecutionPlan>>().unwrap();
-            assert_eq!(plan.clone_inner().unwrap().name(), "demo");
-            assert!(plan.clone_tokio().is_ok());
+            let owned = PyExecutionPlan::owned(plan, py).unwrap();
+            assert_eq!(owned.inner().name(), "demo");
+            assert!(Arc::strong_count(owned.tokio()) >= 2);
             assert!(runtime.borrow(py).clone_tokio().is_ok());
             assert!(
                 runtime
@@ -459,6 +483,39 @@ mod tests {
                 .filter(|reference| !reference.call0(py).unwrap().is_none(py))
                 .count();
             assert_eq!(alive, 0);
+        });
+    }
+
+    #[test]
+    fn runtime_reports_each_shared_python_root_once() {
+        Python::initialize();
+        Python::attach(|py| {
+            let runtime = PyRuntime::new().unwrap();
+            let root = Arc::new(PythonRoot::new(py.None()));
+            let factory: Arc<dyn calc_flow::ExternalOperatorFactory> = Arc::new(RootedFactory {
+                _callback: Arc::clone(&root),
+            });
+            runtime
+                .register_provider("python", "array", "1", &factory, Arc::clone(&root))
+                .unwrap();
+            let native = rooted_udf("rooted", Arc::clone(&root));
+            runtime
+                .register_datafusion_udf(
+                    calc_flow::UdfReference::new(
+                        "python",
+                        "rooted",
+                        "1",
+                        calc_flow::UdfKind::DataFusionScalar,
+                    )
+                    .unwrap(),
+                    &native,
+                    0,
+                    root,
+                )
+                .unwrap();
+
+            let state = runtime.state.read();
+            assert_eq!(state.as_ref().unwrap().roots.len(), 1);
         });
     }
 
