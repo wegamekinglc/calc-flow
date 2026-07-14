@@ -19,6 +19,8 @@ from calc_flow.pipeline import (
     project_json_schema,
     validate_project_json,
 )
+from calc_flow.runtime import MicroBatchRunner, StreamingRunner
+from calc_flow.store import FileCheckpointStore, FileProjectStore
 
 __version__ = "2.0.0a1"
 Batch = _native.Batch
@@ -32,12 +34,16 @@ __all__ = [
     "CompileError",
     "ConfigError",
     "ExecutionError",
+    "FileCheckpointStore",
+    "FileProjectStore",
     "ProviderError",
     "ProjectDocument",
     "ExecutionPlan",
     "PipelineBuilder",
+    "MicroBatchRunner",
     "Runtime",
     "RunResult",
+    "StreamingRunner",
     "register_jax",
     "register_numpy",
     "project_json_schema",

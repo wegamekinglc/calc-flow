@@ -152,6 +152,43 @@ impl PyExecutionPlan {
         })
     }
 
+    fn snapshot_async<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let ExecutionPlanOwner { inner, owner, .. } = Self::owned(slf, py)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let state = inner.snapshot().await.map_err(crate::error::to_py_err)?;
+            let encoded = serde_json::to_string(&state)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            let result =
+                Python::attach(|py| crate::config::json_to_python(py, &encoded).map(Bound::unbind));
+            drop(owner);
+            result
+        })
+    }
+
+    fn restore_async<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        state_json: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let state = serde_json::from_str::<BTreeMap<String, serde_json::Value>>(state_json)
+            .map_err(|error| PyTypeError::new_err(format!("invalid plan state: {error}")))?;
+        let ExecutionPlanOwner { inner, owner, .. } = Self::owned(slf, py)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let result = inner.restore(&state).await.map_err(crate::error::to_py_err);
+            drop(owner);
+            result
+        })
+    }
+
+    fn reset_async<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let ExecutionPlanOwner { inner, owner, .. } = Self::owned(slf, py)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let result = inner.reset().await.map_err(crate::error::to_py_err);
+            drop(owner);
+            result
+        })
+    }
+
     #[allow(
         clippy::needless_pass_by_value,
         reason = "PyO3's garbage-collector protocol requires PyVisit by value"
@@ -214,7 +251,7 @@ pub(crate) struct PyRunResult {
 }
 
 impl PyRunResult {
-    fn from_inner(py: Python<'_>, mut inner: calc_flow::RunResult) -> PyResult<Self> {
+    pub(crate) fn from_inner(py: Python<'_>, mut inner: calc_flow::RunResult) -> PyResult<Self> {
         for output in inner.outputs.values_mut() {
             *output = crate::batch::rehome_python_payload(py, output.clone())?;
         }

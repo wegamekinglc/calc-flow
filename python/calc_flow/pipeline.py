@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from calc_flow import _native
+from calc_flow.store import _copy_json_value, _run_blocking
 
 JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
 UdfReference = tuple[str, str, str]
@@ -154,6 +155,31 @@ class ExecutionPlan:
             return await self._inner.execute_async(copied)
 
         return execute()
+
+    async def snapshot_async(self) -> dict[str, Any]:
+        state = await self._inner.snapshot_async()
+        return _copy_json_value(state, root_mapping=True, label="plan state")
+
+    def restore_async(self, state: Mapping[str, object]) -> Awaitable[None]:
+        copied = _copy_json_value(dict(state), root_mapping=True, label="plan state")
+        encoded = json.dumps(copied, separators=(",", ":"), sort_keys=True)
+
+        async def restore() -> None:
+            await self._inner.restore_async(encoded)
+
+        return restore()
+
+    async def reset_async(self) -> None:
+        await self._inner.reset_async()
+
+    def snapshot(self) -> dict[str, Any]:
+        return _run_blocking(self.snapshot_async, "snapshot_async")
+
+    def restore(self, state: Mapping[str, object]) -> None:
+        return _run_blocking(lambda: self.restore_async(state), "restore_async")
+
+    def reset(self) -> None:
+        return _run_blocking(self.reset_async, "reset_async")
 
 
 @dataclass(frozen=True, slots=True, init=False)

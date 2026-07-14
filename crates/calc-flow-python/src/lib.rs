@@ -5,6 +5,8 @@ mod config;
 mod error;
 mod pipeline;
 mod provider;
+mod runtime;
+mod store;
 mod udf;
 
 use pyo3::prelude::*;
@@ -22,6 +24,8 @@ fn calc_flow_python(module: &Bound<'_, PyModule>) -> PyResult<()> {
     batch::register(module)?;
     config::register(module)?;
     pipeline::register(module)?;
+    store::register(module)?;
+    runtime::register(module)?;
     Ok(())
 }
 
