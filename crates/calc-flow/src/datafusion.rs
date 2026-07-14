@@ -21,7 +21,8 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
     Batch, BatchMetadata, CalcFlowError, Result, UdfKind, UdfReference, UdfRegistrySnapshot,
-    sql_projection, validate_select_query, validate_selected_udfs,
+    expression::{sql_projection, validate_select_query},
+    validate_selected_udfs,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]

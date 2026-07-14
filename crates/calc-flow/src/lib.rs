@@ -28,7 +28,6 @@ pub use config::{
 pub use context::{CancellationToken, RunContext};
 pub use datafusion::{DataFusionConfig, DataFusionQueryMetric, DataFusionRuntime};
 pub use error::{CalcFlowError, Result};
-pub use expression::{split_assignment, sql_projection, validate_select_query};
 pub use io::{BatchingSource, Sink, Source, SourceItem};
 pub use json::{JsonMap, MAX_JSON_DEPTH, canonical_json};
 pub use operator::{

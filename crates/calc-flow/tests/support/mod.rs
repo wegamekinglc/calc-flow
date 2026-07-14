@@ -3,6 +3,8 @@
 use std::{
     collections::BTreeMap,
     collections::VecDeque,
+    fs::File,
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -13,12 +15,13 @@ use std::{
 use async_trait::async_trait;
 use calc_flow::{
     Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken, Checkpoint, CheckpointStore,
-    Edge, JsonMap, Operator, OperatorContext, PipelineBuilder, Port, PortEndpoint, Result,
-    RunContext, Sink, Source, SourceItem, UdfRegistry,
+    Edge, ExecutionPlan, ExpressionOperator, JsonMap, Operator, OperatorContext, PipelineBuilder,
+    Port, PortEndpoint, Result, RunContext, Sink, Source, SourceItem, SqlOperator, UdfRegistry,
 };
 use datafusion::arrow::{
     array::{Int64Array, StringArray},
     datatypes::{DataType, Field, Schema},
+    ipc::reader::FileReader,
     record_batch::RecordBatch,
 };
 use serde_json::{Value, json};
@@ -314,7 +317,151 @@ pub fn string_batch(values: &[&str]) -> Batch {
     Batch::table(vec![record], BatchMetadata::default()).unwrap()
 }
 
-pub fn stateful_plan(name: &str, probe: Arc<Probe>) -> Arc<calc_flow::ExecutionPlan> {
+pub fn read_v1_fixture(name: &str) -> Vec<RecordBatch> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/v1")
+        .join(name);
+    let reader = FileReader::try_new(File::open(path).unwrap(), None).unwrap();
+    let schema = reader.schema();
+    let batches: Vec<RecordBatch> = reader.collect::<std::result::Result<_, _>>().unwrap();
+    if batches.is_empty() {
+        vec![RecordBatch::new_empty(schema)]
+    } else {
+        batches
+    }
+}
+
+pub fn v1_expression_plan(expression: &str) -> ExecutionPlan {
+    PipelineBuilder::new("v1-expression")
+        .unwrap()
+        .add_node(
+            "calculate",
+            Box::new(
+                ExpressionOperator::new("calculate", expression, Vec::new(), None, Vec::new())
+                    .unwrap(),
+            ),
+        )
+        .unwrap()
+        .compile(&UdfRegistry::new().snapshot())
+        .unwrap()
+}
+
+pub fn v1_sql_plan() -> ExecutionPlan {
+    PipelineBuilder::new("v1-sql")
+        .unwrap()
+        .add_node(
+            "join",
+            Box::new(
+                SqlOperator::new(
+                    "join",
+                    "SELECT l.id, l.amount * r.rate AS total FROM l JOIN r ON l.id = r.id",
+                    vec!["l".into(), "r".into()],
+                    Vec::new(),
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap()
+        .compile(&UdfRegistry::new().snapshot())
+        .unwrap()
+}
+
+pub fn v1_identity_plan(name: &str) -> ExecutionPlan {
+    PipelineBuilder::new(name)
+        .unwrap()
+        .add_node(
+            "identity",
+            Box::new(TestOperator::ports(
+                "identity",
+                vec![untyped_table_port("input", true)],
+                vec![untyped_table_port("output", true)],
+                Action::Pass,
+                Arc::new(Probe::default()),
+            )),
+        )
+        .unwrap()
+        .compile(&UdfRegistry::new().snapshot())
+        .unwrap()
+}
+
+pub fn v1_rollback_plan() -> ExecutionPlan {
+    PipelineBuilder::new("v1-state-rollback")
+        .unwrap()
+        .add_node("state", Box::new(EmptyStateFailingOperator::default()))
+        .unwrap()
+        .compile(&UdfRegistry::new().snapshot())
+        .unwrap()
+}
+
+struct EmptyStateFailingOperator {
+    inputs: [Port; 1],
+    outputs: [Port; 1],
+    state: JsonMap,
+}
+
+impl Default for EmptyStateFailingOperator {
+    fn default() -> Self {
+        Self {
+            inputs: [untyped_table_port("input", true)],
+            outputs: [untyped_table_port("output", true)],
+            state: JsonMap::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl Operator for EmptyStateFailingOperator {
+    fn name(&self) -> &'static str {
+        "fail_after_state"
+    }
+
+    fn input_ports(&self) -> &[Port] {
+        &self.inputs
+    }
+
+    fn output_ports(&self) -> &[Port] {
+        &self.outputs
+    }
+
+    fn configuration(&self) -> JsonMap {
+        JsonMap::new()
+    }
+
+    async fn process(
+        &mut self,
+        _inputs: &BTreeMap<String, Batch>,
+        _context: &OperatorContext<'_>,
+    ) -> Result<BTreeMap<String, Batch>> {
+        self.state.insert("mutated".into(), json!(true));
+        Err(CalcFlowError::Operator {
+            node_id: "state".into(),
+            message: "fail_after_state".into(),
+        })
+    }
+
+    fn snapshot(&self) -> Result<Value> {
+        Ok(Value::Object(self.state.clone().into_iter().collect()))
+    }
+
+    fn restore(&mut self, state: &Value) -> Result<()> {
+        self.state = state
+            .as_object()
+            .ok_or_else(|| CalcFlowError::Format {
+                message: "state rollback fixture requires an object".into(),
+            })?
+            .clone()
+            .into_iter()
+            .collect();
+        Ok(())
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        self.state.clear();
+        Ok(())
+    }
+}
+
+pub fn stateful_plan(name: &str, probe: Arc<Probe>) -> Arc<ExecutionPlan> {
     Arc::new(
         PipelineBuilder::new(name)
             .unwrap()
@@ -332,7 +479,7 @@ pub fn partially_failing_reset_plan(
     name: &str,
     first_probe: Arc<Probe>,
     second_probe: Arc<Probe>,
-) -> Arc<calc_flow::ExecutionPlan> {
+) -> Arc<ExecutionPlan> {
     Arc::new(
         PipelineBuilder::new(name)
             .unwrap()

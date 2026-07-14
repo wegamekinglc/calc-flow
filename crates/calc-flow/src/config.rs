@@ -533,7 +533,7 @@ fn validate_operator(
                     "invalid_operator",
                     "SQL requires a query and at least one alias",
                 ));
-            } else if let Err(error) = crate::validate_select_query(query) {
+            } else if let Err(error) = crate::expression::validate_select_query(query) {
                 issues.push(issue(&base, "invalid_operator", error.to_string()));
             }
             let unique = aliases.iter().collect::<BTreeSet<_>>();

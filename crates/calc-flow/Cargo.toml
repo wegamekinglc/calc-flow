@@ -28,7 +28,12 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 proptest.workspace = true
+
+[[bench]]
+name = "core"
+harness = false
 
 [lints]
 workspace = true

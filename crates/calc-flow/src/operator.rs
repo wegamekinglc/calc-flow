@@ -11,7 +11,8 @@ use serde_json::{Value, json};
 
 use crate::{
     Batch, BatchKind, CalcFlowError, DataFusionRuntime, JsonMap, Result, RunContext, UdfReference,
-    json::validate_portable_identifier, sql_projection, validate_select_query,
+    expression::{sql_projection, validate_select_query},
+    json::validate_portable_identifier,
 };
 
 #[derive(Clone, Debug)]
