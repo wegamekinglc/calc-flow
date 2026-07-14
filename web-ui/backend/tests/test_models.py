@@ -46,7 +46,7 @@ def _project() -> dict[str, object]:
     }
 
 
-def test_project_create_request_delegates_complete_validation_to_rust() -> None:
+def test_project_create_request_uses_rust_structural_validation_only() -> None:
     request = ProjectCreateRequest.model_validate(_project())
     copied = request.to_project()
     copied.root["name"] = "Changed"

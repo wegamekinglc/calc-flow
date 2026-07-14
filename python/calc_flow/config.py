@@ -83,6 +83,27 @@ def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object
     return result
 
 
+def _openapi_project_schema(component_name: str) -> dict[str, Any]:
+    reference_prefix = f"#/components/schemas/{component_name}/$defs/"
+
+    def rewrite_references(value: object) -> object:
+        if type(value) is dict:
+            rewritten = {key: rewrite_references(item) for key, item in value.items()}
+            reference = rewritten.get("$ref")
+            if isinstance(reference, str) and reference.startswith("#/$defs/"):
+                rewritten["$ref"] = reference_prefix + reference.removeprefix(
+                    "#/$defs/"
+                )
+            return rewritten
+        if type(value) is list:
+            return [rewrite_references(item) for item in value]
+        return value
+
+    schema = rewrite_references(json.loads(_native.project_json_schema()))
+    assert isinstance(schema, dict)
+    return schema
+
+
 class ProjectDocument(RootModel[dict[str, JSONValue]]):
     @model_validator(mode="before")
     @classmethod
@@ -143,7 +164,7 @@ class ProjectDocument(RootModel[dict[str, JSONValue]]):
         cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
     ) -> dict[str, Any]:
         del core_schema, handler
-        return json.loads(_native.project_json_schema())
+        return _openapi_project_schema(cls.__name__)
 
     @classmethod
     def model_json_schema(cls, *args: object, **kwargs: object) -> dict[str, Any]:

@@ -7,7 +7,7 @@ from types import MappingProxyType
 import pytest
 from pydantic import ValidationError
 
-from calc_flow import PipelineBuilder, ProjectDocument, Runtime
+from calc_flow import PipelineBuilder, ProjectDocument, Runtime, project_json_schema
 
 
 def _minimal_project() -> dict[str, object]:
@@ -16,6 +16,7 @@ def _minimal_project() -> dict[str, object]:
 
 def test_project_document_delegates_schema_and_rust_defaults() -> None:
     schema = ProjectDocument.model_json_schema()
+    assert schema == json.loads(project_json_schema())
     assert schema["title"] == "Calc Flow Project V2"
     assert schema["properties"]["format_version"]["const"] == 2
 

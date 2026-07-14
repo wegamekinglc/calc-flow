@@ -137,18 +137,66 @@ def test_openapi_contains_only_v2_routes_and_exact_rust_schema(tmp_path) -> None
             return [without_none_defaults(item) for item in value]
         return value
 
+    def resolve_json_pointer(document: object, pointer: str) -> object:
+        assert pointer.startswith("#/")
+        current = document
+        for encoded_part in pointer[2:].split("/"):
+            part = encoded_part.replace("~1", "/").replace("~0", "~")
+            if isinstance(current, dict):
+                current = current[part]
+            else:
+                assert isinstance(current, list)
+                current = current[int(part)]
+        return current
+
+    def schema_references(value: object):
+        if isinstance(value, dict):
+            reference = value.get("$ref")
+            if isinstance(reference, str):
+                yield reference
+            for item in value.values():
+                yield from schema_references(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from schema_references(item)
+
+    def normalize_component_references(value: object, component_name: str) -> object:
+        if isinstance(value, dict):
+            normalized = {
+                key: normalize_component_references(item, component_name)
+                for key, item in value.items()
+            }
+            reference = normalized.get("$ref")
+            component_prefix = f"#/components/schemas/{component_name}/$defs/"
+            if isinstance(reference, str) and reference.startswith(component_prefix):
+                normalized["$ref"] = "#/$defs/" + reference.removeprefix(
+                    component_prefix
+                )
+            return normalized
+        if isinstance(value, list):
+            return [
+                normalize_component_references(item, component_name) for item in value
+            ]
+        return value
+
     for component_name in ("ProjectCreateRequest", "ProjectDocument"):
         component = openapi["components"]["schemas"][component_name]
-        assert component["properties"] == schema["properties"]
+        assert (
+            normalize_component_references(component["properties"], component_name)
+            == schema["properties"]
+        )
         assert component["required"] == schema["required"]
         assert component["additionalProperties"] is False
         assert component["$defs"].keys() == schema["$defs"].keys()
-        assert without_none_defaults(component["$defs"]) == without_none_defaults(
-            schema["$defs"]
-        )
-        assert (
-            component["$defs"]["NodeSpec"]["properties"]["operator"]["$ref"]
-            == "#/$defs/OperatorSpec"
+        assert without_none_defaults(
+            normalize_component_references(component["$defs"], component_name)
+        ) == without_none_defaults(schema["$defs"])
+        references = tuple(schema_references(component))
+        assert references
+        for reference in references:
+            assert resolve_json_pointer(openapi, reference)
+        assert component["$defs"]["NodeSpec"]["properties"]["operator"]["$ref"] == (
+            f"#/components/schemas/{component_name}/$defs/OperatorSpec"
         )
         assert "JSONValue" not in json.dumps(component)
 
