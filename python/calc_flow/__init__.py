@@ -12,8 +12,10 @@ from calc_flow.errors import (
 )
 
 __version__ = "2.0.0a1"
+Batch = _native.Batch
 
 __all__ = [
+    "Batch",
     "CalcFlowError",
     "CancelledError",
     "CheckpointError",
