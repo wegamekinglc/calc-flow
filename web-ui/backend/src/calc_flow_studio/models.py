@@ -1,11 +1,41 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal, Self
+from typing import Literal
 
-from calc_flow import ProjectDocument, Runtime
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from calc_flow import ProjectDocument
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+type JSONValue = (
+    None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
+)
+_MAX_JSON_DEPTH = 32
+
+
+def _copy_json_value(value: object, *, depth: int = 0) -> JSONValue:
+    if depth > _MAX_JSON_DEPTH:
+        raise ValueError(
+            f"transport value exceeds the maximum JSON depth of {_MAX_JSON_DEPTH}"
+        )
+    if value is None or type(value) in {bool, int, str}:
+        return value  # type: ignore[return-value]
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError("transport JSON numbers must be finite")
+        return value
+    if type(value) is list:
+        return [_copy_json_value(item, depth=depth + 1) for item in value]
+    if type(value) is dict:
+        if not all(type(key) is str for key in value):
+            raise ValueError("transport JSON object keys must be strings")
+        return {
+            key: _copy_json_value(item, depth=depth + 1) for key, item in value.items()
+        }
+    raise ValueError(
+        f"transport contains a non-JSON value of type {type(value).__name__}"
+    )
 
 
 class StrictModel(BaseModel):
@@ -23,8 +53,13 @@ class RunStatus(StrEnum):
 
 class InputPayload(StrictModel):
     format: Literal["records", "columns", "arrow_ipc"]
-    data: object
+    data: JSONValue
     source_id: str | None = None
+
+    @field_validator("data", mode="before")
+    @classmethod
+    def copy_data(cls, value: object) -> JSONValue:
+        return _copy_json_value(value)
 
 
 class RunOptions(StrictModel):
@@ -41,17 +76,6 @@ class RunRequest(StrictModel):
 
 
 class ProjectCreateRequest(ProjectDocument):
-    @model_validator(mode="after")
-    def validate_complete_project(self) -> Self:
-        report = Runtime().validation_report(self.canonical_json())
-        if not report["valid"]:
-            issues = report.get("issues", [])
-            details = "; ".join(
-                str(issue.get("message", "invalid project")) for issue in issues
-            )
-            raise ValueError(details or "invalid project")
-        return self
-
     def to_project(self) -> ProjectDocument:
         return ProjectDocument.model_validate(self.root)
 
@@ -69,9 +93,14 @@ class CheckpointSummary(StrictModel):
     compatible: bool | None = None
     pipeline_fingerprint: str | None = None
     sequence: int | None = None
-    source_cursor: object = None
+    source_cursor: JSONValue = None
     created_at: datetime | None = None
     state_nodes: tuple[str, ...] = ()
+
+    @field_validator("source_cursor", mode="before")
+    @classmethod
+    def copy_source_cursor(cls, value: object) -> JSONValue:
+        return _copy_json_value(value)
 
 
 class RunEvent(StrictModel):
@@ -89,4 +118,9 @@ class RunResponse(StrictModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     error: str | None = None
-    result: dict[str, object] | None = None
+    result: dict[str, JSONValue] | None = None
+
+    @field_validator("result", mode="before")
+    @classmethod
+    def copy_result(cls, value: object) -> JSONValue:
+        return _copy_json_value(value)

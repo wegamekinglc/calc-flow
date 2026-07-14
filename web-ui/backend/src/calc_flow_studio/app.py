@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import quote
 
 from calc_flow import (
     CalcFlowError,
@@ -38,6 +39,7 @@ from calc_flow_studio.models import (
 )
 
 API_PREFIX = "/api/v2"
+MAX_PROJECT_IMPORT_BYTES = 10 * 1024 * 1024
 
 
 class ProjectStoreProtocol(Protocol):
@@ -116,6 +118,38 @@ def _manager_unavailable() -> HTTPException:
     )
 
 
+async def _bounded_request_body(request: Request) -> bytes:
+    declared_lengths = request.headers.getlist("content-length")
+    if len(declared_lengths) > 1:
+        raise _http_error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "project import must contain at most one Content-Length header",
+        )
+    if declared_lengths:
+        try:
+            length = int(declared_lengths[0])
+        except ValueError as error:
+            raise _http_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "project import Content-Length must be an integer",
+            ) from error
+        if length < 0 or length > MAX_PROJECT_IMPORT_BYTES:
+            raise _http_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"project import exceeds the {MAX_PROJECT_IMPORT_BYTES} byte limit",
+            )
+
+    content = bytearray()
+    async for chunk in request.stream():
+        if len(content) + len(chunk) > MAX_PROJECT_IMPORT_BYTES:
+            raise _http_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"project import exceeds the {MAX_PROJECT_IMPORT_BYTES} byte limit",
+            )
+        content.extend(chunk)
+    return bytes(content)
+
+
 def _default_frontend_directory() -> Path | None:
     static = Path(__file__).with_name("static")
     return static if (static / "index.html").is_file() else None
@@ -155,6 +189,71 @@ def create_app(
         allow_headers=["Content-Type", "Last-Event-ID"],
     )
 
+    async def stored_project(project_id: str) -> ProjectDocument:
+        try:
+            return await projects.get(project_id)
+        except (CalcFlowError, KeyError) as error:
+            raise _native_error(error, operation="get") from error
+
+    async def runtime_validation_report(
+        project: ProjectDocument,
+    ) -> dict[str, object]:
+        try:
+            report = await run_in_threadpool(
+                selected_runtime.validation_report, project.canonical_json()
+            )
+        except CalcFlowError as error:
+            raise _native_error(error, operation="validate") from error
+        if type(report) is not dict:
+            raise _http_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "runtime returned an invalid project validation report",
+            )
+        try:
+            report = json.loads(
+                json.dumps(
+                    report,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+        except (RecursionError, TypeError, ValueError) as error:
+            raise _http_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "runtime returned an invalid project validation report",
+            ) from error
+        assert isinstance(report, dict)
+        valid = report.get("valid")
+        issues = report.get("issues", [])
+        if (
+            type(valid) is not bool
+            or type(issues) is not list
+            or any(type(issue) is not dict for issue in issues)
+            or (valid is True and bool(issues))
+        ):
+            raise _http_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "runtime returned an invalid project validation report",
+            )
+        return report
+
+    async def validate_for_storage(project: ProjectDocument) -> None:
+        report = await runtime_validation_report(project)
+        if report["valid"] is True:
+            return
+        issues = report["issues"]
+        assert isinstance(issues, list)
+        details = "; ".join(
+            str(issue.get("message", "invalid project"))
+            for issue in issues
+            if isinstance(issue, dict)
+        )
+        raise _http_error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            details or "project validation failed",
+        )
+
     @app.get(f"{API_PREFIX}/catalog")
     def get_catalog() -> list[dict[str, object]]:
         return selected_runtime.catalog()
@@ -181,6 +280,7 @@ def create_app(
     )
     async def create_project(request: ProjectCreateRequest) -> ProjectDocument:
         project = request.to_project()
+        await validate_for_storage(project)
         try:
             await projects.create(project)
         except CalcFlowError as error:
@@ -197,10 +297,11 @@ def create_app(
         format: str = Query(pattern="^(json|yaml)$"),
         replace: bool = False,
     ) -> ProjectDocument:
-        content = await request.body()
+        content = await _bounded_request_body(request)
         parser = import_project_json if format == "json" else import_project_yaml
         try:
             project = await run_in_threadpool(parser, content)
+            await validate_for_storage(project)
             if replace:
                 await projects.put(project)
             else:
@@ -212,10 +313,7 @@ def create_app(
 
     @app.get(f"{API_PREFIX}/projects/{{project_id}}", response_model=ProjectDocument)
     async def get_project(project_id: str) -> ProjectDocument:
-        try:
-            return await projects.get(project_id)
-        except (CalcFlowError, KeyError) as error:
-            raise _native_error(error, operation="get") from error
+        return await stored_project(project_id)
 
     @app.put(f"{API_PREFIX}/projects/{{project_id}}", response_model=ProjectDocument)
     async def put_project(
@@ -227,6 +325,7 @@ def create_app(
                 status.HTTP_409_CONFLICT,
                 "path project ID does not match the document",
             )
+        await validate_for_storage(project)
         try:
             await projects.put(project)
         except CalcFlowError as error:
@@ -249,45 +348,33 @@ def create_app(
         project_id: str,
         format: str = Query(default="json", pattern="^(json|yaml)$"),
     ) -> PlainTextResponse:
+        project = await stored_project(project_id)
+        serializer = export_project_json if format == "json" else export_project_yaml
         try:
-            project = await projects.get(project_id)
-            serializer = (
-                export_project_json if format == "json" else export_project_yaml
-            )
             document = await run_in_threadpool(serializer, project)
-        except (CalcFlowError, KeyError) as error:
-            operation = "get" if "not found" in str(error) else "export"
-            raise _native_error(error, operation=operation) from error
+        except CalcFlowError as error:
+            raise _native_error(error, operation="export") from error
         media_type = "application/json" if format == "json" else "application/yaml"
+        filename = quote(f"{project_id}.{format}", safe="")
         return PlainTextResponse(
             document,
             media_type=media_type,
-            headers={
-                "Content-Disposition": f'attachment; filename="{project_id}.{format}"'
-            },
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
         )
 
     @app.post(f"{API_PREFIX}/projects/{{project_id}}/validate")
     async def validate_stored_project(project_id: str) -> dict[str, object]:
-        try:
-            project = await projects.get(project_id)
-            report = await run_in_threadpool(
-                selected_runtime.validation_report, project.canonical_json()
-            )
-        except (CalcFlowError, KeyError) as error:
-            operation = "get" if "not found" in str(error) else "validate"
-            raise _native_error(error, operation=operation) from error
-        return report
+        project = await stored_project(project_id)
+        return await runtime_validation_report(project)
 
     async def compiled_project(project_id: str) -> tuple[ProjectDocument, object]:
+        project = await stored_project(project_id)
         try:
-            project = await projects.get(project_id)
             plan = await run_in_threadpool(
                 selected_runtime.compile_project, project.canonical_json()
             )
-        except (CalcFlowError, KeyError) as error:
-            operation = "get" if "not found" in str(error) else "compile"
-            raise _native_error(error, operation=operation) from error
+        except CalcFlowError as error:
+            raise _native_error(error, operation="compile") from error
         return project, plan
 
     async def checkpoint_summary(project_id: str) -> CheckpointSummary:
@@ -343,10 +430,7 @@ def create_app(
         status_code=status.HTTP_202_ACCEPTED,
     )
     async def create_run(project_id: str, request: RunRequest) -> RunResponse:
-        try:
-            project = await projects.get(project_id)
-        except (CalcFlowError, KeyError) as error:
-            raise _native_error(error, operation="get") from error
+        project = await stored_project(project_id)
         if run_manager is None:
             raise _manager_unavailable()
         try:

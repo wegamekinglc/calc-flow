@@ -66,27 +66,39 @@ fn parse_project(document: &str) -> PyResult<calc_flow::ProjectSpec> {
 }
 
 #[pyfunction]
-fn import_project_json(document: &[u8]) -> PyResult<String> {
-    let project = calc_flow::import_project_json(document).map_err(crate::error::to_py_err)?;
-    calc_flow::export_project_json(&project).map_err(crate::error::to_py_err)
+fn import_project_json(py: Python<'_>, document: &[u8]) -> PyResult<String> {
+    let document = document.to_vec();
+    py.detach(move || {
+        let project = calc_flow::import_project_json(&document).map_err(crate::error::to_py_err)?;
+        calc_flow::export_project_json(&project).map_err(crate::error::to_py_err)
+    })
 }
 
 #[pyfunction]
-fn import_project_yaml(document: &[u8]) -> PyResult<String> {
-    let project = calc_flow::import_project_yaml(document).map_err(crate::error::to_py_err)?;
-    calc_flow::export_project_json(&project).map_err(crate::error::to_py_err)
+fn import_project_yaml(py: Python<'_>, document: &[u8]) -> PyResult<String> {
+    let document = document.to_vec();
+    py.detach(move || {
+        let project = calc_flow::import_project_yaml(&document).map_err(crate::error::to_py_err)?;
+        calc_flow::export_project_json(&project).map_err(crate::error::to_py_err)
+    })
 }
 
 #[pyfunction]
-fn export_project_json(project_json: &str) -> PyResult<String> {
-    let project = parse_project(project_json)?;
-    calc_flow::export_project_json(&project).map_err(crate::error::to_py_err)
+fn export_project_json(py: Python<'_>, project_json: &str) -> PyResult<String> {
+    let project_json = project_json.to_owned();
+    py.detach(move || {
+        let project = parse_project(&project_json)?;
+        calc_flow::export_project_json(&project).map_err(crate::error::to_py_err)
+    })
 }
 
 #[pyfunction]
-fn export_project_yaml(project_json: &str) -> PyResult<String> {
-    let project = parse_project(project_json)?;
-    calc_flow::export_project_yaml(&project).map_err(crate::error::to_py_err)
+fn export_project_yaml(py: Python<'_>, project_json: &str) -> PyResult<String> {
+    let project_json = project_json.to_owned();
+    py.detach(move || {
+        let project = parse_project(&project_json)?;
+        calc_flow::export_project_yaml(&project).map_err(crate::error::to_py_err)
+    })
 }
 
 fn parse_checkpoint(document: &str) -> PyResult<calc_flow::Checkpoint> {
@@ -333,29 +345,34 @@ mod tests {
 
     #[test]
     fn native_project_transforms_use_bounded_strict_core_serialization() {
-        let project = project_json("portable");
-        let imported = import_project_json(project.as_bytes()).unwrap();
-        assert!(imported.ends_with('\n'));
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&imported).unwrap()["format_version"],
-            2
-        );
+        Python::initialize();
+        Python::attach(|py| {
+            let project = project_json("portable");
+            let imported = import_project_json(py, project.as_bytes()).unwrap();
+            assert!(imported.ends_with('\n'));
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&imported).unwrap()["format_version"],
+                2
+            );
 
-        let yaml = export_project_yaml(&project).unwrap();
-        assert!(yaml.contains("format_version: 2"));
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(
-                &import_project_yaml(yaml.as_bytes()).unwrap()
+            let yaml = export_project_yaml(py, &project).unwrap();
+            assert!(yaml.contains("format_version: 2"));
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(
+                    &import_project_yaml(py, yaml.as_bytes()).unwrap(),
+                )
+                .unwrap()["id"],
+                "portable"
+            );
+            assert!(
+                import_project_json(py, &vec![b'x'; calc_flow::MAX_PROJECT_DOCUMENT_BYTES + 1],)
+                    .is_err()
+            );
+            assert!(import_project_yaml(
+                py,
+                b"format_version: 2\nid: aliases\nname: &name aliases\ndescription: *name\npipeline: {name: p, nodes: []}\n"
             )
-            .unwrap()["id"],
-            "portable"
-        );
-        assert!(
-            import_project_json(&vec![b'x'; calc_flow::MAX_PROJECT_DOCUMENT_BYTES + 1]).is_err()
-        );
-        assert!(import_project_yaml(
-            b"format_version: 2\nid: aliases\nname: &name aliases\ndescription: *name\npipeline: {name: p, nodes: []}\n"
-        )
-        .is_err());
+            .is_err());
+        });
     }
 }

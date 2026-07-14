@@ -58,22 +58,6 @@ def test_project_create_request_delegates_complete_validation_to_rust() -> None:
     for invalid in (
         {**_project(), "format_version": 1},
         {**_project(), "unknown": True},
-        {
-            **_project(),
-            "pipeline": {
-                "name": "duplicate",
-                "nodes": [
-                    {
-                        "id": "same",
-                        "operator": {"kind": "expression", "expression": "b = a"},
-                    },
-                    {
-                        "id": "same",
-                        "operator": {"kind": "expression", "expression": "c = b"},
-                    },
-                ],
-            },
-        },
     ):
         with pytest.raises(ValidationError):
             ProjectCreateRequest.model_validate(invalid)
@@ -81,12 +65,23 @@ def test_project_create_request_delegates_complete_validation_to_rust() -> None:
     with pytest.raises(ValidationError):
         ProjectCreateRequest.model_validate({**_project(), "description": object()})
 
+    semantically_invalid = {
+        **_project(),
+        "pipeline": {"name": "empty", "nodes": []},
+    }
+    assert not ProjectCreateRequest.model_validate(semantically_invalid).root[
+        "pipeline"
+    ]["nodes"]
+
 
 def test_transport_models_are_strict_frozen_and_v2_only() -> None:
-    payload = InputPayload(format="records", data=[{"value": 1}], source_id="sample")
+    data = [{"value": [1]}]
+    payload = InputPayload(format="records", data=data, source_id="sample")
     request = RunRequest(inputs={"input": payload})
+    data[0]["value"].append(2)
 
     assert request.inputs["input"].format == "records"
+    assert request.inputs["input"].data == [{"value": [1]}]
     with pytest.raises(ValidationError):
         InputPayload(format="inline_json", data=[])
     with pytest.raises(ValidationError):
@@ -118,6 +113,7 @@ def test_run_options_enforce_preview_limits() -> None:
 
 
 def test_project_and_checkpoint_summaries_are_json_transport_values() -> None:
+    source_cursor = {"offsets": [10]}
     project = ProjectSummary(
         id="project_alpha", name="Alpha", description="A v2 project", node_count=1
     )
@@ -127,26 +123,50 @@ def test_project_and_checkpoint_summaries_are_json_transport_values() -> None:
         compatible=True,
         pipeline_fingerprint="fingerprint",
         sequence=2,
-        source_cursor={"offset": 10},
+        source_cursor=source_cursor,
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
         state_nodes=("counter",),
     )
+    source_cursor["offsets"].append(11)
 
     assert project.node_count == 1
-    assert checkpoint.model_dump(mode="json")["source_cursor"] == {"offset": 10}
+    assert checkpoint.model_dump(mode="json")["source_cursor"] == {"offsets": [10]}
     assert checkpoint.model_dump(mode="json")["created_at"] == "2026-01-01T00:00:00Z"
 
 
 def test_run_response_serializes_status_and_timestamps() -> None:
+    result = {"outputs": {"rows": [1]}}
     response = RunResponse(
         id="run",
         project_id="project_alpha",
         status=RunStatus.COMPLETED,
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
-        result={"outputs": {}},
+        result=result,
     )
+    result["outputs"]["rows"].append(2)
 
     data = response.model_dump(mode="json")
 
     assert data["status"] == "completed"
     assert data["created_at"] == "2026-01-01T00:00:00Z"
+    assert data["result"] == {"outputs": {"rows": [1]}}
+
+
+@pytest.mark.parametrize("invalid", [object(), float("nan"), float("inf")])
+def test_transport_json_values_reject_non_json_and_non_finite_values(
+    invalid: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        InputPayload(format="records", data={"value": invalid})
+    with pytest.raises(ValidationError):
+        CheckpointSummary(
+            pipeline_name="pipeline", exists=True, source_cursor={"value": invalid}
+        )
+    with pytest.raises(ValidationError):
+        RunResponse(
+            id="run",
+            project_id="project",
+            status=RunStatus.COMPLETED,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            result={"value": invalid},
+        )

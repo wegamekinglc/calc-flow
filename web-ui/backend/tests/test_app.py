@@ -10,11 +10,13 @@ import pytest
 from calc_flow import (
     FileCheckpointStore,
     FileProjectStore,
+    PipelineBuilder,
     ProjectDocument,
     Runtime,
     project_json_schema,
 )
 from fastapi.testclient import TestClient
+from starlette.requests import Request as StarletteRequest
 
 import calc_flow_studio.app as app_module
 from calc_flow_studio.app import API_PREFIX, create_app, validate_bind_host
@@ -124,6 +126,32 @@ def test_openapi_contains_only_v2_routes_and_exact_rust_schema(tmp_path) -> None
     assert schema["properties"]["format_version"]["const"] == 2
     assert "backend" not in json.dumps(schema).lower()
 
+    def without_none_defaults(value: object) -> object:
+        if isinstance(value, dict):
+            return {
+                key: without_none_defaults(item)
+                for key, item in value.items()
+                if not (key == "default" and item is None)
+            }
+        if isinstance(value, list):
+            return [without_none_defaults(item) for item in value]
+        return value
+
+    for component_name in ("ProjectCreateRequest", "ProjectDocument"):
+        component = openapi["components"]["schemas"][component_name]
+        assert component["properties"] == schema["properties"]
+        assert component["required"] == schema["required"]
+        assert component["additionalProperties"] is False
+        assert component["$defs"].keys() == schema["$defs"].keys()
+        assert without_none_defaults(component["$defs"]) == without_none_defaults(
+            schema["$defs"]
+        )
+        assert (
+            component["$defs"]["NodeSpec"]["properties"]["operator"]["$ref"]
+            == "#/$defs/OperatorSpec"
+        )
+        assert "JSONValue" not in json.dumps(component)
+
 
 def test_catalog_is_exact_runtime_metadata_and_validation_uses_canonical_json(
     tmp_path,
@@ -151,8 +179,103 @@ def test_catalog_is_exact_runtime_metadata_and_validation_uses_canonical_json(
         "issues": [],
         "fingerprint": "fake",
     }
-    assert len(runtime.documents) == 1
-    assert json.loads(runtime.documents[0])["id"] == "project_alpha"
+    assert len(runtime.documents) == 2
+    assert [json.loads(document)["id"] for document in runtime.documents] == [
+        "project_alpha",
+        "project_alpha",
+    ]
+
+
+def test_mutating_routes_use_the_injected_runtime_before_store_mutation(
+    tmp_path,
+) -> None:
+    runtime = Runtime()
+    runtime.register_provider("test", "identity", "1", lambda batch, _options: batch)
+    runtime.register_scalar_udf(
+        provider="python",
+        name="identity",
+        version="1",
+        input_types=("int64",),
+        return_type="int64",
+        volatility="immutable",
+        function=lambda value: value,
+    )
+    provider_project = (
+        PipelineBuilder("provider_project")
+        .external("calc", "test", "identity", "1", {})
+        .project
+    )
+    udf_project = (
+        PipelineBuilder("udf_project")
+        .expression(
+            "calc",
+            "result = identity(value)",
+            udfs=(("python", "identity", "1"),),
+        )
+        .project
+    )
+    invalid_project = {
+        **_project("invalid_project"),
+        "pipeline": {"name": "empty", "nodes": []},
+    }
+
+    with _client(tmp_path, runtime=runtime) as client:
+        created = _create(client, provider_project)
+        imported = client.post(
+            f"{API_PREFIX}/projects/import?format=json",
+            content=json.dumps(udf_project),
+        )
+        rejected_create = _create(client, invalid_project)
+        rejected_put = client.put(
+            f"{API_PREFIX}/projects/invalid_project", json=invalid_project
+        )
+        rejected_import = client.post(
+            f"{API_PREFIX}/projects/import?format=json",
+            content=json.dumps({**invalid_project, "id": "unsafe\r\nid"}),
+        )
+        listed = client.get(f"{API_PREFIX}/projects")
+
+    assert created.status_code == 201
+    assert imported.status_code == 201
+    assert rejected_create.status_code == 422
+    assert rejected_put.status_code == 422
+    assert rejected_import.status_code == 422
+    assert [project["id"] for project in listed.json()] == [
+        "provider_project",
+        "udf_project",
+    ]
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        [],
+        {"valid": "yes", "issues": []},
+        {"valid": False, "issues": object()},
+        {"valid": False, "issues": [object()]},
+        {"valid": True, "issues": [], "fingerprint": float("nan")},
+        {"valid": True, "issues": [{"message": "contradictory"}]},
+    ],
+)
+def test_mutating_routes_reject_malformed_runtime_validation_reports(
+    tmp_path, report
+) -> None:
+    class MalformedRuntime:
+        def validation_report(self, project_json: str):
+            assert json.loads(project_json)["id"] == "project_alpha"
+            return report
+
+    app = create_app(
+        project_directory=tmp_path / "projects",
+        checkpoint_directory=tmp_path / "checkpoints",
+        runtime=MalformedRuntime(),
+    )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = _create(client)
+        listed = client.get(f"{API_PREFIX}/projects")
+
+    assert response.status_code == 422
+    assert listed.json() == []
 
 
 def test_project_crud_preserves_client_ids_sorting_and_request_values(tmp_path) -> None:
@@ -272,6 +395,8 @@ def test_import_export_use_bounded_strict_rust_transforms_and_conflicts(
             content=b"x" * (10 * 1024 * 1024 + 1),
         )
         missing = client.get(f"{API_PREFIX}/projects/missing/export")
+        missing_validation = client.post(f"{API_PREFIX}/projects/missing/validate")
+        missing_checkpoint = client.get(f"{API_PREFIX}/projects/missing/checkpoint")
 
     assert imported.status_code == 201
     assert conflict.status_code == 409
@@ -289,6 +414,117 @@ def test_import_export_use_bounded_strict_rust_transforms_and_conflicts(
     assert alias.status_code == 422
     assert oversized.status_code == 422
     assert missing.status_code == 404
+    assert missing_validation.status_code == 404
+    assert missing_checkpoint.status_code == 404
+
+
+def test_import_streams_with_early_and_running_size_limits(
+    tmp_path, monkeypatch
+) -> None:
+    maximum = 10 * 1024 * 1024
+    parser_calls: list[int] = []
+
+    def tracking_parser(document: str | bytes) -> ProjectDocument:
+        parser_calls.append(len(document))
+        return ProjectDocument.model_validate(_project())
+
+    monkeypatch.setattr(app_module, "import_project_json", tracking_parser)
+    with _client(tmp_path) as client:
+        declared_oversize = client.post(
+            f"{API_PREFIX}/projects/import?format=json",
+            content=json.dumps(_project()),
+            headers={"Content-Length": str(maximum + 1)},
+        )
+
+        def chunks():
+            yield b" " * maximum
+            yield b"x"
+
+        streamed_oversize = client.post(
+            f"{API_PREFIX}/projects/import?format=json", content=chunks()
+        )
+        malformed_length = client.post(
+            f"{API_PREFIX}/projects/import?format=json",
+            content=b"",
+            headers={"Content-Length": "not-an-integer"},
+        )
+        negative_length = client.post(
+            f"{API_PREFIX}/projects/import?format=json",
+            content=b"",
+            headers={"Content-Length": "-1"},
+        )
+        duplicate_length = client.post(
+            f"{API_PREFIX}/projects/import?format=json",
+            content=b"",
+            headers=[("Content-Length", "0"), ("Content-Length", "1")],
+        )
+
+        def exact_chunks():
+            yield b"x" * maximum
+
+        exact_limit = client.post(
+            f"{API_PREFIX}/projects/import?format=json", content=exact_chunks()
+        )
+
+    assert declared_oversize.status_code == 422
+    assert streamed_oversize.status_code == 422
+    assert malformed_length.status_code == 422
+    assert negative_length.status_code == 422
+    assert duplicate_length.status_code == 422
+    assert exact_limit.status_code == 201
+    assert parser_calls == [maximum]
+
+
+def test_import_never_uses_request_body_buffering(tmp_path, monkeypatch) -> None:
+    async def fail_body(_: StarletteRequest) -> bytes:
+        raise AssertionError("Request.body() buffered the project import")
+
+    monkeypatch.setattr(StarletteRequest, "body", fail_body)
+    with _client(tmp_path) as client:
+        imported = client.post(
+            f"{API_PREFIX}/projects/import?format=json",
+            content=json.dumps(_project()),
+        )
+
+    assert imported.status_code == 201
+
+
+def test_export_content_disposition_encodes_untrusted_project_ids(tmp_path) -> None:
+    class UntrustedStore:
+        async def get(self, project_id: str) -> ProjectDocument:
+            return ProjectDocument.model_validate(_project(project_id))
+
+    app = create_app(
+        project_store=UntrustedStore(),
+        checkpoint_directory=tmp_path / "checkpoints",
+    )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        exported = client.get(
+            f"{API_PREFIX}/projects/unsafe%0D%0AX-Injected%3Ayes/export"
+        )
+
+    assert exported.status_code == 200
+    disposition = exported.headers["content-disposition"]
+    assert disposition.startswith("attachment; filename*=UTF-8''")
+    assert "%0D%0A" in disposition
+    assert "\r" not in disposition
+    assert "\n" not in disposition
+
+
+def test_injected_key_error_maps_missing_project_dependencies_to_404(tmp_path) -> None:
+    class MissingStore:
+        async def get(self, project_id: str) -> ProjectDocument:
+            raise KeyError(project_id)
+
+    with _client(tmp_path, project_store=MissingStore()) as client:
+        responses = (
+            client.get(f"{API_PREFIX}/projects/missing/export"),
+            client.post(f"{API_PREFIX}/projects/missing/validate"),
+            client.get(f"{API_PREFIX}/projects/missing/checkpoint"),
+            client.delete(f"{API_PREFIX}/projects/missing/checkpoint"),
+        )
+
+    assert [response.status_code for response in responses] == [404, 404, 404, 404]
 
 
 def test_import_and_export_threadpool_only_pure_rust_transformations(

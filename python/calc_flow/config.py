@@ -4,7 +4,8 @@ import json
 import math
 from typing import Any
 
-from pydantic import RootModel, ValidationError, model_validator
+from pydantic import GetJsonSchemaHandler, RootModel, ValidationError, model_validator
+from pydantic_core import CoreSchema
 
 from calc_flow import _native
 
@@ -136,6 +137,13 @@ class ProjectDocument(RootModel[dict[str, JSONValue]]):
             by_alias=by_alias,
             by_name=by_name,
         )
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> dict[str, Any]:
+        del core_schema, handler
+        return json.loads(_native.project_json_schema())
 
     @classmethod
     def model_json_schema(cls, *args: object, **kwargs: object) -> dict[str, Any]:
