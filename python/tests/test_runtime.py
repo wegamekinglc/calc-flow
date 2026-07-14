@@ -34,6 +34,48 @@ def _plan(name: str = "stream"):
     return PipelineBuilder(name).expression("calc", "result = value + 1").compile()
 
 
+def test_registration_snapshot_is_success_only_and_defensive() -> None:
+    runtime = Runtime()
+
+    def provider(batch: Batch, _options: dict[str, object]) -> Batch:
+        return batch
+
+    def identity(value: pa.Array) -> pa.Array:
+        return value
+
+    runtime.register_provider("test", "identity", "1", provider)
+    runtime.register_scalar_udf(
+        provider="python",
+        name="identity",
+        version="1",
+        input_types=("int64",),
+        return_type="int64",
+        volatility="immutable",
+        function=identity,
+    )
+    snapshot = runtime._registration_snapshot()
+    assert [(record["kind"], record["name"]) for record in snapshot] == [
+        ("provider", "identity"),
+        ("scalar_udf", "identity"),
+    ]
+    snapshot[0]["name"] = "mutated"
+    assert runtime._registration_snapshot()[0]["name"] == "identity"
+
+    with pytest.raises(ConfigError, match="duplicate"):
+        runtime.register_provider("test", "identity", "1", provider)
+    with pytest.raises(ConfigError, match="duplicate"):
+        runtime.register_scalar_udf(
+            provider="python",
+            name="identity",
+            version="1",
+            input_types=("int64",),
+            return_type="int64",
+            volatility="immutable",
+            function=identity,
+        )
+    assert len(runtime._registration_snapshot()) == 2
+
+
 def test_execution_plan_lifecycle_is_async_defensive_and_guarded() -> None:
     plan = _plan("lifecycle")
 

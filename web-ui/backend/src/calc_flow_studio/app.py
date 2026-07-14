@@ -163,7 +163,13 @@ def create_app(
     projects = project_store or FileProjectStore(project_directory)
     checkpoints = checkpoint_store or FileCheckpointStore(checkpoint_directory)
     selected_runtime = runtime or Runtime()
-    selected_run_manager = run_manager if run_manager is not None else RunManager()
+    selected_run_manager = (
+        run_manager
+        if run_manager is not None
+        else RunManager(
+            runtime=selected_runtime if isinstance(selected_runtime, Runtime) else None
+        )
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:

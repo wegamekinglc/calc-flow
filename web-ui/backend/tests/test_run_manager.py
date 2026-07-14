@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import base64
 import json
-import pickle
 import threading
 import time
 from datetime import date
 from decimal import Decimal
 from enum import Enum
 
+import cloudpickle
 import pyarrow as pa
 import pytest
-from calc_flow import ProjectDocument
+from calc_flow import ProjectDocument, Runtime
 
 import calc_flow_studio.run_manager as run_manager_module
 from calc_flow_studio.models import InputPayload, RunOptions, RunRequest, RunStatus
@@ -22,6 +22,7 @@ from calc_flow_studio.run_manager import (
     _json_safe,
     _register_referenced_builtins,
     _result_payload,
+    _selected_registrations,
     _serialize_worker_payload,
     prepare_run,
 )
@@ -97,6 +98,21 @@ def _two_input_project(*, run_options: dict[str, int] | None = None) -> ProjectD
     )
 
 
+def _udf_project() -> ProjectDocument:
+    project = _project()
+    operator = project.root["pipeline"]["nodes"][0]["operator"]
+    operator["expression"] = "result = identity(value)"
+    operator["udfs"] = [
+        {
+            "kind": "data_fusion_scalar",
+            "provider": "python",
+            "name": "identity",
+            "version": "1",
+        }
+    ]
+    return project
+
+
 def _ipc_data(*, file: bool = False) -> str:
     sink = pa.BufferOutputStream()
     table = pa.table({"value": [1, 2]})
@@ -139,7 +155,7 @@ def test_prepare_run_decodes_request_table_formats(payload: InputPayload) -> Non
 
     table, metadata = prepared["input"]
     assert table.to_pylist() == [{"value": 1}, {"value": 2}]
-    assert metadata == {"source_id": "input"}
+    assert metadata == {"source_id": "sample"}
     assert options == RunOptions()
 
 
@@ -152,6 +168,81 @@ def test_prepare_run_accepts_an_empty_columns_mapping() -> None:
     table, _ = prepared["input"]
     assert table.num_rows == 0
     assert table.num_columns == 0
+
+
+@pytest.mark.parametrize("request_override", [False, True])
+def test_empty_records_preserve_the_exact_declared_schema(
+    request_override: bool,
+) -> None:
+    ports = [
+        {
+            "name": "input",
+            "kind": "table",
+            "required": True,
+            "schema": [{"name": "value", "data_type": "int64", "nullable": False}],
+        }
+    ]
+    project = _project(sources=[_source(data=[])], input_ports=ports)
+    request = (
+        RunRequest(inputs={"input": InputPayload(format="records", data=[])})
+        if request_override
+        else RunRequest()
+    )
+
+    prepared, _ = prepare_run(project, request)
+
+    table, _ = prepared["input"]
+    assert table.num_rows == 0
+    assert table.schema == pa.schema([pa.field("value", pa.int64(), nullable=False)])
+
+
+def test_schema_conversion_errors_are_stable_run_manager_errors() -> None:
+    project = _project(
+        input_ports=[
+            {
+                "name": "input",
+                "kind": "table",
+                "required": True,
+                "schema": [{"name": "value", "data_type": "int64", "nullable": True}],
+            }
+        ]
+    )
+    with pytest.raises(RunManagerError, match="declared Arrow schema"):
+        prepare_run(
+            project,
+            RunRequest(
+                inputs={
+                    "input": InputPayload(
+                        format="records", data=[{"value": {"nested": 1}}]
+                    )
+                }
+            ),
+        )
+
+
+def test_source_metadata_is_portable_and_included_in_exact_byte_limits() -> None:
+    source_id = "a" * 64
+    metadata_size = len(
+        json.dumps({"source_id": source_id}, separators=(",", ":")).encode()
+    )
+    exact_limit = len(b"[]") + metadata_size
+    request = RunRequest(
+        inputs={"input": InputPayload(format="records", data=[], source_id=source_id)},
+        options=RunOptions(max_input_bytes=exact_limit),
+    )
+    prepared, _ = prepare_run(_project(), request)
+    assert prepared["input"][1] == {"source_id": source_id}
+    with pytest.raises(RunManagerError, match="combined encoded inputs"):
+        prepare_run(
+            _project(),
+            request.model_copy(
+                update={"options": RunOptions(max_input_bytes=exact_limit - 1)}
+            ),
+        )
+
+    unsafe = _project(sources=[_source(source_id="a" * 65, data=[])])
+    with pytest.raises(RunManagerError, match="source ID"):
+        prepare_run(unsafe, RunRequest())
 
 
 @pytest.mark.parametrize(
@@ -244,6 +335,10 @@ def test_prepare_run_enforces_combined_encoded_and_decoded_bytes() -> None:
     encoded = len(json.dumps(left, separators=(",", ":")).encode()) + len(
         json.dumps(right, separators=(",", ":")).encode()
     )
+    encoded += sum(
+        len(json.dumps({"source_id": source_id}, separators=(",", ":")).encode())
+        for source_id in ("left", "right")
+    )
     request = RunRequest(
         inputs={
             "left_input": InputPayload(format="records", data=left),
@@ -261,20 +356,27 @@ def test_prepare_run_enforces_combined_encoded_and_decoded_bytes() -> None:
         )
 
     expanding = InputPayload(format="columns", data={"value": [1, 2, 3, 4]})
+    sample_metadata = len(
+        json.dumps({"source_id": "sample"}, separators=(",", ":")).encode()
+    )
     exact_decoded, _ = prepare_run(
         _project(),
         RunRequest(
             inputs={"input": expanding},
-            options=RunOptions(max_input_bytes=32),
+            options=RunOptions(max_input_bytes=32 + sample_metadata),
         ),
     )
     assert exact_decoded["input"][0].nbytes == 32
+    two_input_metadata = sum(
+        len(json.dumps({"source_id": source_id}, separators=(",", ":")).encode())
+        for source_id in ("left", "right")
+    )
     with pytest.raises(RunManagerError, match="combined decoded inputs"):
         prepare_run(
             _two_input_project(),
             RunRequest(
                 inputs={"left_input": expanding, "right_input": expanding},
-                options=RunOptions(max_input_bytes=40),
+                options=RunOptions(max_input_bytes=63 + two_input_metadata),
             ),
         )
 
@@ -336,14 +438,35 @@ def test_prepare_run_rejects_array_external_inputs_before_worker_creation() -> N
 
 
 def test_parent_payload_contains_no_calc_flow_extension_objects() -> None:
-    project = _project()
+    runtime = Runtime()
+
+    def identity(value: pa.Array) -> pa.Array:
+        return value
+
+    runtime.register_scalar_udf(
+        provider="python",
+        name="identity",
+        version="1",
+        input_types=("int64",),
+        return_type="int64",
+        volatility="immutable",
+        function=identity,
+    )
+    project = _udf_project()
     prepared, options = prepare_run(project, RunRequest())
-    payload = _serialize_worker_payload(project, prepared, options)
-    project_json, serialized_inputs, options_data = pickle.loads(payload)
+    registrations = _selected_registrations(
+        project.canonical_json(), runtime._registration_snapshot()
+    )
+    payload = _serialize_worker_payload(project, prepared, options, registrations)
+    project_json, serialized_inputs, options_data, serialized_registrations = (
+        cloudpickle.loads(payload)
+    )
 
     assert isinstance(project_json, str)
     assert isinstance(options_data, dict)
     assert all(isinstance(value[0], pa.Table) for value in serialized_inputs.values())
+    assert len(serialized_registrations) == 1
+    assert serialized_registrations[0]["name"] == "identity"
 
     def contains_pyo3(value: object) -> bool:
         module = type(value).__module__
@@ -357,7 +480,43 @@ def test_parent_payload_contains_no_calc_flow_extension_objects() -> None:
             return any(contains_pyo3(item) for item in value)
         return False
 
-    assert contains_pyo3((project_json, serialized_inputs, options_data)) is False
+    assert (
+        contains_pyo3(
+            (
+                project_json,
+                serialized_inputs,
+                options_data,
+                serialized_registrations,
+            )
+        )
+        is False
+    )
+
+
+def test_worker_payload_rejects_a_registration_that_captures_runtime() -> None:
+    runtime = Runtime()
+
+    def identity(value: pa.Array) -> pa.Array:
+        runtime.catalog()
+        return value
+
+    runtime.register_scalar_udf(
+        provider="python",
+        name="identity",
+        version="1",
+        input_types=("int64",),
+        return_type="int64",
+        volatility="immutable",
+        function=identity,
+    )
+    project = _udf_project()
+    prepared, options = prepare_run(project, RunRequest())
+    registrations = _selected_registrations(
+        project.canonical_json(), runtime._registration_snapshot()
+    )
+
+    with pytest.raises(RunManagerError, match="trusted registrations"):
+        _serialize_worker_payload(project, prepared, options, registrations)
 
 
 def test_worker_registers_only_exact_referenced_builtin_providers(
@@ -403,6 +562,65 @@ def test_worker_registers_only_exact_referenced_builtin_providers(
     _register_referenced_builtins(runtime, project_json)  # type: ignore[arg-type]
 
     assert calls == [("numpy", runtime)]
+    tracked = (
+        {
+            "kind": "provider",
+            "provider": "numpy",
+            "name": "expression",
+            "version": "1",
+            "callback": lambda batch, _options: batch,
+        },
+    )
+    selected = _selected_registrations(project_json, tracked)
+    calls.clear()
+
+    _register_referenced_builtins(  # type: ignore[arg-type]
+        runtime, project_json, selected
+    )
+
+    assert len(selected) == 1
+    assert calls == []
+
+
+@pytest.mark.parametrize("use_processes", [False, True])
+def test_worker_executes_only_the_referenced_trusted_udf(
+    use_processes: bool,
+) -> None:
+    runtime = Runtime()
+
+    def identity(value: pa.Array) -> pa.Array:
+        return value
+
+    def unreferenced(value: pa.Array) -> pa.Array:
+        raise AssertionError("unreferenced UDF was transported")
+
+    for name, function in (("identity", identity), ("unreferenced", unreferenced)):
+        runtime.register_scalar_udf(
+            provider="python",
+            name=name,
+            version="1",
+            input_types=("int64",),
+            return_type="int64",
+            volatility="immutable",
+            function=function,
+        )
+    selected = _selected_registrations(
+        _udf_project().canonical_json(), runtime._registration_snapshot()
+    )
+    assert [registration["name"] for registration in selected] == ["identity"]
+    manager = RunManager(runtime=runtime, use_processes=use_processes)
+    run = manager.submit(
+        _udf_project(),
+        RunRequest(
+            inputs={"input": InputPayload(format="records", data=[{"value": 7}])}
+        ),
+    )
+
+    assert _wait(manager, run.id, timeout=20) is RunStatus.COMPLETED
+    assert manager.get(run.id).result["outputs"]["output"]["rows"] == [
+        {"value": 7, "result": 7}
+    ]
+    manager.shutdown()
 
 
 def test_thread_worker_executes_rust_plan_with_bounded_result() -> None:
@@ -664,6 +882,69 @@ def test_shutdown_handles_queue_closed_after_monitor_poll() -> None:
 
     assert manager.get(run.id).status is RunStatus.CANCELLED
     assert manager._runs[run.id].monitor is None
+
+
+@pytest.mark.parametrize("action", ["cancel", "shutdown"])
+def test_cancel_or_shutdown_cannot_interleave_before_monitor_start(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    action_done = threading.Event()
+    real_thread = threading.Thread
+
+    class GatedMonitor:
+        def __init__(self, **kwargs: object) -> None:
+            self._thread = real_thread(**kwargs)
+            self._started = False
+
+        def start(self) -> None:
+            entered.set()
+            release.wait(timeout=2)
+            self._thread.start()
+            self._started = True
+
+        def join(self, *, timeout: float) -> None:
+            if self._started:
+                self._thread.join(timeout=timeout)
+
+    manager = RunManager()
+    monkeypatch.setattr(run_manager_module, "Thread", GatedMonitor)
+    submit_outcome: list[object] = []
+
+    def submit() -> None:
+        try:
+            submit_outcome.append(manager.submit(_project(), RunRequest()))
+        except BaseException as error:
+            submit_outcome.append(error)
+
+    submitting = threading.Thread(target=submit)
+    submitting.start()
+    assert entered.wait(timeout=2)
+    run_id = next(iter(manager._runs))
+
+    def act() -> None:
+        if action == "cancel":
+            manager.cancel(run_id)
+        else:
+            manager.shutdown()
+        action_done.set()
+
+    acting = threading.Thread(target=act)
+    acting.start()
+    assert action_done.wait(timeout=0.1) is False
+    release.set()
+    submitting.join(timeout=5)
+    acting.join(timeout=5)
+
+    assert action_done.is_set()
+    assert not any(isinstance(item, BaseException) for item in submit_outcome)
+    assert manager.get(run_id).status is RunStatus.CANCELLED
+    assert manager._runs[run_id].worker is None
+    assert manager._runs[run_id].output_queue is None
+    assert manager._runs[run_id].monitor is None
+    manager.shutdown()
 
 
 def test_shutdown_during_preparation_never_starts_a_late_worker(

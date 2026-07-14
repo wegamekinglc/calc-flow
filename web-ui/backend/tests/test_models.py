@@ -91,6 +91,14 @@ def test_transport_models_are_strict_frozen_and_v2_only() -> None:
     with pytest.raises(ValidationError):
         request.options = RunOptions()  # type: ignore[misc]
 
+    assert (
+        InputPayload(format="records", data=[], source_id="a" * 64).source_id
+        == "a" * 64
+    )
+    for source_id in ("", "a" * 65, "not.portable", "é"):
+        with pytest.raises(ValidationError):
+            InputPayload(format="records", data=[], source_id=source_id)
+
 
 def test_run_options_enforce_preview_limits() -> None:
     assert RunOptions().model_dump() == {

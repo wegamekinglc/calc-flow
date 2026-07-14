@@ -6,7 +6,6 @@ import json
 import math
 import multiprocessing
 import os
-import pickle
 import queue
 from contextlib import suppress
 from dataclasses import dataclass
@@ -20,6 +19,7 @@ from time import monotonic
 from typing import Any
 from uuid import uuid4
 
+import cloudpickle
 import pyarrow as pa
 import pyarrow.csv as pa_csv
 import pyarrow.json as pa_json
@@ -36,6 +36,7 @@ from calc_flow_studio.models import (
 
 type PreparedInput = tuple[pa.Table, dict[str, JSONValue]]
 type PreparedInputs = dict[str, PreparedInput]
+type RegistrationRecord = dict[str, Any]
 
 
 class RunManagerError(RuntimeError):
@@ -273,6 +274,22 @@ def _saved_inputs(project: ProjectDocument) -> dict[str, tuple[str, object, str]
     }
 
 
+def _portable_source_id(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 64
+        or not value.isascii()
+        or not value[0].isalpha()
+        or any(not (character.isalnum() or character in "_-") for character in value)
+    ):
+        raise RunManagerError(
+            "source ID must be 1-64 portable ASCII letters, digits, underscores, "
+            "or hyphens and start with a letter"
+        )
+    return value
+
+
 def prepare_run(
     project: ProjectDocument,
     request: RunRequest,
@@ -285,7 +302,7 @@ def prepare_run(
     saved = _saved_inputs(project)
     if request.inputs:
         payloads = {
-            name: (payload.format, payload.data, payload.source_id or name)
+            name: (payload.format, payload.data, payload.source_id)
             for name, payload in request.inputs.items()
         }
     else:
@@ -309,10 +326,14 @@ def prepare_run(
             raise RunManagerError(
                 "web preview currently accepts table graph inputs only"
             )
-        format, data, source_id = payloads[input_name]
+        format, data, requested_source_id = payloads[input_name]
+        source_id = _portable_source_id(requested_source_id or saved[input_name][2])
+        metadata: dict[str, JSONValue] = {"source_id": source_id}
+        metadata_size = _json_size(metadata)
         table, encoded_size, decoded_size = _decode_source(
             format, data, max_bytes=options.max_input_bytes
         )
+        encoded_size += metadata_size
         total_encoded += encoded_size
         if total_encoded > options.max_input_bytes:
             raise RunManagerError(
@@ -327,8 +348,12 @@ def prepare_run(
         schema = _declared_schema(port)
         if schema is not None and not table.schema.equals(schema, check_metadata=True):
             try:
-                table = table.cast(schema)
-            except (pa.ArrowInvalid, pa.ArrowNotImplementedError) as error:
+                table = (
+                    pa.Table.from_batches([], schema=schema)
+                    if table.num_rows == 0 and table.num_columns == 0
+                    else table.cast(schema)
+                )
+            except (pa.ArrowException, TypeError, ValueError) as error:
                 raise RunManagerError(
                     f"input {input_name!r} does not match its declared Arrow schema"
                 ) from error
@@ -337,13 +362,13 @@ def prepare_run(
                 raise RunManagerError(
                     f"decoded input exceeds the {options.max_input_bytes} byte limit"
                 )
-        total_decoded += decoded_size
+        total_decoded += decoded_size + metadata_size
         if total_decoded > options.max_input_bytes:
             raise RunManagerError(
                 "combined decoded inputs exceed the "
                 f"{options.max_input_bytes} byte limit"
             )
-        prepared[input_name] = (table, {"source_id": str(source_id)})
+        prepared[input_name] = (table, metadata)
     return prepared, options
 
 
@@ -432,7 +457,11 @@ def _resident_bytes(worker: Any) -> int | None:
         return None
 
 
-def _register_referenced_builtins(runtime: Runtime, project_json: str) -> None:
+def _register_referenced_builtins(
+    runtime: Runtime,
+    project_json: str,
+    registrations: tuple[RegistrationRecord, ...] = (),
+) -> None:
     project = json.loads(project_json)
     nodes = project["pipeline"]["nodes"]
     references = {
@@ -444,37 +473,121 @@ def _register_referenced_builtins(runtime: Runtime, project_json: str) -> None:
         for node in nodes
         if (operator := node.get("operator", {})).get("kind") == "external"
     }
-    if ("numpy", "expression", "1") in references:
+    transported = {
+        (
+            registration["provider"],
+            registration["name"],
+            registration["version"],
+        )
+        for registration in registrations
+        if registration["kind"] == "provider"
+    }
+    if ("numpy", "expression", "1") in references - transported:
         register_numpy(runtime)
-    if ("jax", "expression", "1") in references:
+    if ("jax", "expression", "1") in references - transported:
         register_jax(runtime)
+
+
+def _selected_registrations(
+    project_json: str,
+    registrations: tuple[RegistrationRecord, ...],
+) -> tuple[RegistrationRecord, ...]:
+    project = json.loads(project_json)
+    nodes = project["pipeline"]["nodes"]
+    references: set[tuple[str, str, str, str]] = set()
+    for node in nodes:
+        operator = node.get("operator", {})
+        if operator.get("kind") == "external":
+            references.add(
+                (
+                    "provider",
+                    operator.get("provider"),
+                    operator.get("name"),
+                    operator.get("version"),
+                )
+            )
+        for udf in operator.get("udfs", []):
+            if udf.get("kind") == "data_fusion_scalar":
+                references.add(
+                    (
+                        "scalar_udf",
+                        udf.get("provider"),
+                        udf.get("name"),
+                        udf.get("version"),
+                    )
+                )
+    return tuple(
+        dict(registration)
+        for registration in registrations
+        if (
+            registration["kind"],
+            registration["provider"],
+            registration["name"],
+            registration["version"],
+        )
+        in references
+    )
+
+
+def _restore_registrations(
+    runtime: Runtime, registrations: tuple[RegistrationRecord, ...]
+) -> None:
+    for registration in registrations:
+        if registration["kind"] == "provider":
+            runtime.register_provider(
+                registration["provider"],
+                registration["name"],
+                registration["version"],
+                registration["callback"],
+            )
+        elif registration["kind"] == "scalar_udf":
+            runtime.register_scalar_udf(
+                provider=registration["provider"],
+                name=registration["name"],
+                version=registration["version"],
+                input_types=registration["input_types"],
+                return_type=registration["return_type"],
+                volatility=registration["volatility"],
+                function=registration["function"],
+            )
+        else:
+            raise RunManagerError("worker received an unsupported registration kind")
 
 
 def _serialize_worker_payload(
     project: ProjectDocument,
     prepared: PreparedInputs,
     options: RunOptions,
+    registrations: tuple[RegistrationRecord, ...] = (),
 ) -> bytes:
-    return pickle.dumps(
-        (
-            project.canonical_json(),
-            prepared,
-            options.model_dump(mode="json"),
-        ),
-        protocol=pickle.HIGHEST_PROTOCOL,
-    )
+    try:
+        return cloudpickle.dumps(
+            (
+                project.canonical_json(),
+                prepared,
+                options.model_dump(mode="json"),
+                registrations,
+            )
+        )
+    except Exception as error:
+        raise RunManagerError(
+            "trusted registrations could not be serialized for the worker"
+        ) from error
 
 
 def _execute_worker(
     worker_payload: bytes, output_queue: Any, apply_limits: bool
 ) -> None:
     try:
-        project_json, prepared, options_data = pickle.loads(worker_payload)
+        project_json, prepared, options_data, registrations = cloudpickle.loads(
+            worker_payload
+        )
         options = RunOptions.model_validate(options_data)
         if apply_limits:
             _apply_resource_limits(options)
         runtime = Runtime()
-        _register_referenced_builtins(runtime, project_json)
+        _restore_registrations(runtime, registrations)
+        _register_referenced_builtins(runtime, project_json, registrations)
         plan = runtime.compile_project(project_json)
         batches = {
             name: Batch.from_pyarrow(table, metadata=metadata)
@@ -517,6 +630,7 @@ class RunManager:
     def __init__(
         self,
         *,
+        runtime: Runtime | None = None,
         use_processes: bool = True,
         max_workers: int = 2,
         max_history: int = 100,
@@ -526,6 +640,7 @@ class RunManager:
         self._lock = RLock()
         self._event_condition = Condition(self._lock)
         self._runs: dict[str, _RunHandle] = {}
+        self._runtime = runtime
         self._use_processes = use_processes
         self._max_workers = max_workers
         self._max_history = max_history
@@ -558,7 +673,13 @@ class RunManager:
         worker: Any = None
         try:
             prepared, options = prepare_run(project, request)
-            worker_payload = _serialize_worker_payload(project, prepared, options)
+            registrations = _selected_registrations(
+                project.canonical_json(),
+                self._runtime._registration_snapshot() if self._runtime else (),
+            )
+            worker_payload = _serialize_worker_payload(
+                project, prepared, options, registrations
+            )
             if self._use_processes:
                 assert self._process_context is not None
                 output_queue = self._process_context.Queue(maxsize=1)
@@ -611,22 +732,21 @@ class RunManager:
                         name=f"calc-flow-monitor-{run_id[:8]}",
                     )
                     handle.monitor = monitor
-                    cleanup_immediately = False
+                    try:
+                        monitor.start()
+                    except BaseException as error:
+                        worker, output_queue, _ = self._detach_resources(handle)
+                        self._runs.pop(run_id, None)
+                        self._event_condition.notify_all()
+                        start_error = error
+                        cleanup_immediately = True
+                    else:
+                        cleanup_immediately = False
         if cleanup_immediately:
             self._cleanup_resources(worker, output_queue, terminate=True)
             if start_error is not None:
                 raise start_error
             raise RunManagerError("run manager shut down during submission")
-        try:
-            monitor.start()
-        except BaseException:
-            with self._lock:
-                handle = self._require(run_id)
-                worker, output_queue, _ = self._detach_resources(handle)
-                self._runs.pop(run_id, None)
-                self._event_condition.notify_all()
-            self._cleanup_resources(worker, output_queue, terminate=True)
-            raise
         return self.get(run_id)
 
     def get(self, run_id: str) -> RunResponse:

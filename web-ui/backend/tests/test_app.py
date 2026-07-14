@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
 import pytest
 from calc_flow import (
     FileCheckpointStore,
@@ -715,6 +716,58 @@ def test_default_app_runs_a_real_rust_worker_and_shuts_it_down(tmp_path) -> None
 
     assert manager._runs[run_id].worker is None
     assert manager._runs[run_id].output_queue is None
+
+
+def test_default_manager_runs_injected_runtime_udf_in_spawned_worker(tmp_path) -> None:
+    runtime = Runtime()
+
+    def identity(value: pa.Array) -> pa.Array:
+        return value
+
+    runtime.register_scalar_udf(
+        provider="python",
+        name="identity",
+        version="1",
+        input_types=("int64",),
+        return_type="int64",
+        volatility="immutable",
+        function=identity,
+    )
+    project = _project()
+    operator = project["pipeline"]["nodes"][0]["operator"]
+    operator["expression"] = "result = identity(value)"
+    operator["udfs"] = [
+        {
+            "kind": "data_fusion_scalar",
+            "provider": "python",
+            "name": "identity",
+            "version": "1",
+        }
+    ]
+    app = create_app(
+        project_directory=tmp_path / "projects",
+        checkpoint_directory=tmp_path / "checkpoints",
+        runtime=runtime,
+    )
+    manager = app.state.run_manager
+
+    with TestClient(app) as client:
+        assert _create(client, project).status_code == 201
+        submitted = client.post(f"{API_PREFIX}/projects/project_alpha/runs", json={})
+        assert submitted.status_code == 202
+        run_id = submitted.json()["id"]
+        for _ in range(400):
+            completed = client.get(f"{API_PREFIX}/runs/{run_id}")
+            if completed.json()["status"] not in {"pending", "running"}:
+                break
+            time.sleep(0.025)
+
+        assert completed.json()["status"] == "completed"
+        assert completed.json()["result"]["outputs"]["output"]["rows"] == [
+            {"value": 1, "result": 1}
+        ]
+
+    assert manager._runtime is runtime
 
 
 def test_app_serves_static_frontend_and_accepts_only_loopback(tmp_path) -> None:

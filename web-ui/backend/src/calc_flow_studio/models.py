@@ -54,7 +54,12 @@ class RunStatus(StrEnum):
 class InputPayload(StrictModel):
     format: Literal["records", "columns", "arrow_ipc"]
     data: JSONValue
-    source_id: str | None = None
+    source_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z][A-Za-z0-9_-]*$",
+    )
 
     @field_validator("data", mode="before")
     @classmethod

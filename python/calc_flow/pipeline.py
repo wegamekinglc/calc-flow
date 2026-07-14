@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, field
+from threading import RLock
 from typing import Any
 
 from calc_flow import _native
@@ -83,6 +84,10 @@ def _updated_project(project_json: str, update: Any) -> str:
 @dataclass(frozen=True, slots=True)
 class Runtime:
     _inner: _native.Runtime = field(default_factory=_native.Runtime, repr=False)
+    _registration_lock: RLock = field(default_factory=RLock, repr=False, compare=False)
+    _registrations: list[dict[str, Any]] = field(
+        default_factory=list, repr=False, compare=False
+    )
 
     def register_provider(
         self,
@@ -91,7 +96,17 @@ class Runtime:
         version: str,
         callback: Any,
     ) -> None:
-        self._inner.register_provider(provider, name, version, callback)
+        with self._registration_lock:
+            self._inner.register_provider(provider, name, version, callback)
+            self._registrations.append(
+                {
+                    "kind": "provider",
+                    "provider": provider,
+                    "name": name,
+                    "version": version,
+                    "callback": callback,
+                }
+            )
 
     def register_scalar_udf(
         self,
@@ -107,15 +122,43 @@ class Runtime:
         from calc_flow.udf import _validate_scalar_udf_registration
 
         copied_types = _validate_scalar_udf_registration(input_types, function)
-        self._inner.register_scalar_udf(
-            provider=provider,
-            name=name,
-            version=version,
-            input_types=copied_types,
-            return_type=return_type,
-            volatility=volatility,
-            function=function,
-        )
+        with self._registration_lock:
+            self._inner.register_scalar_udf(
+                provider=provider,
+                name=name,
+                version=version,
+                input_types=copied_types,
+                return_type=return_type,
+                volatility=volatility,
+                function=function,
+            )
+            self._registrations.append(
+                {
+                    "kind": "scalar_udf",
+                    "provider": provider,
+                    "name": name,
+                    "version": version,
+                    "input_types": tuple(copied_types),
+                    "return_type": return_type,
+                    "volatility": volatility,
+                    "function": function,
+                }
+            )
+
+    def _registration_snapshot(self) -> tuple[dict[str, Any], ...]:
+        """Return successful trusted registrations as defensive plain records."""
+        with self._registration_lock:
+            return tuple(
+                {
+                    **registration,
+                    **(
+                        {"input_types": tuple(registration["input_types"])}
+                        if registration["kind"] == "scalar_udf"
+                        else {}
+                    ),
+                }
+                for registration in self._registrations
+            )
 
     def catalog(self) -> list[dict[str, Any]]:
         return self._inner.catalog()

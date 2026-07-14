@@ -5,6 +5,7 @@ description = "Local FastAPI backend for Calc Flow Studio"
 requires-python = ">=3.13"
 dependencies = [
     "calc-flow",
+    "cloudpickle>=3.1",
     "fastapi>=0.116",
     "pyarrow>=24.0.0",
     "uvicorn>=0.35",
