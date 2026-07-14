@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use parking_lot::RwLock;
 use pyo3::{PyTraverseError, PyVisit, exceptions::PyRuntimeError, prelude::*, types::PyAny};
@@ -46,6 +46,17 @@ struct RuntimeState {
     udfs: Arc<RwLock<calc_flow::UdfRegistry>>,
     tokio: Arc<tokio::runtime::Runtime>,
     roots: Vec<Arc<PythonRoot>>,
+    udf_catalog: BTreeMap<(String, String, String), UdfCatalogMetadata>,
+}
+
+#[derive(Clone)]
+pub(crate) struct UdfCatalogMetadata {
+    pub(crate) provider: String,
+    pub(crate) name: String,
+    pub(crate) version: String,
+    pub(crate) input_types: Vec<String>,
+    pub(crate) return_type: String,
+    pub(crate) volatility: String,
 }
 
 struct RuntimeSnapshot {
@@ -67,6 +78,7 @@ impl PyRuntime {
                 udfs: Arc::new(RwLock::new(calc_flow::UdfRegistry::new())),
                 tokio,
                 roots: Vec::new(),
+                udf_catalog: BTreeMap::new(),
             })),
         }
     }
@@ -159,6 +171,22 @@ impl PyRuntime {
         Ok(())
     }
 
+    fn record_udf_metadata(&self, metadata: UdfCatalogMetadata) -> PyResult<()> {
+        let mut state = self.state.write();
+        let state = state
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err(CLEARED_RUNTIME_MESSAGE))?;
+        state.udf_catalog.insert(
+            (
+                metadata.provider.clone(),
+                metadata.name.clone(),
+                metadata.version.clone(),
+            ),
+            metadata,
+        );
+        Ok(())
+    }
+
     #[allow(
         dead_code,
         reason = "Task 19 reads the data-only UDF catalog through this guarded snapshot"
@@ -212,6 +240,89 @@ impl PyRuntime {
             crate::provider::PythonOperatorFactory::new(Arc::clone(&root), provider, name, version),
         );
         self.register_provider_factory(provider, name, version, &factory, root)
+    }
+
+    #[pyo3(signature = (*, provider, name, version, input_types, return_type, volatility, function))]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the public binding preserves the explicit keyword-only UDF contract"
+    )]
+    fn register_scalar_udf(
+        &self,
+        py: Python<'_>,
+        provider: &str,
+        name: &str,
+        version: &str,
+        input_types: Vec<String>,
+        return_type: String,
+        volatility: String,
+        function: Py<PyAny>,
+    ) -> PyResult<()> {
+        let prepared = crate::udf::prepare_python_scalar_udf(
+            py,
+            provider,
+            name,
+            version,
+            input_types,
+            return_type,
+            volatility,
+            function,
+        )?;
+        self.register_datafusion_udf(
+            prepared.reference,
+            &prepared.udf,
+            prepared.metadata.input_types.len(),
+            prepared.root,
+        )?;
+        self.record_udf_metadata(prepared.metadata)
+    }
+
+    fn catalog<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let entries = {
+            let state = self.state.read();
+            let state = state
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err(CLEARED_RUNTIME_MESSAGE))?;
+            state.udf_catalog.values().cloned().collect::<Vec<_>>()
+        };
+        let value = serde_json::Value::Array(
+            entries
+                .into_iter()
+                .map(|entry| {
+                    serde_json::json!({
+                        "provider": entry.provider,
+                        "name": entry.name,
+                        "version": entry.version,
+                        "kind": "data_fusion_scalar",
+                        "signature": {
+                            "input_types": entry.input_types,
+                            "return_type": entry.return_type,
+                        },
+                        "volatility": entry.volatility,
+                    })
+                })
+                .collect(),
+        );
+        let encoded = calc_flow::canonical_json(&value).map_err(crate::error::to_py_err)?;
+        json_to_python(py, &encoded)
+    }
+
+    fn validation_report<'py>(
+        &self,
+        py: Python<'py>,
+        project_json: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let runtime = self.snapshot()?;
+        let project = calc_flow::import_project_json(project_json.as_bytes())
+            .map_err(crate::error::to_py_err)?;
+        let report = calc_flow::validate_project(&project, &runtime.providers, &runtime.udfs);
+        let value = serde_json::to_value(report).map_err(|error| {
+            crate::error::to_py_err(calc_flow::CalcFlowError::Format {
+                message: error.to_string(),
+            })
+        })?;
+        let encoded = calc_flow::canonical_json(&value).map_err(crate::error::to_py_err)?;
+        json_to_python(py, &encoded)
     }
 
     fn compile_project(
@@ -633,6 +744,103 @@ mod tests {
                 .extract::<Vec<String>>()
                 .unwrap();
             assert_eq!(events, ["reentered", "reentered"]);
+        });
+    }
+
+    #[test]
+    fn duplicate_python_udf_registration_leaves_roots_and_catalog_unchanged() {
+        Python::initialize();
+        Python::attach(|py| {
+            let runtime = PyRuntime::new().unwrap();
+            let callback = || {
+                py.eval(pyo3::ffi::c_str!("lambda value: value"), None, None)
+                    .unwrap()
+                    .unbind()
+            };
+            runtime
+                .register_scalar_udf(
+                    py,
+                    "python",
+                    "identity",
+                    "1",
+                    vec!["int64".into()],
+                    "int64".into(),
+                    "immutable".into(),
+                    callback(),
+                )
+                .unwrap();
+            let before = {
+                let state = runtime.state.read();
+                let state = state.as_ref().unwrap();
+                (state.roots.len(), state.udf_catalog.len())
+            };
+            assert!(
+                runtime
+                    .register_scalar_udf(
+                        py,
+                        "python",
+                        "identity",
+                        "1",
+                        vec!["int64".into()],
+                        "int64".into(),
+                        "immutable".into(),
+                        callback(),
+                    )
+                    .is_err()
+            );
+            let state = runtime.state.read();
+            let state = state.as_ref().unwrap();
+            assert_eq!((state.roots.len(), state.udf_catalog.len()), before);
+        });
+    }
+
+    #[test]
+    fn public_catalog_and_validation_report_are_sorted_redacted_and_defensive() {
+        Python::initialize();
+        Python::attach(|py| {
+            let runtime = PyRuntime::new().unwrap();
+            let callback = py
+                .eval(pyo3::ffi::c_str!("lambda value: value"), None, None)
+                .unwrap()
+                .unbind();
+            runtime
+                .register_scalar_udf(
+                    py,
+                    "python",
+                    "identity",
+                    "1",
+                    vec!["int64".into()],
+                    "int64".into(),
+                    "stable".into(),
+                    callback,
+                )
+                .unwrap();
+
+            let catalog = runtime.catalog(py).unwrap();
+            let encoded: String = py
+                .import("json")
+                .unwrap()
+                .getattr("dumps")
+                .unwrap()
+                .call1((catalog,))
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert!(encoded.contains("identity"));
+            assert!(encoded.contains("stable"));
+            assert!(!encoded.contains("function"));
+
+            let report = runtime.validation_report(py, PROJECT).unwrap();
+            let valid: bool = report
+                .cast::<PyDict>()
+                .unwrap()
+                .get_item("valid")
+                .unwrap()
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert!(valid);
+            assert!(runtime.validation_report(py, "not JSON").is_err());
         });
     }
 }

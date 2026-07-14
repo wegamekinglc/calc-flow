@@ -92,6 +92,38 @@ class Runtime:
     ) -> None:
         self._inner.register_provider(provider, name, version, callback)
 
+    def register_scalar_udf(
+        self,
+        *,
+        provider: str,
+        name: str,
+        version: str,
+        input_types: Sequence[str],
+        return_type: str,
+        volatility: str,
+        function: Any,
+    ) -> None:
+        from calc_flow.udf import _validate_scalar_udf_registration
+
+        copied_types = _validate_scalar_udf_registration(input_types, function)
+        self._inner.register_scalar_udf(
+            provider=provider,
+            name=name,
+            version=version,
+            input_types=copied_types,
+            return_type=return_type,
+            volatility=volatility,
+            function=function,
+        )
+
+    def catalog(self) -> list[dict[str, Any]]:
+        return self._inner.catalog()
+
+    def validation_report(self, project_json: str) -> dict[str, Any]:
+        if not isinstance(project_json, str):
+            raise TypeError("project_json must be a string")
+        return self._inner.validation_report(project_json)
+
     def compile_project(self, project_json: str) -> ExecutionPlan:
         if not isinstance(project_json, str):
             raise TypeError("project_json must be a string")

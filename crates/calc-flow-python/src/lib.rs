@@ -5,6 +5,7 @@ mod config;
 mod error;
 mod pipeline;
 mod provider;
+mod udf;
 
 use pyo3::prelude::*;
 

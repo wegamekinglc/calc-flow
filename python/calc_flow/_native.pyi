@@ -1,4 +1,4 @@
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Protocol, TypedDict
 
 import pyarrow as pa
@@ -52,6 +52,19 @@ class Runtime:
     def register_provider(
         self, provider: str, name: str, version: str, callback: object
     ) -> None: ...
+    def register_scalar_udf(
+        self,
+        *,
+        provider: str,
+        name: str,
+        version: str,
+        input_types: Sequence[str],
+        return_type: str,
+        volatility: str,
+        function: Callable[..., object],
+    ) -> None: ...
+    def catalog(self) -> list[dict[str, object]]: ...
+    def validation_report(self, project_json: str) -> dict[str, object]: ...
     def compile_project(self, project_json: str) -> ExecutionPlan: ...
 
 class ExecutionPlan:
