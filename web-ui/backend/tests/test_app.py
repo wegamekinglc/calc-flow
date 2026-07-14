@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -687,18 +688,33 @@ def test_run_routes_use_injected_manager_and_preserve_sse_contract(tmp_path) -> 
     assert manager.shutdown_calls == 1
 
 
-def test_run_routes_return_typed_503_without_a_task22_manager(tmp_path) -> None:
-    with _client(tmp_path) as client:
+def test_default_app_runs_a_real_rust_worker_and_shuts_it_down(tmp_path) -> None:
+    app = create_app(
+        project_directory=tmp_path / "projects",
+        checkpoint_directory=tmp_path / "checkpoints",
+    )
+    manager = app.state.run_manager
+    with TestClient(app) as client:
         assert _create(client).status_code == 201
-        responses = (
-            client.post(f"{API_PREFIX}/projects/project_alpha/runs", json={}),
-            client.get(f"{API_PREFIX}/runs/run"),
-            client.get(f"{API_PREFIX}/runs/run/events"),
-            client.delete(f"{API_PREFIX}/runs/run"),
+        submitted = client.post(
+            f"{API_PREFIX}/projects/project_alpha/runs",
+            json={"inputs": {"input": {"format": "records", "data": [{"value": 2}]}}},
         )
+        assert submitted.status_code == 202
+        run_id = submitted.json()["id"]
+        for _ in range(400):
+            completed = client.get(f"{API_PREFIX}/runs/{run_id}")
+            if completed.json()["status"] not in {"pending", "running"}:
+                break
+            time.sleep(0.025)
 
-    assert all(response.status_code == 503 for response in responses)
-    assert all("run manager" in response.json()["detail"] for response in responses)
+        assert completed.json()["status"] == "completed"
+        assert completed.json()["result"]["outputs"]["output"]["rows"] == [
+            {"value": 2, "result": 3}
+        ]
+
+    assert manager._runs[run_id].worker is None
+    assert manager._runs[run_id].output_queue is None
 
 
 def test_app_serves_static_frontend_and_accepts_only_loopback(tmp_path) -> None:

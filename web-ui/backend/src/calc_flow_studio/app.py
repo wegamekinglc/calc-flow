@@ -37,6 +37,7 @@ from calc_flow_studio.models import (
     RunResponse,
     RunStatus,
 )
+from calc_flow_studio.run_manager import RunManager
 
 API_PREFIX = "/api/v2"
 MAX_PROJECT_IMPORT_BYTES = 10 * 1024 * 1024
@@ -111,13 +112,6 @@ def _native_error(error: Exception, *, operation: str) -> HTTPException:
     return _http_error(status.HTTP_422_UNPROCESSABLE_CONTENT, message)
 
 
-def _manager_unavailable() -> HTTPException:
-    return _http_error(
-        status.HTTP_503_SERVICE_UNAVAILABLE,
-        "run manager is unavailable until the bounded v2 worker is configured",
-    )
-
-
 async def _bounded_request_body(request: Request) -> bytes:
     declared_lengths = request.headers.getlist("content-length")
     if len(declared_lengths) > 1:
@@ -169,18 +163,20 @@ def create_app(
     projects = project_store or FileProjectStore(project_directory)
     checkpoints = checkpoint_store or FileCheckpointStore(checkpoint_directory)
     selected_runtime = runtime or Runtime()
+    selected_run_manager = run_manager if run_manager is not None else RunManager()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        yield
-        if run_manager is not None:
-            await run_in_threadpool(run_manager.shutdown)
+        try:
+            yield
+        finally:
+            await run_in_threadpool(selected_run_manager.shutdown)
 
     app = FastAPI(title="Calc Flow API", version="2.0.0a1", lifespan=lifespan)
     app.state.project_store = projects
     app.state.checkpoint_store = checkpoints
     app.state.runtime = selected_runtime
-    app.state.run_manager = run_manager
+    app.state.run_manager = selected_run_manager
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
@@ -431,10 +427,10 @@ def create_app(
     )
     async def create_run(project_id: str, request: RunRequest) -> RunResponse:
         project = await stored_project(project_id)
-        if run_manager is None:
-            raise _manager_unavailable()
         try:
-            return await run_in_threadpool(run_manager.submit, project, request)
+            return await run_in_threadpool(
+                selected_run_manager.submit, project, request
+            )
         except KeyError as error:
             raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
         except (RuntimeError, ValueError) as error:
@@ -444,10 +440,8 @@ def create_app(
 
     @app.get(f"{API_PREFIX}/runs/{{run_id}}", response_model=RunResponse)
     async def get_run(run_id: str) -> RunResponse:
-        if run_manager is None:
-            raise _manager_unavailable()
         try:
-            return await run_in_threadpool(run_manager.get, run_id)
+            return await run_in_threadpool(selected_run_manager.get, run_id)
         except KeyError as error:
             raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
 
@@ -456,10 +450,8 @@ def create_app(
         run_id: str,
         last_event_id: int | None = Header(default=None, alias="Last-Event-ID"),
     ) -> StreamingResponse:
-        if run_manager is None:
-            raise _manager_unavailable()
         try:
-            await run_in_threadpool(run_manager.get, run_id)
+            await run_in_threadpool(selected_run_manager.get, run_id)
         except KeyError as error:
             raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
 
@@ -474,7 +466,7 @@ def create_app(
             yield "retry: 500\n\n"
             while True:
                 events, run_status = await run_in_threadpool(
-                    run_manager.wait_for_events,
+                    selected_run_manager.wait_for_events,
                     run_id,
                     after_sequence=after_sequence,
                     timeout=10.0,
@@ -504,10 +496,8 @@ def create_app(
 
     @app.delete(f"{API_PREFIX}/runs/{{run_id}}", response_model=RunResponse)
     async def cancel_run(run_id: str) -> RunResponse:
-        if run_manager is None:
-            raise _manager_unavailable()
         try:
-            return await run_in_threadpool(run_manager.cancel, run_id)
+            return await run_in_threadpool(selected_run_manager.cancel, run_id)
         except KeyError as error:
             raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
 
