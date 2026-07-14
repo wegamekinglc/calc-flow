@@ -115,10 +115,20 @@ impl<S: Source> Source for BatchingSource<S> {
                 Ok(Some(candidate)) => candidate,
                 Ok(None) => break,
                 Err(error) => {
-                    // The accumulated group has not been returned. Poisoning
-                    // avoids a later call silently advancing past those rows;
-                    // reopening establishes a fresh cursor and clears it.
-                    self.faulted = true;
+                    // The upstream read did not produce a candidate, so the
+                    // validated accumulated group remains replayable. Retain
+                    // it and retry the upstream source on the next call.
+                    match coalesced_item(&schema, &batches, &latest) {
+                        Ok(item) => self.pending = Some(item),
+                        Err(retain_error) => {
+                            self.faulted = true;
+                            return Err(CalcFlowError::Internal {
+                                message: format!(
+                                    "source read failed with {error}; retaining the accumulated batch also failed with {retain_error}"
+                                ),
+                            });
+                        }
+                    }
                     return Err(error);
                 }
             };
@@ -148,28 +158,14 @@ impl<S: Source> Source for BatchingSource<S> {
             latest = candidate;
         }
 
-        let record = match concat_batches(&schema, &batches) {
-            Ok(record) => record,
-            Err(error) => {
-                self.faulted = true;
-                return Err(CalcFlowError::InvalidArgument {
-                    field: "source.batch".into(),
-                    message: format!("Arrow batches could not be concatenated: {error}"),
-                });
-            }
-        };
-        let batch = match Batch::table(vec![record], latest.batch.metadata().clone()) {
-            Ok(batch) => batch,
+        let item = match coalesced_item(&schema, &batches, &latest) {
+            Ok(item) => item,
             Err(error) => {
                 self.faulted = true;
                 return Err(error);
             }
         };
-        Ok(Some(SourceItem {
-            batch,
-            cursor: latest.cursor,
-            sequence: latest.sequence,
-        }))
+        Ok(Some(item))
     }
 }
 
@@ -199,14 +195,47 @@ fn table_parts(
     }
     let table = item.batch.table_payload()?;
     let batches = table.batches().to_vec();
-    let bytes = batches
-        .iter()
-        .map(RecordBatch::get_array_memory_size)
-        .fold(0_usize, usize::saturating_add);
+    let bytes = batches.iter().try_fold(0_usize, |batch_total, batch| {
+        batch
+            .columns()
+            .iter()
+            .try_fold(batch_total, |column_total, column| {
+                let bytes = column.to_data().get_slice_memory_size().map_err(|error| {
+                    CalcFlowError::InvalidArgument {
+                        field: "source.batch".into(),
+                        message: format!("Arrow slice memory could not be measured: {error}"),
+                    }
+                })?;
+                column_total
+                    .checked_add(bytes)
+                    .ok_or_else(|| CalcFlowError::InvalidArgument {
+                        field: "source.batch".into(),
+                        message: "Arrow slice memory size overflowed usize".into(),
+                    })
+            })
+    })?;
     Ok((
         table.schema().clone(),
         batches,
         item.batch.num_rows(),
         bytes,
     ))
+}
+
+fn coalesced_item(
+    schema: &datafusion::arrow::datatypes::SchemaRef,
+    batches: &[RecordBatch],
+    latest: &SourceItem,
+) -> Result<SourceItem> {
+    let record =
+        concat_batches(schema, batches).map_err(|error| CalcFlowError::InvalidArgument {
+            field: "source.batch".into(),
+            message: format!("Arrow batches could not be concatenated: {error}"),
+        })?;
+    let batch = Batch::table(vec![record], latest.batch.metadata().clone())?;
+    Ok(SourceItem {
+        batch,
+        cursor: latest.cursor.clone(),
+        sequence: latest.sequence,
+    })
 }

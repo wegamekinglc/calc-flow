@@ -348,6 +348,7 @@ pub struct MemoryCheckpointStore {
     deletes: AtomicUsize,
     fail_saves: AtomicUsize,
     fail_deletes: AtomicUsize,
+    fail_deletes_after_remove: AtomicUsize,
 }
 
 impl MemoryCheckpointStore {
@@ -364,6 +365,11 @@ impl MemoryCheckpointStore {
 
     pub fn fail_next_deletes(&self, count: usize) {
         self.fail_deletes.store(count, Ordering::SeqCst);
+    }
+
+    pub fn fail_next_deletes_after_remove(&self, count: usize) {
+        self.fail_deletes_after_remove
+            .store(count, Ordering::SeqCst);
     }
 
     pub fn checkpoint(&self) -> Option<Checkpoint> {
@@ -412,6 +418,17 @@ impl CheckpointStore for MemoryCheckpointStore {
             });
         }
         *self.checkpoint.lock().unwrap() = None;
+        if self
+            .fail_deletes_after_remove
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                (remaining > 0).then(|| remaining - 1)
+            })
+            .is_ok()
+        {
+            return Err(CalcFlowError::Format {
+                message: "delete after removal injected".into(),
+            });
+        }
         Ok(())
     }
 }
@@ -458,6 +475,26 @@ pub struct RecordingSink {
     label: String,
     calls: Arc<Mutex<Vec<(String, String, usize)>>>,
     failures: Arc<AtomicUsize>,
+}
+
+pub struct GatedSink {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl GatedSink {
+    pub fn new(started: Arc<tokio::sync::Notify>, release: Arc<tokio::sync::Notify>) -> Self {
+        Self { started, release }
+    }
+}
+
+#[async_trait]
+impl Sink for GatedSink {
+    async fn write(&mut self, _batch: &Batch, _context: &RunContext) -> Result<()> {
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(())
+    }
 }
 
 impl RecordingSink {

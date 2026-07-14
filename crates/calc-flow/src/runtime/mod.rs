@@ -61,6 +61,7 @@ impl SinkRouter {
         for (output, sinks) in &mut self.routes {
             let batch = &result.outputs[output];
             for sink in sinks {
+                result.context().check_cancelled()?;
                 sink.write(batch, result.context()).await?;
             }
         }

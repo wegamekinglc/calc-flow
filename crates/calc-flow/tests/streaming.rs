@@ -6,8 +6,8 @@ use calc_flow::{CalcFlowError, Checkpoint, CheckpointStore, SinkRouter, Streamin
 use chrono::Utc;
 use serde_json::json;
 use support::{
-    MemoryCheckpointStore, Probe, RecordingSink, int_batch, partially_failing_reset_plan,
-    stateful_plan,
+    Action, MemoryCheckpointStore, Probe, RecordingSink, TestOperator, int_batch,
+    partially_failing_reset_plan, stateful_plan,
 };
 
 #[tokio::test]
@@ -93,6 +93,57 @@ async fn checkpoint_failure_restores_state_and_allows_explicit_batch_retry() {
 }
 
 #[tokio::test]
+async fn rollback_failure_poisons_streaming_until_successful_reset() {
+    let probe = Arc::new(Probe::default());
+    let plan = Arc::new(
+        calc_flow::PipelineBuilder::new("stream poison")
+            .unwrap()
+            .add_node(
+                "node",
+                Box::new(
+                    TestOperator::transform("node", Action::Pass, Arc::clone(&probe))
+                        .stateful()
+                        .failing_restore(),
+                ),
+            )
+            .unwrap()
+            .compile(&calc_flow::UdfRegistry::new().snapshot())
+            .unwrap(),
+    );
+    let store = Arc::new(MemoryCheckpointStore::default());
+    let mut sinks = SinkRouter::new();
+    sinks
+        .add(
+            "output",
+            Box::new(RecordingSink::new(
+                "delivery",
+                Arc::new(Mutex::new(Vec::new())),
+                Arc::new(AtomicUsize::new(1)),
+            )),
+        )
+        .unwrap();
+    let mut runner = StreamingRunner::new(plan, clone_store(&store)).unwrap();
+
+    let first = runner
+        .step(int_batch(&[1]), &mut sinks)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(first.contains("rollback also failed"));
+    let poisoned = runner
+        .step(int_batch(&[1]), &mut sinks)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(poisoned.contains("poisoned"));
+    assert_eq!(probe.calls(), 1);
+
+    runner.reset().await.unwrap();
+    runner.step(int_batch(&[2]), &mut sinks).await.unwrap();
+    assert_eq!(probe.calls(), 2);
+}
+
+#[tokio::test]
 async fn stale_fingerprint_is_rejected_before_restore() {
     let probe = Arc::new(Probe::default());
     let plan = stateful_plan("stream stale", Arc::clone(&probe));
@@ -159,7 +210,7 @@ async fn partially_failing_reset_restores_all_pre_reset_state() {
 }
 
 #[tokio::test]
-async fn maximum_next_sequence_is_rejected_before_execution_or_save() {
+async fn recovered_max_minus_one_commits_max_then_exhausts_before_execution() {
     let probe = Arc::new(Probe::default());
     let plan = stateful_plan("stream overflow", Arc::clone(&probe));
     let checkpoint = Checkpoint::new(
@@ -174,12 +225,47 @@ async fn maximum_next_sequence_is_rejected_before_execution_or_save() {
     let store = Arc::new(MemoryCheckpointStore::with_checkpoint(checkpoint));
     let mut runner = StreamingRunner::new(plan, clone_store(&store)).unwrap();
 
-    assert!(matches!(
-        runner.step(int_batch(&[1]), &mut SinkRouter::new()).await,
-        Err(CalcFlowError::CheckpointMismatch { .. })
-    ));
-    assert_eq!(probe.calls(), 0);
-    assert_eq!(store.saves(), 0);
+    runner
+        .step(int_batch(&[1]), &mut SinkRouter::new())
+        .await
+        .unwrap();
+    assert_eq!(store.checkpoint().unwrap().sequence, u64::MAX);
+    assert_eq!(probe.calls(), 1);
+    assert_eq!(store.saves(), 1);
+
+    let error = runner
+        .step(int_batch(&[2]), &mut SinkRouter::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, CalcFlowError::Internal { .. }));
+    assert!(error.to_string().contains("exhausted"));
+    assert_eq!(probe.calls(), 1);
+    assert_eq!(store.saves(), 1);
+}
+
+#[tokio::test]
+async fn reset_compensation_failure_poisons_streaming_runner() {
+    let probe = Arc::new(Probe::default());
+    let plan = stateful_plan("stream reset compensation", Arc::clone(&probe));
+    let store = Arc::new(MemoryCheckpointStore::default());
+    let mut runner = StreamingRunner::new(plan, clone_store(&store)).unwrap();
+    let mut sinks = SinkRouter::new();
+    runner.step(int_batch(&[1]), &mut sinks).await.unwrap();
+    store.fail_next_deletes_after_remove(1);
+    store.fail_next_saves(1);
+
+    let reset = runner.reset().await.unwrap_err().to_string();
+    assert!(reset.contains("delete after removal injected"));
+    assert!(reset.contains("checkpoint compensation also failed"));
+    let calls = probe.calls();
+
+    let poisoned = runner
+        .step(int_batch(&[2]), &mut sinks)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(poisoned.contains("poisoned"));
+    assert_eq!(probe.calls(), calls);
 }
 
 fn clone_store(store: &Arc<MemoryCheckpointStore>) -> Arc<dyn CheckpointStore> {

@@ -1,18 +1,18 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, fmt::Write as _, sync::Arc};
 
 use chrono::Utc;
 
 use crate::{
     CalcFlowError, Checkpoint, CheckpointStore, ExecutionOptions, ExecutionPlan, Result, RunResult,
-    Source, SourceItem,
+    Source, SourceItem, pipeline::PlanTransaction,
 };
 
 use super::SinkRouter;
 
 /// Pull-based at-least-once runner for one replayable source.
 ///
-/// A runner owns its source and router. Callers must not execute or mutate the
-/// same plan through another owner while `next` or `reset` is in progress.
+/// A runner owns its source and router. Other owners of the same plan are
+/// serialized for the full state, delivery, and checkpoint transaction.
 pub struct MicroBatchRunner {
     plan: Arc<ExecutionPlan>,
     source: Box<dyn Source>,
@@ -24,6 +24,7 @@ pub struct MicroBatchRunner {
     current: Option<SourceItem>,
     pending_checkpoint: Option<Checkpoint>,
     eof: bool,
+    poisoned: Option<String>,
 }
 
 impl MicroBatchRunner {
@@ -58,6 +59,7 @@ impl MicroBatchRunner {
             current: None,
             pending_checkpoint: None,
             eof: false,
+            poisoned: None,
         })
     }
 
@@ -69,6 +71,7 @@ impl MicroBatchRunner {
     ///
     /// Returns source, execution, sink, checkpoint, or rollback errors.
     pub async fn next(&mut self) -> Result<Option<RunResult>> {
+        self.ensure_healthy()?;
         self.recover_once().await?;
         if self.current.is_none() && !self.eof {
             self.current = self.source.next().await?;
@@ -85,10 +88,11 @@ impl MicroBatchRunner {
                     message: "micro-batch delivery counter overflowed".into(),
                 })?;
 
-        let before = self.plan.snapshot().await?;
-        let input_name = self.plan.single_external_input()?.to_owned();
-        let result = match self
-            .plan
+        let plan = Arc::clone(&self.plan);
+        let transaction = plan.transaction().await;
+        let before = transaction.snapshot().await?;
+        let input_name = plan.single_external_input()?.to_owned();
+        let result = match transaction
             .execute(
                 BTreeMap::from([(input_name, item.batch.clone())]),
                 ExecutionOptions::default(),
@@ -96,30 +100,36 @@ impl MicroBatchRunner {
             .await
         {
             Ok(result) => result,
-            Err(error) => return Err(rollback_error(&self.plan, &before, error).await),
+            Err(error) => {
+                return Err(self.rollback_operation(&transaction, &before, error).await);
+            }
         };
         if let Err(error) = self.sinks.write_all(&result).await {
-            return Err(rollback_error(&self.plan, &before, error).await);
+            return Err(self.rollback_operation(&transaction, &before, error).await);
         }
 
-        let state = match self.plan.snapshot().await {
+        let state = match transaction.snapshot().await {
             Ok(state) => state,
-            Err(error) => return Err(rollback_error(&self.plan, &before, error).await),
+            Err(error) => {
+                return Err(self.rollback_operation(&transaction, &before, error).await);
+            }
         };
         let checkpoint = match Checkpoint::new(
-            self.plan.name(),
-            self.plan.fingerprint(),
+            plan.name(),
+            plan.fingerprint(),
             item.cursor.clone(),
             item.sequence,
             state,
             Utc::now(),
         ) {
             Ok(checkpoint) => checkpoint,
-            Err(error) => return Err(rollback_error(&self.plan, &before, error).await),
+            Err(error) => {
+                return Err(self.rollback_operation(&transaction, &before, error).await);
+            }
         };
         if next_delivered % self.checkpoint_every == 0 {
             if let Err(error) = self.checkpoints.save(&checkpoint).await {
-                return Err(rollback_error(&self.plan, &before, error).await);
+                return Err(self.rollback_operation(&transaction, &before, error).await);
             }
             self.pending_checkpoint = None;
         } else {
@@ -137,18 +147,31 @@ impl MicroBatchRunner {
     ///
     /// Returns reset, store, or rollback errors.
     pub async fn reset(&mut self) -> Result<()> {
-        let before = self.plan.snapshot().await?;
-        if let Err(error) = self.plan.reset().await {
-            return Err(rollback_error(&self.plan, &before, error).await);
+        let plan = Arc::clone(&self.plan);
+        let transaction = plan.transaction().await;
+        let previous_checkpoint = self.checkpoints.load(plan.name()).await?;
+        let before = transaction.snapshot().await?;
+        if let Err(error) = transaction.reset().await {
+            return Err(self.rollback_operation(&transaction, &before, error).await);
         }
-        if let Err(error) = self.checkpoints.delete(self.plan.name()).await {
-            return Err(rollback_error(&self.plan, &before, error).await);
+        if let Err(error) = self.checkpoints.delete(plan.name()).await {
+            let plan_rollback = transaction.restore(&before).await.err();
+            let checkpoint_rollback = match &previous_checkpoint {
+                Some(checkpoint) => self.checkpoints.save(checkpoint).await.err(),
+                None => None,
+            };
+            let result = compensated_reset_error(error, plan_rollback, checkpoint_rollback);
+            if let Some(reason) = &result.poison_reason {
+                self.poisoned = Some(reason.clone());
+            }
+            return Err(result.error);
         }
         self.recovered = false;
         self.delivered = 0;
         self.current = None;
         self.pending_checkpoint = None;
         self.eof = false;
+        self.poisoned = None;
         Ok(())
     }
 
@@ -156,15 +179,17 @@ impl MicroBatchRunner {
         if self.recovered {
             return Ok(());
         }
-        let checkpoint = self.checkpoints.load(self.plan.name()).await?;
+        let plan = Arc::clone(&self.plan);
+        let transaction = plan.transaction().await;
+        let checkpoint = self.checkpoints.load(plan.name()).await?;
         if let Some(checkpoint) = checkpoint {
-            validate_checkpoint(&checkpoint, &self.plan)?;
-            let before = self.plan.snapshot().await?;
-            if let Err(error) = self.plan.restore(&checkpoint.state).await {
-                return Err(rollback_error(&self.plan, &before, error).await);
+            validate_checkpoint(&checkpoint, &plan)?;
+            let before = transaction.snapshot().await?;
+            if let Err(error) = transaction.restore(&checkpoint.state).await {
+                return Err(self.rollback_operation(&transaction, &before, error).await);
             }
             if let Err(error) = self.source.open(checkpoint.source_cursor.clone()).await {
-                return Err(rollback_error(&self.plan, &before, error).await);
+                return Err(self.rollback_operation(&transaction, &before, error).await);
             }
         } else {
             self.source.open(None).await?;
@@ -177,9 +202,35 @@ impl MicroBatchRunner {
         let Some(checkpoint) = &self.pending_checkpoint else {
             return Ok(());
         };
+        let plan = Arc::clone(&self.plan);
+        let _transaction = plan.transaction().await;
         self.checkpoints.save(checkpoint).await?;
         self.pending_checkpoint = None;
         Ok(())
+    }
+
+    fn ensure_healthy(&self) -> Result<()> {
+        match &self.poisoned {
+            Some(reason) => Err(CalcFlowError::Internal {
+                message: format!(
+                    "micro-batch runner is poisoned after an incomplete rollback: {reason}; call reset before reuse"
+                ),
+            }),
+            None => Ok(()),
+        }
+    }
+
+    async fn rollback_operation(
+        &mut self,
+        transaction: &PlanTransaction<'_>,
+        before: &BTreeMap<String, serde_json::Value>,
+        original: CalcFlowError,
+    ) -> CalcFlowError {
+        let result = rollback_error(transaction, before, original).await;
+        if let Some(reason) = &result.poison_reason {
+            self.poisoned = Some(reason.clone());
+        }
+        result.error
     }
 }
 
@@ -201,17 +252,62 @@ pub(super) fn validate_checkpoint(checkpoint: &Checkpoint, plan: &ExecutionPlan)
     Ok(())
 }
 
+pub(super) struct RollbackResult {
+    pub(super) error: CalcFlowError,
+    pub(super) poison_reason: Option<String>,
+}
+
 pub(super) async fn rollback_error(
-    plan: &ExecutionPlan,
+    transaction: &PlanTransaction<'_>,
     before: &BTreeMap<String, serde_json::Value>,
     original: CalcFlowError,
-) -> CalcFlowError {
-    match plan.restore(before).await {
-        Ok(()) => original,
-        Err(rollback) => CalcFlowError::Internal {
-            message: format!(
-                "runner operation failed with {original}; rollback also failed with {rollback}"
-            ),
+) -> RollbackResult {
+    match transaction.restore(before).await {
+        Ok(()) => RollbackResult {
+            error: original,
+            poison_reason: None,
         },
+        Err(rollback) => {
+            let message = format!(
+                "runner operation failed with {original}; rollback also failed with {rollback}"
+            );
+            RollbackResult {
+                error: CalcFlowError::Internal {
+                    message: message.clone(),
+                },
+                poison_reason: Some(message),
+            }
+        }
+    }
+}
+
+pub(super) fn compensated_reset_error(
+    original: CalcFlowError,
+    plan_rollback: Option<CalcFlowError>,
+    checkpoint_rollback: Option<CalcFlowError>,
+) -> RollbackResult {
+    if plan_rollback.is_none() && checkpoint_rollback.is_none() {
+        return RollbackResult {
+            error: original,
+            poison_reason: None,
+        };
+    }
+    let mut message = format!("runner reset failed with {original}");
+    if let Some(rollback) = plan_rollback {
+        write!(&mut message, "; plan rollback also failed with {rollback}")
+            .expect("writing to a String cannot fail");
+    }
+    if let Some(rollback) = checkpoint_rollback {
+        write!(
+            &mut message,
+            "; checkpoint compensation also failed with {rollback}"
+        )
+        .expect("writing to a String cannot fail");
+    }
+    RollbackResult {
+        error: CalcFlowError::Internal {
+            message: message.clone(),
+        },
+        poison_reason: Some(message),
     }
 }

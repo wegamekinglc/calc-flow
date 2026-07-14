@@ -8,10 +8,14 @@ use std::{
 
 use async_trait::async_trait;
 use calc_flow::{
-    Batch, BatchMetadata, BatchingSource, CalcFlowError, ExecutionOptions, ExternalPayload, Result,
-    SinkRouter, Source, SourceItem,
+    Batch, BatchMetadata, BatchingSource, CalcFlowError, CancellationToken, ExecutionOptions,
+    ExternalPayload, Result, RunContext, Sink, SinkRouter, Source, SourceItem,
 };
-use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::arrow::{
+    array::{Array, ArrayRef, Int64Array},
+    datatypes::{DataType, Field, Schema},
+    record_batch::RecordBatch,
+};
 use serde_json::json;
 use support::{Probe, QueueSource, RecordingSink, source_item, stateful_plan, string_batch};
 
@@ -54,6 +58,39 @@ async fn batching_source_uses_arrow_memory_and_emits_an_oversized_item_alone() {
     assert_eq!(source.next().await.unwrap().unwrap().batch.num_rows(), 2);
     assert_eq!(source.next().await.unwrap().unwrap().batch.num_rows(), 4);
     assert!(source.next().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn batching_source_counts_logical_slice_bytes_across_record_batches() {
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "value",
+        DataType::Int64,
+        false,
+    )]));
+    let base = Arc::new(Int64Array::from((0..64).collect::<Vec<_>>())) as ArrayRef;
+    let record = |offset, len| {
+        RecordBatch::try_new(Arc::clone(&schema), vec![base.slice(offset, len)]).unwrap()
+    };
+    let item = |records: Vec<RecordBatch>, cursor, sequence| SourceItem {
+        batch: Batch::table(records, BatchMetadata::default()).unwrap(),
+        cursor: Some(json!(cursor)),
+        sequence,
+    };
+    let (source, _) = QueueSource::new(vec![
+        item(vec![record(4, 2)], 2, 1),
+        item(vec![record(12, 1), record(24, 1)], 4, 2),
+        item(vec![record(40, 1)], 5, 3),
+    ]);
+    // Four logical i64 values occupy exactly 32 bytes even though every
+    // record shares a much larger backing allocation.
+    let mut source = BatchingSource::new(source, usize::MAX, 32).unwrap();
+    source.open(None).await.unwrap();
+
+    let first = source.next().await.unwrap().unwrap();
+    assert_eq!(first.batch.num_rows(), 4);
+    assert_eq!(first.cursor, Some(json!(4)));
+    assert_eq!(first.sequence, 2);
+    assert_eq!(source.next().await.unwrap().unwrap().batch.num_rows(), 1);
 }
 
 #[test]
@@ -120,7 +157,7 @@ async fn batching_source_rejects_arrays_and_schema_mismatch_but_accepts_zero_row
 }
 
 #[tokio::test]
-async fn candidate_read_failure_poisons_instead_of_skipping_the_accumulated_group() {
+async fn candidate_read_failure_retains_the_accumulated_group_for_retry() {
     let mut source = BatchingSource::new(
         CandidateErrorSource {
             item: Some(source_item(&[1, 2], json!(2), 2)),
@@ -136,10 +173,10 @@ async fn candidate_read_failure_poisons_instead_of_skipping_the_accumulated_grou
         source.next().await,
         Err(CalcFlowError::Format { message }) if message == "candidate injected"
     ));
-    assert!(matches!(
-        source.next().await,
-        Err(CalcFlowError::InvalidArgument { field, .. }) if field == "source"
-    ));
+    let retained = source.next().await.unwrap().unwrap();
+    assert_eq!(retained.batch.num_rows(), 2);
+    assert_eq!(retained.cursor, Some(json!(2)));
+    assert_eq!(retained.sequence, 2);
 }
 
 #[tokio::test]
@@ -192,13 +229,50 @@ async fn sink_router_preserves_order_stops_on_failure_and_uses_run_context() {
     assert!(calls.iter().all(|call| call.1 == result.metadata.run_id));
 }
 
+#[tokio::test]
+async fn sink_router_checks_cancellation_before_each_sink_write() {
+    let token = CancellationToken::new();
+    let plan = stateful_plan("sink cancellation", Arc::new(Probe::default()));
+    let result = plan
+        .execute(
+            BTreeMap::from([("input".into(), support::int_batch(&[1]))]),
+            ExecutionOptions {
+                cancellation: token.clone(),
+                ..ExecutionOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    let later_calls = Arc::new(AtomicUsize::new(0));
+    let mut router = SinkRouter::new();
+    router
+        .add(
+            "output",
+            Box::new(CancellingSink {
+                token,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        )
+        .unwrap();
+    router
+        .add("output", Box::new(CountingSink(Arc::clone(&later_calls))))
+        .unwrap();
+
+    assert!(matches!(
+        router.write_all(&result).await,
+        Err(CalcFlowError::Cancelled { .. })
+    ));
+    assert_eq!(later_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
 fn arrow_bytes(batch: &Batch) -> usize {
     batch
         .table_payload()
         .unwrap()
         .batches()
         .iter()
-        .map(RecordBatch::get_array_memory_size)
+        .flat_map(RecordBatch::columns)
+        .map(|column| column.to_data().get_slice_memory_size().unwrap())
         .sum()
 }
 
@@ -222,6 +296,30 @@ impl ExternalPayload for TestArray {
 struct CandidateErrorSource {
     item: Option<SourceItem>,
     calls: usize,
+}
+
+struct CancellingSink {
+    token: CancellationToken,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Sink for CancellingSink {
+    async fn write(&mut self, _batch: &Batch, _context: &RunContext) -> Result<()> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.token.cancel();
+        Ok(())
+    }
+}
+
+struct CountingSink(Arc<AtomicUsize>);
+
+#[async_trait]
+impl Sink for CountingSink {
+    async fn write(&mut self, _batch: &Batch, _context: &RunContext) -> Result<()> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 #[async_trait]

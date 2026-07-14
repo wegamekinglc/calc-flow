@@ -41,6 +41,7 @@ pub struct RunMetadata {
 }
 
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct RunResult {
     pub outputs: BTreeMap<String, Batch>,
     pub node_timings: BTreeMap<String, NodeTiming>,
@@ -131,6 +132,16 @@ pub struct ExecutionPlan {
     pub(crate) selected_udfs: Vec<UdfReference>,
 }
 
+/// Crate-internal state transaction that owns a plan's lifecycle lock.
+///
+/// Runners keep this guard alive while awaiting sinks and checkpoint stores so
+/// another owner of the same [`ExecutionPlan`] cannot observe or mutate an
+/// intermediate state.
+pub(crate) struct PlanTransaction<'a> {
+    plan: &'a ExecutionPlan,
+    _guard: tokio::sync::MutexGuard<'a, ()>,
+}
+
 impl ExecutionPlan {
     pub fn name(&self) -> &str {
         &self.name
@@ -192,13 +203,12 @@ impl ExecutionPlan {
         inputs: BTreeMap<String, Batch>,
         options: ExecutionOptions,
     ) -> Result<RunResult> {
-        let _run_guard = self.run_lock.lock().await;
-        self.validate_external_inputs(&inputs)?;
-        let before = self.snapshot_unlocked().await?;
-        let result = self.execute_unlocked(inputs, options).await;
+        let transaction = self.transaction().await;
+        let before = transaction.snapshot().await?;
+        let result = transaction.execute(inputs, options).await;
         match result {
             Ok(result) => Ok(result),
-            Err(original) => match self.restore_unlocked(&before).await {
+            Err(original) => match transaction.restore(&before).await {
                 Ok(()) => Err(original),
                 Err(rollback) => Err(CalcFlowError::Internal {
                     message: format!(
@@ -215,8 +225,7 @@ impl ExecutionPlan {
     ///
     /// Returns an error when any operator cannot capture its state.
     pub async fn snapshot(&self) -> Result<BTreeMap<String, Value>> {
-        let _run_guard = self.run_lock.lock().await;
-        self.snapshot_unlocked().await
+        self.transaction().await.snapshot().await
     }
 
     /// Restores an exact node-keyed state map under the plan's run lock.
@@ -229,8 +238,7 @@ impl ExecutionPlan {
     /// Returns [`CalcFlowError::CheckpointMismatch`] for missing or extra node
     /// IDs, or an error summarizing operator restore failures.
     pub async fn restore(&self, state: &BTreeMap<String, Value>) -> Result<()> {
-        let _run_guard = self.run_lock.lock().await;
-        self.restore_unlocked(state).await
+        self.transaction().await.restore(state).await
     }
 
     /// Resets every node under the plan's run lock.
@@ -241,7 +249,17 @@ impl ExecutionPlan {
     ///
     /// Returns an error summarizing operator reset failures.
     pub async fn reset(&self) -> Result<()> {
-        let _run_guard = self.run_lock.lock().await;
+        self.transaction().await.reset().await
+    }
+
+    pub(crate) async fn transaction(&self) -> PlanTransaction<'_> {
+        PlanTransaction {
+            plan: self,
+            _guard: self.run_lock.lock().await,
+        }
+    }
+
+    async fn reset_unlocked(&self) -> Result<()> {
         let mut failures = Vec::new();
         for node in &self.nodes {
             if let Err(error) = node.operator.lock().await.reset() {
@@ -425,6 +443,29 @@ impl ExecutionPlan {
             .ok_or_else(|| CalcFlowError::Internal {
                 message: format!("compiled plan has no node {node_id}"),
             })
+    }
+}
+
+impl PlanTransaction<'_> {
+    pub(crate) async fn execute(
+        &self,
+        inputs: BTreeMap<String, Batch>,
+        options: ExecutionOptions,
+    ) -> Result<RunResult> {
+        self.plan.validate_external_inputs(&inputs)?;
+        self.plan.execute_unlocked(inputs, options).await
+    }
+
+    pub(crate) async fn snapshot(&self) -> Result<BTreeMap<String, Value>> {
+        self.plan.snapshot_unlocked().await
+    }
+
+    pub(crate) async fn restore(&self, state: &BTreeMap<String, Value>) -> Result<()> {
+        self.plan.restore_unlocked(state).await
+    }
+
+    pub(crate) async fn reset(&self) -> Result<()> {
+        self.plan.reset_unlocked().await
     }
 }
 

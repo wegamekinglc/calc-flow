@@ -1,17 +1,114 @@
 mod support;
 
-use std::sync::{Arc, Mutex, atomic::AtomicUsize};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex, atomic::AtomicUsize},
+};
 
+use async_trait::async_trait;
 use calc_flow::{
-    CalcFlowError, Checkpoint, CheckpointStore, MicroBatchRunner, PipelineBuilder, SinkRouter,
-    UdfRegistry,
+    BatchingSource, CalcFlowError, Checkpoint, CheckpointStore, ExecutionOptions, MicroBatchRunner,
+    PipelineBuilder, Result, SinkRouter, Source, SourceItem, UdfRegistry,
 };
 use chrono::Utc;
 use serde_json::json;
 use support::{
-    Action, MemoryCheckpointStore, Probe, QueueSource, RecordingSink, TestOperator,
+    Action, GatedSink, MemoryCheckpointStore, Probe, QueueSource, RecordingSink, TestOperator,
     partially_failing_reset_plan, source_item, stateful_plan,
 };
+
+#[tokio::test]
+async fn runner_holds_the_plan_transaction_through_sink_and_checkpoint() {
+    let probe = Arc::new(Probe::default());
+    let plan = stateful_plan("atomic runner", Arc::clone(&probe));
+    let (source, _) = QueueSource::new(vec![source_item(&[1], json!(1), 1)]);
+    let store = Arc::new(MemoryCheckpointStore::default());
+    let sink_started = Arc::new(tokio::sync::Notify::new());
+    let sink_release = Arc::new(tokio::sync::Notify::new());
+    let direct_attempted = Arc::new(tokio::sync::Notify::new());
+    let mut sinks = SinkRouter::new();
+    sinks
+        .add(
+            "output",
+            Box::new(GatedSink::new(
+                Arc::clone(&sink_started),
+                Arc::clone(&sink_release),
+            )),
+        )
+        .unwrap();
+    let mut runner = MicroBatchRunner::new(
+        Arc::clone(&plan),
+        Box::new(source),
+        sinks,
+        clone_store(&store),
+        1,
+    )
+    .unwrap();
+
+    let runner_task = tokio::spawn(async move { runner.next().await });
+    sink_started.notified().await;
+    let direct_plan = Arc::clone(&plan);
+    let direct_attempt = Arc::clone(&direct_attempted);
+    let direct_task = tokio::spawn(async move {
+        direct_attempt.notify_one();
+        direct_plan
+            .execute(
+                BTreeMap::from([("input".into(), support::int_batch(&[2]))]),
+                ExecutionOptions::default(),
+            )
+            .await
+    });
+    direct_attempted.notified().await;
+    tokio::task::yield_now().await;
+
+    assert_eq!(
+        probe.calls(),
+        1,
+        "direct execute interleaved during delivery"
+    );
+    sink_release.notify_one();
+    runner_task.await.unwrap().unwrap().unwrap();
+    direct_task.await.unwrap().unwrap();
+
+    assert_eq!(store.checkpoint().unwrap().state["node"]["state"], json!(1));
+    assert_eq!(plan.snapshot().await.unwrap()["node"]["state"], json!(2));
+}
+
+#[tokio::test]
+async fn transient_batching_read_error_is_retryable_through_the_runner() {
+    let probe = Arc::new(Probe::default());
+    let plan = stateful_plan("batching retry", Arc::clone(&probe));
+    let source = BatchingSource::new(
+        TransientCandidateSource {
+            first: Some(source_item(&[1], json!(1), 1)),
+            second: Some(source_item(&[2], json!(2), 2)),
+            calls: 0,
+        },
+        10,
+        usize::MAX,
+    )
+    .unwrap();
+    let store = Arc::new(MemoryCheckpointStore::default());
+    let mut runner = MicroBatchRunner::new(
+        plan,
+        Box::new(source),
+        SinkRouter::new(),
+        clone_store(&store),
+        1,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        runner.next().await,
+        Err(CalcFlowError::Format { message }) if message == "transient candidate read"
+    ));
+    let retried = runner.next().await.unwrap().unwrap();
+    assert_eq!(retried.outputs["output"].num_rows(), 2);
+    assert_eq!(probe.calls(), 1);
+    let checkpoint = store.checkpoint().unwrap();
+    assert_eq!(checkpoint.sequence, 2);
+    assert_eq!(checkpoint.source_cursor, Some(json!(2)));
+}
 
 #[tokio::test]
 async fn sink_failure_rolls_back_and_retries_the_same_source_item() {
@@ -247,13 +344,14 @@ async fn eof_checkpoint_failure_retries_the_pending_checkpoint() {
 
 #[tokio::test]
 async fn delivery_and_rollback_failures_keep_both_diagnostics() {
+    let probe = Arc::new(Probe::default());
     let plan = Arc::new(
         PipelineBuilder::new("rollback diagnostics")
             .unwrap()
             .add_node(
                 "node",
                 Box::new(
-                    TestOperator::transform("node", Action::Pass, Arc::new(Probe::default()))
+                    TestOperator::transform("node", Action::Pass, Arc::clone(&probe))
                         .stateful()
                         .failing_restore(),
                 ),
@@ -262,7 +360,10 @@ async fn delivery_and_rollback_failures_keep_both_diagnostics() {
             .compile(&UdfRegistry::new().snapshot())
             .unwrap(),
     );
-    let (source, _) = QueueSource::new(vec![source_item(&[1], json!(1), 1)]);
+    let (source, _) = QueueSource::new(vec![
+        source_item(&[1], json!(1), 1),
+        source_item(&[2], json!(2), 2),
+    ]);
     let store = Arc::new(MemoryCheckpointStore::default());
     let mut sinks = SinkRouter::new();
     sinks
@@ -282,6 +383,40 @@ async fn delivery_and_rollback_failures_keep_both_diagnostics() {
     assert!(error.contains("delivery injected"));
     assert!(error.contains("rollback also failed"));
     assert!(error.contains("restore injected"));
+
+    let poisoned = runner.next().await.unwrap_err().to_string();
+    assert!(poisoned.contains("poisoned"));
+    assert_eq!(probe.calls(), 1);
+
+    runner.reset().await.unwrap();
+    assert!(runner.next().await.unwrap().is_some());
+    assert_eq!(probe.calls(), 2);
+}
+
+#[tokio::test]
+async fn reset_restores_checkpoint_when_delete_errors_after_removal() {
+    let plan = stateful_plan("durable reset", Arc::new(Probe::default()));
+    let (source, _) = QueueSource::new(vec![source_item(&[1], json!(1), 1)]);
+    let store = Arc::new(MemoryCheckpointStore::default());
+    let mut runner = MicroBatchRunner::new(
+        Arc::clone(&plan),
+        Box::new(source),
+        SinkRouter::new(),
+        clone_store(&store),
+        1,
+    )
+    .unwrap();
+    runner.next().await.unwrap();
+    let checkpoint = store.checkpoint().unwrap();
+    let state = plan.snapshot().await.unwrap();
+    store.fail_next_deletes_after_remove(1);
+
+    let error = runner.reset().await.unwrap_err().to_string();
+
+    assert!(error.contains("delete after removal injected"));
+    assert_eq!(store.checkpoint(), Some(checkpoint));
+    assert_eq!(plan.snapshot().await.unwrap(), state);
+    assert!(runner.next().await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -389,4 +524,29 @@ fn constructor_requires_positive_cadence_and_exactly_one_external_input() {
 
 fn clone_store(store: &Arc<MemoryCheckpointStore>) -> Arc<dyn CheckpointStore> {
     Arc::clone(store) as Arc<dyn CheckpointStore>
+}
+
+struct TransientCandidateSource {
+    first: Option<SourceItem>,
+    second: Option<SourceItem>,
+    calls: usize,
+}
+
+#[async_trait]
+impl Source for TransientCandidateSource {
+    async fn open(&mut self, _cursor: Option<serde_json::Value>) -> Result<()> {
+        Ok(())
+    }
+
+    async fn next(&mut self) -> Result<Option<SourceItem>> {
+        self.calls += 1;
+        match self.calls {
+            1 => Ok(self.first.take()),
+            2 => Err(CalcFlowError::Format {
+                message: "transient candidate read".into(),
+            }),
+            3 => Ok(self.second.take()),
+            _ => Ok(None),
+        }
+    }
 }
