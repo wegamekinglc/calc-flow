@@ -115,6 +115,31 @@ def test_metadata_source_and_sequence_names_remain_plain_attributes() -> None:
     assert batch.metadata == {"source": "caller-value", "sequence": 42}
 
 
+def test_metadata_preserves_portable_integer_boundaries_exactly() -> None:
+    metadata = {
+        "minimum": -(2**63),
+        "maximum": 2**64 - 1,
+        "nested": [True, {"value": 2**64 - 1}],
+    }
+
+    batch = Batch.from_pyarrow(pa.table({"value": [1]}), metadata)
+
+    assert batch.metadata == metadata
+    assert isinstance(batch.metadata["nested"][0], bool)
+
+
+@pytest.mark.parametrize("value", [-(2**63) - 1, 2**64, 10**100])
+def test_metadata_rejects_integers_outside_the_portable_range(value: int) -> None:
+    with pytest.raises(
+        TypeError,
+        match="metadata integers must be in the portable JSON range",
+    ):
+        Batch.from_pyarrow(
+            pa.table({"value": [1]}),
+            {"nested": [{"value": value}]},
+        )
+
+
 @pytest.mark.parametrize("metadata", [[], "metadata", 1, True])
 def test_metadata_rejects_non_mappings(metadata: object) -> None:
     with pytest.raises(TypeError, match="metadata must be a JSON-compatible mapping"):
@@ -181,8 +206,27 @@ def test_batch_is_frozen() -> None:
 
 
 def test_from_pyarrow_requires_an_arrow_table() -> None:
-    with pytest.raises(TypeError):
+    with pytest.raises(
+        TypeError,
+        match="table must implement the Arrow C stream interface",
+    ):
         Batch.from_pyarrow(object())
+
+
+def test_from_pyarrow_preserves_arrow_producer_exceptions() -> None:
+    failure = RuntimeError("Arrow producer failed")
+
+    class BrokenArrowProducer:
+        def __arrow_c_stream__(self) -> object:
+            raise failure
+
+    with pytest.raises(RuntimeError) as raised:
+        Batch.from_pyarrow(BrokenArrowProducer())  # type: ignore[arg-type]
+
+    assert raised.value is failure
+    assert raised.tb is not None
+    assert raised.tb.tb_next is not None
+    assert raised.tb.tb_next.tb_frame.f_code.co_name == "__arrow_c_stream__"
 
 
 def test_table_accessor_rejects_array_payload() -> None:
@@ -215,6 +259,23 @@ def test_external_batch_owns_the_python_object() -> None:
 
     del batch
     gc.collect()
+    assert payload_ref() is None
+
+
+def test_external_batch_payload_cycle_is_collected() -> None:
+    class Payload:
+        batch: Batch | None = None
+
+    payload = Payload()
+    payload_ref = weakref.ref(payload)
+    batch = Batch._from_external(payload, "test", 1, {})
+    payload.batch = batch
+
+    assert gc.is_tracked(batch)
+    del batch
+    del payload
+    gc.collect()
+
     assert payload_ref() is None
 
 

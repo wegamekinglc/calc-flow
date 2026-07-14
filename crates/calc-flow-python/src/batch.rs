@@ -1,16 +1,20 @@
 use std::{collections::HashSet, fmt, sync::Arc};
 
 use datafusion::arrow::record_batch::RecordBatch;
+use parking_lot::RwLock;
 use pyo3::{
-    exceptions::{PyTypeError, PyValueError},
+    PyTraverseError, PyVisit,
+    exceptions::{PyRuntimeError, PyTypeError, PyValueError},
     intern,
     prelude::*,
-    types::{PyAny, PyDict, PyList, PyString, PyTuple},
+    types::{PyAny, PyBool, PyDict, PyInt, PyList, PyString, PyTuple},
 };
 use pyo3_arrow::PyTable;
 
 const MAX_METADATA_DEPTH: usize = calc_flow::MAX_JSON_DEPTH;
 const METADATA_TYPE_MESSAGE: &str = "metadata must be a JSON-compatible mapping";
+const METADATA_INTEGER_MESSAGE: &str = "metadata integers must be in the portable JSON range -9223372036854775808 to 18446744073709551615";
+const CLEARED_BATCH_MESSAGE: &str = "Batch has been cleared by garbage collection";
 
 pub(crate) struct PythonPayload {
     #[allow(
@@ -48,7 +52,22 @@ impl calc_flow::ExternalPayload for PythonPayload {
 
 #[pyclass(name = "Batch", frozen, module = "calc_flow._native")]
 pub(crate) struct PyBatch {
-    pub(crate) inner: calc_flow::Batch,
+    inner: RwLock<Option<calc_flow::Batch>>,
+}
+
+impl PyBatch {
+    pub(crate) fn from_inner(inner: calc_flow::Batch) -> Self {
+        Self {
+            inner: RwLock::new(Some(inner)),
+        }
+    }
+
+    pub(crate) fn clone_inner(&self) -> PyResult<calc_flow::Batch> {
+        self.inner
+            .read()
+            .clone()
+            .ok_or_else(|| PyRuntimeError::new_err(CLEARED_BATCH_MESSAGE))
+    }
 }
 
 #[pymethods]
@@ -60,18 +79,19 @@ impl PyBatch {
         table: &Bound<'_, PyAny>,
         metadata: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        let table = table.extract::<PyTable>().map_err(|error| {
-            PyTypeError::new_err(format!(
-                "table must implement the Arrow C stream interface: {error}"
-            ))
-        })?;
+        if !table.hasattr(intern!(py, "__arrow_c_stream__"))? {
+            return Err(PyTypeError::new_err(
+                "table must implement the Arrow C stream interface",
+            ));
+        }
+        let table = table.extract::<PyTable>()?;
         let (mut batches, schema) = table.into_inner();
         if batches.is_empty() {
             batches.push(RecordBatch::new_empty(schema));
         }
         let metadata = metadata_from_python(py, metadata)?;
         let inner = calc_flow::Batch::table(batches, metadata).map_err(crate::error::to_py_err)?;
-        Ok(Self { inner })
+        Ok(Self::from_inner(inner))
     }
 
     #[staticmethod]
@@ -89,33 +109,57 @@ impl PyBatch {
         };
         let inner = calc_flow::Batch::external(Arc::new(payload), metadata)
             .map_err(crate::error::to_py_err)?;
-        Ok(Self { inner })
+        Ok(Self::from_inner(inner))
     }
 
     fn to_pyarrow<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let table = self
-            .inner
+        let inner = self.clone_inner()?;
+        let table = inner
             .table_payload()
             .map_err(|_| PyTypeError::new_err("array batches do not contain a PyArrow table"))?;
         PyTable::try_new(table.batches().to_vec(), table.schema().clone())?.into_pyarrow(py)
     }
 
     #[getter]
-    fn kind(&self) -> &'static str {
-        match self.inner.kind() {
+    fn kind(&self) -> PyResult<&'static str> {
+        Ok(match self.clone_inner()?.kind() {
             calc_flow::BatchKind::Table => "table",
             calc_flow::BatchKind::Array => "array",
-        }
+        })
     }
 
     #[getter]
-    fn num_rows(&self) -> usize {
-        self.inner.num_rows()
+    fn num_rows(&self) -> PyResult<usize> {
+        Ok(self.clone_inner()?.num_rows())
     }
 
     #[getter]
     fn metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        metadata_to_python(py, self.inner.metadata())
+        let inner = self.clone_inner()?;
+        metadata_to_python(py, inner.metadata())
+    }
+
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "PyO3's garbage-collector protocol requires PyVisit by value"
+    )]
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        let guard = self.inner.read();
+        let Some(inner) = guard.as_ref() else {
+            return Ok(());
+        };
+        let Ok(payload) = inner.external_payload() else {
+            return Ok(());
+        };
+        let Some(payload) = payload.as_any().downcast_ref::<PythonPayload>() else {
+            return Ok(());
+        };
+        visit.call(&payload.object)
+    }
+
+    fn __clear__(&self) {
+        let inner = self.inner.write().take();
+        drop(inner);
     }
 }
 
@@ -201,6 +245,14 @@ fn validate_json_containers(
             }
             Ok(())
         })
+    } else if value.is_instance_of::<PyBool>() {
+        Ok(())
+    } else if value.is_instance_of::<PyInt>() {
+        if value.extract::<i64>().is_ok() || value.extract::<u64>().is_ok() {
+            Ok(())
+        } else {
+            Err(PyTypeError::new_err(METADATA_INTEGER_MESSAGE))
+        }
     } else {
         Ok(())
     }
@@ -261,9 +313,10 @@ mod tests {
 
             let batch = PyBatch::from_pyarrow(py, &table, Some(metadata.as_any())).unwrap();
 
-            assert_eq!(batch.kind(), "table");
-            assert_eq!(batch.num_rows(), 3);
-            let inner_values = batch.inner.table_payload().unwrap().batches()[0].column(0);
+            assert_eq!(batch.kind().unwrap(), "table");
+            assert_eq!(batch.num_rows().unwrap(), 3);
+            let inner = batch.clone_inner().unwrap();
+            let inner_values = inner.table_payload().unwrap().batches()[0].column(0);
             assert_eq!(
                 inner_values.to_data().buffers()[0].as_ptr(),
                 values.to_data().buffers()[0].as_ptr()
@@ -299,7 +352,8 @@ mod tests {
             )
             .unwrap();
 
-            let table = batch.inner.table_payload().unwrap();
+            let inner = batch.clone_inner().unwrap();
+            let table = inner.table_payload().unwrap();
             assert_eq!(table.schema(), &schema);
             assert_eq!(table.batches().len(), 1);
             assert_eq!(table.batches()[0].num_rows(), 0);
@@ -315,9 +369,10 @@ mod tests {
             let batch =
                 PyBatch::_from_external(object, "numpy".into(), 2, metadata.as_any()).unwrap();
 
-            assert_eq!(batch.kind(), "array");
-            assert_eq!(batch.num_rows(), 2);
-            let payload = batch.inner.external_payload().unwrap();
+            assert_eq!(batch.kind().unwrap(), "array");
+            assert_eq!(batch.num_rows().unwrap(), 2);
+            let inner = batch.clone_inner().unwrap();
+            let payload = inner.external_payload().unwrap();
             let payload = payload.as_any().downcast_ref::<PythonPayload>().unwrap();
             assert_eq!(payload.backend, "numpy");
             assert_eq!(payload.len, 2);
@@ -377,5 +432,45 @@ mod tests {
             };
             assert!(error.is_instance_of::<crate::error::ConfigError>(py));
         });
+    }
+
+    #[test]
+    fn cleared_batch_rejects_every_payload_accessor() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (table, _) = table();
+            let table = table.into_pyarrow(py).unwrap();
+            let batch = PyBatch::from_pyarrow(py, &table, None).unwrap();
+
+            batch.__clear__();
+
+            for error in [
+                batch.clone_inner().unwrap_err(),
+                batch.kind().unwrap_err(),
+                batch.num_rows().unwrap_err(),
+                batch.metadata(py).unwrap_err(),
+                batch.to_pyarrow(py).unwrap_err(),
+            ] {
+                assert!(error.is_instance_of::<PyRuntimeError>(py));
+                assert_eq!(error.value(py).to_string(), CLEARED_BATCH_MESSAGE);
+            }
+            batch.__clear__();
+        });
+    }
+
+    #[test]
+    fn external_batch_payload_can_drop_on_a_background_thread() {
+        Python::initialize();
+        let inner = Python::attach(|py| {
+            let object = PyList::new(py, [1, 2]).unwrap().unbind().into_any();
+            let metadata = PyDict::new(py);
+            PyBatch::_from_external(object, "numpy".into(), 2, metadata.as_any())
+                .unwrap()
+                .clone_inner()
+                .unwrap()
+        });
+
+        std::thread::spawn(move || drop(inner)).join().unwrap();
+        Python::attach(|_| {});
     }
 }

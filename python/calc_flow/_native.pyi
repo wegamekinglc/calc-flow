@@ -1,6 +1,12 @@
 from collections.abc import Mapping
+from typing import Protocol
 
 import pyarrow as pa
+
+class _ArrowCStream(Protocol):
+    def __arrow_c_stream__(
+        self, requested_schema: object | None = None, /
+    ) -> object: ...
 
 class CalcFlowError(Exception): ...
 class ConfigError(CalcFlowError): ...
@@ -13,7 +19,7 @@ class CancelledError(ExecutionError): ...
 class Batch:
     @staticmethod
     def from_pyarrow(
-        table: pa.Table, metadata: Mapping[str, object] | None = None
+        table: _ArrowCStream, metadata: Mapping[str, object] | None = None
     ) -> Batch: ...
     @staticmethod
     def _from_external(
