@@ -135,6 +135,17 @@ def test_runtime_compiles_strict_json_and_plan_outlives_runtime() -> None:
         Runtime().compile_project('{"format_version":2,"format_version":2}')
 
 
+def test_execution_plan_exposes_immutable_rust_identity() -> None:
+    plan = PipelineBuilder("identity").expression("calc", "b = a + 1").compile()
+
+    assert plan.name == "identity"
+    assert plan.fingerprint
+    with pytest.raises((AttributeError, TypeError)):
+        plan.name = "changed"  # type: ignore[misc]
+    with pytest.raises((AttributeError, TypeError)):
+        plan.fingerprint = "changed"  # type: ignore[misc]
+
+
 def test_runtime_plan_and_result_are_visible_to_cyclic_gc() -> None:
     runtime = Runtime()
     plan = PipelineBuilder("tracked").expression("calc", "b = a + 1").compile(runtime)

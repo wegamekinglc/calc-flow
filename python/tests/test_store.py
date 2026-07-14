@@ -6,6 +6,12 @@ import json
 from datetime import UTC, datetime
 
 import pytest
+from calc_flow.store import (
+    export_project_json,
+    export_project_yaml,
+    import_project_json,
+    import_project_yaml,
+)
 
 from calc_flow import (
     ConfigError,
@@ -175,3 +181,40 @@ def test_store_blocking_conveniences_work_and_reject_running_loop(tmp_path) -> N
             checkpoint_store.load_blocking("blocking")
 
     asyncio.run(reject())
+
+
+def test_project_document_transforms_are_bounded_strict_and_rust_backed() -> None:
+    project = _project("portable")
+
+    imported_json = import_project_json(project.canonical_json().encode())
+    exported_json = export_project_json(imported_json)
+    exported_yaml = export_project_yaml(project)
+    imported_yaml = import_project_yaml(exported_yaml)
+
+    assert imported_json.root == project.root
+    assert imported_yaml.root == project.root
+    assert exported_json == json.dumps(project.root, indent=2, sort_keys=True) + "\n"
+    assert "format_version: 2" in exported_yaml
+
+    with pytest.raises(ConfigError):
+        import_project_json('{"format_version":1}')
+    with pytest.raises(ConfigError, match="alias"):
+        import_project_yaml(
+            "format_version: 2\nid: aliases\nname: &name aliases\n"
+            "description: *name\npipeline: {name: p, nodes: []}\n"
+        )
+    with pytest.raises(ConfigError, match="exceeds"):
+        import_project_json(b"x" * (10 * 1024 * 1024 + 1))
+
+
+def test_project_document_transforms_reject_subclass_hooks_without_calling_them() -> (
+    None
+):
+    class HostileDict(dict):
+        def items(self):
+            raise AssertionError("caller-controlled hook ran")
+
+    with pytest.raises(TypeError, match="strict dict"):
+        export_project_json(HostileDict(_project("hostile").root))
+    with pytest.raises(TypeError, match="bytes or str"):
+        import_project_json(bytearray(b"{}"))  # type: ignore[arg-type]

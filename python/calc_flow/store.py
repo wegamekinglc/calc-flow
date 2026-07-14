@@ -44,9 +44,41 @@ def _project_document(
 ) -> ProjectDocument:
     if isinstance(project, ProjectDocument):
         return ProjectDocument.model_validate(project.root)
-    if not isinstance(project, Mapping):
-        raise TypeError("project must be a ProjectDocument or mapping")
-    return ProjectDocument.model_validate(dict(project))
+    if type(project) is not dict:
+        raise TypeError("project must be a ProjectDocument or strict dict")
+    return ProjectDocument.model_validate(project)
+
+
+def _document_bytes(document: str | bytes) -> bytes:
+    if type(document) is str:
+        return document.encode("utf-8")
+    if type(document) is bytes:
+        return document
+    raise TypeError("project document must be bytes or str")
+
+
+def import_project_json(document: str | bytes) -> ProjectDocument:
+    imported = _native.import_project_json(_document_bytes(document))
+    return ProjectDocument.model_validate_json(imported)
+
+
+def import_project_yaml(document: str | bytes) -> ProjectDocument:
+    imported = _native.import_project_yaml(_document_bytes(document))
+    return ProjectDocument.model_validate_json(imported)
+
+
+def export_project_json(
+    project: ProjectDocument | Mapping[str, object],
+) -> str:
+    document = _project_document(project)
+    return _native.export_project_json(document.canonical_json())
+
+
+def export_project_yaml(
+    project: ProjectDocument | Mapping[str, object],
+) -> str:
+    document = _project_document(project)
+    return _native.export_project_yaml(document.canonical_json())
 
 
 def _checkpoint_document(

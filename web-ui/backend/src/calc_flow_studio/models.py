@@ -4,17 +4,12 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal, Self
 
-from calc_flow.batch import JSONValue
-from calc_flow.config import (
-    CONFIG_FORMAT_VERSION,
-    DataSourceConfig,
-    InputFormat,
-    PipelineConfig,
-    ProjectConfig,
-    RunOptions,
-    StrictModel,
-)
-from pydantic import Field, model_validator
+from calc_flow import ProjectDocument, Runtime
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
 
 class RunStatus(StrEnum):
@@ -27,9 +22,17 @@ class RunStatus(StrEnum):
 
 
 class InputPayload(StrictModel):
-    format: InputFormat
-    data: JSONValue
+    format: Literal["records", "columns", "arrow_ipc"]
+    data: object
     source_id: str | None = None
+
+
+class RunOptions(StrictModel):
+    timeout_seconds: int = Field(default=30, ge=1, le=300)
+    memory_limit_mb: int = Field(default=512, ge=64, le=4096)
+    max_input_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
+    max_rows: int = Field(default=100_000, ge=1)
+    output_rows: int = Field(default=1000, ge=1, le=10_000)
 
 
 class RunRequest(StrictModel):
@@ -37,21 +40,20 @@ class RunRequest(StrictModel):
     options: RunOptions | None = None
 
 
-class ProjectCreateRequest(StrictModel):
-    format_version: Literal[CONFIG_FORMAT_VERSION] = CONFIG_FORMAT_VERSION
-    name: str = Field(min_length=1, max_length=120)
-    description: str = Field(default="", max_length=2000)
-    pipeline: PipelineConfig
-    data_sources: tuple[DataSourceConfig, ...] = ()
-    run_options: RunOptions = RunOptions()
-
+class ProjectCreateRequest(ProjectDocument):
     @model_validator(mode="after")
-    def validate_project_content(self) -> Self:
-        ProjectConfig(id="project_validation", **self.model_dump())
+    def validate_complete_project(self) -> Self:
+        report = Runtime().validation_report(self.canonical_json())
+        if not report["valid"]:
+            issues = report.get("issues", [])
+            details = "; ".join(
+                str(issue.get("message", "invalid project")) for issue in issues
+            )
+            raise ValueError(details or "invalid project")
         return self
 
-    def to_project(self, project_id: str) -> ProjectConfig:
-        return ProjectConfig(id=project_id, **self.model_dump())
+    def to_project(self) -> ProjectDocument:
+        return ProjectDocument.model_validate(self.root)
 
 
 class ProjectSummary(StrictModel):
@@ -67,7 +69,7 @@ class CheckpointSummary(StrictModel):
     compatible: bool | None = None
     pipeline_fingerprint: str | None = None
     sequence: int | None = None
-    source_cursor: JSONValue = None
+    source_cursor: object = None
     created_at: datetime | None = None
     state_nodes: tuple[str, ...] = ()
 
@@ -87,12 +89,4 @@ class RunResponse(StrictModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     error: str | None = None
-    result: dict[str, JSONValue] | None = None
-
-
-class CatalogResponse(StrictModel):
-    config_format_version: str
-    operators: tuple[dict[str, JSONValue], ...]
-    udfs: tuple[dict[str, JSONValue], ...]
-    arrow_types: tuple[str, ...]
-    limits: dict[str, JSONValue]
+    result: dict[str, object] | None = None

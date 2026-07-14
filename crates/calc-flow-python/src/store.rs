@@ -65,6 +65,30 @@ fn parse_project(document: &str) -> PyResult<calc_flow::ProjectSpec> {
     calc_flow::import_project_json(document.as_bytes()).map_err(crate::error::to_py_err)
 }
 
+#[pyfunction]
+fn import_project_json(document: &[u8]) -> PyResult<String> {
+    let project = calc_flow::import_project_json(document).map_err(crate::error::to_py_err)?;
+    calc_flow::export_project_json(&project).map_err(crate::error::to_py_err)
+}
+
+#[pyfunction]
+fn import_project_yaml(document: &[u8]) -> PyResult<String> {
+    let project = calc_flow::import_project_yaml(document).map_err(crate::error::to_py_err)?;
+    calc_flow::export_project_json(&project).map_err(crate::error::to_py_err)
+}
+
+#[pyfunction]
+fn export_project_json(project_json: &str) -> PyResult<String> {
+    let project = parse_project(project_json)?;
+    calc_flow::export_project_json(&project).map_err(crate::error::to_py_err)
+}
+
+#[pyfunction]
+fn export_project_yaml(project_json: &str) -> PyResult<String> {
+    let project = parse_project(project_json)?;
+    calc_flow::export_project_yaml(&project).map_err(crate::error::to_py_err)
+}
+
 fn parse_checkpoint(document: &str) -> PyResult<calc_flow::Checkpoint> {
     serde_json::from_str(document).map_err(|error| {
         crate::error::to_py_err(calc_flow::CalcFlowError::Format {
@@ -213,6 +237,10 @@ impl PyFileCheckpointStore {
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyFileProjectStore>()?;
     module.add_class::<PyFileCheckpointStore>()?;
+    module.add_function(wrap_pyfunction!(import_project_json, module)?)?;
+    module.add_function(wrap_pyfunction!(import_project_yaml, module)?)?;
+    module.add_function(wrap_pyfunction!(export_project_json, module)?)?;
+    module.add_function(wrap_pyfunction!(export_project_yaml, module)?)?;
     Ok(())
 }
 
@@ -296,6 +324,38 @@ mod tests {
             register(&module).unwrap();
             assert!(module.getattr("_FileProjectStore").is_ok());
             assert!(module.getattr("_FileCheckpointStore").is_ok());
+            assert!(module.getattr("import_project_json").is_ok());
+            assert!(module.getattr("import_project_yaml").is_ok());
+            assert!(module.getattr("export_project_json").is_ok());
+            assert!(module.getattr("export_project_yaml").is_ok());
         });
+    }
+
+    #[test]
+    fn native_project_transforms_use_bounded_strict_core_serialization() {
+        let project = project_json("portable");
+        let imported = import_project_json(project.as_bytes()).unwrap();
+        assert!(imported.ends_with('\n'));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&imported).unwrap()["format_version"],
+            2
+        );
+
+        let yaml = export_project_yaml(&project).unwrap();
+        assert!(yaml.contains("format_version: 2"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                &import_project_yaml(yaml.as_bytes()).unwrap()
+            )
+            .unwrap()["id"],
+            "portable"
+        );
+        assert!(
+            import_project_json(&vec![b'x'; calc_flow::MAX_PROJECT_DOCUMENT_BYTES + 1]).is_err()
+        );
+        assert!(import_project_yaml(
+            b"format_version: 2\nid: aliases\nname: &name aliases\ndescription: *name\npipeline: {name: p, nodes: []}\n"
+        )
+        .is_err());
     }
 }

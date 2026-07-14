@@ -135,6 +135,14 @@ class Runtime:
 class ExecutionPlan:
     _inner: _native.ExecutionPlan = field(repr=False)
 
+    @property
+    def name(self) -> str:
+        return self._inner.name
+
+    @property
+    def fingerprint(self) -> str:
+        return self._inner.fingerprint
+
     def execute(self, inputs: Mapping[str, _native.Batch]) -> _native.RunResult:
         try:
             asyncio.get_running_loop()

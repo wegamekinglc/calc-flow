@@ -106,6 +106,14 @@ impl PyExecutionPlan {
         Ok((Arc::clone(&state.inner), Arc::clone(&state.tokio)))
     }
 
+    fn identity(&self) -> PyResult<(String, String)> {
+        let state = self.state.read();
+        let state = state
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err(CLEARED_PLAN_MESSAGE))?;
+        Ok((state.inner.name().into(), state.inner.fingerprint().into()))
+    }
+
     /// Clones native handles together with a real Python owner.
     ///
     /// The owner is what keeps callback roots traversable while native state is
@@ -123,6 +131,16 @@ impl PyExecutionPlan {
 
 #[pymethods]
 impl PyExecutionPlan {
+    #[getter]
+    fn name(&self) -> PyResult<String> {
+        self.identity().map(|(name, _)| name)
+    }
+
+    #[getter]
+    fn fingerprint(&self) -> PyResult<String> {
+        self.identity().map(|(_, fingerprint)| fingerprint)
+    }
+
     fn execute(&self, py: Python<'_>, inputs: &Bound<'_, PyDict>) -> PyResult<PyRunResult> {
         let inputs = extract_inputs(inputs)?;
         let (plan, runtime) = self.execution_handles()?;
@@ -762,6 +780,13 @@ mod tests {
                 "pipeline"
             );
         });
+    }
+
+    #[test]
+    fn execution_plan_exposes_core_name_and_fingerprint() {
+        let plan = plan();
+        assert_eq!(plan.name().unwrap(), "pipeline");
+        assert!(!plan.fingerprint().unwrap().is_empty());
     }
 
     #[test]
