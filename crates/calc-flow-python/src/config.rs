@@ -89,7 +89,7 @@ impl PyRuntime {
         reason = "Task 18 registers Python-hosted provider factories through this GC-safe seam"
     )]
     /// Registers a factory that retains the same `root` allocation.
-    pub(crate) fn register_provider(
+    pub(crate) fn register_provider_factory(
         &self,
         provider: &str,
         name: &str,
@@ -191,6 +191,27 @@ impl PyRuntime {
         let tokio = tokio::runtime::Runtime::new()
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         Ok(Self::from_tokio(Arc::new(tokio)))
+    }
+
+    #[pyo3(name = "register_provider")]
+    fn register_python_provider(
+        &self,
+        py: Python<'_>,
+        provider: &str,
+        name: &str,
+        version: &str,
+        callback: Py<PyAny>,
+    ) -> PyResult<()> {
+        if !callback.bind(py).is_callable() {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "provider callback must be callable",
+            ));
+        }
+        let root = Arc::new(PythonRoot::new(callback));
+        let factory: Arc<dyn calc_flow::ExternalOperatorFactory> = Arc::new(
+            crate::provider::PythonOperatorFactory::new(Arc::clone(&root), provider, name, version),
+        );
+        self.register_provider_factory(provider, name, version, &factory, root)
     }
 
     fn compile_project(
@@ -445,7 +466,7 @@ mod tests {
                     });
                 runtime
                     .borrow(py)
-                    .register_provider("python", "array", "1", &factory, provider_root)
+                    .register_provider_factory("python", "array", "1", &factory, provider_root)
                     .unwrap();
 
                 let udf_root = Arc::new(PythonRoot::new(udf.clone().unbind()));
@@ -496,7 +517,7 @@ mod tests {
                 _callback: Arc::clone(&root),
             });
             runtime
-                .register_provider("python", "array", "1", &factory, Arc::clone(&root))
+                .register_provider_factory("python", "array", "1", &factory, Arc::clone(&root))
                 .unwrap();
             let native = rooted_udf("rooted", Arc::clone(&root));
             runtime
@@ -531,7 +552,7 @@ mod tests {
                 });
             runtime
                 .borrow(py)
-                .register_provider("python", "array", "1", &inert_factory, inert_provider)
+                .register_provider_factory("python", "array", "1", &inert_factory, inert_provider)
                 .unwrap();
             let inert_udf = Arc::new(PythonRoot::new(py.None()));
             let inert_native = rooted_udf("rooted", Arc::clone(&inert_udf));
@@ -572,7 +593,13 @@ mod tests {
             assert!(
                 runtime
                     .borrow(py)
-                    .register_provider("python", "array", "1", &rejected_factory, provider_root,)
+                    .register_provider_factory(
+                        "python",
+                        "array",
+                        "1",
+                        &rejected_factory,
+                        provider_root,
+                    )
                     .is_err()
             );
             drop(rejected_factory);

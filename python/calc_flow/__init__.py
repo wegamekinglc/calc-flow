@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from calc_flow import _native as _native
+from calc_flow.array import register_jax, register_numpy
 from calc_flow.errors import (
     CalcFlowError,
     CancelledError,
@@ -35,6 +36,8 @@ __all__ = [
     "PipelineBuilder",
     "Runtime",
     "RunResult",
+    "register_jax",
+    "register_numpy",
     "project_json_schema",
     "validate_project_json",
     "__version__",

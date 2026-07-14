@@ -4,6 +4,7 @@ mod batch;
 mod config;
 mod error;
 mod pipeline;
+mod provider;
 
 use pyo3::prelude::*;
 

@@ -22,6 +22,13 @@ class Batch:
         table: _ArrowCStream, metadata: Mapping[str, object] | None = None
     ) -> Batch: ...
     @staticmethod
+    def from_array(
+        array: object,
+        *,
+        backend: str,
+        metadata: Mapping[str, object] | None = None,
+    ) -> Batch: ...
+    @staticmethod
     def _from_external(
         object: object, backend: str, len: int, metadata: Mapping[str, object]
     ) -> Batch:
@@ -29,6 +36,10 @@ class Batch:
         ...
 
     def to_pyarrow(self) -> pa.Table: ...
+    @property
+    def array(self) -> object: ...
+    @property
+    def backend(self) -> str: ...
     @property
     def kind(self) -> str: ...
     @property
@@ -38,6 +49,9 @@ class Batch:
 
 class Runtime:
     def __init__(self) -> None: ...
+    def register_provider(
+        self, provider: str, name: str, version: str, callback: object
+    ) -> None: ...
     def compile_project(self, project_json: str) -> ExecutionPlan: ...
 
 class ExecutionPlan:

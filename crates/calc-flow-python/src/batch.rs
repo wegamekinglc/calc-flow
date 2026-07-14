@@ -26,6 +26,12 @@ pub(crate) struct PythonPayload {
     len: usize,
 }
 
+impl PythonPayload {
+    pub(crate) fn backend(&self) -> &str {
+        &self.backend
+    }
+}
+
 impl fmt::Debug for PythonPayload {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -71,6 +77,19 @@ impl PyBatch {
 
     pub(crate) fn from_inner_python(py: Python<'_>, inner: calc_flow::Batch) -> PyResult<Self> {
         Ok(Self::from_inner(rehome_python_payload(py, inner)?))
+    }
+
+    pub(crate) fn python_payload(&self) -> PyResult<calc_flow::Batch> {
+        let batch = self.clone_inner()?;
+        let payload = batch.external_payload().map_err(|_| {
+            PyTypeError::new_err("table batches do not contain a Python array payload")
+        })?;
+        if payload.as_any().downcast_ref::<PythonPayload>().is_none() {
+            return Err(PyTypeError::new_err(
+                "array batch payload was not created by the Python host",
+            ));
+        }
+        Ok(batch)
     }
 }
 
@@ -127,6 +146,30 @@ impl PyBatch {
     }
 
     #[staticmethod]
+    #[pyo3(signature = (array, *, backend, metadata=None))]
+    fn from_array(
+        py: Python<'_>,
+        array: &Bound<'_, PyAny>,
+        backend: String,
+        metadata: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let prepared = py
+            .import(intern!(py, "calc_flow.array"))?
+            .getattr(intern!(py, "_prepare_array"))?
+            .call1((array, &backend))?;
+        let (object, len): (Py<PyAny>, usize) = prepared.extract()?;
+        let metadata = metadata_from_python(py, metadata)?;
+        let payload = PythonPayload {
+            object,
+            backend,
+            len,
+        };
+        let inner = calc_flow::Batch::external(Arc::new(payload), metadata)
+            .map_err(crate::error::to_py_err)?;
+        Ok(Self::from_inner(inner))
+    }
+
+    #[staticmethod]
     fn _from_external(
         object: Py<PyAny>,
         backend: String,
@@ -150,6 +193,36 @@ impl PyBatch {
             .table_payload()
             .map_err(|_| PyTypeError::new_err("array batches do not contain a PyArrow table"))?;
         PyTable::try_new(table.batches().to_vec(), table.schema().clone())?.into_pyarrow(py)
+    }
+
+    #[getter]
+    fn array(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let inner = self.clone_inner()?;
+        let payload = inner
+            .external_payload()
+            .map_err(|_| PyTypeError::new_err("table batches do not contain an array"))?;
+        let payload = payload
+            .as_any()
+            .downcast_ref::<PythonPayload>()
+            .ok_or_else(|| {
+                PyTypeError::new_err("array batch payload was not created by the Python host")
+            })?;
+        Ok(payload.object.clone_ref(py))
+    }
+
+    #[getter]
+    fn backend(&self) -> PyResult<String> {
+        let inner = self.clone_inner()?;
+        let payload = inner
+            .external_payload()
+            .map_err(|_| PyTypeError::new_err("table batches do not have an array backend"))?;
+        let payload = payload
+            .as_any()
+            .downcast_ref::<PythonPayload>()
+            .ok_or_else(|| {
+                PyTypeError::new_err("array batch payload was not created by the Python host")
+            })?;
+        Ok(payload.backend().into())
     }
 
     #[getter]

@@ -83,6 +83,15 @@ def _updated_project(project_json: str, update: Any) -> str:
 class Runtime:
     _inner: _native.Runtime = field(default_factory=_native.Runtime, repr=False)
 
+    def register_provider(
+        self,
+        provider: str,
+        name: str,
+        version: str,
+        callback: Any,
+    ) -> None:
+        self._inner.register_provider(provider, name, version, callback)
+
     def compile_project(self, project_json: str) -> ExecutionPlan:
         if not isinstance(project_json, str):
             raise TypeError("project_json must be a string")
@@ -189,6 +198,48 @@ class PipelineBuilder:
 
         return self._from_json(_updated_project(self._project_json, add))
 
+    def external(
+        self,
+        node_id: str,
+        provider: str,
+        name: str,
+        version: str,
+        options: Mapping[str, object],
+    ) -> PipelineBuilder:
+        copied_options = dict(options)
+
+        def add(project: dict[str, Any]) -> None:
+            project["pipeline"]["nodes"].append(
+                {
+                    "id": node_id,
+                    "input_ports": [
+                        {
+                            "kind": "array",
+                            "name": "input",
+                            "required": True,
+                            "schema": [],
+                        }
+                    ],
+                    "operator": {
+                        "kind": "external",
+                        "name": name,
+                        "options": copied_options,
+                        "provider": provider,
+                        "version": version,
+                    },
+                    "output_ports": [
+                        {
+                            "kind": "array",
+                            "name": "output",
+                            "required": True,
+                            "schema": [],
+                        }
+                    ],
+                }
+            )
+
+        return self._from_json(_updated_project(self._project_json, add))
+
     def connect(
         self,
         source_node: str,
@@ -210,6 +261,17 @@ class PipelineBuilder:
         return self._from_json(_updated_project(self._project_json, add))
 
     def compile(self, runtime: Runtime | None = None) -> ExecutionPlan:
+        from calc_flow.array import _validate_provider_options
+
+        for node in self.project["pipeline"]["nodes"]:
+            operator = node["operator"]
+            if operator["kind"] == "external":
+                _validate_provider_options(
+                    operator["provider"],
+                    operator["name"],
+                    operator["version"],
+                    operator["options"],
+                )
         selected = Runtime() if runtime is None else runtime
         if not isinstance(selected, Runtime):
             raise TypeError("runtime must be a calc_flow.Runtime")
