@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 import math
 import operator
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -14,6 +14,9 @@ if TYPE_CHECKING:
 
 _MAX_AST_NODES = 128
 _MAX_AST_DEPTH = 24
+_MAX_EXPRESSION_LENGTH = 4096
+_MAX_INTEGER_MAGNITUDE = 2**63 - 1
+_MAX_POWER_EXPONENT_MAGNITUDE = 64
 _MAX_RESHAPE_RANK = 16
 _MAX_RESHAPE_DIMENSION = 1_000_000
 _MAX_RESHAPE_ELEMENTS = 10_000_000
@@ -38,6 +41,10 @@ def _array_error(message: str) -> ValueError:
 def _parse_expression(expression: object) -> ast.Expression:
     if not isinstance(expression, str) or not expression.strip():
         raise _array_error("expression must be a non-empty string")
+    if len(expression) > _MAX_EXPRESSION_LENGTH:
+        raise _array_error(
+            f"expression length limit is {_MAX_EXPRESSION_LENGTH} characters"
+        )
     try:
         parsed = ast.parse(expression, mode="eval")
     except (SyntaxError, ValueError) as error:
@@ -68,11 +75,23 @@ def _validate_node(node: ast.AST) -> None:
     if isinstance(node, ast.Constant):
         if type(node.value) not in (int, float):
             raise _array_error("constants must be finite numbers")
+        if type(node.value) is int and abs(node.value) > _MAX_INTEGER_MAGNITUDE:
+            raise _array_error(
+                f"integer constant magnitude limit is {_MAX_INTEGER_MAGNITUDE}"
+            )
         if isinstance(node.value, float) and not math.isfinite(node.value):
             raise _array_error("constants must be finite numbers")
         return
     if isinstance(node, ast.BinOp) and type(node.op) in _ALLOWED_BINARY:
         _validate_node(node.left)
+        if isinstance(node.op, ast.Pow):
+            exponent = _numeric_literal(node.right)
+            if exponent is None:
+                raise _array_error("power exponent must be a finite numeric literal")
+            if abs(exponent) > _MAX_POWER_EXPONENT_MAGNITUDE:
+                raise _array_error(
+                    f"power exponent magnitude limit is {_MAX_POWER_EXPONENT_MAGNITUDE}"
+                )
         _validate_node(node.right)
         return
     if isinstance(node, ast.UnaryOp) and type(node.op) in _ALLOWED_UNARY:
@@ -82,6 +101,18 @@ def _validate_node(node: ast.AST) -> None:
         _validate_call(node)
         return
     raise _array_error(f"unsupported syntax {type(node).__name__}")
+
+
+def _numeric_literal(node: ast.AST) -> int | float | None:
+    sign = 1
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        sign = -1 if isinstance(node.op, ast.USub) else 1
+        node = node.operand
+    if not isinstance(node, ast.Constant) or type(node.value) not in (int, float):
+        return None
+    if isinstance(node.value, float) and not math.isfinite(node.value):
+        return None
+    return sign * node.value
 
 
 def _validate_call(node: ast.Call) -> None:
@@ -135,28 +166,37 @@ def _reshape_shape(node: ast.AST) -> tuple[int, ...]:
     return tuple(dimensions)
 
 
-def _evaluate(node: ast.AST, value: object, namespace: object) -> object:
+def _evaluate(
+    node: ast.AST,
+    value: object,
+    namespace: object,
+    validate_result: Callable[[object], None] | None = None,
+) -> object:
     if isinstance(node, ast.Name):
-        return value
-    if isinstance(node, ast.Constant):
-        return node.value
-    if isinstance(node, ast.BinOp):
+        result = value
+    elif isinstance(node, ast.Constant):
+        result = node.value
+    elif isinstance(node, ast.BinOp):
         function = _ALLOWED_BINARY[type(node.op)]
-        return function(
-            _evaluate(node.left, value, namespace),
-            _evaluate(node.right, value, namespace),
+        result = function(
+            _evaluate(node.left, value, namespace, validate_result),
+            _evaluate(node.right, value, namespace, validate_result),
         )
-    if isinstance(node, ast.UnaryOp):
+    elif isinstance(node, ast.UnaryOp):
         function = _ALLOWED_UNARY[type(node.op)]
-        return function(_evaluate(node.operand, value, namespace))
-    if isinstance(node, ast.Call):
+        result = function(_evaluate(node.operand, value, namespace, validate_result))
+    elif isinstance(node, ast.Call):
         name = node.func.id  # type: ignore[union-attr]
         function = getattr(namespace, name)
-        arguments = [_evaluate(node.args[0], value, namespace)]
+        arguments = [_evaluate(node.args[0], value, namespace, validate_result)]
         if name == "reshape":
             arguments.append(_reshape_shape(node.args[1]))
-        return function(*arguments)
-    raise AssertionError("validated array expression contained an unsupported node")
+        result = function(*arguments)
+    else:
+        raise AssertionError("validated array expression contained an unsupported node")
+    if validate_result is not None:
+        validate_result(result)
+    return result
 
 
 def _validate_options(options: Mapping[str, object]) -> ast.Expression:
@@ -179,11 +219,67 @@ def _validate_provider_options(
 def _owned_numpy(value: object) -> object:
     import numpy as np
 
-    owner = np.array(value, copy=True)
-    owner.setflags(write=False)
-    view = owner.view()
-    view.setflags(write=False)
-    return view
+    array = np.asarray(value)
+    _validate_numpy_dtype(array.dtype)
+    owner = np.array(array, copy=True, order="C", subok=False)
+    immutable_bytes = owner.tobytes(order="C")
+    return np.frombuffer(immutable_bytes, dtype=owner.dtype).reshape(owner.shape)
+
+
+def _validate_numpy_dtype(dtype: object) -> None:
+    import numpy as np
+
+    normalized = np.dtype(dtype)
+    allowed_scalar_types = frozenset(
+        {
+            np.bool_,
+            np.int8,
+            np.int16,
+            np.int32,
+            np.int64,
+            np.uint8,
+            np.uint16,
+            np.uint32,
+            np.uint64,
+            np.float32,
+            np.float64,
+            np.complex64,
+            np.complex128,
+        }
+    )
+    if normalized.type not in allowed_scalar_types or not normalized.isnative:
+        raise ValueError(
+            f"NumPy arrays require a NumPy Array API dtype; received {normalized}"
+        )
+
+
+def _validate_python_operation_scalar(value: object) -> bool:
+    if type(value) is int:
+        if abs(value) > _MAX_INTEGER_MAGNITUDE:
+            raise _array_error(
+                f"integer constant magnitude limit is {_MAX_INTEGER_MAGNITUDE}"
+            )
+        return True
+    return type(value) in (float, complex)
+
+
+def _validate_numpy_operation_result(value: object) -> None:
+    import numpy as np
+
+    if _validate_python_operation_scalar(value):
+        return
+    if type(value) is np.ndarray or isinstance(value, np.generic):
+        _validate_numpy_dtype(value.dtype)
+        return
+    raise TypeError("NumPy provider operations must produce arrays or numeric scalars")
+
+
+def _validate_jax_operation_result(value: object) -> None:
+    import jax
+
+    if _validate_python_operation_scalar(value) or isinstance(value, jax.Array):
+        return
+    raise TypeError("JAX provider operations must produce arrays or numeric scalars")
 
 
 def _owned_jax(value: object) -> object:
@@ -226,7 +322,11 @@ class _ArrayProvider:
                 f"provider requires backend {self.backend}, received {batch.backend}"
             )
         parsed = _validate_options(options)
-        result = _evaluate(parsed.body, batch.array, self.namespace)
+        validate_result = {
+            "jax": _validate_jax_operation_result,
+            "numpy": _validate_numpy_operation_result,
+        }[self.backend]
+        result = _evaluate(parsed.body, batch.array, self.namespace, validate_result)
         if self.backend == "jax":
             import jax
 

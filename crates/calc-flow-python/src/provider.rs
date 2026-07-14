@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use pyo3::{exceptions::PyTypeError, prelude::*};
+use serde_json::json;
 
 use crate::{
     batch::{PyBatch, PythonPayload, rehome_python_payload},
@@ -131,7 +132,12 @@ impl calc_flow::Operator for PythonOperator {
     }
 
     fn configuration(&self) -> calc_flow::JsonMap {
-        self.options.clone()
+        BTreeMap::from([
+            ("name".into(), json!(self.name)),
+            ("options".into(), json!(self.options)),
+            ("provider".into(), json!(self.provider)),
+            ("version".into(), json!(self.version)),
+        ])
     }
 
     async fn process(
@@ -186,11 +192,9 @@ fn call_python_operator(
 mod tests {
     use std::sync::Arc;
 
+    use super::*;
     use calc_flow::ExternalOperatorFactory as _;
     use pyo3::types::PyDict;
-    use serde_json::json;
-
-    use super::*;
 
     #[derive(Debug)]
     struct ForeignPayload;
