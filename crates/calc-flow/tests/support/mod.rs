@@ -457,6 +457,33 @@ pub struct QueueSource {
     opens: Arc<Mutex<Vec<Option<Value>>>>,
 }
 
+pub struct GatedCandidateSource {
+    items: VecDeque<SourceItem>,
+    calls: usize,
+    gate_call: usize,
+    gate_pending: bool,
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl GatedCandidateSource {
+    pub fn new(
+        items: Vec<SourceItem>,
+        gate_call: usize,
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        Self {
+            items: items.into(),
+            calls: 0,
+            gate_call,
+            gate_pending: true,
+            started,
+            release,
+        }
+    }
+}
+
 impl QueueSource {
     pub fn new(items: Vec<SourceItem>) -> (Self, Arc<Mutex<Vec<Option<Value>>>>) {
         let opens = Arc::new(Mutex::new(Vec::new()));
@@ -478,6 +505,23 @@ impl Source for QueueSource {
     }
 
     async fn next(&mut self) -> Result<Option<SourceItem>> {
+        Ok(self.items.pop_front())
+    }
+}
+
+#[async_trait]
+impl Source for GatedCandidateSource {
+    async fn open(&mut self, _cursor: Option<Value>) -> Result<()> {
+        Ok(())
+    }
+
+    async fn next(&mut self) -> Result<Option<SourceItem>> {
+        self.calls += 1;
+        if self.calls == self.gate_call && self.gate_pending {
+            self.gate_pending = false;
+            self.started.notify_one();
+            self.release.notified().await;
+        }
         Ok(self.items.pop_front())
     }
 }
@@ -507,12 +551,36 @@ pub struct GatedOnceSink {
     pending: AtomicUsize,
 }
 
+pub struct GateOnCallSink {
+    gate_call: usize,
+    calls: usize,
+    gate_pending: bool,
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
 impl GatedOnceSink {
     pub fn new(started: Arc<tokio::sync::Notify>, release: Arc<tokio::sync::Notify>) -> Self {
         Self {
             started,
             release,
             pending: AtomicUsize::new(1),
+        }
+    }
+}
+
+impl GateOnCallSink {
+    pub fn new(
+        gate_call: usize,
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        Self {
+            gate_call,
+            calls: 0,
+            gate_pending: true,
+            started,
+            release,
         }
     }
 }
@@ -549,6 +617,19 @@ impl Sink for GatedOnceSink {
     }
 }
 
+#[async_trait]
+impl Sink for GateOnCallSink {
+    async fn write(&mut self, _batch: &Batch, _context: &RunContext) -> Result<()> {
+        self.calls += 1;
+        if self.calls == self.gate_call && self.gate_pending {
+            self.gate_pending = false;
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy)]
 pub enum StoreGate {
     Save,
@@ -562,6 +643,7 @@ pub struct VisibleGateCheckpointStore {
     started: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
     fail_compensation: AtomicUsize,
+    saves: AtomicUsize,
 }
 
 impl VisibleGateCheckpointStore {
@@ -578,6 +660,7 @@ impl VisibleGateCheckpointStore {
             started,
             release,
             fail_compensation: AtomicUsize::new(0),
+            saves: AtomicUsize::new(0),
         }
     }
 
@@ -587,6 +670,10 @@ impl VisibleGateCheckpointStore {
 
     pub fn fail_next_compensations(&self, count: usize) {
         self.fail_compensation.store(count, Ordering::SeqCst);
+    }
+
+    pub fn saves(&self) -> usize {
+        self.saves.load(Ordering::SeqCst)
     }
 
     async fn gate_once(&self, operation: StoreGate) {
@@ -626,6 +713,7 @@ impl CheckpointStore for VisibleGateCheckpointStore {
     }
 
     async fn save(&self, checkpoint: &Checkpoint) -> Result<()> {
+        self.saves.fetch_add(1, Ordering::SeqCst);
         if self.gate_pending.load(Ordering::SeqCst) == 0 {
             self.maybe_fail_compensation()?;
         }

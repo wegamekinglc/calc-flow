@@ -28,6 +28,10 @@ impl StreamingRunner {
     /// Returns [`CalcFlowError::InvalidArgument`] unless the plan has exactly
     /// one external input, or [`CalcFlowError::PlanLeased`] when another
     /// runner already owns the plan.
+    ///
+    /// A replacement runner used after abandonment must receive the same
+    /// logical [`CheckpointStore`] so interrupted durable mutations are
+    /// recovered against the store that observed them.
     pub fn new(plan: Arc<ExecutionPlan>, checkpoints: Arc<dyn CheckpointStore>) -> Result<Self> {
         plan.single_external_input()?;
         let lease = plan.acquire_lease()?;

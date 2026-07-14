@@ -150,6 +150,7 @@ struct OperationState {
 #[derive(Clone)]
 struct InFlightOperation {
     token: u64,
+    runner_owner: Option<u64>,
     action: RecoveryAction,
 }
 
@@ -180,6 +181,21 @@ pub(crate) struct RollbackOutcome {
     pub(crate) recovery_failed: bool,
 }
 
+pub(crate) enum RecoveryOutcome {
+    None,
+    RolledBack,
+    CommittedCheckpoint(Checkpoint),
+}
+
+impl RecoveryOutcome {
+    pub(crate) const fn committed_checkpoint(&self) -> Option<&Checkpoint> {
+        match self {
+            Self::CommittedCheckpoint(checkpoint) => Some(checkpoint),
+            Self::None | Self::RolledBack => None,
+        }
+    }
+}
+
 /// Exclusive, non-cloneable runner ownership of an execution plan.
 ///
 /// The synchronous lease flag makes reentrant public calls fail before they
@@ -198,6 +214,7 @@ pub(crate) struct PlanLease {
 /// intermediate state.
 pub(crate) struct PlanTransaction<'a> {
     plan: &'a ExecutionPlan,
+    lease_token: Option<u64>,
     _guard: tokio::sync::MutexGuard<'a, ()>,
 }
 
@@ -319,7 +336,24 @@ impl ExecutionPlan {
     ///
     /// Returns an error summarizing operator reset failures.
     pub async fn reset(&self) -> Result<()> {
-        let transaction = self.public_transaction().await?;
+        let transaction = self.raw_public_transaction().await?;
+        if let Err(recovery) = transaction.recover_in_flight(None).await {
+            if transaction.has_runner_owned_operation() {
+                return Err(recovery);
+            }
+            if !transaction.has_direct_operation() {
+                return Err(recovery);
+            }
+            let before = transaction.snapshot().await?;
+            let operation = transaction.replace_for_direct_forced_reset(before)?;
+            return match transaction.reset().await {
+                Ok(()) => transaction.commit_operation(operation),
+                Err(original) => Err(transaction
+                    .rollback_error(operation, original, None)
+                    .await
+                    .error),
+            };
+        }
         let before = transaction.snapshot().await?;
         let operation = transaction.begin_rollback(before)?;
         match transaction.reset().await {
@@ -358,15 +392,20 @@ impl ExecutionPlan {
     }
 
     async fn public_transaction(&self) -> Result<PlanTransaction<'_>> {
+        let transaction = self.raw_public_transaction().await?;
+        transaction.recover_in_flight(None).await?;
+        Ok(transaction)
+    }
+
+    async fn raw_public_transaction(&self) -> Result<PlanTransaction<'_>> {
         self.ensure_unleased()?;
         let guard = self.run_lock.lock().await;
         self.ensure_unleased()?;
-        let transaction = PlanTransaction {
+        Ok(PlanTransaction {
             plan: self,
+            lease_token: None,
             _guard: guard,
-        };
-        transaction.recover_in_flight(None).await?;
-        Ok(transaction)
+        })
     }
 
     pub(crate) async fn leased_transaction<'plan>(
@@ -378,8 +417,58 @@ impl ExecutionPlan {
         self.ensure_lease_owner(lease)?;
         Ok(PlanTransaction {
             plan: self,
+            lease_token: Some(lease.token),
             _guard: guard,
         })
+    }
+
+    pub(crate) fn handoff_runner_drop(
+        &self,
+        lease: &PlanLease,
+        durable_state: BTreeMap<String, Value>,
+        durable_checkpoint: Option<Checkpoint>,
+    ) {
+        let lease_state = self
+            .lease_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !std::ptr::eq(self, Arc::as_ptr(&lease.plan)) || lease_state.owner != Some(lease.token) {
+            return;
+        }
+        let mut state = self
+            .operation_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match state.in_flight.as_mut() {
+            Some(operation) if operation.runner_owner == Some(lease.token) => {
+                if let RecoveryAction::Rollback {
+                    state,
+                    checkpoint: CheckpointRecovery::Restore(checkpoint),
+                    ..
+                } = &mut operation.action
+                {
+                    *state = durable_state;
+                    *checkpoint = durable_checkpoint;
+                }
+            }
+            Some(_) => {}
+            None => {
+                let Some(token) = state.generation.checked_add(1) else {
+                    return;
+                };
+                state.generation = token;
+                state.in_flight = Some(InFlightOperation {
+                    token,
+                    runner_owner: Some(lease.token),
+                    action: RecoveryAction::Rollback {
+                        state: durable_state,
+                        checkpoint: CheckpointRecovery::Restore(durable_checkpoint),
+                        store_mutation_started: false,
+                        clear_after_recovery: true,
+                    },
+                });
+            }
+        }
     }
 
     fn ensure_unleased(&self) -> Result<()> {
@@ -640,12 +729,15 @@ impl PlanTransaction<'_> {
     /// Records direct-plan rollback data synchronously before the first
     /// cancellable state mutation.
     fn begin_rollback(&self, state: BTreeMap<String, Value>) -> Result<OperationToken> {
-        self.begin_operation(RecoveryAction::Rollback {
-            state,
-            checkpoint: CheckpointRecovery::NotRequired,
-            store_mutation_started: false,
-            clear_after_recovery: true,
-        })
+        self.begin_operation(
+            RecoveryAction::Rollback {
+                state,
+                checkpoint: CheckpointRecovery::NotRequired,
+                store_mutation_started: false,
+                clear_after_recovery: true,
+            },
+            None,
+        )
     }
 
     /// Records runner rollback data, including an absent durable checkpoint.
@@ -654,12 +746,15 @@ impl PlanTransaction<'_> {
         state: BTreeMap<String, Value>,
         checkpoint_before: Option<Checkpoint>,
     ) -> Result<OperationToken> {
-        self.begin_operation(RecoveryAction::Rollback {
-            state,
-            checkpoint: CheckpointRecovery::Restore(checkpoint_before),
-            store_mutation_started: false,
-            clear_after_recovery: true,
-        })
+        self.begin_operation(
+            RecoveryAction::Rollback {
+                state,
+                checkpoint: CheckpointRecovery::Restore(checkpoint_before),
+                store_mutation_started: false,
+                clear_after_recovery: true,
+            },
+            Some(self.runner_token()?),
+        )
     }
 
     /// Replaces an unrecoverable marker before a forced reset. Recovery of
@@ -691,16 +786,75 @@ impl PlanTransaction<'_> {
                 ),
             })?;
         state.generation = token;
-        state.in_flight = Some(InFlightOperation { token, action });
+        state.in_flight = Some(InFlightOperation {
+            token,
+            runner_owner: Some(self.runner_token()?),
+            action,
+        });
+        Ok(OperationToken(token))
+    }
+
+    fn replace_for_direct_forced_reset(
+        &self,
+        state_before_reset: BTreeMap<String, Value>,
+    ) -> Result<OperationToken> {
+        let mut state = self
+            .plan
+            .operation_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match state.in_flight.as_ref() {
+            Some(InFlightOperation {
+                runner_owner: None,
+                action:
+                    RecoveryAction::Rollback {
+                        checkpoint: CheckpointRecovery::NotRequired,
+                        ..
+                    },
+                ..
+            }) => {}
+            _ => {
+                return Err(self.recovery_error(
+                    "only a direct rollback marker can be replaced by public reset",
+                ));
+            }
+        }
+        let token = state
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| CalcFlowError::Internal {
+                message: format!(
+                    "execution plan {:?} exhausted operation generations",
+                    self.plan.name
+                ),
+            })?;
+        state.generation = token;
+        state.in_flight = Some(InFlightOperation {
+            token,
+            runner_owner: None,
+            action: RecoveryAction::Rollback {
+                state: state_before_reset,
+                checkpoint: CheckpointRecovery::NotRequired,
+                store_mutation_started: false,
+                clear_after_recovery: false,
+            },
+        });
         Ok(OperationToken(token))
     }
 
     /// Records an idempotent durable commit, used by the micro-batch EOF flush.
     pub(crate) fn begin_checkpoint_commit(&self, checkpoint: Checkpoint) -> Result<OperationToken> {
-        self.begin_operation(RecoveryAction::CommitCheckpoint { checkpoint })
+        self.begin_operation(
+            RecoveryAction::CommitCheckpoint { checkpoint },
+            Some(self.runner_token()?),
+        )
     }
 
-    fn begin_operation(&self, action: RecoveryAction) -> Result<OperationToken> {
+    fn begin_operation(
+        &self,
+        action: RecoveryAction,
+        runner_owner: Option<u64>,
+    ) -> Result<OperationToken> {
         let mut state = self
             .plan
             .operation_state
@@ -719,7 +873,11 @@ impl PlanTransaction<'_> {
                 ),
             })?;
         state.generation = token;
-        state.in_flight = Some(InFlightOperation { token, action });
+        state.in_flight = Some(InFlightOperation {
+            token,
+            runner_owner,
+            action,
+        });
         Ok(OperationToken(token))
     }
 
@@ -774,7 +932,7 @@ impl PlanTransaction<'_> {
     pub(crate) async fn recover_in_flight(
         &self,
         checkpoints: Option<&dyn CheckpointStore>,
-    ) -> Result<()> {
+    ) -> Result<RecoveryOutcome> {
         let operation = self
             .plan
             .operation_state
@@ -783,10 +941,10 @@ impl PlanTransaction<'_> {
             .in_flight
             .clone();
         let Some(operation) = operation else {
-            return Ok(());
+            return Ok(RecoveryOutcome::None);
         };
 
-        match &operation.action {
+        let outcome = match &operation.action {
             RecoveryAction::Rollback {
                 state,
                 checkpoint,
@@ -825,6 +983,7 @@ impl PlanTransaction<'_> {
                         "an interrupted forced reset must be explicitly reset again",
                     ));
                 }
+                RecoveryOutcome::RolledBack
             }
             RecoveryAction::CommitCheckpoint { checkpoint } => {
                 let store = checkpoints.ok_or_else(|| {
@@ -833,9 +992,11 @@ impl PlanTransaction<'_> {
                 store.save(checkpoint).await.map_err(|error| {
                     self.recovery_error(&format!("pending checkpoint commit failed: {error}"))
                 })?;
+                RecoveryOutcome::CommittedCheckpoint(checkpoint.clone())
             }
-        }
-        self.commit_operation(OperationToken(operation.token))
+        };
+        self.commit_operation(OperationToken(operation.token))?;
+        Ok(outcome)
     }
 
     pub(crate) async fn rollback_error(
@@ -855,7 +1016,7 @@ impl PlanTransaction<'_> {
             };
         }
         match self.recover_in_flight(checkpoints).await {
-            Ok(()) => RollbackOutcome {
+            Ok(_) => RollbackOutcome {
                 error: original,
                 recovery_failed: false,
             },
@@ -880,6 +1041,32 @@ impl PlanTransaction<'_> {
             Some(operation) if operation.token == token.0 => Ok(()),
             _ => Err(self.stale_operation_error(token)),
         }
+    }
+
+    fn runner_token(&self) -> Result<u64> {
+        self.lease_token.ok_or_else(|| CalcFlowError::Internal {
+            message: "runner-owned operation requires a leased transaction".into(),
+        })
+    }
+
+    fn has_runner_owned_operation(&self) -> bool {
+        self.plan
+            .operation_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .in_flight
+            .as_ref()
+            .is_some_and(|operation| operation.runner_owner.is_some())
+    }
+
+    fn has_direct_operation(&self) -> bool {
+        self.plan
+            .operation_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .in_flight
+            .as_ref()
+            .is_some_and(|operation| operation.runner_owner.is_none())
     }
 
     fn stale_operation_error(&self, token: OperationToken) -> CalcFlowError {

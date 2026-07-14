@@ -26,6 +26,9 @@ pub struct MicroBatchRunner {
     delivered: u64,
     current: Option<SourceItem>,
     pending_checkpoint: Option<Checkpoint>,
+    durable_state: Option<BTreeMap<String, serde_json::Value>>,
+    durable_checkpoint: Option<Checkpoint>,
+    advanced_since_durable: bool,
     eof: bool,
     poisoned: Option<String>,
 }
@@ -38,6 +41,10 @@ impl MicroBatchRunner {
     /// Returns [`CalcFlowError::InvalidArgument`] for zero cadence or a plan
     /// without exactly one external input, or [`CalcFlowError::PlanLeased`]
     /// when another runner already owns the plan.
+    ///
+    /// A replacement runner used after abandonment must receive the same
+    /// logical [`CheckpointStore`] so it can authenticate the durable cursor
+    /// and compensate any interrupted store mutation.
     pub fn new(
         plan: Arc<ExecutionPlan>,
         source: Box<dyn Source>,
@@ -64,6 +71,9 @@ impl MicroBatchRunner {
             delivered: 0,
             current: None,
             pending_checkpoint: None,
+            durable_state: None,
+            durable_checkpoint: None,
+            advanced_since_durable: false,
             eof: false,
             poisoned: None,
         })
@@ -101,6 +111,11 @@ impl MicroBatchRunner {
         let inputs = BTreeMap::from([(input_name, item.batch.clone())]);
         transaction.validate_inputs(&inputs)?;
         let before = transaction.snapshot().await?;
+        if self.durable_state.is_none() {
+            self.durable_state = Some(before.clone());
+            self.durable_checkpoint = None;
+            self.advanced_since_durable = false;
+        }
         let checkpoint_before = self.checkpoints.load(plan.name()).await?;
         let operation = transaction.begin_runner_rollback(before, checkpoint_before)?;
         let result = match transaction
@@ -150,11 +165,13 @@ impl MicroBatchRunner {
                     .rollback_operation(&transaction, operation, error)
                     .await);
             }
-            self.pending_checkpoint = None;
+            transaction.commit_operation(operation)?;
+            self.record_durable_checkpoint(checkpoint);
         } else {
             self.pending_checkpoint = Some(checkpoint);
+            transaction.commit_operation(operation)?;
+            self.advanced_since_durable = true;
         }
-        transaction.commit_operation(operation)?;
         self.delivered = next_delivered;
         self.current = None;
         Ok(Some(result))
@@ -182,6 +199,14 @@ impl MicroBatchRunner {
                     .rollback_operation(&transaction, operation, error)
                     .await);
             }
+            let reset_state = match transaction.snapshot().await {
+                Ok(state) => state,
+                Err(error) => {
+                    return Err(self
+                        .rollback_operation(&transaction, operation, error)
+                        .await);
+                }
+            };
             transaction.mark_store_mutation(operation)?;
             if let Err(error) = self.checkpoints.delete(plan.name()).await {
                 return Err(self
@@ -189,7 +214,7 @@ impl MicroBatchRunner {
                     .await);
             }
             transaction.commit_operation(operation)?;
-            self.finish_reset();
+            self.finish_reset(reset_state);
             return Ok(());
         }
         let previous_checkpoint = self.checkpoints.load(plan.name()).await?;
@@ -200,6 +225,14 @@ impl MicroBatchRunner {
                 .rollback_operation(&transaction, operation, error)
                 .await);
         }
+        let reset_state = match transaction.snapshot().await {
+            Ok(state) => state,
+            Err(error) => {
+                return Err(self
+                    .rollback_operation(&transaction, operation, error)
+                    .await);
+            }
+        };
         transaction.mark_store_mutation(operation)?;
         if let Err(error) = self.checkpoints.delete(plan.name()).await {
             return Err(self
@@ -207,15 +240,18 @@ impl MicroBatchRunner {
                 .await);
         }
         transaction.commit_operation(operation)?;
-        self.finish_reset();
+        self.finish_reset(reset_state);
         Ok(())
     }
 
-    fn finish_reset(&mut self) {
+    fn finish_reset(&mut self, reset_state: BTreeMap<String, serde_json::Value>) {
         self.recovered = false;
         self.delivered = 0;
         self.current = None;
         self.pending_checkpoint = None;
+        self.durable_state = Some(reset_state);
+        self.durable_checkpoint = None;
+        self.advanced_since_durable = false;
         self.eof = false;
         self.poisoned = None;
     }
@@ -225,12 +261,15 @@ impl MicroBatchRunner {
     /// # Errors
     ///
     /// Returns an operator lifecycle error if state cannot be captured.
-    pub async fn plan_snapshot(&self) -> Result<BTreeMap<String, serde_json::Value>> {
+    pub async fn plan_snapshot(&mut self) -> Result<BTreeMap<String, serde_json::Value>> {
         let plan = Arc::clone(&self.plan);
         let transaction = plan.leased_transaction(&self.lease).await?;
-        transaction
+        let outcome = transaction
             .recover_in_flight(Some(self.checkpoints.as_ref()))
             .await?;
+        if let Some(checkpoint) = outcome.committed_checkpoint().cloned() {
+            self.record_durable_checkpoint(checkpoint);
+        }
         transaction.snapshot().await
     }
 
@@ -257,23 +296,29 @@ impl MicroBatchRunner {
                     .await);
             }
             transaction.commit_operation(operation)?;
+            self.durable_state = Some(checkpoint.state.clone());
+            self.durable_checkpoint = Some(checkpoint);
+            self.advanced_since_durable = false;
         } else {
             self.source.open(None).await?;
+            self.durable_state = None;
+            self.durable_checkpoint = None;
+            self.advanced_since_durable = false;
         }
         self.recovered = true;
         Ok(())
     }
 
     async fn flush_pending(&mut self) -> Result<()> {
-        let Some(checkpoint) = &self.pending_checkpoint else {
+        let Some(checkpoint) = self.pending_checkpoint.clone() else {
             return Ok(());
         };
         let plan = Arc::clone(&self.plan);
         let transaction = plan.leased_transaction(&self.lease).await?;
         let operation = transaction.begin_checkpoint_commit(checkpoint.clone())?;
-        self.checkpoints.save(checkpoint).await?;
+        self.checkpoints.save(&checkpoint).await?;
         transaction.commit_operation(operation)?;
-        self.pending_checkpoint = None;
+        self.record_durable_checkpoint(checkpoint);
         Ok(())
     }
 
@@ -306,14 +351,40 @@ impl MicroBatchRunner {
     async fn recover_abandoned(&mut self) -> Result<()> {
         let plan = Arc::clone(&self.plan);
         let transaction = plan.leased_transaction(&self.lease).await?;
-        if let Err(error) = transaction
+        let outcome = match transaction
             .recover_in_flight(Some(self.checkpoints.as_ref()))
             .await
         {
-            self.poisoned = Some(error.to_string());
-            return Err(error);
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.poisoned = Some(error.to_string());
+                return Err(error);
+            }
+        };
+        if let Some(checkpoint) = outcome.committed_checkpoint().cloned() {
+            self.record_durable_checkpoint(checkpoint);
         }
         Ok(())
+    }
+
+    fn record_durable_checkpoint(&mut self, checkpoint: Checkpoint) {
+        self.durable_state = Some(checkpoint.state.clone());
+        self.durable_checkpoint = Some(checkpoint);
+        self.pending_checkpoint = None;
+        self.advanced_since_durable = false;
+    }
+}
+
+impl Drop for MicroBatchRunner {
+    fn drop(&mut self) {
+        if !self.advanced_since_durable {
+            return;
+        }
+        let Some(durable_state) = self.durable_state.clone() else {
+            return;
+        };
+        self.plan
+            .handoff_runner_drop(&self.lease, durable_state, self.durable_checkpoint.clone());
     }
 }
 

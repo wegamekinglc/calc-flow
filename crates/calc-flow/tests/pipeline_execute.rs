@@ -85,6 +85,61 @@ async fn dropped_execute_restores_mutated_state_before_the_next_public_call() {
     assert_eq!(probe.calls(), 2);
 }
 
+#[tokio::test]
+async fn reset_recovers_an_unrestorable_dropped_direct_multi_input_operation() {
+    let first = Arc::new(Probe::default());
+    let second = Arc::new(Probe::default());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let plan = PipelineBuilder::new("forced direct reset")
+        .unwrap()
+        .add_node(
+            "first",
+            Box::new(
+                TestOperator::transform(
+                    "first",
+                    Action::GateOncePass {
+                        started: Arc::clone(&started),
+                        release,
+                        pending: Arc::new(AtomicBool::new(true)),
+                    },
+                    Arc::clone(&first),
+                )
+                .stateful()
+                .failing_restore(),
+            ),
+        )
+        .unwrap()
+        .add_node(
+            "second",
+            Box::new(
+                TestOperator::transform("second", Action::Pass, Arc::clone(&second)).stateful(),
+            ),
+        )
+        .unwrap()
+        .compile(&UdfRegistry::new().snapshot())
+        .unwrap();
+    let inputs = plan
+        .external_inputs()
+        .keys()
+        .map(|name| (name.clone(), int_batch(&[1])))
+        .collect();
+
+    let mut cancelled = Box::pin(plan.execute(inputs, ExecutionOptions::default()));
+    tokio::select! {
+        () = started.notified() => {}
+        result = &mut cancelled => panic!("operator gate did not suspend execute: {result:?}"),
+    }
+    drop(cancelled);
+
+    plan.reset().await.unwrap();
+    let state = plan.snapshot().await.unwrap();
+    assert_eq!(state["first"]["state"], json!(0));
+    assert_eq!(state["second"]["state"], json!(0));
+    assert_eq!(first.resets(), 1);
+    assert_eq!(second.resets(), 1);
+}
+
 struct DriftingOutputOperator {
     input_ports: Vec<Port>,
     output_ports: Vec<Port>,

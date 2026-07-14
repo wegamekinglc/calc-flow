@@ -17,7 +17,10 @@ use datafusion::arrow::{
     record_batch::RecordBatch,
 };
 use serde_json::json;
-use support::{Probe, QueueSource, RecordingSink, source_item, stateful_plan, string_batch};
+use support::{
+    GatedCandidateSource, Probe, QueueSource, RecordingSink, source_item, stateful_plan,
+    string_batch,
+};
 
 #[tokio::test]
 async fn batching_source_coalesces_adjacent_items_and_retains_latest_position() {
@@ -177,6 +180,57 @@ async fn candidate_read_failure_retains_the_accumulated_group_for_retry() {
     assert_eq!(retained.batch.num_rows(), 2);
     assert_eq!(retained.cursor, Some(json!(2)));
     assert_eq!(retained.sequence, 2);
+}
+
+#[tokio::test]
+async fn cancelled_candidate_read_retains_the_accumulated_group_for_retry() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let source = GatedCandidateSource::new(
+        vec![
+            source_item(&[1], json!(1), 1),
+            source_item(&[2], json!(2), 2),
+        ],
+        2,
+        Arc::clone(&started),
+        release,
+    );
+    let mut source = BatchingSource::new(source, 10, usize::MAX).unwrap();
+    source.open(None).await.unwrap();
+
+    let mut cancelled = Box::pin(source.next());
+    tokio::select! {
+        () = started.notified() => {}
+        result = &mut cancelled => panic!("candidate gate did not suspend batching: {result:?}"),
+    }
+    drop(cancelled);
+
+    let retained = source.next().await.unwrap().unwrap();
+    assert_eq!(retained.batch.num_rows(), 2);
+    assert_eq!(retained.cursor, Some(json!(2)));
+    assert_eq!(retained.sequence, 2);
+}
+
+#[tokio::test]
+async fn oversized_first_item_emits_without_awaiting_a_candidate() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let source = GatedCandidateSource::new(
+        vec![
+            source_item(&[1, 2], json!(2), 1),
+            source_item(&[3], json!(3), 2),
+        ],
+        2,
+        Arc::clone(&started),
+        release,
+    );
+    let mut source = BatchingSource::new(source, 1, usize::MAX).unwrap();
+    source.open(None).await.unwrap();
+
+    tokio::select! {
+        result = source.next() => assert_eq!(result.unwrap().unwrap().batch.num_rows(), 2),
+        () = started.notified() => panic!("oversized item unnecessarily awaited a candidate"),
+    }
 }
 
 #[tokio::test]

@@ -14,9 +14,9 @@ use calc_flow::{
 use chrono::Utc;
 use serde_json::json;
 use support::{
-    Action, CommitThenResetGateStore, GatedOnceSink, GatedSink, MemoryCheckpointStore, Probe,
-    QueueSource, RecordingSink, StoreGate, TestOperator, VisibleGateCheckpointStore,
-    partially_failing_reset_plan, source_item, stateful_plan,
+    Action, CommitThenResetGateStore, GateOnCallSink, GatedCandidateSource, GatedOnceSink,
+    GatedSink, MemoryCheckpointStore, Probe, QueueSource, RecordingSink, StoreGate, TestOperator,
+    VisibleGateCheckpointStore, partially_failing_reset_plan, source_item, stateful_plan,
 };
 
 #[tokio::test]
@@ -177,6 +177,10 @@ async fn dropping_cancelled_runner_requires_store_recovery_before_state_is_visib
     drop(runner);
 
     assert!(matches!(
+        plan.reset().await,
+        Err(CalcFlowError::RecoveryRequired { .. })
+    ));
+    assert!(matches!(
         plan.snapshot().await,
         Err(CalcFlowError::RecoveryRequired { .. })
     ));
@@ -267,9 +271,193 @@ async fn cancelled_eof_flush_retries_commit_without_reexecuting_item() {
     }
     drop(cancelled);
 
+    assert_eq!(
+        runner.plan_snapshot().await.unwrap()["node"]["state"],
+        json!(1)
+    );
     assert!(runner.next().await.unwrap().is_none());
     assert_eq!(store.checkpoint().unwrap().sequence, 1);
+    assert_eq!(store.saves(), 2, "recovery must not immediately save twice");
     assert_eq!(probe.calls(), 1);
+}
+
+#[tokio::test]
+async fn cancelled_batching_candidate_retries_the_complete_group() {
+    let probe = Arc::new(Probe::default());
+    let plan = stateful_plan("cancelled batching candidate", Arc::clone(&probe));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let source = BatchingSource::new(
+        GatedCandidateSource::new(
+            vec![
+                source_item(&[1], json!(1), 1),
+                source_item(&[2], json!(2), 2),
+            ],
+            2,
+            Arc::clone(&started),
+            release,
+        ),
+        10,
+        usize::MAX,
+    )
+    .unwrap();
+    let store = Arc::new(MemoryCheckpointStore::default());
+    let mut runner = MicroBatchRunner::new(
+        plan,
+        Box::new(source),
+        SinkRouter::new(),
+        clone_store(&store),
+        1,
+    )
+    .unwrap();
+
+    let mut cancelled = Box::pin(runner.next());
+    tokio::select! {
+        () = started.notified() => {}
+        result = &mut cancelled => panic!("candidate gate did not suspend runner: {result:?}"),
+    }
+    drop(cancelled);
+
+    let result = runner.next().await.unwrap().unwrap();
+    assert_eq!(result.outputs["output"].num_rows(), 2);
+    let checkpoint = store.checkpoint().unwrap();
+    assert_eq!(checkpoint.sequence, 2);
+    assert_eq!(checkpoint.source_cursor, Some(json!(2)));
+    assert_eq!(checkpoint.state["node"]["state"], json!(1));
+    assert_eq!(probe.calls(), 1);
+}
+
+#[tokio::test]
+async fn dropping_pending_cadence_restores_the_last_durable_baseline_for_replay() {
+    let probe = Arc::new(Probe::default());
+    let plan = stateful_plan("drop pending cadence", Arc::clone(&probe));
+    let store = Arc::new(MemoryCheckpointStore::default());
+    let (source, _) = QueueSource::new(vec![source_item(&[1], json!(1), 1)]);
+    let mut runner = MicroBatchRunner::new(
+        Arc::clone(&plan),
+        Box::new(source),
+        SinkRouter::new(),
+        clone_store(&store),
+        3,
+    )
+    .unwrap();
+    runner.next().await.unwrap().unwrap();
+    assert_eq!(
+        runner.plan_snapshot().await.unwrap()["node"]["state"],
+        json!(1)
+    );
+    assert!(store.checkpoint().is_none());
+    drop(runner);
+
+    assert!(matches!(
+        plan.snapshot().await,
+        Err(CalcFlowError::RecoveryRequired { .. })
+    ));
+    let (replay, _) = QueueSource::new(vec![source_item(&[1], json!(1), 1)]);
+    let mut fresh = MicroBatchRunner::new(
+        plan,
+        Box::new(replay),
+        SinkRouter::new(),
+        clone_store(&store),
+        3,
+    )
+    .unwrap();
+    fresh.next().await.unwrap().unwrap();
+    assert_eq!(
+        fresh.plan_snapshot().await.unwrap()["node"]["state"],
+        json!(1)
+    );
+    assert_eq!(probe.calls(), 2);
+}
+
+#[tokio::test]
+async fn dropping_after_later_cancel_replays_from_the_durable_baseline() {
+    let probe = Arc::new(Probe::default());
+    let plan = stateful_plan("drop after later cancel", Arc::clone(&probe));
+    let store = Arc::new(MemoryCheckpointStore::default());
+    let (source, _) = QueueSource::new(vec![
+        source_item(&[1], json!(1), 1),
+        source_item(&[2], json!(2), 2),
+    ]);
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut sinks = SinkRouter::new();
+    sinks
+        .add(
+            "output",
+            Box::new(GateOnCallSink::new(2, Arc::clone(&started), release)),
+        )
+        .unwrap();
+    let mut runner = MicroBatchRunner::new(
+        Arc::clone(&plan),
+        Box::new(source),
+        sinks,
+        clone_store(&store),
+        3,
+    )
+    .unwrap();
+    runner.next().await.unwrap().unwrap();
+
+    let mut cancelled = Box::pin(runner.next());
+    tokio::select! {
+        () = started.notified() => {}
+        result = &mut cancelled => panic!("second sink write did not suspend: {result:?}"),
+    }
+    drop(cancelled);
+    drop(runner);
+
+    let (replay, _) = QueueSource::new(vec![source_item(&[1], json!(1), 1)]);
+    let mut fresh = MicroBatchRunner::new(
+        plan,
+        Box::new(replay),
+        SinkRouter::new(),
+        clone_store(&store),
+        3,
+    )
+    .unwrap();
+    fresh.next().await.unwrap().unwrap();
+    assert_eq!(
+        fresh.plan_snapshot().await.unwrap()["node"]["state"],
+        json!(1)
+    );
+    assert_eq!(probe.calls(), 3);
+}
+
+#[tokio::test]
+async fn same_runner_cancel_retains_prior_pending_cadence_progress() {
+    let probe = Arc::new(Probe::default());
+    let plan = stateful_plan("same runner later cancel", Arc::clone(&probe));
+    let store = Arc::new(MemoryCheckpointStore::default());
+    let (source, _) = QueueSource::new(vec![
+        source_item(&[1], json!(1), 1),
+        source_item(&[2], json!(2), 2),
+    ]);
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut sinks = SinkRouter::new();
+    sinks
+        .add(
+            "output",
+            Box::new(GateOnCallSink::new(2, Arc::clone(&started), release)),
+        )
+        .unwrap();
+    let mut runner =
+        MicroBatchRunner::new(plan, Box::new(source), sinks, clone_store(&store), 3).unwrap();
+    runner.next().await.unwrap().unwrap();
+
+    let mut cancelled = Box::pin(runner.next());
+    tokio::select! {
+        () = started.notified() => {}
+        result = &mut cancelled => panic!("second sink write did not suspend: {result:?}"),
+    }
+    drop(cancelled);
+    runner.next().await.unwrap().unwrap();
+
+    assert_eq!(
+        runner.plan_snapshot().await.unwrap()["node"]["state"],
+        json!(2)
+    );
+    assert_eq!(probe.calls(), 3);
 }
 
 #[tokio::test]

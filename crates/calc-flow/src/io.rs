@@ -45,7 +45,16 @@ pub struct BatchingSource<S> {
     max_rows: usize,
     max_bytes: usize,
     pending: Option<SourceItem>,
+    accumulated: Option<TableAccumulator>,
     faulted: bool,
+}
+
+struct TableAccumulator {
+    schema: datafusion::arrow::datatypes::SchemaRef,
+    batches: Vec<RecordBatch>,
+    rows: usize,
+    bytes: usize,
+    latest: SourceItem,
 }
 
 impl<S> BatchingSource<S> {
@@ -72,6 +81,7 @@ impl<S> BatchingSource<S> {
             max_rows,
             max_bytes,
             pending: None,
+            accumulated: None,
             faulted: false,
         })
     }
@@ -87,6 +97,7 @@ impl<S: Source> Source for BatchingSource<S> {
     async fn open(&mut self, cursor: Option<Value>) -> Result<()> {
         self.source.open(cursor).await?;
         self.pending = None;
+        self.accumulated = None;
         self.faulted = false;
         Ok(())
     }
@@ -98,39 +109,39 @@ impl<S: Source> Source for BatchingSource<S> {
                 message: "batching source must be reopened after its previous invalid item".into(),
             });
         }
-        let Some(first) = take_next(&mut self.source, &mut self.pending).await? else {
-            return Ok(None);
-        };
-        let (schema, mut batches, mut rows, mut bytes) = match table_parts(&first) {
-            Ok(parts) => parts,
-            Err(error) => {
-                self.faulted = true;
-                return Err(error);
-            }
-        };
-        let mut latest = first;
+        if self.accumulated.is_none() {
+            let Some(first) = take_next(&mut self.source, &mut self.pending).await? else {
+                return Ok(None);
+            };
+            let (schema, batches, rows, bytes) = match table_parts(&first) {
+                Ok(parts) => parts,
+                Err(error) => {
+                    self.faulted = true;
+                    return Err(error);
+                }
+            };
+            self.accumulated = Some(TableAccumulator {
+                schema,
+                batches,
+                rows,
+                bytes,
+                latest: first,
+            });
+        }
+
+        let first_exceeds_limit = self
+            .accumulated
+            .as_ref()
+            .is_some_and(|group| group.rows > self.max_rows || group.bytes > self.max_bytes);
+        if first_exceeds_limit {
+            return self.take_accumulated();
+        }
 
         loop {
             let candidate = match self.source.next().await {
                 Ok(Some(candidate)) => candidate,
                 Ok(None) => break,
-                Err(error) => {
-                    // The upstream read did not produce a candidate, so the
-                    // validated accumulated group remains replayable. Retain
-                    // it and retry the upstream source on the next call.
-                    match coalesced_item(&schema, &batches, &latest) {
-                        Ok(item) => self.pending = Some(item),
-                        Err(retain_error) => {
-                            self.faulted = true;
-                            return Err(CalcFlowError::Internal {
-                                message: format!(
-                                    "source read failed with {error}; retaining the accumulated batch also failed with {retain_error}"
-                                ),
-                            });
-                        }
-                    }
-                    return Err(error);
-                }
+                Err(error) => return Err(error),
             };
             let candidate_parts = match table_parts(&candidate) {
                 Ok(parts) => parts,
@@ -139,33 +150,50 @@ impl<S: Source> Source for BatchingSource<S> {
                     return Err(error);
                 }
             };
-            if candidate_parts.0 != schema {
+            let accumulated = self
+                .accumulated
+                .as_mut()
+                .expect("validated accumulator remains present until emission");
+            if candidate_parts.0 != accumulated.schema {
                 self.faulted = true;
                 return Err(CalcFlowError::InvalidArgument {
                     field: "source.batch.schema".into(),
                     message: "adjacent table batches must have identical schemas".into(),
                 });
             }
-            let exceeds = rows.saturating_add(candidate_parts.2) > self.max_rows
-                || bytes.saturating_add(candidate_parts.3) > self.max_bytes;
+            let exceeds = accumulated.rows.saturating_add(candidate_parts.2) > self.max_rows
+                || accumulated.bytes.saturating_add(candidate_parts.3) > self.max_bytes;
             if exceeds {
                 self.pending = Some(candidate);
                 break;
             }
-            batches.extend(candidate_parts.1);
-            rows = rows.saturating_add(candidate_parts.2);
-            bytes = bytes.saturating_add(candidate_parts.3);
-            latest = candidate;
+            accumulated.batches.extend(candidate_parts.1);
+            accumulated.rows = accumulated.rows.saturating_add(candidate_parts.2);
+            accumulated.bytes = accumulated.bytes.saturating_add(candidate_parts.3);
+            accumulated.latest = candidate;
         }
 
-        let item = match coalesced_item(&schema, &batches, &latest) {
-            Ok(item) => item,
+        self.take_accumulated()
+    }
+}
+
+impl<S> BatchingSource<S> {
+    fn take_accumulated(&mut self) -> Result<Option<SourceItem>> {
+        let accumulated = self
+            .accumulated
+            .take()
+            .expect("emission requires a validated accumulator");
+        match coalesced_item(
+            &accumulated.schema,
+            &accumulated.batches,
+            &accumulated.latest,
+        ) {
+            Ok(item) => Ok(Some(item)),
             Err(error) => {
                 self.faulted = true;
-                return Err(error);
+                Err(error)
             }
-        };
-        Ok(Some(item))
+        }
     }
 }
 
