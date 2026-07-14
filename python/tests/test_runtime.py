@@ -130,6 +130,36 @@ def test_streaming_validates_all_sinks_before_delivery(tmp_path) -> None:
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize("invalid_output", ["missing", ""])
+def test_streaming_validates_empty_sink_routes_before_advancing(
+    tmp_path, invalid_output: str
+) -> None:
+    async def exercise() -> None:
+        pipeline_name = f"empty-stream-route-{invalid_output or 'blank'}"
+        plan = _plan(pipeline_name)
+        checkpoints = FileCheckpointStore(tmp_path)
+        runner = StreamingRunner(plan, checkpoints)
+        calls: list[str] = []
+
+        with pytest.raises(ConfigError):
+            await runner.step_async(
+                _batch(1),
+                sinks={
+                    "output": [lambda _: calls.append("called")],
+                    invalid_output: [],
+                },
+            )
+
+        assert calls == []
+        assert await checkpoints.load(pipeline_name) is None
+        await runner.step_async(_batch(1), sinks={"output": []})
+        checkpoint = await checkpoints.load(pipeline_name)
+        assert checkpoint is not None
+        assert checkpoint["sequence"] == 0
+
+    asyncio.run(exercise())
+
+
 def test_streaming_delivers_sorted_outputs_then_insertion_order(tmp_path) -> None:
     async def exercise() -> None:
         plan = (
@@ -175,6 +205,43 @@ class _Source:
         position = self.index
         self.index += 1
         return _batch(self.values[position]), {"offset": self.index}, self.index
+
+
+@pytest.mark.parametrize("invalid_output", ["missing", ""])
+def test_micro_validates_empty_sink_routes_before_leasing_or_reading(
+    tmp_path, invalid_output: str
+) -> None:
+    pipeline_name = f"empty-micro-route-{invalid_output or 'blank'}"
+    plan = _plan(pipeline_name)
+    checkpoints = FileCheckpointStore(tmp_path)
+    source = _Source([1])
+    calls: list[str] = []
+
+    with pytest.raises(ConfigError):
+        MicroBatchRunner(
+            plan,
+            source,
+            checkpoints,
+            sinks={
+                "output": [lambda _: calls.append("called")],
+                invalid_output: [],
+            },
+            checkpoint_every=1,
+        )
+
+    assert calls == []
+    assert source.opened == []
+    assert checkpoints.load_blocking(pipeline_name) is None
+    assert plan.snapshot() == {"calc": None}
+
+    runner = MicroBatchRunner(
+        plan,
+        source,
+        checkpoints,
+        sinks={"output": []},
+        checkpoint_every=1,
+    )
+    assert runner.next() is not None
 
 
 def test_micro_batch_runner_recovers_flushes_retries_and_releases_lease(
@@ -434,6 +501,70 @@ def test_micro_source_cycle_is_collectable_and_releases_plan_lease(tmp_path) -> 
     del source
     gc.collect()
 
+    assert runner_ref() is None
+    assert source_ref() is None
+    assert plan.snapshot() == {"calc": None}
+
+
+def test_micro_buffered_array_payload_cycle_is_collectable_after_failure(
+    tmp_path,
+) -> None:
+    class Payload:
+        runner: MicroBatchRunner | None = None
+
+    class Source:
+        def __init__(self, item: Batch) -> None:
+            self.item: Batch | None = item
+
+        def open(self, cursor: object) -> None:
+            assert cursor is None
+
+        def next(self) -> tuple[Batch, None, int] | None:
+            if self.item is None:
+                return None
+            item = self.item
+            self.item = None
+            return item, None, 1
+
+    def identity(batch: Batch, _options: dict[str, object]) -> Batch:
+        return batch
+
+    def fail(_: Batch) -> None:
+        raise RuntimeError("retain buffered payload")
+
+    runtime = Runtime()
+    runtime.register_provider("test", "identity", "1", identity)
+    plan = (
+        PipelineBuilder("buffered-array-cycle")
+        .external("calc", "test", "identity", "1", {})
+        .compile(runtime)
+    )
+    payload = Payload()
+    batch = Batch._from_external(payload, "test", 1, {})
+    source = Source(batch)
+    runner = MicroBatchRunner(
+        plan,
+        source,
+        FileCheckpointStore(tmp_path),
+        sinks={"output": [fail]},
+        checkpoint_every=1,
+    )
+    payload.runner = runner
+    payload_ref = weakref.ref(payload)
+    runner_ref = weakref.ref(runner)
+    source_ref = weakref.ref(source)
+
+    with pytest.raises(ProviderError, match="retain buffered payload"):
+        asyncio.run(runner.next_async())
+    assert source.item is None
+
+    del batch
+    del payload
+    del runner
+    del source
+    gc.collect()
+
+    assert payload_ref() is None
     assert runner_ref() is None
     assert source_ref() is None
     assert plan.snapshot() == {"calc": None}

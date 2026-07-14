@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -74,6 +74,7 @@ fn python_json(value: &Bound<'_, PyAny>, label: &str) -> calc_flow::Result<serde
 
 struct PythonSource {
     callback: Arc<PythonRoot>,
+    roots: Arc<RootRegistry>,
 }
 
 impl PythonSource {
@@ -109,6 +110,7 @@ impl calc_flow::Source for PythonSource {
         Python::attach(|py| {
             let value = value.bind(py);
             if value.is_none() {
+                self.roots.replace_current_source_payload(None);
                 return Ok(None);
             }
             let tuple = value.cast::<PyTuple>().map_err(|_| {
@@ -155,11 +157,15 @@ impl calc_flow::Source for PythonSource {
             let sequence = sequence_value.extract::<u64>().map_err(|_| {
                 provider_error("source.next", "sequence must be a non-negative u64 integer")
             })?;
-            Ok(Some(calc_flow::SourceItem {
+            let item = calc_flow::SourceItem {
                 batch,
                 cursor,
                 sequence,
-            }))
+            };
+            let payload =
+                crate::batch::python_payload_root(&item.batch).map(|_| item.batch.clone());
+            self.roots.replace_current_source_payload(payload);
+            Ok(Some(item))
         })
     }
 }
@@ -203,12 +209,34 @@ fn validate_source(py: Python<'_>, source: &Py<PyAny>) -> PyResult<()> {
 fn build_sinks(
     py: Python<'_>,
     sinks: Option<&Bound<'_, PyDict>>,
+    external_outputs: &BTreeSet<String>,
 ) -> PyResult<(calc_flow::SinkRouter, Vec<Arc<PythonRoot>>)> {
     let mut router = calc_flow::SinkRouter::new();
     let mut roots = Vec::new();
     let Some(sinks) = sinks else {
         return Ok((router, roots));
     };
+    for output in sinks.keys() {
+        let output = output
+            .extract::<String>()
+            .map_err(|_| PyTypeError::new_err("sink output names must be strings"))?;
+        if output.is_empty() {
+            return Err(crate::error::to_py_err(
+                calc_flow::CalcFlowError::InvalidArgument {
+                    field: "sink.output".into(),
+                    message: "must not be empty".into(),
+                },
+            ));
+        }
+        if !external_outputs.contains(&output) {
+            return Err(crate::error::to_py_err(
+                calc_flow::CalcFlowError::InvalidArgument {
+                    field: "sinks".into(),
+                    message: format!("sink configured for unknown graph output {output:?}"),
+                },
+            ));
+        }
+    }
     for (output, callbacks) in sinks {
         let output = output
             .extract::<String>()
@@ -248,6 +276,7 @@ fn build_sinks(
 struct RunnerRoots {
     plan: Py<PyAny>,
     source: Option<Arc<PythonRoot>>,
+    current_source_payload: Option<calc_flow::Batch>,
     persistent_sinks: Vec<Arc<PythonRoot>>,
     active_sinks: BTreeMap<u64, Vec<Arc<PythonRoot>>>,
 }
@@ -267,6 +296,7 @@ impl RootRegistry {
             roots: RwLock::new(RunnerRoots {
                 plan,
                 source,
+                current_source_payload: None,
                 persistent_sinks,
                 active_sinks: BTreeMap::new(),
             }),
@@ -283,11 +313,24 @@ impl RootRegistry {
         }
     }
 
+    fn replace_current_source_payload(&self, payload: Option<calc_flow::Batch>) {
+        let previous = {
+            let mut roots = self.roots.write();
+            std::mem::replace(&mut roots.current_source_payload, payload)
+        };
+        drop(previous);
+    }
+
     fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
         let roots = self.roots.read();
         visit.call(&roots.plan)?;
         if let Some(source) = &roots.source {
             visit.call(source.object())?;
+        }
+        if let Some(payload) = &roots.current_source_payload {
+            if let Some(payload) = crate::batch::python_payload_root(payload) {
+                visit.call(payload)?;
+            }
         }
         for root in &roots.persistent_sinks {
             visit.call(root.object())?;
@@ -400,24 +443,26 @@ impl PyMicroBatchRunner {
         checkpoint_every: u64,
     ) -> PyResult<Self> {
         validate_source(py, &source)?;
-        let (sinks, sink_roots) = build_sinks(py, sinks)?;
         let source_root = Arc::new(PythonRoot::new(source));
         let owned = PyExecutionPlan::owned(plan, py)?;
+        let external_outputs = owned.inner().external_outputs().keys().cloned().collect();
+        let (sinks, sink_roots) = build_sinks(py, sinks, &external_outputs)?;
+        let roots = Arc::new(RootRegistry::new(
+            owned.owner().clone_ref(py),
+            Some(Arc::clone(&source_root)),
+            sink_roots,
+        ));
         let runner = calc_flow::MicroBatchRunner::new(
             Arc::clone(owned.inner()),
             Box::new(PythonSource {
-                callback: Arc::clone(&source_root),
+                callback: source_root,
+                roots: Arc::clone(&roots),
             }),
             sinks,
             checkpoints.clone_store(),
             checkpoint_every,
         )
         .map_err(crate::error::to_py_err)?;
-        let roots = Arc::new(RootRegistry::new(
-            owned.owner().clone_ref(py),
-            Some(source_root),
-            sink_roots,
-        ));
         Ok(Self {
             state: RwLock::new(Some(Arc::new(MicroShared {
                 runner: Arc::new(RunnerSlot::new(runner)),
@@ -428,6 +473,7 @@ impl PyMicroBatchRunner {
 
     fn next_async<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let shared = slf.shared()?;
+        let roots = Arc::clone(&shared.roots);
         let owner = slf.into_pyobject(py)?.into_any().unbind();
         let mut runner = shared
             .runner
@@ -438,6 +484,7 @@ impl PyMicroBatchRunner {
                 .next()
                 .await
                 .map_err(crate::error::to_py_err)?;
+            roots.replace_current_source_payload(None);
             let result = Python::attach(|py| {
                 result
                     .map(|result| Py::new(py, PyRunResult::from_inner(py, result)?))
@@ -451,6 +498,7 @@ impl PyMicroBatchRunner {
 
     fn reset_async<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let shared = slf.shared()?;
+        let roots = Arc::clone(&shared.roots);
         let owner = slf.into_pyobject(py)?.into_any().unbind();
         let mut runner = shared
             .runner
@@ -461,6 +509,9 @@ impl PyMicroBatchRunner {
                 .reset()
                 .await
                 .map_err(crate::error::to_py_err);
+            if result.is_ok() {
+                roots.replace_current_source_payload(None);
+            }
             drop(runner);
             drop(owner);
             result
@@ -509,6 +560,7 @@ impl PyMicroBatchRunner {
 struct StreamingShared {
     runner: Arc<RunnerSlot<calc_flow::StreamingRunner>>,
     roots: Arc<RootRegistry>,
+    external_outputs: BTreeSet<String>,
 }
 
 #[pyclass(name = "_StreamingRunner", frozen, module = "calc_flow._native")]
@@ -539,6 +591,7 @@ impl PyStreamingRunner {
         checkpoints: PyRef<'_, PyFileCheckpointStore>,
     ) -> PyResult<Self> {
         let owned = PyExecutionPlan::owned(plan, py)?;
+        let external_outputs = owned.inner().external_outputs().keys().cloned().collect();
         let runner =
             calc_flow::StreamingRunner::new(Arc::clone(owned.inner()), checkpoints.clone_store())
                 .map_err(crate::error::to_py_err)?;
@@ -551,6 +604,7 @@ impl PyStreamingRunner {
             state: RwLock::new(Some(Arc::new(StreamingShared {
                 runner: Arc::new(RunnerSlot::new(runner)),
                 roots,
+                external_outputs,
             }))),
         })
     }
@@ -566,9 +620,9 @@ impl PyStreamingRunner {
         batch: PyRef<'_, PyBatch>,
         sinks: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let batch = crate::batch::rehome_python_payload(py, batch.clone_inner()?)?;
-        let (mut sinks, roots) = build_sinks(py, sinks)?;
         let shared = slf.shared()?;
+        let batch = crate::batch::rehome_python_payload(py, batch.clone_inner()?)?;
+        let (mut sinks, roots) = build_sinks(py, sinks, &shared.external_outputs)?;
         let root_lease = shared.roots.retain(roots);
         let owner = slf.into_pyobject(py)?.into_any().unbind();
         let mut runner = shared
@@ -806,20 +860,21 @@ mod tests {
         Python::initialize();
         Python::attach(|py| {
             let invalid = py.eval(pyo3::ffi::c_str!("object()"), None, None).unwrap();
+            let external_outputs = BTreeSet::from(["output".to_owned()]);
             assert!(validate_source(py, &invalid.clone().unbind()).is_err());
 
             let invalid_sinks = PyDict::new(py);
             invalid_sinks.set_item(1, PyList::empty(py)).unwrap();
-            assert!(build_sinks(py, Some(&invalid_sinks)).is_err());
+            assert!(build_sinks(py, Some(&invalid_sinks), &external_outputs).is_err());
             invalid_sinks.clear();
             invalid_sinks.set_item("output", "not-a-list").unwrap();
-            assert!(build_sinks(py, Some(&invalid_sinks)).is_err());
+            assert!(build_sinks(py, Some(&invalid_sinks), &external_outputs).is_err());
             invalid_sinks.clear();
             invalid_sinks
                 .set_item("output", PyList::new(py, [invalid]).unwrap())
                 .unwrap();
-            assert!(build_sinks(py, Some(&invalid_sinks)).is_err());
-            assert_eq!(build_sinks(py, None).unwrap().1.len(), 0);
+            assert!(build_sinks(py, Some(&invalid_sinks), &external_outputs).is_err());
+            assert_eq!(build_sinks(py, None, &external_outputs).unwrap().1.len(), 0);
 
             let valid = PyDict::new(py);
             valid
@@ -871,10 +926,16 @@ mod tests {
             )
             .unwrap();
 
+            let source_roots = Arc::new(RootRegistry::new(
+                PyString::new(py, "plan").unbind().into_any(),
+                None,
+                Vec::new(),
+            ));
             let make_source = |name: &str| PythonSource {
                 callback: Arc::new(PythonRoot::new(
                     locals.get_item(name).unwrap().unwrap().unbind(),
                 )),
+                roots: Arc::clone(&source_roots),
             };
             let mut valid = make_source("valid");
             py.detach(|| {
