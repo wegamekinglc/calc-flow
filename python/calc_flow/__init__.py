@@ -10,9 +10,17 @@ from calc_flow.errors import (
     ExecutionError,
     ProviderError,
 )
+from calc_flow.pipeline import (
+    ExecutionPlan,
+    PipelineBuilder,
+    Runtime,
+    project_json_schema,
+    validate_project_json,
+)
 
 __version__ = "2.0.0a1"
 Batch = _native.Batch
+RunResult = _native.RunResult
 
 __all__ = [
     "Batch",
@@ -23,5 +31,11 @@ __all__ = [
     "ConfigError",
     "ExecutionError",
     "ProviderError",
+    "ExecutionPlan",
+    "PipelineBuilder",
+    "Runtime",
+    "RunResult",
+    "project_json_schema",
+    "validate_project_json",
     "__version__",
 ]

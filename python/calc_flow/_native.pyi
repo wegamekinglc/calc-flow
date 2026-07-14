@@ -1,5 +1,5 @@
-from collections.abc import Mapping
-from typing import Protocol
+from collections.abc import Awaitable, Mapping
+from typing import Protocol, TypedDict
 
 import pyarrow as pa
 
@@ -36,4 +36,38 @@ class Batch:
     @property
     def metadata(self) -> dict[str, object]: ...
 
+class Runtime:
+    def __init__(self) -> None: ...
+    def compile_project(self, project_json: str) -> ExecutionPlan: ...
+
+class ExecutionPlan:
+    def execute(self, inputs: dict[str, Batch]) -> RunResult: ...
+    def execute_async(self, inputs: dict[str, Batch]) -> Awaitable[RunResult]: ...
+
+class _NodeTiming(TypedDict):
+    duration_ns: int
+    input_rows: dict[str, int]
+    output_rows: dict[str, int]
+
+class _DataFusionMetric(TypedDict):
+    query_id: int
+    node_id: str | None
+    planning_ns: int
+    execution_ns: int
+    output_rows: int
+    logical_plan: str
+    physical_plan: str
+
+class RunResult:
+    @property
+    def outputs(self) -> dict[str, Batch]: ...
+    @property
+    def metadata(self) -> dict[str, str]: ...
+    @property
+    def node_timings(self) -> dict[str, _NodeTiming]: ...
+    @property
+    def datafusion_metrics(self) -> list[_DataFusionMetric]: ...
+
+def project_json_schema() -> str: ...
+def validate_project_json(project_json: str) -> str: ...
 def version() -> str: ...

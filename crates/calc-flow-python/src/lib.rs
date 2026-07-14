@@ -1,7 +1,9 @@
 //! Python bindings for Calc Flow's Rust-native v2 engine.
 
 mod batch;
+mod config;
 mod error;
+mod pipeline;
 
 use pyo3::prelude::*;
 
@@ -16,6 +18,8 @@ fn calc_flow_python(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(version, module)?)?;
     error::register(module)?;
     batch::register(module)?;
+    config::register(module)?;
+    pipeline::register(module)?;
     Ok(())
 }
 
@@ -50,6 +54,9 @@ mod tests {
                 "CheckpointError",
                 "CancelledError",
                 "Batch",
+                "Runtime",
+                "ExecutionPlan",
+                "RunResult",
             ] {
                 let exception = module.getattr(name).unwrap();
                 assert!(exception.is_instance_of::<PyType>());
