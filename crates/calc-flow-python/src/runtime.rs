@@ -74,7 +74,7 @@ impl Drop for PythonAwaitLease {
         let previous = self.registry.pending.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0);
         if previous == 1 {
-            self.registry.idle.notify_one();
+            self.registry.idle.notify_waiters();
         }
     }
 }
@@ -723,7 +723,7 @@ impl<T> Drop for RunnerCheckout<T> {
             .replace(runner.expect("checked-out runner remains owned until guard drop"));
         debug_assert!(previous.is_none());
         drop(previous);
-        self.slot.available.notify_one();
+        self.slot.available.notify_waiters();
     }
 }
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Any, Protocol
+from typing import Any, NoReturn, Protocol
 
 from calc_flow import _native
 from calc_flow.store import FileCheckpointStore, _copy_json_value, _run_blocking
@@ -19,6 +19,25 @@ async def _resolve(value: object) -> object:
     if inspect.isawaitable(value):
         return await value
     return value
+
+
+async def _raise_after_cancellation_cleanup(
+    cleanup: Awaitable[object], cancellation: asyncio.CancelledError
+) -> NoReturn:
+    async def run_cleanup() -> None:
+        await cleanup
+
+    cleanup_task = asyncio.create_task(run_cleanup())
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            continue
+    try:
+        cleanup_task.result()
+    except BaseException as cleanup_error:
+        raise cleanup_error from cancellation
+    raise cancellation
 
 
 class _SourceAdapter:
@@ -106,9 +125,10 @@ class MicroBatchRunner:
     async def next_async(self) -> _native.RunResult | None:
         try:
             return await self._inner.next_async()
-        except asyncio.CancelledError:
-            await self._inner.wait_idle_async()
-            raise
+        except asyncio.CancelledError as cancellation:
+            await _raise_after_cancellation_cleanup(
+                self._inner.wait_idle_async(), cancellation
+            )
 
     async def reset_async(self) -> None:
         await self._inner.reset_async()
@@ -152,9 +172,10 @@ class StreamingRunner:
         async def step() -> _native.RunResult:
             try:
                 return await self._inner.step_async(batch, copied_sinks)
-            except asyncio.CancelledError:
-                await self._inner.wait_idle_async()
-                raise
+            except asyncio.CancelledError as cancellation:
+                await _raise_after_cancellation_cleanup(
+                    self._inner.wait_idle_async(), cancellation
+                )
 
         return step()
 

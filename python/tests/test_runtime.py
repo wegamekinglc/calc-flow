@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import subprocess
+import sys
+import textwrap
 import weakref
 
 import numpy as np
@@ -607,8 +610,9 @@ def test_streaming_cancellation_cancels_pending_sink_without_late_delivery(
 
         observer = asyncio.create_task(observe_cancellation())
         await asyncio.wait_for(cancelled.wait(), timeout=1)
-        await asyncio.sleep(0)
-        assert not observer.done()
+        task.cancel()
+        completed, _ = await asyncio.wait({observer}, timeout=0.05)
+        assert completed == set()
         cancellation_release.set()
         with pytest.raises(asyncio.CancelledError):
             await observer
@@ -670,8 +674,9 @@ def test_micro_cancellation_cancels_pending_source_and_runner_recovers(
 
         observer = asyncio.create_task(observe_cancellation())
         await asyncio.wait_for(cancelled.wait(), timeout=1)
-        await asyncio.sleep(0)
-        assert not observer.done()
+        task.cancel()
+        completed, _ = await asyncio.wait({observer}, timeout=0.05)
+        assert completed == set()
         cancellation_release.set()
         with pytest.raises(asyncio.CancelledError):
             await observer
@@ -687,6 +692,71 @@ def test_micro_cancellation_cancels_pending_source_and_runner_recovers(
         assert source.next_calls == 2
 
     asyncio.run(exercise())
+
+
+def test_native_idle_waiters_all_complete_when_streaming_operation_finishes(
+    tmp_path,
+) -> None:
+    script = textwrap.dedent(
+        """
+        import asyncio
+        import sys
+
+        import pyarrow as pa
+
+        from calc_flow import (
+            Batch,
+            FileCheckpointStore,
+            PipelineBuilder,
+            StreamingRunner,
+        )
+
+
+        def batch(value):
+            return Batch.from_pyarrow(pa.table({"value": [value]}))
+
+
+        async def exercise():
+            entered = asyncio.Event()
+            release = asyncio.Event()
+
+            async def sink(_):
+                entered.set()
+                await release.wait()
+
+            plan = (
+                PipelineBuilder("multiple-idle-waiters")
+                .expression("calc", "result = value + 1")
+                .compile()
+            )
+            runner = StreamingRunner(plan, FileCheckpointStore(sys.argv[1]))
+            operation = asyncio.create_task(
+                runner.step_async(batch(1), sinks={"output": [sink]})
+            )
+            await entered.wait()
+            waiters = [
+                asyncio.ensure_future(runner._inner.wait_idle_async()) for _ in range(3)
+            ]
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            release.set()
+            await operation
+            await asyncio.gather(*waiters)
+            result = await runner.step_async(batch(2))
+            assert result.outputs["output"].to_pyarrow()["result"].to_pylist() == [3]
+
+
+        asyncio.run(exercise())
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-W", "error", "-c", script, str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_cancelled_sink_retaining_array_batch_is_collectable_and_releases_lease(
