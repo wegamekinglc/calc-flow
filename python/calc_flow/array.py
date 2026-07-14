@@ -230,8 +230,9 @@ def _validate_numpy_dtype(dtype: object) -> None:
     import numpy as np
 
     normalized = np.dtype(dtype)
-    allowed_scalar_types = frozenset(
-        {
+    allowed_dtypes = frozenset(
+        np.dtype(scalar_type)
+        for scalar_type in (
             np.bool_,
             np.int8,
             np.int16,
@@ -245,9 +246,9 @@ def _validate_numpy_dtype(dtype: object) -> None:
             np.float64,
             np.complex64,
             np.complex128,
-        }
+        )
     )
-    if normalized.type not in allowed_scalar_types or not normalized.isnative:
+    if normalized not in allowed_dtypes or not normalized.isnative:
         raise ValueError(
             f"NumPy arrays require a NumPy Array API dtype; received {normalized}"
         )

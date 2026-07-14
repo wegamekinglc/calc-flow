@@ -225,6 +225,43 @@ def test_numpy_batches_accept_array_api_numeric_and_bool_dtypes(
     assert output.array.dtype == np.dtype(dtype)
 
 
+@pytest.mark.parametrize(
+    ("alias", "supported"),
+    [
+        pytest.param(
+            np.longlong,
+            np.int64,
+            marks=pytest.mark.skipif(
+                np.dtype(np.longlong) != np.dtype(np.int64),
+                reason="NumPy longlong does not describe int64 on this platform",
+            ),
+        ),
+        pytest.param(
+            np.ulonglong,
+            np.uint64,
+            marks=pytest.mark.skipif(
+                np.dtype(np.ulonglong) != np.dtype(np.uint64),
+                reason="NumPy ulonglong does not describe uint64 on this platform",
+            ),
+        ),
+    ],
+)
+def test_numpy_batches_accept_semantically_equivalent_dtype_aliases(
+    alias: type[np.generic], supported: type[np.generic]
+) -> None:
+    batch = Batch.from_array(np.array([0, 1], dtype=alias), backend="numpy")
+    runtime = Runtime()
+    register_numpy(runtime)
+    output = (
+        _external("dtype_alias", "numpy", "x")
+        .compile(runtime)
+        .execute({"input": batch})
+        .outputs["output"]
+    )
+
+    assert output.array.dtype == np.dtype(supported)
+
+
 def test_numpy_provider_accepts_bool_scalar_results() -> None:
     runtime = Runtime()
     register_numpy(runtime)
@@ -246,14 +283,14 @@ def test_numpy_provider_accepts_bool_scalar_results() -> None:
         pytest.param(
             np.array([1], dtype=np.longdouble),
             marks=pytest.mark.skipif(
-                np.dtype(np.longdouble).type is np.float64,
+                np.dtype(np.longdouble) == np.dtype(np.float64),
                 reason="NumPy longdouble aliases float64 on this platform",
             ),
         ),
         pytest.param(
             np.array([1], dtype=np.clongdouble),
             marks=pytest.mark.skipif(
-                np.dtype(np.clongdouble).type is np.complex128,
+                np.dtype(np.clongdouble) == np.dtype(np.complex128),
                 reason="NumPy clongdouble aliases complex128 on this platform",
             ),
         ),
