@@ -4,7 +4,8 @@ use chrono::Utc;
 
 use crate::{
     Batch, CalcFlowError, Checkpoint, CheckpointStore, ExecutionOptions, ExecutionPlan, Result,
-    RunResult, pipeline::PlanTransaction,
+    RunResult,
+    pipeline::{PlanLease, PlanTransaction},
 };
 
 use super::{
@@ -15,6 +16,7 @@ use super::{
 /// Push-based at-least-once runner for already formed batches.
 pub struct StreamingRunner {
     plan: Arc<ExecutionPlan>,
+    lease: PlanLease,
     checkpoints: Arc<dyn CheckpointStore>,
     recovered: bool,
     next_sequence: Option<u64>,
@@ -27,11 +29,14 @@ impl StreamingRunner {
     /// # Errors
     ///
     /// Returns [`CalcFlowError::InvalidArgument`] unless the plan has exactly
-    /// one external input.
+    /// one external input, or [`CalcFlowError::PlanLeased`] when another
+    /// runner already owns the plan.
     pub fn new(plan: Arc<ExecutionPlan>, checkpoints: Arc<dyn CheckpointStore>) -> Result<Self> {
         plan.single_external_input()?;
+        let lease = plan.acquire_lease()?;
         Ok(Self {
             plan,
+            lease,
             checkpoints,
             recovered: false,
             next_sequence: Some(0),
@@ -42,9 +47,9 @@ impl StreamingRunner {
     /// Recovers once, executes and delivers one batch, then checkpoints it.
     ///
     /// Push-mode checkpoints do not own a replay cursor: `source_cursor` is
-    /// always `None`. The caller retains ownership of the supplied batch and
-    /// must submit it again after any failed step to obtain at-least-once
-    /// delivery.
+    /// always `None`. This method consumes the supplied batch. The caller must
+    /// retain a clone or reconstruct it, then submit that value again after a
+    /// failed step to obtain at-least-once delivery.
     ///
     /// # Errors
     ///
@@ -56,14 +61,13 @@ impl StreamingRunner {
             message: "streaming sequence is exhausted".into(),
         })?;
         let plan = Arc::clone(&self.plan);
-        let transaction = plan.transaction().await;
-        let before = transaction.snapshot().await?;
+        let transaction = plan.leased_transaction(&self.lease).await?;
         let input_name = plan.single_external_input()?.to_owned();
+        let inputs = BTreeMap::from([(input_name, batch)]);
+        transaction.validate_inputs(&inputs)?;
+        let before = transaction.snapshot().await?;
         let result = match transaction
-            .execute(
-                BTreeMap::from([(input_name, batch)]),
-                ExecutionOptions::default(),
-            )
+            .execute_validated(inputs, ExecutionOptions::default())
             .await
         {
             Ok(result) => result,
@@ -107,7 +111,7 @@ impl StreamingRunner {
     /// Returns reset, store, or rollback errors.
     pub async fn reset(&mut self) -> Result<()> {
         let plan = Arc::clone(&self.plan);
-        let transaction = plan.transaction().await;
+        let transaction = plan.leased_transaction(&self.lease).await?;
         let previous_checkpoint = self.checkpoints.load(plan.name()).await?;
         let before = transaction.snapshot().await?;
         if let Err(error) = transaction.reset().await {
@@ -131,12 +135,22 @@ impl StreamingRunner {
         Ok(())
     }
 
+    /// Captures plan state through this runner's exclusive lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns an operator lifecycle error if state cannot be captured.
+    pub async fn plan_snapshot(&self) -> Result<BTreeMap<String, serde_json::Value>> {
+        let plan = Arc::clone(&self.plan);
+        plan.leased_transaction(&self.lease).await?.snapshot().await
+    }
+
     async fn recover_once(&mut self) -> Result<()> {
         if self.recovered {
             return Ok(());
         }
         let plan = Arc::clone(&self.plan);
-        let transaction = plan.transaction().await;
+        let transaction = plan.leased_transaction(&self.lease).await?;
         if let Some(checkpoint) = self.checkpoints.load(plan.name()).await? {
             validate_checkpoint(&checkpoint, &plan)?;
             let before = transaction.snapshot().await?;

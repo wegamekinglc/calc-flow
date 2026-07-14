@@ -69,7 +69,7 @@ async fn sink_failure_rolls_back_and_does_not_advance_sequence() {
     let mut runner = StreamingRunner::new(Arc::clone(&plan), clone_store(&store)).unwrap();
 
     assert!(runner.step(int_batch(&[1]), &mut sinks).await.is_err());
-    assert_eq!(plan.snapshot().await.unwrap(), initial);
+    assert_eq!(runner.plan_snapshot().await.unwrap(), initial);
     assert!(store.checkpoint().is_none());
     runner.step(int_batch(&[1]), &mut sinks).await.unwrap();
     assert_eq!(store.checkpoint().unwrap().sequence, 0);
@@ -86,7 +86,7 @@ async fn checkpoint_failure_restores_state_and_allows_explicit_batch_retry() {
     let mut sinks = SinkRouter::new();
 
     assert!(runner.step(int_batch(&[1]), &mut sinks).await.is_err());
-    assert_eq!(plan.snapshot().await.unwrap(), initial);
+    assert_eq!(runner.plan_snapshot().await.unwrap(), initial);
     runner.step(int_batch(&[1]), &mut sinks).await.unwrap();
     assert_eq!(store.checkpoint().unwrap().sequence, 0);
     assert_eq!(probe.calls(), 2);
@@ -198,12 +198,12 @@ async fn partially_failing_reset_restores_all_pre_reset_state() {
         .step(int_batch(&[1]), &mut SinkRouter::new())
         .await
         .unwrap();
-    let before = plan.snapshot().await.unwrap();
+    let before = runner.plan_snapshot().await.unwrap();
 
     let error = runner.reset().await.unwrap_err().to_string();
 
     assert!(error.contains("reset injected"));
-    assert_eq!(plan.snapshot().await.unwrap(), before);
+    assert_eq!(runner.plan_snapshot().await.unwrap(), before);
     assert!(store.checkpoint().is_some());
     assert_eq!(first_probe.resets(), 1);
     assert_eq!(second_probe.resets(), 1);

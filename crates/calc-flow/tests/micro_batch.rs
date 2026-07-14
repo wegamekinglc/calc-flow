@@ -7,8 +7,9 @@ use std::{
 
 use async_trait::async_trait;
 use calc_flow::{
-    BatchingSource, CalcFlowError, Checkpoint, CheckpointStore, ExecutionOptions, MicroBatchRunner,
-    PipelineBuilder, Result, SinkRouter, Source, SourceItem, UdfRegistry,
+    Batch, BatchingSource, CalcFlowError, Checkpoint, CheckpointStore, ExecutionOptions,
+    MicroBatchRunner, PipelineBuilder, Result, RunContext, Sink, SinkRouter, Source, SourceItem,
+    StreamingRunner, UdfRegistry,
 };
 use chrono::Utc;
 use serde_json::json;
@@ -61,17 +62,279 @@ async fn runner_holds_the_plan_transaction_through_sink_and_checkpoint() {
     direct_attempted.notified().await;
     tokio::task::yield_now().await;
 
-    assert_eq!(
-        probe.calls(),
-        1,
-        "direct execute interleaved during delivery"
-    );
+    let direct_error = tokio::time::timeout(std::time::Duration::from_millis(100), direct_task)
+        .await
+        .expect("a leased-plan error must not wait for the runner transaction")
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(direct_error, CalcFlowError::PlanLeased { .. }));
+    assert_eq!(probe.calls(), 1, "direct execute reached the operator");
     sink_release.notify_one();
     runner_task.await.unwrap().unwrap().unwrap();
-    direct_task.await.unwrap().unwrap();
 
     assert_eq!(store.checkpoint().unwrap().state["node"]["state"], json!(1));
-    assert_eq!(plan.snapshot().await.unwrap()["node"]["state"], json!(2));
+    assert_eq!(plan.snapshot().await.unwrap()["node"]["state"], json!(1));
+}
+
+#[tokio::test]
+async fn runner_lease_rejects_direct_calls_and_a_second_runner_until_drop() {
+    let plan = stateful_plan("exclusive lease", Arc::new(Probe::default()));
+    let store = Arc::new(MemoryCheckpointStore::default());
+    let (source, _) = QueueSource::new(vec![
+        source_item(&[1], json!(1), 1),
+        source_item(&[2], json!(2), 2),
+    ]);
+    let mut runner = MicroBatchRunner::new(
+        Arc::clone(&plan),
+        Box::new(source),
+        SinkRouter::new(),
+        clone_store(&store),
+        1,
+    )
+    .unwrap();
+
+    runner.next().await.unwrap().unwrap();
+    let direct = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        plan.execute(
+            BTreeMap::from([("input".into(), support::int_batch(&[9]))]),
+            ExecutionOptions::default(),
+        ),
+    )
+    .await
+    .expect("direct execute must fail fast while leased")
+    .unwrap_err();
+    assert!(matches!(
+        direct,
+        CalcFlowError::PlanLeased { pipeline_name } if pipeline_name == "exclusive lease"
+    ));
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), plan.snapshot())
+            .await
+            .expect("direct snapshot must fail fast while leased"),
+        Err(CalcFlowError::PlanLeased { .. })
+    ));
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), plan.reset())
+            .await
+            .expect("direct reset must fail fast while leased"),
+        Err(CalcFlowError::PlanLeased { .. })
+    ));
+    assert!(matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            plan.restore(&BTreeMap::new())
+        )
+        .await
+        .expect("direct restore must fail fast while leased"),
+        Err(CalcFlowError::PlanLeased { .. })
+    ));
+
+    let (other_source, _) = QueueSource::new(Vec::new());
+    let second = MicroBatchRunner::new(
+        Arc::clone(&plan),
+        Box::new(other_source),
+        SinkRouter::new(),
+        clone_store(&store),
+        1,
+    );
+    assert!(matches!(second, Err(CalcFlowError::PlanLeased { .. })));
+    assert!(matches!(
+        StreamingRunner::new(Arc::clone(&plan), clone_store(&store)),
+        Err(CalcFlowError::PlanLeased { .. })
+    ));
+    runner.next().await.unwrap().unwrap();
+
+    drop(runner);
+    plan.execute(
+        BTreeMap::from([("input".into(), support::int_batch(&[3]))]),
+        ExecutionOptions::default(),
+    )
+    .await
+    .unwrap();
+    let (fresh_source, _) = QueueSource::new(Vec::new());
+    MicroBatchRunner::new(
+        plan,
+        Box::new(fresh_source),
+        SinkRouter::new(),
+        clone_store(&store),
+        1,
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn runner_lease_closes_the_queued_direct_call_race() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let plan = Arc::new(
+        PipelineBuilder::new("queued direct")
+            .unwrap()
+            .add_node(
+                "node",
+                Box::new(TestOperator::transform(
+                    "node",
+                    Action::GatePass {
+                        started: Arc::clone(&started),
+                        release: Arc::clone(&release),
+                    },
+                    Arc::new(Probe::default()),
+                )),
+            )
+            .unwrap()
+            .compile(&UdfRegistry::new().snapshot())
+            .unwrap(),
+    );
+    let first = tokio::spawn({
+        let plan = Arc::clone(&plan);
+        async move {
+            plan.execute(
+                BTreeMap::from([("input".into(), support::int_batch(&[1]))]),
+                ExecutionOptions::default(),
+            )
+            .await
+        }
+    });
+    started.notified().await;
+    let queued = tokio::spawn({
+        let plan = Arc::clone(&plan);
+        async move {
+            plan.execute(
+                BTreeMap::from([("input".into(), support::int_batch(&[2]))]),
+                ExecutionOptions::default(),
+            )
+            .await
+        }
+    });
+    tokio::task::yield_now().await;
+
+    let (source, _) = QueueSource::new(Vec::new());
+    let runner = MicroBatchRunner::new(
+        Arc::clone(&plan),
+        Box::new(source),
+        SinkRouter::new(),
+        Arc::new(MemoryCheckpointStore::default()),
+        1,
+    )
+    .unwrap();
+    release.notify_one();
+    first.await.unwrap().unwrap();
+    let error = tokio::time::timeout(std::time::Duration::from_millis(100), queued)
+        .await
+        .expect("queued direct call must recheck the lease")
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(error, CalcFlowError::PlanLeased { .. }));
+    drop(runner);
+}
+
+#[tokio::test]
+async fn reentrant_source_sink_and_store_plan_calls_fail_fast() {
+    let plan = stateful_plan("reentrant callbacks", Arc::new(Probe::default()));
+    let source_observation = Arc::new(Mutex::new(None));
+    let sink_observation = Arc::new(Mutex::new(None));
+    let store_observation = Arc::new(Mutex::new(None));
+    let store = Arc::new(ReentrantCheckpointStore {
+        plan: Arc::clone(&plan),
+        checkpoint: Mutex::new(None),
+        observation: Arc::clone(&store_observation),
+    });
+    let mut sinks = SinkRouter::new();
+    sinks
+        .add(
+            "output",
+            Box::new(ReentrantSink {
+                plan: Arc::clone(&plan),
+                observation: Arc::clone(&sink_observation),
+            }),
+        )
+        .unwrap();
+    let (source, _) = QueueSource::new(vec![source_item(&[1], json!(1), 1)]);
+    let mut runner = MicroBatchRunner::new(
+        Arc::clone(&plan),
+        Box::new(ReentrantSource {
+            plan,
+            source,
+            observation: Arc::clone(&source_observation),
+        }),
+        sinks,
+        Arc::clone(&store) as Arc<dyn CheckpointStore>,
+        1,
+    )
+    .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_millis(300), runner.next())
+        .await
+        .expect("reentrant callbacks must not self-deadlock")
+        .unwrap()
+        .unwrap();
+    assert!(
+        source_observation
+            .lock()
+            .unwrap()
+            .as_deref()
+            .unwrap()
+            .contains("leased")
+    );
+    assert!(
+        sink_observation
+            .lock()
+            .unwrap()
+            .as_deref()
+            .unwrap()
+            .contains("leased")
+    );
+    assert!(
+        store_observation
+            .lock()
+            .unwrap()
+            .as_deref()
+            .unwrap()
+            .contains("leased")
+    );
+}
+
+#[tokio::test]
+async fn runner_invalid_input_does_not_snapshot_restore_or_poison() {
+    let probe = Arc::new(Probe::default());
+    let plan = Arc::new(
+        PipelineBuilder::new("invalid runner input")
+            .unwrap()
+            .add_node(
+                "node",
+                Box::new(
+                    TestOperator::transform("node", Action::Pass, Arc::clone(&probe))
+                        .stateful()
+                        .failing_restore(),
+                ),
+            )
+            .unwrap()
+            .compile(&UdfRegistry::new().snapshot())
+            .unwrap(),
+    );
+    let (source, _) = QueueSource::new(vec![SourceItem {
+        batch: support::string_batch(&["wrong schema"]),
+        cursor: Some(json!(1)),
+        sequence: 1,
+    }]);
+    let mut runner = MicroBatchRunner::new(
+        plan,
+        Box::new(source),
+        SinkRouter::new(),
+        Arc::new(MemoryCheckpointStore::default()),
+        1,
+    )
+    .unwrap();
+
+    for _ in 0..2 {
+        assert!(matches!(
+            runner.next().await,
+            Err(CalcFlowError::Compile { message }) if message.contains("schema mismatch")
+        ));
+    }
+    assert_eq!(probe.calls(), 0);
+    assert_eq!(probe.snapshots(), 0);
+    assert_eq!(probe.restores(), 0);
 }
 
 #[tokio::test]
@@ -148,7 +411,7 @@ async fn sink_failure_rolls_back_and_retries_the_same_source_item() {
 
     assert!(runner.next().await.is_err());
     assert!(store.checkpoint().is_none());
-    assert_eq!(plan.snapshot().await.unwrap(), initial);
+    assert_eq!(runner.plan_snapshot().await.unwrap(), initial);
     let result = runner.next().await.unwrap().unwrap();
 
     assert_eq!(result.outputs["output"].num_rows(), 1);
@@ -215,7 +478,7 @@ async fn checkpoint_failure_rolls_back_and_does_not_skip_the_item() {
     .unwrap();
 
     assert!(runner.next().await.is_err());
-    assert_eq!(plan.snapshot().await.unwrap(), initial);
+    assert_eq!(runner.plan_snapshot().await.unwrap(), initial);
     assert!(runner.next().await.unwrap().is_some());
     assert_eq!(store.checkpoint().unwrap().sequence, 4);
     assert_eq!(probe.calls(), 2);
@@ -254,7 +517,7 @@ async fn execution_failure_is_rolled_back_and_the_item_remains_retryable() {
     assert!(runner.next().await.is_err());
     assert!(runner.next().await.is_err());
     assert_eq!(probe.calls(), 2);
-    assert_eq!(plan.snapshot().await.unwrap(), initial);
+    assert_eq!(runner.plan_snapshot().await.unwrap(), initial);
     assert_eq!(opens.lock().unwrap().len(), 1);
 }
 
@@ -408,14 +671,14 @@ async fn reset_restores_checkpoint_when_delete_errors_after_removal() {
     .unwrap();
     runner.next().await.unwrap();
     let checkpoint = store.checkpoint().unwrap();
-    let state = plan.snapshot().await.unwrap();
+    let state = runner.plan_snapshot().await.unwrap();
     store.fail_next_deletes_after_remove(1);
 
     let error = runner.reset().await.unwrap_err().to_string();
 
     assert!(error.contains("delete after removal injected"));
     assert_eq!(store.checkpoint(), Some(checkpoint));
-    assert_eq!(plan.snapshot().await.unwrap(), state);
+    assert_eq!(runner.plan_snapshot().await.unwrap(), state);
     assert!(runner.next().await.unwrap().is_none());
 }
 
@@ -463,12 +726,12 @@ async fn partially_failing_reset_restores_all_pre_reset_state() {
     )
     .unwrap();
     runner.next().await.unwrap();
-    let before = plan.snapshot().await.unwrap();
+    let before = runner.plan_snapshot().await.unwrap();
 
     let error = runner.reset().await.unwrap_err().to_string();
 
     assert!(error.contains("reset injected"));
-    assert_eq!(plan.snapshot().await.unwrap(), before);
+    assert_eq!(runner.plan_snapshot().await.unwrap(), before);
     assert!(store.checkpoint().is_some());
     assert_eq!(first_probe.resets(), 1);
     assert_eq!(second_probe.resets(), 1);
@@ -548,5 +811,84 @@ impl Source for TransientCandidateSource {
             3 => Ok(self.second.take()),
             _ => Ok(None),
         }
+    }
+}
+
+struct ReentrantSink {
+    plan: Arc<calc_flow::ExecutionPlan>,
+    observation: Arc<Mutex<Option<String>>>,
+}
+
+struct ReentrantSource {
+    plan: Arc<calc_flow::ExecutionPlan>,
+    source: QueueSource,
+    observation: Arc<Mutex<Option<String>>>,
+}
+
+#[async_trait]
+impl Source for ReentrantSource {
+    async fn open(&mut self, cursor: Option<serde_json::Value>) -> Result<()> {
+        let message =
+            match tokio::time::timeout(std::time::Duration::from_millis(100), self.plan.reset())
+                .await
+            {
+                Ok(Err(error)) => error.to_string(),
+                Ok(Ok(())) => "unexpected success".into(),
+                Err(_) => "timeout".into(),
+            };
+        *self.observation.lock().unwrap() = Some(message);
+        self.source.open(cursor).await
+    }
+
+    async fn next(&mut self) -> Result<Option<SourceItem>> {
+        self.source.next().await
+    }
+}
+
+#[async_trait]
+impl Sink for ReentrantSink {
+    async fn write(&mut self, _batch: &Batch, _context: &RunContext) -> Result<()> {
+        let message =
+            match tokio::time::timeout(std::time::Duration::from_millis(100), self.plan.snapshot())
+                .await
+            {
+                Ok(Err(error)) => error.to_string(),
+                Ok(Ok(_)) => "unexpected success".into(),
+                Err(_) => "timeout".into(),
+            };
+        *self.observation.lock().unwrap() = Some(message);
+        Ok(())
+    }
+}
+
+struct ReentrantCheckpointStore {
+    plan: Arc<calc_flow::ExecutionPlan>,
+    checkpoint: Mutex<Option<Checkpoint>>,
+    observation: Arc<Mutex<Option<String>>>,
+}
+
+#[async_trait]
+impl CheckpointStore for ReentrantCheckpointStore {
+    async fn load(&self, _pipeline_name: &str) -> Result<Option<Checkpoint>> {
+        Ok(self.checkpoint.lock().unwrap().clone())
+    }
+
+    async fn save(&self, checkpoint: &Checkpoint) -> Result<()> {
+        let message =
+            match tokio::time::timeout(std::time::Duration::from_millis(100), self.plan.snapshot())
+                .await
+            {
+                Ok(Err(error)) => error.to_string(),
+                Ok(Ok(_)) => "unexpected success".into(),
+                Err(_) => "timeout".into(),
+            };
+        *self.observation.lock().unwrap() = Some(message);
+        *self.checkpoint.lock().unwrap() = Some(checkpoint.clone());
+        Ok(())
+    }
+
+    async fn delete(&self, _pipeline_name: &str) -> Result<()> {
+        *self.checkpoint.lock().unwrap() = None;
+        Ok(())
     }
 }

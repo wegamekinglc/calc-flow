@@ -26,6 +26,8 @@ pub enum CalcFlowError {
     Cancelled { run_id: String },
     #[error("checkpoint mismatch: {message}")]
     CheckpointMismatch { message: String },
+    #[error("execution plan {pipeline_name:?} is exclusively leased by a runner")]
+    PlanLeased { pipeline_name: String },
     #[error("stored document is invalid: {message}")]
     Format { message: String },
     #[error("{resource} {key:?} already exists")]

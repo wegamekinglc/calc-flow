@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::{Duration, Instant},
 };
 
@@ -128,8 +128,26 @@ pub struct ExecutionPlan {
     pub(crate) fingerprint: String,
     pub(crate) datafusion_config: DataFusionConfig,
     pub(crate) run_lock: tokio::sync::Mutex<()>,
+    lease_state: StdMutex<LeaseState>,
     pub(crate) udfs: UdfRegistrySnapshot,
     pub(crate) selected_udfs: Vec<UdfReference>,
+}
+
+#[derive(Default)]
+struct LeaseState {
+    owner: Option<u64>,
+    generation: u64,
+}
+
+/// Exclusive, non-cloneable runner ownership of an execution plan.
+///
+/// The synchronous lease flag makes reentrant public calls fail before they
+/// can wait on the async run lock. The lock is still rechecked after every
+/// acquisition so calls queued before this lease was created cannot slip
+/// through the ownership transition.
+pub(crate) struct PlanLease {
+    plan: Arc<ExecutionPlan>,
+    token: u64,
 }
 
 /// Crate-internal state transaction that owns a plan's lifecycle lock.
@@ -203,9 +221,10 @@ impl ExecutionPlan {
         inputs: BTreeMap<String, Batch>,
         options: ExecutionOptions,
     ) -> Result<RunResult> {
-        let transaction = self.transaction().await;
+        let transaction = self.public_transaction().await?;
+        transaction.validate_inputs(&inputs)?;
         let before = transaction.snapshot().await?;
-        let result = transaction.execute(inputs, options).await;
+        let result = transaction.execute_validated(inputs, options).await;
         match result {
             Ok(result) => Ok(result),
             Err(original) => match transaction.restore(&before).await {
@@ -225,7 +244,7 @@ impl ExecutionPlan {
     ///
     /// Returns an error when any operator cannot capture its state.
     pub async fn snapshot(&self) -> Result<BTreeMap<String, Value>> {
-        self.transaction().await.snapshot().await
+        self.public_transaction().await?.snapshot().await
     }
 
     /// Restores an exact node-keyed state map under the plan's run lock.
@@ -238,7 +257,7 @@ impl ExecutionPlan {
     /// Returns [`CalcFlowError::CheckpointMismatch`] for missing or extra node
     /// IDs, or an error summarizing operator restore failures.
     pub async fn restore(&self, state: &BTreeMap<String, Value>) -> Result<()> {
-        self.transaction().await.restore(state).await
+        self.public_transaction().await?.restore(state).await
     }
 
     /// Resets every node under the plan's run lock.
@@ -249,13 +268,89 @@ impl ExecutionPlan {
     ///
     /// Returns an error summarizing operator reset failures.
     pub async fn reset(&self) -> Result<()> {
-        self.transaction().await.reset().await
+        self.public_transaction().await?.reset().await
     }
 
-    pub(crate) async fn transaction(&self) -> PlanTransaction<'_> {
-        PlanTransaction {
+    pub(crate) fn acquire_lease(self: &Arc<Self>) -> Result<PlanLease> {
+        let mut state = self
+            .lease_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.owner.is_some() {
+            return Err(self.leased_error());
+        }
+        let token = state
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| CalcFlowError::Internal {
+                message: format!(
+                    "execution plan {:?} exhausted runner lease generations",
+                    self.name
+                ),
+            })?;
+        state.generation = token;
+        state.owner = Some(token);
+        drop(state);
+        Ok(PlanLease {
+            plan: Arc::clone(self),
+            token,
+        })
+    }
+
+    async fn public_transaction(&self) -> Result<PlanTransaction<'_>> {
+        self.ensure_unleased()?;
+        let guard = self.run_lock.lock().await;
+        self.ensure_unleased()?;
+        Ok(PlanTransaction {
             plan: self,
-            _guard: self.run_lock.lock().await,
+            _guard: guard,
+        })
+    }
+
+    pub(crate) async fn leased_transaction<'plan>(
+        &'plan self,
+        lease: &PlanLease,
+    ) -> Result<PlanTransaction<'plan>> {
+        self.ensure_lease_owner(lease)?;
+        let guard = self.run_lock.lock().await;
+        self.ensure_lease_owner(lease)?;
+        Ok(PlanTransaction {
+            plan: self,
+            _guard: guard,
+        })
+    }
+
+    fn ensure_unleased(&self) -> Result<()> {
+        let state = self
+            .lease_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match state.owner {
+            Some(_) => Err(self.leased_error()),
+            None => Ok(()),
+        }
+    }
+
+    fn ensure_lease_owner(&self, lease: &PlanLease) -> Result<()> {
+        let state = self
+            .lease_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if std::ptr::eq(self, Arc::as_ptr(&lease.plan)) && state.owner == Some(lease.token) {
+            Ok(())
+        } else {
+            Err(CalcFlowError::Internal {
+                message: format!(
+                    "runner lease for execution plan {:?} is no longer active",
+                    self.name
+                ),
+            })
+        }
+    }
+
+    fn leased_error(&self) -> CalcFlowError {
+        CalcFlowError::PlanLeased {
+            pipeline_name: self.name.clone(),
         }
     }
 
@@ -447,12 +542,15 @@ impl ExecutionPlan {
 }
 
 impl PlanTransaction<'_> {
-    pub(crate) async fn execute(
+    pub(crate) fn validate_inputs(&self, inputs: &BTreeMap<String, Batch>) -> Result<()> {
+        self.plan.validate_external_inputs(inputs)
+    }
+
+    pub(crate) async fn execute_validated(
         &self,
         inputs: BTreeMap<String, Batch>,
         options: ExecutionOptions,
     ) -> Result<RunResult> {
-        self.plan.validate_external_inputs(&inputs)?;
         self.plan.execute_unlocked(inputs, options).await
     }
 
@@ -466,6 +564,19 @@ impl PlanTransaction<'_> {
 
     pub(crate) async fn reset(&self) -> Result<()> {
         self.plan.reset_unlocked().await
+    }
+}
+
+impl Drop for PlanLease {
+    fn drop(&mut self) {
+        let mut state = self
+            .plan
+            .lease_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.owner == Some(self.token) {
+            state.owner = None;
+        }
     }
 }
 
@@ -1146,6 +1257,7 @@ fn build_plan(
         external_outputs,
         fingerprint,
         run_lock: tokio::sync::Mutex::new(()),
+        lease_state: StdMutex::new(LeaseState::default()),
         udfs,
         selected_udfs,
     }

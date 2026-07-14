@@ -730,6 +730,40 @@ async fn execution_does_not_replace_or_modify_input_batches() {
 }
 
 #[tokio::test]
+async fn invalid_external_input_does_not_touch_operator_lifecycle() {
+    let probe = Arc::new(Probe::default());
+    let plan = PipelineBuilder::new("invalid before snapshot")
+        .unwrap()
+        .add_node(
+            "node",
+            Box::new(
+                TestOperator::transform("node", Action::Pass, Arc::clone(&probe))
+                    .stateful()
+                    .failing_restore(),
+            ),
+        )
+        .unwrap()
+        .compile(&UdfRegistry::new().snapshot())
+        .unwrap();
+
+    let error = plan
+        .execute(
+            BTreeMap::from([("input".into(), support::string_batch(&["wrong schema"]))]),
+            ExecutionOptions::default(),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        CalcFlowError::Compile { message } if message.contains("schema mismatch")
+    ));
+    assert_eq!(probe.calls(), 0);
+    assert_eq!(probe.snapshots(), 0);
+    assert_eq!(probe.restores(), 0);
+}
+
+#[tokio::test]
 async fn each_run_registers_only_compile_time_selected_native_udfs() {
     let selected = UdfReference::new("rust", "chosen", "1", UdfKind::DataFusionScalar).unwrap();
     let unselected = UdfReference::new("plugin", "chosen", "2", UdfKind::DataFusionScalar).unwrap();

@@ -59,6 +59,10 @@ impl Probe {
         self.restores.load(Ordering::SeqCst)
     }
 
+    pub fn snapshots(&self) -> usize {
+        self.snapshots.load(Ordering::SeqCst)
+    }
+
     pub fn resets(&self) -> usize {
         self.resets.load(Ordering::SeqCst)
     }
