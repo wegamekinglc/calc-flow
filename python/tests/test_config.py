@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from collections import UserDict
+from types import MappingProxyType
 
 import pytest
 from pydantic import ValidationError
@@ -58,6 +60,44 @@ def test_project_document_rejects_non_json_values(invalid: object) -> None:
         ProjectDocument.model_validate(project)
 
 
+def test_project_document_rejects_non_builtin_json_containers_without_hooks() -> None:
+    class HostileDict(dict[str, object]):
+        hooks_called = False
+
+        def items(self):
+            type(self).hooks_called = True
+            raise AssertionError("dict subclass hook must not run")
+
+    class HostileList(list[object]):
+        hooks_called = False
+
+        def __iter__(self):
+            type(self).hooks_called = True
+            raise AssertionError("list subclass hook must not run")
+
+    containers = (
+        HostileDict(value=1),
+        HostileList([1]),
+        UserDict({"value": 1}),
+        MappingProxyType({"value": 1}),
+    )
+    for container in containers:
+        project = _minimal_project()
+        project["data_sources"] = [
+            {
+                "id": "input",
+                "input": "calc.input",
+                "format": "inline_json",
+                "data": container,
+            }
+        ]
+        with pytest.raises(ValidationError, match="non-JSON"):
+            ProjectDocument.model_validate(project)
+
+    assert HostileDict.hooks_called is False
+    assert HostileList.hooks_called is False
+
+
 def test_project_document_rejects_cycles_and_excessive_depth() -> None:
     cyclic: dict[str, object] = {}
     cyclic["self"] = cyclic
@@ -74,6 +114,17 @@ def test_project_document_rejects_cycles_and_excessive_depth() -> None:
 def test_project_document_json_rejects_duplicate_keys() -> None:
     with pytest.raises(ValidationError, match="duplicate"):
         ProjectDocument.model_validate_json('{"format_version":2,"format_version":2}')
+
+
+def test_project_document_json_translates_decoder_recursion_errors() -> None:
+    project = _minimal_project()
+    project["data_sources"][0]["data"] = "deep-value"
+    encoded = json.dumps(project)
+    nested = "[" * 10_000 + "null" + "]" * 10_000
+    encoded = encoded.replace('"deep-value"', nested)
+
+    with pytest.raises(ValidationError, match="depth|nesting"):
+        ProjectDocument.model_validate_json(encoded)
 
 
 def test_project_document_does_not_mutate_inputs_or_expose_owned_values() -> None:

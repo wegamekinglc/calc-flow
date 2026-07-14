@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping
 from typing import Any
 
 from pydantic import RootModel, ValidationError, model_validator
@@ -37,7 +36,7 @@ def _validate_json_value(value: object) -> None:
             if not math.isfinite(current):
                 raise _json_error("project JSON numbers must be finite")
             continue
-        if isinstance(current, Mapping):
+        if type(current) is dict:
             identity = id(current)
             if identity in ancestors:
                 raise _json_error("project contains a cycle")
@@ -47,7 +46,7 @@ def _validate_json_value(value: object) -> None:
                     raise _json_error("project JSON object keys must be strings")
                 pending.append((child, depth + 1, nested_ancestors))
             continue
-        if isinstance(current, list):
+        if type(current) is list:
             identity = id(current)
             if identity in ancestors:
                 raise _json_error("project contains a cycle")
@@ -103,6 +102,21 @@ class ProjectDocument(RootModel[dict[str, JSONValue]]):
         del extra
         try:
             parsed = json.loads(json_data, object_pairs_hook=_reject_duplicate_pairs)
+        except RecursionError as cause:
+            validation_error = _json_error(
+                "project JSON exceeds the maximum nesting depth"
+            )
+            raise ValidationError.from_exception_data(
+                cls.__name__,
+                [
+                    {
+                        "type": "value_error",
+                        "loc": (),
+                        "input": json_data,
+                        "ctx": {"error": validation_error},
+                    }
+                ],
+            ) from cause
         except (TypeError, ValueError, UnicodeDecodeError) as error:
             raise ValidationError.from_exception_data(
                 cls.__name__,

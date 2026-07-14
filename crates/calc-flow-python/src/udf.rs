@@ -1,10 +1,13 @@
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 use datafusion::{
     arrow::{array::ArrayRef, datatypes::DataType},
     common::ScalarValue,
     error::DataFusionError,
-    logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
+    logical_expr::{
+        ColumnarValue, ScalarFunctionArgs, ScalarFunctionImplementation, ScalarUDF, ScalarUDFImpl,
+        Signature, SimpleScalarUDF, Volatility,
+    },
 };
 use pyo3::{
     exceptions::{PyTypeError, PyValueError},
@@ -105,9 +108,10 @@ fn python_scalar_udf(
     let argument_count = input_types.len();
     let expected_inputs = input_types.clone();
     let expected_return = return_type.clone();
-    let implementation = Arc::new(move |arguments: &[ColumnarValue]| {
+    let callback_identity = identity.clone();
+    let implementation: ScalarFunctionImplementation = Arc::new(move |arguments| {
         invoke_python_udf(
-            &identity,
+            &callback_identity,
             &root,
             &expected_inputs,
             &expected_return,
@@ -115,16 +119,93 @@ fn python_scalar_udf(
             arguments,
         )
         .map_err(|error| {
-            DataFusionError::Execution(format!("python UDF {identity} failed: {error}"))
+            DataFusionError::Execution(format!("python UDF {callback_identity} failed: {error}"))
         })
     });
-    Arc::new(create_udf(
+    let inner = SimpleScalarUDF::new_with_signature(
         &name,
-        input_types,
+        Signature::user_defined(volatility),
         return_type,
-        volatility,
         implementation,
-    ))
+    );
+    Arc::new(ScalarUDF::from(ExactPythonScalarUdf {
+        name,
+        identity,
+        signature: Signature::user_defined(volatility),
+        expected_inputs: input_types,
+        inner,
+    }))
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct ExactPythonScalarUdf {
+    name: String,
+    identity: String,
+    signature: Signature,
+    expected_inputs: Vec<DataType>,
+    inner: SimpleScalarUDF,
+}
+
+impl fmt::Debug for ExactPythonScalarUdf {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExactPythonScalarUdf")
+            .field("name", &self.name)
+            .field("identity", &self.identity)
+            .field("signature", &self.signature)
+            .field("expected_inputs", &self.expected_inputs)
+            .field("inner", &"<PYTHON CALLBACK REDACTED>")
+            .finish()
+    }
+}
+
+impl ScalarUDFImpl for ExactPythonScalarUdf {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, arg_types: &[DataType]) -> datafusion::common::Result<DataType> {
+        self.inner.return_type(arg_types)
+    }
+
+    fn coerce_types(&self, arg_types: &[DataType]) -> datafusion::common::Result<Vec<DataType>> {
+        if arg_types == self.expected_inputs {
+            return Ok(self.expected_inputs.clone());
+        }
+        let expected = describe_argument_types(&self.expected_inputs);
+        let actual = describe_argument_types(arg_types);
+        Err(DataFusionError::Plan(format!(
+            "{} requires exact Arrow input types {expected}; received {actual}",
+            self.identity
+        )))
+    }
+
+    fn invoke_with_args(
+        &self,
+        arguments: ScalarFunctionArgs,
+    ) -> datafusion::common::Result<ColumnarValue> {
+        self.inner.invoke_with_args(arguments)
+    }
+}
+
+fn describe_argument_types(types: &[DataType]) -> String {
+    match types {
+        [] => "zero arguments".into(),
+        [single] => arrow_type_name(single).into(),
+        _ => format!(
+            "{} arguments ({})",
+            types.len(),
+            types
+                .iter()
+                .map(arrow_type_name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 fn invoke_python_udf(

@@ -64,6 +64,60 @@ def test_python_scalar_udf_executes_arrays_and_preserves_nulls() -> None:
     assert isinstance(seen[0], pa.Array)
 
 
+def test_python_scalar_udf_requires_exact_input_types_before_callback() -> None:
+    runtime = Runtime()
+    calls = 0
+
+    def identity(value: pa.Array) -> pa.Array:
+        nonlocal calls
+        calls += 1
+        return value
+
+    _register(runtime, identity)
+    plan = _plan(runtime)
+    with pytest.raises(
+        ExecutionError,
+        match=r"python:transform@1.*exact Arrow input types.*int64.*int32",
+    ):
+        _execute(plan, pa.array([1, 2], type=pa.int32()))
+    assert calls == 0
+
+    assert _execute(plan, pa.array([1, 2], type=pa.int64())) == [1, 2]
+    assert calls == 1
+
+
+@pytest.mark.parametrize(
+    ("expression", "values", "actual"),
+    [
+        ("result = transform(value)", pa.array([1.0], type=pa.float64()), "float64"),
+        ("result = transform()", pa.array([1], type=pa.int64()), "zero arguments"),
+        (
+            "result = transform(value, value)",
+            pa.array([1], type=pa.int64()),
+            "2 arguments",
+        ),
+    ],
+)
+def test_python_scalar_udf_planner_errors_include_identity_and_exact_contract(
+    expression: str, values: pa.Array, actual: str
+) -> None:
+    runtime = Runtime()
+    calls = 0
+
+    def identity(value: pa.Array) -> pa.Array:
+        nonlocal calls
+        calls += 1
+        return value
+
+    _register(runtime, identity)
+    with pytest.raises(
+        ExecutionError,
+        match=rf"python:transform@1.*exact Arrow input types.*{actual}",
+    ):
+        _execute(_plan(runtime, expression), values)
+    assert calls == 0
+
+
 @pytest.mark.parametrize(
     ("function", "expected"),
     [
