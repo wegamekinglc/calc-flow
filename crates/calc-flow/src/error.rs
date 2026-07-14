@@ -1,6 +1,12 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+/// Public v2-alpha error surface.
+///
+/// The enum remains non-exhaustive while the Rust API is alpha so recovery and
+/// runtime boundaries can gain precise typed failures without prematurely
+/// freezing every variant.
+#[non_exhaustive]
 pub enum CalcFlowError {
     #[error("invalid {field}: {message}")]
     InvalidArgument { field: String, message: String },
@@ -28,6 +34,11 @@ pub enum CalcFlowError {
     CheckpointMismatch { message: String },
     #[error("execution plan {pipeline_name:?} is exclusively leased by a runner")]
     PlanLeased { pipeline_name: String },
+    #[error("execution plan {pipeline_name:?} requires recovery: {message}")]
+    RecoveryRequired {
+        pipeline_name: String,
+        message: String,
+    },
     #[error("stored document is invalid: {message}")]
     Format { message: String },
     #[error("{resource} {key:?} already exists")]

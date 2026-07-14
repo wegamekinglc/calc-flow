@@ -1,6 +1,10 @@
 mod support;
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use calc_flow::{
@@ -38,6 +42,47 @@ fn one_node(action: Action, probe: Arc<Probe>) -> calc_flow::ExecutionPlan {
 
 fn inputs() -> BTreeMap<String, Batch> {
     BTreeMap::from([("input".into(), int_batch(&[1, 2, 3]))])
+}
+
+#[tokio::test]
+async fn dropped_execute_restores_mutated_state_before_the_next_public_call() {
+    let probe = Arc::new(Probe::default());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let plan = PipelineBuilder::new("cancelled execute")
+        .unwrap()
+        .add_node(
+            "node",
+            Box::new(
+                TestOperator::transform(
+                    "node",
+                    Action::GateOncePass {
+                        started: Arc::clone(&started),
+                        release,
+                        pending: Arc::new(AtomicBool::new(true)),
+                    },
+                    Arc::clone(&probe),
+                )
+                .stateful(),
+            ),
+        )
+        .unwrap()
+        .compile(&UdfRegistry::new().snapshot())
+        .unwrap();
+
+    let mut cancelled = Box::pin(plan.execute(inputs(), ExecutionOptions::default()));
+    tokio::select! {
+        () = started.notified() => {}
+        result = &mut cancelled => panic!("operator gate did not suspend execute: {result:?}"),
+    }
+    drop(cancelled);
+
+    assert_eq!(plan.snapshot().await.unwrap()["node"]["state"], json!(0));
+    plan.execute(inputs(), ExecutionOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(plan.snapshot().await.unwrap()["node"]["state"], json!(1));
+    assert_eq!(probe.calls(), 2);
 }
 
 struct DriftingOutputOperator {

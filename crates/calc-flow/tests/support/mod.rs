@@ -34,6 +34,11 @@ pub enum Action {
         started: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
     },
+    GateOncePass {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        pending: Arc<std::sync::atomic::AtomicBool>,
+    },
     MissingOutput,
     UnknownOutput,
     WrongSchema,
@@ -201,6 +206,16 @@ impl Operator for TestOperator {
             Action::GatePass { started, release } => {
                 started.notify_one();
                 release.notified().await;
+            }
+            Action::GateOncePass {
+                started,
+                release,
+                pending,
+            } => {
+                if pending.swap(false, Ordering::SeqCst) {
+                    started.notify_one();
+                    release.notified().await;
+                }
             }
             Action::MissingOutput => return Ok(BTreeMap::new()),
             Action::UnknownOutput => {
@@ -486,6 +501,22 @@ pub struct GatedSink {
     release: Arc<tokio::sync::Notify>,
 }
 
+pub struct GatedOnceSink {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    pending: AtomicUsize,
+}
+
+impl GatedOnceSink {
+    pub fn new(started: Arc<tokio::sync::Notify>, release: Arc<tokio::sync::Notify>) -> Self {
+        Self {
+            started,
+            release,
+            pending: AtomicUsize::new(1),
+        }
+    }
+}
+
 impl GatedSink {
     pub fn new(started: Arc<tokio::sync::Notify>, release: Arc<tokio::sync::Notify>) -> Self {
         Self { started, release }
@@ -497,6 +528,205 @@ impl Sink for GatedSink {
     async fn write(&mut self, _batch: &Batch, _context: &RunContext) -> Result<()> {
         self.started.notify_one();
         self.release.notified().await;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Sink for GatedOnceSink {
+    async fn write(&mut self, _batch: &Batch, _context: &RunContext) -> Result<()> {
+        if self
+            .pending
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                (remaining > 0).then(|| remaining - 1)
+            })
+            .is_ok()
+        {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum StoreGate {
+    Save,
+    Delete,
+}
+
+pub struct VisibleGateCheckpointStore {
+    checkpoint: Mutex<Option<Checkpoint>>,
+    gate: StoreGate,
+    gate_pending: AtomicUsize,
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    fail_compensation: AtomicUsize,
+}
+
+impl VisibleGateCheckpointStore {
+    pub fn new(
+        checkpoint: Option<Checkpoint>,
+        gate: StoreGate,
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        Self {
+            checkpoint: Mutex::new(checkpoint),
+            gate,
+            gate_pending: AtomicUsize::new(1),
+            started,
+            release,
+            fail_compensation: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn checkpoint(&self) -> Option<Checkpoint> {
+        self.checkpoint.lock().unwrap().clone()
+    }
+
+    pub fn fail_next_compensations(&self, count: usize) {
+        self.fail_compensation.store(count, Ordering::SeqCst);
+    }
+
+    async fn gate_once(&self, operation: StoreGate) {
+        if std::mem::discriminant(&self.gate) == std::mem::discriminant(&operation)
+            && self
+                .gate_pending
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    (remaining > 0).then(|| remaining - 1)
+                })
+                .is_ok()
+        {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    fn maybe_fail_compensation(&self) -> Result<()> {
+        if self
+            .fail_compensation
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                (remaining > 0).then(|| remaining - 1)
+            })
+            .is_ok()
+        {
+            return Err(CalcFlowError::Format {
+                message: "checkpoint compensation injected".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl CheckpointStore for VisibleGateCheckpointStore {
+    async fn load(&self, _pipeline_name: &str) -> Result<Option<Checkpoint>> {
+        Ok(self.checkpoint())
+    }
+
+    async fn save(&self, checkpoint: &Checkpoint) -> Result<()> {
+        if self.gate_pending.load(Ordering::SeqCst) == 0 {
+            self.maybe_fail_compensation()?;
+        }
+        *self.checkpoint.lock().unwrap() = Some(checkpoint.clone());
+        self.gate_once(StoreGate::Save).await;
+        Ok(())
+    }
+
+    async fn delete(&self, _pipeline_name: &str) -> Result<()> {
+        if self.gate_pending.load(Ordering::SeqCst) == 0 {
+            self.maybe_fail_compensation()?;
+        }
+        *self.checkpoint.lock().unwrap() = None;
+        self.gate_once(StoreGate::Delete).await;
+        Ok(())
+    }
+}
+
+pub struct CommitThenResetGateStore {
+    checkpoint: Mutex<Option<Checkpoint>>,
+    save_gate_pending: AtomicUsize,
+    save_started: Arc<tokio::sync::Notify>,
+    save_release: Arc<tokio::sync::Notify>,
+    delete_gate_pending: AtomicUsize,
+    delete_started: Arc<tokio::sync::Notify>,
+    delete_release: Arc<tokio::sync::Notify>,
+    fail_saves: AtomicUsize,
+}
+
+impl CommitThenResetGateStore {
+    pub fn new(
+        save_started: Arc<tokio::sync::Notify>,
+        save_release: Arc<tokio::sync::Notify>,
+        delete_started: Arc<tokio::sync::Notify>,
+        delete_release: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        Self {
+            checkpoint: Mutex::new(None),
+            save_gate_pending: AtomicUsize::new(1),
+            save_started,
+            save_release,
+            delete_gate_pending: AtomicUsize::new(1),
+            delete_started,
+            delete_release,
+            fail_saves: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn checkpoint(&self) -> Option<Checkpoint> {
+        self.checkpoint.lock().unwrap().clone()
+    }
+
+    pub fn fail_next_saves(&self, count: usize) {
+        self.fail_saves.store(count, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl CheckpointStore for CommitThenResetGateStore {
+    async fn load(&self, _pipeline_name: &str) -> Result<Option<Checkpoint>> {
+        Ok(self.checkpoint())
+    }
+
+    async fn save(&self, checkpoint: &Checkpoint) -> Result<()> {
+        if self
+            .fail_saves
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                (remaining > 0).then(|| remaining - 1)
+            })
+            .is_ok()
+        {
+            return Err(CalcFlowError::Format {
+                message: "commit recovery save injected".into(),
+            });
+        }
+        *self.checkpoint.lock().unwrap() = Some(checkpoint.clone());
+        if self
+            .save_gate_pending
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                (remaining > 0).then(|| remaining - 1)
+            })
+            .is_ok()
+        {
+            self.save_started.notify_one();
+            self.save_release.notified().await;
+        }
+        Ok(())
+    }
+
+    async fn delete(&self, _pipeline_name: &str) -> Result<()> {
+        *self.checkpoint.lock().unwrap() = None;
+        if self
+            .delete_gate_pending
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                (remaining > 0).then(|| remaining - 1)
+            })
+            .is_ok()
+        {
+            self.delete_started.notify_one();
+            self.delete_release.notified().await;
+        }
         Ok(())
     }
 }

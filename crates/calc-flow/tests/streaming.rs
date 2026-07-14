@@ -6,9 +6,81 @@ use calc_flow::{CalcFlowError, Checkpoint, CheckpointStore, SinkRouter, Streamin
 use chrono::Utc;
 use serde_json::json;
 use support::{
-    Action, MemoryCheckpointStore, Probe, RecordingSink, TestOperator, int_batch,
-    partially_failing_reset_plan, stateful_plan,
+    Action, GatedOnceSink, MemoryCheckpointStore, Probe, RecordingSink, StoreGate, TestOperator,
+    VisibleGateCheckpointStore, int_batch, partially_failing_reset_plan, stateful_plan,
 };
+
+#[tokio::test]
+async fn cancelled_step_at_sink_requires_resubmission_without_double_state() {
+    let probe = Arc::new(Probe::default());
+    let plan = stateful_plan("stream cancellation", Arc::clone(&probe));
+    let store = Arc::new(MemoryCheckpointStore::default());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut sinks = SinkRouter::new();
+    sinks
+        .add(
+            "output",
+            Box::new(GatedOnceSink::new(started.clone(), release)),
+        )
+        .unwrap();
+    let mut runner = StreamingRunner::new(Arc::clone(&plan), clone_store(&store)).unwrap();
+    let batch = int_batch(&[1]);
+
+    let mut cancelled = Box::pin(runner.step(batch.clone(), &mut sinks));
+    tokio::select! {
+        () = started.notified() => {}
+        result = &mut cancelled => panic!("sink gate did not suspend step: {result:?}"),
+    }
+    drop(cancelled);
+
+    runner.step(batch, &mut sinks).await.unwrap();
+    let checkpoint = store.checkpoint().unwrap();
+    assert_eq!(checkpoint.sequence, 0);
+    assert_eq!(checkpoint.state["node"]["state"], json!(1));
+    assert_eq!(probe.calls(), 2);
+}
+
+#[tokio::test]
+async fn cancelled_stream_save_compensates_visible_checkpoint_then_retries() {
+    let probe = Arc::new(Probe::default());
+    let plan = stateful_plan("stream visible cancellation", Arc::clone(&probe));
+    let old = Checkpoint::new(
+        plan.name(),
+        plan.fingerprint(),
+        None,
+        6,
+        plan.snapshot().await.unwrap(),
+        Utc::now(),
+    )
+    .unwrap();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let store = Arc::new(VisibleGateCheckpointStore::new(
+        Some(old),
+        StoreGate::Save,
+        Arc::clone(&started),
+        release,
+    ));
+    let mut runner =
+        StreamingRunner::new(plan, Arc::clone(&store) as Arc<dyn CheckpointStore>).unwrap();
+    let mut sinks = SinkRouter::new();
+    let batch = int_batch(&[1]);
+
+    let mut cancelled = Box::pin(runner.step(batch.clone(), &mut sinks));
+    tokio::select! {
+        () = started.notified() => {}
+        result = &mut cancelled => panic!("visible save did not suspend step: {result:?}"),
+    }
+    assert_eq!(store.checkpoint().unwrap().sequence, 7);
+    drop(cancelled);
+
+    runner.step(batch, &mut sinks).await.unwrap();
+    let checkpoint = store.checkpoint().unwrap();
+    assert_eq!(checkpoint.sequence, 7);
+    assert_eq!(checkpoint.state["node"]["state"], json!(1));
+    assert_eq!(probe.calls(), 2);
+}
 
 #[tokio::test]
 async fn streaming_recovers_once_and_advances_after_delivery() {
