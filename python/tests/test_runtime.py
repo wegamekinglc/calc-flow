@@ -10,6 +10,7 @@ import pytest
 
 from calc_flow import (
     Batch,
+    CheckpointError,
     ConfigError,
     ExecutionError,
     FileCheckpointStore,
@@ -568,3 +569,208 @@ def test_micro_buffered_array_payload_cycle_is_collectable_after_failure(
     assert runner_ref() is None
     assert source_ref() is None
     assert plan.snapshot() == {"calc": None}
+
+
+def test_streaming_cancellation_cancels_pending_sink_without_late_delivery(
+    tmp_path,
+) -> None:
+    async def exercise() -> None:
+        entered = asyncio.Event()
+        cancelled = asyncio.Event()
+        cancellation_release = asyncio.Event()
+        gate = asyncio.Event()
+        late_deliveries: list[str] = []
+
+        class Sink:
+            async def __call__(self, batch: Batch) -> None:
+                del batch
+                entered.set()
+                try:
+                    await gate.wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    await cancellation_release.wait()
+                    raise
+                late_deliveries.append("delivered")
+
+        runner = StreamingRunner(
+            _plan("cancel-pending-sink"), FileCheckpointStore(tmp_path)
+        )
+        task = asyncio.create_task(
+            runner.step_async(_batch(1), sinks={"output": [Sink()]})
+        )
+        await entered.wait()
+        task.cancel()
+
+        async def observe_cancellation() -> None:
+            await task
+
+        observer = asyncio.create_task(observe_cancellation())
+        await asyncio.wait_for(cancelled.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert not observer.done()
+        cancellation_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await observer
+
+        gate.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert late_deliveries == []
+
+        result = await runner.step_async(_batch(2))
+        assert result.outputs["output"].to_pyarrow()["result"].to_pylist() == [3]
+
+    asyncio.run(exercise())
+
+
+def test_micro_cancellation_cancels_pending_source_and_runner_recovers(
+    tmp_path,
+) -> None:
+    async def exercise() -> None:
+        entered = asyncio.Event()
+        cancelled = asyncio.Event()
+        cancellation_release = asyncio.Event()
+        gate = asyncio.Event()
+        late_reads: list[str] = []
+
+        class Source:
+            def __init__(self) -> None:
+                self.next_calls = 0
+
+            def open(self, cursor: object) -> None:
+                assert cursor is None
+
+            async def next(self) -> tuple[Batch, None, int]:
+                self.next_calls += 1
+                if self.next_calls == 1:
+                    entered.set()
+                    try:
+                        await gate.wait()
+                    except asyncio.CancelledError:
+                        cancelled.set()
+                        await cancellation_release.wait()
+                        raise
+                    late_reads.append("read")
+                return _batch(4), None, 1
+
+        source = Source()
+        runner = MicroBatchRunner(
+            _plan("cancel-pending-source"),
+            source,
+            FileCheckpointStore(tmp_path),
+            checkpoint_every=1,
+        )
+        task = asyncio.create_task(runner.next_async())
+        await entered.wait()
+        task.cancel()
+
+        async def observe_cancellation() -> None:
+            await task
+
+        observer = asyncio.create_task(observe_cancellation())
+        await asyncio.wait_for(cancelled.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert not observer.done()
+        cancellation_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await observer
+
+        gate.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert late_reads == []
+
+        result = await runner.next_async()
+        assert result is not None
+        assert result.outputs["output"].to_pyarrow()["result"].to_pylist() == [5]
+        assert source.next_calls == 2
+
+    asyncio.run(exercise())
+
+
+def test_cancelled_sink_retaining_array_batch_is_collectable_and_releases_lease(
+    tmp_path,
+) -> None:
+    class Payload:
+        runner: StreamingRunner | None = None
+
+    class Sink:
+        def __init__(
+            self,
+            entered: asyncio.Event,
+            cancelled: asyncio.Event,
+            gate: asyncio.Event,
+            late_deliveries: list[str],
+        ) -> None:
+            self.entered = entered
+            self.cancelled = cancelled
+            self.gate = gate
+            self.late_deliveries = late_deliveries
+            self.batch: Batch | None = None
+
+        async def __call__(self, batch: Batch) -> None:
+            self.batch = batch
+            self.entered.set()
+            try:
+                await self.gate.wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise
+            self.late_deliveries.append("delivered")
+
+    def identity(batch: Batch, _options: dict[str, object]) -> Batch:
+        return batch
+
+    async def exercise() -> tuple[
+        object,
+        weakref.ReferenceType[Payload],
+        weakref.ReferenceType[StreamingRunner],
+        weakref.ReferenceType[Sink],
+    ]:
+        entered = asyncio.Event()
+        cancelled = asyncio.Event()
+        gate = asyncio.Event()
+        late_deliveries: list[str] = []
+        runtime = Runtime()
+        runtime.register_provider("test", "identity", "1", identity)
+        plan = (
+            PipelineBuilder("cancelled-array-cycle")
+            .external("calc", "test", "identity", "1", {})
+            .compile(runtime)
+        )
+        payload = Payload()
+        batch = Batch._from_external(payload, "test", 1, {})
+        sink = Sink(entered, cancelled, gate, late_deliveries)
+        runner = StreamingRunner(plan, FileCheckpointStore(tmp_path))
+        payload.runner = runner
+        payload_ref = weakref.ref(payload)
+        runner_ref = weakref.ref(runner)
+        sink_ref = weakref.ref(sink)
+
+        task = asyncio.create_task(runner.step_async(batch, sinks={"output": [sink]}))
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert cancelled.is_set()
+        gate.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert late_deliveries == []
+
+        del task
+        del batch
+        del payload
+        del runner
+        del sink
+        return plan, payload_ref, runner_ref, sink_ref
+
+    plan, payload_ref, runner_ref, sink_ref = asyncio.run(exercise())
+    gc.collect()
+
+    assert payload_ref() is None
+    assert runner_ref() is None
+    assert sink_ref() is None
+    with pytest.raises(CheckpointError, match="requires recovery"):
+        plan.snapshot()

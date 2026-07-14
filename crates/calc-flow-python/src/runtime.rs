@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -34,7 +34,276 @@ fn provider_error(name: &str, error: impl std::fmt::Display) -> calc_flow::CalcF
     }
 }
 
-async fn resolve_python(value: Py<PyAny>, callback_name: &str) -> calc_flow::Result<Py<PyAny>> {
+struct PythonAwaitRegistry {
+    pending: AtomicU64,
+    idle: tokio::sync::Notify,
+}
+
+impl PythonAwaitRegistry {
+    fn new() -> Self {
+        Self {
+            pending: AtomicU64::new(0),
+            idle: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn retain(self: &Arc<Self>) -> PythonAwaitLease {
+        self.pending.fetch_add(1, Ordering::AcqRel);
+        PythonAwaitLease {
+            registry: Arc::clone(self),
+        }
+    }
+
+    async fn wait_idle(&self) {
+        loop {
+            let notified = self.idle.notified();
+            if self.pending.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+struct PythonAwaitLease {
+    registry: Arc<PythonAwaitRegistry>,
+}
+
+impl Drop for PythonAwaitLease {
+    fn drop(&mut self) {
+        let previous = self.registry.pending.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0);
+        if previous == 1 {
+            self.registry.idle.notify_one();
+        }
+    }
+}
+
+struct PythonAwaitState {
+    cancel_requested: AtomicBool,
+    event_loop: Arc<PythonRoot>,
+    task: Mutex<Option<Arc<PythonRoot>>>,
+}
+
+impl PythonAwaitState {
+    fn new(event_loop: Py<PyAny>) -> Self {
+        Self {
+            cancel_requested: AtomicBool::new(false),
+            event_loop: Arc::new(PythonRoot::new(event_loop)),
+            task: Mutex::new(None),
+        }
+    }
+
+    fn register_task(&self, task: Py<PyAny>) {
+        let previous = self.task.lock().replace(Arc::new(PythonRoot::new(task)));
+        drop(previous);
+        if self.cancel_requested.load(Ordering::Acquire) {
+            self.schedule_cancel();
+        }
+    }
+
+    fn clear_task(&self) {
+        let task = self.task.lock().take();
+        drop(task);
+    }
+
+    fn request_cancel(&self) {
+        self.cancel_requested.store(true, Ordering::Release);
+        self.schedule_cancel();
+    }
+
+    fn schedule_cancel(&self) {
+        let task = self.task.lock().clone();
+        let event_loop = Arc::clone(&self.event_loop);
+        let Some(task) = task else {
+            return;
+        };
+        let _ = Python::attach(|py| {
+            let cancel = task
+                .object()
+                .bind(py)
+                .getattr(pyo3::intern!(py, "cancel"))?;
+            event_loop
+                .object()
+                .bind(py)
+                .call_method1(pyo3::intern!(py, "call_soon_threadsafe"), (cancel,))?;
+            Ok::<(), PyErr>(())
+        });
+    }
+
+    fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        let task = self.task.lock().clone();
+        visit.call(self.event_loop.object())?;
+        if let Some(task) = task {
+            visit.call(task.object())?;
+        }
+        Ok(())
+    }
+}
+
+struct PythonAwaitCompletion {
+    sender: Mutex<Option<tokio::sync::oneshot::Sender<PyResult<Py<PyAny>>>>>,
+    lease: Mutex<Option<PythonAwaitLease>>,
+}
+
+impl PythonAwaitCompletion {
+    fn send(&self, result: PyResult<Py<PyAny>>) {
+        let sender = self.sender.lock().take();
+        let lease = self.lease.lock().take();
+        drop(lease);
+        if let Some(sender) = sender {
+            let _ = sender.send(result);
+        }
+    }
+}
+
+#[pyclass]
+struct PythonAwaitCompleter {
+    state: Option<Arc<PythonAwaitState>>,
+    completion: Arc<PythonAwaitCompletion>,
+}
+
+#[pymethods]
+impl PythonAwaitCompleter {
+    fn __call__(&mut self, task: &Bound<'_, PyAny>) {
+        let result = task
+            .call_method0(pyo3::intern!(task.py(), "result"))
+            .map(Bound::unbind);
+        if let Some(state) = self.state.take() {
+            state.clear_task();
+        }
+        self.completion.send(result);
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        if let Some(state) = &self.state {
+            state.traverse(&visit)?;
+        }
+        Ok(())
+    }
+
+    fn __clear__(&mut self) {
+        let state = self.state.take();
+        if let Some(state) = state {
+            state.request_cancel();
+        }
+    }
+}
+
+#[pyclass]
+struct PythonAwaitScheduler {
+    awaitable: Option<Py<PyAny>>,
+    context: Option<Py<PyAny>>,
+    state: Option<Arc<PythonAwaitState>>,
+    completion: Arc<PythonAwaitCompletion>,
+}
+
+impl PythonAwaitScheduler {
+    fn schedule(&mut self, py: Python<'_>) -> PyResult<()> {
+        let awaitable = self
+            .awaitable
+            .take()
+            .ok_or_else(|| PyRuntimeError::new_err("Python awaitable was already scheduled"))?;
+        let state = self
+            .state
+            .take()
+            .ok_or_else(|| PyRuntimeError::new_err("Python await state was already scheduled"))?;
+        let task = py
+            .import(pyo3::intern!(py, "asyncio"))?
+            .getattr(pyo3::intern!(py, "ensure_future"))?
+            .call1((awaitable,))?;
+        state.register_task(task.clone().unbind());
+        let completer = match Py::new(
+            py,
+            PythonAwaitCompleter {
+                state: Some(Arc::clone(&state)),
+                completion: Arc::clone(&self.completion),
+            },
+        ) {
+            Ok(completer) => completer,
+            Err(error) => {
+                state.request_cancel();
+                return Err(error);
+            }
+        };
+        if let Err(error) = task.call_method1(pyo3::intern!(py, "add_done_callback"), (completer,))
+        {
+            state.request_cancel();
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
+#[pymethods]
+impl PythonAwaitScheduler {
+    fn __call__(&mut self, py: Python<'_>) {
+        let result = self.schedule(py);
+        let context = self.context.take();
+        drop(context);
+        if let Err(error) = result {
+            if let Some(state) = self.state.take() {
+                state.request_cancel();
+            }
+            self.completion.send(Err(error));
+        }
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        if let Some(awaitable) = &self.awaitable {
+            visit.call(awaitable)?;
+        }
+        if let Some(context) = &self.context {
+            visit.call(context)?;
+        }
+        if let Some(state) = &self.state {
+            state.traverse(&visit)?;
+        }
+        Ok(())
+    }
+
+    fn __clear__(&mut self) {
+        let awaitable = self.awaitable.take();
+        let context = self.context.take();
+        let state = self.state.take();
+        drop(awaitable);
+        drop(context);
+        if let Some(state) = state {
+            state.request_cancel();
+        }
+    }
+}
+
+struct PythonAwaitCancelGuard {
+    state: Option<Arc<PythonAwaitState>>,
+}
+
+impl PythonAwaitCancelGuard {
+    fn disarm(&mut self) {
+        let state = self.state.take();
+        drop(state);
+    }
+
+    fn cancel(&mut self) {
+        if let Some(state) = self.state.take() {
+            state.request_cancel();
+        }
+    }
+}
+
+impl Drop for PythonAwaitCancelGuard {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+async fn resolve_python(
+    value: Py<PyAny>,
+    callback_name: &str,
+    awaits: &Arc<PythonAwaitRegistry>,
+) -> calc_flow::Result<Py<PyAny>> {
     let is_awaitable = Python::attach(|py| {
         py.import(pyo3::intern!(py, "inspect"))?
             .getattr(pyo3::intern!(py, "isawaitable"))?
@@ -45,11 +314,46 @@ async fn resolve_python(value: Py<PyAny>, callback_name: &str) -> calc_flow::Res
     if !is_awaitable {
         return Ok(value);
     }
-    let future = Python::attach(|py| pyo3_async_runtimes::tokio::into_future(value.into_bound(py)))
-        .map_err(|error| provider_error(callback_name, error))?;
-    future
-        .await
-        .map_err(|error| provider_error(callback_name, error))
+    let scheduled = Python::attach(|py| -> PyResult<_> {
+        let locals = pyo3_async_runtimes::tokio::get_current_locals(py)?;
+        let event_loop = locals.event_loop(py);
+        let context = locals.context(py);
+        let state = Arc::new(PythonAwaitState::new(event_loop.clone().unbind()));
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let completion = Arc::new(PythonAwaitCompletion {
+            sender: Mutex::new(Some(sender)),
+            lease: Mutex::new(Some(awaits.retain())),
+        });
+        let scheduler = Py::new(
+            py,
+            PythonAwaitScheduler {
+                awaitable: Some(value),
+                context: Some(context.clone().unbind()),
+                state: Some(Arc::clone(&state)),
+                completion,
+            },
+        )?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(pyo3::intern!(py, "context"), context)?;
+        event_loop.call_method(
+            pyo3::intern!(py, "call_soon_threadsafe"),
+            (scheduler,),
+            Some(&kwargs),
+        )?;
+        Ok((receiver, PythonAwaitCancelGuard { state: Some(state) }))
+    })
+    .map_err(|error| provider_error(callback_name, error))?;
+    let (receiver, mut cancellation) = scheduled;
+    let result = if let Ok(result) = receiver.await {
+        result
+    } else {
+        cancellation.cancel();
+        Err(PyRuntimeError::new_err(
+            "Python awaitable completion channel closed unexpectedly",
+        ))
+    };
+    cancellation.disarm();
+    result.map_err(|error| provider_error(callback_name, error))
 }
 
 fn python_json(value: &Bound<'_, PyAny>, label: &str) -> calc_flow::Result<serde_json::Value> {
@@ -75,6 +379,7 @@ fn python_json(value: &Bound<'_, PyAny>, label: &str) -> calc_flow::Result<serde
 struct PythonSource {
     callback: Arc<PythonRoot>,
     roots: Arc<RootRegistry>,
+    awaits: Arc<PythonAwaitRegistry>,
 }
 
 impl PythonSource {
@@ -100,13 +405,13 @@ impl calc_flow::Source for PythonSource {
             Python::attach(|py| crate::config::json_to_python(py, &cursor).map(Bound::unbind))
                 .map_err(|error| provider_error("source.open", error))?;
         let value = self.call_method("open", Some(argument))?;
-        resolve_python(value, "source.open").await?;
+        resolve_python(value, "source.open", &self.awaits).await?;
         Ok(())
     }
 
     async fn next(&mut self) -> calc_flow::Result<Option<calc_flow::SourceItem>> {
         let value = self.call_method("next", None)?;
-        let value = resolve_python(value, "source.next").await?;
+        let value = resolve_python(value, "source.next", &self.awaits).await?;
         Python::attach(|py| {
             let value = value.bind(py);
             if value.is_none() {
@@ -173,6 +478,7 @@ impl calc_flow::Source for PythonSource {
 struct PythonSink {
     callback: Arc<PythonRoot>,
     output: String,
+    awaits: Arc<PythonAwaitRegistry>,
 }
 
 #[async_trait]
@@ -187,7 +493,7 @@ impl calc_flow::Sink for PythonSink {
             self.callback.object().call1(py, (batch,))
         })
         .map_err(|error| provider_error(&format!("sink.{}", self.output), error))?;
-        resolve_python(value, &format!("sink.{}", self.output)).await?;
+        resolve_python(value, &format!("sink.{}", self.output), &self.awaits).await?;
         Ok(())
     }
 }
@@ -210,6 +516,7 @@ fn build_sinks(
     py: Python<'_>,
     sinks: Option<&Bound<'_, PyDict>>,
     external_outputs: &BTreeSet<String>,
+    awaits: &Arc<PythonAwaitRegistry>,
 ) -> PyResult<(calc_flow::SinkRouter, Vec<Arc<PythonRoot>>)> {
     let mut router = calc_flow::SinkRouter::new();
     let mut roots = Vec::new();
@@ -263,6 +570,7 @@ fn build_sinks(
                     Box::new(PythonSink {
                         callback: Arc::clone(&root),
                         output: output.clone(),
+                        awaits: Arc::clone(awaits),
                     }),
                 )
                 .map_err(crate::error::to_py_err)?;
@@ -358,12 +666,14 @@ impl Drop for RootLease {
 
 struct RunnerSlot<T> {
     inner: Mutex<Option<T>>,
+    available: tokio::sync::Notify,
 }
 
 impl<T> RunnerSlot<T> {
     fn new(runner: T) -> Self {
         Self {
             inner: Mutex::new(Some(runner)),
+            available: tokio::sync::Notify::new(),
         }
     }
 
@@ -377,6 +687,16 @@ impl<T> RunnerSlot<T> {
             slot: Arc::clone(self),
             runner: Some(runner),
         })
+    }
+
+    async fn wait_idle(&self) {
+        loop {
+            let notified = self.available.notified();
+            if self.inner.lock().is_some() {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -403,12 +723,14 @@ impl<T> Drop for RunnerCheckout<T> {
             .replace(runner.expect("checked-out runner remains owned until guard drop"));
         debug_assert!(previous.is_none());
         drop(previous);
+        self.slot.available.notify_one();
     }
 }
 
 struct MicroShared {
     runner: Arc<RunnerSlot<calc_flow::MicroBatchRunner>>,
     roots: Arc<RootRegistry>,
+    awaits: Arc<PythonAwaitRegistry>,
 }
 
 #[pyclass(name = "_MicroBatchRunner", frozen, module = "calc_flow._native")]
@@ -446,7 +768,8 @@ impl PyMicroBatchRunner {
         let source_root = Arc::new(PythonRoot::new(source));
         let owned = PyExecutionPlan::owned(plan, py)?;
         let external_outputs = owned.inner().external_outputs().keys().cloned().collect();
-        let (sinks, sink_roots) = build_sinks(py, sinks, &external_outputs)?;
+        let awaits = Arc::new(PythonAwaitRegistry::new());
+        let (sinks, sink_roots) = build_sinks(py, sinks, &external_outputs, &awaits)?;
         let roots = Arc::new(RootRegistry::new(
             owned.owner().clone_ref(py),
             Some(Arc::clone(&source_root)),
@@ -457,6 +780,7 @@ impl PyMicroBatchRunner {
             Box::new(PythonSource {
                 callback: source_root,
                 roots: Arc::clone(&roots),
+                awaits: Arc::clone(&awaits),
             }),
             sinks,
             checkpoints.clone_store(),
@@ -467,6 +791,7 @@ impl PyMicroBatchRunner {
             state: RwLock::new(Some(Arc::new(MicroShared {
                 runner: Arc::new(RunnerSlot::new(runner)),
                 roots,
+                awaits,
             }))),
         })
     }
@@ -543,6 +868,16 @@ impl PyMicroBatchRunner {
         })
     }
 
+    fn wait_idle_async<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let shared = slf.shared()?;
+        let owner = slf.into_pyobject(py)?.into_any().unbind();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            tokio::join!(shared.runner.wait_idle(), shared.awaits.wait_idle());
+            drop(owner);
+            Ok(())
+        })
+    }
+
     #[allow(clippy::needless_pass_by_value)]
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         if let Some(shared) = self.state.read().as_ref() {
@@ -561,6 +896,7 @@ struct StreamingShared {
     runner: Arc<RunnerSlot<calc_flow::StreamingRunner>>,
     roots: Arc<RootRegistry>,
     external_outputs: BTreeSet<String>,
+    awaits: Arc<PythonAwaitRegistry>,
 }
 
 #[pyclass(name = "_StreamingRunner", frozen, module = "calc_flow._native")]
@@ -595,6 +931,7 @@ impl PyStreamingRunner {
         let runner =
             calc_flow::StreamingRunner::new(Arc::clone(owned.inner()), checkpoints.clone_store())
                 .map_err(crate::error::to_py_err)?;
+        let awaits = Arc::new(PythonAwaitRegistry::new());
         let roots = Arc::new(RootRegistry::new(
             owned.owner().clone_ref(py),
             None,
@@ -605,6 +942,7 @@ impl PyStreamingRunner {
                 runner: Arc::new(RunnerSlot::new(runner)),
                 roots,
                 external_outputs,
+                awaits,
             }))),
         })
     }
@@ -622,7 +960,7 @@ impl PyStreamingRunner {
     ) -> PyResult<Bound<'py, PyAny>> {
         let shared = slf.shared()?;
         let batch = crate::batch::rehome_python_payload(py, batch.clone_inner()?)?;
-        let (mut sinks, roots) = build_sinks(py, sinks, &shared.external_outputs)?;
+        let (mut sinks, roots) = build_sinks(py, sinks, &shared.external_outputs, &shared.awaits)?;
         let root_lease = shared.roots.retain(roots);
         let owner = slf.into_pyobject(py)?.into_any().unbind();
         let mut runner = shared
@@ -682,6 +1020,16 @@ impl PyStreamingRunner {
             drop(runner);
             drop(owner);
             result
+        })
+    }
+
+    fn wait_idle_async<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let shared = slf.shared()?;
+        let owner = slf.into_pyobject(py)?.into_any().unbind();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            tokio::join!(shared.runner.wait_idle(), shared.awaits.wait_idle());
+            drop(owner);
+            Ok(())
         })
     }
 
@@ -780,7 +1128,7 @@ mod tests {
                 .unwrap();
             py.run(
                 pyo3::ffi::c_str!(
-                    "import asyncio\nclass Source:\n    def __init__(self):\n        self.emitted = False\n        self.opened = []\n    async def open(self, cursor):\n        await asyncio.sleep(0)\n        self.opened.append(cursor)\n    def next(self):\n        if self.emitted:\n            return None\n        self.emitted = True\n        return batch, {'offset': 1}, 1\nsource = Source()\ncalls = []\ndef sync_sink(value):\n    calls.append(('sync', value.num_rows))\nasync def async_sink(value):\n    await asyncio.sleep(0)\n    calls.append(('async', value.num_rows))"
+                    "import asyncio\nclass Source:\n    def __init__(self):\n        self.emitted = False\n        self.opened = []\n    async def open(self, cursor):\n        await asyncio.sleep(0)\n        self.opened.append(cursor)\n    def next(self):\n        if self.emitted:\n            return None\n        self.emitted = True\n        return batch, {'offset': 1}, 1\nsource = Source()\ncalls = []\ndef sync_sink(value):\n    calls.append(('sync', value.num_rows))\nasync def async_sink(value):\n    await asyncio.sleep(0)\n    calls.append(('async', value.num_rows))\ncancel_entered = asyncio.Event()\ncancel_seen = asyncio.Event()\ncancel_release = asyncio.Event()\nasync def pending_sink(value):\n    del value\n    cancel_entered.set()\n    try:\n        await asyncio.Event().wait()\n    except asyncio.CancelledError:\n        cancel_seen.set()\n        await cancel_release.wait()\n        raise"
                 ),
                 Some(&locals),
                 None,
@@ -833,7 +1181,7 @@ mod tests {
             locals.set_item("streaming", &streaming).unwrap();
             py.run(
                 &CString::new(
-                    "async def exercise():\n    first = await micro.next_async()\n    assert first.outputs['output'].num_rows == 1\n    assert await micro.next_async() is None\n    assert (await micro.plan_snapshot_async()) == {'calc': None}\n    await micro.reset_async()\n    streamed = await streaming.step_async(batch, {'output': [async_sink, sync_sink]})\n    assert streamed.outputs['output'].num_rows == 1\n    assert (await streaming.plan_snapshot_async()) == {'calc': None}\n    try:\n        await streaming.step_async(batch, {'missing': [sync_sink]})\n    except Exception as error:\n        assert 'unknown graph output' in str(error)\n    await streaming.reset_async()\nasyncio.run(exercise())",
+                    "async def exercise():\n    first = await micro.next_async()\n    assert first.outputs['output'].num_rows == 1\n    assert await micro.next_async() is None\n    assert (await micro.plan_snapshot_async()) == {'calc': None}\n    await micro.reset_async()\n    streamed = await streaming.step_async(batch, {'output': [async_sink, sync_sink]})\n    assert streamed.outputs['output'].num_rows == 1\n    assert (await streaming.plan_snapshot_async()) == {'calc': None}\n    pending = asyncio.ensure_future(streaming.step_async(batch, {'output': [pending_sink]}))\n    await cancel_entered.wait()\n    pending.cancel()\n    idle = asyncio.ensure_future(streaming.wait_idle_async())\n    await cancel_seen.wait()\n    await asyncio.sleep(0)\n    assert not idle.done()\n    cancel_release.set()\n    try:\n        await pending\n    except asyncio.CancelledError:\n        pass\n    await idle\n    try:\n        await streaming.step_async(batch, {'missing': [sync_sink]})\n    except Exception as error:\n        assert 'unknown graph output' in str(error)\n    await streaming.reset_async()\nasyncio.run(exercise())",
                 )
                 .unwrap(),
                 Some(&locals),
@@ -861,20 +1209,27 @@ mod tests {
         Python::attach(|py| {
             let invalid = py.eval(pyo3::ffi::c_str!("object()"), None, None).unwrap();
             let external_outputs = BTreeSet::from(["output".to_owned()]);
+            let awaits = Arc::new(PythonAwaitRegistry::new());
             assert!(validate_source(py, &invalid.clone().unbind()).is_err());
 
             let invalid_sinks = PyDict::new(py);
             invalid_sinks.set_item(1, PyList::empty(py)).unwrap();
-            assert!(build_sinks(py, Some(&invalid_sinks), &external_outputs).is_err());
+            assert!(build_sinks(py, Some(&invalid_sinks), &external_outputs, &awaits).is_err());
             invalid_sinks.clear();
             invalid_sinks.set_item("output", "not-a-list").unwrap();
-            assert!(build_sinks(py, Some(&invalid_sinks), &external_outputs).is_err());
+            assert!(build_sinks(py, Some(&invalid_sinks), &external_outputs, &awaits).is_err());
             invalid_sinks.clear();
             invalid_sinks
                 .set_item("output", PyList::new(py, [invalid]).unwrap())
                 .unwrap();
-            assert!(build_sinks(py, Some(&invalid_sinks), &external_outputs).is_err());
-            assert_eq!(build_sinks(py, None, &external_outputs).unwrap().1.len(), 0);
+            assert!(build_sinks(py, Some(&invalid_sinks), &external_outputs, &awaits).is_err());
+            assert_eq!(
+                build_sinks(py, None, &external_outputs, &awaits)
+                    .unwrap()
+                    .1
+                    .len(),
+                0
+            );
 
             let valid = PyDict::new(py);
             valid
@@ -931,11 +1286,13 @@ mod tests {
                 None,
                 Vec::new(),
             ));
+            let awaits = Arc::new(PythonAwaitRegistry::new());
             let make_source = |name: &str| PythonSource {
                 callback: Arc::new(PythonRoot::new(
                     locals.get_item(name).unwrap().unwrap().unbind(),
                 )),
                 roots: Arc::clone(&source_roots),
+                awaits: Arc::clone(&awaits),
             };
             let mut valid = make_source("valid");
             py.detach(|| {
@@ -961,12 +1318,14 @@ mod tests {
                     locals.get_item("sink").unwrap().unwrap().unbind(),
                 )),
                 output: "output".into(),
+                awaits: Arc::clone(&awaits),
             };
             let mut broken_sink = PythonSink {
                 callback: Arc::new(PythonRoot::new(
                     locals.get_item("broken_sink").unwrap().unwrap().unbind(),
                 )),
                 output: "output".into(),
+                awaits,
             };
             let context = calc_flow::RunContext::new(
                 BTreeMap::new(),

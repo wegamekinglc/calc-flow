@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Protocol
@@ -103,7 +104,11 @@ class MicroBatchRunner:
         )
 
     async def next_async(self) -> _native.RunResult | None:
-        return await self._inner.next_async()
+        try:
+            return await self._inner.next_async()
+        except asyncio.CancelledError:
+            await self._inner.wait_idle_async()
+            raise
 
     async def reset_async(self) -> None:
         await self._inner.reset_async()
@@ -145,7 +150,11 @@ class StreamingRunner:
         copied_sinks = _sink_mapping(sinks)
 
         async def step() -> _native.RunResult:
-            return await self._inner.step_async(batch, copied_sinks)
+            try:
+                return await self._inner.step_async(batch, copied_sinks)
+            except asyncio.CancelledError:
+                await self._inner.wait_idle_async()
+                raise
 
         return step()
 
