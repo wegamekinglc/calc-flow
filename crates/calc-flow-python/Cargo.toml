@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Python bindings for the Rust-native Calc Flow engine"
 publish = false
 
 [lib]
@@ -13,7 +14,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 async-trait.workspace = true
-calc-flow = { path = "../calc-flow" }
+calc-flow = { path = "../calc-flow", version = "=2.0.0-alpha.1" }
 datafusion.workspace = true
 parking_lot.workspace = true
 pyo3 = { version = "0.28.3", features = ["abi3-py313"] }

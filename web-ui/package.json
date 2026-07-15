@@ -1,12 +1,12 @@
 {
   "name": "calc-flow-web-ui",
   "private": true,
-  "version": "0.2.0",
+  "version": "2.0.0-alpha.1",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
-    "build:wheel": "npm run sync:api && npm run build && UV_CACHE_DIR=/tmp/calc-flow-web-uv-cache uv build --project backend",
+    "build:wheel": "npm run sync:api && npm run build && uv build --project backend --wheel --out-dir ../dist",
     "test": "vitest run",
     "test:e2e": "playwright test",
     "generate:api": "openapi-typescript openapi.json -o src/api/schema.d.ts",

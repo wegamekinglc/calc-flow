@@ -3,11 +3,15 @@ name = "calc-flow"
 version = "2.0.0a1"
 description = "Rust-native DataFusion batch and streaming calculation pipelines"
 readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.13"
 dependencies = [
     "pydantic>=2.12.0,<3",
     "pyarrow>=24.0.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/wegamekinglc/calc-flow"
 
 [project.optional-dependencies]
 numpy = ["numpy>=2.0.0"]

@@ -16,9 +16,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version-file: .python-version
       - name: Install uv
@@ -36,7 +36,7 @@ jobs:
           uv run pytest -q -n auto --dist load -p no:benchmark
           --cov=calc_flow --cov-report=term-missing --cov-report=xml
       - name: Upload coverage report
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: python-coverage
           path: coverage.xml
@@ -50,9 +50,9 @@ jobs:
         working-directory: web-ui
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 20.20.0
           cache: npm
@@ -70,9 +70,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version-file: .python-version
       - name: Install uv
@@ -80,7 +80,7 @@ jobs:
         with:
           enable-cache: true
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 20.20.0
           cache: npm
@@ -100,7 +100,7 @@ jobs:
           npm run sync:api
           git diff --exit-code -- openapi.json src/api/schema.d.ts
       - name: Upload studio coverage report
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: studio-python-coverage
           path: web-ui/backend/coverage.xml
@@ -114,9 +114,9 @@ jobs:
         working-directory: web-ui
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version-file: .python-version
       - name: Install uv
@@ -127,7 +127,7 @@ jobs:
         working-directory: .
         run: uv sync --package calc-flow-studio
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 20.20.0
           cache: npm
@@ -144,9 +144,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version-file: .python-version
       - name: Install uv
@@ -155,27 +155,21 @@ jobs:
           enable-cache: true
       - name: Build wheel and source distribution
         run: |
+          python -m unittest scripts.test_inspect_wheel
           uv build
-          ! tar -tzf dist/calc_flow-*.tar.gz | grep -E 'web-ui|calc_flow/web'
+          python scripts/inspect_wheel.py dist/calc_flow-*.whl
+          tar -tzf dist/calc_flow-*.tar.gz > /tmp/core-sdist-contents.txt
+          ! grep -E '(^|/)(src/calc_flow|web-ui|tests/fixtures|AGENTS\.md|CLAUDE\.md|\.claude|\.codex)(/|$)' \
+            /tmp/core-sdist-contents.txt
       - name: Install and execute the wheel in isolation
         run: |
           wheel="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
           test -n "${wheel}"
           uv venv /tmp/calc-flow-wheel
           uv pip install --python /tmp/calc-flow-wheel/bin/python "${wheel}"
-          /tmp/calc-flow-wheel/bin/python - <<'PY'
-          import pyarrow as pa
-          from calc_flow import Batch, ExpressionOperator, Pipeline
-
-          result = (
-              Pipeline("wheel-smoke")
-              .then(ExpressionOperator("calculate", "total = a + b"))
-              .execute({"input": Batch.table(pa.table({"a": [1], "b": [2]}))})
-          )
-          assert result.output.table_payload["total"].to_pylist() == [3]
-          PY
+          /tmp/calc-flow-wheel/bin/python scripts/smoke_wheel.py
       - name: Upload release artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: python-distributions
           path: dist/*
@@ -189,9 +183,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version-file: .python-version
       - name: Install uv
@@ -199,7 +193,7 @@ jobs:
         with:
           enable-cache: true
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 20.20.0
           cache: npm
@@ -225,18 +219,25 @@ jobs:
 
           app = calc_flow_studio.create_app()
           paths = [route.path for route in app.routes]
-          assert "/api/v1/catalog" in app.openapi()["paths"]
+          assert "/api/v2/catalog" in app.openapi()["paths"]
           assert "/" in paths
           assert "/assets" in paths
           assert not hasattr(calc_flow, "web")
           core_requirements = requires("calc-flow") or []
+          studio_requirements = requires("calc-flow-studio") or []
           assert not any("fastapi" in item.lower() for item in core_requirements)
           assert not any("uvicorn" in item.lower() for item in core_requirements)
+          assert any(
+              item.lower().startswith("calc-flow")
+              and ">=2.0.0a1" in item
+              and "<3" in item
+              for item in studio_requirements
+          )
           index = next(route for route in app.routes if route.path == "/").endpoint()
           assert Path(index.path).is_file()
           PY
       - name: Upload release artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: studio-python-distributions
           path: dist/*
@@ -248,9 +249,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version-file: .python-version
       - name: Install uv
@@ -268,7 +269,7 @@ jobs:
           uv run pytest benchmarks -q --benchmark-only \
             --benchmark-json=benchmark-results/smoke.json
       - name: Upload benchmark report
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: benchmark-smoke
           path: benchmark-results/smoke.json
@@ -278,8 +279,8 @@ jobs:
     name: Rust core parity
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
         with:
           components: clippy,llvm-tools-preview,rustfmt
       - run: cargo fmt --all --check
@@ -292,10 +293,27 @@ jobs:
           cargo llvm-cov --workspace --all-features --fail-under-lines 90
           --lcov --output-path rust-lcov.info
       - name: Upload Rust coverage report
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: rust-coverage
           path: rust-lcov.info
           if-no-files-found: error
           retention-days: 14
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+  rust-supply-chain:
+    name: Rust dependency policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+      - name: Install locked audit tools
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo install cargo-deny --version 0.20.2 --locked
+      - name: Check RustSec advisories
+        run: >-
+          cargo audit
+          --ignore RUSTSEC-2026-0176
+          --ignore RUSTSEC-2026-0177
+      - name: Check licenses, sources, advisories, and duplicate policy
+        run: cargo deny --locked check
