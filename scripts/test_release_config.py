@@ -78,11 +78,23 @@ class ReleaseConfigTests(unittest.TestCase):
         setup_python = (
             "uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"
         )
+        lock = tomllib.loads((ROOT / "uv.lock").read_text())
+        pyarrow_version = next(
+            package["version"]
+            for package in lock["package"]
+            if package["name"] == "pyarrow"
+        )
+        install_pyarrow = f'python -m pip install "pyarrow=={pyarrow_version}"'
         self.assertIn(setup_python, rust_core)
         self.assertIn("python-version-file: .python-version", rust_core)
+        self.assertIn(install_pyarrow, rust_core)
         self.assertLess(
             rust_core.index(setup_python),
             rust_core.index("cargo clippy --workspace --all-targets --all-features"),
+        )
+        self.assertLess(
+            rust_core.index(install_pyarrow),
+            rust_core.index("cargo test --workspace --all-targets --all-features"),
         )
 
     def test_final_release_error_docs_do_not_claim_alpha_status(self) -> None:
