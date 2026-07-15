@@ -57,9 +57,9 @@ pub(crate) fn to_py_err(error: calc_flow::CalcFlowError) -> PyErr {
             });
             translated
         }
-        // The core error is deliberately non-exhaustive during alpha. New
-        // categories remain catchable as execution failures until this mapping
-        // gives them a more precise Python exception.
+        // The core error is deliberately non-exhaustive. New categories remain
+        // catchable as execution failures until this mapping gives them a more
+        // precise Python exception.
         _ => future_core_error(message),
     }
 }

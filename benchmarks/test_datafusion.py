@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
+
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
@@ -11,19 +14,53 @@ from benchmarks.support import (
     selected_scale,
     table_inputs,
 )
-from calc_flow import (
-    Batch,
-    ExpressionOperator,
-    Pipeline,
-    SqlOperator,
-    UdfReference,
-    UdfRegistry,
-)
-from calc_flow.engine.datafusion import DataFusionConfig, DataFusionRuntime
+from calc_flow import Batch, ExecutionPlan, PipelineBuilder, RunResult, Runtime
 
 
 def _input() -> Batch:
     return table_inputs(selected_scale().table_rows).fact
+
+
+def _output(result: RunResult, name: str = "output") -> Batch:
+    return result.outputs[name]
+
+
+def _compile_with_datafusion(
+    builder: PipelineBuilder, *, batch_size: int, target_partitions: int
+) -> ExecutionPlan:
+    project = builder.project
+    configured = {
+        **project,
+        "pipeline": {
+            **project["pipeline"],
+            "datafusion": {
+                "batch_size": batch_size,
+                "target_partitions": target_partitions,
+            },
+        },
+    }
+    return Runtime().compile_project(
+        json.dumps(configured, separators=(",", ":"), sort_keys=True)
+    )
+
+
+def _benchmark_plan(
+    benchmark: BenchmarkFixture,
+    plan: ExecutionPlan,
+    inputs: Mapping[str, Batch],
+    *,
+    scenario: str,
+    input_rows: int,
+) -> RunResult:
+    warm_result = plan.execute(inputs)
+    record_benchmark(
+        benchmark,
+        scenario=scenario,
+        input_rows=input_rows,
+        output_rows=_output(warm_result).num_rows,
+        metrics=warm_result.datafusion_metrics,
+    )
+    return benchmark(plan.execute, inputs)
 
 
 @pytest.mark.benchmark(
@@ -35,26 +72,25 @@ def test_projection_and_calculated_column(
 ) -> None:
     batch = _input()
     plan = (
-        Pipeline("benchmark-projection")
-        .then(
-            ExpressionOperator(
-                "calculate",
-                select=("id", "amount * quantity AS gross"),
-            )
+        PipelineBuilder("benchmark-projection")
+        .expression(
+            "calculate",
+            "",
+            select=("id", "amount * quantity AS gross"),
         )
         .compile()
     )
 
-    result = benchmark(plan.execute, {"input": batch})
-
-    assert result.output.num_rows == batch.num_rows
-    record_benchmark(
+    result = _benchmark_plan(
         benchmark,
+        plan,
+        {"input": batch},
         scenario="datafusion_projection",
         input_rows=batch.num_rows,
-        output_rows=result.output.num_rows,
-        metrics=result.datafusion_metrics,
     )
+    output = _output(result)
+
+    assert output.num_rows == batch.num_rows
 
 
 @pytest.mark.benchmark(
@@ -64,27 +100,26 @@ def test_projection_and_calculated_column(
 def test_filter_selectivity(benchmark: BenchmarkFixture, _scale: str) -> None:
     batch = _input()
     plan = (
-        Pipeline("benchmark-filter")
-        .then(
-            ExpressionOperator(
-                "filter",
-                select=("id", "amount"),
-                filter_expression="selected",
-            )
+        PipelineBuilder("benchmark-filter")
+        .expression(
+            "filter",
+            "",
+            select=("id", "amount"),
+            filter="selected",
         )
         .compile()
     )
 
-    result = benchmark(plan.execute, {"input": batch})
-
-    assert 0 < result.output.num_rows < batch.num_rows
-    record_benchmark(
+    result = _benchmark_plan(
         benchmark,
+        plan,
+        {"input": batch},
         scenario="datafusion_filter_35_percent",
         input_rows=batch.num_rows,
-        output_rows=result.output.num_rows,
-        metrics=result.datafusion_metrics,
     )
+    output = _output(result)
+
+    assert 0 < output.num_rows < batch.num_rows
 
 
 @pytest.mark.benchmark(
@@ -94,27 +129,25 @@ def test_filter_selectivity(benchmark: BenchmarkFixture, _scale: str) -> None:
 def test_group_by_aggregation(benchmark: BenchmarkFixture, _scale: str) -> None:
     batch = _input()
     plan = (
-        Pipeline("benchmark-group-by")
-        .then(
-            SqlOperator(
-                "aggregate",
-                "SELECT group_id, SUM(amount) AS total FROM fact GROUP BY group_id",
-                inputs=("fact",),
-            )
+        PipelineBuilder("benchmark-group-by")
+        .sql(
+            "aggregate",
+            "SELECT group_id, SUM(amount) AS total FROM fact GROUP BY group_id",
+            aliases=("fact",),
         )
         .compile()
     )
 
-    result = benchmark(plan.execute, {"fact": batch})
-
-    assert result.output.num_rows > 0
-    record_benchmark(
+    result = _benchmark_plan(
         benchmark,
+        plan,
+        {"fact": batch},
         scenario="datafusion_group_by",
         input_rows=batch.num_rows,
-        output_rows=result.output.num_rows,
-        metrics=result.datafusion_metrics,
     )
+    output = _output(result)
+
+    assert output.num_rows > 0
 
 
 @pytest.mark.benchmark(
@@ -124,31 +157,26 @@ def test_group_by_aggregation(benchmark: BenchmarkFixture, _scale: str) -> None:
 def test_join_cardinality(benchmark: BenchmarkFixture, _scale: str) -> None:
     inputs = table_inputs(selected_scale().table_rows)
     plan = (
-        Pipeline("benchmark-join")
-        .then(
-            SqlOperator(
-                "join",
-                "SELECT f.id, f.amount * d.multiplier AS adjusted "
-                "FROM fact f JOIN dimension d USING (group_id)",
-                inputs=("fact", "dimension"),
-            )
+        PipelineBuilder("benchmark-join")
+        .sql(
+            "join",
+            "SELECT f.id, f.amount * d.multiplier AS adjusted "
+            "FROM fact f JOIN dimension d USING (group_id)",
+            aliases=("fact", "dimension"),
         )
         .compile()
     )
 
-    result = benchmark(
-        plan.execute,
-        {"fact": inputs.fact, "dimension": inputs.dimension},
-    )
-
-    assert result.output.num_rows == inputs.fact.num_rows
-    record_benchmark(
+    result = _benchmark_plan(
         benchmark,
+        plan,
+        {"fact": inputs.fact, "dimension": inputs.dimension},
         scenario="datafusion_inner_join",
         input_rows=inputs.fact.num_rows + inputs.dimension.num_rows,
-        output_rows=result.output.num_rows,
-        metrics=result.datafusion_metrics,
     )
+    output = _output(result)
+
+    assert output.num_rows == inputs.fact.num_rows
 
 
 @pytest.mark.benchmark(
@@ -158,28 +186,26 @@ def test_join_cardinality(benchmark: BenchmarkFixture, _scale: str) -> None:
 def test_window_function(benchmark: BenchmarkFixture, _scale: str) -> None:
     batch = _input()
     plan = (
-        Pipeline("benchmark-window")
-        .then(
-            SqlOperator(
-                "window",
-                "SELECT id, ROW_NUMBER() OVER ("
-                "PARTITION BY group_id ORDER BY amount) AS position FROM fact",
-                inputs=("fact",),
-            )
+        PipelineBuilder("benchmark-window")
+        .sql(
+            "window",
+            "SELECT id, ROW_NUMBER() OVER ("
+            "PARTITION BY group_id ORDER BY amount) AS position FROM fact",
+            aliases=("fact",),
         )
         .compile()
     )
 
-    result = benchmark(plan.execute, {"fact": batch})
-
-    assert result.output.num_rows == batch.num_rows
-    record_benchmark(
+    result = _benchmark_plan(
         benchmark,
+        plan,
+        {"fact": batch},
         scenario="datafusion_window",
         input_rows=batch.num_rows,
-        output_rows=result.output.num_rows,
-        metrics=result.datafusion_metrics,
     )
+    output = _output(result)
+
+    assert output.num_rows == batch.num_rows
 
 
 @pytest.mark.parametrize("implementation", ("builtin", "registered_udf"))
@@ -191,38 +217,41 @@ def test_builtin_versus_registered_udf(
     benchmark: BenchmarkFixture, implementation: str, _scale: str
 ) -> None:
     batch = _input()
-    registry = UdfRegistry()
-
-    @registry.datafusion_scalar(
-        name="double_amount",
-        version="1",
-        input_fields=(pa.int64(),),
-        return_field=pa.int64(),
-    )
-    def double_amount(values: pa.Array) -> pa.Array:
-        return pc.multiply(values, 2)
-
+    runtime = Runtime()
     expression = "doubled = amount * 2"
-    references: tuple[UdfReference, ...] = ()
+    references: tuple[tuple[str, str, str], ...] = ()
     if implementation == "registered_udf":
+
+        def double_amount(values: pa.Array) -> pa.Array:
+            return pc.multiply(values, 2)
+
+        runtime.register_scalar_udf(
+            provider="python",
+            name="double_amount",
+            version="1",
+            input_types=("int64",),
+            return_type="int64",
+            volatility="immutable",
+            function=double_amount,
+        )
         expression = "doubled = double_amount(amount)"
-        references = (UdfReference("double_amount", "1"),)
+        references = (("python", "double_amount", "1"),)
     plan = (
-        Pipeline("benchmark-udf", udf_registry=registry)
-        .then(ExpressionOperator("calculate", expression, udfs=references))
-        .compile()
+        PipelineBuilder("benchmark-udf")
+        .expression("calculate", expression, udfs=references)
+        .compile(runtime)
     )
 
-    result = benchmark(plan.execute, {"input": batch})
-
-    assert result.output.num_rows == batch.num_rows
-    record_benchmark(
+    result = _benchmark_plan(
         benchmark,
+        plan,
+        {"input": batch},
         scenario=f"datafusion_{implementation}",
         input_rows=batch.num_rows,
-        output_rows=result.output.num_rows,
-        metrics=result.datafusion_metrics,
     )
+    output = _output(result)
+
+    assert output.num_rows == batch.num_rows
 
 
 @pytest.mark.parametrize(
@@ -240,52 +269,46 @@ def test_execution_configuration(
     _scale: str,
 ) -> None:
     batch = _input()
-    plan = (
-        Pipeline(
-            "benchmark-config",
-            datafusion_config=DataFusionConfig(
-                batch_size=batch_size,
-                target_partitions=target_partitions,
-            ),
-        )
-        .then(ExpressionOperator("calculate", "gross = amount * quantity"))
-        .compile()
+    plan = _compile_with_datafusion(
+        PipelineBuilder("benchmark-config").expression(
+            "calculate", "gross = amount * quantity"
+        ),
+        batch_size=batch_size,
+        target_partitions=target_partitions,
     )
 
-    result = benchmark(plan.execute, {"input": batch})
-
-    assert result.output.num_rows == batch.num_rows
-    record_benchmark(
+    result = _benchmark_plan(
         benchmark,
-        scenario=(f"datafusion_batch_{batch_size}_partitions_{target_partitions}"),
+        plan,
+        {"input": batch},
+        scenario=f"datafusion_batch_{batch_size}_partitions_{target_partitions}",
         input_rows=batch.num_rows,
-        output_rows=result.output.num_rows,
-        metrics=result.datafusion_metrics,
     )
+    output = _output(result)
+
+    assert output.num_rows == batch.num_rows
 
 
 @pytest.mark.benchmark(
     group=benchmark_group("datafusion-session"), min_rounds=3, max_time=0.5
 )
 @pytest.mark.parametrize("_scale", [selected_scale().name])
-def test_warm_session_context(benchmark: BenchmarkFixture, _scale: str) -> None:
+def test_repeated_compiled_plan_execution(
+    benchmark: BenchmarkFixture, _scale: str
+) -> None:
     batch = _input()
-    runtime = DataFusionRuntime()
-    try:
-        runtime.sql("SELECT amount + 1 AS value FROM fact", {"fact": batch})
-        result = benchmark(
-            runtime.sql,
-            "SELECT amount + 1 AS value FROM fact",
-            {"fact": batch},
-        )
-    finally:
-        runtime.close()
-
-    assert result.num_rows == batch.num_rows
-    record_benchmark(
-        benchmark,
-        scenario="datafusion_warm_session",
-        input_rows=batch.num_rows,
-        output_rows=result.num_rows,
-        metrics=runtime.metrics[-1:],
+    plan = (
+        PipelineBuilder("benchmark-repeated-plan")
+        .expression("calculate", "value = amount + 1")
+        .compile()
     )
+    result = _benchmark_plan(
+        benchmark,
+        plan,
+        {"input": batch},
+        scenario="datafusion_repeated_compiled_plan",
+        input_rows=batch.num_rows,
+    )
+    output = _output(result)
+
+    assert output.num_rows == batch.num_rows

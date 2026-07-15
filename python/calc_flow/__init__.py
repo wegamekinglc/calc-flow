@@ -22,7 +22,7 @@ from calc_flow.pipeline import (
 from calc_flow.runtime import MicroBatchRunner, StreamingRunner
 from calc_flow.store import FileCheckpointStore, FileProjectStore
 
-__version__ = "2.0.0a1"
+__version__ = "2.0.0"
 Batch = _native.Batch
 RunResult = _native.RunResult
 

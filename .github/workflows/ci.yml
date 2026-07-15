@@ -227,7 +227,7 @@ jobs:
           assert not any("uvicorn" in item.lower() for item in core_requirements)
           assert any(
               item.lower().startswith("calc-flow")
-              and ">=2.0.0a1" in item
+              and ">=2.0.0" in item
               and "<3" in item
               for item in studio_requirements
           )

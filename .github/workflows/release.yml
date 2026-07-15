@@ -172,7 +172,7 @@ jobs:
           requirements = requires("calc-flow-studio") or []
           assert any(
               requirement.lower().startswith("calc-flow")
-              and ">=2.0.0a1" in requirement
+              and ">=2.0.0" in requirement
               and "<3" in requirement
               for requirement in requirements
           )

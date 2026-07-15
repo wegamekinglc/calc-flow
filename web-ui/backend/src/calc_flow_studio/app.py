@@ -178,7 +178,7 @@ def create_app(
         finally:
             await run_in_threadpool(selected_run_manager.shutdown)
 
-    app = FastAPI(title="Calc Flow API", version="2.0.0a1", lifespan=lifespan)
+    app = FastAPI(title="Calc Flow API", version="2.0.0", lifespan=lifespan)
     app.state.project_store = projects
     app.state.checkpoint_store = checkpoints
     app.state.runtime = selected_runtime

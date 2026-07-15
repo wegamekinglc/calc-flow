@@ -6,13 +6,17 @@ implementation; they are not a promise that Rust v2 will preserve Python API
 compatibility.
 
 The names below are every public symbol exported by `calc_flow.__all__` at the
-freeze. The responsibility groups describe their v1 role; detailed member and
-method contracts remain in [the API reference](api-reference.md).
+freeze. The responsibility groups describe their v1 role; the detailed member
+and method contracts remain in `docs/api-reference.md` on the
+`v1-python-final` tag. The current API reference documents v2.
 
 The deterministic corpus under `tests/fixtures/v1/` records representative
 Arrow inputs and expected outputs for expression assignment, multi-input SQL,
-empty tables, metadata round trips, and state rollback. Regenerate it from the
-frozen package with `uv run python scripts/export_v1_contract_fixtures.py`.
+empty tables, metadata round trips, and state rollback. To regenerate it,
+check out the `v1-python-final` tag and run
+`uv run python scripts/export_v1_contract_fixtures.py` there; the exporter is
+intentionally absent from the v2 source tree because v2 does not ship the
+frozen Python engine it imports.
 
 ## Batch responsibilities
 

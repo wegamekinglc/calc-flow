@@ -6,12 +6,6 @@ import json
 from datetime import UTC, datetime
 
 import pytest
-from calc_flow.store import (
-    export_project_json,
-    export_project_yaml,
-    import_project_json,
-    import_project_yaml,
-)
 
 from calc_flow import (
     ConfigError,
@@ -19,6 +13,12 @@ from calc_flow import (
     FileProjectStore,
     PipelineBuilder,
     ProjectDocument,
+)
+from calc_flow.store import (
+    export_project_json,
+    export_project_yaml,
+    import_project_json,
+    import_project_yaml,
 )
 
 

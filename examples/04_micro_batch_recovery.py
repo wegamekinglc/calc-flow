@@ -1,75 +1,76 @@
-"""Resume stateful micro-batch processing from a committed checkpoint."""
+"""Resume micro-batch processing from a committed source cursor."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import gc
 from tempfile import TemporaryDirectory
 
 import pyarrow as pa
 
 from calc_flow import (
     Batch,
-    BatchingSource,
     FileCheckpointStore,
     MicroBatchRunner,
-    Pipeline,
-    RunContext,
-    StatefulOperator,
+    PipelineBuilder,
 )
 
 
-class RunningRowCount(StatefulOperator):
-    def process(
-        self, inputs: Mapping[str, Batch], _context: RunContext
-    ) -> Mapping[str, Batch]:
-        batch = inputs["input"]
-        total_rows = self._state.get("total_rows", 0) + batch.num_rows
-        self._state["total_rows"] = total_rows
-        table = batch.table_payload.append_column(
-            "running_rows",
-            pa.array([total_rows] * batch.num_rows),
+class ReplaySource:
+    def __init__(self, values: list[int]) -> None:
+        self._values = tuple(values)
+        self._offset = 0
+
+    def open(self, cursor: object) -> None:
+        self._offset = 0 if cursor is None else int(cursor["offset"])
+
+    def next(self) -> tuple[Batch, dict[str, int], int] | None:
+        if self._offset == len(self._values):
+            return None
+        value = self._values[self._offset]
+        self._offset += 1
+        return (
+            Batch.from_pyarrow(pa.table({"value": [value]})),
+            {"offset": self._offset},
+            self._offset,
         )
-        return {"output": batch.with_payload(table)}
-
-
-def source() -> BatchingSource:
-    return BatchingSource(
-        [{"value": value} for value in range(1, 6)],
-        source_id="numbers",
-        max_rows=2,
-    )
 
 
 def main() -> None:
     with TemporaryDirectory(prefix="calc-flow-checkpoints-") as directory:
         store = FileCheckpointStore(directory)
-
-        first_counter = RunningRowCount("count_rows")
+        plan = (
+            PipelineBuilder("recovery-example")
+            .expression("calculate", "result = value + 1")
+            .compile()
+        )
         first_runner = MicroBatchRunner(
-            Pipeline("recovery-example").then(first_counter),
+            plan,
+            ReplaySource([1, 2, 3]),
+            store,
             checkpoint_every=1,
-            checkpoint_store=store,
         )
-        first_runs = first_runner.run(source())
-        first_result = next(first_runs)
-        first_runs.close()
+        first_result = first_runner.next()
+        del first_runner
+        gc.collect()
 
-        recovered_counter = RunningRowCount("count_rows")
         recovered_runner = MicroBatchRunner(
-            Pipeline("recovery-example").then(recovered_counter),
+            plan,
+            ReplaySource([1, 2, 3]),
+            store,
             checkpoint_every=1,
-            checkpoint_store=store,
         )
-        remaining_results = list(recovered_runner.run(source()))
-        checkpoint = store.load("recovery-example")
+        recovered_results = []
+        while (result := recovered_runner.next()) is not None:
+            recovered_results.append(result.outputs["output"].to_pyarrow().to_pylist())
+        checkpoint = store.load_blocking("recovery-example")
 
-        print("first committed batch:", first_result.output.table_payload.to_pylist())
+        assert first_result is not None
+        print("first committed batch:", first_result.outputs["output"].to_pyarrow())
+        print("recovered batches:", recovered_results)
         print(
-            "recovered batches:",
-            [result.output.table_payload.to_pylist() for result in remaining_results],
+            "final source cursor:",
+            checkpoint["source_cursor"] if checkpoint else None,
         )
-        print("recovered state:", recovered_counter.snapshot())
-        print("final source cursor:", checkpoint.source_cursor if checkpoint else None)
 
 
 if __name__ == "__main__":

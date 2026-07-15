@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 async-trait.workspace = true
-calc-flow = { path = "../calc-flow", version = "=2.0.0-alpha.1" }
+calc-flow = { path = "../calc-flow", version = "=2.0.0" }
 datafusion.workspace = true
 parking_lot.workspace = true
 pyo3 = { version = "0.28.3", features = ["abi3-py313"] }

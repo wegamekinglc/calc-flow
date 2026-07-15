@@ -1,6 +1,6 @@
 [project]
 name = "calc-flow"
-version = "2.0.0a1"
+version = "2.0.0"
 description = "Rust-native DataFusion batch and streaming calculation pipelines"
 readme = "README.md"
 license = "Apache-2.0"
@@ -60,6 +60,9 @@ target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["benchmarks", "calc_flow", "calc_flow_studio"]
 
 [tool.ruff.format]
 quote-style = "double"

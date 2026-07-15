@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Protocol
@@ -10,7 +11,6 @@ import psutil
 import pyarrow as pa
 
 from calc_flow import Batch
-from calc_flow.engine.datafusion import DataFusionQueryMetrics
 
 SEED = 20_260_711
 
@@ -78,7 +78,7 @@ def table_inputs(rows: int) -> TableInputs:
     rng = np.random.default_rng(SEED)
     group_count = max(1, min(10_000, int(rows**0.5)))
     group_ids = rng.integers(0, group_count, size=rows, dtype=np.int64)
-    fact = Batch.table(
+    fact = Batch.from_pyarrow(
         pa.table(
             {
                 "id": np.arange(rows, dtype=np.int64),
@@ -89,7 +89,7 @@ def table_inputs(rows: int) -> TableInputs:
             }
         )
     )
-    dimension = Batch.table(
+    dimension = Batch.from_pyarrow(
         pa.table(
             {
                 "group_id": np.arange(group_count, dtype=np.int64),
@@ -106,22 +106,27 @@ def record_benchmark(
     scenario: str,
     input_rows: int,
     output_rows: int,
-    metrics: tuple[DataFusionQueryMetrics, ...] = (),
+    metrics: Sequence[Mapping[str, object]] = (),
     backend: str | None = None,
 ) -> None:
     scale = selected_scale()
     backend_info = {"backend": backend} if backend is not None else {}
     metric_info = (
         {
-            "datafusion_planning_ns": sum(metric.planning_ns for metric in metrics),
-            "datafusion_execution_ns": sum(metric.execution_ns for metric in metrics),
+            "datafusion_planning_ns": sum(
+                _metric_value(metric, "planning_ns") for metric in metrics
+            ),
+            "datafusion_execution_ns": sum(
+                _metric_value(metric, "execution_ns") for metric in metrics
+            ),
             "datafusion_query_count": len(metrics),
         }
         if metrics
         else {}
     )
-    # pytest-benchmark exposes this attribute as its metadata output boundary.
-    # Replace the mapping so no caller-owned dictionary is changed in place.
+    # pytest-benchmark snapshots this attribute when benchmark(...) starts.
+    # Call this helper before that boundary, and replace the mapping so no
+    # caller-owned dictionary is changed in place.
     benchmark.extra_info = {
         **benchmark.extra_info,
         "scenario": scenario,
@@ -135,3 +140,8 @@ def record_benchmark(
         **backend_info,
         **metric_info,
     }
+
+
+def _metric_value(metric: Mapping[str, object], name: str) -> int:
+    value = metric.get(name, 0)
+    return value if type(value) is int and value >= 0 else 0

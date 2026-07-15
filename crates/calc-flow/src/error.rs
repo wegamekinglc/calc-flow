@@ -1,11 +1,10 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-/// Public v2-alpha error surface.
+/// Public v2 error surface.
 ///
-/// The enum remains non-exhaustive while the Rust API is alpha so recovery and
-/// runtime boundaries can gain precise typed failures without prematurely
-/// freezing every variant.
+/// The enum remains non-exhaustive so the stable API can add precise typed
+/// failures at recovery and runtime boundaries without freezing every variant.
 #[non_exhaustive]
 pub enum CalcFlowError {
     #[error("invalid {field}: {message}")]

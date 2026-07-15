@@ -5,9 +5,9 @@ import tempfile
 import pyarrow as pa
 import pyarrow.compute as pc
 import uvicorn
-from calc_flow_studio.app import create_app
 
 from calc_flow import Runtime
+from calc_flow_studio.app import create_app
 
 
 def double_value(values: pa.Array) -> pa.Array:

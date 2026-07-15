@@ -4,32 +4,30 @@ from __future__ import annotations
 
 import numpy as np
 
-from calc_flow import ArrayExpressionOperator, Batch, Pipeline
+from calc_flow import Batch, PipelineBuilder, Runtime, register_numpy
 
 
 def main() -> None:
-    values = Batch.array(np.asarray([1.0, 2.0, 4.0, 6.0]))
+    runtime = Runtime()
+    register_numpy(runtime)
+    values = Batch.from_array(
+        np.asarray([1.0, 2.0, 4.0, 6.0]),
+        backend="numpy",
+    )
     plan = (
-        Pipeline("numpy-array")
-        .then(
-            ArrayExpressionOperator(
-                "center",
-                "x - xp.mean(x)",
-                backend="numpy",
-            )
+        PipelineBuilder("numpy-array")
+        .external(
+            "center",
+            "numpy",
+            "expression",
+            "1",
+            {"expression": "x - mean(x)"},
         )
-        .then(
-            ArrayExpressionOperator(
-                "clip_lower_bound",
-                "xp.maximum(x, -1.5)",
-                backend="numpy",
-            )
-        )
-        .compile()
+        .compile(runtime)
     )
 
     run = plan.execute({"input": values})
-    print(run.output.array_payload.tolist())
+    print(run.outputs["output"].array.tolist())
 
 
 if __name__ == "__main__":

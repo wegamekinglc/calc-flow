@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -11,16 +12,41 @@ from benchmarks.support import (
     record_benchmark,
     selected_scale,
 )
-from calc_flow import Batch, UdfReference, UdfRegistry
-from calc_flow.engine import JaxEngine, NumpyEngine
-from calc_flow.engine.array import ArrayEngine
+from calc_flow import (
+    Batch,
+    PipelineBuilder,
+    Runtime,
+    register_jax,
+    register_numpy,
+)
 
 
-def _engine(backend: str) -> ArrayEngine:
+def _runtime(backend: str) -> Runtime:
+    runtime = Runtime()
     if backend == "numpy":
-        return NumpyEngine()
-    pytest.importorskip("jax")
-    return JaxEngine()
+        register_numpy(runtime)
+    else:
+        pytest.importorskip("jax")
+        register_jax(runtime)
+    return runtime
+
+
+def _batch(value: object, backend: str) -> Batch:
+    return Batch.from_array(value, backend=backend)
+
+
+def _plan(runtime: Runtime, backend: str, expression: str):
+    return (
+        PipelineBuilder(f"benchmark-{backend}")
+        .external(
+            "calculate",
+            backend,
+            "expression",
+            "1",
+            {"expression": expression},
+        )
+        .compile(runtime)
+    )
 
 
 def _synchronize(value: Any) -> None:
@@ -35,20 +61,20 @@ def _benchmark_array(
     backend: str,
     scenario: str,
     input_rows: int,
-    calculate: Any,
+    calculate: Callable[[], Batch],
 ) -> Batch:
     warm_result = calculate()
-    _synchronize(warm_result.array_payload)
-
-    result = benchmark(calculate)
-
+    _synchronize(warm_result.array)
     record_benchmark(
         benchmark,
         scenario=scenario,
         input_rows=input_rows,
-        output_rows=result.num_rows,
+        output_rows=warm_result.num_rows,
         backend=backend,
     )
+
+    result = benchmark(calculate)
+
     return result
 
 
@@ -61,12 +87,13 @@ def test_elementwise_expression(
     benchmark: BenchmarkFixture, backend: str, _scale: str
 ) -> None:
     scale = selected_scale()
-    engine = _engine(backend)
-    values = Batch.array(engine.xp.asarray(np.arange(scale.array_elements)))
+    runtime = _runtime(backend)
+    values = _batch(np.arange(scale.array_elements, dtype=np.float64), backend)
+    plan = _plan(runtime, backend, "(x * x + 1) ** 0.5")
 
     def calculate() -> Batch:
-        result = engine.evaluate("xp.sqrt(x * x + 1)", values)
-        _synchronize(result.array_payload)
+        result = plan.execute({"input": values}).outputs["output"]
+        _synchronize(result.array)
         return result
 
     result = _benchmark_array(
@@ -87,12 +114,13 @@ def test_elementwise_expression(
 @pytest.mark.parametrize("_scale", [selected_scale().name])
 def test_reduction(benchmark: BenchmarkFixture, backend: str, _scale: str) -> None:
     scale = selected_scale()
-    engine = _engine(backend)
-    values = Batch.array(engine.xp.asarray(np.arange(scale.array_elements)))
+    runtime = _runtime(backend)
+    values = _batch(np.arange(scale.array_elements, dtype=np.float64), backend)
+    plan = _plan(runtime, backend, "mean(x)")
 
     def calculate() -> Batch:
-        result = engine.mean(values)
-        _synchronize(result.array_payload)
+        result = plan.execute({"input": values}).outputs["output"]
+        _synchronize(result.array)
         return result
 
     result = _benchmark_array(
@@ -115,14 +143,16 @@ def test_matrix_multiplication(
     benchmark: BenchmarkFixture, backend: str, _scale: str
 ) -> None:
     dimension = selected_scale().matrix_dimension
-    engine = _engine(backend)
-    matrix = Batch.array(
-        engine.xp.asarray(np.arange(dimension**2).reshape(dimension, dimension))
+    runtime = _runtime(backend)
+    matrix = _batch(
+        np.arange(dimension**2, dtype=np.float64).reshape(dimension, dimension),
+        backend,
     )
+    plan = _plan(runtime, backend, "x @ x")
 
     def calculate() -> Batch:
-        result = engine.matmul(matrix, matrix)
-        _synchronize(result.array_payload)
+        result = plan.execute({"input": matrix}).outputs["output"]
+        _synchronize(result.array)
         return result
 
     result = _benchmark_array(
@@ -133,44 +163,40 @@ def test_matrix_multiplication(
         calculate=calculate,
     )
 
-    assert result.array_payload.shape == (dimension, dimension)
+    assert result.array.shape == (dimension, dimension)
 
 
 @pytest.mark.parametrize("backend", ("numpy", "jax"))
-@pytest.mark.benchmark(group=benchmark_group("array-udf"), min_rounds=3, max_time=0.5)
+@pytest.mark.benchmark(
+    group=benchmark_group("array-reshape"), min_rounds=3, max_time=0.5
+)
 @pytest.mark.parametrize("_scale", [selected_scale().name])
-def test_registered_array_udf(
+def test_transpose_and_reshape(
     benchmark: BenchmarkFixture, backend: str, _scale: str
 ) -> None:
-    scale = selected_scale()
-    registry = UdfRegistry()
-
-    @registry.array(name="square", version="1", argument_count=1)
-    def square(values: Any) -> Any:
-        return values * values
-
-    reference = UdfReference("square", "1")
-    if backend == "numpy":
-        engine: ArrayEngine = NumpyEngine(
-            udf_registry=registry,
-            udfs=(reference,),
-        )
-    else:
-        pytest.importorskip("jax")
-        engine = JaxEngine(udf_registry=registry, udfs=(reference,))
-    values = Batch.array(engine.xp.asarray(np.arange(scale.array_elements)))
+    dimension = selected_scale().matrix_dimension
+    runtime = _runtime(backend)
+    matrix = _batch(
+        np.arange(dimension**2, dtype=np.float64).reshape(dimension, dimension),
+        backend,
+    )
+    plan = _plan(
+        runtime,
+        backend,
+        f"reshape(transpose(x), ({dimension**2},))",
+    )
 
     def calculate() -> Batch:
-        result = engine.evaluate("square(x)", values)
-        _synchronize(result.array_payload)
+        result = plan.execute({"input": matrix}).outputs["output"]
+        _synchronize(result.array)
         return result
 
     result = _benchmark_array(
         benchmark,
         backend=backend,
-        scenario="array_registered_udf",
-        input_rows=scale.array_elements,
+        scenario="array_transpose_reshape",
+        input_rows=dimension,
         calculate=calculate,
     )
 
-    assert result.num_rows == scale.array_elements
+    assert result.num_rows == dimension**2
