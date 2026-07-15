@@ -155,12 +155,10 @@ jobs:
           enable-cache: true
       - name: Build wheel and source distribution
         run: |
-          python -m unittest scripts.test_inspect_wheel
+          python -m unittest scripts.test_inspect_wheel scripts.test_release_config
           uv build
-          python scripts/inspect_wheel.py dist/calc_flow-*.whl
-          tar -tzf dist/calc_flow-*.tar.gz > /tmp/core-sdist-contents.txt
-          ! grep -E '(^|/)(src/calc_flow|web-ui|tests/fixtures|AGENTS\.md|CLAUDE\.md|\.claude|\.codex)(/|$)' \
-            /tmp/core-sdist-contents.txt
+          python scripts/inspect_wheel.py core-wheel dist/calc_flow-*.whl
+          python scripts/inspect_wheel.py sdist dist/calc_flow-*.tar.gz
       - name: Install and execute the wheel in isolation
         run: |
           wheel="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"

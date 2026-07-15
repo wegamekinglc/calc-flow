@@ -3,6 +3,7 @@ name = "calc-flow-studio"
 version = "2.0.0a1"
 description = "Local FastAPI backend for Calc Flow Studio"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
     "calc-flow>=2.0.0a1,<3",

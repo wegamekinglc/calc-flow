@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Rust core for stateful DataFusion calculation pipelines"
+exclude = ["tests/**"]
 
 [dependencies]
 async-trait.workspace = true

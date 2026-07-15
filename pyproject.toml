@@ -4,6 +4,7 @@ version = "2.0.0a1"
 description = "Rust-native DataFusion batch and streaming calculation pipelines"
 readme = "README.md"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
     "pydantic>=2.12.0,<3",
