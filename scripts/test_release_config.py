@@ -78,16 +78,11 @@ class ReleaseConfigTests(unittest.TestCase):
         setup_python = (
             "uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"
         )
-        lock = tomllib.loads((ROOT / "uv.lock").read_text())
-        pyarrow_version = next(
-            package["version"]
-            for package in lock["package"]
-            if package["name"] == "pyarrow"
-        )
-        install_pyarrow = f'python -m pip install "pyarrow=={pyarrow_version}"'
+        install_pyarrow = 'python -m pip install "pyarrow==24.0.0"'
         self.assertIn(setup_python, rust_core)
         self.assertIn("python-version-file: .python-version", rust_core)
         self.assertIn(install_pyarrow, rust_core)
+        self.assertIn("RUST_TEST_THREADS: 1", rust_core)
         self.assertLess(
             rust_core.index(setup_python),
             rust_core.index("cargo clippy --workspace --all-targets --all-features"),
@@ -96,6 +91,12 @@ class ReleaseConfigTests(unittest.TestCase):
             rust_core.index(install_pyarrow),
             rust_core.index("cargo test --workspace --all-targets --all-features"),
         )
+
+    def test_python_package_excludes_unsupported_pyarrow_25(self) -> None:
+        for project in (ROOT, ROOT / "web-ui/backend"):
+            with self.subTest(project=project):
+                package = tomllib.loads((project / "pyproject.toml").read_text())
+                self.assertIn("pyarrow>=24.0.0,<25", package["project"]["dependencies"])
 
     def test_final_release_error_docs_do_not_claim_alpha_status(self) -> None:
         stale_claims = {
