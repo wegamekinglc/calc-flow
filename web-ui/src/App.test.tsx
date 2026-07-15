@@ -11,23 +11,16 @@ const response = (body: unknown, status = 200) =>
     }),
   );
 
-const catalog = {
-  config_format_version: '1',
-  operators: [
-    { kind: 'expression', label: 'DataFusion expression', backend_selector: false },
-    { kind: 'sql', label: 'DataFusion SQL', backend_selector: false },
-  ],
-  udfs: [
-    {
-      kind: 'datafusion_scalar',
-      name: 'double_value',
-      version: '1',
-      description: 'Double a value',
-    },
-  ],
-  arrow_types: ['float64', 'int64', 'string'],
-  limits: { max_rows: 100000 },
-};
+const catalog = [
+  {
+    provider: 'server',
+    kind: 'data_fusion_scalar',
+    name: 'double_value',
+    version: '1',
+    signature: { input_types: ['int64'], return_type: 'int64' },
+    volatility: 'immutable',
+  },
+];
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -47,6 +40,7 @@ describe('Calc Flow Studio', () => {
 
     expect(await screen.findByText('Build the flow')).toBeInTheDocument();
     expect(screen.queryByText(/pandas/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Array expression/i })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /DataFusion SQL/i }));
 
     expect(screen.getByText('sql')).toBeInTheDocument();
@@ -60,18 +54,15 @@ describe('Calc Flow Studio', () => {
       if (path.endsWith('/projects') && !init?.method) return response([]);
       if (path.endsWith('/projects') && init?.method === 'POST') {
         return response(
-          { ...JSON.parse(String(init.body)), id: 'project_generated' },
+          JSON.parse(String(init.body)),
           201,
         );
       }
-      if (path.endsWith('/projects/project_generated/validate')) {
+      if (path.includes('/projects/project_') && path.endsWith('/validate')) {
         return response({
           valid: true,
-          errors: [],
-          warnings: [],
+          issues: [],
           fingerprint: 'abc',
-          graph_inputs: ['input'],
-          graph_outputs: ['output'],
         });
       }
       throw new Error(`Unexpected request ${path}`);
@@ -87,6 +78,65 @@ describe('Calc Flow Studio', () => {
     const createCall = fetchMock.mock.calls.find(
       ([path, init]) => String(path).endsWith('/projects') && init?.method === 'POST',
     );
-    expect(JSON.parse(String(createCall?.[1]?.body))).not.toHaveProperty('id');
+    const created = JSON.parse(String(createCall?.[1]?.body));
+    expect(created.format_version).toBe(2);
+    expect(created.id).toMatch(/^project_[0-9a-f]{32}$/);
+    expect(created.pipeline.nodes[0].operator.kind).toBe('expression');
+  });
+
+  it('submits parsed records with the v2 preview contract', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith('/catalog')) return response(catalog);
+      if (path.endsWith('/projects') && !init?.method) return response([]);
+      if (path.endsWith('/projects') && init?.method === 'POST') {
+        return response(JSON.parse(String(init.body)), 201);
+      }
+      if (path.includes('/projects/project_') && path.endsWith('/runs')) {
+        return response(
+          {
+            id: 'run_1',
+            project_id: path.split('/').at(-2),
+            status: 'pending',
+            created_at: '2026-01-01T00:00:00Z',
+          },
+          202,
+        );
+      }
+      throw new Error(`Unexpected request ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('EventSource', class {
+      addEventListener() {}
+      removeEventListener() {}
+      close() {}
+    });
+    render(<App />);
+    await screen.findByText('Build the flow');
+
+    fireEvent.click(screen.getByRole('button', { name: /Run preview/ }));
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(
+          ([path]) => String(path).includes('/api/v2/projects/project_') && String(path).endsWith('/runs'),
+        ),
+      ).toBe(true),
+    );
+    const runCall = fetchMock.mock.calls.find(
+      ([path]) => String(path).includes('/api/v2/projects/project_') && String(path).endsWith('/runs'),
+    );
+    expect(JSON.parse(String(runCall?.[1]?.body))).toEqual({
+      inputs: {
+        input: {
+          format: 'records',
+          data: [
+            { a: 1, b: 2 },
+            { a: 3, b: 4 },
+          ],
+          source_id: 'browser-preview',
+        },
+      },
+    });
   });
 });

@@ -9,6 +9,7 @@ import pytest
 
 WEB_UI = Path(__file__).parents[2]
 PROCESS_MANAGER = WEB_UI / "scripts" / "web_ui_process.py"
+PLAYWRIGHT_CONFIG = WEB_UI / "playwright.config.ts"
 
 
 @pytest.mark.parametrize("name", ("start_web_ui.sh", "stop_web_ui.sh"))
@@ -61,6 +62,7 @@ def test_web_ui_process_manager_launches_workspace_backend() -> None:
     assert 'WEB_UI = ROOT / "web-ui"' not in source
     assert '"--package", "calc-flow-studio"' in source
     assert '"--extra", "web"' not in source
+    assert "/api/v2/catalog" in source
 
 
 @pytest.mark.parametrize("name", ("export_openapi.py", "run_e2e_server.py"))
@@ -69,3 +71,22 @@ def test_web_ui_python_script_imports_studio_package(name: str) -> None:
 
     assert "calc_flow_studio" in source
     assert "calc_flow.web" not in source
+
+
+def test_e2e_server_registers_udf_on_the_v2_runtime() -> None:
+    source = (WEB_UI / "scripts" / "run_e2e_server.py").read_text(encoding="utf-8")
+
+    assert "Runtime()" in source
+    assert "runtime.register_scalar_udf(" in source
+    assert 'provider="python"' in source
+    assert "create_app(" in source
+    assert "runtime=runtime" in source
+    assert "udf_registry=" not in source
+
+
+def test_playwright_reuses_the_prepared_python_environment() -> None:
+    source = PLAYWRIGHT_CONFIG.read_text(encoding="utf-8")
+
+    assert "UV_CACHE_DIR=../target/playwright-uv-cache" in source
+    assert "uv run --no-sync --package calc-flow-studio" in source
+    assert "UV_CACHE_DIR=/tmp" not in source

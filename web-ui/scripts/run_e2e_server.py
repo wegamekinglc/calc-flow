@@ -7,20 +7,23 @@ import pyarrow.compute as pc
 import uvicorn
 from calc_flow_studio.app import create_app
 
-from calc_flow.udf import UdfRegistry
-
-registry = UdfRegistry()
+from calc_flow import Runtime
 
 
-@registry.datafusion_scalar(
+def double_value(values: pa.Array) -> pa.Array:
+    return pc.multiply(values, 2)
+
+
+runtime = Runtime()
+runtime.register_scalar_udf(
+    provider="python",
     name="double_value",
     version="1",
-    input_fields=[pa.int64()],
-    return_field=pa.int64(),
-    description="Double a value",
+    input_types=["int64"],
+    return_type="int64",
+    volatility="immutable",
+    function=double_value,
 )
-def double_value(values):
-    return pc.multiply(values, 2)
 
 
 if __name__ == "__main__":
@@ -30,7 +33,7 @@ if __name__ == "__main__":
         create_app(
             project_directory=projects,
             checkpoint_directory=checkpoints,
-            udf_registry=registry,
+            runtime=runtime,
         ),
         host="127.0.0.1",
         port=8765,

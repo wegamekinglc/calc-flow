@@ -20,12 +20,12 @@ describe('ResultsPanel', () => {
             rows: [{ total: 3 }],
           },
         },
-        warnings: [],
         node_timings: {
           calculate: { duration_ns: 2_000_000, input_rows: { input: 1 }, output_rows: { output: 1 } },
         },
         datafusion_metrics: [
           {
+            query_id: 1,
             node_id: 'calculate',
             planning_ns: 1_000_000,
             execution_ns: 2_000_000,
@@ -45,5 +45,24 @@ describe('ResultsPanel', () => {
     expect(screen.getByText('3')).toBeInTheDocument();
     expect(screen.getByText('calculate')).toBeInTheDocument();
     expect(screen.getByText('Logical plan')).toBeInTheDocument();
+  });
+
+  it('renders exact v2 validation issues', () => {
+    render(
+      <ResultsPanel
+        validation={{
+          valid: false,
+          issues: [
+            { path: 'pipeline.nodes[0]', code: 'invalid_expression', message: 'bad expression' },
+          ],
+          fingerprint: null,
+        }}
+        run={null}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('Graph needs attention')).toBeInTheDocument();
+    expect(screen.getByText('bad expression')).toBeInTheDocument();
   });
 });

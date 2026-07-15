@@ -4,7 +4,6 @@ import {
   Controls,
   MiniMap,
   ReactFlow,
-  addEdge,
   applyEdgeChanges,
   applyNodeChanges,
   type Connection,
@@ -33,7 +32,7 @@ import {
   type EditableProject,
   type JSONValue,
   type NodeConfig,
-  type ProjectConfig,
+  type ProjectDocument,
   type ProjectSummary,
   type RunResponse,
   type ValidationReport,
@@ -42,36 +41,51 @@ import {
 type FlowNode = CalculationFlowNode;
 
 const nodeTypes: NodeTypes = { calculation: CalculationNode };
+const arrowTypes = [
+  'boolean',
+  'int8',
+  'int16',
+  'int32',
+  'int64',
+  'uint8',
+  'uint16',
+  'uint32',
+  'uint64',
+  'float32',
+  'float64',
+  'string',
+  'binary',
+  'date32',
+  'date64',
+  'timestamp',
+];
+type EditableNodeKind = Extract<NodeConfig['operator']['kind'], 'expression' | 'sql'>;
+type ProjectUpdate = EditableProject | ((current: EditableProject) => EditableProject);
 
 const nodeColor = (node: FlowNode) => {
   if (node.data.kind === 'sql') return '#ef9456';
-  if (node.data.kind === 'array_expression') return '#a994ff';
+  if (node.data.kind === 'external') return '#a994ff';
   return '#56d5b2';
 };
 
 const nextId = (
-  kind: NodeConfig['kind'],
+  kind: EditableNodeKind,
   nodes: readonly NodeConfig[],
   index = nodes.length + 1,
 ): string => {
-  const prefix = kind === 'array_expression' ? 'array' : kind;
-  const candidate = `${prefix}_${index}`;
+  const candidate = `${kind}_${index}`;
   return nodes.some((node) => node.id === candidate)
     ? nextId(kind, nodes, index + 1)
     : candidate;
 };
 
 const makeNode = (
-  kind: NodeConfig['kind'],
+  kind: EditableNodeKind,
   nodes: readonly NodeConfig[],
 ): NodeConfig => {
   const id = nextId(kind, nodes);
   const shared = {
     id,
-    kind,
-    select: [],
-    filter_expression: null,
-    udfs: [],
     input_ports: [],
     output_ports: [],
     position: { x: 120 + nodes.length * 32, y: 100 + nodes.length * 36 },
@@ -79,27 +93,23 @@ const makeNode = (
   if (kind === 'sql') {
     return {
       ...shared,
-      expression: null,
-      query: 'SELECT * FROM input',
-      inputs: ['input'],
-      backend: null,
-    };
-  }
-  if (kind === 'array_expression') {
-    return {
-      ...shared,
-      expression: 'x * 2',
-      query: null,
-      inputs: [],
-      backend: 'numpy',
+      operator: {
+        kind: 'sql',
+        query: 'SELECT * FROM input',
+        aliases: ['input'],
+        udfs: [],
+      },
     };
   }
   return {
     ...shared,
-    expression: 'result = value + 1',
-    query: null,
-    inputs: [],
-    backend: null,
+    operator: {
+      kind: 'expression',
+      expression: 'result = value + 1',
+      select: [],
+      filter: null,
+      udfs: [],
+    },
   };
 };
 
@@ -116,11 +126,12 @@ export default function App() {
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [project, setProject] = useState<EditableProject>(() => blankProject());
+  const [persisted, setPersisted] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string>('calculate');
   const [validation, setValidation] = useState<ValidationReport | null>(null);
   const [run, setRun] = useState<RunResponse | null>(null);
   const [checkpoint, setCheckpoint] = useState<CheckpointSummary | null>(null);
-  const [sampleFormat, setSampleFormat] = useState<'inline_json' | 'json' | 'csv' | 'arrow_ipc'>('inline_json');
+  const [sampleFormat, setSampleFormat] = useState<'records' | 'columns' | 'arrow_ipc'>('records');
   const [sampleInputName, setSampleInputName] = useState('input');
   const [sampleData, setSampleData] = useState('[{"a": 1, "b": 2}, {"a": 3, "b": 4}]');
   const [message, setMessage] = useState('');
@@ -147,6 +158,7 @@ export default function App() {
           const loaded = await api.project(loadedProjects[0].id);
           if (controller.signal.aborted) return;
           setProject(loaded);
+          setPersisted(true);
           setSelectedNodeId(loaded.pipeline.nodes[0]?.id ?? '');
         }
       } catch (error) {
@@ -157,8 +169,10 @@ export default function App() {
     return () => controller.abort();
   }, []);
 
-  const updateProject = useCallback((next: EditableProject) => {
-    setProject(next);
+  const updateProject = useCallback((update: ProjectUpdate) => {
+    setProject((current) =>
+      typeof update === 'function' ? update(current) : update,
+    );
     setValidation(null);
     setRun(null);
     setCheckpoint(null);
@@ -171,14 +185,20 @@ export default function App() {
       project.pipeline.nodes.map((node) => ({
         id: node.id,
         type: 'calculation',
-        position: node.position,
+        position: node.position ?? { x: 0, y: 0 },
         data: {
           label: node.id,
-          kind: node.kind,
-          inputPorts: node.kind === 'sql' ? node.inputs : ['input'],
-          outputPorts: ['output'],
+          kind: node.operator.kind,
+          inputPorts: node.input_ports.length
+            ? node.input_ports.map((port) => port.name)
+            : node.operator.kind === 'sql'
+              ? node.operator.aliases
+              : ['input'],
+          outputPorts: node.output_ports.length
+            ? node.output_ports.map((port) => port.name)
+            : ['output'],
         },
-        className: `flow-node ${node.kind}`,
+        className: `flow-node ${node.operator.kind}`,
         selected: selectedNodeId === node.id,
       })),
     [project.pipeline.nodes, selectedNodeId],
@@ -204,18 +224,18 @@ export default function App() {
       if (!positionChanges.length) return;
       const changed = applyNodeChanges(positionChanges, flowNodes);
       const positions = new Map(changed.map((node) => [node.id, node.position]));
-      updateProject({
-        ...project,
+      updateProject((current) => ({
+        ...current,
         pipeline: {
-          ...project.pipeline,
-          nodes: project.pipeline.nodes.map((node) => ({
+          ...current.pipeline,
+          nodes: current.pipeline.nodes.map((node) => ({
             ...node,
             position: positions.get(node.id) ?? node.position,
           })),
         },
-      });
+      }));
     },
-    [flowNodes, project, updateProject],
+    [flowNodes, updateProject],
   );
 
   const onEdgesChange = useCallback(
@@ -223,10 +243,10 @@ export default function App() {
       const structuralChanges = changes.filter((change) => change.type === 'remove');
       if (!structuralChanges.length) return;
       const changed = applyEdgeChanges(structuralChanges, flowEdges);
-      updateProject({
-        ...project,
+      updateProject((current) => ({
+        ...current,
         pipeline: {
-          ...project.pipeline,
+          ...current.pipeline,
           edges: changed.map((edge) => ({
             source_node: edge.source,
             target_node: edge.target,
@@ -234,22 +254,20 @@ export default function App() {
             target_port: String(edge.data?.targetPort ?? edge.targetHandle ?? 'input'),
           })),
         },
-      });
+      }));
     },
-    [flowEdges, project, updateProject],
+    [flowEdges, updateProject],
   );
 
   const onConnect = useCallback(
     (connection: Connection) => {
-      const changed = addEdge(connection, flowEdges);
-      const edge = changed.at(-1);
-      if (!edge) return;
-      updateProject({
-        ...project,
+      if (!connection.source || !connection.target) return;
+      updateProject((current) => ({
+        ...current,
         pipeline: {
-          ...project.pipeline,
+          ...current.pipeline,
           edges: [
-            ...project.pipeline.edges,
+            ...current.pipeline.edges,
             {
               source_node: connection.source,
               target_node: connection.target,
@@ -258,18 +276,19 @@ export default function App() {
             },
           ],
         },
-      });
+      }));
     },
-    [flowEdges, project, updateProject],
+    [updateProject],
   );
 
   const selectedNode = project.pipeline.nodes.find((node) => node.id === selectedNodeId) ?? null;
 
-  const persistProject = async (): Promise<ProjectConfig> => {
-    const saved = 'id' in project
+  const persistProject = async (): Promise<ProjectDocument> => {
+    const saved = persisted
       ? await api.saveProject(project)
       : await api.createProject(project);
     setProject(saved);
+    setPersisted(true);
     await refreshProjects();
     return saved;
   };
@@ -305,8 +324,9 @@ export default function App() {
     setMessage('');
     try {
       const saved = await persistProject();
-      let data: JSONValue = sampleData;
-      if (sampleFormat === 'inline_json') data = JSON.parse(sampleData) as JSONValue;
+      const data: JSONValue = sampleFormat === 'arrow_ipc'
+        ? sampleData
+        : JSON.parse(sampleData) as JSONValue;
       const submitted = await api.runProject(saved.id, {
         inputs: {
           [sampleInputName]: { format: sampleFormat, data, source_id: 'browser-preview' },
@@ -333,7 +353,7 @@ export default function App() {
   };
 
   const resetCheckpoint = async () => {
-    if (!('id' in project)) return;
+    if (!persisted) return;
     setBusy(true);
     try {
       setCheckpoint(await api.resetCheckpoint(project.id));
@@ -368,6 +388,7 @@ export default function App() {
   const newProject = () => {
     const fresh = blankProject();
     setProject(fresh);
+    setPersisted(false);
     setSelectedNodeId(fresh.pipeline.nodes[0].id);
     setValidation(null);
     setRun(null);
@@ -389,7 +410,7 @@ export default function App() {
     setBusy(true);
     try {
       const document = await file.text();
-      let imported: ProjectConfig;
+      let imported: ProjectDocument;
       try {
         imported = await api.importProject(document, format);
       } catch (error) {
@@ -404,6 +425,7 @@ export default function App() {
         imported = await api.importProject(document, format, true);
       }
       setProject(imported);
+      setPersisted(true);
       setSelectedNodeId(imported.pipeline.nodes[0]?.id ?? '');
       setValidation(null);
       setRun(null);
@@ -418,7 +440,7 @@ export default function App() {
   };
 
   const exportProject = async (format: 'json' | 'yaml') => {
-    if (!('id' in project)) return;
+    if (!persisted) return;
     setBusy(true);
     try {
       const exported = await api.exportProject(project.id, format);
@@ -441,7 +463,7 @@ export default function App() {
   };
 
   const deleteProject = async () => {
-    if (!('id' in project) || !window.confirm(`Delete ${project.name}?`)) return;
+    if (!persisted || !window.confirm(`Delete ${project.name}?`)) return;
     setBusy(true);
     try {
       await api.deleteProject(project.id);
@@ -456,38 +478,38 @@ export default function App() {
     }
   };
 
-  const addNode = (kind: NodeConfig['kind']) => {
+  const addNode = (kind: EditableNodeKind) => {
     const node = makeNode(kind, project.pipeline.nodes);
-    updateProject({
-      ...project,
-      pipeline: { ...project.pipeline, nodes: [...project.pipeline.nodes, node] },
-    });
+    updateProject((current) => ({
+      ...current,
+      pipeline: { ...current.pipeline, nodes: [...current.pipeline.nodes, node] },
+    }));
     setSelectedNodeId(node.id);
   };
 
   const updateNode = (node: NodeConfig) => {
-    updateProject({
-      ...project,
+    updateProject((current) => ({
+      ...current,
       pipeline: {
-        ...project.pipeline,
-        nodes: project.pipeline.nodes.map((item) => (item.id === node.id ? node : item)),
+        ...current.pipeline,
+        nodes: current.pipeline.nodes.map((item) => (item.id === node.id ? node : item)),
       },
-    });
+    }));
   };
 
   const deleteSelectedNode = () => {
     if (!selectedNode) return;
     const nodes = project.pipeline.nodes.filter((node) => node.id !== selectedNode.id);
-    updateProject({
-      ...project,
+    updateProject((current) => ({
+      ...current,
       pipeline: {
-        ...project.pipeline,
-        nodes,
-        edges: project.pipeline.edges.filter(
+        ...current.pipeline,
+        nodes: current.pipeline.nodes.filter((node) => node.id !== selectedNode.id),
+        edges: current.pipeline.edges.filter(
           (edge) => edge.source_node !== selectedNode.id && edge.target_node !== selectedNode.id,
         ),
       },
-    });
+    }));
     setSelectedNodeId(nodes[0]?.id ?? '');
   };
 
@@ -498,6 +520,7 @@ export default function App() {
     }
     const loaded = await api.project(id);
     setProject(loaded);
+    setPersisted(true);
     setSelectedNodeId(loaded.pipeline.nodes[0]?.id ?? '');
     setValidation(null);
     setRun(null);
@@ -512,15 +535,18 @@ export default function App() {
           <div><strong>Calc Flow</strong><small>DataFusion studio</small></div>
         </div>
         <div className="project-switcher">
-          <select aria-label="Project" value={'id' in project && projects.some((item) => item.id === project.id) ? project.id : ''} onChange={(event) => void loadProject(event.target.value)}>
+          <select aria-label="Project" value={persisted && projects.some((item) => item.id === project.id) ? project.id : ''} onChange={(event) => void loadProject(event.target.value)}>
             <option value="">New project</option>
             {projects.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
           </select>
-          <input aria-label="Project name" value={project.name} onChange={(event) => updateProject({ ...project, name: event.target.value })} />
+          <input aria-label="Project name" value={project.name} onChange={(event) => {
+            const name = event.target.value;
+            updateProject((current) => ({ ...current, name }));
+          }} />
         </div>
         <div className="topbar-actions">
           <ProjectActions
-            persisted={'id' in project}
+            persisted={persisted}
             busy={busy}
             onNew={newProject}
             onImport={(file) => void importProject(file)}
@@ -542,14 +568,13 @@ export default function App() {
           <p>Drag connections between typed calculation nodes.</p>
           <button className="node-tool expression" type="button" onClick={() => addNode('expression')}><span>ƒx</span><div><strong>Expression</strong><small>Project · filter · calculate</small></div></button>
           <button className="node-tool sql" type="button" onClick={() => addNode('sql')}><span>SQL</span><div><strong>DataFusion SQL</strong><small>Join · aggregate · window</small></div></button>
-          <button className="node-tool array" type="button" onClick={() => addNode('array_expression')}><span>[ ]</span><div><strong>Array expression</strong><small>NumPy or JAX</small></div></button>
 
           <div className="sample-editor">
             <span className="eyebrow">Preview input</span>
             <label>Graph input<input value={sampleInputName} onChange={(event) => setSampleInputName(event.target.value)} /></label>
-            <label>Format<select value={sampleFormat} onChange={(event) => setSampleFormat(event.target.value as typeof sampleFormat)}><option value="inline_json">Inline JSON</option><option value="json">JSON / NDJSON</option><option value="csv">CSV</option><option value="arrow_ipc">Arrow IPC</option></select></label>
+            <label>Format<select value={sampleFormat} onChange={(event) => setSampleFormat(event.target.value as typeof sampleFormat)}><option value="records">JSON records</option><option value="columns">JSON columns</option><option value="arrow_ipc">Arrow IPC</option></select></label>
             <textarea aria-label="Sample data" rows={8} value={sampleData} onChange={(event) => setSampleData(event.target.value)} />
-            <label className="file-button">Load file<input type="file" accept=".json,.jsonl,.csv,.arrow,.ipc" onChange={(event) => {
+            <label className="file-button">Load file<input type="file" accept=".json,.arrow,.ipc" onChange={(event) => {
               const file = event.target.files?.[0];
               if (!file) return;
               void loadSampleFile(file);
@@ -586,8 +611,8 @@ export default function App() {
         {selectedNode ? (
           <NodeInspector
             node={selectedNode}
-            arrowTypes={catalog?.arrow_types ?? ['float64', 'int64', 'string']}
-            udfs={(catalog?.udfs ?? []) as Record<string, JSONValue>[]}
+            arrowTypes={arrowTypes}
+            udfs={catalog ?? []}
             onChange={updateNode}
             onDelete={deleteSelectedNode}
           />

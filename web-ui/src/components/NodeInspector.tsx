@@ -1,23 +1,62 @@
 import { SchemaEditor } from './SchemaEditor';
-import type { ArrowFieldConfig, JSONValue, NodeConfig, PortConfig } from '../types';
+import type {
+  ArrowFieldConfig,
+  NodeConfig,
+  OperatorSpec,
+  PortConfig,
+  UdfCatalogEntry,
+  UdfReference,
+} from '../types';
 
 interface NodeInspectorProps {
   node: NodeConfig;
   arrowTypes: string[];
-  udfs: Record<string, JSONValue>[];
+  udfs: UdfCatalogEntry[];
   onChange: (node: NodeConfig) => void;
   onDelete: () => void;
 }
 
-const value = (entry: Record<string, JSONValue>, key: string): string => String(entry[key] ?? '');
+type ExpressionOperator = Extract<OperatorSpec, { kind: 'expression' }>;
+type SqlOperator = Extract<OperatorSpec, { kind: 'sql' }>;
 
 export function NodeInspector({ node, arrowTypes, udfs, onChange, onDelete }: NodeInspectorProps) {
-  const patch = (change: Partial<NodeConfig>) => onChange({ ...node, ...change });
-  const isTable = node.kind !== 'array_expression';
-  const inputNames = node.kind === 'sql' ? node.inputs : ['input'];
-  const matchingUdfs = udfs.filter((entry) =>
-    node.kind === 'array_expression' ? entry.kind === 'array' : entry.kind === 'datafusion_scalar',
-  );
+  const patchNode = (change: Partial<NodeConfig>) => onChange({ ...node, ...change });
+  const patchExpression = (change: Partial<ExpressionOperator>) => {
+    if (node.operator.kind !== 'expression') return;
+    patchNode({ operator: { ...node.operator, ...change } });
+  };
+  const patchSql = (change: Partial<SqlOperator>) => {
+    if (node.operator.kind !== 'sql') return;
+    patchNode({ operator: { ...node.operator, ...change } });
+  };
+  const updateSqlAliases = (value: string) => {
+    if (node.operator.kind !== 'sql') return;
+    const aliases = value
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    onChange({
+      ...node,
+      input_ports: [],
+      operator: { ...node.operator, aliases },
+    });
+  };
+  const declaredInputs = node.input_ports.map((port) => port.name);
+  const inputNames = declaredInputs.length
+    ? declaredInputs
+    : node.operator.kind === 'sql'
+      ? node.operator.aliases
+      : ['input'];
+  const outputNames = node.output_ports.length
+    ? node.output_ports.map((port) => port.name)
+    : ['output'];
+  const isTable =
+    node.operator.kind !== 'external'
+    || ![...node.input_ports, ...node.output_ports].some((port) => port.kind === 'array');
+  const matchingUdfs =
+    node.operator.kind === 'expression' || node.operator.kind === 'sql'
+      ? udfs.filter((entry) => entry.kind === 'data_fusion_scalar')
+      : [];
 
   const schema = (direction: 'input' | 'output', name: string): ArrowFieldConfig[] => {
     const ports = direction === 'input' ? node.input_ports : node.output_ports;
@@ -29,23 +68,38 @@ export function NodeInspector({ node, arrowTypes, udfs, onChange, onDelete }: No
     name: string,
     fields: ArrowFieldConfig[],
   ) => {
-    const names = direction === 'input' ? inputNames : ['output'];
+    const names = direction === 'input' ? inputNames : outputNames;
     const current = direction === 'input' ? node.input_ports : node.output_ports;
     const ports: PortConfig[] = names.map((portName) => {
       const existing = current.find((port) => port.name === portName);
       return {
         name: portName,
-        kind: isTable ? 'table' : 'array',
-        required: true,
-        schema: portName === name ? (fields.length ? fields : null) : (existing?.schema ?? null),
+        kind: existing?.kind ?? (isTable ? 'table' : 'array'),
+        required: existing?.required ?? true,
+        schema: portName === name ? fields : (existing?.schema ?? []),
       };
     });
-    patch(direction === 'input' ? { input_ports: ports } : { output_ports: ports });
+    patchNode(direction === 'input' ? { input_ports: ports } : { output_ports: ports });
   };
 
-  const toggleUdf = (name: string, version: string, checked: boolean) => {
-    const others = node.udfs.filter((reference) => reference.name !== name);
-    patch({ udfs: checked ? [...others, { name, version }] : others });
+  const toggleUdf = (entry: UdfCatalogEntry, checked: boolean) => {
+    if (node.operator.kind !== 'expression' && node.operator.kind !== 'sql') return;
+    const reference: UdfReference = {
+      provider: entry.provider,
+      name: entry.name,
+      version: entry.version,
+      kind: entry.kind,
+    };
+    const others = node.operator.udfs.filter(
+      (current) =>
+        current.provider !== reference.provider
+        || current.name !== reference.name
+        || current.version !== reference.version
+        || current.kind !== reference.kind,
+    );
+    const udfs = checked ? [...others, reference] : others;
+    if (node.operator.kind === 'expression') patchExpression({ udfs });
+    else patchSql({ udfs });
   };
 
   return (
@@ -55,7 +109,9 @@ export function NodeInspector({ node, arrowTypes, udfs, onChange, onDelete }: No
           <span className="eyebrow">Node inspector</span>
           <h2>{node.id}</h2>
         </div>
-        <span className={`kind-chip ${node.kind}`}>{node.kind.replace('_', ' ')}</span>
+        <span className={`kind-chip ${node.operator.kind}`}>
+          {node.operator.kind.replace('_', ' ')}
+        </span>
       </div>
 
       <label>
@@ -63,95 +119,89 @@ export function NodeInspector({ node, arrowTypes, udfs, onChange, onDelete }: No
         <input value={node.id} disabled />
       </label>
 
-      {node.kind === 'expression' && (
+      {node.operator.kind === 'expression' && (
         <>
           <label>
             DataFusion expression
             <textarea
               rows={5}
-              value={node.expression ?? ''}
-              onChange={(event) => patch({ expression: event.target.value, select: [] })}
+              value={node.operator.expression}
+              onChange={(event) => patchExpression({
+                expression: event.target.value,
+                select: [],
+              })}
             />
           </label>
           <label>
             Filter expression
             <input
               placeholder="amount > 0"
-              value={node.filter_expression ?? ''}
-              onChange={(event) => patch({ filter_expression: event.target.value || null })}
+              value={node.operator.filter ?? ''}
+              onChange={(event) => patchExpression({ filter: event.target.value || null })}
             />
           </label>
         </>
       )}
 
-      {node.kind === 'sql' && (
+      {node.operator.kind === 'sql' && (
         <>
           <label>
             Input aliases
             <input
-              value={node.inputs.join(', ')}
-              onChange={(event) =>
-                patch({
-                  inputs: event.target.value
-                    .split(',')
-                    .map((item) => item.trim())
-                    .filter(Boolean),
-                  input_ports: [],
-                })
-              }
+              value={node.operator.aliases.join(', ')}
+              onChange={(event) => updateSqlAliases(event.target.value)}
             />
           </label>
           <label>
             DataFusion SQL
             <textarea
               rows={9}
-              value={node.query ?? ''}
-              onChange={(event) => patch({ query: event.target.value })}
+              value={node.operator.query}
+              onChange={(event) => patchSql({ query: event.target.value })}
             />
           </label>
         </>
       )}
 
-      {node.kind === 'array_expression' && (
-        <>
-          <label>
-            Array backend
-            <select
-              value={node.backend ?? 'numpy'}
-              onChange={(event) => patch({ backend: event.target.value as 'numpy' | 'jax' })}
-            >
-              <option value="numpy">NumPy</option>
-              <option value="jax">JAX</option>
-            </select>
-          </label>
-          <label>
-            Restricted expression
-            <textarea
-              rows={6}
-              value={node.expression ?? ''}
-              onChange={(event) => patch({ expression: event.target.value })}
-            />
-          </label>
-        </>
+      {node.operator.kind === 'external' && (
+        <section className="inspector-section">
+          <h3>External provider</h3>
+          <p className="muted">
+            {node.operator.provider} · {node.operator.name} · v{node.operator.version}
+          </p>
+        </section>
       )}
 
       <section className="inspector-section">
         <h3>Registered UDFs</h3>
         {matchingUdfs.length === 0 && <p className="muted">No compatible UDFs installed.</p>}
         {matchingUdfs.map((entry) => {
-          const name = value(entry, 'name');
-          const version = value(entry, 'version');
-          const checked = node.udfs.some((reference) => reference.name === name && reference.version === version);
+          const operatorUdfs =
+            node.operator.kind === 'expression' || node.operator.kind === 'sql'
+              ? node.operator.udfs
+              : [];
+          const checked = operatorUdfs.some(
+            (reference) =>
+              reference.provider === entry.provider
+              && reference.name === entry.name
+              && reference.version === entry.version
+              && reference.kind === entry.kind,
+          );
           return (
-            <label className="udf-option" key={`${name}-${version}`}>
+            <label
+              className="udf-option"
+              key={`${entry.provider}-${entry.name}-${entry.version}-${entry.kind}`}
+            >
               <input
                 type="checkbox"
                 checked={checked}
-                onChange={(event) => toggleUdf(name, version, event.target.checked)}
+                onChange={(event) => toggleUdf(entry, event.target.checked)}
               />
               <span>
-                <strong>{name}</strong>
-                <small>v{version} · {value(entry, 'description')}</small>
+                <strong>{entry.name}</strong>
+                <small>
+                  {entry.provider} · v{entry.version} · {entry.signature.return_type}
+                </small>
               </span>
             </label>
           );
@@ -171,14 +221,16 @@ export function NodeInspector({ node, arrowTypes, udfs, onChange, onDelete }: No
               />
             </div>
           ))}
-          <div className="port-schema">
-            <span className="port-label">out · output</span>
-            <SchemaEditor
-              fields={schema('output', 'output')}
-              arrowTypes={arrowTypes}
-              onChange={(fields) => updateSchema('output', 'output', fields)}
-            />
-          </div>
+          {outputNames.map((name) => (
+            <div className="port-schema" key={name}>
+              <span className="port-label">out · {name}</span>
+              <SchemaEditor
+                fields={schema('output', name)}
+                arrowTypes={arrowTypes}
+                onChange={(fields) => updateSchema('output', name, fields)}
+              />
+            </div>
+          ))}
         </section>
       )}
 

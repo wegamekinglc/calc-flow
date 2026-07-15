@@ -1,13 +1,15 @@
 import type {
   CatalogResponse,
   CheckpointSummary,
-  ProjectConfig,
   ProjectCreateRequest,
+  ProjectDocument,
   ProjectSummary,
   RunRequest,
   RunResponse,
   ValidationReport,
 } from '../types';
+
+const API_PREFIX = '/api/v2';
 
 export class ApiError extends Error {
   constructor(
@@ -66,33 +68,43 @@ async function requestText(
 ): Promise<{ document: string; filename: string | null }> {
   const result = await response(path, init);
   const disposition = result.headers.get('Content-Disposition');
-  const filename = disposition?.match(/filename="([^"]+)"/)?.[1] ?? null;
+  const extended = disposition?.match(/filename\*\s*=\s*([^;]+)/i)?.[1]
+    .trim()
+    .replace(/^"|"$/g, '');
+  let filename: string | null = null;
+  if (extended) {
+    const encoded = extended.match(/^UTF-8''(.+)$/i)?.[1];
+    if (encoded) {
+      try {
+        filename = decodeURIComponent(encoded);
+      } catch {
+        // Fall through to the quoted filename for malformed percent encoding.
+      }
+    }
+  }
+  filename ??= disposition?.match(/filename\s*=\s*"([^"]+)"/i)?.[1] ?? null;
   return { document: await result.text(), filename };
 }
 
 export const api = {
-  catalog: () => request<CatalogResponse>('/api/v1/catalog'),
-  projects: () => request<ProjectSummary[]>('/api/v1/projects'),
-  createProject: (project: ProjectConfig | ProjectCreateRequest) => {
-    const draft = 'id' in project
-      ? (({ id: _id, ...content }) => content)(project)
-      : project;
-    return request<ProjectConfig>('/api/v1/projects', {
+  catalog: () => request<CatalogResponse>(`${API_PREFIX}/catalog`),
+  projects: () => request<ProjectSummary[]>(`${API_PREFIX}/projects`),
+  createProject: (project: ProjectCreateRequest) =>
+    request<ProjectDocument>(`${API_PREFIX}/projects`, {
       method: 'POST',
-      body: JSON.stringify(draft),
-    });
-  },
-  project: (id: string) => request<ProjectConfig>(`/api/v1/projects/${id}`),
-  saveProject: (project: ProjectConfig) =>
-    request<ProjectConfig>(`/api/v1/projects/${project.id}`, {
+      body: JSON.stringify(project),
+    }),
+  project: (id: string) => request<ProjectDocument>(`${API_PREFIX}/projects/${id}`),
+  saveProject: (project: ProjectDocument) =>
+    request<ProjectDocument>(`${API_PREFIX}/projects/${project.id}`, {
       method: 'PUT',
       body: JSON.stringify(project),
     }),
   deleteProject: (id: string) =>
-    request<void>(`/api/v1/projects/${id}`, { method: 'DELETE' }),
+    request<void>(`${API_PREFIX}/projects/${id}`, { method: 'DELETE' }),
   importProject: (document: string, format: 'json' | 'yaml', replace = false) =>
-    request<ProjectConfig>(
-      `/api/v1/projects/import?format=${format}&replace=${String(replace)}`,
+    request<ProjectDocument>(
+      `${API_PREFIX}/projects/import?format=${format}&replace=${String(replace)}`,
       {
         method: 'POST',
         headers: {
@@ -102,23 +114,23 @@ export const api = {
       },
     ),
   exportProject: (id: string, format: 'json' | 'yaml') =>
-    requestText(`/api/v1/projects/${id}/export?format=${format}`),
+    requestText(`${API_PREFIX}/projects/${id}/export?format=${format}`),
   validateProject: (id: string) =>
-    request<ValidationReport>(`/api/v1/projects/${id}/validate`, {
+    request<ValidationReport>(`${API_PREFIX}/projects/${id}/validate`, {
       method: 'POST',
     }),
   checkpoint: (id: string) =>
-    request<CheckpointSummary>(`/api/v1/projects/${id}/checkpoint`),
+    request<CheckpointSummary>(`${API_PREFIX}/projects/${id}/checkpoint`),
   resetCheckpoint: (id: string) =>
-    request<CheckpointSummary>(`/api/v1/projects/${id}/checkpoint`, {
+    request<CheckpointSummary>(`${API_PREFIX}/projects/${id}/checkpoint`, {
       method: 'DELETE',
     }),
   runProject: (id: string, run: RunRequest) =>
-    request<RunResponse>(`/api/v1/projects/${id}/runs`, {
+    request<RunResponse>(`${API_PREFIX}/projects/${id}/runs`, {
       method: 'POST',
       body: JSON.stringify(run),
     }),
-  run: (id: string) => request<RunResponse>(`/api/v1/runs/${id}`),
+  run: (id: string) => request<RunResponse>(`${API_PREFIX}/runs/${id}`),
   cancelRun: (id: string) =>
-    request<RunResponse>(`/api/v1/runs/${id}`, { method: 'DELETE' }),
+    request<RunResponse>(`${API_PREFIX}/runs/${id}`, { method: 'DELETE' }),
 };

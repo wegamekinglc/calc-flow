@@ -4,7 +4,7 @@
  */
 
 export interface paths {
-    "/api/v1/catalog": {
+    "/api/v2/catalog": {
         parameters: {
             query?: never;
             header?: never;
@@ -12,7 +12,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Catalog */
-        get: operations["get_catalog_api_v1_catalog_get"];
+        get: operations["get_catalog_api_v2_catalog_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -21,7 +21,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/projects": {
+    "/api/v2/projects": {
         parameters: {
             query?: never;
             header?: never;
@@ -29,17 +29,17 @@ export interface paths {
             cookie?: never;
         };
         /** List Projects */
-        get: operations["list_projects_api_v1_projects_get"];
+        get: operations["list_projects_api_v2_projects_get"];
         put?: never;
         /** Create Project */
-        post: operations["create_project_api_v1_projects_post"];
+        post: operations["create_project_api_v2_projects_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/projects/import": {
+    "/api/v2/projects/import": {
         parameters: {
             query?: never;
             header?: never;
@@ -49,14 +49,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Import Project */
-        post: operations["import_project_api_v1_projects_import_post"];
+        post: operations["import_project_api_v2_projects_import_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/projects/{project_id}": {
+    "/api/v2/projects/{project_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -64,18 +64,18 @@ export interface paths {
             cookie?: never;
         };
         /** Get Project */
-        get: operations["get_project_api_v1_projects__project_id__get"];
+        get: operations["get_project_api_v2_projects__project_id__get"];
         /** Put Project */
-        put: operations["put_project_api_v1_projects__project_id__put"];
+        put: operations["put_project_api_v2_projects__project_id__put"];
         post?: never;
         /** Delete Project */
-        delete: operations["delete_project_api_v1_projects__project_id__delete"];
+        delete: operations["delete_project_api_v2_projects__project_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/projects/{project_id}/checkpoint": {
+    "/api/v2/projects/{project_id}/checkpoint": {
         parameters: {
             query?: never;
             header?: never;
@@ -83,17 +83,17 @@ export interface paths {
             cookie?: never;
         };
         /** Get Project Checkpoint */
-        get: operations["get_project_checkpoint_api_v1_projects__project_id__checkpoint_get"];
+        get: operations["get_project_checkpoint_api_v2_projects__project_id__checkpoint_get"];
         put?: never;
         post?: never;
-        /** Reset Project Checkpoint */
-        delete: operations["reset_project_checkpoint_api_v1_projects__project_id__checkpoint_delete"];
+        /** Delete Project Checkpoint */
+        delete: operations["delete_project_checkpoint_api_v2_projects__project_id__checkpoint_delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/projects/{project_id}/export": {
+    "/api/v2/projects/{project_id}/export": {
         parameters: {
             query?: never;
             header?: never;
@@ -101,7 +101,7 @@ export interface paths {
             cookie?: never;
         };
         /** Export Project */
-        get: operations["export_project_api_v1_projects__project_id__export_get"];
+        get: operations["export_project_api_v2_projects__project_id__export_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -110,7 +110,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/projects/{project_id}/runs": {
+    "/api/v2/projects/{project_id}/runs": {
         parameters: {
             query?: never;
             header?: never;
@@ -120,14 +120,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Create Run */
-        post: operations["create_run_api_v1_projects__project_id__runs_post"];
+        post: operations["create_run_api_v2_projects__project_id__runs_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/projects/{project_id}/validate": {
+    "/api/v2/projects/{project_id}/validate": {
         parameters: {
             query?: never;
             header?: never;
@@ -137,14 +137,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Validate Stored Project */
-        post: operations["validate_stored_project_api_v1_projects__project_id__validate_post"];
+        post: operations["validate_stored_project_api_v2_projects__project_id__validate_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/runs/{run_id}": {
+    "/api/v2/runs/{run_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -152,17 +152,17 @@ export interface paths {
             cookie?: never;
         };
         /** Get Run */
-        get: operations["get_run_api_v1_runs__run_id__get"];
+        get: operations["get_run_api_v2_runs__run_id__get"];
         put?: never;
         post?: never;
         /** Cancel Run */
-        delete: operations["cancel_run_api_v1_runs__run_id__delete"];
+        delete: operations["cancel_run_api_v2_runs__run_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/runs/{run_id}/events": {
+    "/api/v2/runs/{run_id}/events": {
         parameters: {
             query?: never;
             header?: never;
@@ -170,7 +170,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Run Events */
-        get: operations["get_run_events_api_v1_runs__run_id__events_get"];
+        get: operations["get_run_events_api_v2_runs__run_id__events_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -179,7 +179,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/schema/project": {
+    "/api/v2/schema/project": {
         parameters: {
             query?: never;
             header?: never;
@@ -187,7 +187,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Project Schema */
-        get: operations["get_project_schema_api_v1_schema_project_get"];
+        get: operations["get_project_schema_api_v2_schema_project_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -200,42 +200,6 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /** ArrowFieldConfig */
-        ArrowFieldConfig: {
-            /** Name */
-            name: string;
-            /**
-             * Nullable
-             * @default true
-             */
-            nullable: boolean;
-            /** Type */
-            type: string;
-        };
-        /**
-         * BatchKind
-         * @enum {string}
-         */
-        BatchKind: "table" | "array";
-        /** CatalogResponse */
-        CatalogResponse: {
-            /** Arrow Types */
-            arrow_types: string[];
-            /** Config Format Version */
-            config_format_version: string;
-            /** Limits */
-            limits: {
-                [key: string]: components["schemas"]["JSONValue-Output"];
-            };
-            /** Operators */
-            operators: {
-                [key: string]: components["schemas"]["JSONValue-Output"];
-            }[];
-            /** Udfs */
-            udfs: {
-                [key: string]: components["schemas"]["JSONValue-Output"];
-            }[];
-        };
         /** CheckpointSummary */
         CheckpointSummary: {
             /** Compatible */
@@ -250,305 +214,40 @@ export interface components {
             pipeline_name: string;
             /** Sequence */
             sequence?: number | null;
-            source_cursor?: components["schemas"]["JSONValue-Output"];
+            source_cursor?: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
             /**
              * State Nodes
              * @default []
              */
             state_nodes: string[];
         };
-        /** DataFusionConfig */
-        DataFusionConfig: {
-            /**
-             * Batch Size
-             * @default 8192
-             */
-            batch_size: number;
-            /**
-             * Repartition Aggregations
-             * @default true
-             */
-            repartition_aggregations: boolean;
-            /**
-             * Repartition Joins
-             * @default true
-             */
-            repartition_joins: boolean;
-            /**
-             * Repartition Sorts
-             * @default true
-             */
-            repartition_sorts: boolean;
-            /**
-             * Repartition Windows
-             * @default true
-             */
-            repartition_windows: boolean;
-            /**
-             * Target Partitions
-             * @default 1
-             */
-            target_partitions: number;
-        };
-        /** DataSourceConfig */
-        "DataSourceConfig-Input": {
-            data: components["schemas"]["JSONValue-Input"];
-            format: components["schemas"]["InputFormat"];
-            /** Id */
-            id: string;
-            /**
-             * Input Name
-             * @default input
-             */
-            input_name: string;
-            /** Source Id */
-            source_id?: string | null;
-        };
-        /** DataSourceConfig */
-        "DataSourceConfig-Output": {
-            data: components["schemas"]["JSONValue-Output"];
-            format: components["schemas"]["InputFormat"];
-            /** Id */
-            id: string;
-            /**
-             * Input Name
-             * @default input
-             */
-            input_name: string;
-            /** Source Id */
-            source_id?: string | null;
-        };
-        /** EdgeConfig */
-        EdgeConfig: {
-            /** Source Node */
-            source_node: string;
-            /**
-             * Source Port
-             * @default output
-             */
-            source_port: string;
-            /** Target Node */
-            target_node: string;
-            /**
-             * Target Port
-             * @default input
-             */
-            target_port: string;
-        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
-        /**
-         * InputFormat
-         * @enum {string}
-         */
-        InputFormat: "inline_json" | "csv" | "json" | "arrow_ipc";
         /** InputPayload */
         InputPayload: {
-            data: components["schemas"]["JSONValue-Input"];
-            format: components["schemas"]["InputFormat"];
+            data: components["schemas"]["calc_flow_studio__models__JSONValue-Input"];
+            /**
+             * Format
+             * @enum {string}
+             */
+            format: "records" | "columns" | "arrow_ipc";
             /** Source Id */
             source_id?: string | null;
         };
-        "JSONValue-Input": boolean | number | string | components["schemas"]["JSONValue-Input"][] | {
-            [key: string]: components["schemas"]["JSONValue-Input"];
-        } | null;
-        "JSONValue-Output": boolean | number | string | components["schemas"]["JSONValue-Output"][] | {
-            [key: string]: components["schemas"]["JSONValue-Output"];
-        } | null;
-        /** NodeConfig */
-        NodeConfig: {
-            /** Backend */
-            backend?: ("numpy" | "jax") | null;
-            /** Expression */
-            expression?: string | null;
-            /** Filter Expression */
-            filter_expression?: string | null;
-            /** Id */
-            id: string;
-            /**
-             * Input Ports
-             * @default []
-             */
-            input_ports: components["schemas"]["PortConfig"][];
-            /**
-             * Inputs
-             * @default []
-             */
-            inputs: string[];
-            kind: components["schemas"]["NodeKind"];
-            /**
-             * Output Ports
-             * @default []
-             */
-            output_ports: components["schemas"]["PortConfig"][];
-            /**
-             * @default {
-             *       "x": 0,
-             *       "y": 0
-             *     }
-             */
-            position: components["schemas"]["PositionConfig"];
-            /** Query */
-            query?: string | null;
-            /**
-             * Select
-             * @default []
-             */
-            select: string[];
-            /**
-             * Udfs
-             * @default []
-             */
-            udfs: components["schemas"]["UdfReferenceConfig"][];
-        };
-        /**
-         * NodeKind
-         * @enum {string}
-         */
-        NodeKind: "expression" | "sql" | "array_expression";
-        /** PipelineConfig */
-        PipelineConfig: {
-            /**
-             * @default {
-             *       "batch_size": 8192,
-             *       "repartition_aggregations": true,
-             *       "repartition_joins": true,
-             *       "repartition_sorts": true,
-             *       "repartition_windows": true,
-             *       "target_partitions": 1
-             *     }
-             */
-            datafusion: components["schemas"]["DataFusionConfig"];
-            /**
-             * Edges
-             * @default []
-             */
-            edges: components["schemas"]["EdgeConfig"][];
-            /** Id */
-            id: string;
-            /** Name */
-            name: string;
-            /** Nodes */
-            nodes: components["schemas"]["NodeConfig"][];
-        };
-        /** PortConfig */
-        PortConfig: {
-            kind: components["schemas"]["BatchKind"];
-            /** Name */
-            name: string;
-            /**
-             * Required
-             * @default true
-             */
-            required: boolean;
-            /** Schema */
-            schema?: components["schemas"]["ArrowFieldConfig"][] | null;
-        };
-        /** PositionConfig */
-        PositionConfig: {
-            /**
-             * X
-             * @default 0
-             */
-            x: number;
-            /**
-             * Y
-             * @default 0
-             */
-            y: number;
-        };
-        /** ProjectConfig */
-        "ProjectConfig-Input": {
-            /**
-             * Data Sources
-             * @default []
-             */
-            data_sources: components["schemas"]["DataSourceConfig-Input"][];
-            /**
-             * Description
-             * @default
-             */
-            description: string;
-            /**
-             * Format Version
-             * @default 1
-             * @constant
-             */
-            format_version: "1";
-            /** Id */
-            id: string;
-            /** Name */
-            name: string;
-            pipeline: components["schemas"]["PipelineConfig"];
-            /**
-             * @default {
-             *       "max_input_bytes": 10485760,
-             *       "max_rows": 100000,
-             *       "memory_limit_mb": 512,
-             *       "output_rows": 1000,
-             *       "timeout_seconds": 30
-             *     }
-             */
-            run_options: components["schemas"]["RunOptions"];
-        };
-        /** ProjectConfig */
-        "ProjectConfig-Output": {
-            /**
-             * Data Sources
-             * @default []
-             */
-            data_sources: components["schemas"]["DataSourceConfig-Output"][];
-            /**
-             * Description
-             * @default
-             */
-            description: string;
-            /**
-             * Format Version
-             * @default 1
-             * @constant
-             */
-            format_version: "1";
-            /** Id */
-            id: string;
-            /** Name */
-            name: string;
-            pipeline: components["schemas"]["PipelineConfig"];
-            /**
-             * @default {
-             *       "max_input_bytes": 10485760,
-             *       "max_rows": 100000,
-             *       "memory_limit_mb": 512,
-             *       "output_rows": 1000,
-             *       "timeout_seconds": 30
-             *     }
-             */
-            run_options: components["schemas"]["RunOptions"];
-        };
-        /** ProjectCreateRequest */
+        /** Calc Flow Project V2 */
         ProjectCreateRequest: {
-            /**
-             * Data Sources
-             * @default []
-             */
-            data_sources: components["schemas"]["DataSourceConfig-Input"][];
-            /**
-             * Description
-             * @default
-             */
+            /** @default [] */
+            data_sources: components["schemas"]["ProjectCreateRequest"]["$defs"]["DataSourceSpec"][];
+            /** @default  */
             description: string;
-            /**
-             * Format Version
-             * @default 1
-             * @constant
-             */
-            format_version: "1";
-            /** Name */
+            /** @constant */
+            format_version: 2;
+            id: string;
             name: string;
-            pipeline: components["schemas"]["PipelineConfig"];
+            pipeline: components["schemas"]["ProjectCreateRequest"]["$defs"]["PipelineSpec"];
             /**
              * @default {
              *       "max_input_bytes": 10485760,
@@ -558,7 +257,299 @@ export interface components {
              *       "timeout_seconds": 30
              *     }
              */
-            run_options: components["schemas"]["RunOptions"];
+            run_options: components["schemas"]["ProjectCreateRequest"]["$defs"]["RunOptions"];
+            $defs: {
+                ArrowFieldSpec: {
+                    data_type: string;
+                    name: string;
+                    /** @default true */
+                    nullable: boolean;
+                };
+                /** @enum {string} */
+                BatchKind: "table" | "array";
+                DataFusionConfig: {
+                    /**
+                     * Format: uint
+                     * @default 8192
+                     */
+                    batch_size: number;
+                    /**
+                     * Format: uint
+                     * @default 1
+                     */
+                    target_partitions: number;
+                };
+                DataSourceSpec: {
+                    data: unknown;
+                    format: string;
+                    id: string;
+                    input: string;
+                };
+                EdgeSpec: {
+                    source_node: string;
+                    /** @default output */
+                    source_port: string;
+                    target_node: string;
+                    /** @default input */
+                    target_port: string;
+                };
+                NodeSpec: {
+                    id: string;
+                    /** @default [] */
+                    input_ports: components["schemas"]["ProjectCreateRequest"]["$defs"]["PortSpec"][];
+                    operator: components["schemas"]["ProjectCreateRequest"]["$defs"]["OperatorSpec"];
+                    /** @default [] */
+                    output_ports: components["schemas"]["ProjectCreateRequest"]["$defs"]["PortSpec"][];
+                    position?: components["schemas"]["ProjectCreateRequest"]["$defs"]["PositionSpec"] | null;
+                };
+                OperatorSpec: {
+                    /** @default  */
+                    expression: string;
+                    filter?: string | null;
+                    /** @constant */
+                    kind: "expression";
+                    /** @default [] */
+                    select: string[];
+                    /** @default [] */
+                    udfs: components["schemas"]["ProjectCreateRequest"]["$defs"]["UdfReference"][];
+                } | {
+                    aliases: string[];
+                    /** @constant */
+                    kind: "sql";
+                    query: string;
+                    /** @default [] */
+                    udfs: components["schemas"]["ProjectCreateRequest"]["$defs"]["UdfReference"][];
+                } | {
+                    /** @constant */
+                    kind: "external";
+                    name: string;
+                    /** @default {} */
+                    options: {
+                        [key: string]: unknown;
+                    };
+                    provider: string;
+                    version: string;
+                };
+                PipelineSpec: {
+                    /**
+                     * @default {
+                     *       "batch_size": 8192,
+                     *       "target_partitions": 1
+                     *     }
+                     */
+                    datafusion: components["schemas"]["ProjectCreateRequest"]["$defs"]["DataFusionConfig"];
+                    /** @default [] */
+                    edges: components["schemas"]["ProjectCreateRequest"]["$defs"]["EdgeSpec"][];
+                    name: string;
+                    nodes: components["schemas"]["ProjectCreateRequest"]["$defs"]["NodeSpec"][];
+                };
+                PortSpec: {
+                    kind: components["schemas"]["ProjectCreateRequest"]["$defs"]["BatchKind"];
+                    name: string;
+                    /** @default true */
+                    required: boolean;
+                    /** @default [] */
+                    schema: components["schemas"]["ProjectCreateRequest"]["$defs"]["ArrowFieldSpec"][];
+                };
+                PositionSpec: {
+                    /** Format: double */
+                    x: number;
+                    /** Format: double */
+                    y: number;
+                };
+                RunOptions: {
+                    /**
+                     * Format: uint
+                     * @default 10485760
+                     */
+                    max_input_bytes: number;
+                    /**
+                     * Format: uint
+                     * @default 100000
+                     */
+                    max_rows: number;
+                    /**
+                     * Format: uint
+                     * @default 512
+                     */
+                    memory_limit_mb: number;
+                    /**
+                     * Format: uint
+                     * @default 1000
+                     */
+                    output_rows: number;
+                    /**
+                     * Format: uint64
+                     * @default 30
+                     */
+                    timeout_seconds: number;
+                };
+                /** @enum {string} */
+                UdfKind: "data_fusion_scalar" | "external_scalar" | "external_array";
+                UdfReference: {
+                    kind: components["schemas"]["ProjectCreateRequest"]["$defs"]["UdfKind"];
+                    name: string;
+                    provider: string;
+                    version: string;
+                };
+            };
+        };
+        /** Calc Flow Project V2 */
+        ProjectDocument: {
+            /** @default [] */
+            data_sources: components["schemas"]["ProjectDocument"]["$defs"]["DataSourceSpec"][];
+            /** @default  */
+            description: string;
+            /** @constant */
+            format_version: 2;
+            id: string;
+            name: string;
+            pipeline: components["schemas"]["ProjectDocument"]["$defs"]["PipelineSpec"];
+            /**
+             * @default {
+             *       "max_input_bytes": 10485760,
+             *       "max_rows": 100000,
+             *       "memory_limit_mb": 512,
+             *       "output_rows": 1000,
+             *       "timeout_seconds": 30
+             *     }
+             */
+            run_options: components["schemas"]["ProjectDocument"]["$defs"]["RunOptions"];
+            $defs: {
+                ArrowFieldSpec: {
+                    data_type: string;
+                    name: string;
+                    /** @default true */
+                    nullable: boolean;
+                };
+                /** @enum {string} */
+                BatchKind: "table" | "array";
+                DataFusionConfig: {
+                    /**
+                     * Format: uint
+                     * @default 8192
+                     */
+                    batch_size: number;
+                    /**
+                     * Format: uint
+                     * @default 1
+                     */
+                    target_partitions: number;
+                };
+                DataSourceSpec: {
+                    data: unknown;
+                    format: string;
+                    id: string;
+                    input: string;
+                };
+                EdgeSpec: {
+                    source_node: string;
+                    /** @default output */
+                    source_port: string;
+                    target_node: string;
+                    /** @default input */
+                    target_port: string;
+                };
+                NodeSpec: {
+                    id: string;
+                    /** @default [] */
+                    input_ports: components["schemas"]["ProjectDocument"]["$defs"]["PortSpec"][];
+                    operator: components["schemas"]["ProjectDocument"]["$defs"]["OperatorSpec"];
+                    /** @default [] */
+                    output_ports: components["schemas"]["ProjectDocument"]["$defs"]["PortSpec"][];
+                    position?: components["schemas"]["ProjectDocument"]["$defs"]["PositionSpec"] | null;
+                };
+                OperatorSpec: {
+                    /** @default  */
+                    expression: string;
+                    filter?: string | null;
+                    /** @constant */
+                    kind: "expression";
+                    /** @default [] */
+                    select: string[];
+                    /** @default [] */
+                    udfs: components["schemas"]["ProjectDocument"]["$defs"]["UdfReference"][];
+                } | {
+                    aliases: string[];
+                    /** @constant */
+                    kind: "sql";
+                    query: string;
+                    /** @default [] */
+                    udfs: components["schemas"]["ProjectDocument"]["$defs"]["UdfReference"][];
+                } | {
+                    /** @constant */
+                    kind: "external";
+                    name: string;
+                    /** @default {} */
+                    options: {
+                        [key: string]: unknown;
+                    };
+                    provider: string;
+                    version: string;
+                };
+                PipelineSpec: {
+                    /**
+                     * @default {
+                     *       "batch_size": 8192,
+                     *       "target_partitions": 1
+                     *     }
+                     */
+                    datafusion: components["schemas"]["ProjectDocument"]["$defs"]["DataFusionConfig"];
+                    /** @default [] */
+                    edges: components["schemas"]["ProjectDocument"]["$defs"]["EdgeSpec"][];
+                    name: string;
+                    nodes: components["schemas"]["ProjectDocument"]["$defs"]["NodeSpec"][];
+                };
+                PortSpec: {
+                    kind: components["schemas"]["ProjectDocument"]["$defs"]["BatchKind"];
+                    name: string;
+                    /** @default true */
+                    required: boolean;
+                    /** @default [] */
+                    schema: components["schemas"]["ProjectDocument"]["$defs"]["ArrowFieldSpec"][];
+                };
+                PositionSpec: {
+                    /** Format: double */
+                    x: number;
+                    /** Format: double */
+                    y: number;
+                };
+                RunOptions: {
+                    /**
+                     * Format: uint
+                     * @default 10485760
+                     */
+                    max_input_bytes: number;
+                    /**
+                     * Format: uint
+                     * @default 100000
+                     */
+                    max_rows: number;
+                    /**
+                     * Format: uint
+                     * @default 512
+                     */
+                    memory_limit_mb: number;
+                    /**
+                     * Format: uint
+                     * @default 1000
+                     */
+                    output_rows: number;
+                    /**
+                     * Format: uint64
+                     * @default 30
+                     */
+                    timeout_seconds: number;
+                };
+                /** @enum {string} */
+                UdfKind: "data_fusion_scalar" | "external_scalar" | "external_array";
+                UdfReference: {
+                    kind: components["schemas"]["ProjectDocument"]["$defs"]["UdfKind"];
+                    name: string;
+                    provider: string;
+                    version: string;
+                };
+            };
         };
         /** ProjectSummary */
         ProjectSummary: {
@@ -624,7 +615,7 @@ export interface components {
             project_id: string;
             /** Result */
             result?: {
-                [key: string]: components["schemas"]["JSONValue-Output"];
+                [key: string]: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
             } | null;
             /** Started At */
             started_at?: string | null;
@@ -635,13 +626,6 @@ export interface components {
          * @enum {string}
          */
         RunStatus: "pending" | "running" | "completed" | "failed" | "cancelled" | "timed_out";
-        /** UdfReferenceConfig */
-        UdfReferenceConfig: {
-            /** Name */
-            name: string;
-            /** Version */
-            version: string;
-        };
         /** ValidationError */
         ValidationError: {
             /** Context */
@@ -655,42 +639,18 @@ export interface components {
             /** Error Type */
             type: string;
         };
-        /** ValidationIssue */
-        ValidationIssue: {
-            /** Code */
-            code: string;
-            /** Message */
-            message: string;
-            /** Path */
-            path?: string | null;
-        };
-        /** ValidationReport */
-        ValidationReport: {
-            /**
-             * Errors
-             * @default []
-             */
-            errors: components["schemas"]["ValidationIssue"][];
-            /** Fingerprint */
-            fingerprint?: string | null;
-            /**
-             * Graph Inputs
-             * @default []
-             */
-            graph_inputs: string[];
-            /**
-             * Graph Outputs
-             * @default []
-             */
-            graph_outputs: string[];
-            /** Valid */
-            valid: boolean;
-            /**
-             * Warnings
-             * @default []
-             */
-            warnings: components["schemas"]["ValidationIssue"][];
-        };
+        "calc_flow__config__JSONValue-Input": boolean | number | string | components["schemas"]["calc_flow__config__JSONValue-Input"][] | {
+            [key: string]: components["schemas"]["calc_flow__config__JSONValue-Input"];
+        } | null;
+        "calc_flow__config__JSONValue-Output": boolean | number | string | components["schemas"]["calc_flow__config__JSONValue-Output"][] | {
+            [key: string]: components["schemas"]["calc_flow__config__JSONValue-Output"];
+        } | null;
+        "calc_flow_studio__models__JSONValue-Input": boolean | number | string | components["schemas"]["calc_flow_studio__models__JSONValue-Input"][] | {
+            [key: string]: components["schemas"]["calc_flow_studio__models__JSONValue-Input"];
+        } | null;
+        "calc_flow_studio__models__JSONValue-Output": boolean | number | string | components["schemas"]["calc_flow_studio__models__JSONValue-Output"][] | {
+            [key: string]: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
+        } | null;
     };
     responses: never;
     parameters: never;
@@ -700,7 +660,7 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    get_catalog_api_v1_catalog_get: {
+    get_catalog_api_v2_catalog_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -715,12 +675,14 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["CatalogResponse"];
+                    "application/json": {
+                        [key: string]: unknown;
+                    }[];
                 };
             };
         };
     };
-    list_projects_api_v1_projects_get: {
+    list_projects_api_v2_projects_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -740,7 +702,7 @@ export interface operations {
             };
         };
     };
-    create_project_api_v1_projects_post: {
+    create_project_api_v2_projects_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -759,7 +721,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProjectConfig-Output"];
+                    "application/json": components["schemas"]["ProjectDocument"];
                 };
             };
             /** @description Validation Error */
@@ -773,7 +735,7 @@ export interface operations {
             };
         };
     };
-    import_project_api_v1_projects_import_post: {
+    import_project_api_v2_projects_import_post: {
         parameters: {
             query: {
                 format: string;
@@ -791,7 +753,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProjectConfig-Output"];
+                    "application/json": components["schemas"]["ProjectDocument"];
                 };
             };
             /** @description Validation Error */
@@ -805,7 +767,7 @@ export interface operations {
             };
         };
     };
-    get_project_api_v1_projects__project_id__get: {
+    get_project_api_v2_projects__project_id__get: {
         parameters: {
             query?: never;
             header?: never;
@@ -822,7 +784,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProjectConfig-Output"];
+                    "application/json": components["schemas"]["ProjectDocument"];
                 };
             };
             /** @description Validation Error */
@@ -836,7 +798,7 @@ export interface operations {
             };
         };
     };
-    put_project_api_v1_projects__project_id__put: {
+    put_project_api_v2_projects__project_id__put: {
         parameters: {
             query?: never;
             header?: never;
@@ -847,7 +809,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ProjectConfig-Input"];
+                "application/json": components["schemas"]["ProjectCreateRequest"];
             };
         };
         responses: {
@@ -857,7 +819,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProjectConfig-Output"];
+                    "application/json": components["schemas"]["ProjectDocument"];
                 };
             };
             /** @description Validation Error */
@@ -871,7 +833,7 @@ export interface operations {
             };
         };
     };
-    delete_project_api_v1_projects__project_id__delete: {
+    delete_project_api_v2_projects__project_id__delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -900,7 +862,7 @@ export interface operations {
             };
         };
     };
-    get_project_checkpoint_api_v1_projects__project_id__checkpoint_get: {
+    get_project_checkpoint_api_v2_projects__project_id__checkpoint_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -931,7 +893,7 @@ export interface operations {
             };
         };
     };
-    reset_project_checkpoint_api_v1_projects__project_id__checkpoint_delete: {
+    delete_project_checkpoint_api_v2_projects__project_id__checkpoint_delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -962,7 +924,7 @@ export interface operations {
             };
         };
     };
-    export_project_api_v1_projects__project_id__export_get: {
+    export_project_api_v2_projects__project_id__export_get: {
         parameters: {
             query?: {
                 format?: string;
@@ -995,7 +957,7 @@ export interface operations {
             };
         };
     };
-    create_run_api_v1_projects__project_id__runs_post: {
+    create_run_api_v2_projects__project_id__runs_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -1030,7 +992,7 @@ export interface operations {
             };
         };
     };
-    validate_stored_project_api_v1_projects__project_id__validate_post: {
+    validate_stored_project_api_v2_projects__project_id__validate_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -1047,7 +1009,9 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ValidationReport"];
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
             /** @description Validation Error */
@@ -1061,7 +1025,7 @@ export interface operations {
             };
         };
     };
-    get_run_api_v1_runs__run_id__get: {
+    get_run_api_v2_runs__run_id__get: {
         parameters: {
             query?: never;
             header?: never;
@@ -1092,7 +1056,7 @@ export interface operations {
             };
         };
     };
-    cancel_run_api_v1_runs__run_id__delete: {
+    cancel_run_api_v2_runs__run_id__delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -1123,7 +1087,7 @@ export interface operations {
             };
         };
     };
-    get_run_events_api_v1_runs__run_id__events_get: {
+    get_run_events_api_v2_runs__run_id__events_get: {
         parameters: {
             query?: never;
             header?: {
@@ -1156,7 +1120,7 @@ export interface operations {
             };
         };
     };
-    get_project_schema_api_v1_schema_project_get: {
+    get_project_schema_api_v2_schema_project_get: {
         parameters: {
             query?: never;
             header?: never;

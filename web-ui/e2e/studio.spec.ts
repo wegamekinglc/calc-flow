@@ -12,7 +12,7 @@ test('builds and runs a persisted DataFusion UDF graph without browser code', as
   await expect(page.getByText('Graph is valid')).toBeVisible();
 
   await page.getByRole('button', { name: /Run preview/ }).click({ force: true });
-  await expect(page.getByText('completed')).toBeVisible();
+  await expect(page.getByText('completed')).toBeVisible({ timeout: 20_000 });
   await expect(page.getByRole('columnheader', { name: /doubled/ })).toBeVisible();
   await page.getByText('Physical plan').click({ force: true });
   await expect(page.getByText('ProjectionExec')).toBeVisible();
@@ -20,19 +20,31 @@ test('builds and runs a persisted DataFusion UDF graph without browser code', as
   await expect(page.getByText('No stored checkpoint')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Benchmark comparison' })).toBeVisible();
 
-  const projects = await page.request.get('http://127.0.0.1:8765/api/v1/projects');
+  const projects = await page.request.get('http://127.0.0.1:8765/api/v2/projects');
   expect(projects.ok()).toBeTruthy();
   const [summary] = await projects.json();
   expect(summary.id).toMatch(/^project_[0-9a-f]{32}$/);
   const project = await page.request.get(
-    `http://127.0.0.1:8765/api/v1/projects/${summary.id}`,
+    `http://127.0.0.1:8765/api/v2/projects/${summary.id}`,
   );
   expect(project.ok()).toBeTruthy();
   const document = await project.json();
-  expect(document.pipeline.nodes[0].udfs).toEqual([
-    { name: 'double_value', version: '1' },
+  expect(document.format_version).toBe(2);
+  expect(document.pipeline.nodes[0].operator.udfs).toEqual([
+    {
+      provider: 'python',
+      name: 'double_value',
+      version: '1',
+      kind: 'data_fusion_scalar',
+    },
   ]);
   expect(JSON.stringify(document)).not.toContain('def double_value');
+
+  const validation = await page.request.post(
+    `http://127.0.0.1:8765/api/v2/projects/${summary.id}/validate`,
+  );
+  expect(validation.ok()).toBeTruthy();
+  expect(await validation.json()).toMatchObject({ valid: true, issues: [] });
 
   const downloadPromise = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Export JSON' }).click({ force: true });
@@ -52,6 +64,6 @@ test('builds and runs a persisted DataFusion UDF graph without browser code', as
   page.once('dialog', (dialog) => dialog.accept());
   await page.getByRole('button', { name: 'Delete', exact: true }).click({ force: true });
   await expect(page.getByText('Project deleted')).toBeVisible();
-  const remaining = await page.request.get('http://127.0.0.1:8765/api/v1/projects');
+  const remaining = await page.request.get('http://127.0.0.1:8765/api/v2/projects');
   expect(await remaining.json()).toEqual([]);
 });

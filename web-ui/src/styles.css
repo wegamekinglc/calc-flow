@@ -108,11 +108,11 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weig
 .react-flow__node-calculation { width: 168px !important; color: #e9f5f0; font: 600 11px 'SFMono-Regular', Consolas, ui-monospace, monospace; }
 .calculation-node { position: relative; padding: 13px; border: 1px solid #3e6459; border-radius: 11px; background: linear-gradient(145deg, #17332c, #10231f); box-shadow: 0 14px 35px #0005; }
 .calculation-node.sql { border-color: #88583a; }
-.calculation-node.array_expression { border-color: #61558f; }
+.calculation-node.external { border-color: #61558f; }
 .calculation-node.selected { outline: 2px solid var(--mint); outline-offset: 2px; }
 .calculation-node .node-kind { display: inline-block; margin-bottom: 8px; padding: 3px 5px; border-radius: 5px; color: #082019; background: var(--mint); font-size: 8px; }
 .calculation-node.sql .node-kind { background: var(--orange); }
-.calculation-node.array_expression .node-kind { background: var(--violet); }
+.calculation-node.external .node-kind { background: var(--violet); }
 .calculation-node strong, .calculation-node small { display: block; }
 .calculation-node small { margin-top: 5px; color: var(--muted); font-size: 7px; font-weight: 400; }
 .react-flow__handle { width: 9px !important; height: 9px !important; border: 2px solid #0a1816 !important; background: var(--mint) !important; }
@@ -125,7 +125,7 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weig
 .panel-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 16px; }
 .kind-chip, .status-pill { padding: 5px 7px; border: 1px solid #31705f; border-radius: 20px; color: var(--mint); background: var(--mint-deep); font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
 .kind-chip.sql { color: var(--orange); border-color: #74482f; background: #342318; }
-.kind-chip.array_expression { color: var(--violet); border-color: #574c7f; background: #25203a; }
+.kind-chip.external { color: var(--violet); border-color: #574c7f; background: #25203a; }
 .inspector > label { margin-bottom: 12px; }
 .inspector-section { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
 .inspector-section h3 { margin: 0 0 10px; font-size: 11px; }

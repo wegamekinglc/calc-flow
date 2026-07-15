@@ -72,7 +72,7 @@ describe('useRunEvents', () => {
     act(() => source.emit('completed'));
 
     await waitFor(() => expect(onUpdate).toHaveBeenCalledWith(run('completed')));
-    expect(source.url).toBe('/api/v1/runs/run-1/events');
+    expect(source.url).toBe('/api/v2/runs/run-1/events');
     expect(source.close).toHaveBeenCalledOnce();
   });
 

@@ -4,7 +4,7 @@ import type { NodeConfig } from '../types';
 
 export interface FlowNodeData extends Record<string, unknown> {
   label: string;
-  kind: NodeConfig['kind'];
+  kind: NodeConfig['operator']['kind'];
   inputPorts: string[];
   outputPorts: string[];
 }
@@ -23,7 +23,9 @@ export function CalculationNode({ data, selected }: NodeProps<CalculationFlowNod
           style={{ top: `${((index + 1) / (data.inputPorts.length + 1)) * 100}%` }}
         />
       ))}
-      <span className="node-kind">{data.kind === 'expression' ? 'ƒx' : data.kind === 'sql' ? 'SQL' : '[ ]'}</span>
+      <span className="node-kind">
+        {data.kind === 'expression' ? 'ƒx' : data.kind === 'sql' ? 'SQL' : 'EXT'}
+      </span>
       <strong>{data.label}</strong>
       <small>{data.inputPorts.join(' · ')} → {data.outputPorts.join(' · ')}</small>
       {data.outputPorts.map((port, index) => (
