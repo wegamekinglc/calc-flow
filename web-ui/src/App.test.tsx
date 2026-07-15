@@ -1,7 +1,8 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import App from './App';
+import App, { ARROW_TYPES, connectProject, flowNodeData } from './App';
+import { blankProject } from './types';
 
 const response = (body: unknown, status = 200) =>
   Promise.resolve(
@@ -25,6 +26,85 @@ const catalog = [
 afterEach(() => vi.unstubAllGlobals());
 
 describe('Calc Flow Studio', () => {
+  it('offers exactly the Arrow types accepted by the Rust runtime', () => {
+    expect(ARROW_TYPES).toEqual([
+      'bool',
+      'date32',
+      'date64',
+      'float32',
+      'float64',
+      'int8',
+      'int16',
+      'int32',
+      'int64',
+      'large_string',
+      'string',
+      'time32[s]',
+      'time64[us]',
+      'timestamp[ms]',
+      'timestamp[us]',
+      'uint8',
+      'uint16',
+      'uint32',
+      'uint64',
+    ]);
+  });
+
+  it('maps external graph handles from configured ports without defaults', () => {
+    const base = blankProject().pipeline.nodes[0];
+    const source = {
+      ...base,
+      input_ports: [],
+      output_ports: [{ name: 'rows', kind: 'table' as const, required: true, schema: [] }],
+      operator: {
+        kind: 'external' as const,
+        provider: 'trusted',
+        name: 'source',
+        version: '1',
+        options: {},
+      },
+    };
+    const sink = {
+      ...source,
+      id: 'sink',
+      input_ports: [{ name: 'rows', kind: 'table' as const, required: true, schema: [] }],
+      output_ports: [],
+      operator: { ...source.operator, name: 'sink' },
+    };
+
+    expect(flowNodeData(source)).toMatchObject({
+      inputPorts: [],
+      outputPorts: ['rows'],
+    });
+    expect(flowNodeData(sink)).toMatchObject({
+      inputPorts: ['rows'],
+      outputPorts: [],
+    });
+  });
+
+  it('suppresses duplicate graph connections without mutating the project', () => {
+    const project = blankProject();
+    const connection = {
+      source: 'source',
+      target: 'calculate',
+      sourceHandle: 'output',
+      targetHandle: 'input',
+    };
+
+    const connected = connectProject(project, connection);
+    const reconnected = connectProject(connected, connection);
+
+    expect(project.pipeline.edges).toEqual([]);
+    expect(reconnected.pipeline.edges).toEqual([
+      {
+        source_node: 'source',
+        target_node: 'calculate',
+        source_port: 'output',
+        target_port: 'input',
+      },
+    ]);
+  });
+
   it('loads the catalog and adds a DataFusion SQL node', async () => {
     vi.stubGlobal(
       'fetch',

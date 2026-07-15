@@ -18,6 +18,7 @@ import { api } from './api/client';
 import {
   CalculationNode,
   type CalculationFlowNode,
+  type FlowNodeData,
 } from './components/CalculationNode';
 import { BenchmarkComparison } from './components/BenchmarkComparison';
 import { CheckpointControl } from './components/CheckpointControl';
@@ -41,24 +42,27 @@ import {
 type FlowNode = CalculationFlowNode;
 
 const nodeTypes: NodeTypes = { calculation: CalculationNode };
-const arrowTypes = [
-  'boolean',
+export const ARROW_TYPES = [
+  'bool',
+  'date32',
+  'date64',
+  'float32',
+  'float64',
   'int8',
   'int16',
   'int32',
   'int64',
+  'large_string',
+  'string',
+  'time32[s]',
+  'time64[us]',
+  'timestamp[ms]',
+  'timestamp[us]',
   'uint8',
   'uint16',
   'uint32',
   'uint64',
-  'float32',
-  'float64',
-  'string',
-  'binary',
-  'date32',
-  'date64',
-  'timestamp',
-];
+] as const;
 type EditableNodeKind = Extract<NodeConfig['operator']['kind'], 'expression' | 'sql'>;
 type ProjectUpdate = EditableProject | ((current: EditableProject) => EditableProject);
 
@@ -109,6 +113,51 @@ const makeNode = (
       select: [],
       filter: null,
       udfs: [],
+    },
+  };
+};
+
+export const flowNodeData = (node: NodeConfig): FlowNodeData => ({
+  label: node.id,
+  kind: node.operator.kind,
+  inputPorts: node.input_ports.length
+    ? node.input_ports.map((port) => port.name)
+    : node.operator.kind === 'sql'
+      ? node.operator.aliases
+      : node.operator.kind === 'expression'
+        ? ['input']
+        : [],
+  outputPorts: node.output_ports.length
+    ? node.output_ports.map((port) => port.name)
+    : node.operator.kind === 'external'
+      ? []
+      : ['output'],
+});
+
+export const connectProject = (
+  project: EditableProject,
+  connection: Connection,
+): EditableProject => {
+  if (!connection.source || !connection.target) return project;
+  const edge = {
+    source_node: connection.source,
+    target_node: connection.target,
+    source_port: connection.sourceHandle ?? 'output',
+    target_port: connection.targetHandle ?? 'input',
+  };
+  const duplicate = project.pipeline.edges.some(
+    (current) =>
+      current.source_node === edge.source_node
+      && current.target_node === edge.target_node
+      && current.source_port === edge.source_port
+      && current.target_port === edge.target_port,
+  );
+  if (duplicate) return project;
+  return {
+    ...project,
+    pipeline: {
+      ...project.pipeline,
+      edges: [...project.pipeline.edges, edge],
     },
   };
 };
@@ -186,18 +235,7 @@ export default function App() {
         id: node.id,
         type: 'calculation',
         position: node.position ?? { x: 0, y: 0 },
-        data: {
-          label: node.id,
-          kind: node.operator.kind,
-          inputPorts: node.input_ports.length
-            ? node.input_ports.map((port) => port.name)
-            : node.operator.kind === 'sql'
-              ? node.operator.aliases
-              : ['input'],
-          outputPorts: node.output_ports.length
-            ? node.output_ports.map((port) => port.name)
-            : ['output'],
-        },
+        data: flowNodeData(node),
         className: `flow-node ${node.operator.kind}`,
         selected: selectedNodeId === node.id,
       })),
@@ -261,22 +299,7 @@ export default function App() {
 
   const onConnect = useCallback(
     (connection: Connection) => {
-      if (!connection.source || !connection.target) return;
-      updateProject((current) => ({
-        ...current,
-        pipeline: {
-          ...current.pipeline,
-          edges: [
-            ...current.pipeline.edges,
-            {
-              source_node: connection.source,
-              target_node: connection.target,
-              source_port: connection.sourceHandle ?? 'output',
-              target_port: connection.targetHandle ?? 'input',
-            },
-          ],
-        },
-      }));
+      updateProject((current) => connectProject(current, connection));
     },
     [updateProject],
   );
@@ -611,7 +634,7 @@ export default function App() {
         {selectedNode ? (
           <NodeInspector
             node={selectedNode}
-            arrowTypes={arrowTypes}
+            arrowTypes={ARROW_TYPES}
             udfs={catalog ?? []}
             onChange={updateNode}
             onDelete={deleteSelectedNode}

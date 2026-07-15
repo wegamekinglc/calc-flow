@@ -10,7 +10,7 @@ import type {
 
 interface NodeInspectorProps {
   node: NodeConfig;
-  arrowTypes: string[];
+  arrowTypes: readonly string[];
   udfs: UdfCatalogEntry[];
   onChange: (node: NodeConfig) => void;
   onDelete: () => void;
@@ -46,10 +46,14 @@ export function NodeInspector({ node, arrowTypes, udfs, onChange, onDelete }: No
     ? declaredInputs
     : node.operator.kind === 'sql'
       ? node.operator.aliases
-      : ['input'];
+      : node.operator.kind === 'expression'
+        ? ['input']
+        : [];
   const outputNames = node.output_ports.length
     ? node.output_ports.map((port) => port.name)
-    : ['output'];
+    : node.operator.kind === 'external'
+      ? []
+      : ['output'];
   const isTable =
     node.operator.kind !== 'external'
     || ![...node.input_ports, ...node.output_ports].some((port) => port.kind === 'array');

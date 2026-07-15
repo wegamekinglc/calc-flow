@@ -2,7 +2,7 @@ import type { ArrowFieldConfig } from '../types';
 
 interface SchemaEditorProps {
   fields: ArrowFieldConfig[];
-  arrowTypes: string[];
+  arrowTypes: readonly string[];
   onChange: (fields: ArrowFieldConfig[]) => void;
 }
 

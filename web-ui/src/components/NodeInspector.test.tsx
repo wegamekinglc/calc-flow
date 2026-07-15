@@ -54,10 +54,19 @@ describe('NodeInspector', () => {
     expect(node.operator).toMatchObject({ filter: null, udfs: [] });
   });
 
-  it('inspects an external v2 operator without assuming calculation fields', () => {
+  it('shows only configured schema ports for an external source', () => {
     const base = blankProject().pipeline.nodes[0];
     const node = {
       ...base,
+      input_ports: [],
+      output_ports: [
+        {
+          name: 'rows',
+          kind: 'table' as const,
+          required: true,
+          schema: [],
+        },
+      ],
       operator: {
         kind: 'external' as const,
         provider: 'trusted',
@@ -79,5 +88,43 @@ describe('NodeInspector', () => {
 
     expect(screen.getByText('External provider')).toBeInTheDocument();
     expect(screen.getByText('trusted · lookup · v2')).toBeInTheDocument();
+    expect(screen.queryByText('in · input')).not.toBeInTheDocument();
+    expect(screen.getByText('out · rows')).toBeInTheDocument();
+  });
+
+  it('shows only configured schema ports for an external sink', () => {
+    const base = blankProject().pipeline.nodes[0];
+    const node = {
+      ...base,
+      input_ports: [
+        {
+          name: 'rows',
+          kind: 'table' as const,
+          required: true,
+          schema: [],
+        },
+      ],
+      output_ports: [],
+      operator: {
+        kind: 'external' as const,
+        provider: 'trusted',
+        name: 'publish',
+        version: '2',
+        options: {},
+      },
+    };
+
+    render(
+      <NodeInspector
+        node={node}
+        arrowTypes={['int64']}
+        udfs={[]}
+        onChange={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('in · rows')).toBeInTheDocument();
+    expect(screen.queryByText('out · output')).not.toBeInTheDocument();
   });
 });
