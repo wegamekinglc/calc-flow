@@ -69,6 +69,22 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(workflow.count("maturin-version: v1.14.1"), action_count)
         self.assertEqual(workflow.count('rust-toolchain: "1.88.0"'), action_count)
 
+    def test_rust_core_ci_sets_python_313_before_all_features(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        rust_core = workflow.split("  rust-core:\n", 1)[1].split(
+            "  rust-supply-chain:\n", 1
+        )[0]
+
+        setup_python = (
+            "uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"
+        )
+        self.assertIn(setup_python, rust_core)
+        self.assertIn("python-version-file: .python-version", rust_core)
+        self.assertLess(
+            rust_core.index(setup_python),
+            rust_core.index("cargo clippy --workspace --all-targets --all-features"),
+        )
+
     def test_final_release_error_docs_do_not_claim_alpha_status(self) -> None:
         stale_claims = {
             "crates/calc-flow/src/error.rs": (
