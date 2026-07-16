@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import hashlib
 from dataclasses import replace
 from types import SimpleNamespace
@@ -227,6 +228,53 @@ def test_numpy_configuration_and_metadata_omit_jax_fields(
         "jax_enable_x64",
         "jax_version",
         "jaxlib_version",
+    ):
+        assert name not in benchmark.extra_info
+
+
+def test_numpy_configuration_does_not_import_jax(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_import = builtins.__import__
+
+    def guarded_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "jax":
+            pytest.fail("NumPy configuration must not import JAX")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    assert support._backend_configuration("numpy") == {}
+
+
+def test_numpy_record_removes_stale_jax_fields_without_mutating_previous_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_array_identities(monkeypatch)
+    original = {
+        "retained": True,
+        "jax_version": "stale-jax",
+        "jaxlib_version": "stale-jaxlib",
+        "jax_platform": "stale-platform",
+        "jax_enable_x64": True,
+    }
+    benchmark = SimpleNamespace(extra_info=original)
+
+    record_array_benchmark(benchmark, _array_record(backend="numpy"))
+
+    assert original == {
+        "retained": True,
+        "jax_version": "stale-jax",
+        "jaxlib_version": "stale-jaxlib",
+        "jax_platform": "stale-platform",
+        "jax_enable_x64": True,
+    }
+    assert benchmark.extra_info["retained"] is True
+    for name in (
+        "jax_version",
+        "jaxlib_version",
+        "jax_platform",
+        "jax_enable_x64",
     ):
         assert name not in benchmark.extra_info
 

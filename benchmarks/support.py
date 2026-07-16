@@ -28,6 +28,9 @@ ArrayBenchmarkScope = Literal[
     "batch_ownership",
 ]
 _ArrayBenchmarkBackend = Literal["numpy", "jax"]
+_JAX_ONLY_METADATA_FIELDS = frozenset(
+    {"jax_version", "jaxlib_version", "jax_platform", "jax_enable_x64"}
+)
 
 
 class BenchmarkFixture(Protocol):
@@ -202,8 +205,13 @@ def record_array_benchmark(
         "output_dtype": record.output_dtype,
         "backend_configuration": backend_configuration,
     }
+    preserved_metadata = {
+        name: value
+        for name, value in benchmark.extra_info.items()
+        if record.backend == "jax" or name not in _JAX_ONLY_METADATA_FIELDS
+    }
     benchmark.extra_info = {
-        **benchmark.extra_info,
+        **preserved_metadata,
         "benchmark_contract_version": BENCHMARK_CONTRACT_VERSION,
         "workload_version": ARRAY_WORKLOAD_VERSION,
         "scope": record.scope,
