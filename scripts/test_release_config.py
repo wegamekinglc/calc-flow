@@ -82,7 +82,11 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn(setup_python, rust_core)
         self.assertIn("python-version-file: .python-version", rust_core)
         self.assertIn(install_pyarrow, rust_core)
-        self.assertIn("RUST_TEST_THREADS: 1", rust_core)
+        rust_core_header = rust_core.split("    steps:\n", 1)[0]
+        self.assertIn(
+            "    env:\n      RUST_TEST_THREADS: 1\n",
+            rust_core_header,
+        )
         self.assertLess(
             rust_core.index(setup_python),
             rust_core.index("cargo clippy --workspace --all-targets --all-features"),

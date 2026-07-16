@@ -35,3 +35,17 @@ async fn node_context_shares_cancellation() {
         Err(CalcFlowError::Cancelled { .. })
     ));
 }
+
+#[test]
+fn run_context_exposes_settings_and_rejects_empty_node_ids() {
+    let settings = BTreeMap::from([("window".into(), json!(5))]);
+    let context = RunContext::new(settings.clone(), None, CancellationToken::new()).unwrap();
+
+    assert_eq!(context.settings(), &settings);
+    assert_eq!(context.node_id(), None);
+    assert!(context.check_cancelled().is_ok());
+    assert!(matches!(
+        context.for_node(" \t"),
+        Err(CalcFlowError::InvalidArgument { field, .. }) if field == "node_id"
+    ));
+}

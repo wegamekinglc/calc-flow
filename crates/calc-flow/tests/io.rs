@@ -111,6 +111,15 @@ fn batching_source_rejects_zero_limits() {
 }
 
 #[tokio::test]
+async fn batching_source_can_return_its_unopened_inner_source() {
+    let (source, opens) = QueueSource::new(Vec::new());
+    let mut source = BatchingSource::new(source, 1, 1).unwrap().into_inner();
+
+    source.open(Some(json!(7))).await.unwrap();
+    assert_eq!(*opens.lock().unwrap(), vec![Some(json!(7))]);
+}
+
+#[tokio::test]
 async fn batching_source_rejects_arrays_and_schema_mismatch_but_accepts_zero_rows() {
     let array = Batch::external(Arc::new(TestArray), BatchMetadata::default()).unwrap();
     let (array_source, _) = QueueSource::new(vec![SourceItem {

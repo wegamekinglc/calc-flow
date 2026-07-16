@@ -141,6 +141,10 @@ fn expression_operator_has_fixed_table_ports_and_one_calculation_mode() {
     assert!(expression.output_ports()[0].schema().is_none());
 
     assert!(ExpressionOperator::new("projection", "", vec!["a".into()], None, vec![]).is_ok());
+    assert!(matches!(
+        ExpressionOperator::new("projection", "", vec![" ".into()], None, vec![]),
+        Err(CalcFlowError::InvalidArgument { field, .. }) if field == "operator.select"
+    ));
     for invalid in [
         ExpressionOperator::new("bad", "", vec![], None, vec![]),
         ExpressionOperator::new("bad", "a + 1", vec!["a".into()], None, vec![]),
@@ -155,6 +159,21 @@ fn expression_operator_has_fixed_table_ports_and_one_calculation_mode() {
         ExpressionOperator::new("", "a + 1", vec![], None, vec![]),
         Err(CalcFlowError::InvalidArgument { field, .. }) if field == "operator.name"
     ));
+}
+
+#[test]
+fn built_in_operator_trait_metadata_delegates_to_inherent_accessors() {
+    let expression = ExpressionOperator::new("calc", "a + 1", vec![], None, vec![]).unwrap();
+    let sql = SqlOperator::new("sql", "SELECT * FROM input", vec!["input".into()], vec![]).unwrap();
+
+    for (operator, name) in [
+        (&expression as &dyn Operator, "calc"),
+        (&sql as &dyn Operator, "sql"),
+    ] {
+        assert_eq!(operator.name(), name);
+        assert!(!operator.input_ports().is_empty());
+        assert_eq!(operator.output_ports()[0].name(), "output");
+    }
 }
 
 #[test]

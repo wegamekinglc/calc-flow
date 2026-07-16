@@ -49,6 +49,18 @@ fn project_json_and_yaml_round_trip_through_strict_project_spec() {
     assert!(yaml.ends_with('\n'));
 }
 
+#[tokio::test]
+async fn file_project_store_conversion_helpers_match_free_functions() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = FileProjectStore::new(directory.path()).await.unwrap();
+    let value = project("demo", "Demo");
+
+    let json = store.export_json(&value).unwrap();
+    let yaml = store.export_yaml(&value).unwrap();
+    assert_eq!(store.import_json(json.as_bytes()).unwrap(), value);
+    assert_eq!(store.import_yaml(yaml.as_bytes()).unwrap(), value);
+}
+
 #[test]
 fn canonical_project_json_is_recursive_pretty_sorted_and_exact() {
     let mut value = project("demo", "Demo");
