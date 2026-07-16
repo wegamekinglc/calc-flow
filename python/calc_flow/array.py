@@ -5,6 +5,7 @@ import math
 import operator
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from calc_flow import _native
@@ -45,6 +46,11 @@ def _parse_expression(expression: object) -> ast.Expression:
         raise _array_error(
             f"expression length limit is {_MAX_EXPRESSION_LENGTH} characters"
         )
+    return _parse_valid_expression(expression)
+
+
+@lru_cache(maxsize=256)
+def _parse_valid_expression(expression: str) -> ast.Expression:
     try:
         parsed = ast.parse(expression, mode="eval")
     except (SyntaxError, ValueError) as error:

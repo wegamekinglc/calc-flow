@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import gc
 import weakref
 from typing import Any
@@ -8,6 +9,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
+import calc_flow.array as array_module
 from calc_flow import (
     Batch,
     PipelineBuilder,
@@ -32,6 +34,98 @@ def _external(
         "1",
         {"expression": expression, **(options or {})},
     )
+
+
+def test_array_expression_cache_reuses_successful_exact_strings() -> None:
+    cache = array_module._parse_valid_expression
+    cache.cache_clear()
+    try:
+        first = array_module._parse_expression("x + 1")
+        second = array_module._parse_expression("x + 1")
+
+        assert first is second
+        assert cache.cache_info().hits == 1
+        assert cache.cache_info().misses == 1
+    finally:
+        cache.cache_clear()
+
+
+def test_array_expression_cache_is_bounded() -> None:
+    cache = array_module._parse_valid_expression
+    cache.cache_clear()
+    try:
+        for value in range(257):
+            array_module._parse_expression(f"x + {value}")
+        before = cache.cache_info()
+
+        array_module._parse_expression("x + 0")
+        after = cache.cache_info()
+
+        assert before.maxsize == 256
+        assert before.currsize == 256
+        assert after.misses == before.misses + 1
+    finally:
+        cache.cache_clear()
+
+
+def test_array_expression_cache_does_not_cache_invalid_expressions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = array_module._parse_valid_expression
+    cache.cache_clear()
+    parse_calls = 0
+    original_parse = array_module.ast.parse
+
+    def counting_parse(*args: object, **kwargs: object) -> ast.AST:
+        nonlocal parse_calls
+        parse_calls += 1
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(array_module.ast, "parse", counting_parse)
+    try:
+        errors: list[str] = []
+        for _ in range(2):
+            with pytest.raises(ValueError) as caught:
+                array_module._parse_expression("x +")
+            errors.append(str(caught.value))
+
+        assert parse_calls == 2
+        assert errors == ["invalid array expression: syntax is invalid"] * 2
+        assert cache.cache_info().currsize == 0
+    finally:
+        cache.cache_clear()
+
+
+def test_array_expression_cache_preserves_runtime_intermediate_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = array_module._parse_valid_expression
+    cache.cache_clear()
+    results = iter(
+        (
+            np.array([1], dtype=np.int64),
+            np.array([object()], dtype=object),
+        )
+    )
+    monkeypatch.setattr(np, "sum", lambda _value: next(results))
+    try:
+        runtime = Runtime()
+        register_numpy(runtime)
+        plan = _external("cached_validation", "numpy", "sum(x) + 1").compile(runtime)
+        batch = Batch.from_array(np.array([1]), backend="numpy")
+        before_execution = cache.cache_info()
+
+        assert plan.execute({"input": batch}).outputs["output"].array.tolist() == [2]
+        after_first_execution = cache.cache_info()
+        with pytest.raises(ProviderError, match="NumPy Array API dtype"):
+            plan.execute({"input": batch})
+        after_second_execution = cache.cache_info()
+
+        assert after_first_execution.hits == before_execution.hits + 1
+        assert after_second_execution.hits == after_first_execution.hits + 1
+        assert after_second_execution.misses == 1
+    finally:
+        cache.cache_clear()
 
 
 def test_numpy_provider_owns_read_only_arrays() -> None:
