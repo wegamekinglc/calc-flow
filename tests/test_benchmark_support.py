@@ -6,12 +6,15 @@ from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
 
+import numpy as np
 import pytest
 
 from benchmarks import support
+from benchmarks.array_support import ARRAY_WORKLOADS
 from benchmarks.support import (
     SCALES,
     ArrayBenchmarkRecord,
+    ArrayBenchmarkScope,
     BenchmarkScale,
     record_array_benchmark,
     record_benchmark,
@@ -64,6 +67,54 @@ def _patch_array_identities(monkeypatch: pytest.MonkeyPatch) -> None:
             {"jax_platform": "cpu", "jax_enable_x64": False} if backend == "jax" else {}
         ),
     )
+
+
+def test_array_workloads_have_unique_stable_identities() -> None:
+    identities = [
+        (workload.scenario, workload.expression) for workload in ARRAY_WORKLOADS
+    ]
+
+    assert len(identities) == len(set(identities))
+    assert {scenario for scenario, _expression in identities} == {
+        "array_elementwise",
+        "array_mean",
+        "array_matrix_multiplication",
+        "array_transpose_reshape",
+    }
+
+
+def test_array_workloads_create_deterministic_overhead_inputs() -> None:
+    scale = SCALES["overhead"]
+    expected_shapes = {
+        "array_elementwise": (1_000,),
+        "array_mean": (1_000,),
+        "array_matrix_multiplication": (16, 16),
+        "array_transpose_reshape": (16, 16),
+    }
+
+    for workload in ARRAY_WORKLOADS:
+        first = workload.input_factory(scale)
+        second = workload.input_factory(scale)
+
+        assert first.shape == expected_shapes[workload.scenario]
+        assert np.array_equal(first, second)
+
+
+@pytest.mark.parametrize(
+    "scope",
+    ("backend_kernel", "provider_boundary", "plan_end_to_end", "batch_ownership"),
+)
+def test_record_array_benchmark_records_every_measurement_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    scope: ArrayBenchmarkScope,
+) -> None:
+    _patch_array_identities(monkeypatch)
+    benchmark = SimpleNamespace(extra_info={})
+
+    record_array_benchmark(benchmark, _array_record(scope=scope))
+
+    assert benchmark.extra_info["scope"] == scope
+    assert benchmark.extra_info["workload_identity"]["scope"] == scope
 
 
 def test_overhead_table_and_array_scales_match() -> None:
