@@ -1018,12 +1018,14 @@
         "properties": {
           "max_input_bytes": {
             "default": 10485760,
+            "maximum": 10485760.0,
             "minimum": 1.0,
             "title": "Max Input Bytes",
             "type": "integer"
           },
           "max_rows": {
             "default": 100000,
+            "maximum": 100000.0,
             "minimum": 1.0,
             "title": "Max Rows",
             "type": "integer"

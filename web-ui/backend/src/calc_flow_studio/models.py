@@ -67,11 +67,15 @@ class InputPayload(StrictModel):
         return _copy_json_value(value)
 
 
+_MAX_INPUT_BYTES = 10 * 1024 * 1024
+_MAX_ROWS = 100_000
+
+
 class RunOptions(StrictModel):
     timeout_seconds: int = Field(default=30, ge=1, le=300)
     memory_limit_mb: int = Field(default=512, ge=64, le=4096)
-    max_input_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
-    max_rows: int = Field(default=100_000, ge=1)
+    max_input_bytes: int = Field(default=_MAX_INPUT_BYTES, ge=1, le=_MAX_INPUT_BYTES)
+    max_rows: int = Field(default=_MAX_ROWS, ge=1, le=_MAX_ROWS)
     output_rows: int = Field(default=1000, ge=1, le=10_000)
 
 

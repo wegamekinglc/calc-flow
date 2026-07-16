@@ -47,13 +47,18 @@ python-source = "python"
 module-name = "calc_flow._native"
 features = ["pyo3/abi3-py313"]
 strip = true
-exclude = ["src/calc_flow/**"]
 
 [tool.uv.workspace]
 members = ["web-ui/backend"]
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
+
+[tool.coverage.run]
+source = ["calc_flow"]
+
+[tool.coverage.report]
+fail_under = 90
 
 [tool.ruff]
 target-version = "py313"

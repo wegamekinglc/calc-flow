@@ -113,7 +113,9 @@ def test_run_options_enforce_preview_limits() -> None:
         ("timeout_seconds", 301),
         ("memory_limit_mb", 32),
         ("max_input_bytes", 0),
+        ("max_input_bytes", 10 * 1024 * 1024 + 1),
         ("max_rows", 0),
+        ("max_rows", 100_001),
         ("output_rows", 10_001),
     ):
         with pytest.raises(ValidationError):
