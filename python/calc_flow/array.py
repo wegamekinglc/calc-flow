@@ -227,9 +227,8 @@ def _owned_numpy(value: object) -> object:
 
     array = np.asarray(value)
     _validate_numpy_dtype(array.dtype)
-    owner = np.array(array, copy=True, order="C", subok=False)
-    immutable_bytes = owner.tobytes(order="C")
-    return np.frombuffer(immutable_bytes, dtype=owner.dtype).reshape(owner.shape)
+    immutable_bytes = array.tobytes(order="C")
+    return np.frombuffer(immutable_bytes, dtype=array.dtype).reshape(array.shape)
 
 
 def _validate_numpy_dtype(dtype: object) -> None:

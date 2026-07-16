@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 import gc
 import weakref
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -34,6 +36,151 @@ def _external(
         "1",
         {"expression": expression, **(options or {})},
     )
+
+
+class _ArraySubclass(np.ndarray):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class _NumpyOwnershipCase:
+    name: str
+    factory: Callable[[], np.ndarray[Any, Any]]
+
+
+def _c_contiguous_input() -> np.ndarray[Any, Any]:
+    return np.arange(12, dtype=np.int64).reshape(3, 4)
+
+
+def _non_contiguous_slice_input() -> np.ndarray[Any, Any]:
+    return np.arange(24, dtype=np.int64).reshape(4, 6)[:, ::2]
+
+
+def _transposed_input() -> np.ndarray[Any, Any]:
+    return np.arange(12, dtype=np.int64).reshape(3, 4).T
+
+
+def _fortran_order_input() -> np.ndarray[Any, Any]:
+    return np.asfortranarray(np.arange(12, dtype=np.int64).reshape(3, 4))
+
+
+def _negative_stride_input() -> np.ndarray[Any, Any]:
+    return np.arange(12, dtype=np.int64)[::-2]
+
+
+def _scalar_input() -> np.ndarray[Any, Any]:
+    return np.array(7, dtype=np.int64)
+
+
+def _shaped_empty_input() -> np.ndarray[Any, Any]:
+    return np.empty((2, 0, 3), dtype=np.int64)
+
+
+def _subclass_input() -> np.ndarray[Any, Any]:
+    return np.arange(8, dtype=np.int64).view(_ArraySubclass)
+
+
+def _nested_view_input() -> np.ndarray[Any, Any]:
+    owner = np.arange(60, dtype=np.int64).reshape(5, 12)
+    return owner[1:5, 1:11][:, ::3].T
+
+
+def _dtype_input(dtype: type[np.generic]) -> np.ndarray[Any, Any]:
+    return np.array([0, 1, 2], dtype=dtype)
+
+
+_SUPPORTED_OWNERSHIP_DTYPES = (
+    np.bool_,
+    np.int8,
+    np.int16,
+    np.int32,
+    np.int64,
+    np.uint8,
+    np.uint16,
+    np.uint32,
+    np.uint64,
+    np.float32,
+    np.float64,
+    np.complex64,
+    np.complex128,
+)
+
+_NUMPY_OWNERSHIP_CASES = (
+    _NumpyOwnershipCase("c_contiguous", _c_contiguous_input),
+    _NumpyOwnershipCase("non_contiguous_slice", _non_contiguous_slice_input),
+    _NumpyOwnershipCase("transpose", _transposed_input),
+    _NumpyOwnershipCase("fortran_order", _fortran_order_input),
+    _NumpyOwnershipCase("negative_stride", _negative_stride_input),
+    _NumpyOwnershipCase("zero_dimensional", _scalar_input),
+    _NumpyOwnershipCase("shaped_empty", _shaped_empty_input),
+    _NumpyOwnershipCase("ndarray_subclass", _subclass_input),
+    _NumpyOwnershipCase("nested_view_base", _nested_view_input),
+    *(
+        _NumpyOwnershipCase(
+            f"dtype_{np.dtype(dtype).name}",
+            lambda dtype=dtype: _dtype_input(dtype),
+        )
+        for dtype in _SUPPORTED_OWNERSHIP_DTYPES
+    ),
+)
+
+
+def _mutate_source(source: np.ndarray[Any, Any]) -> None:
+    if source.size == 0:
+        return
+    if source.dtype == np.dtype(np.bool_):
+        source.flat[0] = not bool(source.flat[0])
+    else:
+        source.flat[0] = source.flat[0] + 1
+
+
+@pytest.mark.parametrize(
+    "case",
+    _NUMPY_OWNERSHIP_CASES,
+    ids=lambda case: case.name,
+)
+def test_numpy_batch_ownership_preserves_layout_dtype_and_snapshot(
+    case: _NumpyOwnershipCase,
+) -> None:
+    source = case.factory()
+    expected = np.asarray(source).copy(order="C")
+    metadata = {"case": case.name, "nested": {"value": 1}}
+    batch = Batch.from_array(source, backend="numpy", metadata=metadata)
+
+    _mutate_source(source)
+    metadata["nested"]["value"] = 2
+    output = batch.array
+
+    assert type(output) is np.ndarray
+    assert output.dtype == expected.dtype
+    assert output.shape == expected.shape
+    assert output.flags.c_contiguous
+    np.testing.assert_array_equal(output, expected)
+    assert batch.num_rows == (expected.shape[0] if expected.shape else 1)
+    assert batch.metadata == {"case": case.name, "nested": {"value": 1}}
+
+    current: object = output
+    while isinstance(current, np.ndarray):
+        assert not current.flags.writeable
+        with pytest.raises(ValueError):
+            current.setflags(write=True)
+        current = current.base
+
+
+def test_numpy_ownership_avoids_intermediate_array_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = np.arange(12, dtype=np.int64).reshape(3, 4)[:, ::2]
+    expected = source.copy(order="C")
+
+    def reject_intermediate_copy(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("_owned_numpy must not call np.array")
+
+    monkeypatch.setattr(np, "array", reject_intermediate_copy)
+
+    output = array_module._owned_numpy(source)
+
+    np.testing.assert_array_equal(output, expected)
 
 
 def test_array_expression_cache_reuses_successful_exact_strings() -> None:
