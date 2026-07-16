@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 
 import {
   compareBenchmarkReports,
@@ -28,6 +28,7 @@ export function BenchmarkComparison() {
   const [baseline, setBaseline] = useState<BenchmarkReport | null>(null);
   const [current, setCurrent] = useState<BenchmarkReport | null>(null);
   const [error, setError] = useState('');
+  const loadGeneration = useRef({ baseline: 0, current: 0 });
   const result = useMemo(
     () => (baseline && current ? compareBenchmarkReports(baseline, current) : null),
     [baseline, current],
@@ -35,14 +36,19 @@ export function BenchmarkComparison() {
 
   const load = async (file: File | undefined, target: 'baseline' | 'current') => {
     if (!file) return;
+    const generation = loadGeneration.current[target] + 1;
+    loadGeneration.current[target] = generation;
     if (target === 'baseline') setBaseline(null);
     else setCurrent(null);
     setError('');
     try {
-      const report = parseBenchmarkReport(JSON.parse(await file.text()) as unknown);
+      const contents = await file.text();
+      if (loadGeneration.current[target] !== generation) return;
+      const report = parseBenchmarkReport(JSON.parse(contents) as unknown);
       if (target === 'baseline') setBaseline(report);
       else setCurrent(report);
     } catch (caught) {
+      if (loadGeneration.current[target] !== generation) return;
       setError((caught as Error).message);
     }
   };

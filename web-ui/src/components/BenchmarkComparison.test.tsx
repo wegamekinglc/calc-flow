@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
 import { BenchmarkComparison } from './BenchmarkComparison';
@@ -75,10 +75,24 @@ const jsonFile = (value: unknown, name: string): File => {
   return file;
 };
 
-const upload = (label: string, value: unknown) => {
-  fireEvent.change(screen.getByLabelText(label), {
-    target: { files: [jsonFile(value, `${label}.json`)] },
+const deferredJsonFile = (name: string) => {
+  let resolveText!: (contents: string) => void;
+  const text = new Promise<string>((resolve) => {
+    resolveText = resolve;
   });
+  const file = new File([], name, { type: 'application/json' });
+  Object.defineProperty(file, 'text', { value: () => text });
+  return { file, resolveText, text };
+};
+
+const uploadFile = (label: string, file: File) => {
+  fireEvent.change(screen.getByLabelText(label), {
+    target: { files: [file] },
+  });
+};
+
+const upload = (label: string, value: unknown) => {
+  uploadFile(label, jsonFile(value, `${label}.json`));
 };
 
 describe('BenchmarkComparison', () => {
@@ -134,5 +148,23 @@ describe('BenchmarkComparison', () => {
 
     await screen.findByText(/Unexpected|JSON/);
     await waitFor(() => expect(screen.queryByRole('table')).not.toBeInTheDocument());
+  });
+
+  it('ignores an older file read that finishes after a newer selection errors', async () => {
+    render(<BenchmarkComparison />);
+
+    upload('Baseline benchmark report', report(entry()));
+    const older = deferredJsonFile('older-current.json');
+    uploadFile('Current benchmark report', older.file);
+    upload('Current benchmark report', '{ definitely not JSON');
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Unexpected|JSON/);
+
+    await act(async () => {
+      older.resolveText(JSON.stringify(report(entry(1.2))));
+      await older.text;
+    });
+
+    expect(screen.getByRole('alert')).toHaveTextContent(/Unexpected|JSON/);
+    expect(screen.queryByRole('table')).not.toBeInTheDocument();
   });
 });

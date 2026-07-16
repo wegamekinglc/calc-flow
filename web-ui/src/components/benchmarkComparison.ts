@@ -161,25 +161,120 @@ const fingerprint = (value: unknown, name: string, field: string): string => {
 const optionalIdentityText = (value: unknown): string | null =>
   typeof value === 'string' && value.trim().length > 0 ? value : null;
 
+const supportedBackend = (
+  value: unknown,
+  name: string,
+  field: string,
+): BenchmarkBackend => {
+  const backend = nonEmptyText(value, name, field);
+  if (!SUPPORTED_BACKENDS.has(backend as BenchmarkBackend)) contractError(name, field);
+  return backend as BenchmarkBackend;
+};
+
+const supportedScope = (
+  value: unknown,
+  name: string,
+  field: string,
+): BenchmarkScope => {
+  const scope = nonEmptyText(value, name, field);
+  if (!SUPPORTED_SCOPES.has(scope as BenchmarkScope)) contractError(name, field);
+  return scope as BenchmarkScope;
+};
+
+const validateMachineIdentity = (value: unknown, name: string): void => {
+  const identity = identityObject(value, name, 'machine_identity');
+  nonEmptyText(identity.operating_system, name, 'machine_identity.operating_system');
+  nonEmptyText(identity.architecture, name, 'machine_identity.architecture');
+  nonEmptyText(identity.cpu_brand, name, 'machine_identity.cpu_brand');
+  integer(identity.logical_cpu_count, name, 'machine_identity.logical_cpu_count', 1);
+  nonEmptyText(
+    identity.python_implementation,
+    name,
+    'machine_identity.python_implementation',
+  );
+};
+
+const validateDependencyIdentity = (
+  value: unknown,
+  name: string,
+  backend: BenchmarkBackend,
+): void => {
+  const identity = identityObject(value, name, 'dependency_identity');
+  nonEmptyText(identity.python_version, name, 'dependency_identity.python_version');
+  nonEmptyText(identity.numpy_version, name, 'dependency_identity.numpy_version');
+  if (backend === 'jax') {
+    nonEmptyText(identity.jax_version, name, 'dependency_identity.jax_version');
+    nonEmptyText(identity.jaxlib_version, name, 'dependency_identity.jaxlib_version');
+  } else if ('jax_version' in identity || 'jaxlib_version' in identity) {
+    contractError(name, 'dependency_identity cannot contain JAX fields for NumPy');
+  }
+};
+
+const validateBackendConfiguration = (
+  value: unknown,
+  name: string,
+  backend: BenchmarkBackend,
+  field: string,
+): Record<string, unknown> => {
+  const configuration = identityObject(value, name, field);
+  if (backend === 'jax') {
+    nonEmptyText(configuration.jax_platform, name, `${field}.jax_platform`);
+    if (typeof configuration.jax_enable_x64 !== 'boolean') {
+      contractError(name, `${field}.jax_enable_x64`);
+    }
+  } else if (Object.keys(configuration).length > 0) {
+    contractError(name, `${field} must be empty for NumPy`);
+  }
+  return configuration;
+};
+
+const validateWorkloadIdentity = (value: unknown, name: string): void => {
+  const field = 'workload_identity';
+  const identity = identityObject(value, name, field);
+  const version = integer(
+    identity.benchmark_contract_version,
+    name,
+    `${field}.benchmark_contract_version`,
+    1,
+  );
+  if (version !== 2) contractError(name, `${field}.benchmark_contract_version`);
+  nonEmptyText(identity.scenario, name, `${field}.scenario`);
+  supportedScope(identity.scope, name, `${field}.scope`);
+  integer(identity.workload_version, name, `${field}.workload_version`, 1);
+  const backend = supportedBackend(identity.backend, name, `${field}.backend`);
+  nonEmptyText(identity.scale, name, `${field}.scale`);
+  integer(identity.table_rows, name, `${field}.table_rows`, 1);
+  integer(identity.array_elements, name, `${field}.array_elements`, 1);
+  integer(identity.matrix_dimension, name, `${field}.matrix_dimension`, 1);
+  integer(identity.input_rows, name, `${field}.input_rows`, 0);
+  integer(identity.output_rows, name, `${field}.output_rows`, 0);
+  nonEmptyText(identity.expression, name, `${field}.expression`);
+  nonEmptyText(identity.input_dtype, name, `${field}.input_dtype`);
+  nonEmptyText(identity.output_dtype, name, `${field}.output_dtype`);
+  validateBackendConfiguration(
+    identity.backend_configuration,
+    name,
+    backend,
+    `${field}.backend_configuration`,
+  );
+};
+
 const parseContractV2 = (
   name: string,
   info: Record<string, unknown>,
 ): BenchmarkContractV2 => {
   const scenario = nonEmptyText(info.scenario, name, 'scenario');
-  const backendText = nonEmptyText(info.backend, name, 'backend');
-  if (!SUPPORTED_BACKENDS.has(backendText as BenchmarkBackend)) contractError(name, 'backend');
-  const backend = backendText as BenchmarkBackend;
-  const scopeText = nonEmptyText(info.scope, name, 'scope');
-  if (!SUPPORTED_SCOPES.has(scopeText as BenchmarkScope)) contractError(name, 'scope');
-  const scope = scopeText as BenchmarkScope;
-  const backendConfiguration = identityObject(
+  const backend = supportedBackend(info.backend, name, 'backend');
+  const scope = supportedScope(info.scope, name, 'scope');
+  validateBackendConfiguration(
     info.backend_configuration,
     name,
+    backend,
     'backend_configuration',
   );
-  identityObject(info.machine_identity, name, 'machine_identity');
-  identityObject(info.dependency_identity, name, 'dependency_identity');
-  identityObject(info.workload_identity, name, 'workload_identity');
+  validateMachineIdentity(info.machine_identity, name);
+  validateDependencyIdentity(info.dependency_identity, name, backend);
+  validateWorkloadIdentity(info.workload_identity, name);
   nonEmptyText(info.python_version, name, 'python_version');
   nonEmptyText(info.numpy_version, name, 'numpy_version');
   integer(info.process_rss_bytes, name, 'process_rss_bytes', 0);
@@ -192,12 +287,8 @@ const parseContractV2 = (
     jaxPlatform = nonEmptyText(info.jax_platform, name, 'jax_platform');
     if (typeof info.jax_enable_x64 !== 'boolean') contractError(name, 'jax_enable_x64');
     jaxEnableX64 = info.jax_enable_x64 as boolean;
-    nonEmptyText(backendConfiguration.jax_platform, name, 'backend_configuration.jax_platform');
-    if (typeof backendConfiguration.jax_enable_x64 !== 'boolean') {
-      contractError(name, 'backend_configuration.jax_enable_x64');
-    }
   } else {
-    const hasJaxOnlyField = JAX_ONLY_FIELDS.some((field) => field in info || field in backendConfiguration);
+    const hasJaxOnlyField = JAX_ONLY_FIELDS.some((field) => field in info);
     if (hasJaxOnlyField) {
       throw new Error(`Benchmark ${name} has invalid contract-v2 metadata: NumPy entries cannot contain JAX fields`);
     }
@@ -282,16 +373,20 @@ const rejectDuplicateContracts = (entries: BenchmarkEntry[]): void => {
   const identities = new Set<string>();
   const workloadFingerprints = new Set<string>();
   for (const entry of entries) {
-    if (!isContractV2(entry.contract)) continue;
-    const identity = `${entry.contract.scenario}\u0000${entry.contract.backend}\u0000${entry.contract.scope}`;
-    if (identities.has(identity)) {
-      throw new Error('Benchmark report contains duplicate (scenario, backend, scope) identity');
+    const contract = entry.contract;
+    if (!contract) continue;
+    if (contract.scenario !== null && contract.backend !== null && contract.scope !== null) {
+      const identity = `${contract.scenario}\u0000${contract.backend}\u0000${contract.scope}`;
+      if (identities.has(identity)) {
+        throw new Error('Benchmark report contains duplicate (scenario, backend, scope) identity');
+      }
+      identities.add(identity);
     }
-    identities.add(identity);
-    if (workloadFingerprints.has(entry.contract.workloadFingerprint)) {
+    if (!isContractV2(contract)) continue;
+    if (workloadFingerprints.has(contract.workloadFingerprint)) {
       throw new Error('Benchmark report contains duplicate workload fingerprint');
     }
-    workloadFingerprints.add(entry.contract.workloadFingerprint);
+    workloadFingerprints.add(contract.workloadFingerprint);
   }
 };
 
@@ -468,14 +563,6 @@ export const compareBenchmarkReports = (
     issues.sort((left, right) => ISSUE_ORDER.indexOf(left.code) - ISSUE_ORDER.indexOf(right.code));
     return { status: 'incompatible', rows: [], issues };
   }
-  if (matchedPairs > 0) {
-    return {
-      status: 'compatible',
-      rows: rows.sort((left, right) => right.deltaPercent - left.deltaPercent),
-      issues: [],
-    };
-  }
-
   const unsupportedBaseline = baselineVersioned.find((entry) => entry.contract?.version !== 2);
   const unsupportedCurrent = currentVersioned.find((entry) => entry.contract?.version !== 2);
   if (unsupportedBaseline || unsupportedCurrent) {
@@ -488,6 +575,13 @@ export const compareBenchmarkReports = (
         unsupportedBaseline?.contract?.version,
         unsupportedCurrent?.contract?.version,
       )],
+    };
+  }
+  if (matchedPairs > 0) {
+    return {
+      status: 'compatible',
+      rows: rows.sort((left, right) => right.deltaPercent - left.deltaPercent),
+      issues: [],
     };
   }
 

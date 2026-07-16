@@ -211,6 +211,34 @@ describe('benchmark report compatibility', () => {
     expect(result.issues).toEqual([]);
   });
 
+  it.each(['baseline', 'current'] as const)(
+    'rejects an unsupported version mixed into the %s report',
+    (target) => {
+      const compatibleBaseline = contractEntry();
+      const compatibleCurrent = contractEntry({ mean: 1.2 });
+      const unsupported = contractEntry({
+        scenario: 'future_contract_case',
+        workloadFingerprint: fingerprint('d'),
+      });
+      unsupported.extra_info.benchmark_contract_version = 3;
+      const baselineEntries = target === 'baseline'
+        ? [compatibleBaseline, unsupported]
+        : [compatibleBaseline];
+      const currentEntries = target === 'current'
+        ? [compatibleCurrent, unsupported]
+        : [compatibleCurrent];
+
+      const result = compareBenchmarkReports(
+        parsedReport(...baselineEntries),
+        parsedReport(...currentEntries),
+      );
+
+      expect(result.status).toBe('incompatible');
+      expect(result.rows).toEqual([]);
+      expect(result.issues.map((issue) => issue.code)).toContain('contract_version_mismatch');
+    },
+  );
+
   it('does not fall back from a v2 case to a legacy case with the same scenario', () => {
     const result = compareBenchmarkReports(
       parsedReport(contractEntry()),
@@ -327,12 +355,113 @@ describe('benchmark report parsing', () => {
     expect(() => parsedReport(entry)).toThrow(/NumPy.*JAX/);
   });
 
+  it.each<{
+    name: string;
+    backend?: 'numpy' | 'jax';
+    field: string;
+    change: (entry: ReturnType<typeof contractEntry>) => void;
+  }>([
+    {
+      name: 'incomplete machine identity',
+      field: 'machine_identity.operating_system',
+      change: (entry) => {
+        delete (entry.extra_info.machine_identity as Record<string, unknown>).operating_system;
+      },
+    },
+    {
+      name: 'wrong-typed machine identity',
+      field: 'machine_identity.logical_cpu_count',
+      change: (entry) => {
+        (entry.extra_info.machine_identity as Record<string, unknown>).logical_cpu_count = 'eight';
+      },
+    },
+    {
+      name: 'incomplete dependency identity',
+      field: 'dependency_identity.numpy_version',
+      change: (entry) => {
+        delete (entry.extra_info.dependency_identity as Record<string, unknown>).numpy_version;
+      },
+    },
+    {
+      name: 'wrong-typed JAX dependency identity',
+      backend: 'jax',
+      field: 'dependency_identity.jax_version',
+      change: (entry) => {
+        (entry.extra_info.dependency_identity as Record<string, unknown>).jax_version = 10;
+      },
+    },
+    {
+      name: 'JAX dependency fields on a NumPy identity',
+      field: 'dependency_identity',
+      change: (entry) => {
+        (entry.extra_info.dependency_identity as Record<string, unknown>).jax_version = '0.10.2';
+      },
+    },
+    {
+      name: 'non-empty NumPy backend configuration',
+      field: 'backend_configuration',
+      change: (entry) => {
+        (entry.extra_info as Record<string, unknown>).backend_configuration = {
+          unexpected: true,
+        };
+      },
+    },
+    {
+      name: 'incomplete workload identity',
+      field: 'workload_identity.expression',
+      change: (entry) => {
+        delete (entry.extra_info.workload_identity as Record<string, unknown>).expression;
+      },
+    },
+    {
+      name: 'wrong-typed workload identity',
+      field: 'workload_identity.array_elements',
+      change: (entry) => {
+        (entry.extra_info.workload_identity as Record<string, unknown>).array_elements = '1000';
+      },
+    },
+    {
+      name: 'incomplete workload JAX configuration',
+      backend: 'jax',
+      field: 'workload_identity.backend_configuration.jax_enable_x64',
+      change: (entry) => {
+        const workload = entry.extra_info.workload_identity as Record<string, unknown>;
+        const configuration = structuredClone(
+          workload.backend_configuration as Record<string, unknown>,
+        );
+        delete configuration.jax_enable_x64;
+        workload.backend_configuration = configuration;
+      },
+    },
+  ])('rejects $name', ({ backend = 'numpy', field, change }) => {
+    const entry = contractEntry({ backend });
+    change(entry);
+
+    expect(() => parsedReport(entry)).toThrow(field);
+  });
+
   it('rejects duplicate scenario, backend, and scope identities', () => {
     expect(() => parsedReport(
       contractEntry({ workloadFingerprint: fingerprint('1') }),
       contractEntry({ workloadFingerprint: fingerprint('2') }),
     )).toThrow(/duplicate.*scenario.*backend.*scope/i);
   });
+
+  it.each(['before', 'after'] as const)(
+    'rejects a v2 and unsupported-version duplicate with the unsupported entry %s',
+    (position) => {
+      const supported = contractEntry();
+      const unsupported = contractEntry({ workloadFingerprint: fingerprint('d') });
+      unsupported.extra_info.benchmark_contract_version = 3;
+      const entries = position === 'before'
+        ? [unsupported, supported]
+        : [supported, unsupported];
+
+      expect(() => parsedReport(...entries)).toThrow(
+        /duplicate.*scenario.*backend.*scope/i,
+      );
+    },
+  );
 
   it('rejects duplicate workload fingerprints', () => {
     expect(() => parsedReport(
