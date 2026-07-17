@@ -129,6 +129,88 @@ describe('benchmark report compatibility', () => {
     expect(result.rows[0].status).toBe(status);
   });
 
+  it('rejects different machine identities with the same claimed fingerprint', () => {
+    const baselineEntry = contractEntry();
+    const currentEntry = cloneEntry(baselineEntry);
+    (currentEntry.extra_info.machine_identity as Record<string, unknown>).cpu_brand =
+      'different cpu';
+
+    const result = compareBenchmarkReports(
+      parsedReport(baselineEntry),
+      parsedReport(currentEntry),
+    );
+
+    expect(result.status).toBe('incompatible');
+    expect(result.rows).toEqual([]);
+    expect(result.issues.map((issue) => issue.code)).toEqual(['machine_mismatch']);
+  });
+
+  it('rejects different dependency identities with the same claimed fingerprint', () => {
+    const baselineEntry = contractEntry();
+    const currentEntry = cloneEntry(baselineEntry);
+    currentEntry.extra_info.numpy_version = '2.6.0';
+    (currentEntry.extra_info.dependency_identity as Record<string, unknown>).numpy_version =
+      '2.6.0';
+
+    const result = compareBenchmarkReports(
+      parsedReport(baselineEntry),
+      parsedReport(currentEntry),
+    );
+
+    expect(result.status).toBe('incompatible');
+    expect(result.rows).toEqual([]);
+    expect(result.issues.map((issue) => issue.code)).toEqual(['dependency_mismatch']);
+  });
+
+  it('rejects different workload identities with the same claimed fingerprint', () => {
+    const baselineEntry = contractEntry();
+    const currentEntry = cloneEntry(baselineEntry);
+    currentEntry.extra_info.expression = 'sum(x)';
+    (currentEntry.extra_info.workload_identity as Record<string, unknown>).expression =
+      'sum(x)';
+
+    const result = compareBenchmarkReports(
+      parsedReport(baselineEntry),
+      parsedReport(currentEntry),
+    );
+
+    expect(result.status).toBe('incompatible');
+    expect(result.rows).toEqual([]);
+    expect(result.issues.map((issue) => issue.code)).toEqual(['workload_mismatch']);
+  });
+
+  it('treats identity documents with different key order as compatible', () => {
+    const baselineEntry = contractEntry({ backend: 'jax' });
+    const currentEntry = cloneEntry(baselineEntry);
+    const reversed = <T extends object>(value: T): T =>
+      Object.fromEntries(Object.entries(value).reverse()) as T;
+    currentEntry.extra_info.machine_identity = reversed(
+      currentEntry.extra_info.machine_identity,
+    );
+    currentEntry.extra_info.dependency_identity = reversed(
+      currentEntry.extra_info.dependency_identity,
+    );
+    currentEntry.extra_info.backend_configuration = reversed(
+      currentEntry.extra_info.backend_configuration,
+    );
+    const workload = reversed(
+      currentEntry.extra_info.workload_identity,
+    );
+    workload.backend_configuration = reversed(
+      workload.backend_configuration as Record<string, unknown>,
+    );
+    currentEntry.extra_info.workload_identity = workload;
+
+    const result = compareBenchmarkReports(
+      parsedReport(baselineEntry),
+      parsedReport(currentEntry),
+    );
+
+    expect(result.status).toBe('compatible');
+    expect(result.issues).toEqual([]);
+    expect(result.rows).toHaveLength(1);
+  });
+
   it.each<{
     code: BenchmarkCompatibilityIssue['code'];
     expectedStatus?: 'incompatible' | 'unverified';
@@ -155,11 +237,18 @@ describe('benchmark report compatibility', () => {
     },
     {
       code: 'scale_mismatch',
-      change: (entry) => { entry.extra_info.array_elements = 2_000; },
+      change: (entry) => {
+        entry.extra_info.array_elements = 2_000;
+        (entry.extra_info.workload_identity as Record<string, unknown>).array_elements = 2_000;
+      },
     },
     {
       code: 'scope_mismatch',
-      change: (entry) => { entry.extra_info.scope = 'provider_boundary'; },
+      change: (entry) => {
+        entry.extra_info.scope = 'provider_boundary';
+        (entry.extra_info.workload_identity as Record<string, unknown>).scope =
+          'provider_boundary';
+      },
     },
     {
       code: 'workload_mismatch',
@@ -167,11 +256,19 @@ describe('benchmark report compatibility', () => {
     },
     {
       code: 'dtype_mismatch',
-      change: (entry) => { entry.extra_info.output_dtype = 'float32'; },
+      change: (entry) => {
+        entry.extra_info.output_dtype = 'float32';
+        (entry.extra_info.workload_identity as Record<string, unknown>).output_dtype = 'float32';
+      },
     },
     {
       code: 'backend_configuration_mismatch',
-      change: (entry) => { entry.extra_info.jax_enable_x64 = true; },
+      change: (entry) => {
+        entry.extra_info.jax_enable_x64 = true;
+        (entry.extra_info.backend_configuration as Record<string, unknown>).jax_enable_x64 = true;
+        const workload = entry.extra_info.workload_identity as Record<string, unknown>;
+        (workload.backend_configuration as Record<string, unknown>).jax_enable_x64 = true;
+      },
     },
   ])('returns no rows for $code', ({ code, expectedStatus = 'incompatible', change }) => {
     const baselineEntry = contractEntry({ backend: code === 'backend_configuration_mismatch' ? 'jax' : 'numpy' });
@@ -271,6 +368,18 @@ describe('benchmark report compatibility', () => {
       input_dtype: 'float32',
       jax_platform: 'gpu',
     });
+    const workload = currentEntry.extra_info.workload_identity as Record<string, unknown>;
+    Object.assign(workload, {
+      scale: 'standard',
+      scope: 'provider_boundary',
+      input_dtype: 'float32',
+    });
+    Object.assign(currentEntry.extra_info.backend_configuration as Record<string, unknown>, {
+      jax_platform: 'gpu',
+    });
+    Object.assign(workload.backend_configuration as Record<string, unknown>, {
+      jax_platform: 'gpu',
+    });
 
     const result = compareBenchmarkReports(
       parsedReport(baselineEntry),
@@ -353,6 +462,155 @@ describe('benchmark report parsing', () => {
     Object.assign(entry.extra_info, { jax_platform: 'cpu', jax_enable_x64: false });
 
     expect(() => parsedReport(entry)).toThrow(/NumPy.*JAX/);
+  });
+
+  it.each<{
+    name: string;
+    field: string;
+    change: (entry: ReturnType<typeof contractEntry>) => void;
+  }>([
+    {
+      name: 'contract version',
+      field: 'workload_identity.benchmark_contract_version',
+      change: (entry) => {
+        (entry.extra_info.workload_identity as Record<string, unknown>)
+          .benchmark_contract_version = 3;
+      },
+    },
+    {
+      name: 'scenario',
+      field: 'workload_identity.scenario',
+      change: (entry) => {
+        (entry.extra_info.workload_identity as Record<string, unknown>).scenario =
+          'array_sum';
+      },
+    },
+    {
+      name: 'backend',
+      field: 'workload_identity.backend',
+      change: (entry) => {
+        const workload = entry.extra_info.workload_identity as Record<string, unknown>;
+        workload.backend = 'jax';
+        workload.backend_configuration = {
+          jax_platform: 'cpu',
+          jax_enable_x64: false,
+        };
+      },
+    },
+    {
+      name: 'scope',
+      field: 'workload_identity.scope',
+      change: (entry) => {
+        (entry.extra_info.workload_identity as Record<string, unknown>).scope =
+          'provider_boundary';
+      },
+    },
+    {
+      name: 'workload version',
+      field: 'workload_identity.workload_version',
+      change: (entry) => {
+        (entry.extra_info.workload_identity as Record<string, unknown>).workload_version = 2;
+      },
+    },
+    {
+      name: 'scale',
+      field: 'workload_identity.scale',
+      change: (entry) => {
+        (entry.extra_info.workload_identity as Record<string, unknown>).scale = 'small';
+      },
+    },
+    ...[
+      'table_rows',
+      'array_elements',
+      'matrix_dimension',
+      'input_rows',
+      'output_rows',
+    ].map((field) => ({
+      name: field,
+      field: `workload_identity.${field}`,
+      change: (entry: ReturnType<typeof contractEntry>) => {
+        (entry.extra_info.workload_identity as Record<string, unknown>)[field] = 2_000;
+      },
+    })),
+    {
+      name: 'expression',
+      field: 'workload_identity.expression',
+      change: (entry) => {
+        (entry.extra_info.workload_identity as Record<string, unknown>).expression = 'sum(x)';
+      },
+    },
+    {
+      name: 'input dtype',
+      field: 'workload_identity.input_dtype',
+      change: (entry) => {
+        (entry.extra_info.workload_identity as Record<string, unknown>).input_dtype = 'float32';
+      },
+    },
+    {
+      name: 'output dtype',
+      field: 'workload_identity.output_dtype',
+      change: (entry) => {
+        (entry.extra_info.workload_identity as Record<string, unknown>).output_dtype = 'float32';
+      },
+    },
+    {
+      name: 'backend configuration',
+      field: 'workload_identity.backend_configuration.jax_enable_x64',
+      change: (entry) => {
+        const workload = entry.extra_info.workload_identity as Record<string, unknown>;
+        workload.backend_configuration = {
+          jax_platform: 'cpu',
+          jax_enable_x64: true,
+        };
+      },
+    },
+  ])('rejects a flat/nested workload mismatch: $name', ({ field, change }) => {
+    const entry = contractEntry({ backend: field.includes('backend_configuration') ? 'jax' : 'numpy' });
+    change(entry);
+
+    expect(() => parsedReport(entry)).toThrow(field);
+  });
+
+  it.each<{
+    name: string;
+    field: string;
+    change: (entry: ReturnType<typeof contractEntry>) => void;
+  }>([
+    {
+      name: 'Python version',
+      field: 'python_version',
+      change: (entry) => { entry.extra_info.python_version = '3.14.0'; },
+    },
+    {
+      name: 'NumPy version',
+      field: 'numpy_version',
+      change: (entry) => { entry.extra_info.numpy_version = '2.6.0'; },
+    },
+    {
+      name: 'JAX version',
+      field: 'jax_version',
+      change: (entry) => { entry.extra_info.jax_version = '0.11.0'; },
+    },
+    {
+      name: 'JAXlib version',
+      field: 'jaxlib_version',
+      change: (entry) => { entry.extra_info.jaxlib_version = '0.11.0'; },
+    },
+    {
+      name: 'JAX platform',
+      field: 'jax_platform',
+      change: (entry) => { entry.extra_info.jax_platform = 'gpu'; },
+    },
+    {
+      name: 'JAX x64 mode',
+      field: 'jax_enable_x64',
+      change: (entry) => { entry.extra_info.jax_enable_x64 = true; },
+    },
+  ])('rejects a flat/nested dependency or backend mismatch: $name', ({ name, field, change }) => {
+    const entry = contractEntry({ backend: name.startsWith('JAX') ? 'jax' : 'numpy' });
+    change(entry);
+
+    expect(() => parsedReport(entry)).toThrow(field);
   });
 
   it.each<{

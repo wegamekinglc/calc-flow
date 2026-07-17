@@ -29,6 +29,44 @@ type BenchmarkScope =
   | 'plan_end_to_end'
   | 'batch_ownership';
 
+interface MachineIdentity {
+  operatingSystem: string;
+  architecture: string;
+  cpuBrand: string;
+  logicalCpuCount: number;
+  pythonImplementation: string;
+}
+
+interface DependencyIdentity {
+  pythonVersion: string;
+  numpyVersion: string;
+  jaxVersion: string | null;
+  jaxlibVersion: string | null;
+}
+
+interface BackendConfiguration {
+  jaxPlatform: string | null;
+  jaxEnableX64: boolean | null;
+}
+
+interface WorkloadIdentity {
+  benchmarkContractVersion: 2;
+  scenario: string;
+  scope: BenchmarkScope;
+  workloadVersion: number;
+  backend: BenchmarkBackend;
+  scale: string;
+  tableRows: number;
+  arrayElements: number;
+  matrixDimension: number;
+  inputRows: number;
+  outputRows: number;
+  expression: string;
+  inputDtype: string;
+  outputDtype: string;
+  backendConfiguration: BackendConfiguration;
+}
+
 interface ContractIdentity {
   version: number;
   scenario: string | null;
@@ -56,6 +94,9 @@ interface BenchmarkContractV2 extends ContractIdentity {
   workloadFingerprint: string;
   jaxPlatform: string | null;
   jaxEnableX64: boolean | null;
+  machineIdentity: MachineIdentity;
+  dependencyIdentity: DependencyIdentity;
+  workloadIdentity: WorkloadIdentity;
 }
 
 interface BenchmarkEntry {
@@ -181,56 +222,154 @@ const supportedScope = (
   return scope as BenchmarkScope;
 };
 
-const validateMachineIdentity = (value: unknown, name: string): void => {
-  const identity = identityObject(value, name, 'machine_identity');
-  nonEmptyText(identity.operating_system, name, 'machine_identity.operating_system');
-  nonEmptyText(identity.architecture, name, 'machine_identity.architecture');
-  nonEmptyText(identity.cpu_brand, name, 'machine_identity.cpu_brand');
-  integer(identity.logical_cpu_count, name, 'machine_identity.logical_cpu_count', 1);
-  nonEmptyText(
-    identity.python_implementation,
-    name,
-    'machine_identity.python_implementation',
-  );
+const rejectUnknownFields = (
+  identity: Record<string, unknown>,
+  allowedFields: readonly string[],
+  name: string,
+  field: string,
+): void => {
+  const allowed = new Set(allowedFields);
+  const unknown = Object.keys(identity).find((key) => !allowed.has(key));
+  if (unknown !== undefined) contractError(name, `${field}.${unknown}`);
 };
 
-const validateDependencyIdentity = (
+const normalizeMachineIdentity = (value: unknown, name: string): MachineIdentity => {
+  const identity = identityObject(value, name, 'machine_identity');
+  rejectUnknownFields(
+    identity,
+    [
+      'operating_system',
+      'architecture',
+      'cpu_brand',
+      'logical_cpu_count',
+      'python_implementation',
+    ],
+    name,
+    'machine_identity',
+  );
+  return {
+    operatingSystem: nonEmptyText(
+      identity.operating_system,
+      name,
+      'machine_identity.operating_system',
+    ),
+    architecture: nonEmptyText(identity.architecture, name, 'machine_identity.architecture'),
+    cpuBrand: nonEmptyText(identity.cpu_brand, name, 'machine_identity.cpu_brand'),
+    logicalCpuCount: integer(
+      identity.logical_cpu_count,
+      name,
+      'machine_identity.logical_cpu_count',
+      1,
+    ),
+    pythonImplementation: nonEmptyText(
+      identity.python_implementation,
+      name,
+      'machine_identity.python_implementation',
+    ),
+  };
+};
+
+const normalizeDependencyIdentity = (
   value: unknown,
   name: string,
   backend: BenchmarkBackend,
-): void => {
+): DependencyIdentity => {
   const identity = identityObject(value, name, 'dependency_identity');
-  nonEmptyText(identity.python_version, name, 'dependency_identity.python_version');
-  nonEmptyText(identity.numpy_version, name, 'dependency_identity.numpy_version');
+  rejectUnknownFields(
+    identity,
+    backend === 'jax'
+      ? ['python_version', 'numpy_version', 'jax_version', 'jaxlib_version']
+      : ['python_version', 'numpy_version'],
+    name,
+    'dependency_identity',
+  );
+  const pythonVersion = nonEmptyText(
+    identity.python_version,
+    name,
+    'dependency_identity.python_version',
+  );
+  const numpyVersion = nonEmptyText(
+    identity.numpy_version,
+    name,
+    'dependency_identity.numpy_version',
+  );
   if (backend === 'jax') {
-    nonEmptyText(identity.jax_version, name, 'dependency_identity.jax_version');
-    nonEmptyText(identity.jaxlib_version, name, 'dependency_identity.jaxlib_version');
-  } else if ('jax_version' in identity || 'jaxlib_version' in identity) {
-    contractError(name, 'dependency_identity cannot contain JAX fields for NumPy');
+    return {
+      pythonVersion,
+      numpyVersion,
+      jaxVersion: nonEmptyText(
+        identity.jax_version,
+        name,
+        'dependency_identity.jax_version',
+      ),
+      jaxlibVersion: nonEmptyText(
+        identity.jaxlib_version,
+        name,
+        'dependency_identity.jaxlib_version',
+      ),
+    };
   }
+  return { pythonVersion, numpyVersion, jaxVersion: null, jaxlibVersion: null };
 };
 
-const validateBackendConfiguration = (
+const normalizeBackendConfiguration = (
   value: unknown,
   name: string,
   backend: BenchmarkBackend,
   field: string,
-): Record<string, unknown> => {
+): BackendConfiguration => {
   const configuration = identityObject(value, name, field);
   if (backend === 'jax') {
-    nonEmptyText(configuration.jax_platform, name, `${field}.jax_platform`);
+    rejectUnknownFields(
+      configuration,
+      ['jax_platform', 'jax_enable_x64'],
+      name,
+      field,
+    );
+    const jaxPlatform = nonEmptyText(
+      configuration.jax_platform,
+      name,
+      `${field}.jax_platform`,
+    );
     if (typeof configuration.jax_enable_x64 !== 'boolean') {
       contractError(name, `${field}.jax_enable_x64`);
     }
-  } else if (Object.keys(configuration).length > 0) {
+    return {
+      jaxPlatform,
+      jaxEnableX64: configuration.jax_enable_x64 as boolean,
+    };
+  }
+  if (Object.keys(configuration).length > 0) {
     contractError(name, `${field} must be empty for NumPy`);
   }
-  return configuration;
+  return { jaxPlatform: null, jaxEnableX64: null };
 };
 
-const validateWorkloadIdentity = (value: unknown, name: string): void => {
+const normalizeWorkloadIdentity = (value: unknown, name: string): WorkloadIdentity => {
   const field = 'workload_identity';
   const identity = identityObject(value, name, field);
+  rejectUnknownFields(
+    identity,
+    [
+      'benchmark_contract_version',
+      'scenario',
+      'scope',
+      'workload_version',
+      'backend',
+      'scale',
+      'table_rows',
+      'array_elements',
+      'matrix_dimension',
+      'input_rows',
+      'output_rows',
+      'expression',
+      'input_dtype',
+      'output_dtype',
+      'backend_configuration',
+    ],
+    name,
+    field,
+  );
   const version = integer(
     identity.benchmark_contract_version,
     name,
@@ -238,25 +377,51 @@ const validateWorkloadIdentity = (value: unknown, name: string): void => {
     1,
   );
   if (version !== 2) contractError(name, `${field}.benchmark_contract_version`);
-  nonEmptyText(identity.scenario, name, `${field}.scenario`);
-  supportedScope(identity.scope, name, `${field}.scope`);
-  integer(identity.workload_version, name, `${field}.workload_version`, 1);
-  const backend = supportedBackend(identity.backend, name, `${field}.backend`);
-  nonEmptyText(identity.scale, name, `${field}.scale`);
-  integer(identity.table_rows, name, `${field}.table_rows`, 1);
-  integer(identity.array_elements, name, `${field}.array_elements`, 1);
-  integer(identity.matrix_dimension, name, `${field}.matrix_dimension`, 1);
-  integer(identity.input_rows, name, `${field}.input_rows`, 0);
-  integer(identity.output_rows, name, `${field}.output_rows`, 0);
-  nonEmptyText(identity.expression, name, `${field}.expression`);
-  nonEmptyText(identity.input_dtype, name, `${field}.input_dtype`);
-  nonEmptyText(identity.output_dtype, name, `${field}.output_dtype`);
-  validateBackendConfiguration(
-    identity.backend_configuration,
+  const scenario = nonEmptyText(identity.scenario, name, `${field}.scenario`);
+  const scope = supportedScope(identity.scope, name, `${field}.scope`);
+  const workloadVersion = integer(
+    identity.workload_version,
     name,
-    backend,
-    `${field}.backend_configuration`,
+    `${field}.workload_version`,
+    1,
   );
+  const backend = supportedBackend(identity.backend, name, `${field}.backend`);
+  return {
+    benchmarkContractVersion: 2,
+    scenario,
+    scope,
+    workloadVersion,
+    backend,
+    scale: nonEmptyText(identity.scale, name, `${field}.scale`),
+    tableRows: integer(identity.table_rows, name, `${field}.table_rows`, 1),
+    arrayElements: integer(identity.array_elements, name, `${field}.array_elements`, 1),
+    matrixDimension: integer(
+      identity.matrix_dimension,
+      name,
+      `${field}.matrix_dimension`,
+      1,
+    ),
+    inputRows: integer(identity.input_rows, name, `${field}.input_rows`, 0),
+    outputRows: integer(identity.output_rows, name, `${field}.output_rows`, 0),
+    expression: nonEmptyText(identity.expression, name, `${field}.expression`),
+    inputDtype: nonEmptyText(identity.input_dtype, name, `${field}.input_dtype`),
+    outputDtype: nonEmptyText(identity.output_dtype, name, `${field}.output_dtype`),
+    backendConfiguration: normalizeBackendConfiguration(
+      identity.backend_configuration,
+      name,
+      backend,
+      `${field}.backend_configuration`,
+    ),
+  };
+};
+
+const requireCoherentField = (
+  name: string,
+  field: string,
+  flat: unknown,
+  nested: unknown,
+): void => {
+  if (flat !== nested) contractError(name, field);
 };
 
 const parseContractV2 = (
@@ -266,24 +431,40 @@ const parseContractV2 = (
   const scenario = nonEmptyText(info.scenario, name, 'scenario');
   const backend = supportedBackend(info.backend, name, 'backend');
   const scope = supportedScope(info.scope, name, 'scope');
-  validateBackendConfiguration(
+  const workloadVersion = integer(info.workload_version, name, 'workload_version', 1);
+  const scale = nonEmptyText(info.scale, name, 'scale');
+  const tableRows = integer(info.table_rows, name, 'table_rows', 1);
+  const arrayElements = integer(info.array_elements, name, 'array_elements', 1);
+  const matrixDimension = integer(info.matrix_dimension, name, 'matrix_dimension', 1);
+  const inputRows = integer(info.input_rows, name, 'input_rows', 0);
+  const outputRows = integer(info.output_rows, name, 'output_rows', 0);
+  const expression = nonEmptyText(info.expression, name, 'expression');
+  const inputDtype = nonEmptyText(info.input_dtype, name, 'input_dtype');
+  const outputDtype = nonEmptyText(info.output_dtype, name, 'output_dtype');
+  const backendConfiguration = normalizeBackendConfiguration(
     info.backend_configuration,
     name,
     backend,
     'backend_configuration',
   );
-  validateMachineIdentity(info.machine_identity, name);
-  validateDependencyIdentity(info.dependency_identity, name, backend);
-  validateWorkloadIdentity(info.workload_identity, name);
-  nonEmptyText(info.python_version, name, 'python_version');
-  nonEmptyText(info.numpy_version, name, 'numpy_version');
+  const machineIdentity = normalizeMachineIdentity(info.machine_identity, name);
+  const dependencyIdentity = normalizeDependencyIdentity(
+    info.dependency_identity,
+    name,
+    backend,
+  );
+  const workloadIdentity = normalizeWorkloadIdentity(info.workload_identity, name);
+  const pythonVersion = nonEmptyText(info.python_version, name, 'python_version');
+  const numpyVersion = nonEmptyText(info.numpy_version, name, 'numpy_version');
   integer(info.process_rss_bytes, name, 'process_rss_bytes', 0);
 
   let jaxPlatform: string | null = null;
   let jaxEnableX64: boolean | null = null;
+  let jaxVersion: string | null = null;
+  let jaxlibVersion: string | null = null;
   if (backend === 'jax') {
-    nonEmptyText(info.jax_version, name, 'jax_version');
-    nonEmptyText(info.jaxlib_version, name, 'jaxlib_version');
+    jaxVersion = nonEmptyText(info.jax_version, name, 'jax_version');
+    jaxlibVersion = nonEmptyText(info.jaxlib_version, name, 'jaxlib_version');
     jaxPlatform = nonEmptyText(info.jax_platform, name, 'jax_platform');
     if (typeof info.jax_enable_x64 !== 'boolean') contractError(name, 'jax_enable_x64');
     jaxEnableX64 = info.jax_enable_x64 as boolean;
@@ -294,26 +475,62 @@ const parseContractV2 = (
     }
   }
 
+  requireCoherentField(name, 'dependency_identity.python_version', pythonVersion, dependencyIdentity.pythonVersion);
+  requireCoherentField(name, 'dependency_identity.numpy_version', numpyVersion, dependencyIdentity.numpyVersion);
+  requireCoherentField(name, 'dependency_identity.jax_version', jaxVersion, dependencyIdentity.jaxVersion);
+  requireCoherentField(name, 'dependency_identity.jaxlib_version', jaxlibVersion, dependencyIdentity.jaxlibVersion);
+  requireCoherentField(name, 'backend_configuration.jax_platform', jaxPlatform, backendConfiguration.jaxPlatform);
+  requireCoherentField(name, 'backend_configuration.jax_enable_x64', jaxEnableX64, backendConfiguration.jaxEnableX64);
+  requireCoherentField(name, 'workload_identity.benchmark_contract_version', 2, workloadIdentity.benchmarkContractVersion);
+  requireCoherentField(name, 'workload_identity.scenario', scenario, workloadIdentity.scenario);
+  requireCoherentField(name, 'workload_identity.backend', backend, workloadIdentity.backend);
+  requireCoherentField(name, 'workload_identity.scope', scope, workloadIdentity.scope);
+  requireCoherentField(name, 'workload_identity.workload_version', workloadVersion, workloadIdentity.workloadVersion);
+  requireCoherentField(name, 'workload_identity.scale', scale, workloadIdentity.scale);
+  requireCoherentField(name, 'workload_identity.table_rows', tableRows, workloadIdentity.tableRows);
+  requireCoherentField(name, 'workload_identity.array_elements', arrayElements, workloadIdentity.arrayElements);
+  requireCoherentField(name, 'workload_identity.matrix_dimension', matrixDimension, workloadIdentity.matrixDimension);
+  requireCoherentField(name, 'workload_identity.input_rows', inputRows, workloadIdentity.inputRows);
+  requireCoherentField(name, 'workload_identity.output_rows', outputRows, workloadIdentity.outputRows);
+  requireCoherentField(name, 'workload_identity.expression', expression, workloadIdentity.expression);
+  requireCoherentField(name, 'workload_identity.input_dtype', inputDtype, workloadIdentity.inputDtype);
+  requireCoherentField(name, 'workload_identity.output_dtype', outputDtype, workloadIdentity.outputDtype);
+  requireCoherentField(
+    name,
+    'workload_identity.backend_configuration.jax_platform',
+    backendConfiguration.jaxPlatform,
+    workloadIdentity.backendConfiguration.jaxPlatform,
+  );
+  requireCoherentField(
+    name,
+    'workload_identity.backend_configuration.jax_enable_x64',
+    backendConfiguration.jaxEnableX64,
+    workloadIdentity.backendConfiguration.jaxEnableX64,
+  );
+
   return {
     version: 2,
     scenario,
     backend,
     scope,
-    workloadVersion: integer(info.workload_version, name, 'workload_version', 1),
-    scale: nonEmptyText(info.scale, name, 'scale'),
-    tableRows: integer(info.table_rows, name, 'table_rows', 1),
-    arrayElements: integer(info.array_elements, name, 'array_elements', 1),
-    matrixDimension: integer(info.matrix_dimension, name, 'matrix_dimension', 1),
-    inputRows: integer(info.input_rows, name, 'input_rows', 0),
-    outputRows: integer(info.output_rows, name, 'output_rows', 0),
-    expression: nonEmptyText(info.expression, name, 'expression'),
-    inputDtype: nonEmptyText(info.input_dtype, name, 'input_dtype'),
-    outputDtype: nonEmptyText(info.output_dtype, name, 'output_dtype'),
+    workloadVersion,
+    scale,
+    tableRows,
+    arrayElements,
+    matrixDimension,
+    inputRows,
+    outputRows,
+    expression,
+    inputDtype,
+    outputDtype,
     machineFingerprint: fingerprint(info.machine_fingerprint, name, 'machine_fingerprint'),
     dependencyFingerprint: fingerprint(info.dependency_fingerprint, name, 'dependency_fingerprint'),
     workloadFingerprint: fingerprint(info.workload_fingerprint, name, 'workload_fingerprint'),
     jaxPlatform,
     jaxEnableX64,
+    machineIdentity,
+    dependencyIdentity,
+    workloadIdentity,
   };
 };
 
@@ -450,6 +667,30 @@ const compareField = (
   if (baseline !== current) issues.push(compatibilityIssue(code, field, baseline, current));
 };
 
+const sameNormalizedIdentity = (baseline: object, current: object): boolean =>
+  JSON.stringify(baseline) === JSON.stringify(current);
+
+const compareFingerprintAndIdentity = (
+  issues: BenchmarkCompatibilityIssue[],
+  code: BenchmarkCompatibilityIssue['code'],
+  fingerprintField: string,
+  baselineFingerprint: string,
+  currentFingerprint: string,
+  identityField: string,
+  baselineIdentity: object,
+  currentIdentity: object,
+): void => {
+  const fingerprintsMatch = baselineFingerprint === currentFingerprint;
+  const identitiesMatch = sameNormalizedIdentity(baselineIdentity, currentIdentity);
+  if (fingerprintsMatch && identitiesMatch) return;
+  issues.push(compatibilityIssue(
+    code,
+    fingerprintsMatch ? identityField : fingerprintField,
+    fingerprintsMatch ? baselineIdentity : baselineFingerprint,
+    fingerprintsMatch ? currentIdentity : currentFingerprint,
+  ));
+};
+
 const compareContracts = (
   baseline: BenchmarkEntry,
   current: BenchmarkEntry,
@@ -480,20 +721,98 @@ const compareContracts = (
   }
 
   const issues: BenchmarkCompatibilityIssue[] = [];
-  compareField(issues, 'machine_mismatch', 'machine_fingerprint', baselineContract.machineFingerprint, currentContract.machineFingerprint);
-  compareField(issues, 'dependency_mismatch', 'dependency_fingerprint', baselineContract.dependencyFingerprint, currentContract.dependencyFingerprint);
-  compareField(issues, 'scale_mismatch', 'scale', baselineContract.scale, currentContract.scale);
-  compareField(issues, 'scale_mismatch', 'table_rows', baselineContract.tableRows, currentContract.tableRows);
-  compareField(issues, 'scale_mismatch', 'array_elements', baselineContract.arrayElements, currentContract.arrayElements);
-  compareField(issues, 'scale_mismatch', 'matrix_dimension', baselineContract.matrixDimension, currentContract.matrixDimension);
-  compareField(issues, 'scale_mismatch', 'input_rows', baselineContract.inputRows, currentContract.inputRows);
-  compareField(issues, 'scale_mismatch', 'output_rows', baselineContract.outputRows, currentContract.outputRows);
-  compareField(issues, 'scope_mismatch', 'scope', baselineContract.scope, currentContract.scope);
-  compareField(issues, 'workload_mismatch', 'workload_fingerprint', baselineContract.workloadFingerprint, currentContract.workloadFingerprint);
-  compareField(issues, 'dtype_mismatch', 'input_dtype', baselineContract.inputDtype, currentContract.inputDtype);
-  compareField(issues, 'dtype_mismatch', 'output_dtype', baselineContract.outputDtype, currentContract.outputDtype);
-  compareField(issues, 'backend_configuration_mismatch', 'jax_platform', baselineContract.jaxPlatform, currentContract.jaxPlatform);
-  compareField(issues, 'backend_configuration_mismatch', 'jax_enable_x64', baselineContract.jaxEnableX64, currentContract.jaxEnableX64);
+  compareFingerprintAndIdentity(
+    issues,
+    'machine_mismatch',
+    'machine_fingerprint',
+    baselineContract.machineFingerprint,
+    currentContract.machineFingerprint,
+    'machine_identity',
+    baselineContract.machineIdentity,
+    currentContract.machineIdentity,
+  );
+  compareFingerprintAndIdentity(
+    issues,
+    'dependency_mismatch',
+    'dependency_fingerprint',
+    baselineContract.dependencyFingerprint,
+    currentContract.dependencyFingerprint,
+    'dependency_identity',
+    baselineContract.dependencyIdentity,
+    currentContract.dependencyIdentity,
+  );
+  const baselineWorkload = baselineContract.workloadIdentity;
+  const currentWorkload = currentContract.workloadIdentity;
+  compareField(issues, 'scale_mismatch', 'scale', baselineWorkload.scale, currentWorkload.scale);
+  compareField(issues, 'scale_mismatch', 'table_rows', baselineWorkload.tableRows, currentWorkload.tableRows);
+  compareField(issues, 'scale_mismatch', 'array_elements', baselineWorkload.arrayElements, currentWorkload.arrayElements);
+  compareField(issues, 'scale_mismatch', 'matrix_dimension', baselineWorkload.matrixDimension, currentWorkload.matrixDimension);
+  compareField(issues, 'scale_mismatch', 'input_rows', baselineWorkload.inputRows, currentWorkload.inputRows);
+  compareField(issues, 'scale_mismatch', 'output_rows', baselineWorkload.outputRows, currentWorkload.outputRows);
+  compareField(issues, 'scope_mismatch', 'scope', baselineWorkload.scope, currentWorkload.scope);
+  const baselineWorkloadCore = {
+    benchmarkContractVersion: baselineWorkload.benchmarkContractVersion,
+    scenario: baselineWorkload.scenario,
+    backend: baselineWorkload.backend,
+    workloadVersion: baselineWorkload.workloadVersion,
+    expression: baselineWorkload.expression,
+  };
+  const currentWorkloadCore = {
+    benchmarkContractVersion: currentWorkload.benchmarkContractVersion,
+    scenario: currentWorkload.scenario,
+    backend: currentWorkload.backend,
+    workloadVersion: currentWorkload.workloadVersion,
+    expression: currentWorkload.expression,
+  };
+  const workloadFingerprintsMatch =
+    baselineContract.workloadFingerprint === currentContract.workloadFingerprint;
+  const workloadDocumentsMatch = sameNormalizedIdentity(baselineWorkload, currentWorkload);
+  const workloadCoreMatches = sameNormalizedIdentity(
+    baselineWorkloadCore,
+    currentWorkloadCore,
+  );
+  const categorizedWorkloadDifference =
+    baselineWorkload.scale !== currentWorkload.scale
+    || baselineWorkload.tableRows !== currentWorkload.tableRows
+    || baselineWorkload.arrayElements !== currentWorkload.arrayElements
+    || baselineWorkload.matrixDimension !== currentWorkload.matrixDimension
+    || baselineWorkload.inputRows !== currentWorkload.inputRows
+    || baselineWorkload.outputRows !== currentWorkload.outputRows
+    || baselineWorkload.scope !== currentWorkload.scope
+    || baselineWorkload.inputDtype !== currentWorkload.inputDtype
+    || baselineWorkload.outputDtype !== currentWorkload.outputDtype
+    || !sameNormalizedIdentity(
+      baselineWorkload.backendConfiguration,
+      currentWorkload.backendConfiguration,
+    );
+  if (
+    !workloadFingerprintsMatch
+    || !workloadCoreMatches
+    || (!workloadDocumentsMatch && !categorizedWorkloadDifference)
+  ) {
+    issues.push(compatibilityIssue(
+      'workload_mismatch',
+      workloadFingerprintsMatch ? 'workload_identity' : 'workload_fingerprint',
+      workloadFingerprintsMatch ? baselineWorkload : baselineContract.workloadFingerprint,
+      workloadFingerprintsMatch ? currentWorkload : currentContract.workloadFingerprint,
+    ));
+  }
+  compareField(issues, 'dtype_mismatch', 'input_dtype', baselineWorkload.inputDtype, currentWorkload.inputDtype);
+  compareField(issues, 'dtype_mismatch', 'output_dtype', baselineWorkload.outputDtype, currentWorkload.outputDtype);
+  compareField(
+    issues,
+    'backend_configuration_mismatch',
+    'jax_platform',
+    baselineWorkload.backendConfiguration.jaxPlatform,
+    currentWorkload.backendConfiguration.jaxPlatform,
+  );
+  compareField(
+    issues,
+    'backend_configuration_mismatch',
+    'jax_enable_x64',
+    baselineWorkload.backendConfiguration.jaxEnableX64,
+    currentWorkload.backendConfiguration.jaxEnableX64,
+  );
 
   return {
     issues,
