@@ -39,7 +39,7 @@
 
 **Files:**
 - Read: `crates/calc-flow/benches/core.rs`
-- Output only: `target/criterion/`
+- Output only: `target/cargo/criterion/`
 
 **Interfaces:**
 - Consumes: Criterion cases `execute/datafusion_runtime_new`, `execute/datafusion_runtime_new_register_udfs`, `execute/external_passthrough_1000_rows`, and `execute/expression_1024_rows`.
@@ -78,11 +78,11 @@ CARGO_TARGET_DIR="$PWD/target/cargo" CARGO_BUILD_JOBS=1 \
   --save-baseline lazy-datafusion-before
 ```
 
-Expected: all stable Criterion cases complete and write baseline data beneath `target/criterion/`.
+Expected: all stable Criterion cases complete and write baseline data beneath `target/cargo/criterion/`.
 
 - [ ] **Step 4: Record the baseline point estimates before editing production code**
 
-Read the four `estimates.json` files beneath `target/criterion/` and copy their slope point estimates and 95% confidence intervals into working notes. Do not commit generated Criterion output.
+Read the four `estimates.json` files beneath `target/cargo/criterion/` and copy their slope point estimates and 95% confidence intervals into working notes. Do not commit generated Criterion output.
 
 ---
 
@@ -310,7 +310,7 @@ git commit -m "perf: defer DataFusion session setup"
 **Files:**
 - Read: `crates/calc-flow/benches/core.rs`
 - Create: `docs/superpowers/handoffs/2026-07-18-lazy-datafusion-runtime.md`
-- Output only: `target/criterion/`
+- Output only: `target/cargo/criterion/`
 - Output only: `target/benchmark-results/`
 
 **Interfaces:**
