@@ -22,3 +22,7 @@ benchmark-results/
 coverage.xml
 htmlcov/
 .worktrees/
+/target/
+/python/calc_flow/_native*.so
+/python/calc_flow/_native*.pyd
+/.superpowers/

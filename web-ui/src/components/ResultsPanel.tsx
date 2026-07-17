@@ -29,8 +29,10 @@ export function ResultsPanel({ validation, run, onCancel }: ResultsPanelProps) {
           <strong>{validation.valid ? 'Graph is valid' : 'Graph needs attention'}</strong>
           <span>
             {validation.valid
-              ? `${validation.graph_inputs.length} input · ${validation.graph_outputs.length} output`
-              : validation.errors.map((issue) => issue.message).join(' · ')}
+              ? validation.fingerprint
+                ? `Fingerprint ${validation.fingerprint}`
+                : 'No validation issues'
+              : validation.issues.map((issue) => issue.message).join(' · ')}
           </span>
         </div>
       )}
@@ -86,8 +88,8 @@ export function ResultsPanel({ validation, run, onCancel }: ResultsPanelProps) {
               ))}
             </article>
             {result.datafusion_metrics.map((metric, index) => (
-              <article className="plan-card" key={`${metric.node_id}-${index}`}>
-                <span className="eyebrow">DataFusion · {metric.node_id}</span>
+              <article className="plan-card" key={`${metric.query_id}-${metric.node_id}-${index}`}>
+                <span className="eyebrow">DataFusion · {metric.node_id ?? `query ${metric.query_id}`}</span>
                 <div className="metric-row"><span>Planning</span><strong>{milliseconds(metric.planning_ns)}</strong></div>
                 <div className="metric-row"><span>Execution</span><strong>{milliseconds(metric.execution_ns)}</strong></div>
                 <details>

@@ -2,34 +2,26 @@ from __future__ import annotations
 
 import ipaddress
 import json
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from uuid import uuid4
+from typing import Protocol
+from urllib.parse import quote
 
-from calc_flow.checkpoint import CheckpointError, FileCheckpointStore
-from calc_flow.config import (
-    CONFIG_FORMAT_VERSION,
-    MAX_PREVIEW_BYTES,
-    MAX_PREVIEW_ROWS,
-    MAX_PREVIEW_SECONDS,
-    SUPPORTED_ARROW_TYPES,
-    ProjectConfig,
-    RunOptions,
-    ValidationReport,
-    compile_project,
-    project_json_schema,
-    validate_project,
-)
-from calc_flow.project_store import (
+from calc_flow import (
+    CalcFlowError,
+    FileCheckpointStore,
     FileProjectStore,
-    ProjectConflictError,
-    ProjectFormatError,
-    ProjectNotFoundError,
-    export_project_document,
-    load_project_document,
+    ProjectDocument,
+    Runtime,
+    project_json_schema,
 )
-from calc_flow.udf import UdfRegistry, UdfRegistrySnapshot
+from calc_flow.store import (
+    export_project_json,
+    export_project_yaml,
+    import_project_json,
+    import_project_yaml,
+)
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
@@ -37,28 +29,119 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from calc_flow_studio.models import (
-    CatalogResponse,
     CheckpointSummary,
     ProjectCreateRequest,
     ProjectSummary,
+    RunEvent,
     RunRequest,
     RunResponse,
     RunStatus,
 )
-from calc_flow_studio.run_manager import RunManager, RunManagerError
+from calc_flow_studio.run_manager import RunManager
+
+API_PREFIX = "/api/v2"
+MAX_PROJECT_IMPORT_BYTES = 10 * 1024 * 1024
 
 
-def _project_summary(project: ProjectConfig) -> ProjectSummary:
+class ProjectStoreProtocol(Protocol):
+    async def create(self, project: ProjectDocument) -> None: ...
+
+    async def put(self, project: ProjectDocument) -> None: ...
+
+    async def get(self, project_id: str) -> ProjectDocument: ...
+
+    async def list(self) -> list[ProjectDocument]: ...
+
+    async def delete(self, project_id: str) -> None: ...
+
+
+class CheckpointStoreProtocol(Protocol):
+    async def load(self, pipeline_name: str) -> dict[str, object] | None: ...
+
+    async def delete(self, pipeline_name: str) -> None: ...
+
+
+class RuntimeProtocol(Protocol):
+    def catalog(self) -> list[dict[str, object]]: ...
+
+    def validation_report(self, project_json: str) -> dict[str, object]: ...
+
+    def compile_project(self, project_json: str) -> object: ...
+
+
+class RunManagerProtocol(Protocol):
+    def submit(self, project: ProjectDocument, request: RunRequest) -> RunResponse: ...
+
+    def get(self, run_id: str) -> RunResponse: ...
+
+    def wait_for_events(
+        self, run_id: str, *, after_sequence: int, timeout: float
+    ) -> tuple[tuple[RunEvent, ...], RunStatus]: ...
+
+    def cancel(self, run_id: str) -> RunResponse: ...
+
+    def shutdown(self) -> None: ...
+
+
+def _project_summary(project: ProjectDocument) -> ProjectSummary:
+    root = project.root
+    pipeline = root["pipeline"]
+    assert isinstance(pipeline, dict)
+    nodes = pipeline["nodes"]
+    assert isinstance(nodes, list)
     return ProjectSummary(
-        id=project.id,
-        name=project.name,
-        description=project.description,
-        node_count=len(project.pipeline.nodes),
+        id=str(root["id"]),
+        name=str(root["name"]),
+        description=str(root["description"]),
+        node_count=len(nodes),
     )
 
 
-def _not_found(error: Exception) -> HTTPException:
-    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error))
+def _http_error(code: int, detail: str) -> HTTPException:
+    return HTTPException(status_code=code, detail=detail)
+
+
+def _native_error(error: Exception, *, operation: str) -> HTTPException:
+    message = str(error)
+    if operation in {"get", "delete"} and (
+        isinstance(error, KeyError) or "not found" in message
+    ):
+        return _http_error(status.HTTP_404_NOT_FOUND, message)
+    if operation == "create" and "already exists" in message:
+        return _http_error(status.HTTP_409_CONFLICT, message)
+    return _http_error(status.HTTP_422_UNPROCESSABLE_CONTENT, message)
+
+
+async def _bounded_request_body(request: Request) -> bytes:
+    declared_lengths = request.headers.getlist("content-length")
+    if len(declared_lengths) > 1:
+        raise _http_error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "project import must contain at most one Content-Length header",
+        )
+    if declared_lengths:
+        try:
+            length = int(declared_lengths[0])
+        except ValueError as error:
+            raise _http_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "project import Content-Length must be an integer",
+            ) from error
+        if length < 0 or length > MAX_PROJECT_IMPORT_BYTES:
+            raise _http_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"project import exceeds the {MAX_PROJECT_IMPORT_BYTES} byte limit",
+            )
+
+    content = bytearray()
+    async for chunk in request.stream():
+        if len(content) + len(chunk) > MAX_PROJECT_IMPORT_BYTES:
+            raise _http_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"project import exceeds the {MAX_PROJECT_IMPORT_BYTES} byte limit",
+            )
+        content.extend(chunk)
+    return bytes(content)
 
 
 def _default_frontend_directory() -> Path | None:
@@ -66,293 +149,319 @@ def _default_frontend_directory() -> Path | None:
     return static if (static / "index.html").is_file() else None
 
 
-def _import_project_document(
-    store: FileProjectStore,
-    content: bytes,
-    *,
-    format: str,
-    replace: bool,
-) -> ProjectConfig:
-    project = load_project_document(content, format=format)
-    if replace:
-        store.put(project)
-    else:
-        store.create(project)
-    return project
-
-
 def create_app(
     *,
     project_directory: str | Path = ".calc-flow-projects",
     checkpoint_directory: str | Path = ".calc-flow-checkpoints",
-    udf_registry: UdfRegistry | UdfRegistrySnapshot | None = None,
-    run_manager: RunManager | None = None,
+    project_store: ProjectStoreProtocol | None = None,
+    checkpoint_store: CheckpointStoreProtocol | None = None,
+    runtime: RuntimeProtocol | None = None,
+    run_manager: RunManagerProtocol | None = None,
     frontend_directory: str | Path | None = None,
 ) -> FastAPI:
-    """Create the local-only API without opening a network listener."""
-    store = FileProjectStore(project_directory)
-    checkpoint_store = FileCheckpointStore(checkpoint_directory)
-    manager = run_manager or RunManager(udf_registry=udf_registry)
-    registry = manager.udf_registry
+    """Create the local-only v2 API without opening a network listener."""
+    projects = project_store or FileProjectStore(project_directory)
+    checkpoints = checkpoint_store or FileCheckpointStore(checkpoint_directory)
+    selected_runtime = runtime or Runtime()
+    selected_run_manager = (
+        run_manager
+        if run_manager is not None
+        else RunManager(
+            runtime=selected_runtime if isinstance(selected_runtime, Runtime) else None
+        )
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        yield
-        manager.shutdown()
+        try:
+            yield
+        finally:
+            await run_in_threadpool(selected_run_manager.shutdown)
 
-    app = FastAPI(
-        title="Calc Flow API",
-        version="0.2.0",
-        lifespan=lifespan,
-    )
-    app.state.project_store = store
-    app.state.checkpoint_store = checkpoint_store
-    app.state.run_manager = manager
-    app.state.udf_registry = registry
+    app = FastAPI(title="Calc Flow API", version="2.0.0", lifespan=lifespan)
+    app.state.project_store = projects
+    app.state.checkpoint_store = checkpoints
+    app.state.runtime = selected_runtime
+    app.state.run_manager = selected_run_manager
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "DELETE"],
-        allow_headers=["Content-Type"],
+        allow_headers=["Content-Type", "Last-Event-ID"],
     )
 
-    @app.get("/api/v1/catalog", response_model=CatalogResponse)
-    def get_catalog() -> CatalogResponse:
-        defaults = RunOptions()
-        return CatalogResponse(
-            config_format_version=CONFIG_FORMAT_VERSION,
-            operators=(
-                {
-                    "kind": "expression",
-                    "label": "DataFusion expression",
-                    "backend_selector": False,
-                    "capabilities": ["calculation", "projection", "filter"],
-                },
-                {
-                    "kind": "sql",
-                    "label": "DataFusion SQL",
-                    "backend_selector": False,
-                    "capabilities": ["join", "aggregate", "window", "sort"],
-                },
-                {
-                    "kind": "array_expression",
-                    "label": "Array expression",
-                    "backends": ["numpy", "jax"],
-                },
-            ),
-            udfs=registry.catalog(),
-            arrow_types=SUPPORTED_ARROW_TYPES,
-            limits={
-                "max_input_bytes": MAX_PREVIEW_BYTES,
-                "max_rows": MAX_PREVIEW_ROWS,
-                "max_seconds": MAX_PREVIEW_SECONDS,
-                "memory_limit_mb": defaults.memory_limit_mb,
-                "output_rows": defaults.output_rows,
-            },
+    async def stored_project(project_id: str) -> ProjectDocument:
+        try:
+            return await projects.get(project_id)
+        except (CalcFlowError, KeyError) as error:
+            raise _native_error(error, operation="get") from error
+
+    async def runtime_validation_report(
+        project: ProjectDocument,
+    ) -> dict[str, object]:
+        try:
+            report = await run_in_threadpool(
+                selected_runtime.validation_report, project.canonical_json()
+            )
+        except CalcFlowError as error:
+            raise _native_error(error, operation="validate") from error
+        if type(report) is not dict:
+            raise _http_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "runtime returned an invalid project validation report",
+            )
+        try:
+            report = json.loads(
+                json.dumps(
+                    report,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+        except (RecursionError, TypeError, ValueError) as error:
+            raise _http_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "runtime returned an invalid project validation report",
+            ) from error
+        assert isinstance(report, dict)
+        valid = report.get("valid")
+        issues = report.get("issues", [])
+        if (
+            type(valid) is not bool
+            or type(issues) is not list
+            or any(type(issue) is not dict for issue in issues)
+            or (valid is True and bool(issues))
+        ):
+            raise _http_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "runtime returned an invalid project validation report",
+            )
+        return report
+
+    async def validate_for_storage(project: ProjectDocument) -> None:
+        report = await runtime_validation_report(project)
+        if report["valid"] is True:
+            return
+        issues = report["issues"]
+        assert isinstance(issues, list)
+        details = "; ".join(
+            str(issue.get("message", "invalid project"))
+            for issue in issues
+            if isinstance(issue, dict)
+        )
+        raise _http_error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            details or "project validation failed",
         )
 
-    @app.get("/api/v1/schema/project")
-    def get_project_schema() -> dict:
-        return dict(project_json_schema())
+    @app.get(f"{API_PREFIX}/catalog")
+    def get_catalog() -> list[dict[str, object]]:
+        return selected_runtime.catalog()
 
-    @app.get("/api/v1/projects", response_model=tuple[ProjectSummary, ...])
-    def list_projects() -> tuple[ProjectSummary, ...]:
-        return tuple(_project_summary(project) for project in store.list())
+    @app.get(f"{API_PREFIX}/schema/project")
+    def get_project_schema() -> dict[str, object]:
+        schema = json.loads(project_json_schema())
+        assert isinstance(schema, dict)
+        return schema
+
+    @app.get(f"{API_PREFIX}/projects", response_model=tuple[ProjectSummary, ...])
+    async def list_projects() -> tuple[ProjectSummary, ...]:
+        try:
+            stored = await projects.list()
+        except CalcFlowError as error:
+            raise _native_error(error, operation="list") from error
+        summaries = (_project_summary(project) for project in stored)
+        return tuple(sorted(summaries, key=lambda item: item.id))
 
     @app.post(
-        "/api/v1/projects",
-        response_model=ProjectConfig,
+        f"{API_PREFIX}/projects",
+        response_model=ProjectDocument,
         status_code=status.HTTP_201_CREATED,
     )
-    def create_project(request: ProjectCreateRequest) -> ProjectConfig:
-        for _ in range(3):
-            project = request.to_project(f"project_{uuid4().hex}")
-            try:
-                store.create(project)
-            except ProjectConflictError:
-                continue
-            return project
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="could not allocate a unique project ID",
-        )
+    async def create_project(request: ProjectCreateRequest) -> ProjectDocument:
+        project = request.to_project()
+        await validate_for_storage(project)
+        try:
+            await projects.create(project)
+        except CalcFlowError as error:
+            raise _native_error(error, operation="create") from error
+        return project
 
     @app.post(
-        "/api/v1/projects/import",
-        response_model=ProjectConfig,
+        f"{API_PREFIX}/projects/import",
+        response_model=ProjectDocument,
         status_code=status.HTTP_201_CREATED,
     )
     async def import_project(
         request: Request,
         format: str = Query(pattern="^(json|yaml)$"),
         replace: bool = False,
-    ) -> ProjectConfig:
-        content = await request.body()
+    ) -> ProjectDocument:
+        content = await _bounded_request_body(request)
+        parser = import_project_json if format == "json" else import_project_yaml
         try:
-            project = await run_in_threadpool(
-                _import_project_document,
-                store,
-                content,
-                format=format,
-                replace=replace,
-            )
-        except ProjectConflictError as error:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT, detail=str(error)
-            ) from error
-        except ProjectFormatError as error:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=str(error),
-            ) from error
+            project = await run_in_threadpool(parser, content)
+            await validate_for_storage(project)
+            if replace:
+                await projects.put(project)
+            else:
+                await projects.create(project)
+        except CalcFlowError as error:
+            operation = "put" if replace else "create"
+            raise _native_error(error, operation=operation) from error
         return project
 
-    @app.get("/api/v1/projects/{project_id}", response_model=ProjectConfig)
-    def get_project(project_id: str) -> ProjectConfig:
-        try:
-            return store.get(project_id)
-        except ProjectNotFoundError as error:
-            raise _not_found(error) from error
+    @app.get(f"{API_PREFIX}/projects/{{project_id}}", response_model=ProjectDocument)
+    async def get_project(project_id: str) -> ProjectDocument:
+        return await stored_project(project_id)
 
-    @app.put("/api/v1/projects/{project_id}", response_model=ProjectConfig)
-    def put_project(project_id: str, project: ProjectConfig) -> ProjectConfig:
-        if project.id != project_id:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="path project ID does not match the document",
+    @app.put(f"{API_PREFIX}/projects/{{project_id}}", response_model=ProjectDocument)
+    async def put_project(
+        project_id: str, request: ProjectCreateRequest
+    ) -> ProjectDocument:
+        project = request.to_project()
+        if project.root["id"] != project_id:
+            raise _http_error(
+                status.HTTP_409_CONFLICT,
+                "path project ID does not match the document",
             )
-        store.put(project)
+        await validate_for_storage(project)
+        try:
+            await projects.put(project)
+        except CalcFlowError as error:
+            raise _native_error(error, operation="put") from error
         return project
 
-    @app.delete("/api/v1/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
-    def delete_project(project_id: str) -> Response:
+    @app.delete(
+        f"{API_PREFIX}/projects/{{project_id}}",
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
+    async def delete_project(project_id: str) -> Response:
         try:
-            store.delete(project_id)
-        except ProjectNotFoundError as error:
-            raise _not_found(error) from error
+            await projects.delete(project_id)
+        except (CalcFlowError, KeyError) as error:
+            raise _native_error(error, operation="delete") from error
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-    @app.get("/api/v1/projects/{project_id}/export")
-    def export_project(
+    @app.get(f"{API_PREFIX}/projects/{{project_id}}/export")
+    async def export_project(
         project_id: str,
         format: str = Query(default="json", pattern="^(json|yaml)$"),
     ) -> PlainTextResponse:
+        project = await stored_project(project_id)
+        serializer = export_project_json if format == "json" else export_project_yaml
         try:
-            project = store.get(project_id)
-            document = export_project_document(project, format=format)
-        except ProjectNotFoundError as error:
-            raise _not_found(error) from error
-        except ProjectFormatError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
+            document = await run_in_threadpool(serializer, project)
+        except CalcFlowError as error:
+            raise _native_error(error, operation="export") from error
         media_type = "application/json" if format == "json" else "application/yaml"
+        filename = quote(f"{project_id}.{format}", safe="")
         return PlainTextResponse(
             document,
             media_type=media_type,
-            headers={
-                "Content-Disposition": f'attachment; filename="{project_id}.{format}"'
-            },
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
         )
 
-    @app.post(
-        "/api/v1/projects/{project_id}/validate",
-        response_model=ValidationReport,
-    )
-    def validate_stored_project(project_id: str) -> ValidationReport:
-        try:
-            project = store.get(project_id)
-        except ProjectNotFoundError as error:
-            raise _not_found(error) from error
-        return validate_project(project, udf_registry=registry)
+    @app.post(f"{API_PREFIX}/projects/{{project_id}}/validate")
+    async def validate_stored_project(project_id: str) -> dict[str, object]:
+        project = await stored_project(project_id)
+        return await runtime_validation_report(project)
 
-    def checkpoint_summary(project: ProjectConfig) -> CheckpointSummary:
+    async def compiled_project(project_id: str) -> tuple[ProjectDocument, object]:
+        project = await stored_project(project_id)
         try:
-            plan = compile_project(project, udf_registry=registry)
-            checkpoint = checkpoint_store.load(plan.name)
-        except CheckpointError as error:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=str(error),
-            ) from error
-        except Exception as error:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=f"project cannot be compiled: {error}",
-            ) from error
+            plan = await run_in_threadpool(
+                selected_runtime.compile_project, project.canonical_json()
+            )
+        except CalcFlowError as error:
+            raise _native_error(error, operation="compile") from error
+        return project, plan
+
+    async def checkpoint_summary(project_id: str) -> CheckpointSummary:
+        _, plan = await compiled_project(project_id)
+        pipeline_name = str(plan.name)
+        fingerprint = str(plan.fingerprint)
+        try:
+            checkpoint = await checkpoints.load(pipeline_name)
+        except CalcFlowError as error:
+            raise _native_error(error, operation="checkpoint") from error
         if checkpoint is None:
-            return CheckpointSummary(pipeline_name=plan.name, exists=False)
+            return CheckpointSummary(pipeline_name=pipeline_name, exists=False)
+        state = checkpoint.get("state", {})
+        if not isinstance(state, dict):
+            raise _http_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "checkpoint state must be a JSON object",
+            )
         return CheckpointSummary(
-            pipeline_name=plan.name,
+            pipeline_name=pipeline_name,
             exists=True,
-            compatible=checkpoint.pipeline_fingerprint == plan.fingerprint,
-            pipeline_fingerprint=checkpoint.pipeline_fingerprint,
-            sequence=checkpoint.sequence,
-            source_cursor=checkpoint.source_cursor,
-            created_at=checkpoint.created_at,
-            state_nodes=tuple(sorted(checkpoint.state)),
+            compatible=checkpoint.get("pipeline_fingerprint") == fingerprint,
+            pipeline_fingerprint=str(checkpoint["pipeline_fingerprint"]),
+            sequence=int(checkpoint["sequence"]),
+            source_cursor=checkpoint.get("source_cursor"),
+            created_at=checkpoint.get("created_at"),
+            state_nodes=tuple(sorted(state)),
         )
 
     @app.get(
-        "/api/v1/projects/{project_id}/checkpoint",
+        f"{API_PREFIX}/projects/{{project_id}}/checkpoint",
         response_model=CheckpointSummary,
     )
-    def get_project_checkpoint(project_id: str) -> CheckpointSummary:
-        try:
-            project = store.get(project_id)
-        except ProjectNotFoundError as error:
-            raise _not_found(error) from error
-        return checkpoint_summary(project)
+    async def get_project_checkpoint(project_id: str) -> CheckpointSummary:
+        return await checkpoint_summary(project_id)
 
     @app.delete(
-        "/api/v1/projects/{project_id}/checkpoint",
+        f"{API_PREFIX}/projects/{{project_id}}/checkpoint",
         response_model=CheckpointSummary,
     )
-    def reset_project_checkpoint(project_id: str) -> CheckpointSummary:
+    async def delete_project_checkpoint(project_id: str) -> CheckpointSummary:
+        _, plan = await compiled_project(project_id)
+        pipeline_name = str(plan.name)
         try:
-            project = store.get(project_id)
-        except ProjectNotFoundError as error:
-            raise _not_found(error) from error
-        checkpoint_store.delete(project.pipeline.name)
-        return CheckpointSummary(
-            pipeline_name=project.pipeline.name,
-            exists=False,
-        )
+            await checkpoints.delete(pipeline_name)
+        except CalcFlowError as error:
+            raise _native_error(error, operation="checkpoint") from error
+        return CheckpointSummary(pipeline_name=pipeline_name, exists=False)
 
     @app.post(
-        "/api/v1/projects/{project_id}/runs",
+        f"{API_PREFIX}/projects/{{project_id}}/runs",
         response_model=RunResponse,
         status_code=status.HTTP_202_ACCEPTED,
     )
-    def create_run(project_id: str, request: RunRequest) -> RunResponse:
+    async def create_run(project_id: str, request: RunRequest) -> RunResponse:
+        project = await stored_project(project_id)
         try:
-            project = store.get(project_id)
-            return manager.submit(project, request)
-        except ProjectNotFoundError as error:
-            raise _not_found(error) from error
-        except RunManagerError as error:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=str(error),
+            return await run_in_threadpool(
+                selected_run_manager.submit, project, request
+            )
+        except KeyError as error:
+            raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
+        except (RuntimeError, ValueError) as error:
+            raise _http_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)
             ) from error
 
-    @app.get("/api/v1/runs/{run_id}", response_model=RunResponse)
-    def get_run(run_id: str) -> RunResponse:
+    @app.get(f"{API_PREFIX}/runs/{{run_id}}", response_model=RunResponse)
+    async def get_run(run_id: str) -> RunResponse:
         try:
-            return manager.get(run_id)
+            return await run_in_threadpool(selected_run_manager.get, run_id)
         except KeyError as error:
-            raise _not_found(error) from error
+            raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
 
-    @app.get("/api/v1/runs/{run_id}/events")
-    def get_run_events(
+    @app.get(f"{API_PREFIX}/runs/{{run_id}}/events")
+    async def get_run_events(
         run_id: str,
         last_event_id: int | None = Header(default=None, alias="Last-Event-ID"),
     ) -> StreamingResponse:
         try:
-            manager.get(run_id)
+            await run_in_threadpool(selected_run_manager.get, run_id)
         except KeyError as error:
-            raise _not_found(error) from error
+            raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
 
-        def stream() -> Iterator[str]:
+        async def stream() -> AsyncIterator[str]:
             after_sequence = last_event_id if last_event_id is not None else -1
             terminal = {
                 RunStatus.COMPLETED,
@@ -362,7 +471,8 @@ def create_app(
             }
             yield "retry: 500\n\n"
             while True:
-                events, run_status = manager.wait_for_events(
+                events, run_status = await run_in_threadpool(
+                    selected_run_manager.wait_for_events,
                     run_id,
                     after_sequence=after_sequence,
                     timeout=10.0,
@@ -387,18 +497,15 @@ def create_app(
         return StreamingResponse(
             stream(),
             media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    @app.delete("/api/v1/runs/{run_id}", response_model=RunResponse)
-    def cancel_run(run_id: str) -> RunResponse:
+    @app.delete(f"{API_PREFIX}/runs/{{run_id}}", response_model=RunResponse)
+    async def cancel_run(run_id: str) -> RunResponse:
         try:
-            return manager.cancel(run_id)
+            return await run_in_threadpool(selected_run_manager.cancel, run_id)
         except KeyError as error:
-            raise _not_found(error) from error
+            raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
 
     frontend = (
         Path(frontend_directory)
@@ -425,11 +532,11 @@ def validate_bind_host(host: str) -> str:
     try:
         address = ipaddress.ip_address(host)
     except ValueError as error:
-        msg = "Calc Flow web server host must be a loopback IP or localhost"
-        raise ValueError(msg) from error
+        message = "Calc Flow web server host must be a loopback IP or localhost"
+        raise ValueError(message) from error
     if not address.is_loopback:
-        msg = "Calc Flow web server may bind only to a loopback address"
-        raise ValueError(msg)
+        message = "Calc Flow web server may bind only to a loopback address"
+        raise ValueError(message)
     return host
 
 
@@ -440,7 +547,7 @@ def serve(
     project_directory: str | Path = ".calc-flow-projects",
     checkpoint_directory: str | Path = ".calc-flow-checkpoints",
 ) -> None:
-    """Run the unauthenticated v0.2 service on a loopback interface only."""
+    """Run the unauthenticated v2 service on a loopback interface only."""
     import uvicorn
 
     validate_bind_host(host)

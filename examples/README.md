@@ -1,40 +1,35 @@
-# Calc Flow examples
+# Calc Flow v2 examples
 
-These examples are small, executable introductions to Calc Flow's public APIs.
-All tabular calculations use Apache DataFusion; no pandas or Polars dataframe
-backend is required.
+These executable examples use the Rust-native v2 engine through the PyO3
+Python package. Table batches contain PyArrow tables and every table expression
+or query runs in DataFusion. NumPy remains an explicit optional provider.
 
-Run the core examples from the repository root:
+After `uv sync --extra dev && uv run maturin develop`, run:
 
 ```bash
 uv run python examples/01_datafusion_pipeline.py
-uv run python examples/02_branching_and_join.py
+uv run python examples/02_sql_join.py
 uv run python examples/03_registered_udf.py
 uv run python examples/04_micro_batch_recovery.py
-uv run python examples/05_project_configuration.py
+uv run python examples/05_async_execution.py
+JAX_PLATFORMS=cpu uv run python examples/06_numpy_array.py
 ```
 
-The optional array example needs NumPy:
+The files cover:
 
-```bash
-uv run --extra numpy python examples/06_numpy_array.py
-```
+- `01_datafusion_pipeline.py` — the functional `PipelineBuilder`, expression
+  nodes, projection/filtering, immutable batches, outputs, and node timings.
+- `02_sql_join.py` — named table inputs and one read-only multi-table
+  DataFusion SQL query.
+- `03_registered_udf.py` — a trusted, versioned Python scalar UDF registered on
+  `Runtime` and explicitly selected by a node.
+- `04_micro_batch_recovery.py` — a replayable source, checkpoint commit, plan
+  lease release, and recovery from the stored source cursor.
+- `05_async_execution.py` — non-blocking `execute_async()` use inside an
+  asyncio application.
+- `06_numpy_array.py` — explicit NumPy provider registration and a restricted
+  array expression over an immutable array batch.
 
-`notebooks/datafusion_quickstart.ipynb` contains the shortest table-pipeline
-walkthrough for an interactive notebook. Select the repository's Python
-environment as its kernel before running the cells.
-
-## What each example demonstrates
-
-- `01_datafusion_pipeline.py` — a linear DataFusion calculation, projection,
-  filter, results, and node timings.
-- `02_branching_and_join.py` — named graph inputs, a multi-table SQL join, and
-  fan-out to two terminal outputs.
-- `03_registered_udf.py` — a trusted, versioned, vectorized DataFusion scalar
-  UDF referenced explicitly by a pipeline node.
-- `04_micro_batch_recovery.py` — bounded record batches, stateful processing,
-  checkpoint commit, and recovery from the saved source cursor.
-- `05_project_configuration.py` — strict data-only project configuration,
-  deterministic local persistence, validation, compilation, and execution.
-- `06_numpy_array.py` — an optional NumPy Array API pipeline, kept separate
-from DataFusion-backed table processing.
+The previous v1 notebook was removed because it taught the frozen Python v1
+operator API. Historical v1 behavior remains available at the
+`v1-python-final` tag and in `tests/fixtures/v1/`.

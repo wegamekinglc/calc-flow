@@ -1,64 +1,170 @@
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
-import {
-  compareBenchmarkReports,
-  parseBenchmarkReport,
-  type BenchmarkReport,
-} from './BenchmarkComparison';
+import { BenchmarkComparison } from './BenchmarkComparison';
 
-const report = (
-  mean: number,
-  stddev: number,
-  scenario = 'datafusion_projection',
-): BenchmarkReport => ({
-  benchmarks: [{
-    name: 'test_projection',
-    fullname: 'benchmarks/test_datafusion.py::test_projection',
-    stats: { mean, stddev, rounds: 10 },
-    extra_info: { scenario, scale: 'overhead' },
-  }],
+const fingerprint = (digit: string): string => digit.repeat(64);
+
+const entry = (mean = 1, machineFingerprint = fingerprint('a')) => ({
+  name: 'test_array_mean_numpy_plan_end_to_end',
+  fullname: 'benchmarks/test_array.py::test_array_mean_numpy_plan_end_to_end',
+  stats: { mean, stddev: 0.01, rounds: 10 },
+  extra_info: {
+    benchmark_contract_version: 2,
+    workload_version: 1,
+    scenario: 'array_mean',
+    scope: 'plan_end_to_end',
+    backend: 'numpy',
+    scale: 'overhead',
+    table_rows: 1_000,
+    array_elements: 1_000,
+    matrix_dimension: 16,
+    input_rows: 1_000,
+    output_rows: 1,
+    expression: 'mean(x)',
+    input_dtype: 'float64',
+    output_dtype: 'float64',
+    machine_identity: {
+      operating_system: 'linux',
+      architecture: 'x86_64',
+      cpu_brand: 'example cpu',
+      logical_cpu_count: 8,
+      python_implementation: 'cpython',
+    },
+    dependency_identity: { python_version: '3.13.9', numpy_version: '2.5.1' },
+    backend_configuration: {},
+    workload_identity: {
+      benchmark_contract_version: 2,
+      scenario: 'array_mean',
+      scope: 'plan_end_to_end',
+      workload_version: 1,
+      backend: 'numpy',
+      scale: 'overhead',
+      table_rows: 1_000,
+      array_elements: 1_000,
+      matrix_dimension: 16,
+      input_rows: 1_000,
+      output_rows: 1,
+      expression: 'mean(x)',
+      input_dtype: 'float64',
+      output_dtype: 'float64',
+      backend_configuration: {},
+    },
+    machine_fingerprint: machineFingerprint,
+    dependency_fingerprint: fingerprint('b'),
+    workload_fingerprint: fingerprint('c'),
+    python_version: '3.13.9',
+    numpy_version: '2.5.1',
+    process_rss_bytes: 100_000,
+  },
 });
 
-describe('benchmark report comparison', () => {
-  it('classifies stable regressions and improvements', () => {
-    const regression = compareBenchmarkReports(report(1, 0.02), report(1.2, 0.02));
-    const improvement = compareBenchmarkReports(report(1, 0.02), report(0.8, 0.02));
+const report = (benchmark: unknown) => ({ benchmarks: [benchmark] });
 
-    expect(regression[0].status).toBe('regression');
-    expect(regression[0].deltaPercent).toBeCloseTo(20);
-    expect(improvement[0].status).toBe('improvement');
-    expect(improvement[0].deltaPercent).toBeCloseTo(-20);
+const legacyReport = () => report({
+  name: 'test_projection',
+  fullname: 'benchmarks/test_datafusion.py::test_projection',
+  stats: { mean: 1, stddev: 0.01, rounds: 10 },
+  extra_info: { scenario: 'datafusion_projection', scale: 'overhead' },
+});
+
+const jsonFile = (value: unknown, name: string): File => {
+  const contents = typeof value === 'string' ? value : JSON.stringify(value);
+  const file = new File([contents], name, { type: 'application/json' });
+  Object.defineProperty(file, 'text', { value: async () => contents });
+  return file;
+};
+
+const deferredJsonFile = (name: string) => {
+  let resolveText!: (contents: string) => void;
+  const text = new Promise<string>((resolve) => {
+    resolveText = resolve;
+  });
+  const file = new File([], name, { type: 'application/json' });
+  Object.defineProperty(file, 'text', { value: () => text });
+  return { file, resolveText, text };
+};
+
+const uploadFile = (label: string, file: File) => {
+  fireEvent.change(screen.getByLabelText(label), {
+    target: { files: [file] },
+  });
+};
+
+const upload = (label: string, value: unknown) => {
+  uploadFile(label, jsonFile(value, `${label}.json`));
+};
+
+describe('BenchmarkComparison', () => {
+  it('shows legacy reports as unverified without a classification', async () => {
+    render(<BenchmarkComparison />);
+
+    upload('Baseline benchmark report', legacyReport());
+    upload('Current benchmark report', legacyReport());
+
+    expect(await screen.findByText('Unverified')).toBeInTheDocument();
+    expect(screen.getByText(/No performance classification was made/)).toBeInTheDocument();
+    expect(screen.queryByRole('table')).not.toBeInTheDocument();
   });
 
-  it('keeps noisy cases informational', () => {
-    const rows = compareBenchmarkReports(report(1, 0.2), report(1.3, 0.3));
+  it('shows machine incompatibility details without a timing table', async () => {
+    render(<BenchmarkComparison />);
 
-    expect(rows[0].status).toBe('noisy');
+    upload('Baseline benchmark report', report(entry()));
+    upload('Current benchmark report', report(entry(1.2, fingerprint('d'))));
+
+    expect(await screen.findByText('machine_mismatch')).toBeInTheDocument();
+    expect(screen.getByText('machine_fingerprint')).toBeInTheDocument();
+    expect(screen.queryByRole('table')).not.toBeInTheDocument();
   });
 
-  it('matches array cases by scenario and backend', () => {
-    const baseline = report(1, 0.01);
-    baseline.benchmarks[0].extra_info = { scenario: 'array_mean', backend: 'numpy' };
-    const current = report(1, 0.01);
-    current.benchmarks[0].extra_info = { scenario: 'array_mean', backend: 'jax' };
+  it('renders classifications only for compatible reports', async () => {
+    render(<BenchmarkComparison />);
 
-    expect(compareBenchmarkReports(baseline, current)).toEqual([]);
+    upload('Baseline benchmark report', report(entry()));
+    upload('Current benchmark report', report(entry(1.2)));
+
+    expect(await screen.findByRole('table')).toBeInTheDocument();
+    expect(screen.getByText('regression')).toBeInTheDocument();
+    expect(screen.queryByText('Unverified')).not.toBeInTheDocument();
   });
 
-  it('does not compare different dataset scales', () => {
-    const baseline = report(1, 0.01);
-    const current = report(1, 0.01);
-    current.benchmarks[0].extra_info = {
-      scenario: 'datafusion_projection',
-      scale: 'standard',
-    };
+  it('shows malformed JSON parser errors', async () => {
+    render(<BenchmarkComparison />);
 
-    expect(compareBenchmarkReports(baseline, current)).toEqual([]);
+    upload('Baseline benchmark report', '{ definitely not JSON');
+
+    expect(await screen.findByText(/Unexpected|JSON/)).toBeInTheDocument();
   });
 
-  it('rejects malformed pytest-benchmark documents', () => {
-    expect(() => parseBenchmarkReport({})).toThrow(/pytest-benchmark/);
-    expect(() => parseBenchmarkReport({ benchmarks: [] })).toThrow(/no cases/);
-    expect(() => parseBenchmarkReport({ benchmarks: [{ name: 'bad' }] })).toThrow(/fullname/);
+  it('clears a stale comparison when a loaded file is replaced', async () => {
+    render(<BenchmarkComparison />);
+
+    upload('Baseline benchmark report', report(entry()));
+    upload('Current benchmark report', report(entry(1.2)));
+    expect(await screen.findByRole('table')).toBeInTheDocument();
+
+    upload('Current benchmark report', '{ definitely not JSON');
+
+    await screen.findByText(/Unexpected|JSON/);
+    await waitFor(() => expect(screen.queryByRole('table')).not.toBeInTheDocument());
+  });
+
+  it('ignores an older file read that finishes after a newer selection errors', async () => {
+    render(<BenchmarkComparison />);
+
+    upload('Baseline benchmark report', report(entry()));
+    const older = deferredJsonFile('older-current.json');
+    uploadFile('Current benchmark report', older.file);
+    upload('Current benchmark report', '{ definitely not JSON');
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Unexpected|JSON/);
+
+    await act(async () => {
+      older.resolveText(JSON.stringify(report(entry(1.2))));
+      await older.text;
+    });
+
+    expect(screen.getByRole('alert')).toHaveTextContent(/Unexpected|JSON/);
+    expect(screen.queryByRole('table')).not.toBeInTheDocument();
   });
 });

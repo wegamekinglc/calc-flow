@@ -6,25 +6,29 @@ import { blankProject } from '../types';
 afterEach(() => vi.unstubAllGlobals());
 
 describe('API client', () => {
-  it('loads the generated catalog contract', async () => {
+  it('loads the bare v2 UDF catalog', async () => {
+    const entries = [
+      {
+        provider: 'server',
+        name: 'double_value',
+        version: '1',
+        kind: 'data_fusion_scalar',
+        signature: { input_types: ['int64'], return_type: 'int64' },
+        volatility: 'immutable',
+      },
+    ];
     const fetchMock = vi.fn().mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          config_format_version: '1',
-          operators: [],
-          udfs: [],
-          arrow_types: ['int64'],
-          limits: {},
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } },
-      ),
+      new Response(JSON.stringify(entries), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
     );
     vi.stubGlobal('fetch', fetchMock);
 
     const catalog = await api.catalog();
 
-    expect(catalog.config_format_version).toBe('1');
-    expect(fetchMock).toHaveBeenCalledWith('/api/v1/catalog', expect.any(Object));
+    expect(catalog).toEqual(entries);
+    expect(fetchMock).toHaveBeenCalledWith('/api/v2/catalog', expect.any(Object));
   });
 
   it('surfaces API detail messages', async () => {
@@ -62,8 +66,8 @@ describe('API client', () => {
     );
   });
 
-  it('creates a project without sending a client ID', async () => {
-    const created = { ...blankProject(), id: 'project_generated' };
+  it('creates a v2 project with the full client-owned document', async () => {
+    const created = blankProject();
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify(created), {
         status: 201,
@@ -72,16 +76,16 @@ describe('API client', () => {
     );
     vi.stubGlobal('fetch', fetchMock);
 
-    await api.createProject(blankProject());
+    await api.createProject(created);
 
     const init = fetchMock.mock.calls[0][1] as RequestInit;
-    expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/projects');
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/v2/projects');
     expect(init.method).toBe('POST');
-    expect(JSON.parse(String(init.body))).not.toHaveProperty('id');
+    expect(JSON.parse(String(init.body))).toEqual(created);
   });
 
-  it('imports raw YAML and exports text with the server filename', async () => {
-    const project = { ...blankProject(), id: 'imported' };
+  it('imports raw YAML and decodes the RFC 5987 export filename', async () => {
+    const project = { ...blankProject(), id: 'project_imported' };
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
@@ -94,7 +98,8 @@ describe('API client', () => {
         new Response('{"id":"imported"}\n', {
           headers: {
             'Content-Type': 'application/json',
-            'Content-Disposition': 'attachment; filename="imported.json"',
+            'Content-Disposition':
+              "attachment; filename*=UTF-8''project_%E2%9C%93.json",
           },
         }),
       );
@@ -105,7 +110,7 @@ describe('API client', () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      '/api/v1/projects/import?format=yaml&replace=true',
+      '/api/v2/projects/import?format=yaml&replace=true',
       expect.objectContaining({
         method: 'POST',
         body: 'name: Imported\n',
@@ -114,7 +119,26 @@ describe('API client', () => {
     );
     expect(exported).toEqual({
       document: '{"id":"imported"}\n',
-      filename: 'imported.json',
+      filename: 'project_✓.json',
+    });
+  });
+
+  it('falls back safely when an extended export filename is malformed', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response('{}\n', {
+          headers: {
+            'Content-Disposition':
+              "attachment; filename*=UTF-8''bad%ZZ.json; filename=\"safe.json\"",
+          },
+        }),
+      ),
+    );
+
+    await expect(api.exportProject('project_safe', 'json')).resolves.toEqual({
+      document: '{}\n',
+      filename: 'safe.json',
     });
   });
 
@@ -135,7 +159,7 @@ describe('API client', () => {
 
     expect(checkpoint.exists).toBe(false);
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/v1/projects/project/checkpoint',
+      '/api/v2/projects/project/checkpoint',
       expect.objectContaining({ method: 'DELETE' }),
     );
   });

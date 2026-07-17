@@ -1,129 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 
-interface BenchmarkStats {
-  mean: number;
-  stddev: number;
-  rounds: number;
-}
-
-interface BenchmarkEntry {
-  name: string;
-  fullname: string;
-  group?: string;
-  stats: BenchmarkStats;
-  extra_info?: Record<string, unknown>;
-}
-
-export interface BenchmarkReport {
-  benchmarks: BenchmarkEntry[];
-  machine_info?: Record<string, unknown>;
-  commit_info?: Record<string, unknown>;
-}
-
-export interface BenchmarkComparisonRow {
-  key: string;
-  scenario: string;
-  backend: string | null;
-  scale: string | null;
-  baselineMean: number;
-  currentMean: number;
-  deltaPercent: number;
-  baselineCovPercent: number;
-  currentCovPercent: number;
-  status: 'regression' | 'improvement' | 'stable' | 'noisy';
-}
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
-
-const finiteNumber = (value: unknown): value is number =>
-  typeof value === 'number' && Number.isFinite(value);
-
-const parseEntry = (value: unknown): BenchmarkEntry => {
-  if (!isRecord(value) || typeof value.name !== 'string' || typeof value.fullname !== 'string') {
-    throw new Error('Benchmark entries require name and fullname strings');
-  }
-  if (!isRecord(value.stats)) throw new Error(`Benchmark ${value.name} has no stats object`);
-  const { mean, stddev, rounds } = value.stats;
-  if (
-    !finiteNumber(mean)
-    || mean <= 0
-    || !finiteNumber(stddev)
-    || stddev < 0
-    || !finiteNumber(rounds)
-    || !Number.isInteger(rounds)
-    || rounds <= 0
-  ) {
-    throw new Error(`Benchmark ${value.name} contains invalid statistics`);
-  }
-  return {
-    name: value.name,
-    fullname: value.fullname,
-    group: typeof value.group === 'string' ? value.group : undefined,
-    stats: { mean, stddev, rounds },
-    extra_info: isRecord(value.extra_info) ? value.extra_info : undefined,
-  };
-};
-
-export const parseBenchmarkReport = (value: unknown): BenchmarkReport => {
-  if (!isRecord(value) || !Array.isArray(value.benchmarks)) {
-    throw new Error('Expected a pytest-benchmark JSON report');
-  }
-  if (!value.benchmarks.length) throw new Error('Benchmark report contains no cases');
-  return {
-    benchmarks: value.benchmarks.map(parseEntry),
-    machine_info: isRecord(value.machine_info) ? value.machine_info : undefined,
-    commit_info: isRecord(value.commit_info) ? value.commit_info : undefined,
-  };
-};
-
-const textExtra = (entry: BenchmarkEntry, name: string): string | null => {
-  const value = entry.extra_info?.[name];
-  return typeof value === 'string' ? value : null;
-};
-
-const entryKey = (entry: BenchmarkEntry): string => {
-  const scenario = textExtra(entry, 'scenario') ?? entry.fullname;
-  const backend = textExtra(entry, 'backend') ?? '';
-  return `${scenario}\u0000${backend}`;
-};
-
-const coefficientOfVariation = (entry: BenchmarkEntry): number =>
-  (entry.stats.stddev / entry.stats.mean) * 100;
-
-export const compareBenchmarkReports = (
-  baseline: BenchmarkReport,
-  current: BenchmarkReport,
-): BenchmarkComparisonRow[] => {
-  const baselineByKey = new Map(baseline.benchmarks.map((entry) => [entryKey(entry), entry]));
-  return current.benchmarks.flatMap((entry) => {
-    const key = entryKey(entry);
-    const reference = baselineByKey.get(key);
-    if (!reference) return [];
-    const baselineScale = textExtra(reference, 'scale');
-    const currentScale = textExtra(entry, 'scale');
-    if (baselineScale && currentScale && baselineScale !== currentScale) return [];
-    const baselineCovPercent = coefficientOfVariation(reference);
-    const currentCovPercent = coefficientOfVariation(entry);
-    const deltaPercent = ((entry.stats.mean / reference.stats.mean) - 1) * 100;
-    let status: BenchmarkComparisonRow['status'] = 'stable';
-    if (baselineCovPercent > 5 || currentCovPercent > 5) status = 'noisy';
-    else if (deltaPercent > 10) status = 'regression';
-    else if (deltaPercent < -10) status = 'improvement';
-    return [{
-      key,
-      scenario: textExtra(entry, 'scenario') ?? entry.name,
-      backend: textExtra(entry, 'backend'),
-      scale: textExtra(entry, 'scale'),
-      baselineMean: reference.stats.mean,
-      currentMean: entry.stats.mean,
-      deltaPercent,
-      baselineCovPercent,
-      currentCovPercent,
-      status,
-    }];
-  }).sort((left, right) => right.deltaPercent - left.deltaPercent);
-};
+import {
+  compareBenchmarkReports,
+  parseBenchmarkReport,
+  type BenchmarkReport,
+} from './benchmarkComparison';
 
 const duration = (seconds: number): string => {
   if (seconds >= 1) return `${seconds.toFixed(3)} s`;
@@ -137,33 +18,40 @@ const reportLabel = (report: BenchmarkReport | null): string => {
   return `${report.benchmarks.length} cases${typeof commit === 'string' ? ` · ${commit.slice(0, 8)}` : ''}`;
 };
 
+const issueValue = (value: unknown): string => {
+  if (value === undefined) return 'missing';
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value);
+};
+
 export function BenchmarkComparison() {
   const [baseline, setBaseline] = useState<BenchmarkReport | null>(null);
   const [current, setCurrent] = useState<BenchmarkReport | null>(null);
   const [error, setError] = useState('');
-  const rows = useMemo(
-    () => (baseline && current ? compareBenchmarkReports(baseline, current) : []),
+  const loadGeneration = useRef({ baseline: 0, current: 0 });
+  const result = useMemo(
+    () => (baseline && current ? compareBenchmarkReports(baseline, current) : null),
     [baseline, current],
   );
 
   const load = async (file: File | undefined, target: 'baseline' | 'current') => {
     if (!file) return;
+    const generation = loadGeneration.current[target] + 1;
+    loadGeneration.current[target] = generation;
+    if (target === 'baseline') setBaseline(null);
+    else setCurrent(null);
+    setError('');
     try {
-      const report = parseBenchmarkReport(JSON.parse(await file.text()) as unknown);
+      const contents = await file.text();
+      if (loadGeneration.current[target] !== generation) return;
+      const report = parseBenchmarkReport(JSON.parse(contents) as unknown);
       if (target === 'baseline') setBaseline(report);
       else setCurrent(report);
-      setError('');
     } catch (caught) {
+      if (loadGeneration.current[target] !== generation) return;
       setError((caught as Error).message);
     }
   };
-
-  const scales = new Set(
-    [baseline, current]
-      .flatMap((report) => report?.benchmarks ?? [])
-      .map((entry) => textExtra(entry, 'scale'))
-      .filter((scale): scale is string => scale !== null),
-  );
 
   return (
     <section className="benchmark-panel panel">
@@ -187,23 +75,40 @@ export function BenchmarkComparison() {
         </div>
       </div>
 
-      {error && <div className="validation-banner invalid">{error}</div>}
-      {scales.size > 1 && (
-        <div className="validation-banner invalid">Reports contain different dataset scales and should not be compared.</div>
+      {error && <div role="alert" className="validation-banner invalid">{error}</div>}
+      {result?.status === 'incompatible' && (
+        <div role="alert" className="validation-banner invalid">
+          <strong>Incompatible benchmark reports</strong>
+          <ul>
+            {result.issues.map((issue, index) => (
+              <li key={`${issue.code}-${issue.field}-${index}`}>
+                <code>{issue.code}</code>{' '}
+                <span>{issue.field}</span>{' '}
+                {issueValue(issue.baseline)} → {issueValue(issue.current)}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
-      {baseline && current && scales.size <= 1 && !rows.length && (
-        <div className="validation-banner invalid">The reports do not contain matching scenarios.</div>
+      {result?.status === 'unverified' && result.issues.length > 0 && (
+        <div className="validation-banner">
+          <strong>Unverified</strong>
+          <span>No performance classification was made because contract-v2 metadata is missing.</span>
+        </div>
+      )}
+      {result?.status === 'unverified' && result.issues.length === 0 && (
+        <div className="validation-banner">The reports do not contain matching contract-v2 benchmark work.</div>
       )}
       {!baseline || !current ? (
         <div className="benchmark-empty">Load a baseline and current report produced by the same benchmark scale and runner class.</div>
-      ) : scales.size <= 1 && rows.length > 0 && (
+      ) : result?.status === 'compatible' && result.rows.length > 0 && (
         <div className="table-wrap benchmark-table">
           <table>
             <thead>
               <tr><th>Scenario</th><th>Baseline</th><th>Current</th><th>Change</th><th>CoV</th><th>Assessment</th></tr>
             </thead>
             <tbody>
-              {rows.map((row) => (
+              {result.rows.map((row) => (
                 <tr key={row.key}>
                   <td>{row.scenario}{row.backend && <small>{row.backend}</small>}</td>
                   <td>{duration(row.baselineMean)}</td>

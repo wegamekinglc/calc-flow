@@ -369,7 +369,7 @@ def start(runtime_directory: Path, timeout: float) -> None:
             command=[uv, "run", "--package", "calc-flow-studio", "calc-flow-web"],
             cwd=ROOT,
             environment=environment,
-            url="http://127.0.0.1:8765/api/v1/catalog",
+            url="http://127.0.0.1:8765/api/v2/catalog",
             log_path=api_log,
         )
         processes["api"] = api_process

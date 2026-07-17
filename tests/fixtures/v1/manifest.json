@@ -1,0 +1,64 @@
+{
+  "arrow_files": [
+    "expression.arrow",
+    "expression_expected.arrow",
+    "sql_left.arrow",
+    "sql_right.arrow",
+    "sql_expected.arrow",
+    "empty.arrow"
+  ],
+  "cases": [
+    {
+      "expected": "expression_expected.arrow",
+      "input": "expression.arrow",
+      "invariants": [
+        "table_only",
+        "metadata_preserved"
+      ],
+      "name": "expression_assignment",
+      "operation": "total = a + b"
+    },
+    {
+      "expected": "sql_expected.arrow",
+      "input": [
+        "sql_left.arrow",
+        "sql_right.arrow"
+      ],
+      "invariants": [
+        "single_select"
+      ],
+      "name": "sql_join",
+      "operation": "join"
+    },
+    {
+      "expected": "empty.arrow",
+      "input": "empty.arrow",
+      "invariants": [
+        "schema_preserved"
+      ],
+      "name": "empty_table",
+      "operation": "identity"
+    },
+    {
+      "expected": "expression.arrow",
+      "input": "expression.arrow",
+      "invariants": [
+        "deeply_immutable_json"
+      ],
+      "name": "metadata_round_trip",
+      "operation": "identity"
+    },
+    {
+      "expected": {
+        "state": {}
+      },
+      "input": "expression.arrow",
+      "invariants": [
+        "rollback"
+      ],
+      "name": "state_rollback",
+      "operation": "fail_after_state"
+    }
+  ],
+  "format_version": 1
+}

@@ -1,17 +1,25 @@
 [project]
 name = "calc-flow-studio"
-version = "0.2.0"
+version = "2.0.0"
 description = "Local FastAPI backend for Calc Flow Studio"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
-    "calc-flow[yaml]",
+    "calc-flow>=2.0.0,<3",
+    "cloudpickle>=3.1",
     "fastapi>=0.116",
+    "pyarrow>=24.0.0,<25",
     "uvicorn>=0.35",
 ]
+
+[project.urls]
+Repository = "https://github.com/wegamekinglc/calc-flow"
 
 [project.optional-dependencies]
 dev = [
     "httpx2>=2.5",
+    "numpy>=2.0.0",
     "pytest>=8",
     "pytest-cov>=7.1",
 ]

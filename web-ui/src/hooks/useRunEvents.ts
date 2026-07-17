@@ -30,7 +30,7 @@ export function useRunEvents(
     let closed = false;
     let consecutiveErrors = 0;
     let pollTimer: number | undefined;
-    const source = new EventSource(`/api/v1/runs/${runId}/events`);
+    const source = new EventSource(`/api/v2/runs/${runId}/events`);
 
     const closeSource = () => {
       if (closed) return;

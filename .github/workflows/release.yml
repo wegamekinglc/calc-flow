@@ -1,0 +1,228 @@
+name: Release artifacts
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v2.*"
+permissions:
+  contents: read
+jobs:
+  crate:
+    name: Verify crates.io package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+      - name: Package and verify crate
+        run: |
+          cargo package -p calc-flow --locked
+          python scripts/inspect_wheel.py crate target/package/calc-flow-*.crate
+          cargo publish -p calc-flow --dry-run --locked
+      - name: Upload crate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: rust-crate
+          path: target/package/calc-flow-*.crate
+          if-no-files-found: error
+          retention-days: 30
+  wheels:
+    name: Wheel ${{ matrix.os }} ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64
+            manylinux: "2_28"
+            smoke: true
+          - os: ubuntu-latest
+            target: aarch64
+            manylinux: "2_28"
+            smoke: false
+          - os: macos-15-intel
+            target: x86_64
+            manylinux: "off"
+            smoke: true
+          - os: macos-15
+            target: aarch64
+            manylinux: "off"
+            smoke: true
+          - os: windows-latest
+            target: x64
+            manylinux: "off"
+            smoke: true
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Build abi3 wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        with:
+          command: build
+          maturin-version: v1.14.1
+          rust-toolchain: "1.88.0"
+          target: ${{ matrix.target }}
+          args: --release --locked --out dist --find-interpreter
+          manylinux: ${{ matrix.manylinux }}
+      - name: Inspect wheel contents
+        shell: bash
+        run: |
+          python -m unittest scripts.test_inspect_wheel scripts.test_release_config
+          python scripts/inspect_wheel.py core-wheel dist/*.whl
+      - name: Smoke native wheel
+        if: matrix.smoke
+        shell: bash
+        run: |
+          python -m venv wheel-smoke
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            wheel_python="wheel-smoke/Scripts/python.exe"
+          else
+            wheel_python="wheel-smoke/bin/python"
+          fi
+          "${wheel_python}" -m pip install dist/*.whl
+          "${wheel_python}" -m pip show calc-flow
+          "${wheel_python}" scripts/smoke_wheel.py
+      - name: Upload wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: wheel-${{ matrix.os }}-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 30
+  sdist:
+    name: Python source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Build source distribution
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        with:
+          command: sdist
+          maturin-version: v1.14.1
+          rust-toolchain: "1.88.0"
+          args: --out dist
+      - name: Verify source distribution
+        run: |
+          archive="$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)"
+          test -n "${archive}"
+          python scripts/inspect_wheel.py sdist "${archive}"
+      - name: Upload source distribution
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: python-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+  studio-wheel:
+    name: Studio wheel and static assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 20.20.0
+          cache: npm
+          cache-dependency-path: web-ui/package-lock.json
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Build core wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        with:
+          command: build
+          maturin-version: v1.14.1
+          rust-toolchain: "1.88.0"
+          target: x86_64
+          args: --release --locked --out dist --find-interpreter
+          manylinux: "2_28"
+      - name: Build Studio static assets and wheel
+        working-directory: web-ui
+        run: |
+          npm ci
+          npm run build
+          uv build --project backend --wheel --out-dir ../dist
+      - name: Install and inspect local wheels
+        run: |
+          python scripts/inspect_wheel.py core-wheel dist/calc_flow-*.whl
+          python scripts/inspect_wheel.py studio-wheel dist/calc_flow_studio-*.whl
+          python -m venv studio-smoke
+          python -m pip --python studio-smoke install dist/calc_flow-*.whl dist/calc_flow_studio-*.whl
+          test -x studio-smoke/bin/calc-flow-web
+          studio-smoke/bin/python - <<'PY'
+          from importlib.metadata import requires
+          from pathlib import Path
+
+          import calc_flow_studio
+
+          app = calc_flow_studio.create_app()
+          paths = [route.path for route in app.routes]
+          assert "/api/v2/catalog" in app.openapi()["paths"]
+          assert "/" in paths
+          assert "/assets" in paths
+          requirements = requires("calc-flow-studio") or []
+          assert any(
+              requirement.lower().startswith("calc-flow")
+              and ">=2.0.0" in requirement
+              and "<3" in requirement
+              for requirement in requirements
+          )
+          index = next(route for route in app.routes if route.path == "/").endpoint()
+          assert Path(index.path).is_file()
+          assert (Path(index.path).parent / "assets").is_dir()
+          PY
+      - name: Upload Studio wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: studio-wheel
+          path: dist/calc_flow_studio-*.whl
+          if-no-files-found: error
+          retention-days: 30
+  audits:
+    name: Dependency audits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 20.20.0
+          cache: npm
+          cache-dependency-path: web-ui/package-lock.json
+      - name: Install locked Rust audit tools
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo install cargo-deny --version 0.20.2 --locked
+      - name: Run Rust audits
+        run: |
+          mkdir -p audit-reports
+          cargo audit --ignore RUSTSEC-2026-0176 --ignore RUSTSEC-2026-0177
+          cargo audit --ignore RUSTSEC-2026-0176 --ignore RUSTSEC-2026-0177 \
+            --json > audit-reports/cargo-audit.json
+          cargo deny --locked check
+          cargo deny --locked --format json check 2> audit-reports/cargo-deny.json
+          test -s audit-reports/cargo-audit.json
+          test -s audit-reports/cargo-deny.json
+      - name: Run production npm audit
+        working-directory: web-ui
+        run: |
+          npm ci
+          npm audit --omit=dev
+          npm audit --omit=dev --json > ../audit-reports/npm-audit.json
+          test -s ../audit-reports/npm-audit.json
+      - name: Upload audit reports
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dependency-audits
+          path: audit-reports/*.json
+          if-no-files-found: error
+          retention-days: 30

@@ -1,14 +1,14 @@
-"""Build and execute a linear DataFusion table pipeline."""
+"""Build and execute a DataFusion expression pipeline with the v2 builder."""
 
 from __future__ import annotations
 
 import pyarrow as pa
 
-from calc_flow import Batch, ExpressionOperator, Pipeline
+from calc_flow import Batch, PipelineBuilder
 
 
 def main() -> None:
-    orders = Batch.table(
+    orders = Batch.from_pyarrow(
         pa.table(
             {
                 "order_id": ["A-100", "A-101", "A-102"],
@@ -19,25 +19,22 @@ def main() -> None:
     )
 
     plan = (
-        Pipeline("datafusion-quickstart")
-        .then(ExpressionOperator("calculate_gross", "gross = quantity * unit_price"))
-        .then(
-            ExpressionOperator(
-                "large_orders",
-                select=("order_id", "gross"),
-                filter_expression="gross >= 20",
-            )
+        PipelineBuilder("datafusion-quickstart")
+        .expression("calculate_gross", "gross = quantity * unit_price")
+        .expression(
+            "large_orders",
+            "",
+            select=("order_id", "gross"),
+            filter="gross >= 20",
         )
+        .connect("calculate_gross", "large_orders")
         .compile()
     )
 
     run = plan.execute({"input": orders})
 
-    print(run.output.table_payload.to_pylist())
-    print(
-        "node timings (ns):",
-        {node_id: timing.duration_ns for node_id, timing in run.node_timings.items()},
-    )
+    print(run.outputs["output"].to_pyarrow().to_pylist())
+    print("node timings:", run.node_timings)
 
 
 if __name__ == "__main__":

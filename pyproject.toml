@@ -1,69 +1,75 @@
 [project]
 name = "calc-flow"
-version = "0.2.0"
-description = "DataFusion-first batch and streaming calculation pipelines"
+version = "2.0.0"
+description = "Rust-native DataFusion batch and streaming calculation pipelines"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
-    "cloudpickle>=3.1",
-    "datafusion>=53.0.0",
     "pydantic>=2.12.0,<3",
-    "pyarrow>=24.0.0",
+    "pyarrow>=24.0.0,<25",
 ]
+
+[project.urls]
+Repository = "https://github.com/wegamekinglc/calc-flow"
 
 [project.optional-dependencies]
 numpy = ["numpy>=2.0.0"]
 jax = ["jax>=0.4"]
 array = ["jax>=0.4", "numpy>=2.0.0"]
-yaml = ["pyyaml>=6.0"]
 benchmark = [
     "jax>=0.4",
     "numpy>=2.0.0",
     "psutil>=6.1",
+    "py-cpuinfo>=9",
     "pytest>=8",
     "pytest-benchmark>=5.2",
 ]
 dev = [
     "hypothesis>=6.100",
     "jax>=0.4",
+    "maturin>=1.14.1,<2.0",
     "numpy>=2.0.0",
     "psutil>=6.1",
+    "py-cpuinfo>=9",
     "pytest>=8",
     "pytest-cov>=7.1",
     "pytest-xdist>=3.6",
-    "pyyaml>=6.0",
     "ruff>=0.14",
 ]
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.14.1,<2.0"]
+build-backend = "maturin"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/calc_flow"]
-
-[tool.hatch.build.targets.sdist]
-exclude = ["/web-ui"]
+[tool.maturin]
+manifest-path = "crates/calc-flow-python/Cargo.toml"
+python-source = "python"
+module-name = "calc_flow._native"
+features = ["pyo3/abi3-py313"]
+strip = true
 
 [tool.uv.workspace]
 members = ["web-ui/backend"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["python/tests"]
 
 [tool.coverage.run]
 source = ["calc_flow"]
 
 [tool.coverage.report]
 fail_under = 90
-show_missing = true
-skip_covered = true
 
 [tool.ruff]
 target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["benchmarks", "calc_flow", "calc_flow_studio"]
 
 [tool.ruff.format]
 quote-style = "double"

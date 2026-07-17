@@ -2,7 +2,7 @@ import type { ArrowFieldConfig } from '../types';
 
 interface SchemaEditorProps {
   fields: ArrowFieldConfig[];
-  arrowTypes: string[];
+  arrowTypes: readonly string[];
   onChange: (fields: ArrowFieldConfig[]) => void;
 }
 
@@ -22,8 +22,8 @@ export function SchemaEditor({ fields, arrowTypes, onChange }: SchemaEditorProps
           />
           <select
             aria-label="Field type"
-            value={field.type}
-            onChange={(event) => update(index, { type: event.target.value })}
+            value={field.data_type}
+            onChange={(event) => update(index, { data_type: event.target.value })}
           >
             {arrowTypes.map((type) => (
               <option key={type}>{type}</option>
@@ -51,7 +51,10 @@ export function SchemaEditor({ fields, arrowTypes, onChange }: SchemaEditorProps
         className="text-button"
         type="button"
         onClick={() =>
-          onChange([...fields, { name: `field_${fields.length + 1}`, type: 'float64', nullable: true }])
+          onChange([
+            ...fields,
+            { name: `field_${fields.length + 1}`, data_type: 'float64', nullable: true },
+          ])
         }
       >
         + field

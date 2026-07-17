@@ -1,151 +1,145 @@
-# Calc Flow v0.2 API reference
+# Calc Flow 2.0 API reference
 
-This reference summarizes Calc Flow's supported Python and local HTTP surfaces.
-All table values cross public runtime boundaries inside immutable `Batch`
-objects and all table calculation uses Apache DataFusion.
+Calc Flow has three supported surfaces:
 
-## Batch and metadata
+| Surface            | Package or path                    | Purpose                                      |
+| ------------------ | ---------------------------------- | -------------------------------------------- |
+| Rust core          | `calc-flow = "2.0.0"`              | Native batches, graphs, execution, recovery  |
+| Python binding     | `calc-flow==2.0.0`                 | PyO3 engine access and Python integrations   |
+| Local Studio API   | `calc-flow-studio==2.0.0`          | Loopback FastAPI service and React assets    |
 
-Import these names from `calc_flow`.
+For examples and lifecycle detail, see [the Rust API](rust-api.md) and
+[the Python API](python-api.md).
 
-### `Batch`
+## Rust modules and exports
 
-| Member                                               | Contract                                                                         |
-| ---------------------------------------------------- | -------------------------------------------------------------------------------- |
-| `Batch.table(data, metadata=None)`                   | Accept a `pyarrow.Table` or `pyarrow.RecordBatch` and create a table batch.       |
-| `Batch.from_tabular_protocol(data, metadata=None)`   | Normalize an Arrow C Stream or DataFrame Interchange producer to a table batch.  |
-| `Batch.array(data, metadata=None)`                   | Create an array batch from an object implementing `__array_namespace__`.         |
-| `table_payload` / `array_payload`                    | Return the kind-specific payload or reject the wrong kind.                       |
-| `schema`                                             | Return the Arrow schema for table batches.                                       |
-| `num_rows`                                           | Return the table row count or leading array dimension.                           |
-| `with_payload(payload)`                              | Return a new batch while preserving metadata.                                    |
-| `with_metadata(**changes)`                           | Return a new batch with replaced immutable metadata.                             |
+The `calc_flow` crate re-exports its supported public types from
+`crates/calc-flow/src/lib.rs`.
 
-`BatchMetadata` carries `batch_id`, sequence, source ID, replay cursor, event
-time, watermark, and immutable JSON-compatible attributes. `to_dict()` returns
-a JSON-compatible document.
+| Area                 | Primary APIs                                                        |
+| -------------------- | ------------------------------------------------------------------- |
+| Data                 | `Batch`, `BatchKind`, `BatchMetadata`, `TableBatch`                 |
+| Graph                | `PipelineBuilder`, `Edge`, `PortEndpoint`, `ExecutionPlan`          |
+| Operators            | `Port`, `Operator`, `ExpressionOperator`, `SqlOperator`             |
+| Execution            | `ExecutionOptions`, `RunResult`, `RunMetadata`, `NodeTiming`        |
+| UDF/providers        | `UdfRegistry`, `UdfReference`, `ProviderRegistry`                   |
+| Sources and sinks    | `Source`, `SourceItem`, `Sink`, `BatchingSource`                    |
+| Recovery             | `MicroBatchRunner`, `StreamingRunner`, `CheckpointStore`            |
+| Projects             | `ProjectSpec`, `compile_project`, `validate_project`                |
+| Persistence          | `FileProjectStore`, `FileCheckpointStore`                           |
+| Errors               | `CalcFlowError`, `Result<T>`                                        |
 
-## DataFusion engines
+Generate local rustdoc with:
 
-Import engine APIs from `calc_flow.engine`.
+```bash
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+```
 
-### `DataFusionEngine`
+## Python package
 
-`evaluate(expression, batch)` evaluates a SQL expression or assignment over
-one table batch. `sql(query, tables)` executes one read-only `SELECT` or CTE over
-named table batches. Both methods create and close a run-scoped session.
+Import the main surface from `calc_flow`.
 
-### `DataFusionRuntime`
+### Batch
 
-`DataFusionRuntime(config=None, *, udfs=())` owns a reusable DataFusion
-`SessionContext`. Use `evaluate()` and `sql()` as above, inspect `metrics`, and
-call `close()` or use it as a context manager.
+| Member                                      | Contract                                                   |
+| ------------------------------------------- | ---------------------------------------------------------- |
+| `Batch.from_pyarrow(table, metadata=None)`  | Own an Arrow C Stream as an immutable table batch          |
+| `Batch.from_array(array, backend=..., ...)` | Own a read-only explicitly named array-provider payload    |
+| `to_pyarrow()`                              | Return the table payload or reject a non-table batch       |
+| `array` / `backend`                         | Return array-provider data or reject a table batch         |
+| `kind` / `num_rows` / `metadata`            | Return defensive batch observations                        |
 
-Every `DataFusionQueryMetrics` value contains:
+### Graph and execution
 
-- optional node ID;
-- planning and execution nanoseconds;
-- output rows;
-- optimized logical plan;
-- physical plan.
+`PipelineBuilder(name)` supports:
 
-`DataFusionConfig` controls execution `batch_size`, `target_partitions`, and
-repartitioning for aggregations, joins, sorts, and windows. These values do not
-control source batch formation.
+- `expression(name, expression, *, select=(), filter=None, udfs=())`;
+- `sql(name, query, *, aliases=("input",), udfs=())`;
+- `external(node_id, provider, name, version, options)`;
+- `connect(source_node, target_node, *, source_port="output",
+  target_port="input")`;
+- `compile(runtime=None) -> ExecutionPlan`.
 
-### Optional array engines
+`ExecutionPlan` exposes immutable `name` and `fingerprint`.
+`execute(inputs)` is blocking and rejects a running event loop.
+`execute_async(inputs)` is the asynchronous form. `snapshot[_async]`,
+`restore[_async]`, and `reset[_async]` provide the plan-state lifecycle.
 
-`NumpyEngine` and `JaxEngine` accept array batches. Their `evaluate()` methods
-interpret an allowlisted expression AST. They also expose `add`, `subtract`,
-`multiply`, `divide`, `matmul`, `sum`, `mean`, `max`, `min`, `transpose`, and
-`reshape` operations.
+`RunResult` exposes defensive `outputs`, `metadata`, `node_timings`, and
+`datafusion_metrics` values.
 
-## Operators and graph execution
+### Runtime and UDFs
 
-| API                                               | Contract                                                                       |
-| ------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `Port(name, kind, required=True, schema=None)`     | Declare a typed operator boundary.                                             |
-| `Operator.process(inputs, context)`               | Map named batch inputs to named batch outputs.                                 |
-| `StatelessOperator(name, fn, ...)`                | Wrap a pure process function.                                                  |
-| `StatefulOperator`                                | Provide deep-copying `snapshot`, `restore`, and `reset` behavior.              |
-| `ExpressionOperator`                              | Execute one DataFusion calculation, projection, or filter.                     |
-| `SqlOperator`                                     | Execute multi-input DataFusion SQL.                                            |
-| `ArrayExpressionOperator`                         | Execute an allowlisted NumPy or JAX expression.                                |
+`Runtime` compiles strict project JSON, reports validation results, registers
+trusted providers/scalar UDFs, and returns a redacted metadata catalog.
+`register_scalar_udf` requires provider/name/version, exact input type names,
+return type, volatility, and a vectorized callable.
 
-Build a graph with `Pipeline.add_node()` and `Pipeline.connect()`. `then()` and
-`add()` are linear single-port conveniences. `compile()` validates the graph and
-returns an immutable `ExecutionPlan`.
+`register_numpy(runtime)` and `register_jax(runtime)` install the optional
+array expression providers.
 
-`ExecutionPlan.execute(inputs, *, cancellation=None, deadline=None,
-settings=None)` returns a `RunResult`. Results expose named terminal `outputs`,
-node timings, DataFusion metrics, warnings, and run metadata. `output` is a
-convenience property only when the graph has exactly one terminal output.
+### Projects and stores
 
-`RunContext` gives operators the run/node IDs, shared DataFusion runtime,
-selected UDF registry, cancellation/deadline controls, and read-only settings.
+`ProjectDocument` is the strict Pydantic root model for format v2.
+`project_json_schema()` returns the Rust-generated schema and
+`validate_project_json()` returns canonical validated JSON.
 
-## Registered UDFs
+`FileProjectStore` provides async `create`, `put`, `get`, `list`, and
+`delete` plus explicit `*_blocking` forms. Import/export helpers accept safe
+JSON or YAML. `FileCheckpointStore` provides the equivalent async and blocking
+checkpoint operations.
 
-`UdfRegistry.datafusion_scalar(...)` registers a trusted vectorized Arrow
-implementation with a stable name/version, input and return fields, volatility,
-and description. `UdfRegistry.array(...)` registers a vectorized Array API
-implementation with an argument count.
+### Runners
 
-Operators reference implementations only through `UdfReference(name,
-version)`. Compile the pipeline after all required implementations are
-registered. `catalog()` returns JSON-compatible discovery metadata without
-source code, import paths, or callable objects.
+`MicroBatchRunner(plan, source, checkpoints, *, sinks=None,
+checkpoint_every=100)` accepts a source with `open(cursor)` and `next()`.
+`next()` returns one `RunResult` or `None`; `next_async()` is the
+non-blocking form.
 
-## Sources, sinks, and recovery
+`StreamingRunner(plan, checkpoints)` accepts a formed batch through
+`step(..., sinks=None)` or `step_async(..., sinks=None)`.
 
-`Source.read(cursor=None)` yields formed `Batch` objects. `BatchingSource`
-groups an in-memory record sequence by `max_rows` and `max_bytes`. `Sink.write`
-accepts one output batch.
-
-`MicroBatchRunner.run(source, sink=None)` yields every `RunResult` and commits a
-checkpoint after successful sink delivery at the configured interval.
-`StreamingRunner.step(batch, sink=None)` provides the equivalent one-batch
-contract. Both use at-least-once delivery.
-
-`FileCheckpointStore(directory)` atomically persists versioned `Checkpoint`
-documents. Recovery validates the pipeline fingerprint before restoring node
-state and the source cursor.
-
-## Project configuration
-
-`ProjectConfig` is the canonical, strict, data-only project model. It contains
-`PipelineConfig`, `NodeConfig`, `EdgeConfig`, `PortConfig`, `DataFusionConfig`,
-`DataSourceConfig`, and `RunOptions` values.
-
-- `compile_project(project, udf_registry=None)` returns an `ExecutionPlan`.
-- `validate_project(project, udf_registry=None)` returns a `ValidationReport`.
-- `FileProjectStore(directory)` provides atomic `list`, `get`, `create`, `put`,
-  and `delete` operations.
-
-Canonical persistence is sorted formatted JSON. YAML uses safe import/export
-only. Unknown fields and executable configuration values are rejected.
+Sink mappings use output names and sequences of sync or async callbacks. Both
+runners expose reset and plan-snapshot operations.
 
 ## Local HTTP API
 
-The separate `calc-flow-studio` workspace package owns the `calc-flow-web`
-command. The unauthenticated service binds only to loopback and exposes these
-routes under `/api/v1`:
+The separate Studio service exposes its supported API under `/api/v2`.
 
-| Method                 | Route                       | Purpose                                                    |
-| ---------------------- | --------------------------- | ---------------------------------------------------------- |
-| `GET`                  | `/catalog`                  | Operators, UDF metadata, Arrow types, and preview limits.  |
-| `GET`                  | `/schema/project`           | JSON Schema for `ProjectConfig`.                           |
-| `GET`, `POST`          | `/projects`                 | List projects or create one with a server-assigned ID.     |
-| `POST`                 | `/projects/import`          | Safely import JSON or YAML.                                |
-| `GET`, `PUT`, `DELETE` | `/projects/{id}`            | Read, replace, or delete a project.                        |
-| `GET`                  | `/projects/{id}/export`     | Export canonical JSON or safe YAML.                        |
-| `POST`                 | `/projects/{id}/validate`   | Compile and validate a stored graph.                       |
-| `GET`, `DELETE`        | `/projects/{id}/checkpoint` | Inspect or reset runner recovery state.                    |
-| `POST`                 | `/projects/{id}/runs`       | Start a bounded preview worker.                            |
-| `GET`                  | `/runs/{id}`                | Read preview status and results.                           |
-| `GET`                  | `/runs/{id}/events`         | Stream run events.                                         |
-| `DELETE`               | `/runs/{id}`                | Cancel a managed preview.                                  |
+| Method                 | Route                       | Purpose                                  |
+| ---------------------- | --------------------------- | ---------------------------------------- |
+| `GET`                  | `/catalog`                  | Operators, UDFs, Arrow types, limits     |
+| `GET`                  | `/schema/project`           | Rust-generated v2 project JSON Schema    |
+| `GET`, `POST`          | `/projects`                 | List or create projects                  |
+| `POST`                 | `/projects/import`          | Safely import JSON or YAML               |
+| `GET`, `PUT`, `DELETE` | `/projects/{id}`            | Read, replace, or delete a project       |
+| `GET`                  | `/projects/{id}/export`     | Export canonical JSON or safe YAML       |
+| `POST`                 | `/projects/{id}/validate`   | Validate and compile a stored graph      |
+| `GET`, `DELETE`        | `/projects/{id}/checkpoint` | Inspect or reset recovery state          |
+| `POST`                 | `/projects/{id}/runs`       | Start a bounded preview worker           |
+| `GET`                  | `/runs/{id}`                | Read preview status/results              |
+| `GET`                  | `/runs/{id}/events`         | Stream run events                        |
+| `DELETE`               | `/runs/{id}`                | Cancel a managed preview                 |
 
-The checked-in OpenAPI document is
-[`web-ui/openapi.json`](../web-ui/openapi.json). It is the source for generated
-TypeScript request and response types.
+The checked contract is [web-ui/openapi.json](../web-ui/openapi.json).
+`npm run sync:api` regenerates it and
+`web-ui/src/api/schema.d.ts` from the FastAPI application.
+
+## Error categories
+
+Rust returns `CalcFlowError` variants. Python exposes the stable hierarchy:
+`CalcFlowError`, `ConfigError`, `CompileError`, `ExecutionError`,
+`ProviderError`, `CheckpointError`, and `CancelledError`.
+
+Invalid user documents and graph definitions are configuration/compile errors;
+execution, callbacks, source/sink failures, cancellation, and checkpoint
+storage preserve their more specific categories.
+
+## Version and compatibility
+
+The Rust crate, Python binding, Studio package, and frontend are versioned
+`2.0.0`. Project format version `2` and checkpoint format versioning are
+separate protocol values.
+
+Calc Flow 2.0 does not load v1 projects or checkpoints. See
+[the release guide](v2-release.md) for the required migration boundary.

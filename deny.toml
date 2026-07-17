@@ -1,0 +1,49 @@
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+all-features = true
+
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2026-0176", reason = "Temporary: DataFusion 54 requires Arrow 58 and the only Arrow 58 pyo3-arrow line requires PyO3 0.28; Calc Flow never calls BoundListIterator or BoundTupleIterator nth/nth_back. Remove when an Arrow 58-compatible patched bridge exists or DataFusion is upgraded." },
+    { id = "RUSTSEC-2026-0177", reason = "Temporary: DataFusion 54 requires Arrow 58 and the only Arrow 58 pyo3-arrow line requires PyO3 0.28; Calc Flow never constructs PyCFunction closures. Remove when an Arrow 58-compatible patched bridge exists or DataFusion is upgraded." },
+]
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.93
+exceptions = []
+
+[licenses.private]
+ignore = false
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
