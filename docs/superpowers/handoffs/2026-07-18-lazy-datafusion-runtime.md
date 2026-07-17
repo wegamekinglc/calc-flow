@@ -20,28 +20,28 @@ a material expression-path regression.
 
 ## Environment
 
-| Item                          | Value                                                              |
-| ----------------------------- | ------------------------------------------------------------------ |
+| Item                          | Value                                                               |
+| ----------------------------- | ------------------------------------------------------------------- |
 | Operating system              | Linux `5.15.167.4-microsoft-standard-WSL2`                          |
-| Architecture                  | `x86_64`                                                           |
+| Architecture                  | `x86_64`                                                            |
 | Normalized CPU brand          | `13th gen intel(r) core(tm) i9-13900hx`                             |
-| Logical CPU count             | `32`                                                               |
-| Rust                          | `rustc 1.88.0 (6b00bc388 2025-06-23)`                              |
-| Cargo                         | `cargo 1.88.0 (873a06493 2025-05-10)`                              |
-| Python                        | `3.13.13`                                                          |
-| NumPy                         | `2.5.1`                                                            |
-| JAX                           | `0.11.0`                                                           |
-| JAXlib                        | `0.11.0`                                                           |
-| JAX execution                 | CPU; x64 disabled                                                  |
-| Machine fingerprint           | `fe554238f5c55b49c8d1961066a86debe87eb538f7fbb6fc19a72f926e264a56` |
-| CPU scaling governor          | Unavailable in the WSL2 guest                                      |
-| CPU scaling driver            | Unavailable in the WSL2 guest                                      |
-| Energy-performance preference | Unavailable in the WSL2 guest                                      |
-| ACPI platform profile         | Unavailable in the WSL2 guest                                      |
-| Intel P-state status          | Unavailable in the WSL2 guest                                      |
-| AMD P-state status            | Unavailable in the WSL2 guest                                      |
-| `powerprofilesctl` profile    | Command unavailable                                                |
-| `cpupower` policy             | Command unavailable                                                |
+| Logical CPU count             | `32`                                                                |
+| Rust                          | `rustc 1.88.0 (6b00bc388 2025-06-23)`                               |
+| Cargo                         | `cargo 1.88.0 (873a06493 2025-05-10)`                               |
+| Python                        | `3.13.13`                                                           |
+| NumPy                         | `2.5.1`                                                             |
+| JAX                           | `0.11.0`                                                            |
+| JAXlib                        | `0.11.0`                                                            |
+| JAX execution                 | CPU; x64 disabled                                                   |
+| Machine fingerprint           | `fe554238f5c55b49c8d1961066a86debe87eb538f7fbb6fc19a72f926e264a56`  |
+| CPU scaling governor          | Unavailable in the WSL2 guest                                       |
+| CPU scaling driver            | Unavailable in the WSL2 guest                                       |
+| Energy-performance preference | Unavailable in the WSL2 guest                                       |
+| ACPI platform profile         | Unavailable in the WSL2 guest                                       |
+| Intel P-state status          | Unavailable in the WSL2 guest                                       |
+| AMD P-state status            | Unavailable in the WSL2 guest                                       |
+| `powerprofilesctl` profile    | Command unavailable                                                 |
+| `cpupower` policy             | Command unavailable                                                 |
 
 The host power mode was therefore not observable or fixed from the WSL2 guest.
 
