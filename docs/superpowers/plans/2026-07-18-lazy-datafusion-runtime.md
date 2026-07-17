@@ -28,8 +28,7 @@
 
 ## Target File Map
 
-- `crates/calc-flow/src/datafusion.rs` — lazy session ownership, UDF preparation, query initialization, and private initialization-state probe.
-- `crates/calc-flow/src/pipeline.rs` — in-crate external-plan regression test proving the unchanged `OperatorContext` sees an uninitialized runtime.
+- `crates/calc-flow/src/datafusion.rs` — lazy session ownership, UDF preparation, query initialization, and in-file private-state tests.
 - `crates/calc-flow/tests/udf.rs` — public-behavior regression test for registering a native UDF after a lazy session already exists.
 - `crates/calc-flow/benches/core.rs` — unchanged stable Criterion identities used for before/after evidence.
 - `docs/superpowers/handoffs/2026-07-18-lazy-datafusion-runtime.md` — exact environment, commands, estimates, confidence intervals, gate decision, and compatibility evidence.
@@ -91,16 +90,15 @@ Read the four `estimates.json` files beneath `target/criterion/` and copy their 
 
 **Files:**
 - Modify: `crates/calc-flow/src/datafusion.rs`
-- Modify: `crates/calc-flow/src/pipeline.rs`
 - Modify: `crates/calc-flow/tests/udf.rs`
 
 **Interfaces:**
-- Consumes: `DataFusionConfig`, `UdfRegistrySnapshot`, `UdfReference`, `ScalarUDF`, `OperatorContext`, and the existing public runtime methods.
-- Produces: private `DataFusionRuntime::context(&self) -> &SessionContext` and `pub(crate) DataFusionRuntime::session_initialized(&self) -> bool`; all public signatures remain unchanged.
+- Consumes: `DataFusionConfig`, `UdfRegistrySnapshot`, `UdfReference`, `ScalarUDF`, and the existing public runtime methods.
+- Produces: private production method `DataFusionRuntime::context(&self) -> &SessionContext`; all public signatures remain unchanged and no test-only method is added.
 
 - [ ] **Step 1: Add failing runtime-laziness unit tests**
 
-Append an in-file test module to `crates/calc-flow/src/datafusion.rs`. It deliberately names private APIs that do not exist yet:
+Append an in-file test module to `crates/calc-flow/src/datafusion.rs`. The tests live in the owning module and inspect its private field directly, so production code needs no test-only probe:
 
 ```rust
 #[cfg(test)]
@@ -110,24 +108,24 @@ mod tests {
     #[test]
     fn runtime_preparation_and_close_do_not_initialize_a_session() {
         let mut runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
-        assert!(!runtime.session_initialized());
+        assert!(runtime.context.get().is_none());
 
         runtime
             .register_udfs(&UdfRegistrySnapshot::default(), &[])
             .unwrap();
-        assert!(!runtime.session_initialized());
+        assert!(runtime.context.get().is_none());
 
         runtime.close();
-        assert!(!runtime.session_initialized());
+        assert!(runtime.context.get().is_none());
     }
 
     #[test]
     fn context_initializes_once_and_reuses_the_same_session() {
         let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
-        assert!(!runtime.session_initialized());
+        assert!(runtime.context.get().is_none());
 
         let first = std::ptr::from_ref(runtime.context());
-        assert!(runtime.session_initialized());
+        assert!(runtime.context.get().is_some());
         let second = std::ptr::from_ref(runtime.context());
 
         assert_eq!(first, second);
@@ -135,115 +133,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Add the failing external-plan integration-within-crate test**
-
-Append a `#[cfg(test)]` module to `crates/calc-flow/src/pipeline.rs`. Define an array passthrough operator that checks the crate-private runtime state inside the unchanged public context:
-
-```rust
-#[cfg(test)]
-mod lazy_datafusion_tests {
-    use std::{collections::BTreeMap, sync::Arc};
-
-    use async_trait::async_trait;
-
-    use super::*;
-    use crate::{
-        BatchKind, BatchMetadata, ExternalPayload, JsonMap, UdfRegistry,
-    };
-
-    #[derive(Debug)]
-    struct ProbePayload;
-
-    impl ExternalPayload for ProbePayload {
-        fn backend(&self) -> &'static str {
-            "lazy_probe"
-        }
-
-        fn len(&self) -> usize {
-            1
-        }
-
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-    }
-
-    struct LazyProbeOperator {
-        input_ports: Vec<Port>,
-        output_ports: Vec<Port>,
-    }
-
-    impl LazyProbeOperator {
-        fn new() -> Self {
-            Self {
-                input_ports: vec![Port::new("input", BatchKind::Array, true, None).unwrap()],
-                output_ports: vec![Port::new("output", BatchKind::Array, true, None).unwrap()],
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Operator for LazyProbeOperator {
-        fn name(&self) -> &str {
-            "lazy_probe"
-        }
-
-        fn input_ports(&self) -> &[Port] {
-            &self.input_ports
-        }
-
-        fn output_ports(&self) -> &[Port] {
-            &self.output_ports
-        }
-
-        fn configuration(&self) -> JsonMap {
-            JsonMap::new()
-        }
-
-        async fn process(
-            &mut self,
-            inputs: &BTreeMap<String, Batch>,
-            context: &OperatorContext<'_>,
-        ) -> Result<BTreeMap<String, Batch>> {
-            assert!(!context.datafusion.session_initialized());
-            Ok(BTreeMap::from([(
-                "output".into(),
-                inputs["input"].clone(),
-            )]))
-        }
-    }
-
-    #[tokio::test]
-    async fn external_plan_never_initializes_datafusion() {
-        let plan = PipelineBuilder::new("lazy external")
-            .unwrap()
-            .add_node("probe", Box::new(LazyProbeOperator::new()))
-            .unwrap()
-            .compile(&UdfRegistry::new().snapshot())
-            .unwrap();
-        let input = Batch::external(
-            Arc::new(ProbePayload),
-            BatchMetadata::default(),
-        )
-        .unwrap();
-
-        let result = plan
-            .execute(
-                BTreeMap::from([("input".into(), input)]),
-                ExecutionOptions::default(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(result.outputs["output"].num_rows(), 1);
-        assert!(result.datafusion_metrics.is_empty());
-    }
-}
-```
-
-If the builder derives a different external input or output name, inspect the compiled maps and use those exact names; do not weaken the runtime-state assertion.
-
-- [ ] **Step 3: Add the public late-UDF-registration preservation test**
+- [ ] **Step 2: Add the public late-UDF-registration preservation test**
 
 Add this behavior test to `crates/calc-flow/tests/udf.rs` using the existing `constant_udf` and `input` helpers:
 
@@ -276,7 +166,7 @@ async fn runtime_registers_a_native_udf_after_the_lazy_session_exists() {
 }
 ```
 
-- [ ] **Step 4: Run RED and record the expected failure**
+- [ ] **Step 3: Run RED and record the expected failure**
 
 Run:
 
@@ -285,9 +175,9 @@ CARGO_TARGET_DIR="$PWD/target/cargo" CARGO_BUILD_JOBS=1 \
   cargo test -p calc-flow --lib --test udf
 ```
 
-Expected: compilation fails because `DataFusionRuntime::session_initialized` and the private lazy `context()` helper do not exist and the current eager `context` field is not a `OnceLock`.
+Expected: compilation fails because the current eager `context` field has no `get` method and the private lazy `context()` method does not exist.
 
-- [ ] **Step 5: Replace eager session ownership with private lazy state**
+- [ ] **Step 4: Replace eager session ownership with private lazy state**
 
 Update the imports and runtime fields in `crates/calc-flow/src/datafusion.rs`:
 
@@ -331,7 +221,7 @@ pub fn new(config: DataFusionConfig) -> Result<Self> {
 
 Update its rustdoc to say the runtime owns a session lazily rather than claiming construction creates the session.
 
-- [ ] **Step 6: Prepare UDFs eagerly without forcing a session**
+- [ ] **Step 5: Prepare UDFs eagerly without forcing a session**
 
 Keep the current validation and resolution pipeline, then replace direct eager registration with:
 
@@ -350,7 +240,7 @@ Ok(())
 
 Do not move `ensure_open`, `validate_selected_udfs`, snapshot resolution, or SQL namespace validation into the lazy initializer.
 
-- [ ] **Step 7: Add the single lazy initializer and private state probe**
+- [ ] **Step 6: Add the single production lazy initializer**
 
 Add these private methods:
 
@@ -367,15 +257,11 @@ fn context(&self) -> &SessionContext {
         context
     })
 }
-
-pub(crate) fn session_initialized(&self) -> bool {
-    self.context.get().is_some()
-}
 ```
 
-The helper is crate-private and must not be re-exported from `lib.rs` or exposed through PyO3.
+The private method is called by `sql` in production. Do not add an initialization-state method to the production type.
 
-- [ ] **Step 8: Initialize only inside the locked query path**
+- [ ] **Step 7: Initialize only inside the locked query path**
 
 In `sql`, keep both `ensure_open` checks and query validation in their current order. Immediately after acquiring `query_lock` and rechecking `ensure_open`, bind the context once:
 
@@ -389,7 +275,7 @@ for (alias, batch) in tables {
 
 Use `context.sql(&query)` for planning. Do not call `context()` before the query lock, do not hold a separate synchronous lock across `.await`, and do not change `TableRegistrations` cleanup.
 
-- [ ] **Step 9: Run GREEN focused verification**
+- [ ] **Step 8: Run GREEN focused verification**
 
 Run:
 
@@ -405,14 +291,13 @@ git diff --check
 
 Expected: the new laziness tests and all existing DataFusion/UDF/execution tests pass; format, Clippy, and whitespace checks are clean.
 
-- [ ] **Step 10: Commit the behavior change**
+- [ ] **Step 9: Commit the behavior change**
 
 Run:
 
 ```bash
 git add \
   crates/calc-flow/src/datafusion.rs \
-  crates/calc-flow/src/pipeline.rs \
   crates/calc-flow/tests/udf.rs
 git diff --cached --check
 git commit -m "perf: defer DataFusion session setup"

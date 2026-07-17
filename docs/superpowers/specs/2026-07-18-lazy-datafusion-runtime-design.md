@@ -233,13 +233,14 @@ with the runtime after success or failure.
 - Prove a selected native UDF is available on the first lazy query.
 - Prove concurrent first queries share one initialized session and retain alias
   isolation.
-- Prove an external passthrough plan observes an uninitialized runtime inside
-  its operator and returns empty DataFusion metrics.
+- Prove the external passthrough plan remains correct and returns empty
+  DataFusion metrics through the existing public benchmark path.
 - Preserve the existing expression, SQL, UDF, rollback, cancellation, runner,
   and checkpoint test suites unchanged.
 
-Private initialization state is exposed only through a crate-private helper
-used by in-crate tests. It is not added to the public Rust or Python API.
+The `datafusion.rs` in-file tests inspect the private `OnceLock` directly.
+Production code does not gain an initialization-state probe or any method used
+only by tests.
 
 ### Performance evidence
 
