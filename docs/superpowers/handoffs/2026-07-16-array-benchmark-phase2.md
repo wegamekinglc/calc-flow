@@ -139,11 +139,38 @@ percentages must not be summed.
 | array_mean                  | numpy   | 14.488      | 39.207%      | 65.371    | 28.229%  | 50.883    | 59.464%     | 74.805%              |
 | array_transpose_reshape     | numpy   | 17.376      | 35.586%      | 67.610    | 25.108%  | 50.234    | 60.233%     | 75.772%              |
 
-The pytest-benchmark distributions are noisy, so these values are diagnostic
-point estimates rather than a Phase 1 acceptance comparison. Task 7 defines no
-CoV rejection rule. The gate is nevertheless not marginal: the lower
-Criterion confidence bound for runtime creation is above 30 us, and its
-smallest point-estimate share across all eight denominators is 37.750%.
+The raw round counts and reported standard deviations in
+`target/benchmark-results/array-phase2.json` also support a diagnostic
+uncertainty bound. After converting seconds to microseconds, each row uses:
+
+```text
+provider SE = provider stddev / sqrt(provider rounds)
+plan SE = plan stddev / sqrt(plan rounds)
+gap SE = hypot(provider SE, plan SE)
+95% upper gap = gap + 1.96 * gap SE
+conservative runtime share = Criterion runtime lower 30.030 us / 95% upper gap
+```
+
+| Scenario                    | Backend | Provider rounds | Provider SE (us) | Plan rounds | Plan SE (us) | Gap (us) | Gap SE (us) | 95% upper gap (us) | Conservative runtime share |
+| --------------------------- | ------- | --------------- | ---------------- | ----------- | ------------ | -------- | ----------- | ------------------ | -------------------------- |
+| array_elementwise           | jax     | 97              | 12.616           | 908         | 2.050        | 77.957   | 12.782      | 103.010            | 29.153%                    |
+| array_matrix_multiplication | jax     | 1,671           | 2.997            | 1,098       | 2.516        | 68.848   | 3.913       | 76.517             | 39.246%                    |
+| array_mean                  | jax     | 1,696           | 2.001            | 889         | 2.666        | 80.152   | 3.333       | 86.684             | 34.643%                    |
+| array_transpose_reshape     | jax     | 1,522           | 0.442            | 763         | 1.142        | 69.915   | 1.225       | 72.316             | 41.526%                    |
+| array_elementwise           | numpy   | 2,530           | 0.147            | 1,495       | 0.572        | 48.621   | 0.591       | 49.779             | 60.326%                    |
+| array_matrix_multiplication | numpy   | 3,606           | 0.071            | 1,559       | 0.390        | 48.593   | 0.396       | 49.370             | 60.826%                    |
+| array_mean                  | numpy   | 3,672           | 0.094            | 1,293       | 0.513        | 50.883   | 0.522       | 51.905             | 57.855%                    |
+| array_transpose_reshape     | numpy   | 4,398           | 0.093            | 1,432       | 0.449        | 50.234   | 0.458       | 51.132             | 58.731%                    |
+
+This calculation assumes independent provider and plan sample means, treats
+the reported standard deviations as round-level sample standard deviations,
+and uses a normal approximation. It does not claim a joint 95% confidence
+level with Criterion's separately estimated interval. The high CoVs make the
+table diagnostic rather than a Phase 1 acceptance comparison, and Task 7
+defines no CoV rejection rule. Even this deliberately conservative diagnostic
+leaves the worst runtime share at 29.153%, while the isolated Criterion lower
+bound remains 30.030 us. Both values stay above the design gate's 20% and
+10 us thresholds, respectively, so the one design decision below is unchanged.
 
 ## Core design gate
 
