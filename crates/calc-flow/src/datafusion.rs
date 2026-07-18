@@ -73,7 +73,7 @@ pub struct DataFusionQueryMetric {
 pub struct DataFusionRuntime {
     config: DataFusionConfig,
     context: OnceLock<SessionContext>,
-    selected_udfs: Vec<Arc<ScalarUDF>>,
+    selected_udfs: Vec<(UdfReference, Arc<ScalarUDF>)>,
     query_lock: AsyncMutex<()>,
     metrics: Mutex<Vec<DataFusionQueryMetric>>,
     next_query: AtomicU64,
@@ -128,18 +128,30 @@ impl DataFusionRuntime {
             .map(|reference| {
                 snapshot
                     .resolve_native(reference)
-                    .map(|udf| (reference, udf))
+                    .map(|udf| (reference.clone(), udf))
             })
             .collect::<Result<Vec<_>>>()?;
-        validate_udf_sql_namespace(&selected)?;
+        validate_udf_sql_namespace(
+            self.selected_udfs
+                .iter()
+                .chain(&selected)
+                .map(|(reference, udf)| (reference, udf.as_ref())),
+        )?;
+        let selected = selected
+            .into_iter()
+            .filter(|(reference, _)| {
+                !self
+                    .selected_udfs
+                    .iter()
+                    .any(|(registered, _)| registered == reference)
+            })
+            .collect::<Vec<_>>();
         if let Some(context) = self.context.get() {
-            for (_, udf) in selected {
+            for (_, udf) in &selected {
                 context.register_udf(udf.as_ref().clone());
             }
-        } else {
-            self.selected_udfs
-                .extend(selected.into_iter().map(|(_, udf)| udf));
         }
+        self.selected_udfs.extend(selected);
         Ok(())
     }
 
@@ -237,7 +249,7 @@ impl DataFusionRuntime {
                 .with_batch_size(self.config.batch_size)
                 .with_target_partitions(self.config.target_partitions);
             let context = SessionContext::new_with_config(session);
-            for udf in &self.selected_udfs {
+            for (_, udf) in &self.selected_udfs {
                 context.register_udf(udf.as_ref().clone());
             }
             context
@@ -256,10 +268,11 @@ impl DataFusionRuntime {
     }
 }
 
-fn validate_udf_sql_namespace(selected: &[(&UdfReference, Arc<ScalarUDF>)]) -> Result<()> {
+fn validate_udf_sql_namespace<'a>(
+    selected: impl IntoIterator<Item = (&'a UdfReference, &'a ScalarUDF)>,
+) -> Result<()> {
     let mut owners: BTreeMap<&str, &UdfReference> = BTreeMap::new();
     for (reference, udf) in selected {
-        let reference = *reference;
         for sql_name in std::iter::once(udf.name()).chain(udf.aliases().iter().map(String::as_str))
         {
             if let Some(&owner) = owners.get(sql_name) {
@@ -435,7 +448,7 @@ mod tests {
 
         assert!(runtime.context.get().is_none());
         assert_eq!(runtime.selected_udfs.len(), 1);
-        assert!(Arc::ptr_eq(&runtime.selected_udfs[0], &udf));
+        assert!(Arc::ptr_eq(&runtime.selected_udfs[0].1, &udf));
     }
 
     #[test]
@@ -461,7 +474,7 @@ mod tests {
             .unwrap();
         assert!(runtime.context.get().is_none());
         assert_eq!(runtime.selected_udfs.len(), 1);
-        assert!(Arc::ptr_eq(&runtime.selected_udfs[0], &queued_udf));
+        assert!(Arc::ptr_eq(&runtime.selected_udfs[0].1, &queued_udf));
 
         assert!(
             runtime
@@ -470,11 +483,11 @@ mod tests {
         );
         assert!(runtime.context.get().is_none());
         assert_eq!(runtime.selected_udfs.len(), 1);
-        assert!(Arc::ptr_eq(&runtime.selected_udfs[0], &queued_udf));
+        assert!(Arc::ptr_eq(&runtime.selected_udfs[0].1, &queued_udf));
 
         assert!(runtime.register_udfs(&snapshot, &[missing]).is_err());
         assert!(runtime.context.get().is_none());
         assert_eq!(runtime.selected_udfs.len(), 1);
-        assert!(Arc::ptr_eq(&runtime.selected_udfs[0], &queued_udf));
+        assert!(Arc::ptr_eq(&runtime.selected_udfs[0].1, &queued_udf));
     }
 }
