@@ -3,17 +3,29 @@
 The studio is the local React/TypeScript client for Calc Flow's FastAPI service.
 It uses React Flow 12 and types generated from `openapi.json`.
 
-Start the API and Vite server together from the repository root:
+Start the API and Vite server together from the repository root on macOS,
+Linux, or WSL:
 
 ```bash
 ./web-ui/scripts/start_web_ui.sh
 ```
 
+On native Windows PowerShell:
+
+```powershell
+.\web-ui\scripts\start_web_ui.ps1
+```
+
 Open `http://127.0.0.1:5173`. Logs and PID state are written to
-`.calc-flow-web/`. Stop both managed process groups with:
+`.calc-flow-web/`. Stop both managed process groups with the matching command
+for your platform:
 
 ```bash
 ./web-ui/scripts/stop_web_ui.sh
+```
+
+```powershell
+.\web-ui\scripts\stop_web_ui.ps1
 ```
 
 Vite binds to `127.0.0.1` and proxies `/api` to
