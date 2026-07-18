@@ -197,6 +197,7 @@ repository commands and constraints.
 
 ## Reference
 
+- [getting started](docs/getting-started.md)
 - [API map](docs/api-reference.md)
 - [Python API](docs/python-api.md)
 - [Rust API](docs/rust-api.md)

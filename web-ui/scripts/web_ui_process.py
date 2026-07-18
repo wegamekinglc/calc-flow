@@ -469,7 +469,14 @@ def start(runtime_directory: Path, timeout: float) -> None:
     try:
         api_process, api_service = _spawn_service(
             name="api",
-            command=[uv, "run", "--package", "calc-flow-studio", "calc-flow-web"],
+            command=[
+                uv,
+                "run",
+                "--no-sync",
+                "--package",
+                "calc-flow-studio",
+                "calc-flow-web",
+            ],
             cwd=ROOT,
             environment=environment,
             url="http://127.0.0.1:8765/api/v2/catalog",
