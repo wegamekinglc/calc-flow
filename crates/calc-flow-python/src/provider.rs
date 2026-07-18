@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
-use pyo3::{exceptions::PyTypeError, prelude::*};
+use pyo3::prelude::*;
 use serde_json::json;
 
 use crate::{
@@ -40,7 +40,8 @@ impl calc_flow::ExternalOperatorFactory for PythonOperatorFactory {
         outputs: Vec<calc_flow::Port>,
     ) -> calc_flow::Result<Box<dyn calc_flow::Operator>> {
         validate_ports(&inputs, &outputs)?;
-        validate_callback(&self.callback, spec.options()).map_err(|message| {
+        let options_json = encode_provider_options(spec.options())?;
+        validate_callback(&self.callback, &options_json).map_err(|message| {
             calc_flow::CalcFlowError::InvalidArgument {
                 field: "provider.options".into(),
                 message,
@@ -52,6 +53,7 @@ impl calc_flow::ExternalOperatorFactory for PythonOperatorFactory {
             name: self.name.clone(),
             version: self.version.clone(),
             options: spec.options().clone(),
+            options_json,
             inputs,
             outputs,
         }))
@@ -78,7 +80,13 @@ fn validate_ports(
     Ok(())
 }
 
-fn validate_callback(callback: &PythonRoot, options: &calc_flow::JsonMap) -> Result<(), String> {
+fn encode_provider_options(options: &calc_flow::JsonMap) -> calc_flow::Result<String> {
+    serde_json::to_string(options).map_err(|source| calc_flow::CalcFlowError::Format {
+        message: source.to_string(),
+    })
+}
+
+fn validate_callback(callback: &PythonRoot, options_json: &str) -> Result<(), String> {
     Python::attach(|py| {
         let callback = callback.object().bind(py);
         if !callback
@@ -87,8 +95,7 @@ fn validate_callback(callback: &PythonRoot, options: &calc_flow::JsonMap) -> Res
         {
             return Ok(());
         }
-        let encoded = serde_json::to_string(options).map_err(|error| error.to_string())?;
-        let options = json_to_python(py, &encoded).map_err(|error| error.to_string())?;
+        let options = json_to_python(py, options_json).map_err(|error| error.to_string())?;
         callback
             .call_method1(pyo3::intern!(py, "validate"), (options,))
             .map(|_| ())
@@ -102,6 +109,7 @@ struct PythonOperator {
     name: String,
     version: String,
     options: calc_flow::JsonMap,
+    options_json: String,
     inputs: Vec<calc_flow::Port>,
     outputs: Vec<calc_flow::Port>,
 }
@@ -157,9 +165,10 @@ impl calc_flow::Operator for PythonOperator {
             .ok_or_else(|| {
                 self.provider_error("input payload was not created by the Python host")
             })?;
-        let output =
-            Python::attach(|py| call_python_operator(py, &self.callback, input, &self.options))
-                .map_err(|error| self.provider_error(error.to_string()))?;
+        let output = Python::attach(|py| {
+            call_python_operator(py, &self.callback, input, &self.options_json)
+        })
+        .map_err(|error| self.provider_error(error.to_string()))?;
         let output_payload = output
             .external_payload()
             .map_err(|error| self.provider_error(error.to_string()))?;
@@ -177,12 +186,10 @@ fn call_python_operator(
     py: Python<'_>,
     callback: &PythonRoot,
     input: &calc_flow::Batch,
-    options: &calc_flow::JsonMap,
+    options_json: &str,
 ) -> PyResult<calc_flow::Batch> {
     let input = Py::new(py, PyBatch::from_inner_python(py, input.clone())?)?;
-    let encoded =
-        serde_json::to_string(options).map_err(|error| PyTypeError::new_err(error.to_string()))?;
-    let options = json_to_python(py, &encoded)?;
+    let options = json_to_python(py, options_json)?;
     let output = callback.object().bind(py).call1((input, options))?;
     let output = output.extract::<PyRef<'_, PyBatch>>()?.python_payload()?;
     rehome_python_payload(py, output)
@@ -215,6 +222,15 @@ mod tests {
 
     fn array_port(name: &str) -> calc_flow::Port {
         calc_flow::Port::new(name, calc_flow::BatchKind::Array, true, None).unwrap()
+    }
+
+    #[test]
+    fn operator_creation_preencodes_provider_options() {
+        let options = BTreeMap::from([("nested".into(), json!({"value": [1, 2, 3]}))]);
+        assert_eq!(
+            encode_provider_options(&options).unwrap(),
+            r#"{"nested":{"value":[1,2,3]}}"#
+        );
     }
 
     #[test]
@@ -291,13 +307,8 @@ mod tests {
         )
         .unwrap();
         let cancellation = calc_flow::CancellationToken::new();
-        let datafusion =
-            calc_flow::DataFusionRuntime::new(calc_flow::DataFusionConfig::default()).unwrap();
         let run = calc_flow::RunContext::new(BTreeMap::new(), None, cancellation).unwrap();
-        let context = calc_flow::OperatorContext {
-            run: &run,
-            datafusion: &datafusion,
-        };
+        let context = calc_flow::OperatorContext { run: &run };
         let error = operator
             .process(&BTreeMap::from([("input".into(), input)]), &context)
             .await
@@ -329,8 +340,9 @@ mod tests {
                 .clone_inner()
                 .unwrap();
             let options = BTreeMap::from([("value".into(), json!(1))]);
+            let options_json = encode_provider_options(&options).unwrap();
 
-            let output = call_python_operator(py, &root, &batch, &options).unwrap();
+            let output = call_python_operator(py, &root, &batch, &options_json).unwrap();
 
             assert_eq!(output.num_rows(), 1);
             assert_eq!(options, BTreeMap::from([("value".into(), json!(1))]));

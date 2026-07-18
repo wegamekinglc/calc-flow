@@ -60,8 +60,10 @@ performs one calculated expression or projection, optionally with a filter.
 named table aliases.
 
 DDL, DML, utility commands, multi-statement SQL, and table backend selectors are
-rejected. Each execution owns a run-scoped DataFusion session and registers
-only the UDFs selected by the compiled plan.
+rejected. Each table or mixed execution owns one run-scoped DataFusion session
+and registers only the UDFs selected by the compiled plan. An external-only
+plan stores no DataFusion configuration or UDF snapshot and creates no
+DataFusion runtime when it executes.
 
 An `ExecutionPlan` returns a `RunResult` containing:
 
@@ -100,6 +102,13 @@ does not expose callback objects.
 NumPy and JAX are Python-owned providers registered with `register_numpy` or
 `register_jax`. An external v2 node selects provider `numpy` or `jax`,
 operator `expression`, version `1`, and a bounded expression.
+
+External operators receive an engine-neutral run context. They share graph
+validation, cancellation, rollback, node timing, runners, and checkpoints with
+table operators, but they do not receive or initialize the table engine. An
+external-only result therefore has an empty DataFusion metrics list. Mixed
+graphs create one DataFusion runtime for their table nodes while keeping the
+external provider boundary independent.
 
 The evaluator parses an allowlisted Python expression AST; it never calls
 `eval`. It supports arithmetic, bounded literal powers, approved reductions,

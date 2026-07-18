@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -71,7 +71,9 @@ pub struct DataFusionQueryMetric {
 }
 
 pub struct DataFusionRuntime {
-    context: SessionContext,
+    config: DataFusionConfig,
+    context: OnceLock<SessionContext>,
+    selected_udfs: Vec<(UdfReference, Arc<ScalarUDF>)>,
     query_lock: AsyncMutex<()>,
     metrics: Mutex<Vec<DataFusionQueryMetric>>,
     next_query: AtomicU64,
@@ -79,7 +81,7 @@ pub struct DataFusionRuntime {
 }
 
 impl DataFusionRuntime {
-    /// Creates a run-scoped `DataFusion` session.
+    /// Creates a run-scoped runtime that owns a lazily initialized `DataFusion` session.
     ///
     /// # Errors
     ///
@@ -87,11 +89,10 @@ impl DataFusionRuntime {
     /// value is zero.
     pub fn new(config: DataFusionConfig) -> Result<Self> {
         config.validate()?;
-        let session = SessionConfig::new()
-            .with_batch_size(config.batch_size)
-            .with_target_partitions(config.target_partitions);
         Ok(Self {
-            context: SessionContext::new_with_config(session),
+            config,
+            context: OnceLock::new(),
+            selected_udfs: Vec::new(),
             query_lock: AsyncMutex::new(()),
             metrics: Mutex::new(Vec::new()),
             next_query: AtomicU64::new(1),
@@ -127,13 +128,30 @@ impl DataFusionRuntime {
             .map(|reference| {
                 snapshot
                     .resolve_native(reference)
-                    .map(|udf| (reference, udf))
+                    .map(|udf| (reference.clone(), udf))
             })
             .collect::<Result<Vec<_>>>()?;
-        validate_udf_sql_namespace(&selected)?;
-        for (_, udf) in selected {
-            self.context.register_udf(udf.as_ref().clone());
+        validate_udf_sql_namespace(
+            self.selected_udfs
+                .iter()
+                .chain(&selected)
+                .map(|(reference, udf)| (reference, udf.as_ref())),
+        )?;
+        let selected = selected
+            .into_iter()
+            .filter(|(reference, _)| {
+                !self
+                    .selected_udfs
+                    .iter()
+                    .any(|(registered, _)| registered == reference)
+            })
+            .collect::<Vec<_>>();
+        if let Some(context) = self.context.get() {
+            for (_, udf) in &selected {
+                context.register_udf(udf.as_ref().clone());
+            }
         }
+        self.selected_udfs.extend(selected);
         Ok(())
     }
 
@@ -178,14 +196,14 @@ impl DataFusionRuntime {
         // Declared before registrations so alias cleanup runs before unlock.
         let _query_guard = self.query_lock.lock().await;
         self.ensure_open()?;
-        let mut registrations = TableRegistrations::new(&self.context);
+        let context = self.context();
+        let mut registrations = TableRegistrations::new(context);
         for (alias, batch) in tables {
             registrations.register(alias, batch, node_id)?;
         }
 
         let planning_start = Instant::now();
-        let dataframe = self
-            .context
+        let dataframe = context
             .sql(&query)
             .await
             .map_err(|error| datafusion_error(node_id, error))?;
@@ -225,6 +243,19 @@ impl DataFusionRuntime {
         self.closed.store(true, Ordering::Release);
     }
 
+    fn context(&self) -> &SessionContext {
+        self.context.get_or_init(|| {
+            let session = SessionConfig::new()
+                .with_batch_size(self.config.batch_size)
+                .with_target_partitions(self.config.target_partitions);
+            let context = SessionContext::new_with_config(session);
+            for (_, udf) in &self.selected_udfs {
+                context.register_udf(udf.as_ref().clone());
+            }
+            context
+        })
+    }
+
     fn ensure_open(&self) -> Result<()> {
         if self.closed.load(Ordering::Acquire) {
             Err(CalcFlowError::InvalidArgument {
@@ -237,10 +268,11 @@ impl DataFusionRuntime {
     }
 }
 
-fn validate_udf_sql_namespace(selected: &[(&UdfReference, Arc<ScalarUDF>)]) -> Result<()> {
+fn validate_udf_sql_namespace<'a>(
+    selected: impl IntoIterator<Item = (&'a UdfReference, &'a ScalarUDF)>,
+) -> Result<()> {
     let mut owners: BTreeMap<&str, &UdfReference> = BTreeMap::new();
     for (reference, udf) in selected {
-        let reference = *reference;
         for sql_name in std::iter::once(udf.name()).chain(udf.aliases().iter().map(String::as_str))
         {
             if let Some(&owner) = owners.get(sql_name) {
@@ -351,4 +383,111 @@ fn is_identifier(value: &str) -> bool {
         .next()
         .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::UdfRegistry;
+    use datafusion::{
+        arrow::datatypes::DataType,
+        common::ScalarValue,
+        logical_expr::{ColumnarValue, Volatility, create_udf},
+    };
+
+    fn constant_udf(name: &str, value: i64) -> Arc<ScalarUDF> {
+        Arc::new(create_udf(
+            name,
+            vec![],
+            DataType::Int64,
+            Volatility::Immutable,
+            Arc::new(move |_| Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(value))))),
+        ))
+    }
+
+    #[test]
+    fn runtime_preparation_and_close_do_not_initialize_a_session() {
+        let mut runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+        assert!(runtime.context.get().is_none());
+
+        runtime
+            .register_udfs(&UdfRegistrySnapshot::default(), &[])
+            .unwrap();
+        assert!(runtime.context.get().is_none());
+
+        runtime.close();
+        assert!(runtime.context.get().is_none());
+    }
+
+    #[test]
+    fn context_initializes_once_and_reuses_the_same_session() {
+        let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+        assert!(runtime.context.get().is_none());
+
+        let first = std::ptr::from_ref(runtime.context());
+        assert!(runtime.context.get().is_some());
+        let second = std::ptr::from_ref(runtime.context());
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn successful_udf_preparation_queues_native_udf_without_initializing_context() {
+        let selected =
+            UdfReference::new("rust", "prepared_value", "1", UdfKind::DataFusionScalar).unwrap();
+        let udf = constant_udf("prepared_value", 11);
+        let mut registry = UdfRegistry::new();
+        registry
+            .register_datafusion(selected.clone(), Arc::clone(&udf), 0)
+            .unwrap();
+        let mut runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+
+        runtime
+            .register_udfs(&registry.snapshot(), &[selected])
+            .unwrap();
+
+        assert!(runtime.context.get().is_none());
+        assert_eq!(runtime.selected_udfs.len(), 1);
+        assert!(Arc::ptr_eq(&runtime.selected_udfs[0].1, &udf));
+    }
+
+    #[test]
+    fn failed_udf_preparation_preserves_uninitialized_context_and_queue() {
+        let queued =
+            UdfReference::new("rust", "queued_value", "1", UdfKind::DataFusionScalar).unwrap();
+        let conflicting =
+            UdfReference::new("rust", "queued_value", "2", UdfKind::DataFusionScalar).unwrap();
+        let missing =
+            UdfReference::new("rust", "missing_value", "1", UdfKind::DataFusionScalar).unwrap();
+        let queued_udf = constant_udf("queued_value", 11);
+        let mut registry = UdfRegistry::new();
+        registry
+            .register_datafusion(queued.clone(), Arc::clone(&queued_udf), 0)
+            .unwrap();
+        registry
+            .register_datafusion(conflicting.clone(), constant_udf("queued_value", 22), 0)
+            .unwrap();
+        let snapshot = registry.snapshot();
+        let mut runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+        runtime
+            .register_udfs(&snapshot, std::slice::from_ref(&queued))
+            .unwrap();
+        assert!(runtime.context.get().is_none());
+        assert_eq!(runtime.selected_udfs.len(), 1);
+        assert!(Arc::ptr_eq(&runtime.selected_udfs[0].1, &queued_udf));
+
+        assert!(
+            runtime
+                .register_udfs(&snapshot, &[queued, conflicting])
+                .is_err()
+        );
+        assert!(runtime.context.get().is_none());
+        assert_eq!(runtime.selected_udfs.len(), 1);
+        assert!(Arc::ptr_eq(&runtime.selected_udfs[0].1, &queued_udf));
+
+        assert!(runtime.register_udfs(&snapshot, &[missing]).is_err());
+        assert!(runtime.context.get().is_none());
+        assert_eq!(runtime.selected_udfs.len(), 1);
+        assert!(Arc::ptr_eq(&runtime.selected_udfs[0].1, &queued_udf));
+    }
 }

@@ -2,10 +2,10 @@ use std::{any::Any, collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use calc_flow::{
-    Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken, DataFusionConfig,
-    DataFusionRuntime, ExpressionOperator, ExternalOperatorFactory, ExternalOperatorSpec,
-    ExternalPayload, JsonMap, Operator, OperatorContext, Port, ProviderRegistry, Result,
-    RunContext, SqlOperator, UdfKind, UdfReference,
+    Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken, ExecutionOptions,
+    ExpressionOperator, ExternalOperatorFactory, ExternalOperatorSpec, ExternalPayload, JsonMap,
+    Operator, OperatorContext, PipelineBuilder, Port, ProviderRegistry, Result, RunContext,
+    SqlOperator, UdfKind, UdfReference, UdfRegistry,
 };
 use datafusion::arrow::{
     array::{Array, Int64Array},
@@ -162,18 +162,16 @@ fn expression_operator_has_fixed_table_ports_and_one_calculation_mode() {
 }
 
 #[test]
-fn built_in_operator_trait_metadata_delegates_to_inherent_accessors() {
+fn built_in_operator_metadata_uses_engine_specific_accessors() {
     let expression = ExpressionOperator::new("calc", "a + 1", vec![], None, vec![]).unwrap();
     let sql = SqlOperator::new("sql", "SELECT * FROM input", vec!["input".into()], vec![]).unwrap();
 
-    for (operator, name) in [
-        (&expression as &dyn Operator, "calc"),
-        (&sql as &dyn Operator, "sql"),
-    ] {
-        assert_eq!(operator.name(), name);
-        assert!(!operator.input_ports().is_empty());
-        assert_eq!(operator.output_ports()[0].name(), "output");
-    }
+    assert_eq!(expression.name(), "calc");
+    assert!(!expression.input_ports().is_empty());
+    assert_eq!(expression.output_ports()[0].name(), "output");
+    assert_eq!(sql.name(), "sql");
+    assert!(!sql.input_ports().is_empty());
+    assert_eq!(sql.output_ports()[0].name(), "output");
 }
 
 #[test]
@@ -285,19 +283,23 @@ async fn expression_operator_processes_assignment_with_real_datafusion() {
     let input = table(vec![("a", vec![1, 2])]);
     let original_batches = input.table_payload().unwrap().batches().to_vec();
     let inputs = BTreeMap::from([("input".into(), input)]);
-    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
-    let run = RunContext::new(BTreeMap::new(), None, CancellationToken::new())
+    let plan = PipelineBuilder::new("assignment")
         .unwrap()
-        .for_node("calculate")
+        .add_node(
+            "calculate",
+            Box::new(
+                ExpressionOperator::new("calc", "total = a + 1", vec![], None, vec![]).unwrap(),
+            ),
+        )
+        .unwrap()
+        .compile(&UdfRegistry::new().snapshot())
         .unwrap();
-    let context = OperatorContext {
-        run: &run,
-        datafusion: &runtime,
-    };
-    let mut operator =
-        ExpressionOperator::new("calc", "total = a + 1", vec![], None, vec![]).unwrap();
 
-    let outputs = operator.process(&inputs, &context).await.unwrap();
+    let result = plan
+        .execute(inputs.clone(), ExecutionOptions::default())
+        .await
+        .unwrap();
+    let outputs = result.outputs;
 
     assert_eq!(
         outputs.keys().map(String::as_str).collect::<Vec<_>>(),
@@ -316,7 +318,10 @@ async fn expression_operator_processes_assignment_with_real_datafusion() {
             .field_with_name("total")
             .is_err()
     );
-    assert_eq!(runtime.metrics()[0].node_id.as_deref(), Some("calculate"));
+    assert_eq!(
+        result.datafusion_metrics[0].node_id.as_deref(),
+        Some("calculate")
+    );
 }
 
 #[tokio::test]
@@ -325,22 +330,30 @@ async fn expression_operator_processes_projection_and_filter() {
         "input".into(),
         table(vec![("a", vec![1, 2]), ("b", vec![10, 20])]),
     )]);
-    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
-    let run = RunContext::new(BTreeMap::new(), None, CancellationToken::new()).unwrap();
-    let context = OperatorContext {
-        run: &run,
-        datafusion: &runtime,
-    };
-    let mut operator = ExpressionOperator::new(
-        "project",
-        "",
-        vec!["a".into(), "b * 2 AS doubled".into()],
-        Some("a >= 2".into()),
-        vec![],
-    )
-    .unwrap();
+    let plan = PipelineBuilder::new("projection")
+        .unwrap()
+        .add_node(
+            "project",
+            Box::new(
+                ExpressionOperator::new(
+                    "project",
+                    "",
+                    vec!["a".into(), "b * 2 AS doubled".into()],
+                    Some("a >= 2".into()),
+                    vec![],
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap()
+        .compile(&UdfRegistry::new().snapshot())
+        .unwrap();
 
-    let output = operator.process(&inputs, &context).await.unwrap();
+    let output = plan
+        .execute(inputs, ExecutionOptions::default())
+        .await
+        .unwrap()
+        .outputs;
 
     assert_eq!(values(&output["output"], "a"), [2]);
     assert_eq!(values(&output["output"], "doubled"), [40]);
@@ -359,30 +372,38 @@ async fn sql_operator_processes_join_with_real_datafusion() {
         ),
     ]);
     let input_keys = inputs.keys().cloned().collect::<Vec<_>>();
-    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
-    let run = RunContext::new(BTreeMap::new(), None, CancellationToken::new())
+    let plan = PipelineBuilder::new("join")
         .unwrap()
-        .for_node("join")
+        .add_node(
+            "join",
+            Box::new(
+                SqlOperator::new(
+                    "join",
+                    "SELECT l.id, l.value + r.value AS total FROM left_table l \
+                     JOIN right_table r ON l.id = r.id ORDER BY l.id",
+                    vec!["left_table".into(), "right_table".into()],
+                    vec![],
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap()
+        .compile(&UdfRegistry::new().snapshot())
         .unwrap();
-    let context = OperatorContext {
-        run: &run,
-        datafusion: &runtime,
-    };
-    let mut operator = SqlOperator::new(
-        "join",
-        "SELECT l.id, l.value + r.value AS total FROM left_table l \
-         JOIN right_table r ON l.id = r.id ORDER BY l.id",
-        vec!["left_table".into(), "right_table".into()],
-        vec![],
-    )
-    .unwrap();
 
-    let output = operator.process(&inputs, &context).await.unwrap();
+    let result = plan
+        .execute(inputs.clone(), ExecutionOptions::default())
+        .await
+        .unwrap();
+    let output = result.outputs;
 
     assert_eq!(values(&output["output"], "id"), [1, 2]);
     assert_eq!(values(&output["output"], "total"), [15, 27]);
     assert_eq!(inputs.keys().cloned().collect::<Vec<_>>(), input_keys);
-    assert_eq!(runtime.metrics()[0].node_id.as_deref(), Some("join"));
+    assert_eq!(
+        result.datafusion_metrics[0].node_id.as_deref(),
+        Some("join")
+    );
 }
 
 #[test]
@@ -420,8 +441,12 @@ fn built_in_configuration_and_udf_references_are_data_only() {
 
 #[test]
 fn stateless_operator_lifecycle_is_object_safe_and_rejects_state() {
-    let mut operator: Box<dyn Operator> =
-        Box::new(ExpressionOperator::new("calc", "a + 1", vec![], None, vec![]).unwrap());
+    let mut operator: Box<dyn Operator> = Box::new(PassthroughOperator {
+        name: "stateless".into(),
+        marker: "lifecycle",
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+    });
 
     assert_eq!(operator.snapshot().unwrap(), Value::Null);
     assert!(matches!(
@@ -676,12 +701,8 @@ async fn provider_registry_resolves_factory_without_replacing_duplicates() {
 
     let input = table(vec![("a", vec![1, 2])]);
     let inputs = BTreeMap::from([("input".into(), input)]);
-    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
     let run = RunContext::new(BTreeMap::new(), None, CancellationToken::new()).unwrap();
-    let context = OperatorContext {
-        run: &run,
-        datafusion: &runtime,
-    };
+    let context = OperatorContext { run: &run };
     let outputs = operator.process(&inputs, &context).await.unwrap();
     assert_eq!(values(&outputs["output"], "a"), [1, 2]);
 }

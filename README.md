@@ -88,8 +88,11 @@ to the public types.
 - Project documents are strict, data-only JSON/YAML with
   `format_version: 2`. They contain no callable source, import path, or table
   backend selector.
-- Each graph run owns one DataFusion session and returns named outputs,
-  per-node row counts/timings, DataFusion plans/timings, and run metadata.
+- Table and mixed graph runs own one run-scoped DataFusion session. External-only
+  NumPy/JAX runs own no DataFusion configuration, UDF state, or runtime and
+  return an empty DataFusion metrics list.
+- Every graph run returns named outputs, per-node row counts/timings, and run
+  metadata; table work additionally reports DataFusion plans and timings.
 - Micro-batch and streaming runners deliver sinks before committing
   checkpoints. Delivery is at least once, and failed delivery restores owned
   in-memory state.

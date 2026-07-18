@@ -199,6 +199,32 @@ async fn runtime_registers_and_executes_only_selected_native_references() {
 }
 
 #[tokio::test]
+async fn runtime_registers_a_native_udf_after_the_lazy_session_exists() {
+    let selected = UdfReference::new("rust", "late_value", "1", UdfKind::DataFusionScalar).unwrap();
+    let mut registry = UdfRegistry::new();
+    registry
+        .register_datafusion(selected.clone(), constant_udf("late_value", 17), 0)
+        .unwrap();
+    let mut runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+
+    runtime.evaluate("a", &input(), None).await.unwrap();
+    runtime
+        .register_udfs(&registry.snapshot(), &[selected])
+        .unwrap();
+
+    let output = runtime
+        .evaluate("late_value()", &input(), None)
+        .await
+        .unwrap();
+    let values = output.table_payload().unwrap().batches()[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(values.values(), &[17, 17]);
+}
+
+#[tokio::test]
 async fn runtime_rejects_alias_to_primary_collisions_before_registration() {
     let first = UdfReference::new("rust", "first", "1", UdfKind::DataFusionScalar).unwrap();
     let second = UdfReference::new("rust", "second", "1", UdfKind::DataFusionScalar).unwrap();
@@ -256,6 +282,46 @@ async fn runtime_rejects_alias_to_alias_collisions_before_registration() {
     assert!(message.contains("rust:first@1"));
     assert!(message.contains("rust:second@1"));
     assert!(runtime.evaluate("first()", &input(), None).await.is_err());
+}
+
+#[tokio::test]
+async fn runtime_rejects_collisions_across_lazy_registration_calls() {
+    let first = UdfReference::new("rust", "first", "1", UdfKind::DataFusionScalar).unwrap();
+    let second = UdfReference::new("rust", "second", "1", UdfKind::DataFusionScalar).unwrap();
+    let mut registry = UdfRegistry::new();
+    registry
+        .register_datafusion(
+            first.clone(),
+            constant_udf_with_aliases("first", 11, ["shared"]),
+            0,
+        )
+        .unwrap();
+    registry
+        .register_datafusion(
+            second.clone(),
+            constant_udf_with_aliases("second", 22, ["shared"]),
+            0,
+        )
+        .unwrap();
+    let snapshot = registry.snapshot();
+    let mut runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+
+    runtime
+        .register_udfs(&snapshot, std::slice::from_ref(&first))
+        .unwrap();
+    let error = runtime.register_udfs(&snapshot, &[second]).unwrap_err();
+    let message = error.to_string();
+
+    assert!(message.contains("shared"));
+    assert!(message.contains("rust:first@1"));
+    assert!(message.contains("rust:second@1"));
+    let output = runtime.evaluate("first()", &input(), None).await.unwrap();
+    let values = output.table_payload().unwrap().batches()[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(values.values(), &[11, 11]);
 }
 
 #[test]
