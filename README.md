@@ -123,17 +123,30 @@ The local service:
 - runs bounded previews in spawned workers;
 - serves generated frontend assets from the Studio wheel.
 
-Start both development processes:
+Start both development processes on macOS, Linux, or WSL:
 
 ```bash
 ./web-ui/scripts/start_web_ui.sh
 ```
 
-Open `http://127.0.0.1:5173`, then stop them with:
+On native Windows PowerShell:
+
+```powershell
+.\web-ui\scripts\start_web_ui.ps1
+```
+
+Open `http://127.0.0.1:5173`, then stop the managed processes with the
+matching command for your platform:
 
 ```bash
 ./web-ui/scripts/stop_web_ui.sh
 ```
+
+```powershell
+.\web-ui\scripts\stop_web_ui.ps1
+```
+
+Both launchers keep logs and process state under `.calc-flow-web/`.
 
 The checked OpenAPI contract is
 [web-ui/openapi.json](web-ui/openapi.json); generated TypeScript request and

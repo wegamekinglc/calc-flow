@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import ModuleType
 
@@ -29,12 +31,80 @@ def _load_process_manager() -> ModuleType:
 PROCESS_MANAGER_MODULE = _load_process_manager()
 
 
+def _wait_for_pid_file(path: Path, timeout: float = 5.0) -> int:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            return int(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, ValueError):
+            time.sleep(0.05)
+    raise AssertionError(f"timed out waiting for child PID at {path}")
+
+
 @pytest.mark.parametrize("name", ("start_web_ui.sh", "stop_web_ui.sh"))
 def test_web_ui_shell_wrapper_is_executable_and_valid(name: str) -> None:
     wrapper = WEB_UI / "scripts" / name
 
     assert os.access(wrapper, os.X_OK)
     subprocess.run(["bash", "-n", wrapper], check=True)
+
+
+@pytest.mark.parametrize(
+    ("name", "action"),
+    (("start_web_ui.ps1", "start"), ("stop_web_ui.ps1", "stop")),
+)
+def test_web_ui_powershell_wrapper_delegates_to_process_manager(
+    name: str, action: str, tmp_path: Path
+) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows PowerShell wrapper")
+    wrapper = WEB_UI / "scripts" / name
+    assert wrapper.is_file()
+    powershell = shutil.which("pwsh") or shutil.which("powershell")
+    assert powershell is not None
+    capture = tmp_path / "capture.txt"
+    fake_uv = tmp_path / "uv.cmd"
+    fake_uv.write_text(
+        "@echo off\r\n"
+        '> "%CALC_FLOW_CAPTURE%" echo cwd=%CD%\r\n'
+        '>> "%CALC_FLOW_CAPTURE%" echo args=%*\r\n'
+        "exit /b 23\r\n",
+        encoding="utf-8",
+    )
+    environment = dict(os.environ)
+    environment["PATH"] = f"{tmp_path}{os.pathsep}{environment['PATH']}"
+    environment["CALC_FLOW_CAPTURE"] = str(capture)
+
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            wrapper,
+            "--timeout",
+            "12",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    values = dict(
+        line.split("=", maxsplit=1)
+        for line in capture.read_text(encoding="utf-8").splitlines()
+    )
+    assert result.returncode == 23
+    assert Path(values["cwd"]) == WEB_UI.parent
+    assert "run --no-sync python" in values["args"]
+    assert str(PROCESS_MANAGER) in values["args"]
+    assert f" {action} " in f" {values['args']} "
+    assert "--timeout 12" in values["args"]
 
 
 def test_web_ui_process_manager_reports_stopped_state(tmp_path: Path) -> None:
@@ -74,6 +144,47 @@ def test_windows_process_identity_is_stable_and_non_destructive() -> None:
         process.wait(timeout=5)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows process behavior")
+def test_windows_stop_terminates_the_service_process_tree(tmp_path: Path) -> None:
+    child_pid_path = tmp_path / "child.pid"
+    source = (
+        "import subprocess, sys, time; from pathlib import Path; "
+        "child = subprocess.Popen([sys.executable, '-c', "
+        "'import time; time.sleep(30)']); "
+        "Path(sys.argv[1]).write_text(str(child.pid), encoding='utf-8'); "
+        "time.sleep(30)"
+    )
+    root = subprocess.Popen(
+        [sys.executable, "-c", source, str(child_pid_path)],
+        creationflags=(
+            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        ),
+    )
+    try:
+        child_pid = _wait_for_pid_file(child_pid_path)
+        _, token = PROCESS_MANAGER_MODULE._process_identity(root.pid)
+        service = PROCESS_MANAGER_MODULE.ServiceRecord(
+            name="test",
+            pid=root.pid,
+            process_group=root.pid,
+            start_token=token,
+            command=(sys.executable,),
+            url="http://127.0.0.1:1",
+            log_path=tmp_path / "test.log",
+        )
+
+        PROCESS_MANAGER_MODULE._stop_services({"test": service}, timeout=1.0)
+
+        root.wait(timeout=5)
+        assert not PROCESS_MANAGER_MODULE._pid_exists(child_pid)
+    finally:
+        subprocess.run(
+            ["taskkill", "/PID", str(root.pid), "/T", "/F"],
+            check=False,
+            capture_output=True,
+        )
+
+
 def test_web_ui_stop_is_idempotent(tmp_path: Path) -> None:
     result = subprocess.run(
         [
@@ -99,6 +210,13 @@ def test_web_ui_process_manager_launches_workspace_backend() -> None:
     assert '"--package", "calc-flow-studio"' in source
     assert '"--extra", "web"' not in source
     assert "/api/v2/catalog" in source
+
+
+def test_web_ui_documentation_includes_native_windows_commands() -> None:
+    for path in (WEB_UI.parent / "README.md", WEB_UI / "README.md"):
+        source = path.read_text(encoding="utf-8")
+        assert r".\web-ui\scripts\start_web_ui.ps1" in source
+        assert r".\web-ui\scripts\stop_web_ui.ps1" in source
 
 
 @pytest.mark.parametrize("name", ("export_openapi.py", "run_e2e_server.py"))

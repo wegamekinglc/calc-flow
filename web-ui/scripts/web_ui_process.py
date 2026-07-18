@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import shutil
@@ -14,6 +15,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,33 @@ DEFAULT_RUNTIME_DIRECTORY = Path(
 )
 STATE_FILE_NAME = "processes.json"
 EXPECTED_SERVICES = frozenset({"api", "studio"})
+
+if os.name == "nt":
+    _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    _ERROR_INVALID_PARAMETER = 87
+    _STILL_ACTIVE = 259
+    _KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _KERNEL32.OpenProcess.argtypes = [
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    ]
+    _KERNEL32.OpenProcess.restype = wintypes.HANDLE
+    _KERNEL32.GetExitCodeProcess.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _KERNEL32.GetExitCodeProcess.restype = wintypes.BOOL
+    _KERNEL32.GetProcessTimes.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    ]
+    _KERNEL32.GetProcessTimes.restype = wintypes.BOOL
+    _KERNEL32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _KERNEL32.CloseHandle.restype = wintypes.BOOL
 
 
 class WebUiProcessError(RuntimeError):
@@ -141,8 +170,47 @@ def _write_services(
         temporary.unlink(missing_ok=True)
 
 
+def _windows_process_start_token(pid: int) -> str | None:
+    handle = _KERNEL32.OpenProcess(
+        _PROCESS_QUERY_LIMITED_INFORMATION,
+        False,
+        pid,
+    )
+    if not handle:
+        error = ctypes.get_last_error()
+        if error == _ERROR_INVALID_PARAMETER:
+            return None
+        raise ctypes.WinError(error)
+    try:
+        exit_code = wintypes.DWORD()
+        if not _KERNEL32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if exit_code.value != _STILL_ACTIVE:
+            return None
+
+        creation = wintypes.FILETIME()
+        exit_time = wintypes.FILETIME()
+        kernel = wintypes.FILETIME()
+        user = wintypes.FILETIME()
+        if not _KERNEL32.GetProcessTimes(
+            handle,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel),
+            ctypes.byref(user),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        value = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+        return str(value)
+    finally:
+        _KERNEL32.CloseHandle(handle)
+
+
 def _process_identity(pid: int) -> tuple[str | None, str | None]:
-    """Return Linux process state and start time, or empty values elsewhere."""
+    """Return process state and a stable creation token when available."""
+    if os.name == "nt":
+        start_token = _windows_process_start_token(pid)
+        return ("R", start_token) if start_token is not None else (None, None)
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -157,6 +225,8 @@ def _process_identity(pid: int) -> tuple[str | None, str | None]:
 
 
 def _pid_exists(pid: int) -> bool:
+    if os.name == "nt":
+        return _windows_process_start_token(pid) is not None
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -177,8 +247,41 @@ def _service_is_running(service: ServiceRecord) -> bool:
     return True
 
 
+def _popen_group_options() -> dict[str, Any]:
+    if os.name == "nt":
+        return {
+            "creationflags": (
+                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+            )
+        }
+    return {"start_new_session": True}
+
+
+def _process_group(pid: int) -> int:
+    return pid if os.name == "nt" else os.getpgid(pid)
+
+
+def _terminate_windows_process_tree(service: ServiceRecord) -> None:
+    result = subprocess.run(
+        ["taskkill", "/PID", str(service.pid), "/T", "/F"],
+        check=False,
+        capture_output=True,
+        text=True,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    if result.returncode == 0 or not _service_is_running(service):
+        return
+    detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
+    raise WebUiProcessError(
+        f"could not stop {service.name} (PID {service.pid}): {detail}"
+    )
+
+
 def _signal_service(service: ServiceRecord, requested_signal: signal.Signals) -> None:
     if not _service_is_running(service):
+        return
+    if os.name == "nt":
+        _terminate_windows_process_tree(service)
         return
     try:
         current_group = os.getpgid(service.pid)
@@ -281,7 +384,7 @@ def _spawn_service(
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,
-                start_new_session=True,
+                **_popen_group_options(),
             )
     except OSError as error:
         raise WebUiProcessError(f"could not start {name}: {error}") from error
@@ -290,7 +393,7 @@ def _spawn_service(
     return process, ServiceRecord(
         name=name,
         pid=process.pid,
-        process_group=os.getpgid(process.pid),
+        process_group=_process_group(process.pid),
         start_token=start_token,
         command=tuple(command),
         url=url,
