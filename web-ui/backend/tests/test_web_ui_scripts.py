@@ -1,15 +1,32 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
 WEB_UI = Path(__file__).parents[2]
 PROCESS_MANAGER = WEB_UI / "scripts" / "web_ui_process.py"
 PLAYWRIGHT_CONFIG = WEB_UI / "playwright.config.ts"
+
+
+def _load_process_manager() -> ModuleType:
+    spec = importlib.util.spec_from_file_location(
+        "calc_flow_web_ui_process", PROCESS_MANAGER
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+PROCESS_MANAGER_MODULE = _load_process_manager()
 
 
 @pytest.mark.parametrize("name", ("start_web_ui.sh", "stop_web_ui.sh"))
@@ -36,6 +53,25 @@ def test_web_ui_process_manager_reports_stopped_state(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert result.stdout.strip() == "Calc Flow Studio is stopped."
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process behavior")
+def test_windows_process_identity_is_stable_and_non_destructive() -> None:
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    try:
+        first = PROCESS_MANAGER_MODULE._process_identity(process.pid)
+        second = PROCESS_MANAGER_MODULE._process_identity(process.pid)
+
+        assert first[0] == "R"
+        assert first[1]
+        assert second == first
+        assert process.poll() is None
+    finally:
+        process.kill()
+        process.wait(timeout=5)
 
 
 def test_web_ui_stop_is_idempotent(tmp_path: Path) -> None:
