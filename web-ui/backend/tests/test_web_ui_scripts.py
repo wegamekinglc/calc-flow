@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -207,7 +208,11 @@ def test_web_ui_process_manager_launches_workspace_backend() -> None:
     source = PROCESS_MANAGER.read_text(encoding="utf-8")
 
     assert 'WEB_UI = ROOT / "web-ui"' not in source
-    assert '"--package", "calc-flow-studio"' in source
+    assert re.search(
+        r'command=\[\s*uv,\s*"run",\s*"--no-sync",\s*"--package",\s*'
+        r'"calc-flow-studio",\s*"calc-flow-web",?\s*\]',
+        source,
+    )
     assert '"--extra", "web"' not in source
     assert "/api/v2/catalog" in source
 

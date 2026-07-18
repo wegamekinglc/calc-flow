@@ -137,6 +137,42 @@ class ReleaseConfigTests(unittest.TestCase):
             rust_api,
         )
 
+    def test_getting_started_covers_packages_source_and_studio_platforms(
+        self,
+    ) -> None:
+        guide_path = ROOT / "docs/getting-started.md"
+        self.assertTrue(guide_path.is_file())
+        guide = guide_path.read_text()
+
+        for heading in (
+            "## Choose an installation path",
+            "## Prerequisites",
+            "## Install published packages",
+            "## Build and install from source",
+            "## Start and stop Studio",
+            "## Verify the installation",
+            "## Troubleshooting",
+            "### Linux and WSL",
+            "### Windows PowerShell",
+        ):
+            self.assertIn(heading, guide)
+
+        for command in (
+            "uv tool install calc-flow-studio",
+            "cargo build --workspace --all-features --release",
+            "maturin==1.14.1",
+            "UV_TOOL_DIR",
+            "-delete",
+            "Remove-Item",
+            "uv run --no-sync --package calc-flow-studio calc-flow-web",
+            "./web-ui/scripts/start_web_ui.sh",
+            r".\web-ui\scripts\start_web_ui.ps1",
+        ):
+            self.assertIn(command, guide)
+
+        readme = (ROOT / "README.md").read_text()
+        self.assertIn("[getting started](docs/getting-started.md)", readme)
+
 
 if __name__ == "__main__":
     unittest.main()
