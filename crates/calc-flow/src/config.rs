@@ -8,8 +8,9 @@ use serde_json::{Value, json};
 use crate::operator::expression_query;
 use crate::{
     BatchKind, CalcFlowError, DataFusionConfig, Edge, ExecutionPlan, ExpressionOperator,
-    ExternalOperatorSpec, JsonMap, PipelineBuilder, Port, PortEndpoint, ProviderRegistry, Result,
-    SqlOperator, UdfKind, UdfReference, UdfRegistrySnapshot, validate_selected_udfs,
+    ExternalOperatorSpec, JsonMap, OperatorDefinition, PipelineBuilder, Port, PortEndpoint,
+    ProviderRegistry, Result, SqlOperator, UdfKind, UdfReference, UdfRegistrySnapshot,
+    validate_selected_udfs,
 };
 
 pub const PROJECT_FORMAT_VERSION: u32 = 2;
@@ -264,7 +265,7 @@ fn build_project(
     for node in &project.pipeline.nodes {
         let inputs = configured_ports(node, true)?;
         let outputs = configured_ports(node, false)?;
-        let operator: Box<dyn crate::Operator> = match &node.operator {
+        let operator = match &node.operator {
             OperatorSpec::Expression {
                 expression,
                 select,
@@ -273,7 +274,7 @@ fn build_project(
             } => {
                 let (inputs, outputs) =
                     builtin_ports(inputs, outputs, &["input"], &["output"], BatchKind::Table)?;
-                Box::new(
+                OperatorDefinition::Expression(
                     ExpressionOperator::new(
                         &node.id,
                         expression,
@@ -295,7 +296,7 @@ fn build_project(
                 let expected = aliases.iter().map(String::as_str).collect::<Vec<_>>();
                 let (inputs, outputs) =
                     builtin_ports(inputs, outputs, &expected, &["output"], BatchKind::Table)?;
-                Box::new(
+                OperatorDefinition::Sql(
                     SqlOperator::new(&node.id, query, aliases.clone(), references.clone())?
                         .with_ports(inputs, outputs.into_iter().next().unwrap())?,
                 )
@@ -307,9 +308,11 @@ fn build_project(
                 options,
             } => {
                 let spec = ExternalOperatorSpec::new(provider, name, version, options.clone())?;
-                providers
-                    .resolve(provider, name, version)?
-                    .create(&spec, inputs, outputs)?
+                OperatorDefinition::External(
+                    providers
+                        .resolve(provider, name, version)?
+                        .create(&spec, inputs, outputs)?,
+                )
             }
         };
         builder = builder.add_node(&node.id, operator)?;
@@ -412,28 +415,39 @@ fn semantic_issues(
             "pipeline requires at least one node",
         ));
     }
-    if let Err(CalcFlowError::InvalidArgument { field, message }) =
-        project.pipeline.datafusion.validate()
-    {
-        issues.push(issue(format!("pipeline.{field}"), "out_of_range", message));
+    if project_requires_datafusion(project) {
+        if let Err(CalcFlowError::InvalidArgument { field, message }) =
+            project.pipeline.datafusion.validate()
+        {
+            issues.push(issue(format!("pipeline.{field}"), "out_of_range", message));
+        }
+        validate_maximum(
+            project.pipeline.datafusion.batch_size,
+            MAX_BATCH_SIZE,
+            "pipeline.datafusion.batch_size",
+            &mut issues,
+        );
+        validate_maximum(
+            project.pipeline.datafusion.target_partitions,
+            MAX_TARGET_PARTITIONS,
+            "pipeline.datafusion.target_partitions",
+            &mut issues,
+        );
     }
-    validate_maximum(
-        project.pipeline.datafusion.batch_size,
-        MAX_BATCH_SIZE,
-        "pipeline.datafusion.batch_size",
-        &mut issues,
-    );
-    validate_maximum(
-        project.pipeline.datafusion.target_partitions,
-        MAX_TARGET_PARTITIONS,
-        "pipeline.datafusion.target_partitions",
-        &mut issues,
-    );
     validate_run_options(&project.run_options, &mut issues);
     validate_nodes(project, providers, udfs, &mut issues);
     validate_edges(project, &mut issues);
     validate_sources(project, &mut issues);
     issues
+}
+
+fn project_requires_datafusion(project: &ProjectSpec) -> bool {
+    project.pipeline.nodes.iter().any(|node| {
+        matches!(
+            node.operator,
+            OperatorSpec::Expression { .. } | OperatorSpec::Sql { .. }
+        )
+    })
 }
 
 fn validate_nodes(

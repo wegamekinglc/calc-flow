@@ -8,9 +8,9 @@ use std::{
 
 use async_trait::async_trait;
 use calc_flow::{
-    Batch, BatchKind, CalcFlowError, CancellationToken, Edge, ExecutionOptions, ExpressionOperator,
-    JsonMap, Operator, OperatorContext, PipelineBuilder, Port, PortEndpoint, UdfKind, UdfReference,
-    UdfRegistry,
+    Batch, BatchKind, CalcFlowError, CancellationToken, DataFusionConfig, Edge, ExecutionOptions,
+    ExpressionOperator, JsonMap, Operator, OperatorContext, PipelineBuilder, Port, PortEndpoint,
+    UdfKind, UdfReference, UdfRegistry,
 };
 use datafusion::{
     arrow::datatypes::{DataType, Field},
@@ -252,6 +252,133 @@ async fn external_only_plan_returns_exact_output_once_without_datafusion_metrics
     assert_eq!(values.values(), &[1, 2, 3]);
     assert_eq!(probe.calls(), 1);
     assert!(result.datafusion_metrics.is_empty());
+}
+
+#[test]
+fn external_only_plan_requires_no_table_engine() {
+    let plan = one_node(Action::Pass, Arc::new(Probe::default()));
+
+    assert!(!plan.requires_datafusion());
+    assert_eq!(plan.datafusion_config(), None);
+}
+
+#[tokio::test]
+async fn connected_mixed_plan_shares_one_table_runtime() {
+    let probe = Arc::new(Probe::default());
+    let plan = PipelineBuilder::new("mixed")
+        .unwrap()
+        .add_node(
+            "external",
+            Box::new(TestOperator::ports(
+                "external",
+                vec![untyped_table_port("input", true)],
+                vec![untyped_table_port("output", true)],
+                Action::Pass,
+                Arc::clone(&probe),
+            )),
+        )
+        .unwrap()
+        .add_node(
+            "first_table",
+            Box::new(
+                ExpressionOperator::new(
+                    "first_table",
+                    "plus_one = value + 1",
+                    vec![],
+                    None,
+                    vec![],
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap()
+        .add_node(
+            "second_table",
+            Box::new(
+                ExpressionOperator::new(
+                    "second_table",
+                    "doubled = plus_one * 2",
+                    vec![],
+                    None,
+                    vec![],
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap()
+        .connect(edge("external", "first_table"))
+        .unwrap()
+        .connect(edge("first_table", "second_table"))
+        .unwrap()
+        .compile(&UdfRegistry::new().snapshot())
+        .unwrap();
+
+    assert!(plan.requires_datafusion());
+    assert_eq!(plan.datafusion_config(), Some(DataFusionConfig::default()));
+    let result = plan
+        .execute(inputs(), ExecutionOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(probe.calls(), 1);
+    let output = result.outputs["output"].table_payload().unwrap();
+    let doubled = output.batches()[0]
+        .column_by_name("doubled")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .unwrap();
+    assert_eq!(doubled.values(), &[4, 6, 8]);
+    assert_eq!(
+        result
+            .datafusion_metrics
+            .iter()
+            .map(|metric| (metric.query_id, metric.node_id.as_deref()))
+            .collect::<Vec<_>>(),
+        [(1, Some("first_table")), (2, Some("second_table"))]
+    );
+}
+
+#[tokio::test]
+async fn connected_mixed_plan_rolls_back_external_state_after_table_failure() {
+    let failing_probe = Arc::new(Probe::default());
+    let failing = PipelineBuilder::new("mixed rollback")
+        .unwrap()
+        .add_node(
+            "external",
+            Box::new(
+                TestOperator::ports(
+                    "external",
+                    vec![untyped_table_port("input", true)],
+                    vec![untyped_table_port("output", true)],
+                    Action::Pass,
+                    Arc::clone(&failing_probe),
+                )
+                .stateful(),
+            ),
+        )
+        .unwrap()
+        .add_node(
+            "bad_table",
+            Box::new(
+                ExpressionOperator::new("bad_table", "result = missing + 1", vec![], None, vec![])
+                    .unwrap(),
+            ),
+        )
+        .unwrap()
+        .connect(edge("external", "bad_table"))
+        .unwrap()
+        .compile(&UdfRegistry::new().snapshot())
+        .unwrap();
+    let before = failing.snapshot().await.unwrap();
+    assert!(
+        failing
+            .execute(inputs(), ExecutionOptions::default())
+            .await
+            .is_err()
+    );
+    assert_eq!(failing.snapshot().await.unwrap(), before);
+    assert_eq!(failing_probe.calls(), 1);
+    assert_eq!(failing_probe.restores(), 1);
 }
 
 #[tokio::test]

@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     Batch, CalcFlowError, CancellationToken, Checkpoint, CheckpointStore, DataFusionConfig,
-    DataFusionQueryMetric, DataFusionRuntime, JsonMap, Operator, OperatorContext, Port, Result,
+    DataFusionQueryMetric, DataFusionRuntime, JsonMap, OperatorDefinition, Port, Result,
     RunContext, UdfCatalogEntry, UdfReference, UdfRegistrySnapshot, canonical_json,
     validate_selected_udfs,
 };
@@ -102,7 +102,7 @@ impl Edge {
 
 struct NodeDefinition {
     node_id: String,
-    operator: Box<dyn Operator>,
+    operator: OperatorDefinition,
 }
 
 pub struct PipelineBuilder {
@@ -115,10 +115,16 @@ pub struct PipelineBuilder {
 #[allow(dead_code)]
 pub(crate) struct CompiledNode {
     pub(crate) node_id: String,
-    pub(crate) operator: Arc<tokio::sync::Mutex<Box<dyn Operator>>>,
+    pub(crate) operator: Arc<tokio::sync::Mutex<OperatorDefinition>>,
     pub(crate) input_ports: Vec<Port>,
     pub(crate) output_ports: Vec<Port>,
     pub(crate) inbound: BTreeMap<String, PortEndpoint>,
+}
+
+struct TablePlanResources {
+    config: DataFusionConfig,
+    udfs: UdfRegistrySnapshot,
+    selected_udfs: Vec<UdfReference>,
 }
 
 pub struct ExecutionPlan {
@@ -127,12 +133,10 @@ pub struct ExecutionPlan {
     pub(crate) external_inputs: BTreeMap<String, PortEndpoint>,
     pub(crate) external_outputs: BTreeMap<String, PortEndpoint>,
     pub(crate) fingerprint: String,
-    pub(crate) datafusion_config: DataFusionConfig,
+    table: Option<TablePlanResources>,
     pub(crate) run_lock: tokio::sync::Mutex<()>,
     lease_state: StdMutex<LeaseState>,
     operation_state: StdMutex<OperationState>,
-    pub(crate) udfs: UdfRegistrySnapshot,
-    pub(crate) selected_udfs: Vec<UdfReference>,
 }
 
 #[derive(Default)]
@@ -227,8 +231,15 @@ impl ExecutionPlan {
         &self.fingerprint
     }
 
-    pub const fn datafusion_config(&self) -> DataFusionConfig {
-        self.datafusion_config
+    pub const fn datafusion_config(&self) -> Option<DataFusionConfig> {
+        match &self.table {
+            Some(table) => Some(table.config),
+            None => None,
+        }
+    }
+
+    pub const fn requires_datafusion(&self) -> bool {
+        self.table.is_some()
     }
 
     pub fn topological_order(&self) -> Vec<&str> {
@@ -521,15 +532,29 @@ impl ExecutionPlan {
         options: ExecutionOptions,
     ) -> Result<RunResult> {
         let context = RunContext::new(options.settings, options.deadline, options.cancellation)?;
-        let mut runtime = DataFusionRuntime::new(self.datafusion_config)?;
-        runtime.register_udfs(&self.udfs, &self.selected_udfs)?;
-        let execution = self.execute_nodes(&inputs, &context, &runtime).await;
-        runtime.close();
+        let mut runtime = self
+            .table
+            .as_ref()
+            .map(|table| {
+                let mut runtime = DataFusionRuntime::new(table.config)?;
+                runtime.register_udfs(&table.udfs, &table.selected_udfs)?;
+                Ok(runtime)
+            })
+            .transpose()?;
+        let execution = self
+            .execute_nodes(&inputs, &context, runtime.as_ref())
+            .await;
+        if let Some(runtime) = &mut runtime {
+            runtime.close();
+        }
+        let datafusion_metrics = runtime
+            .as_ref()
+            .map_or_else(Vec::new, DataFusionRuntime::metrics);
         let (outputs, node_timings) = execution?;
         Ok(RunResult {
             outputs,
             node_timings,
-            datafusion_metrics: runtime.metrics(),
+            datafusion_metrics,
             metadata: RunMetadata {
                 run_id: context.run_id().into(),
                 pipeline_name: self.name.clone(),
@@ -584,7 +609,7 @@ impl ExecutionPlan {
         &self,
         inputs: &BTreeMap<String, Batch>,
         context: &RunContext,
-        runtime: &DataFusionRuntime,
+        runtime: Option<&DataFusionRuntime>,
     ) -> Result<(BTreeMap<String, Batch>, BTreeMap<String, NodeTiming>)> {
         let external_names = self
             .external_inputs
@@ -614,13 +639,7 @@ impl ExecutionPlan {
             node_context.check_cancelled()?;
             let started = Instant::now();
             let process_result = operator
-                .process(
-                    &operator_inputs,
-                    &OperatorContext {
-                        run: &node_context,
-                        datafusion: runtime,
-                    },
-                )
+                .process(&operator_inputs, &node_context, runtime)
                 .await;
             let duration_ns = nanos(started.elapsed());
             node_context.check_cancelled()?;
@@ -1270,7 +1289,10 @@ impl PipelineBuilder {
     ///
     /// Returns [`CalcFlowError::Compile`] when `node_id` is empty or already
     /// exists.
-    pub fn add_node(mut self, node_id: &str, operator: Box<dyn Operator>) -> Result<Self> {
+    pub fn add_node<O>(mut self, node_id: &str, operator: O) -> Result<Self>
+    where
+        O: Into<OperatorDefinition>,
+    {
         if node_id.is_empty() {
             return Err(CalcFlowError::Compile {
                 message: "node ID must not be empty".into(),
@@ -1285,7 +1307,7 @@ impl PipelineBuilder {
             node_id.into(),
             NodeDefinition {
                 node_id: node_id.into(),
-                operator,
+                operator: operator.into(),
             },
         );
         Ok(self)
@@ -1319,7 +1341,13 @@ impl PipelineBuilder {
     /// Returns [`CalcFlowError::Compile`] for an invalid graph or selected UDF
     /// catalog.
     pub fn compile(self, udfs: &UdfRegistrySnapshot) -> Result<ExecutionPlan> {
-        self.datafusion_config.validate()?;
+        let requires_datafusion = self
+            .nodes
+            .values()
+            .any(|node| node.operator.requires_datafusion());
+        if requires_datafusion {
+            self.datafusion_config.validate()?;
+        }
         validate_nodes(&self.nodes)?;
         validate_edges(&self.nodes, &self.edges)?;
         let order = topological_order(&self.nodes, &self.edges)?;
@@ -1331,19 +1359,23 @@ impl PipelineBuilder {
         let (external_inputs, external_outputs) = external_ports(&self.nodes, &self.edges)?;
         let fingerprint = graph_fingerprint(
             &self.name,
-            self.datafusion_config,
+            requires_datafusion.then_some(self.datafusion_config),
             &self.nodes,
             &self.edges,
             &selected_catalog,
         )?;
+        let table = requires_datafusion.then(|| TablePlanResources {
+            config: self.datafusion_config,
+            udfs: udfs.clone(),
+            selected_udfs,
+        });
         Ok(build_plan(
             self,
             order,
             external_inputs,
             external_outputs,
             fingerprint,
-            udfs.clone(),
-            selected_udfs,
+            table,
         ))
     }
 }
@@ -1628,7 +1660,7 @@ fn catalog_matches(entry: &UdfCatalogEntry, reference: &UdfReference) -> bool {
 
 fn graph_fingerprint(
     name: &str,
-    datafusion_config: DataFusionConfig,
+    datafusion_config: Option<DataFusionConfig>,
     nodes: &BTreeMap<String, NodeDefinition>,
     edges: &[Edge],
     selected_catalog: &[(UdfReference, UdfCatalogEntry)],
@@ -1658,13 +1690,18 @@ fn graph_fingerprint(
         .iter()
         .map(|(reference, entry)| json!({"reference": reference, "catalog": entry}))
         .collect::<Vec<_>>();
-    let value = json!({
-        "datafusion": datafusion_config,
+    let mut value = json!({
         "edges": sorted_edges,
         "name": name,
         "nodes": node_values,
         "selected_udfs": catalog_values,
     });
+    if let Some(datafusion_config) = datafusion_config {
+        value
+            .as_object_mut()
+            .expect("fingerprint root is an object")
+            .insert("datafusion".into(), json!(datafusion_config));
+    }
     let canonical = canonical_json(&value)?;
     Ok(hex::encode(Sha256::digest(canonical.as_bytes())))
 }
@@ -1728,8 +1765,7 @@ fn build_plan(
     external_inputs: BTreeMap<String, PortEndpoint>,
     external_outputs: BTreeMap<String, PortEndpoint>,
     fingerprint: String,
-    udfs: UdfRegistrySnapshot,
-    selected_udfs: Vec<UdfReference>,
+    table: Option<TablePlanResources>,
 ) -> ExecutionPlan {
     let inbound = builder
         .edges
@@ -1770,7 +1806,7 @@ fn build_plan(
         .collect();
     ExecutionPlan {
         name: builder.name,
-        datafusion_config: builder.datafusion_config,
+        table,
         nodes,
         external_inputs,
         external_outputs,
@@ -1778,7 +1814,5 @@ fn build_plan(
         run_lock: tokio::sync::Mutex::new(()),
         lease_state: StdMutex::new(LeaseState::default()),
         operation_state: StdMutex::new(OperationState::default()),
-        udfs,
-        selected_udfs,
     }
 }

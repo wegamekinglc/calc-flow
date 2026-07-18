@@ -67,6 +67,23 @@ be mutated through aliases. Compilation validates ports and topology and binds
 an immutable `UdfRegistrySnapshot`. `ExecutionPlan::execute` is asynchronous and
 accepts only `Batch` values.
 
+### Engine boundary migration
+
+The table/external engine boundary intentionally changes the Rust source API
+and must ship in a breaking-release window. `ExpressionOperator` and
+`SqlOperator` are classified built-ins rather than implementations of the
+external `Operator` trait. Existing boxed calls to `PipelineBuilder::add_node`
+remain valid through `OperatorDefinition` conversions, but downstream code
+must not cast built-ins to `dyn Operator` or call their processing seam
+directly.
+
+Custom and provider operators continue to implement `Operator`, whose
+`OperatorContext` now contains only `run`; code that constructed or
+destructured the previous DataFusion-bearing context must remove that field.
+`ExecutionPlan::datafusion_config()` now returns `Option<DataFusionConfig>`:
+`None` means the plan is external-only and owns no table resources. Use
+`requires_datafusion()` when only the classification is needed.
+
 ## SQL operators
 
 `SqlOperator::new` declares the input aliases that become operator ports. It

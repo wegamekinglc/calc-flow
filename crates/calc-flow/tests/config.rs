@@ -415,7 +415,7 @@ fn datafusion_config_is_preserved_and_changes_the_fingerprint() {
     let changed_plan = compile_project(&changed, &providers, &udfs).unwrap();
     assert_eq!(
         changed_plan.datafusion_config(),
-        changed.pipeline.datafusion
+        Some(changed.pipeline.datafusion)
     );
     assert_ne!(original_plan.fingerprint(), changed_plan.fingerprint());
 
@@ -590,6 +590,47 @@ impl ExternalOperatorFactory for CountingFactory {
         self.creations.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(PassthroughOperator { inputs, outputs }))
     }
+}
+
+#[test]
+fn external_only_projects_ignore_unused_datafusion_configuration() {
+    let (providers, udfs) = empty_registries();
+    providers
+        .register(
+            "acme",
+            "passthrough",
+            "1",
+            Arc::new(CountingFactory {
+                creations: Arc::new(AtomicUsize::new(0)),
+            }),
+        )
+        .unwrap();
+    let original = project(NodeSpec {
+        id: "external".into(),
+        operator: OperatorSpec::External {
+            provider: "acme".into(),
+            name: "passthrough".into(),
+            version: "1".into(),
+            options: BTreeMap::new(),
+        },
+        input_ports: vec![port("input", BatchKind::Table, false, Vec::new())],
+        output_ports: vec![port("output", BatchKind::Table, true, Vec::new())],
+        position: None,
+    });
+    let original_plan = compile_project(&original, &providers, &udfs).unwrap();
+
+    let mut changed = original.clone();
+    changed.pipeline.datafusion = DataFusionConfig {
+        batch_size: 0,
+        target_partitions: 0,
+    };
+    let report = validate_project(&changed, &providers, &udfs);
+    assert!(report.valid, "{:?}", report.issues);
+    let changed_plan = compile_project(&changed, &providers, &udfs).unwrap();
+
+    assert!(!changed_plan.requires_datafusion());
+    assert_eq!(changed_plan.datafusion_config(), None);
+    assert_eq!(changed_plan.fingerprint(), original_plan.fingerprint());
 }
 
 #[test]

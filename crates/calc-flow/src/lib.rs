@@ -32,7 +32,7 @@ pub use io::{BatchingSource, Sink, Source, SourceItem};
 pub use json::{JsonMap, MAX_JSON_DEPTH, canonical_json};
 pub use operator::{
     ExpressionOperator, ExternalOperatorFactory, ExternalOperatorSpec, Operator, OperatorContext,
-    Port, ProviderRegistry, SqlOperator,
+    OperatorDefinition, Port, ProviderRegistry, SqlOperator,
 };
 pub use pipeline::{
     Edge, ExecutionOptions, ExecutionPlan, NodeTiming, PipelineBuilder, PortEndpoint, RunMetadata,

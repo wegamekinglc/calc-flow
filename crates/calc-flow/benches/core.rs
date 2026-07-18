@@ -174,6 +174,7 @@ fn external_passthrough_input() -> Batch {
 fn execute_external_passthrough(c: &mut Criterion) {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let plan = external_passthrough_plan();
+    assert!(!plan.requires_datafusion());
     let input = external_passthrough_input();
     c.bench_function("execute/external_passthrough_1000_rows", |b| {
         b.to_async(&runtime).iter(|| {
@@ -186,6 +187,9 @@ fn execute_external_passthrough(c: &mut Criterion) {
                 )
             }
         });
+    });
+    c.bench_function("execute/external_plan_table_requirement", |b| {
+        b.iter(|| black_box(plan.requires_datafusion()));
     });
 }
 

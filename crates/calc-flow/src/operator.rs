@@ -109,7 +109,6 @@ fn is_identifier(value: &str) -> bool {
 
 pub struct OperatorContext<'a> {
     pub run: &'a RunContext,
-    pub datafusion: &'a DataFusionRuntime,
 }
 
 #[async_trait]
@@ -257,21 +256,8 @@ impl ExpressionOperator {
     }
 }
 
-#[async_trait]
-impl Operator for ExpressionOperator {
-    fn name(&self) -> &str {
-        self.name()
-    }
-
-    fn input_ports(&self) -> &[Port] {
-        self.input_ports()
-    }
-
-    fn output_ports(&self) -> &[Port] {
-        self.output_ports()
-    }
-
-    fn configuration(&self) -> JsonMap {
+impl ExpressionOperator {
+    pub fn configuration(&self) -> JsonMap {
         BTreeMap::from([
             (
                 "expression".into(),
@@ -296,24 +282,23 @@ impl Operator for ExpressionOperator {
         ])
     }
 
-    fn udf_references(&self) -> Vec<UdfReference> {
+    pub fn udf_references(&self) -> Vec<UdfReference> {
         self.udfs.clone()
     }
 
-    async fn process(
+    #[doc(hidden)]
+    pub(crate) async fn process_table(
         &mut self,
         inputs: &BTreeMap<String, Batch>,
-        context: &OperatorContext<'_>,
+        run: &RunContext,
+        datafusion: &DataFusionRuntime,
     ) -> Result<BTreeMap<String, Batch>> {
-        context.run.check_cancelled()?;
-        let input = required_input(inputs, "input", self.name(), context.run.node_id())?;
+        run.check_cancelled()?;
+        let input = required_input(inputs, "input", self.name(), run.node_id())?;
         self.input_ports[0].validate(input, &format!("{}.input", self.name))?;
         let tables = BTreeMap::from([("input".into(), input.clone())]);
-        let output = context
-            .datafusion
-            .sql(&self.query, &tables, context.run.node_id())
-            .await?;
-        context.run.check_cancelled()?;
+        let output = datafusion.sql(&self.query, &tables, run.node_id()).await?;
+        run.check_cancelled()?;
         Ok(BTreeMap::from([("output".into(), output)]))
     }
 }
@@ -407,21 +392,8 @@ impl SqlOperator {
     }
 }
 
-#[async_trait]
-impl Operator for SqlOperator {
-    fn name(&self) -> &str {
-        self.name()
-    }
-
-    fn input_ports(&self) -> &[Port] {
-        self.input_ports()
-    }
-
-    fn output_ports(&self) -> &[Port] {
-        self.output_ports()
-    }
-
-    fn configuration(&self) -> JsonMap {
+impl SqlOperator {
+    pub fn configuration(&self) -> JsonMap {
         BTreeMap::from([
             ("query".into(), Value::String(self.query.clone())),
             (
@@ -435,33 +407,159 @@ impl Operator for SqlOperator {
         ])
     }
 
-    fn udf_references(&self) -> Vec<UdfReference> {
+    pub fn udf_references(&self) -> Vec<UdfReference> {
         self.udfs.clone()
     }
 
-    async fn process(
+    #[doc(hidden)]
+    pub(crate) async fn process_table(
         &mut self,
         inputs: &BTreeMap<String, Batch>,
-        context: &OperatorContext<'_>,
+        run: &RunContext,
+        datafusion: &DataFusionRuntime,
     ) -> Result<BTreeMap<String, Batch>> {
-        context.run.check_cancelled()?;
+        run.check_cancelled()?;
         let tables = self
             .aliases
             .iter()
             .zip(&self.input_ports)
             .map(|(alias, port)| {
-                let batch = required_input(inputs, alias, self.name(), context.run.node_id())?;
+                let batch = required_input(inputs, alias, self.name(), run.node_id())?;
                 port.validate(batch, &format!("{}.{alias}", self.name))?;
                 Ok((alias.clone(), batch.clone()))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
-        let output = context
-            .datafusion
-            .sql(&self.query, &tables, context.run.node_id())
-            .await?;
-        context.run.check_cancelled()?;
+        let output = datafusion.sql(&self.query, &tables, run.node_id()).await?;
+        run.check_cancelled()?;
         Ok(BTreeMap::from([("output".into(), output)]))
     }
+}
+
+/// Compile-time operator classification used to keep table and external engines separate.
+pub enum OperatorDefinition {
+    /// An operator implemented by an explicitly registered external provider.
+    External(Box<dyn Operator>),
+    /// A built-in `DataFusion` expression operator.
+    Expression(ExpressionOperator),
+    /// A built-in `DataFusion` SQL operator.
+    Sql(SqlOperator),
+}
+
+impl<T> From<Box<T>> for OperatorDefinition
+where
+    T: Operator + 'static,
+{
+    fn from(value: Box<T>) -> Self {
+        Self::External(value)
+    }
+}
+
+impl From<Box<dyn Operator>> for OperatorDefinition {
+    fn from(value: Box<dyn Operator>) -> Self {
+        Self::External(value)
+    }
+}
+
+impl From<Box<ExpressionOperator>> for OperatorDefinition {
+    fn from(value: Box<ExpressionOperator>) -> Self {
+        Self::Expression(*value)
+    }
+}
+
+impl From<Box<SqlOperator>> for OperatorDefinition {
+    fn from(value: Box<SqlOperator>) -> Self {
+        Self::Sql(*value)
+    }
+}
+
+impl OperatorDefinition {
+    pub(crate) fn input_ports(&self) -> &[Port] {
+        match self {
+            Self::External(operator) => operator.input_ports(),
+            Self::Expression(operator) => operator.input_ports(),
+            Self::Sql(operator) => operator.input_ports(),
+        }
+    }
+
+    pub(crate) fn output_ports(&self) -> &[Port] {
+        match self {
+            Self::External(operator) => operator.output_ports(),
+            Self::Expression(operator) => operator.output_ports(),
+            Self::Sql(operator) => operator.output_ports(),
+        }
+    }
+
+    pub(crate) fn configuration(&self) -> JsonMap {
+        match self {
+            Self::External(operator) => operator.configuration(),
+            Self::Expression(operator) => operator.configuration(),
+            Self::Sql(operator) => operator.configuration(),
+        }
+    }
+
+    pub(crate) fn udf_references(&self) -> Vec<UdfReference> {
+        match self {
+            Self::External(operator) => operator.udf_references(),
+            Self::Expression(operator) => operator.udf_references(),
+            Self::Sql(operator) => operator.udf_references(),
+        }
+    }
+
+    pub(crate) const fn requires_datafusion(&self) -> bool {
+        matches!(self, Self::Expression(_) | Self::Sql(_))
+    }
+
+    pub(crate) fn snapshot(&self) -> Result<Value> {
+        match self {
+            Self::External(operator) => operator.snapshot(),
+            Self::Expression(_) | Self::Sql(_) => Ok(Value::Null),
+        }
+    }
+
+    pub(crate) fn restore(&mut self, state: &Value) -> Result<()> {
+        match self {
+            Self::External(operator) => operator.restore(state),
+            Self::Expression(_) | Self::Sql(_) if state.is_null() => Ok(()),
+            Self::Expression(_) | Self::Sql(_) => Err(CalcFlowError::Format {
+                message: "stateless operator state must be null".into(),
+            }),
+        }
+    }
+
+    pub(crate) fn reset(&mut self) -> Result<()> {
+        match self {
+            Self::External(operator) => operator.reset(),
+            Self::Expression(_) | Self::Sql(_) => Ok(()),
+        }
+    }
+
+    pub(crate) async fn process(
+        &mut self,
+        inputs: &BTreeMap<String, Batch>,
+        run: &RunContext,
+        datafusion: Option<&DataFusionRuntime>,
+    ) -> Result<BTreeMap<String, Batch>> {
+        match self {
+            Self::External(operator) => operator.process(inputs, &OperatorContext { run }).await,
+            Self::Expression(operator) => {
+                let datafusion = required_datafusion(datafusion, operator.name())?;
+                operator.process_table(inputs, run, datafusion).await
+            }
+            Self::Sql(operator) => {
+                let datafusion = required_datafusion(datafusion, operator.name())?;
+                operator.process_table(inputs, run, datafusion).await
+            }
+        }
+    }
+}
+
+fn required_datafusion<'a>(
+    datafusion: Option<&'a DataFusionRuntime>,
+    operator: &str,
+) -> Result<&'a DataFusionRuntime> {
+    datafusion.ok_or_else(|| CalcFlowError::Internal {
+        message: format!("table operator {operator:?} has no run-scoped DataFusion runtime"),
+    })
 }
 
 fn validate_operator_name(name: &str) -> Result<()> {
