@@ -47,6 +47,15 @@ The host power mode was therefore not observable or fixed from the WSL2 guest.
 
 ## Commands
 
+The saved Criterion baseline was captured at baseline revision
+`b333121b282861ea03e006db7a2a232f6a6566c2` using:
+
+```bash
+CARGO_TARGET_DIR="$PWD/target/cargo" CARGO_BUILD_JOBS=1 \
+  cargo bench -p calc-flow --bench core -- \
+  --save-baseline lazy-datafusion-before
+```
+
 The saved Criterion baseline was compared with the candidate using:
 
 ```bash

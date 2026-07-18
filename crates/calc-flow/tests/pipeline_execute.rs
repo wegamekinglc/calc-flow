@@ -225,6 +225,36 @@ async fn run_result_contains_named_outputs_timings_metrics_and_metadata() {
 }
 
 #[tokio::test]
+async fn external_only_plan_returns_exact_output_once_without_datafusion_metrics() {
+    let probe = Arc::new(Probe::default());
+    let plan = one_node(Action::Pass, Arc::clone(&probe));
+
+    let result = plan
+        .execute(inputs(), ExecutionOptions::default())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result
+            .outputs
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["output"]
+    );
+    let output = result.outputs["output"].table_payload().unwrap();
+    assert_eq!(output.batches().len(), 1);
+    let values = output.batches()[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .unwrap();
+    assert_eq!(values.values(), &[1, 2, 3]);
+    assert_eq!(probe.calls(), 1);
+    assert!(result.datafusion_metrics.is_empty());
+}
+
+#[tokio::test]
 async fn external_inputs_reject_unknown_missing_kind_and_schema_without_calling_nodes() {
     let probe = Arc::new(Probe::default());
     let plan = one_node(Action::Pass, Arc::clone(&probe));
