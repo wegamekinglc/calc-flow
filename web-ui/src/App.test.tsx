@@ -165,6 +165,19 @@ describe('Calc Flow Studio', () => {
   });
 
   it('submits parsed records with the v2 preview contract', async () => {
+    class FakeEventSource {
+      static readonly instances: FakeEventSource[] = [];
+
+      readonly close = vi.fn();
+
+      constructor(readonly url: string) {
+        FakeEventSource.instances.push(this);
+      }
+
+      addEventListener() {}
+      removeEventListener() {}
+    }
+
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path.endsWith('/catalog')) return response(catalog);
@@ -186,12 +199,8 @@ describe('Calc Flow Studio', () => {
       throw new Error(`Unexpected request ${path}`);
     });
     vi.stubGlobal('fetch', fetchMock);
-    vi.stubGlobal('EventSource', class {
-      addEventListener() {}
-      removeEventListener() {}
-      close() {}
-    });
-    render(<App />);
+    vi.stubGlobal('EventSource', FakeEventSource);
+    const { unmount } = render(<App />);
     await screen.findByText('Build the flow');
 
     fireEvent.click(screen.getByRole('button', { name: /Run preview/ }));
@@ -218,5 +227,16 @@ describe('Calc Flow Studio', () => {
         },
       },
     });
+
+    await waitFor(() =>
+      expect(FakeEventSource.instances.map(({ url }) => url)).toEqual([
+        '/api/v2/runs/run_1/events',
+      ]),
+    );
+    const [source] = FakeEventSource.instances;
+
+    unmount();
+
+    expect(source.close).toHaveBeenCalledOnce();
   });
 });
