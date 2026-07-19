@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import tomllib
 import unittest
@@ -95,6 +96,37 @@ class ReleaseConfigTests(unittest.TestCase):
             rust_core.index(install_pyarrow),
             rust_core.index("cargo test --workspace --all-targets --all-features"),
         )
+
+    def test_benchmark_smoke_runs_every_supported_scale(self) -> None:
+        support_tree = ast.parse((ROOT / "benchmarks/support.py").read_text())
+        scales_assignment = next(
+            node
+            for node in support_tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "SCALES"
+                for target in node.targets
+            )
+        )
+        self.assertIsInstance(scales_assignment.value, ast.Dict)
+        scales = [ast.literal_eval(key) for key in scales_assignment.value.keys]
+
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        benchmark_job = workflow.split("  benchmark-smoke:\n", 1)[1].split(
+            "  rust-core:\n", 1
+        )[0]
+
+        self.assertEqual(scales, ["overhead", "small", "standard", "nightly"])
+        self.assertIn("fail-fast: false", benchmark_job)
+        self.assertIn(f"scale: [{', '.join(scales)}]", benchmark_job)
+        self.assertIn("CALC_FLOW_BENCHMARK_SCALE: ${{ matrix.scale }}", benchmark_job)
+        self.assertIn("JAX_PLATFORMS: cpu", benchmark_job)
+        self.assertIn(
+            '--benchmark-json="benchmark-results/${CALC_FLOW_BENCHMARK_SCALE}.json"',
+            benchmark_job,
+        )
+        self.assertIn("name: benchmark-smoke-${{ matrix.scale }}", benchmark_job)
+        self.assertIn("path: benchmark-results/${{ matrix.scale }}.json", benchmark_job)
 
     def test_python_package_excludes_unsupported_pyarrow_25(self) -> None:
         for project in (ROOT, ROOT / "web-ui/backend"):
