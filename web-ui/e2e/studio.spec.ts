@@ -1,5 +1,122 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
+
+const projectsUrl = 'http://127.0.0.1:8765/api/v2/projects';
+const twoSourceProjectUrl = `${projectsUrl}/two_source_e2e`;
+
+// The constrained headless renderer otherwise stalls Playwright's stability check.
+test.use({
+  launchOptions: {
+    args: ['--disable-gpu', '--disable-software-rasterizer'],
+  },
+});
+
+const twoSourceProject = {
+  format_version: 2,
+  id: 'two_source_e2e',
+  name: 'Two source E2E',
+  description: 'Two independent saved sources join downstream.',
+  pipeline: {
+    name: 'Two source pipeline',
+    nodes: [
+      {
+        id: 'left_branch',
+        operator: {
+          kind: 'sql',
+          query: 'SELECT id, value * 2 AS left_value FROM left_source',
+          aliases: ['left_source'],
+          udfs: [],
+        },
+        input_ports: [],
+        output_ports: [],
+        position: { x: 80, y: 80 },
+      },
+      {
+        id: 'right_branch',
+        operator: {
+          kind: 'sql',
+          query: 'SELECT id, adjustment AS right_value FROM right_source',
+          aliases: ['right_source'],
+          udfs: [],
+        },
+        input_ports: [],
+        output_ports: [],
+        position: { x: 80, y: 280 },
+      },
+      {
+        id: 'join_result',
+        operator: {
+          kind: 'sql',
+          query: 'SELECT l.id, l.left_value, r.right_value, l.left_value + r.right_value AS total FROM left l JOIN right r ON l.id = r.id ORDER BY l.id',
+          aliases: ['left', 'right'],
+          udfs: [],
+        },
+        input_ports: [],
+        output_ports: [],
+        position: { x: 480, y: 180 },
+      },
+    ],
+    edges: [
+      {
+        source_node: 'left_branch',
+        source_port: 'output',
+        target_node: 'join_result',
+        target_port: 'left',
+      },
+      {
+        source_node: 'right_branch',
+        source_port: 'output',
+        target_node: 'join_result',
+        target_port: 'right',
+      },
+    ],
+    datafusion: { batch_size: 8192, target_partitions: 1 },
+  },
+  data_sources: [
+    {
+      id: 'left',
+      input: 'left_source',
+      format: 'inline_json',
+      data: [{ id: 1, value: 3 }, { id: 2, value: 5 }],
+    },
+    {
+      id: 'right',
+      input: 'right_source',
+      format: 'inline_json',
+      data: [{ id: 1, adjustment: 10 }, { id: 2, adjustment: 20 }],
+    },
+  ],
+  run_options: {
+    max_input_bytes: 10485760,
+    max_rows: 100000,
+    timeout_seconds: 30,
+    memory_limit_mb: 512,
+    output_rows: 1000,
+  },
+};
+
+async function deleteTwoSourceProject(request: APIRequestContext): Promise<number> {
+  const response = await request.delete(twoSourceProjectUrl);
+  expect([204, 404]).toContain(response.status());
+  return response.status();
+}
+
+async function panelWidth(page: Page, selector: string): Promise<number> {
+  return page.locator(selector).evaluate((element) => element.getBoundingClientRect().width);
+}
+
+async function dragSeparator(page: Page, label: string, deltaX: number): Promise<void> {
+  const separator = page.getByRole('separator', { name: label });
+  await separator.scrollIntoViewIfNeeded();
+  const box = await separator.boundingBox();
+  expect(box).not.toBeNull();
+  const centerX = box!.x + box!.width / 2;
+  const centerY = box!.y + box!.height / 2;
+  await page.mouse.move(centerX, centerY);
+  await page.mouse.down();
+  await page.mouse.move(centerX + deltaX, centerY, { steps: 5 });
+  await page.mouse.up();
+}
 
 test('builds and runs a persisted DataFusion UDF graph without browser code', async ({ page }) => {
   await page.goto('/');
@@ -66,4 +183,129 @@ test('builds and runs a persisted DataFusion UDF graph without browser code', as
   await expect(page.getByText('Project deleted')).toBeVisible();
   const remaining = await page.request.get('http://127.0.0.1:8765/api/v2/projects');
   expect(await remaining.json()).toEqual([]);
+});
+
+test.describe('persisted two-source SQL join', () => {
+  test.beforeEach(async ({ request }) => {
+    await deleteTwoSourceProject(request);
+  });
+
+  test.afterEach(async ({ request }) => {
+    await deleteTwoSourceProject(request);
+  });
+
+  test('edits and runs through two saved sources', async ({ page, request }) => {
+    const created = await request.post(projectsUrl, { data: twoSourceProject });
+    expect(created.status()).toBe(201);
+
+    await page.goto('/');
+
+    const project = page.getByLabel('Project', { exact: true });
+    await expect(project).toBeVisible();
+    await expect(project).toBeEnabled();
+    await project.selectOption('two_source_e2e');
+    await expect(project).toHaveValue('two_source_e2e');
+    await expect(page.getByLabel('Project name')).toHaveValue('Two source E2E');
+
+    const sources = page.getByRole('region', { name: 'Data sources' });
+    await expect(sources.getByRole('article')).toHaveCount(2);
+    await expect(page.getByLabel('Graph input 1')).toHaveValue('left_source');
+    await expect(page.getByLabel('Graph input 2')).toHaveValue('right_source');
+
+    const toolboxBefore = await panelWidth(page, '.toolbox');
+    await dragSeparator(page, 'Resize Toolbox', 40);
+    const toolboxWidth = await panelWidth(page, '.toolbox');
+    expect(toolboxWidth).toBeGreaterThan(toolboxBefore + 30);
+
+    const inspectorBefore = await panelWidth(page, '.inspector');
+    await dragSeparator(page, 'Resize Inspector', -32);
+    const inspectorWidth = await panelWidth(page, '.inspector');
+    expect(inspectorWidth).toBeGreaterThan(inspectorBefore + 22);
+
+    const addSql = page.getByRole('button', { name: /DataFusion SQL/i });
+    await addSql.scrollIntoViewIfNeeded();
+    await addSql.click();
+    const firstAlias = page.getByRole('textbox', { name: 'Input alias 1', exact: true });
+    await expect(firstAlias).toHaveValue('input');
+    await page.getByRole('button', { name: 'Add input alias' }).click();
+    const secondAlias = page.getByRole('textbox', { name: 'Input alias 2', exact: true });
+    await expect(secondAlias).toHaveValue('input_2');
+    await secondAlias.fill('right');
+    await secondAlias.press('Enter');
+    await expect(secondAlias).toHaveValue('right');
+    await page.getByRole('button', { name: 'Delete node' }).click();
+
+    await page.locator('.react-flow__node').filter({ hasText: 'join_result' }).click();
+    await expect(page.getByRole('textbox', { name: 'Input alias 1', exact: true }))
+      .toHaveValue('left');
+    await expect(page.getByRole('textbox', { name: 'Input alias 2', exact: true }))
+      .toHaveValue('right');
+
+    const addSource = sources.getByRole('button', { name: 'Add data source' });
+    await expect(addSource).toBeVisible();
+    await expect(addSource).toBeEnabled();
+    await addSource.scrollIntoViewIfNeeded();
+    await addSource.click();
+    await expect(sources.getByRole('article')).toHaveCount(3);
+    const removeSource = sources.getByRole('button', { name: 'Remove source 3' });
+    await expect(removeSource).toBeVisible();
+    await expect(removeSource).toBeEnabled();
+    await removeSource.scrollIntoViewIfNeeded();
+    await removeSource.click();
+    await expect(sources.getByRole('article')).toHaveCount(2);
+
+    await page.getByLabel('Data 1').fill('[{"id":1,"value":4},{"id":2,"value":5}]');
+    const save = page.getByRole('button', { name: 'Save' });
+    await expect(save).toBeVisible();
+    await expect(save).toBeEnabled();
+    await save.click();
+    await expect(page.getByRole('status')).toHaveText('Project saved');
+
+    const validate = page.getByRole('button', { name: 'Validate' });
+    await expect(validate).toBeVisible();
+    await expect(validate).toBeEnabled();
+    await validate.click();
+    await expect(page.getByText('Graph is valid')).toBeVisible();
+
+    const run = page.getByRole('button', { name: /Run preview/ });
+    await expect(run).toBeVisible();
+    await expect(run).toBeEnabled();
+    await run.click();
+    await expect(page.getByText('completed', { exact: true })).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByRole('columnheader', { name: /total/ })).toBeVisible();
+    await expect(page.getByRole('cell', { name: '18', exact: true })).toBeVisible();
+
+    const metricsBefore = await panelWidth(page, '.metrics-stack');
+    await dragSeparator(page, 'Resize Metrics', -40);
+    const metricsWidth = await panelWidth(page, '.metrics-stack');
+    expect(metricsWidth).toBeGreaterThan(metricsBefore + 30);
+
+    const saved = await request.get(twoSourceProjectUrl);
+    expect(saved.ok()).toBeTruthy();
+    const document = await saved.json();
+    expect(document.data_sources.map((source: { input: string }) => source.input)).toEqual([
+      'left_source',
+      'right_source',
+    ]);
+
+    await page.reload();
+    await expect(page.getByLabel('Project', { exact: true })).toHaveValue('two_source_e2e');
+    await expect.poll(() => panelWidth(page, '.toolbox')).toBeCloseTo(toolboxWidth, 0);
+    await expect.poll(() => panelWidth(page, '.inspector')).toBeCloseTo(inspectorWidth, 0);
+    const storedLayout = await page.evaluate(() => JSON.parse(
+      localStorage.getItem('calc-flow-studio:panel-layout:v1') ?? '{}',
+    ));
+    expect(storedLayout).toMatchObject({
+      version: 1,
+      toolbox: toolboxWidth,
+      inspector: inspectorWidth,
+      metrics: metricsWidth,
+    });
+
+    await page.getByRole('button', { name: /Run preview/ }).click();
+    await expect(page.getByText('completed', { exact: true })).toBeVisible({ timeout: 20_000 });
+    await expect.poll(() => panelWidth(page, '.metrics-stack')).toBeCloseTo(metricsWidth, 0);
+
+    expect(await deleteTwoSourceProject(request)).toBe(204);
+  });
 });

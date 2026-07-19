@@ -7,6 +7,7 @@ export type ProjectCreateRequest = Omit<GeneratedProjectCreateRequest, '$defs'>;
 export type ProjectDocument = Omit<GeneratedProjectDocument, '$defs'>;
 export type ProjectConfig = ProjectDocument;
 export type EditableProject = ProjectDocument;
+export type DataSourceSpec = GeneratedProjectDocument['$defs']['DataSourceSpec'];
 export type ProjectSummary = components['schemas']['ProjectSummary'];
 export type NodeConfig = GeneratedProjectDocument['$defs']['NodeSpec'];
 export type OperatorSpec = GeneratedProjectDocument['$defs']['OperatorSpec'];
