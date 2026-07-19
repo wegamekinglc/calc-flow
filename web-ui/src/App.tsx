@@ -22,16 +22,23 @@ import {
 } from './components/CalculationNode';
 import { BenchmarkComparison } from './components/BenchmarkComparison';
 import { CheckpointControl } from './components/CheckpointControl';
+import { DataSourceEditor } from './components/DataSourceEditor';
 import { NodeInspector } from './components/NodeInspector';
 import { ProjectActions } from './components/ProjectActions';
 import { ResultsPanel } from './components/ResultsPanel';
+import {
+  createDataSourceDrafts,
+  materializeDataSources,
+  nextDataSource,
+  type DataSourceDraft,
+  type DataSourceFormat,
+} from './components/dataSourceEditor';
 import { useRunEvents } from './hooks/useRunEvents';
 import {
   blankProject,
   type CatalogResponse,
   type CheckpointSummary,
   type EditableProject,
-  type JSONValue,
   type NodeConfig,
   type ProjectDocument,
   type ProjectSummary,
@@ -175,14 +182,14 @@ export default function App() {
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [project, setProject] = useState<EditableProject>(() => blankProject());
+  const [sourceDrafts, setSourceDrafts] = useState<DataSourceDraft[]>(() =>
+    createDataSourceDrafts(project.data_sources),
+  );
   const [persisted, setPersisted] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string>('calculate');
   const [validation, setValidation] = useState<ValidationReport | null>(null);
   const [run, setRun] = useState<RunResponse | null>(null);
   const [checkpoint, setCheckpoint] = useState<CheckpointSummary | null>(null);
-  const [sampleFormat, setSampleFormat] = useState<'records' | 'columns' | 'arrow_ipc'>('records');
-  const [sampleInputName, setSampleInputName] = useState('input');
-  const [sampleData, setSampleData] = useState('[{"a": 1, "b": 2}, {"a": 3, "b": 4}]');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -191,6 +198,19 @@ export default function App() {
     setProjects(items);
     return items;
   }, []);
+
+  const replaceEditableProject = useCallback(
+    (next: EditableProject, isPersisted: boolean) => {
+      setProject(next);
+      setSourceDrafts(createDataSourceDrafts(next.data_sources));
+      setPersisted(isPersisted);
+      setSelectedNodeId(next.pipeline.nodes[0]?.id ?? '');
+      setValidation(null);
+      setRun(null);
+      setCheckpoint(null);
+    },
+    [],
+  );
 
   useEffect(() => {
     const controller = new AbortController();
@@ -206,9 +226,7 @@ export default function App() {
         if (loadedProjects.length) {
           const loaded = await api.project(loadedProjects[0].id);
           if (controller.signal.aborted) return;
-          setProject(loaded);
-          setPersisted(true);
-          setSelectedNodeId(loaded.pipeline.nodes[0]?.id ?? '');
+          replaceEditableProject(loaded, true);
         }
       } catch (error) {
         if (!controller.signal.aborted) setMessage((error as Error).message);
@@ -216,7 +234,7 @@ export default function App() {
     };
     void initialize();
     return () => controller.abort();
-  }, []);
+  }, [replaceEditableProject]);
 
   const updateProject = useCallback((update: ProjectUpdate) => {
     setProject((current) =>
@@ -306,20 +324,39 @@ export default function App() {
 
   const selectedNode = project.pipeline.nodes.find((node) => node.id === selectedNodeId) ?? null;
 
-  const persistProject = async (): Promise<ProjectDocument> => {
+  const persistProject = async (
+    nextProject: EditableProject,
+  ): Promise<ProjectDocument> => {
     const saved = persisted
-      ? await api.saveProject(project)
-      : await api.createProject(project);
+      ? await api.saveProject(nextProject)
+      : await api.createProject(nextProject);
     setProject(saved);
     setPersisted(true);
     await refreshProjects();
     return saved;
   };
 
+  const prepareProject = (): EditableProject | null => {
+    const materialized = materializeDataSources(
+      project.data_sources,
+      sourceDrafts,
+    );
+    setSourceDrafts(materialized.drafts);
+    if (!materialized.ok) {
+      setMessage(materialized.message);
+      return null;
+    }
+    const prepared = { ...project, data_sources: materialized.sources };
+    setProject(prepared);
+    return prepared;
+  };
+
   const save = async () => {
     setBusy(true);
     try {
-      await persistProject();
+      const prepared = prepareProject();
+      if (!prepared) return;
+      await persistProject(prepared);
       setMessage('Project saved');
     } catch (error) {
       setMessage((error as Error).message);
@@ -331,7 +368,9 @@ export default function App() {
   const validate = async () => {
     setBusy(true);
     try {
-      const saved = await persistProject();
+      const prepared = prepareProject();
+      if (!prepared) return;
+      const saved = await persistProject(prepared);
       const report = await api.validateProject(saved.id);
       setValidation(report);
       setMessage(report.valid ? 'Graph compiled successfully' : 'Validation failed');
@@ -346,15 +385,10 @@ export default function App() {
     setBusy(true);
     setMessage('');
     try {
-      const saved = await persistProject();
-      const data: JSONValue = sampleFormat === 'arrow_ipc'
-        ? sampleData
-        : JSON.parse(sampleData) as JSONValue;
-      const submitted = await api.runProject(saved.id, {
-        inputs: {
-          [sampleInputName]: { format: sampleFormat, data, source_id: 'browser-preview' },
-        },
-      });
+      const prepared = prepareProject();
+      if (!prepared) return;
+      const saved = await persistProject(prepared);
+      const submitted = await api.runProject(saved.id, {});
       setRun(submitted);
     } catch (error) {
       setMessage((error as Error).message);
@@ -366,7 +400,9 @@ export default function App() {
   const inspectCheckpoint = async () => {
     setBusy(true);
     try {
-      const saved = await persistProject();
+      const prepared = prepareProject();
+      if (!prepared) return;
+      const saved = await persistProject(prepared);
       setCheckpoint(await api.checkpoint(saved.id));
     } catch (error) {
       setMessage((error as Error).message);
@@ -388,12 +424,63 @@ export default function App() {
     }
   };
 
-  const loadSampleFile = async (file: File) => {
+  const addDataSource = () => {
+    const source = nextDataSource(project.data_sources);
+    updateProject((current) => ({
+      ...current,
+      data_sources: [...current.data_sources, source],
+    }));
+    setSourceDrafts((current) => [
+      ...current,
+      ...createDataSourceDrafts([source]),
+    ]);
+  };
+
+  const removeDataSource = (index: number) => {
+    updateProject((current) => ({
+      ...current,
+      data_sources: current.data_sources.filter(
+        (_, currentIndex) => currentIndex !== index,
+      ),
+    }));
+    setSourceDrafts((current) =>
+      current.filter((_, currentIndex) => currentIndex !== index),
+    );
+  };
+
+  const updateDataSourceField = (
+    index: number,
+    field: 'id' | 'input' | 'format',
+    value: string,
+  ) => updateProject((current) => ({
+    ...current,
+    data_sources: current.data_sources.map((source, currentIndex) =>
+      currentIndex === index
+        ? {
+            ...source,
+            [field]: field === 'format' ? value as DataSourceFormat : value,
+          }
+        : source,
+    ),
+  }));
+
+  const updateDataSourceData = (index: number, dataText: string) => {
+    setSourceDrafts((current) =>
+      current.map((draft, currentIndex) =>
+        currentIndex === index ? { ...draft, dataText, error: null } : draft,
+      ),
+    );
+    setValidation(null);
+    setRun(null);
+  };
+
+  const loadDataSourceFile = async (index: number, file: File) => {
     try {
-      const data = sampleFormat === 'arrow_ipc'
+      const format = project.data_sources[index]?.format;
+      const dataText = format === 'arrow_ipc'
         ? await fileToBase64(file)
         : await file.text();
-      setSampleData(data);
+      updateDataSourceData(index, dataText);
     } catch (error) {
       setMessage((error as Error).message);
     }
@@ -410,12 +497,7 @@ export default function App() {
 
   const newProject = () => {
     const fresh = blankProject();
-    setProject(fresh);
-    setPersisted(false);
-    setSelectedNodeId(fresh.pipeline.nodes[0].id);
-    setValidation(null);
-    setRun(null);
-    setCheckpoint(null);
+    replaceEditableProject(fresh, false);
     setMessage('');
   };
 
@@ -447,12 +529,7 @@ export default function App() {
         }
         imported = await api.importProject(document, format, true);
       }
-      setProject(imported);
-      setPersisted(true);
-      setSelectedNodeId(imported.pipeline.nodes[0]?.id ?? '');
-      setValidation(null);
-      setRun(null);
-      setCheckpoint(null);
+      replaceEditableProject(imported, true);
       await refreshProjects();
       setMessage('Project imported');
     } catch (error) {
@@ -542,12 +619,7 @@ export default function App() {
       return;
     }
     const loaded = await api.project(id);
-    setProject(loaded);
-    setPersisted(true);
-    setSelectedNodeId(loaded.pipeline.nodes[0]?.id ?? '');
-    setValidation(null);
-    setRun(null);
-    setCheckpoint(null);
+    replaceEditableProject(loaded, true);
   };
 
   return (
@@ -592,17 +664,16 @@ export default function App() {
           <button className="node-tool expression" type="button" onClick={() => addNode('expression')}><span>ƒx</span><div><strong>Expression</strong><small>Project · filter · calculate</small></div></button>
           <button className="node-tool sql" type="button" onClick={() => addNode('sql')}><span>SQL</span><div><strong>DataFusion SQL</strong><small>Join · aggregate · window</small></div></button>
 
-          <div className="sample-editor">
-            <span className="eyebrow">Preview input</span>
-            <label>Graph input<input value={sampleInputName} onChange={(event) => setSampleInputName(event.target.value)} /></label>
-            <label>Format<select value={sampleFormat} onChange={(event) => setSampleFormat(event.target.value as typeof sampleFormat)}><option value="records">JSON records</option><option value="columns">JSON columns</option><option value="arrow_ipc">Arrow IPC</option></select></label>
-            <textarea aria-label="Sample data" rows={8} value={sampleData} onChange={(event) => setSampleData(event.target.value)} />
-            <label className="file-button">Load file<input type="file" accept=".json,.arrow,.ipc" onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (!file) return;
-              void loadSampleFile(file);
-            }} /></label>
-          </div>
+          <DataSourceEditor
+            sources={project.data_sources}
+            drafts={sourceDrafts}
+            busy={busy}
+            onAdd={addDataSource}
+            onRemove={removeDataSource}
+            onFieldChange={updateDataSourceField}
+            onDataChange={updateDataSourceData}
+            onLoadFile={(index, file) => void loadDataSourceFile(index, file)}
+          />
           <CheckpointControl
             checkpoint={checkpoint}
             busy={busy}

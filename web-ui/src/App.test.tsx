@@ -164,7 +164,7 @@ describe('Calc Flow Studio', () => {
     expect(created.pipeline.nodes[0].operator.kind).toBe('expression');
   });
 
-  it('submits parsed records with the v2 preview contract', async () => {
+  it('persists every loaded source and runs with the saved-source contract', async () => {
     class FakeEventSource {
       static readonly instances: FakeEventSource[] = [];
 
@@ -178,18 +178,48 @@ describe('Calc Flow Studio', () => {
       removeEventListener() {}
     }
 
+    const loadedProject = {
+      ...blankProject(),
+      id: 'two_source',
+      name: 'Two source flow',
+      data_sources: [
+        {
+          id: 'left',
+          input: 'left_source',
+          format: 'inline_json' as const,
+          data: [{ id: 1, value: 2 }],
+        },
+        {
+          id: 'right',
+          input: 'right_source',
+          format: 'csv' as const,
+          data: 'id,adjustment\n1,10\n',
+        },
+      ],
+    };
+    const summaries = [
+      {
+        id: loadedProject.id,
+        name: loadedProject.name,
+        description: loadedProject.description,
+        node_count: loadedProject.pipeline.nodes.length,
+      },
+    ];
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path.endsWith('/catalog')) return response(catalog);
-      if (path.endsWith('/projects') && !init?.method) return response([]);
-      if (path.endsWith('/projects') && init?.method === 'POST') {
-        return response(JSON.parse(String(init.body)), 201);
+      if (path.endsWith('/projects') && !init?.method) return response(summaries);
+      if (path.endsWith('/projects/two_source') && !init?.method) {
+        return response(loadedProject);
       }
-      if (path.includes('/projects/project_') && path.endsWith('/runs')) {
+      if (path.endsWith('/projects/two_source') && init?.method === 'PUT') {
+        return response(JSON.parse(String(init.body)));
+      }
+      if (path.endsWith('/projects/two_source/runs')) {
         return response(
           {
             id: 'run_1',
-            project_id: path.split('/').at(-2),
+            project_id: loadedProject.id,
             status: 'pending',
             created_at: '2026-01-01T00:00:00Z',
           },
@@ -201,32 +231,46 @@ describe('Calc Flow Studio', () => {
     vi.stubGlobal('fetch', fetchMock);
     vi.stubGlobal('EventSource', FakeEventSource);
     const { unmount } = render(<App />);
-    await screen.findByText('Build the flow');
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('Source ID 1')).toHaveValue('left'),
+    );
+    expect(screen.getByLabelText('Source ID 2')).toHaveValue('right');
+    fireEvent.change(screen.getByLabelText('Data 1'), {
+      target: { value: '[{"id":1,"value":4}]' },
+    });
 
     fireEvent.click(screen.getByRole('button', { name: /Run preview/ }));
 
     await waitFor(() =>
       expect(
         fetchMock.mock.calls.some(
-          ([path]) => String(path).includes('/api/v2/projects/project_') && String(path).endsWith('/runs'),
+          ([path]) => String(path).endsWith('/projects/two_source/runs'),
         ),
       ).toBe(true),
     );
-    const runCall = fetchMock.mock.calls.find(
-      ([path]) => String(path).includes('/api/v2/projects/project_') && String(path).endsWith('/runs'),
+    const saveCall = fetchMock.mock.calls.find(
+      ([path, init]) =>
+        String(path).endsWith('/projects/two_source') && init?.method === 'PUT',
     );
-    expect(JSON.parse(String(runCall?.[1]?.body))).toEqual({
-      inputs: {
-        input: {
-          format: 'records',
-          data: [
-            { a: 1, b: 2 },
-            { a: 3, b: 4 },
-          ],
-          source_id: 'browser-preview',
-        },
+    expect(JSON.parse(String(saveCall?.[1]?.body)).data_sources).toEqual([
+      {
+        id: 'left',
+        input: 'left_source',
+        format: 'inline_json',
+        data: [{ id: 1, value: 4 }],
       },
-    });
+      {
+        id: 'right',
+        input: 'right_source',
+        format: 'csv',
+        data: 'id,adjustment\n1,10\n',
+      },
+    ]);
+    const runCall = fetchMock.mock.calls.find(
+      ([path]) => String(path).endsWith('/projects/two_source/runs'),
+    );
+    expect(JSON.parse(String(runCall?.[1]?.body))).toEqual({});
 
     await waitFor(() =>
       expect(FakeEventSource.instances.map(({ url }) => url)).toEqual([
@@ -238,5 +282,106 @@ describe('Calc Flow Studio', () => {
     unmount();
 
     expect(source.close).toHaveBeenCalledOnce();
+  });
+
+  it('blocks every persistence action when a source draft is invalid', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith('/catalog')) return response(catalog);
+      if (path.endsWith('/projects') && !init?.method) return response([]);
+      throw new Error(`Unexpected request ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<App />);
+
+    const data = await screen.findByLabelText('Data 1');
+    fireEvent.change(data, { target: { value: '[{' } });
+
+    const actions = [
+      screen.getByRole('button', { name: 'Save' }),
+      screen.getByRole('button', { name: 'Validate' }),
+      screen.getByRole('button', { name: /Run preview/ }),
+      screen.getByRole('button', { name: 'Inspect' }),
+    ];
+    for (const action of actions) {
+      fireEvent.click(action);
+      expect(await screen.findByText('Data source sample contains invalid inline JSON'))
+        .toBeInTheDocument();
+      await waitFor(() => expect(action).toBeEnabled());
+    }
+
+    expect(data).toHaveAttribute('aria-invalid', 'true');
+    expect(
+      fetchMock.mock.calls.filter(([path, init]) =>
+        Boolean(init?.method)
+        || /\/validate$|\/runs$|\/checkpoint$/.test(String(path)),
+      ),
+    ).toEqual([]);
+  });
+
+  it('replaces source drafts when switching projects', async () => {
+    const first = {
+      ...blankProject(),
+      id: 'first',
+      name: 'First flow',
+      data_sources: [
+        {
+          id: 'left',
+          input: 'left_source',
+          format: 'inline_json' as const,
+          data: [{ value: 1 }],
+        },
+      ],
+    };
+    const second = {
+      ...blankProject(),
+      id: 'second',
+      name: 'Second flow',
+      data_sources: [
+        {
+          id: 'right',
+          input: 'right_source',
+          format: 'csv' as const,
+          data: 'value\n2\n',
+        },
+      ],
+    };
+    const summaries = [first, second].map((item) => ({
+      id: item.id,
+      name: item.name,
+      description: item.description,
+      node_count: item.pipeline.nodes.length,
+    }));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const path = String(input);
+        if (path.endsWith('/catalog')) return response(catalog);
+        if (path.endsWith('/projects') && !init?.method) return response(summaries);
+        if (path.endsWith('/projects/first')) return response(first);
+        if (path.endsWith('/projects/second')) return response(second);
+        throw new Error(`Unexpected request ${path}`);
+      }),
+    );
+    render(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('Source ID 1')).toHaveValue('left'),
+    );
+    fireEvent.change(screen.getByLabelText('Source ID 1'), {
+      target: { value: 'edited-left' },
+    });
+    fireEvent.change(screen.getByLabelText('Data 1'), {
+      target: { value: '[{"value":99}]' },
+    });
+
+    fireEvent.change(screen.getByLabelText('Project'), {
+      target: { value: 'second' },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Source ID 1')).toHaveValue('right');
+      expect(screen.getByLabelText('Data 1')).toHaveValue('value\n2\n');
+    });
   });
 });
