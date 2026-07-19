@@ -12,7 +12,7 @@ import {
   type NodeChange,
   type NodeTypes,
 } from '@xyflow/react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { api } from './api/client';
 import {
@@ -72,6 +72,9 @@ export const ARROW_TYPES = [
 ] as const;
 type EditableNodeKind = Extract<NodeConfig['operator']['kind'], 'expression' | 'sql'>;
 type ProjectUpdate = EditableProject | ((current: EditableProject) => EditableProject);
+type SourceDraftUpdate =
+  | DataSourceDraft[]
+  | ((current: DataSourceDraft[]) => DataSourceDraft[]);
 
 const nodeColor = (node: FlowNode) => {
   if (node.data.kind === 'sql') return '#ef9456';
@@ -182,9 +185,11 @@ export default function App() {
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [project, setProject] = useState<EditableProject>(() => blankProject());
+  const projectRef = useRef(project);
   const [sourceDrafts, setSourceDrafts] = useState<DataSourceDraft[]>(() =>
     createDataSourceDrafts(project.data_sources),
   );
+  const sourceDraftsRef = useRef(sourceDrafts);
   const [persisted, setPersisted] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string>('calculate');
   const [validation, setValidation] = useState<ValidationReport | null>(null);
@@ -192,6 +197,16 @@ export default function App() {
   const [checkpoint, setCheckpoint] = useState<CheckpointSummary | null>(null);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
+  const [pendingFileReads, setPendingFileReads] = useState(0);
+  const pendingFileReadsRef = useRef(0);
+
+  const updateSourceDrafts = useCallback((update: SourceDraftUpdate) => {
+    const next = typeof update === 'function'
+      ? update(sourceDraftsRef.current)
+      : update;
+    sourceDraftsRef.current = next;
+    setSourceDrafts(next);
+  }, []);
 
   const refreshProjects = useCallback(async () => {
     const items = await api.projects();
@@ -201,8 +216,11 @@ export default function App() {
 
   const replaceEditableProject = useCallback(
     (next: EditableProject, isPersisted: boolean) => {
+      const drafts = createDataSourceDrafts(next.data_sources);
+      projectRef.current = next;
+      sourceDraftsRef.current = drafts;
       setProject(next);
-      setSourceDrafts(createDataSourceDrafts(next.data_sources));
+      setSourceDrafts(drafts);
       setPersisted(isPersisted);
       setSelectedNodeId(next.pipeline.nodes[0]?.id ?? '');
       setValidation(null);
@@ -237,9 +255,11 @@ export default function App() {
   }, [replaceEditableProject]);
 
   const updateProject = useCallback((update: ProjectUpdate) => {
-    setProject((current) =>
-      typeof update === 'function' ? update(current) : update,
-    );
+    const next = typeof update === 'function'
+      ? update(projectRef.current)
+      : update;
+    projectRef.current = next;
+    setProject(next);
     setValidation(null);
     setRun(null);
     setCheckpoint(null);
@@ -330,6 +350,7 @@ export default function App() {
     const saved = persisted
       ? await api.saveProject(nextProject)
       : await api.createProject(nextProject);
+    projectRef.current = saved;
     setProject(saved);
     setPersisted(true);
     await refreshProjects();
@@ -337,16 +358,24 @@ export default function App() {
   };
 
   const prepareProject = (): EditableProject | null => {
+    if (pendingFileReadsRef.current > 0) {
+      setMessage('Data source files are still loading');
+      return null;
+    }
     const materialized = materializeDataSources(
-      project.data_sources,
-      sourceDrafts,
+      projectRef.current.data_sources,
+      sourceDraftsRef.current,
     );
-    setSourceDrafts(materialized.drafts);
+    updateSourceDrafts(materialized.drafts);
     if (!materialized.ok) {
       setMessage(materialized.message);
       return null;
     }
-    const prepared = { ...project, data_sources: materialized.sources };
+    const prepared = {
+      ...projectRef.current,
+      data_sources: materialized.sources,
+    };
+    projectRef.current = prepared;
     setProject(prepared);
     return prepared;
   };
@@ -430,7 +459,7 @@ export default function App() {
       ...current,
       data_sources: [...current.data_sources, source],
     }));
-    setSourceDrafts((current) => [
+    updateSourceDrafts((current) => [
       ...current,
       ...createDataSourceDrafts([source]),
     ]);
@@ -443,7 +472,7 @@ export default function App() {
         (_, currentIndex) => currentIndex !== index,
       ),
     }));
-    setSourceDrafts((current) =>
+    updateSourceDrafts((current) =>
       current.filter((_, currentIndex) => currentIndex !== index),
     );
   };
@@ -452,20 +481,29 @@ export default function App() {
     index: number,
     field: 'id' | 'input' | 'format',
     value: string,
-  ) => updateProject((current) => ({
-    ...current,
-    data_sources: current.data_sources.map((source, currentIndex) =>
-      currentIndex === index
-        ? {
-            ...source,
-            [field]: field === 'format' ? value as DataSourceFormat : value,
-          }
-        : source,
-    ),
-  }));
+  ) => {
+    updateProject((current) => ({
+      ...current,
+      data_sources: current.data_sources.map((source, currentIndex) =>
+        currentIndex === index
+          ? {
+              ...source,
+              [field]: field === 'format' ? value as DataSourceFormat : value,
+            }
+          : source,
+      ),
+    }));
+    if (field === 'format') {
+      updateSourceDrafts((current) =>
+        current.map((draft, currentIndex) =>
+          currentIndex === index ? { ...draft, error: null } : draft,
+        ),
+      );
+    }
+  };
 
   const updateDataSourceData = (index: number, dataText: string) => {
-    setSourceDrafts((current) =>
+    updateSourceDrafts((current) =>
       current.map((draft, currentIndex) =>
         currentIndex === index ? { ...draft, dataText, error: null } : draft,
       ),
@@ -475,14 +513,36 @@ export default function App() {
   };
 
   const loadDataSourceFile = async (index: number, file: File) => {
+    const draftKey = sourceDraftsRef.current[index]?.key;
+    const format = projectRef.current.data_sources[index]?.format;
+    if (!draftKey || !format) return;
+
+    const currentTargetIndex = (): number => {
+      const currentIndex = sourceDraftsRef.current.findIndex(
+        (draft) => draft.key === draftKey,
+      );
+      return currentIndex >= 0
+        && projectRef.current.data_sources[currentIndex]?.format === format
+        ? currentIndex
+        : -1;
+    };
+
+    pendingFileReadsRef.current += 1;
+    setPendingFileReads(pendingFileReadsRef.current);
     try {
-      const format = project.data_sources[index]?.format;
       const dataText = format === 'arrow_ipc'
         ? await fileToBase64(file)
         : await file.text();
-      updateDataSourceData(index, dataText);
+      const currentIndex = currentTargetIndex();
+      if (currentIndex >= 0) updateDataSourceData(currentIndex, dataText);
     } catch (error) {
-      setMessage((error as Error).message);
+      if (currentTargetIndex() >= 0) setMessage((error as Error).message);
+    } finally {
+      pendingFileReadsRef.current = Math.max(
+        0,
+        pendingFileReadsRef.current - 1,
+      );
+      setPendingFileReads(pendingFileReadsRef.current);
     }
   };
 
@@ -622,6 +682,8 @@ export default function App() {
     replaceEditableProject(loaded, true);
   };
 
+  const persistenceBusy = busy || pendingFileReads > 0;
+
   return (
     <main className="studio-shell">
       <header className="topbar">
@@ -648,9 +710,9 @@ export default function App() {
             onExport={(format) => void exportProject(format)}
             onDelete={() => void deleteProject()}
           />
-          <button className="ghost-button" type="button" disabled={busy} onClick={() => void save()}>Save</button>
-          <button className="ghost-button" type="button" disabled={busy} onClick={() => void validate()}>Validate</button>
-          <button className="run-button" type="button" disabled={busy} onClick={() => void execute()}><span>▶</span> Run preview</button>
+          <button className="ghost-button" type="button" disabled={persistenceBusy} onClick={() => void save()}>Save</button>
+          <button className="ghost-button" type="button" disabled={persistenceBusy} onClick={() => void validate()}>Validate</button>
+          <button className="run-button" type="button" disabled={persistenceBusy} onClick={() => void execute()}><span>▶</span> Run preview</button>
         </div>
       </header>
 
@@ -676,7 +738,7 @@ export default function App() {
           />
           <CheckpointControl
             checkpoint={checkpoint}
-            busy={busy}
+            busy={persistenceBusy}
             onInspect={() => void inspectCheckpoint()}
             onReset={() => void resetCheckpoint()}
           />

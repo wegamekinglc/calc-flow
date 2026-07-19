@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import App, { ARROW_TYPES, connectProject, flowNodeData } from './App';
@@ -22,6 +22,17 @@ const catalog = [
     volatility: 'immutable',
   },
 ];
+
+const delayedTextFile = (name: string) => {
+  let resolve!: (value: string) => void;
+  const file = {
+    name,
+    text: vi.fn(() => new Promise<string>((complete) => {
+      resolve = complete;
+    })),
+  } as unknown as File;
+  return { file, resolve: (value: string) => resolve(value) };
+};
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -317,6 +328,11 @@ describe('Calc Flow Studio', () => {
         || /\/validate$|\/runs$|\/checkpoint$/.test(String(path)),
       ),
     ).toEqual([]);
+
+    fireEvent.change(screen.getByLabelText('Format 1'), {
+      target: { value: 'csv' },
+    });
+    expect(data).toHaveAttribute('aria-invalid', 'false');
   });
 
   it('replaces source drafts when switching projects', async () => {
@@ -383,5 +399,153 @@ describe('Calc Flow Studio', () => {
       expect(screen.getByLabelText('Source ID 1')).toHaveValue('right');
       expect(screen.getByLabelText('Data 1')).toHaveValue('value\n2\n');
     });
+  });
+
+  it('isolates a delayed file read from persistence and project replacement', async () => {
+    const first = {
+      ...blankProject(),
+      id: 'first',
+      name: 'First flow',
+      data_sources: [
+        {
+          id: 'left',
+          input: 'left_source',
+          format: 'inline_json' as const,
+          data: [{ value: 1 }],
+        },
+      ],
+    };
+    const second = {
+      ...blankProject(),
+      id: 'second',
+      name: 'Second flow',
+      data_sources: [
+        {
+          id: 'right',
+          input: 'right_source',
+          format: 'csv' as const,
+          data: 'value\n2\n',
+        },
+      ],
+    };
+    const summaries = [first, second].map((item) => ({
+      id: item.id,
+      name: item.name,
+      description: item.description,
+      node_count: item.pipeline.nodes.length,
+    }));
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith('/catalog')) return response(catalog);
+      if (path.endsWith('/projects') && !init?.method) return response(summaries);
+      if (path.endsWith('/projects/first') && !init?.method) return response(first);
+      if (path.endsWith('/projects/second') && !init?.method) return response(second);
+      if (path.endsWith('/projects/first') && init?.method === 'PUT') {
+        return response(JSON.parse(String(init.body)));
+      }
+      if (path.endsWith('/projects/second') && init?.method === 'PUT') {
+        return response(JSON.parse(String(init.body)));
+      }
+      throw new Error(`Unexpected request ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('Source ID 1')).toHaveValue('left'),
+    );
+    const delayed = delayedTextFile('left.json');
+    const fileInput = screen.getByLabelText('Load file 1');
+    const save = screen.getByRole('button', { name: 'Save' });
+    Object.defineProperty(fileInput, 'files', {
+      configurable: true,
+      value: [delayed.file],
+    });
+    fireEvent.change(fileInput);
+    expect(save).toBeDisabled();
+    fireEvent.click(save);
+
+    expect(
+      fetchMock.mock.calls.some(([, init]) => init?.method === 'PUT'),
+    ).toBe(false);
+
+    fireEvent.change(screen.getByLabelText('Project'), {
+      target: { value: 'second' },
+    });
+    await waitFor(() => {
+      expect(screen.getByLabelText('Source ID 1')).toHaveValue('right');
+      expect(screen.getByLabelText('Data 1')).toHaveValue('value\n2\n');
+    });
+
+    await act(async () => {
+      delayed.resolve('[{"value":99}]');
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(save).toBeEnabled());
+    expect(screen.getByLabelText('Data 1')).toHaveValue('value\n2\n');
+
+    fireEvent.click(save);
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT'),
+      ).toHaveLength(1),
+    );
+    const saveCall = fetchMock.mock.calls.find(
+      ([path, init]) =>
+        String(path).endsWith('/projects/second') && init?.method === 'PUT',
+    );
+    expect(JSON.parse(String(saveCall?.[1]?.body)).data_sources).toEqual(
+      second.data_sources,
+    );
+  });
+
+  it('blocks persistence until every concurrent file read completes', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith('/catalog')) return response(catalog);
+      if (path.endsWith('/projects') && !init?.method) return response([]);
+      if (path.endsWith('/projects') && init?.method === 'POST') {
+        return response(JSON.parse(String(init.body)), 201);
+      }
+      throw new Error(`Unexpected request ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<App />);
+
+    await screen.findByLabelText('Data 1');
+    const first = delayedTextFile('first.json');
+    const second = delayedTextFile('second.json');
+    const fileInput = screen.getByLabelText('Load file 1');
+    const save = screen.getByRole('button', { name: 'Save' });
+
+    fireEvent.change(fileInput, { target: { files: [first.file] } });
+    fireEvent.change(fileInput, { target: { files: [second.file] } });
+    expect(save).toBeDisabled();
+
+    await act(async () => {
+      first.resolve('[{"value":1}]');
+      await Promise.resolve();
+    });
+    expect(save).toBeDisabled();
+
+    await act(async () => {
+      second.resolve('[{"value":2}]');
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(save).toBeEnabled());
+    expect(screen.getByLabelText('Data 1')).toHaveValue('[{"value":2}]');
+
+    fireEvent.click(save);
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST'),
+      ).toHaveLength(1),
+    );
+    const createCall = fetchMock.mock.calls.find(
+      ([path, init]) =>
+        String(path).endsWith('/projects') && init?.method === 'POST',
+    );
+    expect(JSON.parse(String(createCall?.[1]?.body)).data_sources[0].data)
+      .toEqual([{ value: 2 }]);
   });
 });
