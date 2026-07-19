@@ -89,7 +89,15 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weig
 .node-tool strong { font-size: 11px; }
 .node-tool small { margin-top: 2px; color: var(--muted); font-size: 9px; }
 .node-tool:hover { transform: translateY(-1px); border-color: #3d665b; background: #173027; }
-.sample-editor { display: grid; gap: 9px; margin-top: 22px; padding-top: 17px; border-top: 1px solid var(--line); }
+.data-source-editor { display: grid; gap: 9px; margin-top: 22px; padding-top: 17px; border-top: 1px solid var(--line); }
+.data-source-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.data-source-list { display: grid; gap: 9px; max-height: 430px; overflow: auto; padding-right: 3px; }
+.data-source-card { display: grid; gap: 8px; padding: 9px; border: 1px solid var(--line); border-radius: 9px; background: #091815; }
+.data-source-card header { display: flex; align-items: center; justify-content: space-between; gap: 7px; }
+.data-source-card header strong { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.data-source-card textarea { min-height: 92px; }
+.data-source-error { margin: -2px 0 0; color: var(--danger); font-size: 9px; }
+.data-source-empty { margin: 0; color: var(--muted); font-size: 9px; line-height: 1.45; }
 .file-button { position: relative; display: block; text-align: center; overflow: hidden; }
 .file-button input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 .checkpoint-control { margin-top: 22px; padding-top: 17px; border-top: 1px solid var(--line); }
