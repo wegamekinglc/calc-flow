@@ -499,7 +499,7 @@ describe('Calc Flow Studio', () => {
     );
   });
 
-  it('blocks persistence until every concurrent file read completes', async () => {
+  it('keeps the newest same-source file when reads resolve in reverse', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path.endsWith('/catalog')) return response(catalog);
@@ -523,13 +523,14 @@ describe('Calc Flow Studio', () => {
     expect(save).toBeDisabled();
 
     await act(async () => {
-      first.resolve('[{"value":1}]');
+      second.resolve('[{"value":2}]');
       await Promise.resolve();
     });
     expect(save).toBeDisabled();
+    expect(screen.getByLabelText('Data 1')).toHaveValue('[{"value":2}]');
 
     await act(async () => {
-      second.resolve('[{"value":2}]');
+      first.resolve('[{"value":1}]');
       await Promise.resolve();
     });
     await waitFor(() => expect(save).toBeEnabled());
@@ -547,5 +548,48 @@ describe('Calc Flow Studio', () => {
     );
     expect(JSON.parse(String(createCall?.[1]?.body)).data_sources[0].data)
       .toEqual([{ value: 2 }]);
+  });
+
+  it('keeps a manual data edit made after a file selection', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith('/catalog')) return response(catalog);
+      if (path.endsWith('/projects') && !init?.method) return response([]);
+      if (path.endsWith('/projects') && init?.method === 'POST') {
+        return response(JSON.parse(String(init.body)), 201);
+      }
+      throw new Error(`Unexpected request ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<App />);
+
+    const data = await screen.findByLabelText('Data 1');
+    const delayed = delayedTextFile('older.json');
+    const fileInput = screen.getByLabelText('Load file 1');
+    const save = screen.getByRole('button', { name: 'Save' });
+
+    fireEvent.change(fileInput, { target: { files: [delayed.file] } });
+    fireEvent.change(data, { target: { value: '[{"value":7}]' } });
+    expect(save).toBeDisabled();
+
+    await act(async () => {
+      delayed.resolve('[{"value":1}]');
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(save).toBeEnabled());
+    expect(data).toHaveValue('[{"value":7}]');
+
+    fireEvent.click(save);
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST'),
+      ).toHaveLength(1),
+    );
+    const createCall = fetchMock.mock.calls.find(
+      ([path, init]) =>
+        String(path).endsWith('/projects') && init?.method === 'POST',
+    );
+    expect(JSON.parse(String(createCall?.[1]?.body)).data_sources[0].data)
+      .toEqual([{ value: 7 }]);
   });
 });

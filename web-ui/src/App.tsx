@@ -199,6 +199,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [pendingFileReads, setPendingFileReads] = useState(0);
   const pendingFileReadsRef = useRef(0);
+  const fileReadTokensRef = useRef(new Map<string, symbol>());
 
   const updateSourceDrafts = useCallback((update: SourceDraftUpdate) => {
     const next = typeof update === 'function'
@@ -219,6 +220,7 @@ export default function App() {
       const drafts = createDataSourceDrafts(next.data_sources);
       projectRef.current = next;
       sourceDraftsRef.current = drafts;
+      fileReadTokensRef.current.clear();
       setProject(next);
       setSourceDrafts(drafts);
       setPersisted(isPersisted);
@@ -466,6 +468,8 @@ export default function App() {
   };
 
   const removeDataSource = (index: number) => {
+    const draftKey = sourceDraftsRef.current[index]?.key;
+    if (draftKey) fileReadTokensRef.current.delete(draftKey);
     updateProject((current) => ({
       ...current,
       data_sources: current.data_sources.filter(
@@ -482,6 +486,7 @@ export default function App() {
     field: 'id' | 'input' | 'format',
     value: string,
   ) => {
+    const draftKey = sourceDraftsRef.current[index]?.key;
     updateProject((current) => ({
       ...current,
       data_sources: current.data_sources.map((source, currentIndex) =>
@@ -494,6 +499,7 @@ export default function App() {
       ),
     }));
     if (field === 'format') {
+      if (draftKey) fileReadTokensRef.current.delete(draftKey);
       updateSourceDrafts((current) =>
         current.map((draft, currentIndex) =>
           currentIndex === index ? { ...draft, error: null } : draft,
@@ -502,7 +508,15 @@ export default function App() {
     }
   };
 
-  const updateDataSourceData = (index: number, dataText: string) => {
+  const updateDataSourceData = (
+    index: number,
+    dataText: string,
+    invalidateFileRead = true,
+  ) => {
+    const draftKey = sourceDraftsRef.current[index]?.key;
+    if (invalidateFileRead && draftKey) {
+      fileReadTokensRef.current.delete(draftKey);
+    }
     updateSourceDrafts((current) =>
       current.map((draft, currentIndex) =>
         currentIndex === index ? { ...draft, dataText, error: null } : draft,
@@ -516,6 +530,8 @@ export default function App() {
     const draftKey = sourceDraftsRef.current[index]?.key;
     const format = projectRef.current.data_sources[index]?.format;
     if (!draftKey || !format) return;
+    const fileReadToken = Symbol(draftKey);
+    fileReadTokensRef.current.set(draftKey, fileReadToken);
 
     const currentTargetIndex = (): number => {
       const currentIndex = sourceDraftsRef.current.findIndex(
@@ -523,6 +539,7 @@ export default function App() {
       );
       return currentIndex >= 0
         && projectRef.current.data_sources[currentIndex]?.format === format
+        && fileReadTokensRef.current.get(draftKey) === fileReadToken
         ? currentIndex
         : -1;
     };
@@ -534,10 +551,15 @@ export default function App() {
         ? await fileToBase64(file)
         : await file.text();
       const currentIndex = currentTargetIndex();
-      if (currentIndex >= 0) updateDataSourceData(currentIndex, dataText);
+      if (currentIndex >= 0) {
+        updateDataSourceData(currentIndex, dataText, false);
+      }
     } catch (error) {
       if (currentTargetIndex() >= 0) setMessage((error as Error).message);
     } finally {
+      if (fileReadTokensRef.current.get(draftKey) === fileReadToken) {
+        fileReadTokensRef.current.delete(draftKey);
+      }
       pendingFileReadsRef.current = Math.max(
         0,
         pendingFileReadsRef.current - 1,
