@@ -242,9 +242,17 @@ jobs:
           if-no-files-found: error
           retention-days: 30
   benchmark-smoke:
-    name: Informational benchmark smoke
+    name: Informational ${{ matrix.scale }} benchmark smoke
     needs: lint-and-test
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        scale: [overhead, small, standard, nightly]
+    env:
+      CALC_FLOW_BENCHMARK_SCALE: ${{ matrix.scale }}
+      JAX_PLATFORMS: cpu
     steps:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -258,19 +266,16 @@ jobs:
           enable-cache: true
       - name: Install benchmark dependencies
         run: uv sync --extra benchmark
-      - name: Run deterministic overhead benchmarks
-        env:
-          CALC_FLOW_BENCHMARK_SCALE: overhead
-          JAX_PLATFORMS: cpu
+      - name: Run benchmark scale
         run: |
           mkdir -p benchmark-results
           uv run pytest benchmarks -q --benchmark-only \
-            --benchmark-json=benchmark-results/smoke.json
+            --benchmark-json="benchmark-results/${CALC_FLOW_BENCHMARK_SCALE}.json"
       - name: Upload benchmark report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: benchmark-smoke
-          path: benchmark-results/smoke.json
+          name: benchmark-smoke-${{ matrix.scale }}
+          path: benchmark-results/${{ matrix.scale }}.json
           if-no-files-found: error
           retention-days: 30
   rust-core:
