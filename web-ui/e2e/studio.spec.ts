@@ -1,5 +1,15 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type APIRequestContext } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
+
+const projectsUrl = 'http://127.0.0.1:8765/api/v2/projects';
+const twoSourceProjectUrl = `${projectsUrl}/two_source_e2e`;
+
+// The constrained headless renderer otherwise stalls Playwright's stability check.
+test.use({
+  launchOptions: {
+    args: ['--disable-gpu', '--disable-software-rasterizer'],
+  },
+});
 
 const twoSourceProject = {
   format_version: 2,
@@ -85,6 +95,12 @@ const twoSourceProject = {
   },
 };
 
+async function deleteTwoSourceProject(request: APIRequestContext): Promise<number> {
+  const response = await request.delete(twoSourceProjectUrl);
+  expect([204, 404]).toContain(response.status());
+  return response.status();
+}
+
 test('builds and runs a persisted DataFusion UDF graph without browser code', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByText('Build the flow')).toBeVisible();
@@ -152,40 +168,68 @@ test('builds and runs a persisted DataFusion UDF graph without browser code', as
   expect(await remaining.json()).toEqual([]);
 });
 
-test('edits and runs a persisted two-source SQL join', async ({ page }) => {
-  const projectUrl = 'http://127.0.0.1:8765/api/v2/projects/two_source_e2e';
-  const created = await page.request.post('http://127.0.0.1:8765/api/v2/projects', {
-    data: twoSourceProject,
+test.describe('persisted two-source SQL join', () => {
+  test.beforeEach(async ({ request }) => {
+    await deleteTwoSourceProject(request);
   });
-  expect(created.ok()).toBeTruthy();
 
-  let deleted = false;
-  try {
+  test.afterEach(async ({ request }) => {
+    await deleteTwoSourceProject(request);
+  });
+
+  test('edits and runs through two saved sources', async ({ page, request }) => {
+    const created = await request.post(projectsUrl, { data: twoSourceProject });
+    expect(created.status()).toBe(201);
+
     await page.goto('/');
+
+    const project = page.getByLabel('Project', { exact: true });
+    await expect(project).toBeVisible();
+    await expect(project).toBeEnabled();
+    await project.selectOption('two_source_e2e');
+    await expect(project).toHaveValue('two_source_e2e');
+    await expect(page.getByLabel('Project name')).toHaveValue('Two source E2E');
 
     const sources = page.getByRole('region', { name: 'Data sources' });
     await expect(sources.getByRole('article')).toHaveCount(2);
     await expect(page.getByLabel('Graph input 1')).toHaveValue('left_source');
     await expect(page.getByLabel('Graph input 2')).toHaveValue('right_source');
 
-    await sources.getByRole('button', { name: 'Add data source' }).click({ force: true });
+    const addSource = sources.getByRole('button', { name: 'Add data source' });
+    await expect(addSource).toBeVisible();
+    await expect(addSource).toBeEnabled();
+    await addSource.scrollIntoViewIfNeeded();
+    await addSource.click();
     await expect(sources.getByRole('article')).toHaveCount(3);
-    await sources.getByRole('button', { name: 'Remove source 3' }).click({ force: true });
+    const removeSource = sources.getByRole('button', { name: 'Remove source 3' });
+    await expect(removeSource).toBeVisible();
+    await expect(removeSource).toBeEnabled();
+    await removeSource.scrollIntoViewIfNeeded();
+    await removeSource.click();
     await expect(sources.getByRole('article')).toHaveCount(2);
 
     await page.getByLabel('Data 1').fill('[{"id":1,"value":4},{"id":2,"value":5}]');
-    await page.getByRole('button', { name: 'Save' }).click({ force: true });
+    const save = page.getByRole('button', { name: 'Save' });
+    await expect(save).toBeVisible();
+    await expect(save).toBeEnabled();
+    await save.click();
     await expect(page.getByRole('status')).toHaveText('Project saved');
 
-    await page.getByRole('button', { name: 'Validate' }).click({ force: true });
+    const validate = page.getByRole('button', { name: 'Validate' });
+    await expect(validate).toBeVisible();
+    await expect(validate).toBeEnabled();
+    await validate.click();
     await expect(page.getByText('Graph is valid')).toBeVisible();
 
-    await page.getByRole('button', { name: /Run preview/ }).click({ force: true });
+    const run = page.getByRole('button', { name: /Run preview/ });
+    await expect(run).toBeVisible();
+    await expect(run).toBeEnabled();
+    await run.click();
     await expect(page.getByText('completed', { exact: true })).toBeVisible({ timeout: 20_000 });
     await expect(page.getByRole('columnheader', { name: /total/ })).toBeVisible();
     await expect(page.getByRole('cell', { name: '18', exact: true })).toBeVisible();
 
-    const saved = await page.request.get(projectUrl);
+    const saved = await request.get(twoSourceProjectUrl);
     expect(saved.ok()).toBeTruthy();
     const document = await saved.json();
     expect(document.data_sources.map((source: { input: string }) => source.input)).toEqual([
@@ -193,10 +237,6 @@ test('edits and runs a persisted two-source SQL join', async ({ page }) => {
       'right_source',
     ]);
 
-    const removed = await page.request.delete(projectUrl);
-    expect(removed.ok()).toBeTruthy();
-    deleted = true;
-  } finally {
-    if (!deleted) await page.request.delete(projectUrl);
-  }
+    expect(await deleteTwoSourceProject(request)).toBe(204);
+  });
 });
