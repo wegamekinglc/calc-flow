@@ -175,3 +175,28 @@ export const usePanelLayout = () => {
 
   return { layout, setPanelWidth, resetPanelWidth };
 };
+
+export const useElementWidth = <T extends HTMLElement>() => {
+  const [element, setElement] = useState<T | null>(null);
+  const [width, setWidth] = useState(0);
+  const ref = useCallback((next: T | null) => setElement(next), []);
+
+  useEffect(() => {
+    if (element === null) {
+      setWidth(0);
+      return undefined;
+    }
+    setWidth(element.getBoundingClientRect().width);
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver((entries) => {
+      const nextWidth = entries[0]?.contentRect.width;
+      if (typeof nextWidth === 'number' && Number.isFinite(nextWidth)) {
+        setWidth(nextWidth);
+      }
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [element]);
+
+  return { ref, width };
+};

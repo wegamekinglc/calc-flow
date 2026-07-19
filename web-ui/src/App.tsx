@@ -12,7 +12,14 @@ import {
   type NodeChange,
   type NodeTypes,
 } from '@xyflow/react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from 'react';
 
 import { api } from './api/client';
 import {
@@ -24,6 +31,7 @@ import { BenchmarkComparison } from './components/BenchmarkComparison';
 import { CheckpointControl } from './components/CheckpointControl';
 import { DataSourceEditor } from './components/DataSourceEditor';
 import { NodeInspector } from './components/NodeInspector';
+import { PanelResizeHandle } from './components/PanelResizeHandle';
 import { ProjectActions } from './components/ProjectActions';
 import { ResultsPanel } from './components/ResultsPanel';
 import {
@@ -34,6 +42,13 @@ import {
   type DataSourceFormat,
 } from './components/dataSourceEditor';
 import { editSqlInputAliases } from './components/inputAliasEditor';
+import {
+  PANEL_LIMITS,
+  PANEL_RESIZE_HANDLE_WIDTH,
+  clampWorkspaceLayout,
+  useElementWidth,
+  usePanelLayout,
+} from './components/panelLayout';
 import { useRunEvents } from './hooks/useRunEvents';
 import {
   blankProject,
@@ -183,6 +198,8 @@ const fileToBase64 = async (file: File): Promise<string> => {
 };
 
 export default function App() {
+  const { layout, setPanelWidth, resetPanelWidth } = usePanelLayout();
+  const { ref: workspaceRef, width: workspaceWidth } = useElementWidth<HTMLElement>();
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [project, setProject] = useState<EditableProject>(() => blankProject());
@@ -706,9 +723,52 @@ export default function App() {
   };
 
   const persistenceBusy = busy || pendingFileReads > 0;
+  const workspaceLayout = useMemo(
+    () => workspaceWidth > 0
+      ? clampWorkspaceLayout(layout, workspaceWidth)
+      : layout,
+    [layout, workspaceWidth],
+  );
+  useEffect(() => {
+    if (workspaceWidth <= 0) return;
+    if (workspaceLayout.toolbox !== layout.toolbox) {
+      setPanelWidth('toolbox', workspaceLayout.toolbox);
+    }
+    if (workspaceLayout.inspector !== layout.inspector) {
+      setPanelWidth('inspector', workspaceLayout.inspector);
+    }
+  }, [layout, setPanelWidth, workspaceLayout, workspaceWidth]);
+  const toolboxMaximum = workspaceWidth > 0
+    ? Math.min(
+        PANEL_LIMITS.toolbox.max,
+        Math.max(
+          PANEL_LIMITS.toolbox.min,
+          workspaceWidth
+            - PANEL_LIMITS.canvasMin
+            - 2 * PANEL_RESIZE_HANDLE_WIDTH
+            - workspaceLayout.inspector,
+        ),
+      )
+    : PANEL_LIMITS.toolbox.max;
+  const inspectorMaximum = workspaceWidth > 0
+    ? Math.min(
+        PANEL_LIMITS.inspector.max,
+        Math.max(
+          PANEL_LIMITS.inspector.min,
+          workspaceWidth
+            - PANEL_LIMITS.canvasMin
+            - 2 * PANEL_RESIZE_HANDLE_WIDTH
+            - workspaceLayout.toolbox,
+        ),
+      )
+    : PANEL_LIMITS.inspector.max;
+  const studioStyle = {
+    '--toolbox-width': `${workspaceLayout.toolbox}px`,
+    '--inspector-width': `${workspaceLayout.inspector}px`,
+  } as CSSProperties;
 
   return (
-    <main className="studio-shell">
+    <main className="studio-shell" style={studioStyle}>
       <header className="topbar">
         <div className="brand-lockup">
           <div className="brand-mark"><span /><span /><span /></div>
@@ -741,7 +801,7 @@ export default function App() {
 
       {message && <div className="toast" role="status" onClick={() => setMessage('')}>{message}</div>}
 
-      <section className="workspace">
+      <section className="workspace" ref={workspaceRef}>
         <aside className="toolbox panel">
           <span className="eyebrow">Node catalog</span>
           <h2>Build the flow</h2>
@@ -767,6 +827,16 @@ export default function App() {
           />
         </aside>
 
+        <PanelResizeHandle
+          label="Resize Toolbox"
+          value={workspaceLayout.toolbox}
+          min={PANEL_LIMITS.toolbox.min}
+          max={toolboxMaximum}
+          grow="start"
+          onChange={(width) => setPanelWidth('toolbox', width)}
+          onReset={() => resetPanelWidth('toolbox')}
+        />
+
         <section className="canvas-panel">
           <div className="canvas-meta"><span>{project.pipeline.nodes.length} nodes</span><span>{project.pipeline.edges.length} edges</span><span>DataFusion · {project.pipeline.datafusion.target_partitions} partition</span></div>
           <ReactFlow<FlowNode, Edge>
@@ -786,6 +856,16 @@ export default function App() {
             <Controls />
           </ReactFlow>
         </section>
+
+        <PanelResizeHandle
+          label="Resize Inspector"
+          value={workspaceLayout.inspector}
+          min={PANEL_LIMITS.inspector.min}
+          max={inspectorMaximum}
+          grow="end"
+          onChange={(width) => setPanelWidth('inspector', width)}
+          onReset={() => resetPanelWidth('inspector')}
+        />
 
         {selectedNode ? (
           <NodeInspector
@@ -807,6 +887,9 @@ export default function App() {
       <ResultsPanel
         validation={validation}
         run={run}
+        metricsWidth={layout.metrics}
+        onMetricsWidthChange={(width) => setPanelWidth('metrics', width)}
+        onMetricsWidthReset={() => resetPanelWidth('metrics')}
         onCancel={() => void cancelRun()}
       />
       <BenchmarkComparison />

@@ -38,7 +38,7 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weig
 .topbar {
   z-index: 10;
   display: grid;
-  grid-template-columns: 235px 1fr auto;
+  grid-template-columns: var(--toolbox-width, 235px) 1fr auto;
   align-items: center;
   gap: 22px;
   padding: 0 20px;
@@ -75,9 +75,9 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weig
 .danger-button { width: 100%; margin-top: 16px; color: var(--danger); border-color: #623a3a; background: #271817; }
 .icon-button { padding: 3px 7px; color: var(--muted); background: transparent; }
 
-.workspace { min-height: 0; display: grid; grid-template-columns: 235px minmax(620px, 1fr) 335px; border-bottom: 1px solid var(--line); }
+.workspace { min-height: 0; display: grid; grid-template-columns: var(--toolbox-width, 235px) 6px minmax(480px, 1fr) 6px var(--inspector-width, 335px); border-bottom: 1px solid var(--line); }
 .panel { background: var(--surface); }
-.toolbox { overflow: auto; padding: 18px 15px; border-right: 1px solid var(--line); }
+.toolbox { overflow: auto; min-width: 0; padding: 18px 15px; }
 .toolbox h2, .inspector h2, .results h2, .benchmark-panel h2 { margin: 4px 0 5px; font-size: 18px; letter-spacing: -.025em; }
 .toolbox > p { margin: 0 0 16px; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .eyebrow { color: var(--muted); font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .14em; }
@@ -129,7 +129,11 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weig
 .react-flow__controls button { border: 0 !important; border-bottom: 1px solid var(--line) !important; color: #bdd0ca !important; background: #10221e !important; fill: currentColor !important; }
 .react-flow__minimap { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #071411 !important; }
 
-.inspector { overflow: auto; padding: 18px; border-left: 1px solid var(--line); }
+.inspector { overflow: auto; min-width: 0; padding: 18px; }
+.panel-resize-handle { position: relative; z-index: 8; width: 6px; min-width: 6px; touch-action: none; cursor: col-resize; background: #0a1816; outline: none; }
+.panel-resize-handle::after { content: ''; position: absolute; inset: 0 2px; background: var(--line); transition: background .12s ease, box-shadow .12s ease; }
+.panel-resize-handle:hover::after, .panel-resize-handle:focus-visible::after { background: var(--mint); box-shadow: 0 0 0 2px #56d5b229; }
+.panel-resize-handle:active::after { background: var(--orange); }
 .panel-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 16px; }
 .kind-chip, .status-pill { padding: 5px 7px; border: 1px solid #31705f; border-radius: 20px; color: var(--mint); background: var(--mint-deep); font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
 .kind-chip.sql { color: var(--orange); border-color: #74482f; background: #342318; }
@@ -168,8 +172,10 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weig
 .validation-banner span { color: var(--muted); }
 .empty-state { min-height: 190px; display: grid; place-items: center; align-content: center; gap: 12px; color: var(--muted); font-size: 11px; text-align: center; }
 .empty-orbit { width: 44px; height: 44px; border: 1px solid #2b5147; border-radius: 50%; box-shadow: inset 0 0 0 11px #10251f; }
-.result-grid { display: grid; grid-template-columns: minmax(600px, 1fr) 330px; gap: 13px; }
-.output-stack, .metrics-stack { display: grid; align-content: start; gap: 11px; }
+.result-grid { display: grid; grid-template-columns: minmax(480px, 1fr) 6px var(--metrics-width, 330px); }
+.output-stack, .metrics-stack { min-width: 0; display: grid; align-content: start; gap: 11px; }
+.output-stack { padding-right: 13px; }
+.metrics-stack { padding-left: 13px; }
 .output-card, .metric-card, .plan-card { overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
 .output-card header { display: flex; justify-content: space-between; align-items: center; padding: 11px 13px; border-bottom: 1px solid var(--line); }
 .output-card h3 { margin: 2px 0 0; font: 500 12px 'SFMono-Regular', Consolas, ui-monospace, monospace; }
@@ -205,8 +211,3 @@ pre { max-height: 220px; overflow: auto; padding: 9px; border-radius: 6px; color
 .comparison-status.regression { color: var(--danger); background: #2b1919; }
 .comparison-status.improvement { color: var(--mint); background: var(--mint-deep); }
 .comparison-status.noisy { color: var(--orange); background: #2e2118; }
-
-@media (max-width: 1300px) {
-  .workspace { grid-template-columns: 215px minmax(580px, 1fr) 310px; }
-  .result-grid { grid-template-columns: minmax(560px, 1fr) 300px; }
-}

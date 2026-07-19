@@ -34,7 +34,10 @@ const delayedTextFile = (name: string) => {
   return { file, resolve: (value: string) => resolve(value) };
 };
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  localStorage.clear();
+});
 
 describe('Calc Flow Studio', () => {
   it('offers exactly the Arrow types accepted by the Rust runtime', () => {
@@ -59,6 +62,57 @@ describe('Calc Flow Studio', () => {
       'uint32',
       'uint64',
     ]);
+  });
+
+  it('restores, adjusts, and persists workspace panel widths', async () => {
+    localStorage.setItem('calc-flow-studio:panel-layout:v1', JSON.stringify({
+      version: 1,
+      toolbox: 300,
+      inspector: 410,
+      metrics: 360,
+    }));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.endsWith('/catalog')) return response(catalog);
+        if (path.endsWith('/projects')) return response([]);
+        throw new Error(`Unexpected request ${path}`);
+      }),
+    );
+    const { container } = render(<App />);
+
+    await screen.findByText('Build the flow');
+    const shell = container.querySelector<HTMLElement>('.studio-shell');
+    expect(shell?.style.getPropertyValue('--toolbox-width')).toBe('300px');
+    expect(shell?.style.getPropertyValue('--inspector-width')).toBe('410px');
+
+    fireEvent.keyDown(screen.getByRole('separator', { name: 'Resize Toolbox' }), {
+      key: 'ArrowRight',
+    });
+    expect(shell?.style.getPropertyValue('--toolbox-width')).toBe('316px');
+    await waitFor(() => expect(JSON.parse(
+      localStorage.getItem('calc-flow-studio:panel-layout:v1') ?? '{}',
+    )).toMatchObject({ version: 1, toolbox: 316, inspector: 410 }));
+  });
+
+  it('uses default workspace widths when saved layout JSON is corrupt', async () => {
+    localStorage.setItem('calc-flow-studio:panel-layout:v1', '{bad json');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.endsWith('/catalog')) return response(catalog);
+        if (path.endsWith('/projects')) return response([]);
+        throw new Error(`Unexpected request ${path}`);
+      }),
+    );
+    const { container } = render(<App />);
+
+    await screen.findByText('Build the flow');
+    const shell = container.querySelector<HTMLElement>('.studio-shell');
+    expect(shell?.style.getPropertyValue('--toolbox-width')).toBe('235px');
+    expect(shell?.style.getPropertyValue('--inspector-width')).toBe('335px');
   });
 
   it('maps external graph handles from configured ports without defaults', () => {

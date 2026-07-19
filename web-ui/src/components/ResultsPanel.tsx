@@ -1,15 +1,49 @@
+import { useEffect, type CSSProperties } from 'react';
+
+import { PanelResizeHandle } from './PanelResizeHandle';
+import {
+  PANEL_LIMITS,
+  maxMetricsWidth,
+  useElementWidth,
+} from './panelLayout';
 import type { RunResponse, RunResultPreview, ValidationReport } from '../types';
 
 interface ResultsPanelProps {
   validation: ValidationReport | null;
   run: RunResponse | null;
+  metricsWidth: number;
+  onMetricsWidthChange: (width: number) => void;
+  onMetricsWidthReset: () => void;
   onCancel: () => void;
 }
 
 const milliseconds = (nanoseconds: number): string => `${(nanoseconds / 1_000_000).toFixed(2)} ms`;
 
-export function ResultsPanel({ validation, run, onCancel }: ResultsPanelProps) {
+export function ResultsPanel({
+  validation,
+  run,
+  metricsWidth,
+  onMetricsWidthChange,
+  onMetricsWidthReset,
+  onCancel,
+}: ResultsPanelProps) {
   const result = run?.result as unknown as RunResultPreview | null | undefined;
+  const { ref: resultGridRef, width: resultGridWidth } = useElementWidth<HTMLDivElement>();
+  const metricsMaximum = resultGridWidth > 0
+    ? maxMetricsWidth(resultGridWidth)
+    : Math.max(PANEL_LIMITS.inspector.max, metricsWidth);
+  const safeMetricsWidth = Math.min(
+    metricsMaximum,
+    Math.max(PANEL_LIMITS.metrics.min, metricsWidth),
+  );
+  useEffect(() => {
+    if (resultGridWidth > 0 && safeMetricsWidth !== metricsWidth) {
+      onMetricsWidthChange(safeMetricsWidth);
+    }
+  }, [metricsWidth, onMetricsWidthChange, resultGridWidth, safeMetricsWidth]);
+  const resultGridStyle = {
+    '--metrics-width': `${safeMetricsWidth}px`,
+  } as CSSProperties;
 
   return (
     <section className="results panel">
@@ -47,7 +81,7 @@ export function ResultsPanel({ validation, run, onCancel }: ResultsPanelProps) {
       )}
 
       {result && (
-        <div className="result-grid">
+        <div className="result-grid" ref={resultGridRef} style={resultGridStyle}>
           <div className="output-stack">
             {Object.entries(result.outputs).map(([name, output]) => (
               <article className="output-card" key={name}>
@@ -76,6 +110,16 @@ export function ResultsPanel({ validation, run, onCancel }: ResultsPanelProps) {
               </article>
             ))}
           </div>
+
+          <PanelResizeHandle
+            label="Resize Metrics"
+            value={safeMetricsWidth}
+            min={PANEL_LIMITS.metrics.min}
+            max={metricsMaximum}
+            grow="end"
+            onChange={onMetricsWidthChange}
+            onReset={onMetricsWidthReset}
+          />
 
           <aside className="metrics-stack">
             <article className="metric-card">

@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   DEFAULT_PANEL_LAYOUT,
@@ -9,11 +9,13 @@ import {
   maxMetricsWidth,
   parsePanelLayout,
   readPanelLayout,
+  useElementWidth,
   usePanelLayout,
   writePanelLayout,
 } from './panelLayout';
 
 beforeEach(() => localStorage.clear());
+afterEach(() => vi.restoreAllMocks());
 
 describe('panel layout', () => {
   it('falls back when stored layout data is missing, malformed, or incompatible', () => {
@@ -96,5 +98,22 @@ describe('panel layout', () => {
 
     act(() => result.current.resetPanelWidth('toolbox'));
     expect(result.current.layout.toolbox).toBe(DEFAULT_PANEL_LAYOUT.toolbox);
+  });
+
+  it('tracks element width and disconnects its observer', () => {
+    const observe = vi.spyOn(ResizeObserver.prototype, 'observe');
+    const disconnect = vi.spyOn(ResizeObserver.prototype, 'disconnect');
+    const element = document.createElement('div');
+    vi.spyOn(element, 'getBoundingClientRect').mockReturnValue({
+      width: 800,
+    } as DOMRect);
+    const { result, unmount } = renderHook(() => useElementWidth<HTMLDivElement>());
+
+    act(() => result.current.ref(element));
+    expect(result.current.width).toBe(800);
+    expect(observe).toHaveBeenCalledWith(element);
+
+    unmount();
+    expect(disconnect).toHaveBeenCalledOnce();
   });
 });
