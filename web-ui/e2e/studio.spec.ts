@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 
 const projectsUrl = 'http://127.0.0.1:8765/api/v2/projects';
@@ -101,6 +101,23 @@ async function deleteTwoSourceProject(request: APIRequestContext): Promise<numbe
   return response.status();
 }
 
+async function panelWidth(page: Page, selector: string): Promise<number> {
+  return page.locator(selector).evaluate((element) => element.getBoundingClientRect().width);
+}
+
+async function dragSeparator(page: Page, label: string, deltaX: number): Promise<void> {
+  const separator = page.getByRole('separator', { name: label });
+  await separator.scrollIntoViewIfNeeded();
+  const box = await separator.boundingBox();
+  expect(box).not.toBeNull();
+  const centerX = box!.x + box!.width / 2;
+  const centerY = box!.y + box!.height / 2;
+  await page.mouse.move(centerX, centerY);
+  await page.mouse.down();
+  await page.mouse.move(centerX + deltaX, centerY, { steps: 5 });
+  await page.mouse.up();
+}
+
 test('builds and runs a persisted DataFusion UDF graph without browser code', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByText('Build the flow')).toBeVisible();
@@ -195,6 +212,35 @@ test.describe('persisted two-source SQL join', () => {
     await expect(page.getByLabel('Graph input 1')).toHaveValue('left_source');
     await expect(page.getByLabel('Graph input 2')).toHaveValue('right_source');
 
+    const toolboxBefore = await panelWidth(page, '.toolbox');
+    await dragSeparator(page, 'Resize Toolbox', 40);
+    const toolboxWidth = await panelWidth(page, '.toolbox');
+    expect(toolboxWidth).toBeGreaterThan(toolboxBefore + 30);
+
+    const inspectorBefore = await panelWidth(page, '.inspector');
+    await dragSeparator(page, 'Resize Inspector', -32);
+    const inspectorWidth = await panelWidth(page, '.inspector');
+    expect(inspectorWidth).toBeGreaterThan(inspectorBefore + 22);
+
+    const addSql = page.getByRole('button', { name: /DataFusion SQL/i });
+    await addSql.scrollIntoViewIfNeeded();
+    await addSql.click();
+    const firstAlias = page.getByRole('textbox', { name: 'Input alias 1', exact: true });
+    await expect(firstAlias).toHaveValue('input');
+    await page.getByRole('button', { name: 'Add input alias' }).click();
+    const secondAlias = page.getByRole('textbox', { name: 'Input alias 2', exact: true });
+    await expect(secondAlias).toHaveValue('input_2');
+    await secondAlias.fill('right');
+    await secondAlias.press('Enter');
+    await expect(secondAlias).toHaveValue('right');
+    await page.getByRole('button', { name: 'Delete node' }).click();
+
+    await page.locator('.react-flow__node').filter({ hasText: 'join_result' }).click();
+    await expect(page.getByRole('textbox', { name: 'Input alias 1', exact: true }))
+      .toHaveValue('left');
+    await expect(page.getByRole('textbox', { name: 'Input alias 2', exact: true }))
+      .toHaveValue('right');
+
     const addSource = sources.getByRole('button', { name: 'Add data source' });
     await expect(addSource).toBeVisible();
     await expect(addSource).toBeEnabled();
@@ -229,6 +275,11 @@ test.describe('persisted two-source SQL join', () => {
     await expect(page.getByRole('columnheader', { name: /total/ })).toBeVisible();
     await expect(page.getByRole('cell', { name: '18', exact: true })).toBeVisible();
 
+    const metricsBefore = await panelWidth(page, '.metrics-stack');
+    await dragSeparator(page, 'Resize Metrics', -40);
+    const metricsWidth = await panelWidth(page, '.metrics-stack');
+    expect(metricsWidth).toBeGreaterThan(metricsBefore + 30);
+
     const saved = await request.get(twoSourceProjectUrl);
     expect(saved.ok()).toBeTruthy();
     const document = await saved.json();
@@ -236,6 +287,24 @@ test.describe('persisted two-source SQL join', () => {
       'left_source',
       'right_source',
     ]);
+
+    await page.reload();
+    await expect(page.getByLabel('Project', { exact: true })).toHaveValue('two_source_e2e');
+    await expect.poll(() => panelWidth(page, '.toolbox')).toBeCloseTo(toolboxWidth, 0);
+    await expect.poll(() => panelWidth(page, '.inspector')).toBeCloseTo(inspectorWidth, 0);
+    const storedLayout = await page.evaluate(() => JSON.parse(
+      localStorage.getItem('calc-flow-studio:panel-layout:v1') ?? '{}',
+    ));
+    expect(storedLayout).toMatchObject({
+      version: 1,
+      toolbox: toolboxWidth,
+      inspector: inspectorWidth,
+      metrics: metricsWidth,
+    });
+
+    await page.getByRole('button', { name: /Run preview/ }).click();
+    await expect(page.getByText('completed', { exact: true })).toBeVisible({ timeout: 20_000 });
+    await expect.poll(() => panelWidth(page, '.metrics-stack')).toBeCloseTo(metricsWidth, 0);
 
     expect(await deleteTwoSourceProject(request)).toBe(204);
   });
