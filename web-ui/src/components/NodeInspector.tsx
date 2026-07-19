@@ -1,4 +1,6 @@
 import { SchemaEditor } from './SchemaEditor';
+import { InputAliasEditor } from './InputAliasEditor';
+import type { SqlInputAliasEdit } from './inputAliasEditor';
 import type {
   ArrowFieldConfig,
   NodeConfig,
@@ -13,13 +15,21 @@ interface NodeInspectorProps {
   arrowTypes: readonly string[];
   udfs: UdfCatalogEntry[];
   onChange: (node: NodeConfig) => void;
+  onSqlAliasEdit: (edit: SqlInputAliasEdit) => void;
   onDelete: () => void;
 }
 
 type ExpressionOperator = Extract<OperatorSpec, { kind: 'expression' }>;
 type SqlOperator = Extract<OperatorSpec, { kind: 'sql' }>;
 
-export function NodeInspector({ node, arrowTypes, udfs, onChange, onDelete }: NodeInspectorProps) {
+export function NodeInspector({
+  node,
+  arrowTypes,
+  udfs,
+  onChange,
+  onSqlAliasEdit,
+  onDelete,
+}: NodeInspectorProps) {
   const patchNode = (change: Partial<NodeConfig>) => onChange({ ...node, ...change });
   const patchExpression = (change: Partial<ExpressionOperator>) => {
     if (node.operator.kind !== 'expression') return;
@@ -28,18 +38,6 @@ export function NodeInspector({ node, arrowTypes, udfs, onChange, onDelete }: No
   const patchSql = (change: Partial<SqlOperator>) => {
     if (node.operator.kind !== 'sql') return;
     patchNode({ operator: { ...node.operator, ...change } });
-  };
-  const updateSqlAliases = (value: string) => {
-    if (node.operator.kind !== 'sql') return;
-    const aliases = value
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean);
-    onChange({
-      ...node,
-      input_ports: [],
-      operator: { ...node.operator, aliases },
-    });
   };
   const declaredInputs = node.input_ports.map((port) => port.name);
   const inputNames = declaredInputs.length
@@ -149,13 +147,16 @@ export function NodeInspector({ node, arrowTypes, udfs, onChange, onDelete }: No
 
       {node.operator.kind === 'sql' && (
         <>
-          <label>
-            Input aliases
-            <input
-              value={node.operator.aliases.join(', ')}
-              onChange={(event) => updateSqlAliases(event.target.value)}
-            />
-          </label>
+          <InputAliasEditor
+            aliases={node.operator.aliases}
+            onAdd={() => onSqlAliasEdit({ type: 'add' })}
+            onRename={(alias, nextAlias) => onSqlAliasEdit({
+              type: 'rename',
+              alias,
+              nextAlias,
+            })}
+            onRemove={(alias) => onSqlAliasEdit({ type: 'remove', alias })}
+          />
           <label>
             DataFusion SQL
             <textarea

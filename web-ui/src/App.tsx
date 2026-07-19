@@ -33,6 +33,7 @@ import {
   type DataSourceDraft,
   type DataSourceFormat,
 } from './components/dataSourceEditor';
+import { editSqlInputAliases } from './components/inputAliasEditor';
 import { useRunEvents } from './hooks/useRunEvents';
 import {
   blankProject,
@@ -792,6 +793,10 @@ export default function App() {
             arrowTypes={ARROW_TYPES}
             udfs={catalog ?? []}
             onChange={updateNode}
+            onSqlAliasEdit={(edit) => {
+              const nodeId = selectedNode.id;
+              updateProject((current) => editSqlInputAliases(current, nodeId, edit));
+            }}
             onDelete={deleteSelectedNode}
           />
         ) : (

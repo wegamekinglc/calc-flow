@@ -138,6 +138,100 @@ describe('Calc Flow Studio', () => {
     expect(screen.getByLabelText('DataFusion SQL')).toHaveValue('SELECT * FROM input');
   });
 
+  it('persists a SQL alias rename across its schema port and incoming edge', async () => {
+    const base = blankProject();
+    const expression = base.pipeline.nodes[0];
+    const loadedProject = {
+      ...base,
+      id: 'alias_project',
+      name: 'Alias project',
+      pipeline: {
+        ...base.pipeline,
+        nodes: [
+          {
+            id: 'join',
+            operator: {
+              kind: 'sql' as const,
+              query: 'SELECT * FROM left JOIN right USING (id)',
+              aliases: ['left', 'right'],
+              udfs: [],
+            },
+            input_ports: [
+              { name: 'left', kind: 'table' as const, required: true, schema: [] },
+              {
+                name: 'right',
+                kind: 'table' as const,
+                required: true,
+                schema: [{ name: 'id', data_type: 'int64', nullable: false }],
+              },
+            ],
+            output_ports: [],
+            position: { x: 400, y: 100 },
+          },
+          { ...expression, id: 'left_branch', position: { x: 80, y: 40 } },
+          { ...expression, id: 'right_branch', position: { x: 80, y: 220 } },
+        ],
+        edges: [
+          {
+            source_node: 'left_branch',
+            source_port: 'output',
+            target_node: 'join',
+            target_port: 'left',
+          },
+          {
+            source_node: 'right_branch',
+            source_port: 'output',
+            target_node: 'join',
+            target_port: 'right',
+          },
+        ],
+      },
+    };
+    const summaries = [{
+      id: loadedProject.id,
+      name: loadedProject.name,
+      description: loadedProject.description,
+      node_count: loadedProject.pipeline.nodes.length,
+    }];
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith('/catalog')) return response(catalog);
+      if (path.endsWith('/projects') && !init?.method) return response(summaries);
+      if (path.endsWith('/projects/alias_project') && !init?.method) {
+        return response(loadedProject);
+      }
+      if (path.endsWith('/projects/alias_project') && init?.method === 'PUT') {
+        return response(JSON.parse(String(init.body)));
+      }
+      throw new Error(`Unexpected request ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<App />);
+
+    const right = await screen.findByLabelText('Input alias 2');
+    fireEvent.change(right, { target: { value: 'rhs' } });
+    fireEvent.keyDown(right, { key: 'Enter' });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(
+      fetchMock.mock.calls.some(([, init]) => init?.method === 'PUT'),
+    ).toBe(true));
+    const saveCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'PUT');
+    const saved = JSON.parse(String(saveCall?.[1]?.body));
+    expect(saved.pipeline.nodes[0].operator.aliases).toEqual(['left', 'rhs']);
+    expect(saved.pipeline.nodes[0].input_ports[1]).toEqual({
+      name: 'rhs',
+      kind: 'table',
+      required: true,
+      schema: [{ name: 'id', data_type: 'int64', nullable: false }],
+    });
+    expect(saved.pipeline.edges[1].target_port).toBe('rhs');
+    expect(loadedProject.pipeline.nodes[0].operator).toMatchObject({
+      aliases: ['left', 'right'],
+    });
+    expect(loadedProject.pipeline.edges[1].target_port).toBe('right');
+  });
+
   it('creates an unsaved draft before validating it', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);

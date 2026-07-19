@@ -24,6 +24,7 @@ describe('NodeInspector', () => {
           },
         ]}
         onChange={onChange}
+        onSqlAliasEdit={vi.fn()}
         onDelete={vi.fn()}
       />,
     );
@@ -82,6 +83,7 @@ describe('NodeInspector', () => {
         arrowTypes={['int64']}
         udfs={[]}
         onChange={vi.fn()}
+        onSqlAliasEdit={vi.fn()}
         onDelete={vi.fn()}
       />,
     );
@@ -120,11 +122,59 @@ describe('NodeInspector', () => {
         arrowTypes={['int64']}
         udfs={[]}
         onChange={vi.fn()}
+        onSqlAliasEdit={vi.fn()}
         onDelete={vi.fn()}
       />,
     );
 
     expect(screen.getByText('in · rows')).toBeInTheDocument();
     expect(screen.queryByText('out · output')).not.toBeInTheDocument();
+  });
+
+  it('emits semantic edits for independent SQL alias rows', () => {
+    const base = blankProject().pipeline.nodes[0];
+    const node = {
+      ...base,
+      operator: {
+        kind: 'sql' as const,
+        query: 'SELECT * FROM left JOIN right USING (id)',
+        aliases: ['left', 'right'],
+        udfs: [],
+      },
+    };
+    const onSqlAliasEdit = vi.fn();
+
+    render(
+      <NodeInspector
+        node={node}
+        arrowTypes={['int64']}
+        udfs={[]}
+        onChange={vi.fn()}
+        onSqlAliasEdit={onSqlAliasEdit}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText('Input alias 1')).toHaveValue('left');
+    expect(screen.getByLabelText('Input alias 2')).toHaveValue('right');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add input alias' }));
+    expect(onSqlAliasEdit).toHaveBeenLastCalledWith({ type: 'add' });
+
+    fireEvent.change(screen.getByLabelText('Input alias 2'), {
+      target: { value: 'rhs' },
+    });
+    fireEvent.keyDown(screen.getByLabelText('Input alias 2'), { key: 'Enter' });
+    expect(onSqlAliasEdit).toHaveBeenLastCalledWith({
+      type: 'rename',
+      alias: 'right',
+      nextAlias: 'rhs',
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove input alias 1' }));
+    expect(onSqlAliasEdit).toHaveBeenLastCalledWith({
+      type: 'remove',
+      alias: 'left',
+    });
   });
 });
