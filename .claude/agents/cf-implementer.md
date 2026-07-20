@@ -218,18 +218,18 @@ PR title with a category prefix (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`
 
 ## Key Conventions at a Glance
 
-| Element        | Convention                                                              |
-|----------------|-------------------------------------------------------------------------|
-| Rust           | rustfmt clean; clippy `-D warnings`; workspace tests green; llvm-cov ≥90 lines |
+| Element        | Convention                                                                           |
+|----------------|--------------------------------------------------------------------------------------|
+| Rust           | rustfmt clean; clippy `-D warnings`; workspace tests green; llvm-cov ≥90 lines       |
 | Python         | 3.13+; `from __future__ import annotations`; `list[str]`, `dict[str, Any]`, `A \| B` |
-| Functions      | pure transforms; never mutate inputs or caller-owned objects            |
-| State          | confined to owned boundaries (stateful operators, runners, stores)      |
-| Tables         | Arrow-backed; DataFusion is the only table engine                       |
-| Arrays         | Array API-backed (NumPy/JAX); allowlisted AST, never `eval`             |
-| UDFs           | `UdfReference(provider, name, version)`; configs never carry callables   |
-| Web            | async I/O; immutable React state updates; clean up async resources      |
-| Tests          | mirror source layout; `test_<behavior>()`; local fixtures               |
-| Generated code | never commit `python/calc_flow/_native*.so`; keep outputs under `target/` |
+| Functions      | pure transforms; never mutate inputs or caller-owned objects                         |
+| State          | confined to owned boundaries (stateful operators, runners, stores)                   |
+| Tables         | Arrow-backed; DataFusion is the only table engine                                    |
+| Arrays         | Array API-backed (NumPy/JAX); allowlisted AST, never `eval`                          |
+| UDFs           | `UdfReference(provider, name, version)`; configs never carry callables               |
+| Web            | async I/O; immutable React state updates; clean up async resources                   |
+| Tests          | mirror source layout; `test_<behavior>()`; local fixtures                            |
+| Generated code | never commit `python/calc_flow/_native*.so`; keep outputs under `target/`            |
 
 ## What Not to Do
 
