@@ -1798,6 +1798,14 @@ cd .claude/worktrees/pr-<PR_NUMBER>-review
 If you use `gh pr checkout <PR_NUMBER>` instead, first confirm the current working tree
 has no unrelated changes that would be overwritten or mixed into the review.
 
+If there is no PR (a branch review), adapt: diff with `git diff <base>...<branch>`,
+create the detached worktree at the branch head, and record the branch and base in the
+report header instead of `PR #<N>`. Note in the report when there are no check runs or
+prior reviews to consult.
+
+When the review ends, remove the review worktree (`git worktree remove`) so
+`.claude/worktrees/` does not accumulate clutter.
+
 ### Step 2: Understand the Change
 
 Read the PR description and scan the diff to understand:
@@ -1895,6 +1903,10 @@ Capture:
 - Test counts and any newly failing tests (compare against the PR's test plan)
 - Failures in areas the PR didn't touch (potential regressions)
 - Coverage floor violations
+
+For a docs-only PR no matrix surface is touched — say so in the report, and execute
+any runnable snippet the diff adds (building the native module first if needed) as
+the "verify nothing is broken" step.
 
 If anything fails, investigate whether it is pre-existing or introduced by this PR.
 Pre-existing failures should be noted; new failures are blocking.
