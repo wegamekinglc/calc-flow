@@ -14,7 +14,7 @@
 
 - Every task creates one new file; nothing existing is modified. Agent files are content, not code — TDD maps to a structural check per file (Task steps 2) plus a full validation (Task 12) and live smoke tests (Task 13).
 - Commits land directly on `main`, matching this repo's docs-commit precedent (the spec itself was committed this way). No worktree is needed for this plan — that discipline belongs to the agents being created, not to their definitions.
-- Commit messages use the parent-repo convention: `docs:` prefix, imperative summary under 72 chars, `Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>` trailer.
+- Commit messages use the parent-repo convention as qualified by this repo's `AGENTS.md`: `docs:` prefix, imperative summary under 72 chars, no tool-attribution trailer.
 
 ## File Structure
 
@@ -55,11 +55,11 @@ orchestrator routes work between them.
 |--------------|-------------------|--------|--------------------------------------------|---------------------------------------------|
 | Orchestrator | `cf-orchestrator` | purple | GitHub issues, all artifacts               | task list                                   |
 | Spec writer  | `cf-spec-writer`  | orange | issues, introduction.md, AGENTS.md, rules  | `.claude/specs/<slug>.md`                   |
-| API designer | `cf-api-designer` | pink   | spec, public headers, stubs, openapi.json  | `.claude/api-notes/<slug>.md`               |
+| API designer | `cf-api-designer` | pink   | spec, crate exports, stubs, openapi.json   | `.claude/api-notes/<slug>.md`               |
 | Critic       | `cf-critic`       | red    | spec, api-note                             | `.claude/critiques/<slug>.md`               |
 | Implementer  | `cf-implementer`  | green  | spec, api-note, critique                   | source code, tests, TDD in worktree         |
 | Tester       | `cf-tester`       | cyan   | source under-test, conventions             | tests for the touched surfaces, in worktree |
-| Reviewer     | `cf-reviewer`     | amber  | PR diff, all upstream artifacts            | review report, optional merge               |
+| Reviewer     | `cf-reviewer`     | amber  | PR diff, all upstream artifacts            | review report; merge on explicit request    |
 | Performancer | `cf-performancer` | yellow | finished impl, benchmark suites, baselines | perf-regression report, coverage advisory   |
 | Simplifier   | `cf-simplifier`   | blue   | finished impl, existing modules            | simplification report; optional apply edits |
 | Doc writer   | `cf-doc-writer`   | teal   | current source, AGENTS.md, docs            | `docs/` and `CHANGELOG.md`                  |
@@ -129,9 +129,10 @@ end-to-end.
   stale `CLAUDE.md` (retired `src/calc_flow/` layout) disagrees
 - `docs/introduction.md` — domain vocabulary (Batch, Port, Operator, Pipeline, Checkpoint,
   engines, runners); behavioral claims must match these docs
-- Parent-repo git conventions — `feature/`·`fix/` branches, imperative commits with a
-  why-body and `Co-Authored-By` trailer, category-prefixed PR titles, `## Summary` /
-  `## Test plan` PR bodies (embedded in `cf-implementer` and `cf-reviewer`)
+- Repo git conventions (`AGENTS.md`) — `feature/`·`fix/` branches, imperative commits
+  under 72 chars with a why-body, no tool-attribution trailer unless requested,
+  category-prefixed PR titles, `## Summary` / `## Test plan` PR bodies (embedded in
+  `cf-implementer` and `cf-reviewer`)
 
 ## Team Working Agreements
 
@@ -198,9 +199,7 @@ Expected: `2 tables aligned`
 
 ```bash
 git add .claude/agents/README.md
-git commit -m "docs: add cf agent team README
-
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
+git commit -m "docs: add cf agent team README"
 ```
 
 ---
@@ -425,9 +424,7 @@ Expected: `frontmatter ok`
 
 ```bash
 git add .claude/agents/cf-orchestrator.md
-git commit -m "docs: add cf-orchestrator agent
-
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
+git commit -m "docs: add cf-orchestrator agent"
 ```
 
 ---
@@ -635,9 +632,7 @@ Expected: `frontmatter ok`
 
 ```bash
 git add .claude/agents/cf-spec-writer.md
-git commit -m "docs: add cf-spec-writer agent
-
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
+git commit -m "docs: add cf-spec-writer agent"
 ```
 
 ---
@@ -876,9 +871,7 @@ Expected: `frontmatter ok`
 
 ```bash
 git add .claude/agents/cf-api-designer.md
-git commit -m "docs: add cf-api-designer agent
-
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
+git commit -m "docs: add cf-api-designer agent"
 ```
 
 ---
@@ -1127,9 +1120,7 @@ Expected: `frontmatter ok`
 
 ```bash
 git add .claude/agents/cf-critic.md
-git commit -m "docs: add cf-critic agent
-
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
+git commit -m "docs: add cf-critic agent"
 ```
 
 ---
@@ -1355,7 +1346,7 @@ When the matrix is green and style is clean, report a summary:
 
 Offer to create a commit and PR when the user is ready, following the parent-repo
 conventions: branch `feature/<description>` or `fix/<description>` off `main`; imperative
-commit summary under 72 chars, blank line, body explaining why, `Co-Authored-By` trailer;
+commit summary under 72 chars, blank line, body explaining why;
 PR title with a category prefix (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`,
 `test:`, `style:`, `perf:`, `ci:`) under 70 chars; PR body with `## Summary` and
 `## Test plan`.
@@ -1416,9 +1407,7 @@ Expected: `frontmatter ok`
 
 ```bash
 git add .claude/agents/cf-implementer.md
-git commit -m "docs: add cf-implementer agent
-
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
+git commit -m "docs: add cf-implementer agent"
 ```
 
 ---
@@ -1610,8 +1599,7 @@ particular. Fix any violations before proceeding.
 
 Follow the parent-repo conventions:
 - Branch: `feature/<module>-tests` from `main`
-- Commit message: `test:` prefix, imperative summary under 72 chars, body explaining
-  why, `Co-Authored-By` trailer
+- Commit message: `test:` prefix, imperative summary under 72 chars, body explaining why
 - PR title: `test:` prefix, under 70 characters
 - PR body: `## Summary` bullets and a `## Test plan` checklist
 
@@ -1675,9 +1663,7 @@ Expected: `frontmatter ok`
 
 ```bash
 git add .claude/agents/cf-tester.md
-git commit -m "docs: add cf-tester agent
-
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
+git commit -m "docs: add cf-tester agent"
 ```
 
 ---
@@ -1954,7 +1940,7 @@ merging it, confirm that intent before using a close operation.
 | Backend        | `pytest --cov=calc_flow_studio` green                                   |
 | Frontend       | `npm run build` + `npm test` green; e2e when flows change               |
 | Branches       | `feature/<desc>` / `fix/<desc>` off `main`                              |
-| Commits        | imperative <72 chars + why body + `Co-Authored-By` trailer              |
+| Commits        | imperative <72 chars + why body; no attribution trailer                 |
 | PR             | category prefix <70 chars; `## Summary` + `## Test plan`                |
 | Domain         | Batch immutable; DataFusion-only tables; no `eval`; data-only configs   |
 | Studio backend | loopback-only; safe YAML only                                           |
@@ -1994,9 +1980,7 @@ Expected: `frontmatter ok`
 
 ```bash
 git add .claude/agents/cf-reviewer.md
-git commit -m "docs: add cf-reviewer agent
-
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
+git commit -m "docs: add cf-reviewer agent"
 ```
 
 ---
@@ -2143,8 +2127,8 @@ Self-review every changed file against the project's markdown conventions:
 Follow the parent-repo conventions:
 
 - Branch: `feature/<slug>-docs` (create from `main` if not already on a suitable branch).
-- Commit message: `docs:` prefix, imperative summary under 72 chars, body explaining
-  *why* the docs changed, `Co-Authored-By` trailer.
+- Commit message: `docs:` prefix, imperative summary under 72 chars, body explaining *why* the docs
+  changed.
 - PR title: `docs:` prefix, under 70 characters.
 - PR body: `## Summary` (bullets of what was reconciled or added) and `## Test plan`
   (note that no test suite applies; list the manual verification done — e.g. "read
@@ -2257,9 +2241,7 @@ Expected: `frontmatter ok`
 
 ```bash
 git add .claude/agents/cf-doc-writer.md
-git commit -m "docs: add cf-doc-writer agent
-
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
+git commit -m "docs: add cf-doc-writer agent"
 ```
 
 ---
@@ -2537,9 +2519,7 @@ Expected: `frontmatter ok`
 
 ```bash
 git add .claude/agents/cf-performancer.md
-git commit -m "docs: add cf-performancer agent
-
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
+git commit -m "docs: add cf-performancer agent"
 ```
 
 ---
@@ -2845,9 +2825,7 @@ Expected: `frontmatter ok`
 
 ```bash
 git add .claude/agents/cf-simplifier.md
-git commit -m "docs: add cf-simplifier agent
-
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
+git commit -m "docs: add cf-simplifier agent"
 ```
 
 ---
@@ -2906,9 +2884,7 @@ If any assertion fails, fix the named file and re-run until clean. If a fix chan
 file, amend that file's earlier commit or commit the fix with:
 ```bash
 git add .claude/agents/<file>.md
-git commit -m "docs: fix <file> consistency
-
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
+git commit -m "docs: fix <file> consistency"
 ```
 
 - [ ] **Step 2: Verify git history**

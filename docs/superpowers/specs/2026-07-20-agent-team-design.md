@@ -165,11 +165,12 @@ Embedded in `cf-implementer`, `cf-tester`, and `cf-reviewer`:
 ### Git conventions
 
 Embedded in `cf-implementer` and `cf-reviewer`, inherited from the parent
-repo: branches `feature/<description>` or `fix/<description>` off `main`;
-imperative commit summaries under 72 chars with a why-explaining body and a
-`Co-Authored-By` trailer; PR titles with a category prefix (`feat:`, `fix:`,
-`docs:`, `chore:`, `refactor:`, `test:`, `style:`, `perf:`, `ci:`) under 70
-chars; PR bodies with `## Summary` and `## Test plan`.
+repo and qualified by this repo's `AGENTS.md`: branches `feature/<description>`
+or `fix/<description>` off `main`; imperative commit summaries under 72 chars
+with a why-explaining body and no tool-attribution trailer unless requested
+(`AGENTS.md` overrides the parent repo here); PR titles with a category prefix
+(`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, `test:`, `style:`, `perf:`,
+`ci:`) under 70 chars; PR bodies with `## Summary` and `## Test plan`.
 
 ### Source of truth caveat
 
