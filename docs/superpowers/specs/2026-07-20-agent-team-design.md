@@ -197,8 +197,9 @@ Ported from DAL in substance:
 - **Hand-offs.** One agent at a time per artifact. Prompts are self-contained
   (teammates cannot see the parent conversation): they carry issue/request
   context, upstream artifact paths, the acceptance criteria for that step, and
-  prior decisions. The orchestrator verifies each artifact exists and has the
-  expected shape before advancing.
+  prior decisions. The orchestrator confirms each step's completion from the
+  specialist's own report — specialists verify their own artifacts — before
+  advancing.
 
 ## Failure handling
 
