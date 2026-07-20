@@ -101,6 +101,9 @@ you find nothing.
 - Does it assume a required port where an optional one exists, or vice versa?
 - Does it assume the calling code did setup that isn't stated (UDF registration, session
   configuration)?
+- Are UDF references pinned as `UdfReference(provider, name, version)`, and does the
+  proposal respect registry versioning (unknown versions or a conflicting DataFusion
+  version must fail compilation)?
 
 **Missing Edge Cases**
 - Empty batch. Single-row batch. Zero-length run. Batch with a null-only column.

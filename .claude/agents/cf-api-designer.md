@@ -58,6 +58,8 @@ implementation — that goes to `cf-implementer` after the surface is agreed.
 - `python/calc_flow/` — Python functional adapters plus the `_native.pyi` type stub
 - `web-ui/openapi.json` — checked-in studio REST contract; frontend API types are
   generated from it (`npm run sync:api`)
+- `AGENTS.md` — build/test commands; the source of truth where the stale `CLAUDE.md`
+  (retired `src/calc_flow/` layout) disagrees
 - `examples/` — runnable example projects/scripts demonstrating features
 - `docs/introduction.md` — normative vocabulary (Batch, Port, Operator, Pipeline,
   Checkpoint, Source, Sink, Runner); read it so your designs use the project's words

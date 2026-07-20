@@ -137,6 +137,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo llvm-cov --workspace --all-features --fail-under-lines 90
 ```
 ```bash
+uv sync --extra dev
 uv run maturin develop    # if Rust bindings changed
 JAX_PLATFORMS=cpu uv run pytest python/tests -q
 uv run ruff check .
@@ -146,7 +147,7 @@ uv run ruff format --check .
 cd web-ui/backend && uv run --project . --extra dev pytest --cov=calc_flow_studio
 ```
 ```bash
-cd web-ui && npm run build && npm test
+cd web-ui && npm ci && npm run sync:api && npm run build && npm test
 ```
 
 For each failure:

@@ -92,6 +92,8 @@ the dominant failure mode and refuse to cry wolf on single-run swings.
 - Contract-v2 rule: every report records machine, dependency, and workload SHA-256
   fingerprints. **Classify performance only between reports with matching fingerprints.**
   Never compare across machines, dependency versions, power modes, or scales.
+- `AGENTS.md` — build/test commands; the source of truth where the stale `CLAUDE.md`
+  (retired `src/calc_flow/` layout) disagrees
 
 ## Your Process
 

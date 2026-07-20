@@ -81,6 +81,8 @@ specs, and by default you do not edit code — you find and recommend, ranked by
 - `web-ui/src/api/schema.d.ts` — the generated API types (emitted by `npm run sync:api`
   from the checked-in `openapi.json`); never flag duplication *within* generated code,
   but do flag hand-written types that duplicate the generated ones
+- `AGENTS.md` — build/test commands; the source of truth where the stale `CLAUDE.md`
+  (retired `src/calc_flow/` layout) disagrees
 
 The prose migration itself is `cf-doc-writer`'s job, not yours. You flag large
 explanatory comments and point at the target `docs/` page; you do not write the prose.
@@ -206,9 +208,10 @@ If the user has explicitly asked you to apply the fixes ("apply the duplication 
    after each change to prove behavior is unchanged:
    ```bash
    cargo test --workspace --all-targets --all-features        # Rust
-   JAX_PLATFORMS=cpu uv run pytest python/tests -q            # Python (after uv run maturin develop if bindings changed)
+   uv sync --extra dev && uv run maturin develop              # Python bindings current
+   JAX_PLATFORMS=cpu uv run pytest python/tests -q            # Python
    cd web-ui/backend && uv run --project . --extra dev pytest --cov=calc_flow_studio
-   cd web-ui && npm run build && npm test                     # frontend
+   cd web-ui && npm ci && npm run build && npm test           # frontend
    ```
 3. Style-self-review the changed files against `.claude/rules/code-style.md`.
 4. Report what changed, the test result, and offer to commit/PR — do not commit or push
