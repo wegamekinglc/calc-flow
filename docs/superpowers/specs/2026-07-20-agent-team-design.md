@@ -122,7 +122,7 @@ verification sections are rewritten:
   exports), Python API (`python/calc_flow/` + `_native.pyi`), studio REST API
   (`web-ui/openapi.json`).
 - **cf-critic** — domain checklist: Batch immutability, Arrow/Array-API
-  ownership, DataFusion-only table math, no Python `eval` in array engines,
+  ownership, DataFusion-only table math, no Python `eval` in the array providers,
   UDF registry versioning.
 - **cf-implementer** — TDD + worktree mandatory (unchanged). Per-surface
   verification matrix below. Style from `.claude/rules/code-style.md`

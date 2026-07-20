@@ -539,9 +539,9 @@ or the issue body. Cover:
   A new `BatchKind`? Schema contracts on ports?
 - **State and checkpoints** — does the change hold state across batches? What are the
   `snapshot`/`restore`/`reset` semantics? Checkpoint version compatibility?
-- **Engine constraints** — table math stays in DataFusion; array engines interpret an
-  allowlisted AST (never Python `eval`); UDFs are referenced by `UdfReference(name,
-  version)` — configs never carry callables or import paths
+- **Engine constraints** — table math stays in DataFusion; array providers interpret an
+  allowlisted AST (never Python `eval`); UDFs are referenced by `UdfReference(provider,
+  name, version)` — configs never carry callables or import paths
 - **Runner semantics** — micro-batch vs streaming; source cursor behavior; at-least-once
   sink delivery and what duplicates mean for this change
 - **Inputs and outputs** — types, units, valid ranges, error conditions
@@ -605,7 +605,7 @@ a build/check command, or a measurable observation. "Code should be clean" is no
 
 Report a 3-5 sentence summary of the spec and where it lives. Identify the next agent in
 the chain — usually `cf-api-designer` if there's a public API change (crate exports,
-Python API, or studio REST), or `cf-critic`/`cf-implementer` to proceed directly.
+Python API, or studio REST), or `cf-critic` to proceed (the orchestrator routes from there).
 
 ## What Not to Do
 
@@ -738,7 +738,7 @@ A design is a good API when:
 - Required arguments are required; optional knobs have sensible defaults
 - Names match the `docs/introduction.md` vocabulary (don't invent new terms)
 - Error messages name the offending input and the constraint that failed
-- Configurations are data-only: UDFs appear as `UdfReference(name, version)`; configs and
+- Configurations are data-only: UDFs appear as `UdfReference(provider, name, version)`; configs and
   catalogs never carry source, callables, or import paths
 - APIs return new values; they never mutate caller-owned objects (Batch envelopes are
   immutable end-to-end)
@@ -857,7 +857,7 @@ or has open questions, and the next agent (`cf-critic` for an adversarial pass, 
   spec.
 - Don't invent vocabulary that contradicts `docs/introduction.md`.
 - Don't put callables, source, or import paths into any config or catalog shape — UDFs
-  travel as `UdfReference(name, version)`.
+  travel as `UdfReference(provider, name, version)`.
 ````
 
 - [ ] **Step 2: Verify frontmatter**
@@ -990,7 +990,7 @@ you find nothing.
   owned by NumPy/JAX via the Array API?
 - Is checkpoint restore deterministic — replay from source cursor plus node-keyed state
   reproduces the same outputs?
-- Are expressions safe: no Python `eval` in array engines, only the allowlisted AST?
+- Are expressions safe: no Python `eval` in the array providers, only the allowlisted AST?
 
 **Hidden Assumptions**
 - Is input always sorted? Always non-empty? Always single upstream?
@@ -1328,8 +1328,8 @@ For each behavior:
 2. **GREEN** — write the minimum production code to pass. Follow the style rules:
    functional-first, no mutation of inputs or caller-owned objects, mutation confined to
    owned stateful boundaries; table math in DataFusion only; array expressions through
-   the allowlisted AST, never Python `eval`; UDFs referenced by `UdfReference(name,
-   version)` only.
+   the allowlisted AST, never Python `eval`; UDFs referenced by `UdfReference(provider,
+   name, version)` only.
 3. **REFACTOR** — clean up while green; re-run the surface's suite after each refactor.
 4. **Repeat** — happy path, then edge cases (empty batch, single row, boundary sizes),
    then error handling (invalid inputs error loudly), then state recovery (checkpoint
@@ -1373,7 +1373,7 @@ PR title with a category prefix (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`
 | State          | confined to owned boundaries (stateful operators, runners, stores)      |
 | Tables         | Arrow-backed; DataFusion is the only table engine                       |
 | Arrays         | Array API-backed (NumPy/JAX); allowlisted AST, never `eval`             |
-| UDFs           | `UdfReference(name, version)`; configs never carry callables            |
+| UDFs           | `UdfReference(provider, name, version)`; configs never carry callables   |
 | Web            | async I/O; immutable React state updates; clean up async resources      |
 | Tests          | mirror source layout; `test_<behavior>()`; local fixtures               |
 | Generated code | never commit `python/calc_flow/_native*.so`; keep outputs under `target/` |
@@ -1387,7 +1387,7 @@ PR title with a category prefix (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`
 - Don't batch many behaviors into one big cycle — keep cycles small
 - Don't weaken tests to make them pass — fix the implementation
 - Don't mutate function inputs or caller-owned objects — return new values
-- Don't bypass DataFusion for table math or use Python `eval` in array engines
+- Don't bypass DataFusion for table math or use Python `eval` in the array providers
 - Don't add placeholder modules, unused stubs, or speculative abstractions
 - Don't block FastAPI's event loop or the browser main thread with synchronous I/O
 - Don't commit a generated `_native*.so` or leave build outputs outside `target/`
@@ -1821,8 +1821,8 @@ need context. Check:
 - `Batch` envelopes stay immutable end-to-end
 - Table batches are Arrow-backed and calculated only in DataFusion; array batches are
   Array API-backed (NumPy/JAX)
-- Array engines interpret the allowlisted AST — never Python `eval`
-- UDFs travel as `UdfReference(name, version)`; configs/catalogs carry no source,
+- Array providers interpret the allowlisted AST — never Python `eval`
+- UDFs travel as `UdfReference(provider, name, version)`; configs/catalogs carry no source,
   callables, or import paths
 - Checkpoint format changes are versioned; old checkpoints still restore
 
