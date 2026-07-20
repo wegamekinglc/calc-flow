@@ -110,7 +110,7 @@ you find nothing.
   the design say what that implies?
 
 **Backwards Compatibility**
-- Existing project configs — do they still compile under the new `ProjectConfig` rules?
+- Existing project configs — do they still compile under the v2 `ProjectSpec`/`ProjectDocument` contract?
 - Existing checkpoints — can they still be restored?
 - Python API (`_native.pyi`) and crate exports — source-compatible?
 - `web-ui/openapi.json` — additive or breaking for generated frontend types?
