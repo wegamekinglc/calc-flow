@@ -146,6 +146,8 @@ need context. Check:
   `AGENTS.md` for command changes) are updated — flag gaps for `cf-doc-writer`
 - Changed `.md` files: aligned pipe tables per the markdown rule, no trailing whitespace,
   files end with a newline
+- Oversized source comments that have grown into design/algorithm prose and should
+  migrate to `docs/` (route to `cf-doc-writer`)
 
 #### Security
 - No hardcoded secrets or credentials
