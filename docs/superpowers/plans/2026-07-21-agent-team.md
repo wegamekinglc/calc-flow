@@ -192,7 +192,7 @@ for block in table_blocks:
 print(f"{len(table_blocks)} tables aligned")
 EOF
 ```
-Expected: `3 tables aligned`
+Expected: `2 tables aligned`
 
 - [ ] **Step 3: Commit**
 
