@@ -145,7 +145,8 @@ verification sections are rewritten:
 
 ### Verification matrix
 
-Embedded in `cf-implementer`, `cf-tester`, and `cf-reviewer`:
+Embedded in `cf-implementer`, `cf-tester`, and `cf-reviewer` (the benchmark
+command below is the `cf-performancer`'s, and stays advisory — it never gates):
 
 - **Rust:** `cargo fmt --all --check` ·
   `cargo clippy --workspace --all-targets --all-features -- -D warnings` ·

@@ -732,6 +732,8 @@ implementation — that goes to `cf-implementer` after the surface is agreed.
 - `python/calc_flow/` — Python functional adapters plus the `_native.pyi` type stub
 - `web-ui/openapi.json` — checked-in studio REST contract; frontend API types are
   generated from it (`npm run sync:api`)
+- `AGENTS.md` — build/test commands; the source of truth where the stale `CLAUDE.md`
+  (retired `src/calc_flow/` layout) disagrees
 - `examples/` — runnable example projects/scripts demonstrating features
 - `docs/introduction.md` — normative vocabulary (Batch, Port, Operator, Pipeline,
   Checkpoint, Source, Sink, Runner); read it so your designs use the project's words
@@ -1016,6 +1018,9 @@ you find nothing.
 - Does it assume a required port where an optional one exists, or vice versa?
 - Does it assume the calling code did setup that isn't stated (UDF registration, session
   configuration)?
+- Are UDF references pinned as `UdfReference(provider, name, version)`, and does the
+  proposal respect registry versioning (unknown versions or a conflicting DataFusion
+  version must fail compilation)?
 
 **Missing Edge Cases**
 - Empty batch. Single-row batch. Zero-length run. Batch with a null-only column.
@@ -1375,7 +1380,8 @@ When the matrix is green and style is clean, report a summary:
 
 Offer to create a commit and PR when the user is ready, following the parent-repo
 conventions: branch `feature/<description>` or `fix/<description>` off `main`; category-prefixed imperative
-commit summary under 72 chars, blank line, body explaining why;
+commit summary under 72 chars, blank line, body explaining why, no
+tool-attribution trailer unless the user requests it;
 PR title with a category prefix (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`,
 `test:`, `style:`, `perf:`, `ci:`) under 70 chars; PR body with `## Summary` and
 `## Test plan`.
@@ -1590,6 +1596,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo llvm-cov --workspace --all-features --fail-under-lines 90
 ```
 ```bash
+uv sync --extra dev
 uv run maturin develop    # if Rust bindings changed
 JAX_PLATFORMS=cpu uv run pytest python/tests -q
 uv run ruff check .
@@ -1599,7 +1606,7 @@ uv run ruff format --check .
 cd web-ui/backend && uv run --project . --extra dev pytest --cov=calc_flow_studio
 ```
 ```bash
-cd web-ui && npm run build && npm test
+cd web-ui && npm ci && npm run sync:api && npm run build && npm test
 ```
 
 For each failure:
@@ -2394,6 +2401,8 @@ the dominant failure mode and refuse to cry wolf on single-run swings.
 - Contract-v2 rule: every report records machine, dependency, and workload SHA-256
   fingerprints. **Classify performance only between reports with matching fingerprints.**
   Never compare across machines, dependency versions, power modes, or scales.
+- `AGENTS.md` — build/test commands; the source of truth where the stale `CLAUDE.md`
+  (retired `src/calc_flow/` layout) disagrees
 
 ## Your Process
 
@@ -2661,6 +2670,8 @@ specs, and by default you do not edit code — you find and recommend, ranked by
 - `web-ui/src/api/schema.d.ts` — the generated API types (emitted by `npm run sync:api`
   from the checked-in `openapi.json`); never flag duplication *within* generated code,
   but do flag hand-written types that duplicate the generated ones
+- `AGENTS.md` — build/test commands; the source of truth where the stale `CLAUDE.md`
+  (retired `src/calc_flow/` layout) disagrees
 
 The prose migration itself is `cf-doc-writer`'s job, not yours. You flag large
 explanatory comments and point at the target `docs/` page; you do not write the prose.
@@ -2786,9 +2797,10 @@ If the user has explicitly asked you to apply the fixes ("apply the duplication 
    after each change to prove behavior is unchanged:
    ```bash
    cargo test --workspace --all-targets --all-features        # Rust
-   JAX_PLATFORMS=cpu uv run pytest python/tests -q            # Python (after uv run maturin develop if bindings changed)
+   uv sync --extra dev && uv run maturin develop              # Python bindings current
+   JAX_PLATFORMS=cpu uv run pytest python/tests -q            # Python
    cd web-ui/backend && uv run --project . --extra dev pytest --cov=calc_flow_studio
-   cd web-ui && npm run build && npm test                     # frontend
+   cd web-ui && npm ci && npm run build && npm test           # frontend
    ```
 3. Style-self-review the changed files against `.claude/rules/code-style.md`.
 4. Report what changed, the test result, and offer to commit/PR — do not commit or push
