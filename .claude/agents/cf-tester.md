@@ -134,6 +134,7 @@ Run the suites for every surface you touched:
 cargo test --workspace --all-targets --all-features
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo llvm-cov --workspace --all-features --fail-under-lines 90
 ```
 ```bash
 uv run maturin develop    # if Rust bindings changed
