@@ -18,19 +18,19 @@
 
 ## File Structure
 
-| File                             | Responsibility                                            |
-|----------------------------------|-----------------------------------------------------------|
-| `.claude/agents/README.md`       | Team contract: roster, workflow, artifact layout, agreements, etiquette |
-| `.claude/agents/cf-orchestrator.md` | Dispatcher: plans routes, delegates, reports. No file/shell tools |
-| `.claude/agents/cf-spec-writer.md`  | Turns vague asks into testable specs in `.claude/specs/`  |
-| `.claude/agents/cf-api-designer.md` | Designs public surfaces (Rust/Python/REST) in `.claude/api-notes/` |
-| `.claude/agents/cf-critic.md`       | Adversarial review of specs/api-notes into `.claude/critiques/` |
-| `.claude/agents/cf-implementer.md`  | TDD implementation across Rust/Python/TS, worktree-isolated |
-| `.claude/agents/cf-tester.md`       | Independent test author across all four surfaces, worktree-isolated |
-| `.claude/agents/cf-reviewer.md`     | Blocking PR gate: full matrix, conventions, optional merge |
-| `.claude/agents/cf-doc-writer.md`   | Owns `docs/` + `CHANGELOG.md`, worktree-isolated, TDD-exempt |
-| `.claude/agents/cf-performancer.md` | Out-of-band benchmark regression + coverage advisory      |
-| `.claude/agents/cf-simplifier.md`   | Out-of-band duplication/simplification sweep, opt-in apply |
+| File                                | Responsibility                                                          |
+|-------------------------------------|-------------------------------------------------------------------------|
+| `.claude/agents/README.md`          | Team contract: roster, workflow, artifact layout, agreements, etiquette |
+| `.claude/agents/cf-orchestrator.md` | Dispatcher: plans routes, delegates, reports. No file/shell tools       |
+| `.claude/agents/cf-spec-writer.md`  | Turns vague asks into testable specs in `.claude/specs/`                |
+| `.claude/agents/cf-api-designer.md` | Designs public surfaces (Rust/Python/REST) in `.claude/api-notes/`      |
+| `.claude/agents/cf-critic.md`       | Adversarial review of specs/api-notes into `.claude/critiques/`         |
+| `.claude/agents/cf-implementer.md`  | TDD implementation across Rust/Python/TS, worktree-isolated             |
+| `.claude/agents/cf-tester.md`       | Independent test author across all four surfaces, worktree-isolated     |
+| `.claude/agents/cf-reviewer.md`     | Blocking PR gate: full matrix, conventions, optional merge              |
+| `.claude/agents/cf-doc-writer.md`   | Owns `docs/` + `CHANGELOG.md`, worktree-isolated, TDD-exempt            |
+| `.claude/agents/cf-performancer.md` | Out-of-band benchmark regression + coverage advisory                    |
+| `.claude/agents/cf-simplifier.md`   | Out-of-band duplication/simplification sweep, opt-in apply              |
 
 ---
 
@@ -1367,18 +1367,18 @@ PR title with a category prefix (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`
 
 ## Key Conventions at a Glance
 
-| Element        | Convention                                                              |
-|----------------|-------------------------------------------------------------------------|
-| Rust           | rustfmt clean; clippy `-D warnings`; workspace tests green; llvm-cov ≥90 lines |
+| Element        | Convention                                                                           |
+|----------------|--------------------------------------------------------------------------------------|
+| Rust           | rustfmt clean; clippy `-D warnings`; workspace tests green; llvm-cov ≥90 lines       |
 | Python         | 3.13+; `from __future__ import annotations`; `list[str]`, `dict[str, Any]`, `A \| B` |
-| Functions      | pure transforms; never mutate inputs or caller-owned objects            |
-| State          | confined to owned boundaries (stateful operators, runners, stores)      |
-| Tables         | Arrow-backed; DataFusion is the only table engine                       |
-| Arrays         | Array API-backed (NumPy/JAX); allowlisted AST, never `eval`             |
-| UDFs           | `UdfReference(provider, name, version)`; configs never carry callables   |
-| Web            | async I/O; immutable React state updates; clean up async resources      |
-| Tests          | mirror source layout; `test_<behavior>()`; local fixtures               |
-| Generated code | never commit `python/calc_flow/_native*.so`; keep outputs under `target/` |
+| Functions      | pure transforms; never mutate inputs or caller-owned objects                         |
+| State          | confined to owned boundaries (stateful operators, runners, stores)                   |
+| Tables         | Arrow-backed; DataFusion is the only table engine                                    |
+| Arrays         | Array API-backed (NumPy/JAX); allowlisted AST, never `eval`                          |
+| UDFs           | `UdfReference(provider, name, version)`; configs never carry callables               |
+| Web            | async I/O; immutable React state updates; clean up async resources                   |
+| Tests          | mirror source layout; `test_<behavior>()`; local fixtures                            |
+| Generated code | never commit `python/calc_flow/_native*.so`; keep outputs under `target/`            |
 
 ## What Not to Do
 
@@ -2341,7 +2341,7 @@ the dominant failure mode and refuse to cry wolf on single-run swings.
 - Scales (via `CALC_FLOW_BENCHMARK_SCALE`):
 
 | Scale      | Table rows | Array elements | Matrix dimension |
-|------------|-----------:|---------------:|-----------------:|
+|------------|------------|----------------|------------------|
 | `overhead` |      1,000 |          1,000 |               16 |
 | `small`    |     10,000 |         10,000 |               64 |
 | `standard` |    100,000 |        100,000 |              256 |
@@ -2477,17 +2477,17 @@ issue if the user wants.
 
 ## Key Conventions at a Glance
 
-| Element             | Convention                                                              |
-|---------------------|-------------------------------------------------------------------------|
-| Run command         | `CALC_FLOW_BENCHMARK_SCALE=<scale> JAX_PLATFORMS=cpu uv run pytest benchmarks --benchmark-only --benchmark-json=target/benchmark-results/<scale>.json` |
-| Scales              | `overhead` (1k/1k/16), `small` (10k/10k/64), `standard` (100k/100k/256), `nightly` (1M/1M/512) |
-| Local default       | `overhead` + `standard`; `nightly` on request                           |
-| Compatibility       | classify only matching contract-v2 fingerprints (machine/deps/workload) |
-| Repetitions         | ≥2 full interleaved runs per ref + one same-ref pair for the spread     |
-| Reduction           | per-case **min**, never mean/median                                     |
-| Regression bar      | branch min exceeds baseline min by > 2× the same-ref spread, sustained  |
-| CI posture          | informational only (`benchmarks.yml`); no gate until 20 stable samples  |
-| Verdict categories  | regression / no-change / improvement / inconclusive                     |
+| Element            | Convention                                                                                                                                             |
+|--------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Run command        | `CALC_FLOW_BENCHMARK_SCALE=<scale> JAX_PLATFORMS=cpu uv run pytest benchmarks --benchmark-only --benchmark-json=target/benchmark-results/<scale>.json` |
+| Scales             | `overhead` (1k/1k/16), `small` (10k/10k/64), `standard` (100k/100k/256), `nightly` (1M/1M/512)                                                         |
+| Local default      | `overhead` + `standard`; `nightly` on request                                                                                                          |
+| Compatibility      | classify only matching contract-v2 fingerprints (machine/deps/workload)                                                                                |
+| Repetitions        | ≥2 full interleaved runs per ref + one same-ref pair for the spread                                                                                    |
+| Reduction          | per-case **min**, never mean/median                                                                                                                    |
+| Regression bar     | branch min exceeds baseline min by > 2× the same-ref spread, sustained                                                                                 |
+| CI posture         | informational only (`benchmarks.yml`); no gate until 20 stable samples                                                                                 |
+| Verdict categories | regression / no-change / improvement / inconclusive                                                                                                    |
 
 ## What Not to Do
 
