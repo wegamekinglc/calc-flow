@@ -210,7 +210,7 @@ When the matrix is green and style is clean, report a summary:
 - Any design deviations from the original plan and why
 
 Offer to create a commit and PR when the user is ready, following the parent-repo
-conventions: branch `feature/<description>` or `fix/<description>` off `main`; imperative
+conventions: branch `feature/<description>` or `fix/<description>` off `main`; category-prefixed imperative
 commit summary under 72 chars, blank line, body explaining why;
 PR title with a category prefix (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`,
 `test:`, `style:`, `perf:`, `ci:`) under 70 chars; PR body with `## Summary` and
