@@ -97,7 +97,8 @@ Before proposing anything, read what is already there:
 - Any analogous example under `examples/`
 - The `docs/introduction.md` section that defines the vocabulary
 
-Note the existing conventions: functional builder sugar (`then`/`add` on pipelines),
+Note the existing conventions: functional builder steps (`add_node`/`connect` in
+Rust; `expression`/`sql`/`external`/`connect` in Python, each returning a new builder),
 `Port` declarations with `BatchKind` and optional exact Arrow schemas, checkpoint
 lifecycle (`snapshot`/`restore`/`reset`), and how errors surface through each layer.
 
@@ -143,7 +144,7 @@ def tumbling_window(...) -> ...: ...
 ~~~
 
 ~~~http
-POST /api/v1/projects/{id}/windows
+POST /api/v2/projects/{id}/windows
 ~~~
 
 ## Why This Shape
@@ -157,7 +158,8 @@ POST /api/v1/projects/{id}/windows
 
 ## Example
 <10-30 lines of pseudo-code or real Rust/Python showing the typical happy path. This
-becomes the seed for an `examples/` entry when implementation lands.>
+becomes the seed for an `examples/` entry when implementation lands; the shipped
+example itself targets 20-50 lines.>
 
 ## Open Questions
 - <flag for the spec writer or critic>
