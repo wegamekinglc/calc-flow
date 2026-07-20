@@ -88,9 +88,9 @@ or the issue body. Cover:
   A new `BatchKind`? Schema contracts on ports?
 - **State and checkpoints** — does the change hold state across batches? What are the
   `snapshot`/`restore`/`reset` semantics? Checkpoint version compatibility?
-- **Engine constraints** — table math stays in DataFusion; array engines interpret an
-  allowlisted AST (never Python `eval`); UDFs are referenced by `UdfReference(name,
-  version)` — configs never carry callables or import paths
+- **Engine constraints** — table math stays in DataFusion; array providers interpret an
+  allowlisted AST (never Python `eval`); UDFs are referenced by `UdfReference(provider,
+  name, version)` — configs never carry callables or import paths
 - **Runner semantics** — micro-batch vs streaming; source cursor behavior; at-least-once
   sink delivery and what duplicates mean for this change
 - **Inputs and outputs** — types, units, valid ranges, error conditions
@@ -154,7 +154,7 @@ a build/check command, or a measurable observation. "Code should be clean" is no
 
 Report a 3-5 sentence summary of the spec and where it lives. Identify the next agent in
 the chain — usually `cf-api-designer` if there's a public API change (crate exports,
-Python API, or studio REST), or `cf-critic`/`cf-implementer` to proceed directly.
+Python API, or studio REST), or `cf-critic` to proceed (the orchestrator routes from there).
 
 ## What Not to Do
 
