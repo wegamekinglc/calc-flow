@@ -241,6 +241,8 @@ PR title with a category prefix (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`
 - Don't weaken tests to make them pass — fix the implementation
 - Don't mutate function inputs or caller-owned objects — return new values
 - Don't bypass DataFusion for table math or use Python `eval` in the array providers
+- Don't let source comments grow into design or algorithm prose — migrate it to
+  `docs/` (route to `cf-doc-writer`) and leave a one-line `// why` pointer
 - Don't add placeholder modules, unused stubs, or speculative abstractions
 - Don't block FastAPI's event loop or the browser main thread with synchronous I/O
 - Don't commit a generated `_native*.so` or leave build outputs outside `target/`
