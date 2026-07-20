@@ -114,8 +114,8 @@ inside a worktree):
   parallel.
 - Self-contained prompts. The teammate agent doesn't see the parent conversation, so the
   invocation must include all paths, decisions, and acceptance criteria it needs.
-- Verify before advancing. The orchestrator checks each artifact exists and has the
-  expected shape (acceptance criteria, file map, verdict, etc.) before the next step
-  starts.
+- Verify before advancing. The orchestrator confirms each step's completion from the
+  specialist's own report — specialists verify their own artifacts — before
+  dispatching the next step.
 - A `Block` verdict from the critic routes work back to the upstream author, not forward
   to the implementer.

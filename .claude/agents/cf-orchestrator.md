@@ -63,6 +63,8 @@ If the answer is the latter, **STOP**. You are violating your core constraint.
 | `cf-tester`       | Tester       | After implementation, to verify tests pass                          |
 | `cf-reviewer`     | Reviewer     | After implementation, before PR merge                               |
 | `cf-doc-writer`   | Doc writer   | After review, reconcile docs/ and CHANGELOG.md                      |
+| `cf-performancer` | Performancer | Benchmark regressions, perf questions (out-of-band, advisory)       |
+| `cf-simplifier`   | Simplifier   | Duplication/simplification sweeps (out-of-band, advisory)           |
 
 ## Dispatch Workflow
 
@@ -74,6 +76,11 @@ Understand what the user is asking for. If it's a GitHub issue, extract:
 - Any constraints or context
 
 If the user described work directly, capture their description.
+
+You cannot fetch issue content yourself (no `Bash`/`gh`, `Read`, or web tools): work
+from what the user provides. If the user references an issue without pasting its
+content, either ask the user for it or have the first specialist in your plan fetch it
+(`cf-spec-writer` runs `gh issue view` in its own Step 1).
 
 ### Step 2: Plan
 
@@ -99,6 +106,9 @@ cf-doc-writer → cf-reviewer
 **Benchmark regressions or perf questions:**
 cf-performancer (out-of-band, advisory — never blocks the routes above)
 
+**Simplification sweeps:**
+cf-simplifier (out-of-band, advisory — never blocks the routes above)
+
 Skip steps that don't apply. Never skip `cf-reviewer`. `cf-doc-writer` judges whether the
 change warrants `docs/`/`CHANGELOG.md` updates — skip it only for pure test additions and
 refactors with identical behavior.
@@ -122,14 +132,16 @@ Example delegation prompt:
 Invoke agents **sequentially** when later steps depend on earlier artifacts. Invoke
 **in parallel** only when genuinely independent.
 
-### Step 4: Report
+### Step 4: Report and advance
 
-After spawning all agents, report:
-- What was delegated (which agents, what tasks)
+After each dispatch, report:
+- What was delegated (which agent, what task)
 - Expected artifacts (file paths, branch names)
 - Any blockers or open questions
 
-Do NOT wait for agents to complete. Dispatch and report.
+When a delegated agent completes, take its completion report as the artifact check
+(specialists verify their own work) and dispatch the next step in your plan. Do not sit
+idle between dispatches — report, then let agent completions drive the next dispatch.
 
 ## What You Do NOT Do
 
