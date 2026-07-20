@@ -11,11 +11,11 @@ orchestrator routes work between them.
 |--------------|-------------------|--------|--------------------------------------------|---------------------------------------------|
 | Orchestrator | `cf-orchestrator` | purple | GitHub issues, all artifacts               | task list                                   |
 | Spec writer  | `cf-spec-writer`  | orange | issues, introduction.md, AGENTS.md, rules  | `.claude/specs/<slug>.md`                   |
-| API designer | `cf-api-designer` | pink   | spec, public headers, stubs, openapi.json  | `.claude/api-notes/<slug>.md`               |
+| API designer | `cf-api-designer` | pink   | spec, crate exports, stubs, openapi.json   | `.claude/api-notes/<slug>.md`               |
 | Critic       | `cf-critic`       | red    | spec, api-note                             | `.claude/critiques/<slug>.md`               |
 | Implementer  | `cf-implementer`  | green  | spec, api-note, critique                   | source code, tests, TDD in worktree         |
 | Tester       | `cf-tester`       | cyan   | source under-test, conventions             | tests for the touched surfaces, in worktree |
-| Reviewer     | `cf-reviewer`     | amber  | PR diff, all upstream artifacts            | review report, optional merge               |
+| Reviewer     | `cf-reviewer`     | amber  | PR diff, all upstream artifacts            | review report; merge on explicit request    |
 | Performancer | `cf-performancer` | yellow | finished impl, benchmark suites, baselines | perf-regression report, coverage advisory   |
 | Simplifier   | `cf-simplifier`   | blue   | finished impl, existing modules            | simplification report; optional apply edits |
 | Doc writer   | `cf-doc-writer`   | teal   | current source, AGENTS.md, docs            | `docs/` and `CHANGELOG.md`                  |
@@ -85,9 +85,10 @@ end-to-end.
   stale `CLAUDE.md` (retired `src/calc_flow/` layout) disagrees
 - `docs/introduction.md` — domain vocabulary (Batch, Port, Operator, Pipeline, Checkpoint,
   engines, runners); behavioral claims must match these docs
-- Parent-repo git conventions — `feature/`·`fix/` branches, imperative commits with a
-  why-body and `Co-Authored-By` trailer, category-prefixed PR titles, `## Summary` /
-  `## Test plan` PR bodies (embedded in `cf-implementer` and `cf-reviewer`)
+- Repo git conventions (`AGENTS.md`) — `feature/`·`fix/` branches, imperative commits
+  under 72 chars with a why-body, no tool-attribution trailer unless requested,
+  category-prefixed PR titles, `## Summary` / `## Test plan` PR bodies (embedded in
+  `cf-implementer` and `cf-reviewer`)
 
 ## Team Working Agreements
 
