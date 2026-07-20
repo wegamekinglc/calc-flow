@@ -540,8 +540,8 @@ or the issue body. Cover:
 - **State and checkpoints** — does the change hold state across batches? What are the
   `snapshot`/`restore`/`reset` semantics? Checkpoint version compatibility?
 - **Engine constraints** — table math stays in DataFusion; array providers interpret an
-  allowlisted AST (never Python `eval`); UDFs are referenced by `UdfReference(provider,
-  name, version)` — configs never carry callables or import paths
+  allowlisted AST (never Python `eval`); UDFs are referenced by
+  `UdfReference(provider, name, version)` — configs never carry callables or import paths
 - **Runner semantics** — micro-batch vs streaming; source cursor behavior; at-least-once
   sink delivery and what duplicates mean for this change
 - **Inputs and outputs** — types, units, valid ranges, error conditions
@@ -618,7 +618,7 @@ Python API, or studio REST), or `cf-critic` to proceed (the orchestrator routes 
 - Don't produce a spec without acceptance criteria — without them, the spec is
   unfalsifiable
 - Don't spec a config or catalog entry that carries source, callables, or import paths —
-  UDFs are referenced by name and version only
+  UDFs are referenced by `UdfReference(provider, name, version)` only
 ````
 
 - [ ] **Step 2: Verify frontmatter**
