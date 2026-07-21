@@ -269,17 +269,17 @@ merging it, confirm that intent before using a close operation.
 
 ## Key Conventions at a Glance
 
-| Element        | Convention                                                              |
-|----------------|-------------------------------------------------------------------------|
-| Rust           | fmt + clippy `-D warnings` clean; workspace tests green; llvm-cov ≥90   |
-| Python         | ruff check/format clean; `pytest python/tests` green                    |
-| Backend        | `pytest --cov=calc_flow_studio` green                                   |
-| Frontend       | `npm run build` + `npm test` green; e2e when flows change               |
-| Branches       | `feature/<desc>` / `fix/<desc>` off `main`                              |
-| Commits        | imperative <72 chars + why body; no attribution trailer                 |
-| PR             | category prefix <70 chars; `## Summary` + `## Test plan`                |
-| Domain         | Batch immutable; DataFusion-only tables; no `eval`; data-only configs   |
-| Studio backend | loopback-only; safe YAML only                                           |
+| Element          | Convention                                                                |
+| ---------------- | ------------------------------------------------------------------------- |
+| Rust             | fmt + clippy `-D warnings` clean; workspace tests green; llvm-cov ≥90     |
+| Python           | ruff check/format clean; `pytest python/tests` green                      |
+| Backend          | `pytest --cov=calc_flow_studio` green                                     |
+| Frontend         | `npm run build` + `npm test` green; e2e when flows change                 |
+| Branches         | `feature/<desc>` / `fix/<desc>` off `main`                                |
+| Commits          | imperative <72 chars + why body; no attribution trailer                   |
+| PR               | category prefix <70 chars; `## Summary` + `## Test plan`                  |
+| Domain           | Batch immutable; DataFusion-only tables; no `eval`; data-only configs     |
+| Studio backend   | loopback-only; safe YAML only                                             |
 
 ## What Not to Do
 

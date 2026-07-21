@@ -1,6 +1,6 @@
 # Calc Flow Agent Team Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. This sub-skill governs *executing the plan* (the human/orchestrator layer); it is a separate concern from the design's "no plugin dependency" rule, which applies to the `cf-*` agent *bodies* so a spawned teammate never fails on a missing skill at runtime. The two do not conflict.
 
 **Goal:** Create the `cf-*` agent team — ten specialist agents plus a team README under `.claude/agents/` — ported from the Derivatives-Algorithms-Lib (DAL) team per the approved spec.
 
@@ -12,8 +12,8 @@
 
 **Execution notes:**
 
-- Every task creates one new file; nothing existing is modified. Agent files are content, not code — TDD maps to a structural check per file (Task steps 2) plus a full validation (Task 12) and live smoke tests (Task 13).
-- Commits land directly on `main`, matching this repo's docs-commit precedent (the spec itself was committed this way). No worktree is needed for this plan — that discipline belongs to the agents being created, not to their definitions.
+- Tasks 1–11 each create one new file under `.claude/agents/`; no existing agent file is modified. Agent files are content, not code — TDD maps to a structural check per file (Task steps 2) plus a full validation (Task 12) and live smoke tests (Task 13).
+- Land the work on a `feature/<description>` branch off `main` and open a PR, per this repo's `AGENTS.md`; do not commit to `main` directly. The smoke-test tasks below add a `.claude/specs/head-operator.md` artifact and a snippet to the existing `docs/getting-started.md`, so this is not a zero-modification change despite each agent task otherwise creating one new file. No worktree is needed for this plan — that discipline belongs to the agents being created, not to their definitions.
 - Commit messages use the parent-repo convention as qualified by this repo's `AGENTS.md`: `docs:` prefix, imperative summary under 72 chars, no tool-attribution trailer.
 
 ## File Structure
@@ -189,7 +189,11 @@ for block in table_blocks:
     header, separator = block[0], block[1]
     assert set(separator) <= set("|-: "), f"bad separator: {separator}"
     for span in separator.split("|")[1:-1]:
-        assert set(span) == {"-"}, f"separator cell not all dashes: {span!r}"
+        # Repo rule pads separators so dashes span the full column width
+        # including the surrounding spaces (e.g. ` ------ `), so accept
+        # dashes with optional padding spaces, not dashes only.
+        assert set(span) <= {"-", " "}, f"separator cell has non-dash/space chars: {span!r}"
+        assert "-" in span, f"separator cell has no dashes: {span!r}"
 print(f"{len(table_blocks)} tables aligned")
 EOF
 ```

@@ -7,18 +7,18 @@ orchestrator routes work between them.
 
 ## Team Roster
 
-| Role         | Agent             | Color  | Reads                                      | Writes                                      |
-|--------------|-------------------|--------|--------------------------------------------|---------------------------------------------|
-| Orchestrator | `cf-orchestrator` | purple | GitHub issues, all artifacts               | task list                                   |
-| Spec writer  | `cf-spec-writer`  | orange | issues, introduction.md, AGENTS.md, rules  | `.claude/specs/<slug>.md`                   |
-| API designer | `cf-api-designer` | pink   | spec, crate exports, stubs, openapi.json   | `.claude/api-notes/<slug>.md`               |
-| Critic       | `cf-critic`       | red    | spec, api-note                             | `.claude/critiques/<slug>.md`               |
-| Implementer  | `cf-implementer`  | green  | spec, api-note, critique                   | source code, tests, TDD in worktree         |
-| Tester       | `cf-tester`       | cyan   | source under-test, conventions             | tests for the touched surfaces, in worktree |
-| Reviewer     | `cf-reviewer`     | amber  | PR diff, all upstream artifacts            | review report; merge on explicit request    |
-| Performancer | `cf-performancer` | yellow | finished impl, benchmark suites, baselines | perf-regression report, coverage advisory   |
-| Simplifier   | `cf-simplifier`   | blue   | finished impl, existing modules            | simplification report; optional apply edits |
-| Doc writer   | `cf-doc-writer`   | teal   | current source, AGENTS.md, docs            | `docs/` and `CHANGELOG.md`                  |
+| Role           | Agent               | Color    | Reads                                        | Writes                                        |
+| -------------- | ------------------- | -------- | -------------------------------------------- | --------------------------------------------- |
+| Orchestrator   | `cf-orchestrator`   | purple   | GitHub issues, all artifacts                 | task list                                     |
+| Spec writer    | `cf-spec-writer`    | orange   | issues, introduction.md, AGENTS.md, rules    | `.claude/specs/<slug>.md`                     |
+| API designer   | `cf-api-designer`   | pink     | spec, crate exports, stubs, openapi.json     | `.claude/api-notes/<slug>.md`                 |
+| Critic         | `cf-critic`         | red      | spec, api-note                               | `.claude/critiques/<slug>.md`                 |
+| Implementer    | `cf-implementer`    | green    | spec, api-note, critique                     | source code, tests, TDD in worktree           |
+| Tester         | `cf-tester`         | cyan     | source under-test, conventions               | tests for the touched surfaces, in worktree   |
+| Reviewer       | `cf-reviewer`       | amber    | PR diff, all upstream artifacts              | review report; merge on explicit request      |
+| Performancer   | `cf-performancer`   | yellow   | finished impl, benchmark suites, baselines   | perf-regression report, coverage advisory     |
+| Simplifier     | `cf-simplifier`     | blue     | finished impl, existing modules              | simplification report; optional apply edits   |
+| Doc writer     | `cf-doc-writer`     | teal     | current source, AGENTS.md, docs              | `docs/` and `CHANGELOG.md`                    |
 
 ## Workflow
 
@@ -53,14 +53,14 @@ merge.
 
 ## Artifact Layout
 
-| Path                 | Owner           | Purpose                                                               |
-|----------------------|-----------------|-----------------------------------------------------------------------|
-| `.claude/specs/`     | cf-spec-writer  | testable requirement specifications (created on demand)               |
-| `.claude/api-notes/` | cf-api-designer | public-API surface notes (created on demand)                          |
-| `.claude/critiques/` | cf-critic       | adversarial reviews of specs and api-notes (created on demand)        |
-| `docs/`              | cf-doc-writer   | normative engine and usage docs (referenced by all agents)            |
-| `CHANGELOG.md`       | cf-doc-writer   | dated log of fundamental changes (created on first qualifying change) |
-| `.claude/rules/`     | (existing)      | normative coding/test conventions                                     |
+| Path                   | Owner             | Purpose                                                                 |
+| ---------------------- | ----------------- | ----------------------------------------------------------------------- |
+| `.claude/specs/`       | cf-spec-writer    | testable requirement specifications (created on demand)                 |
+| `.claude/api-notes/`   | cf-api-designer   | public-API surface notes (created on demand)                            |
+| `.claude/critiques/`   | cf-critic         | adversarial reviews of specs and api-notes (created on demand)          |
+| `docs/`                | cf-doc-writer     | normative engine and usage docs (referenced by all agents)              |
+| `CHANGELOG.md`         | cf-doc-writer     | dated log of fundamental changes (created on first qualifying change)   |
+| `.claude/rules/`       | (existing)        | normative coding/test conventions                                       |
 
 Filenames share a single kebab-case slug derived from the request, so work traces through
 `specs/tumbling-window.md → api-notes/tumbling-window.md → critiques/tumbling-window.md`

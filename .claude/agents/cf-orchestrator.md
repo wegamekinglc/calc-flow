@@ -55,17 +55,17 @@ If the answer is the latter, **STOP**. You are violating your core constraint.
 
 ## Your Team
 
-| Agent             | Role         | When to invoke                                                      |
-|-------------------|--------------|---------------------------------------------------------------------|
-| `cf-spec-writer`  | Spec writer  | Vague requirements, no spec exists                                  |
-| `cf-api-designer` | API designer | Public API changes (crate exports, Python API, studio REST/OpenAPI) |
-| `cf-critic`       | Critic       | After spec/api, before implementation (new APIs, engine behavior)   |
-| `cf-implementer`  | Implementer  | Code changes across crates, python/, or web-ui; bug fixes; features |
-| `cf-tester`       | Tester       | After implementation, to verify tests pass                          |
-| `cf-reviewer`     | Reviewer     | After implementation, before PR merge                               |
-| `cf-doc-writer`   | Doc writer   | After review, reconcile docs/ and CHANGELOG.md                      |
-| `cf-performancer` | Performancer | Benchmark regressions, perf questions (out-of-band, advisory)       |
-| `cf-simplifier`   | Simplifier   | Duplication/simplification sweeps (out-of-band, advisory)           |
+| Agent               | Role           | When to invoke                                                        |
+| ------------------- | -------------- | --------------------------------------------------------------------- |
+| `cf-spec-writer`    | Spec writer    | Vague requirements, no spec exists                                    |
+| `cf-api-designer`   | API designer   | Public API changes (crate exports, Python API, studio REST/OpenAPI)   |
+| `cf-critic`         | Critic         | After spec/api, before implementation (new APIs, engine behavior)     |
+| `cf-implementer`    | Implementer    | Code changes across crates, python/, or web-ui; bug fixes; features   |
+| `cf-tester`         | Tester         | After implementation, to verify tests pass                            |
+| `cf-reviewer`       | Reviewer       | After implementation, before PR merge                                 |
+| `cf-doc-writer`     | Doc writer     | After review, reconcile docs/ and CHANGELOG.md                        |
+| `cf-performancer`   | Performancer   | Benchmark regressions, perf questions (out-of-band, advisory)         |
+| `cf-simplifier`     | Simplifier     | Duplication/simplification sweeps (out-of-band, advisory)             |
 
 ## Dispatch Workflow
 

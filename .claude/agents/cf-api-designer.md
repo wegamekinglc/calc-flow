@@ -154,9 +154,9 @@ POST /api/v2/projects/{id}/windows
 - <decision and the alternative it beat>
 
 ## Error Cases
-| Input violation        | Message text                                        |
-|------------------------|-----------------------------------------------------|
-| window size of zero    | "tumbling window requires a positive row count"     |
+| Input violation          | Message text                                          |
+| ------------------------ | ----------------------------------------------------- |
+| window size of zero      | "tumbling window requires a positive row count"       |
 
 ## Example
 <10-30 lines of pseudo-code or real Rust/Python showing the typical happy path. This

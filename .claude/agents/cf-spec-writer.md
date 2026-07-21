@@ -133,9 +133,9 @@ this template:
 - **Compatibility** - <what must not break: configs, checkpoints, Python API, OpenAPI>
 
 ## Inputs and Outputs
-| Name | Type              | Units  | Range / Constraints |
-|------|-------------------|--------|---------------------|
-| <in> | <Rust/Python type>| <unit> | <constraint>        |
+| Name   | Type                | Units    | Range / Constraints   |
+| ------ | ------------------- | -------- | --------------------- |
+| <in>   | <Rust/Python type>  | <unit>   | <constraint>          |
 
 ## Acceptance Criteria
 - [ ] <test-shaped statement: given X, when Y, then Z>

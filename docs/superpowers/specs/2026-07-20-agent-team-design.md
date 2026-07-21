@@ -39,7 +39,7 @@ Settled with the user before this design:
 
 ## File and artifact layout
 
-Eleven new files under `.claude/agents/`; no existing files are modified:
+Eleven new files under `.claude/agents/`; the agent-definition layout is additive, so no existing agent file is modified. (The PR that lands the team additionally carries this design + plan under `docs/superpowers/` and, as a smoke test, adds a `.claude/specs/head-operator.md` artifact and a small snippet to the existing `docs/getting-started.md`; those are side artifacts of the rollout, not part of the agent file layout below.)
 
 ```
 .claude/agents/
@@ -58,11 +58,11 @@ Eleven new files under `.claude/agents/`; no existing files are modified:
 
 Artifact directories are created on demand by the agents themselves:
 
-| Path                 | Owner           | Purpose                                    |
-|----------------------|-----------------|--------------------------------------------|
-| `.claude/specs/`     | cf-spec-writer  | testable requirement specifications        |
-| `.claude/api-notes/` | cf-api-designer | public-API surface notes                   |
-| `.claude/critiques/` | cf-critic       | adversarial reviews of specs and api-notes |
+| Path                   | Owner             | Purpose                                      |
+| ---------------------- | ----------------- | -------------------------------------------- |
+| `.claude/specs/`       | cf-spec-writer    | testable requirement specifications          |
+| `.claude/api-notes/`   | cf-api-designer   | public-API surface notes                     |
+| `.claude/critiques/`   | cf-critic         | adversarial reviews of specs and api-notes   |
 
 Filenames share one kebab-case slug derived from the work item, so work traces
 end-to-end: `specs/lazy-source.md → api-notes/lazy-source.md →

@@ -36,11 +36,11 @@ Calc-flow's built-in table operators (`expression`, `sql`) can calculate, projec
 - **Compatibility** - The change is additive only: existing v2 project documents, checkpoints, and Python programs continue to work unchanged. `schemas/project-v2.schema.json`, the checked-in Studio OpenAPI document, generated TypeScript API types, and `python/calc_flow/_native.pyi` are regenerated or extended to cover the new kind; nothing is removed or renamed.
 
 ## Inputs and Outputs
-| Name   | Type                        | Units  | Range / Constraints                    |
-|--------|-----------------------------|--------|----------------------------------------|
-| n      | Rust `usize` / Python `int` | rows   | integer > 0; fixed at construction     |
-| input  | table `Batch` (Arrow)       | rows   | required; any Arrow schema; 0+ rows    |
-| output | table `Batch` (Arrow)       | rows   | first min(n, input rows) rows of input |
+| Name     | Type                          | Units    | Range / Constraints                      |
+| -------- | ----------------------------- | -------- | ---------------------------------------- |
+| n        | Rust `usize` / Python `int`   | rows     | integer > 0; fixed at construction       |
+| input    | table `Batch` (Arrow)         | rows     | required; any Arrow schema; 0+ rows      |
+| output   | table `Batch` (Arrow)         | rows     | first min(n, input rows) rows of input   |
 
 ## Acceptance Criteria
 - [ ] Unit test: given input batches with 0, R < N, R == N, and R > N rows, when processed, then output row counts are 0, R, N, and N respectively and emitted rows equal the input prefix in order and content.

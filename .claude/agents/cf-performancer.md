@@ -70,12 +70,12 @@ the dominant failure mode and refuse to cry wolf on single-run swings.
   contract-v2 compatibility contract. Read it before classifying anything.
 - Scales (via `CALC_FLOW_BENCHMARK_SCALE`):
 
-| Scale      | Table rows | Array elements | Matrix dimension |
-|------------|------------|----------------|------------------|
-| `overhead` |      1,000 |          1,000 |               16 |
-| `small`    |     10,000 |         10,000 |               64 |
-| `standard` |    100,000 |        100,000 |              256 |
-| `nightly`  |  1,000,000 |      1,000,000 |              512 |
+| Scale        | Table rows   | Array elements   | Matrix dimension   |
+| ------------ | ------------ | ---------------- | ------------------ |
+| `overhead`   | 1,000        | 1,000            | 16                 |
+| `small`      | 10,000       | 10,000           | 64                 |
+| `standard`   | 100,000      | 100,000          | 256                |
+| `nightly`    | 1,000,000    | 1,000,000        | 512                |
 
 - Run command per scale:
   ```bash
@@ -165,8 +165,8 @@ contract-v2 fingerprints differ.
 
 Produce a short report table:
 
-| Case | Scale | Baseline min | Branch min | Delta | Verdict | Notes |
-|------|-------|--------------|------------|-------|---------|-------|
+| Case   | Scale   | Baseline min   | Branch min   | Delta   | Verdict   | Notes   |
+| ------ | ------- | -------------- | ------------ | ------- | --------- | ------- |
 
 (Notes record repetition counts, the measured same-ref spread, and whether the machine
 was quiet.)
@@ -209,17 +209,17 @@ issue if the user wants.
 
 ## Key Conventions at a Glance
 
-| Element            | Convention                                                                                                                                             |
-|--------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Run command        | `CALC_FLOW_BENCHMARK_SCALE=<scale> JAX_PLATFORMS=cpu uv run pytest benchmarks --benchmark-only --benchmark-json=target/benchmark-results/<scale>.json` |
-| Scales             | `overhead` (1k/1k/16), `small` (10k/10k/64), `standard` (100k/100k/256), `nightly` (1M/1M/512)                                                         |
-| Local default      | `overhead` + `standard`; `nightly` on request                                                                                                          |
-| Compatibility      | classify only matching contract-v2 fingerprints (machine/deps/workload)                                                                                |
-| Repetitions        | ≥2 full interleaved runs per ref + one same-ref pair for the spread                                                                                    |
-| Reduction          | per-case **min**, never mean/median                                                                                                                    |
-| Regression bar     | branch min exceeds baseline min by > 2× the same-ref spread, sustained                                                                                 |
-| CI posture         | informational only (`benchmarks.yml`); no gate until 20 stable samples                                                                                 |
-| Verdict categories | regression / no-change / improvement / inconclusive                                                                                                    |
+| Element              | Convention                                                                                                                                               |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Run command          | `CALC_FLOW_BENCHMARK_SCALE=<scale> JAX_PLATFORMS=cpu uv run pytest benchmarks --benchmark-only --benchmark-json=target/benchmark-results/<scale>.json`   |
+| Scales               | `overhead` (1k/1k/16), `small` (10k/10k/64), `standard` (100k/100k/256), `nightly` (1M/1M/512)                                                           |
+| Local default        | `overhead` + `standard`; `nightly` on request                                                                                                            |
+| Compatibility        | classify only matching contract-v2 fingerprints (machine/deps/workload)                                                                                  |
+| Repetitions          | ≥2 full interleaved runs per ref + one same-ref pair for the spread                                                                                      |
+| Reduction            | per-case **min**, never mean/median                                                                                                                      |
+| Regression bar       | branch min exceeds baseline min by > 2× the same-ref spread, sustained                                                                                   |
+| CI posture           | informational only (`benchmarks.yml`); no gate until 20 stable samples                                                                                   |
+| Verdict categories   | regression / no-change / improvement / inconclusive                                                                                                      |
 
 ## What Not to Do
 

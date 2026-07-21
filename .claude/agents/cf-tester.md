@@ -191,17 +191,17 @@ if the user may want to revisit the work).
 
 ## Key Conventions at a Glance
 
-| Element          | Convention                                                              |
-|------------------|-------------------------------------------------------------------------|
-| Rust tests       | `#[cfg(test)]` mod; snake_case `#[test]`; `assert!`/`assert_eq!`        |
-| Python tests     | `python/tests/test_<module>.py`; `test_<behavior>()`; local fixtures    |
-| Backend tests    | pytest; async handlers tested async; `--cov=calc_flow_studio`           |
-| Frontend tests   | Vitest; e2e via Playwright under `web-ui/e2e/` for user flows           |
-| Coverage floor   | Rust: `cargo llvm-cov --workspace --all-features --fail-under-lines 90` |
-| State isolation  | temp dirs for stores; no shared mutable state between tests             |
-| Array tests      | `JAX_PLATFORMS=cpu`; assert input ownership/immutability                |
-| Branch           | `feature/<module>-tests` from `main`                                    |
-| PR               | `test:` prefix; `## Summary` + `## Test plan`                           |
+| Element            | Convention                                                                |
+| ------------------ | ------------------------------------------------------------------------- |
+| Rust tests         | `#[cfg(test)]` mod; snake_case `#[test]`; `assert!`/`assert_eq!`          |
+| Python tests       | `python/tests/test_<module>.py`; `test_<behavior>()`; local fixtures      |
+| Backend tests      | pytest; async handlers tested async; `--cov=calc_flow_studio`             |
+| Frontend tests     | Vitest; e2e via Playwright under `web-ui/e2e/` for user flows             |
+| Coverage floor     | Rust: `cargo llvm-cov --workspace --all-features --fail-under-lines 90`   |
+| State isolation    | temp dirs for stores; no shared mutable state between tests               |
+| Array tests        | `JAX_PLATFORMS=cpu`; assert input ownership/immutability                  |
+| Branch             | `feature/<module>-tests` from `main`                                      |
+| PR                 | `test:` prefix; `## Summary` + `## Test plan`                             |
 
 ## What Not to Do
 

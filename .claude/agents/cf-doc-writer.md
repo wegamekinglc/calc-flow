@@ -167,13 +167,13 @@ Normative docs always describe the **current/latest** state of the project only.
 
 The changelog records **fundamental changes only** — not every commit. Apply this bar:
 
-| Qualifies (add to CHANGELOG)                                  | Does NOT qualify (skip)                   |
-|---------------------------------------------------------------|-------------------------------------------|
-| Breaking public-API change (Rust, Python, or REST)            | Refactor with no API impact               |
-| New engine capability (operator kind, engine, runner behavior)| Test additions or fixes                   |
-| Checkpoint or project-config format change                    | Formatting / style / docs polish          |
-| Removal or deprecation of a public surface                    | Build / CI config changes                 |
-| Significant new studio capability                             | Performance tuning with identical outputs |
+| Qualifies (add to CHANGELOG)                                    | Does NOT qualify (skip)                     |
+| --------------------------------------------------------------- | ------------------------------------------- |
+| Breaking public-API change (Rust, Python, or REST)              | Refactor with no API impact                 |
+| New engine capability (operator kind, engine, runner behavior)  | Test additions or fixes                     |
+| Checkpoint or project-config format change                      | Formatting / style / docs polish            |
+| Removal or deprecation of a public surface                      | Build / CI config changes                   |
+| Significant new studio capability                               | Performance tuning with identical outputs   |
 
 When in doubt, ask the user. A cluttered changelog is worse than a sparse one.
 
@@ -196,17 +196,17 @@ When in doubt, ask the user. A cluttered changelog is worse than a sparse one.
 
 ## Key Conventions at a Glance
 
-| Element           | Convention                                                              |
-|-------------------|-------------------------------------------------------------------------|
-| Docs root         | `docs/` (cross-link from `docs/introduction.md`)                        |
-| Normative docs    | introduction, getting-started, python-api, rust-api, api-reference      |
-| Historical docs   | v1-final-api, v2-release, migration-v0.2 (leave as-is)                  |
-| Changelog         | `CHANGELOG.md` at repo root, fundamental changes only                   |
-| Versioning model  | Single current version; overwrite in place; no per-version doc trees    |
-| Tables            | aligned pipes; separator dashes span full column width                  |
-| Example code      | reuse `examples/` / `.claude/api-notes/` verbatim; do not redesign      |
-| Commit prefix     | `docs:`                                                                 |
-| PR                | left for the user to merge; never self-merge                            |
+| Element             | Convention                                                                |
+| ------------------- | ------------------------------------------------------------------------- |
+| Docs root           | `docs/` (cross-link from `docs/introduction.md`)                          |
+| Normative docs      | introduction, getting-started, python-api, rust-api, api-reference        |
+| Historical docs     | v1-final-api, v2-release, migration-v0.2 (leave as-is)                    |
+| Changelog           | `CHANGELOG.md` at repo root, fundamental changes only                     |
+| Versioning model    | Single current version; overwrite in place; no per-version doc trees      |
+| Tables              | aligned pipes; separator dashes span full column width                    |
+| Example code        | reuse `examples/` / `.claude/api-notes/` verbatim; do not redesign        |
+| Commit prefix       | `docs:`                                                                   |
+| PR                  | left for the user to merge; never self-merge                              |
 
 ## What Not to Do
 
