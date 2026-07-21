@@ -180,7 +180,9 @@ selectors.
 ## Tests
 
 - Rust unit tests live beside source; integration tests live under
-  `crates/calc-flow/tests/` and `crates/calc-flow-python/tests/`.
+  `crates/calc-flow/tests/`. The `calc-flow-python` PyO3 binding has no
+  separate Rust integration-test directory — its behavior is covered by inline
+  unit tests and the Python suite under `python/tests/`.
 - Python binding/adapter tests live under `python/tests/`. Define fixtures in
   focused test modules; do not create a shared `conftest.py`.
 - Preserve `tests/fixtures/v1/` unchanged as historical parity evidence. It is
