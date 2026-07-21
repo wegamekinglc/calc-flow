@@ -147,17 +147,17 @@ The native dependency edge is
 `crates/calc-flow ← crates/calc-flow-python ← python/calc_flow ← web-ui/backend`.
 The frontend talks to the backend over the `/api/v2` REST contract only.
 
-| Path                       | Purpose                                                                  |
-| -------------------------- | ------------------------------------------------------------------------ |
+| Path                       | Purpose                                                                                                                                  |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | `crates/calc-flow/`        | Native core: batches, ports/operators, graph compiler, DataFusion runtime, UDF/provider registries, runners, checkpoints, project stores |
-| `crates/calc-flow-python/` | PyO3 binding exposing the core as `calc_flow._native`                    |
-| `python/calc_flow/`        | Pure-Python public API, functional `PipelineBuilder`, runner/store adapters, NumPy/JAX provider registration, exception hierarchy |
-| `web-ui/backend/`          | `calc-flow-studio` FastAPI service under `/api/v2`, loopback-bound, spawned bounded preview workers |
-| `web-ui/src/`              | React + TypeScript + Vite + React Flow studio; API types generated from `web-ui/openapi.json` |
-| `schemas/`                 | `project-v2.schema.json`, the canonical generated project contract       |
-| `examples/`                | Executable v2 Python examples                                            |
-| `benchmarks/`              | pytest-benchmark harness (informational)                                 |
-| `docs/`                    | Published documentation                                                  |
+| `crates/calc-flow-python/` | PyO3 binding exposing the core as `calc_flow._native`                                                                                    |
+| `python/calc_flow/`        | Pure-Python public API, functional `PipelineBuilder`, runner/store adapters, NumPy/JAX provider registration, exception hierarchy        |
+| `web-ui/backend/`          | `calc-flow-studio` FastAPI service under `/api/v2`, loopback-bound, spawned bounded preview workers                                      |
+| `web-ui/src/`              | React + TypeScript + Vite + React Flow studio; API types generated from `web-ui/openapi.json`                                            |
+| `schemas/`                 | `project-v2.schema.json`, the canonical generated project contract                                                                       |
+| `examples/`                | Executable v2 Python examples                                                                                                            |
+| `benchmarks/`              | pytest-benchmark harness (informational)                                                                                                 |
+| `docs/`                    | Published documentation                                                                                                                  |
 
 ### Core invariants
 
