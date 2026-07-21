@@ -1,5 +1,7 @@
 # Calc Flow
 
+[![CI](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci.yml)
+
 Calc Flow 2.0 is a Rust-native calculation engine for immutable Arrow
 micro-batches and stateful streams. The core crate compiles typed calculation
 graphs, runs every table expression and query with Apache DataFusion, and owns
@@ -77,6 +79,32 @@ cargo run -p calc-flow --example micro_batch_recovery
 
 See [the Rust API guide](docs/rust-api.md) for paired source examples and links
 to the public types.
+
+## Architecture
+
+```text
+crates/calc-flow  (Rust core: Batch, graph compiler, DataFusion, runners, stores)
+  └─ crates/calc-flow-python  (PyO3 _native binding)
+       └─ python/calc_flow  (pure-Python public API + functional adapters)
+            └─ web-ui/backend  (calc-flow-studio FastAPI, /api/v2, loopback only)
+                  └─ web-ui/src  (React + TypeScript + Vite + React Flow studio, via REST)
+```
+
+The native dependency edge is
+`crates/calc-flow ← crates/calc-flow-python ← python/calc_flow ← web-ui/backend`.
+The frontend talks to the backend over the `/api/v2` REST contract only; the
+Python package is not a second engine.
+
+| Path                       | Purpose                                                                                                                                  |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/calc-flow/`        | Native core: batches, ports/operators, graph compiler, DataFusion runtime, UDF/provider registries, runners, checkpoints, project stores |
+| `crates/calc-flow-python/` | PyO3 binding exposing the core as `calc_flow._native`                                                                                    |
+| `python/calc_flow/`        | Pure-Python public API, functional `PipelineBuilder`, runner/store adapters, NumPy/JAX provider registration, exception hierarchy        |
+| `web-ui/backend/`          | `calc-flow-studio` FastAPI service under `/api/v2`, loopback-bound, spawned bounded preview workers                                      |
+| `web-ui/src/`              | React + TypeScript + Vite + React Flow studio; API types generated from `web-ui/openapi.json`                                            |
+| `schemas/`                 | `project-v2.schema.json`, the canonical generated project contract                                                                       |
+| `examples/`                | Executable v2 Python examples                                                                                                            |
+| `benchmarks/`              | pytest-benchmark harness (informational)                                                                                                 |
 
 ## Data and execution model
 
@@ -195,13 +223,17 @@ inspectors, isolated wheel smoke tests, `cargo package`, and
 `cargo publish --dry-run`. See [AGENTS.md](AGENTS.md) for the maintained
 repository commands and constraints.
 
-## Reference
+## Documentation
 
-- [getting started](docs/getting-started.md)
-- [API map](docs/api-reference.md)
-- [Python API](docs/python-api.md)
-- [Rust API](docs/rust-api.md)
-- [v2 release and migration](docs/v2-release.md)
-- [benchmark harness](benchmarks/README.md)
-- [historical v1 final API](docs/v1-final-api.md)
-- [historical v0.2 migration notes](docs/migration-v0.2.md)
+- **[Documentation index](docs/README.md)** — reading order for all published docs
+- **[Introduction](docs/introduction.md)** — architecture and data flow
+- **[Getting started](docs/getting-started.md)** — installation and smoke test
+- **[Python API](docs/python-api.md)** — Python surface and examples
+- **[Rust API](docs/rust-api.md)** — native surface and examples
+- **[API reference](docs/api-reference.md)** — supported surfaces at a glance
+- **[Benchmark harness](benchmarks/README.md)** — informational benchmarks
+- **[v2 release and migration](docs/v2-release.md)** — v1-to-v2 boundary (history)
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE).
