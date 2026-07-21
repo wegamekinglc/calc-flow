@@ -11,6 +11,36 @@ Calc Flow has three supported surfaces:
 For examples and lifecycle detail, see [the Rust API](rust-api.md) and
 [the Python API](python-api.md).
 
+## Examples
+
+Every shipped example is executable against the installed v2 engine:
+
+- **Python** — [`examples/README.md`](../examples/README.md) indexes the six
+  runnable scripts: a DataFusion expression pipeline, a SQL join, a registered
+  scalar UDF, micro-batch recovery, async execution, and NumPy arrays. Run them
+  with `uv run python examples/01_datafusion_pipeline.py` after
+  `uv run maturin develop`.
+- **Rust** — `crates/calc-flow/examples/` ships `expression_pipeline.rs`,
+  `micro_batch_recovery.rs`, and `export_schema.rs`. Run them with
+  `cargo run -p calc-flow --example expression_pipeline`.
+
+A minimal Python pipeline mirrors those scripts:
+
+```python
+from calc_flow import Batch, PipelineBuilder
+
+plan = (
+    PipelineBuilder("totals")
+    .expression("calculate", "total = quantity * unit_price")
+    .compile()
+)
+run = plan.execute({"input": batch})
+```
+
+The snippets in the [Python API](python-api.md) and [Rust API](rust-api.md)
+guides match these example files, so the reference and the runnable code stay
+consistent.
+
 ## Rust modules and exports
 
 The `calc_flow` crate re-exports its supported public types from

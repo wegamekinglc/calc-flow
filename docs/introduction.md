@@ -10,6 +10,52 @@ The browser Studio is not part of the core wheel. The separately packaged
 `calc-flow-studio` FastAPI application hosts a local v2 API and built React
 assets.
 
+## First example
+
+The fastest way to see the engine is a one-node expression pipeline. Python
+builds it with the functional `PipelineBuilder`; Rust builds the same graph
+with the native `PipelineBuilder` and an `ExpressionOperator`. Both compile to
+the same v2 project model and run one DataFusion expression.
+
+Python:
+
+```python
+from calc_flow import Batch, PipelineBuilder
+
+plan = (
+    PipelineBuilder("totals")
+    .expression("calculate", "total = quantity * unit_price")
+    .compile()
+)
+```
+
+Rust:
+
+```rust
+use calc_flow::{ExpressionOperator, PipelineBuilder, UdfRegistry};
+
+let plan = PipelineBuilder::new("expression-example")?
+    .add_node(
+        "calculate",
+        Box::new(ExpressionOperator::new(
+            "calculate",
+            "total = a + b",
+            Vec::new(),
+            None,
+            Vec::new(),
+        )?),
+    )?
+    .compile(&UdfRegistry::new().snapshot())?;
+```
+
+Execute with `plan.execute({"input": batch})` (Python) or
+`plan.execute(inputs, options).await?` (Rust). For complete runnable versions,
+see the indexed Python examples ([examples/README.md](../examples/README.md))
+and the Rust example
+`crates/calc-flow/examples/expression_pipeline.rs`, and the
+[Python API](python-api.md) and [Rust API](rust-api.md) guides for the full
+type reference.
+
 ## Batch contract
 
 Every graph item is an immutable `Batch` envelope:
