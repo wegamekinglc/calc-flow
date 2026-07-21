@@ -279,6 +279,53 @@ For a release-wheel installation, the printed native-module path is beneath
 `.venv/lib/.../site-packages/calc_flow/` on Linux or
 `.venv\Lib\site-packages\calc_flow\` on Windows.
 
+## Smoke-test the engine
+
+Run one tiny DataFusion pipeline end-to-end to confirm the package is installed
+and the native extension loads correctly.
+
+```python
+from __future__ import annotations
+
+import pyarrow as pa
+from calc_flow import Batch, PipelineBuilder
+
+orders = Batch.from_pyarrow(
+    pa.table({
+        "order_id": ["A-100", "A-101", "A-102"],
+        "quantity": [3, 1, 4],
+        "unit_price": [10, 12, 10],
+    })
+)
+
+plan = (
+    PipelineBuilder("verify-install")
+    .expression("gross", "gross = quantity * unit_price")
+    .compile()
+)
+
+run = plan.execute({"input": orders})
+print(run.outputs["output"].to_pyarrow().to_pylist())
+```
+
+Save the script as `verify.py` and run it with the prepared environment's
+interpreter (not `uv run`, which would sync and replace the wheel installation
+you are verifying):
+
+### Linux and WSL
+
+```bash
+.venv/bin/python verify.py
+```
+
+### Windows PowerShell
+
+```powershell
+.venv\Scripts\python.exe verify.py
+```
+
+You should see three rows with a computed `gross` column.
+
 ## Troubleshooting
 
 ### The launcher reports an unsynchronized environment
