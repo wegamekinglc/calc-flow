@@ -7,7 +7,7 @@ use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let plan = PipelineBuilder::new("expression-example")?
+    let plan = PipelineBuilder::new("totals")?
         .add_node(
             "calculate",
             Box::new(ExpressionOperator::new(

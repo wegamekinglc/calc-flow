@@ -13,33 +13,32 @@ For examples and lifecycle detail, see [the Rust API](rust-api.md) and
 
 ## Examples
 
-Every shipped example is executable against the installed v2 engine:
-
-- **Python** — [`examples/README.md`](../examples/README.md) indexes the six
-  runnable scripts: a DataFusion expression pipeline, a SQL join, a registered
-  scalar UDF, micro-batch recovery, async execution, and NumPy arrays. Run them
-  with `uv run python examples/01_datafusion_pipeline.py` after
-  `uv run maturin develop`.
-- **Rust** — `crates/calc-flow/examples/` ships `expression_pipeline.rs`,
-  `micro_batch_recovery.rs`, and `export_schema.rs`. Run them with
-  `cargo run -p calc-flow --example expression_pipeline`.
-
-A minimal Python pipeline mirrors those scripts:
+Minimal end-to-end calculation (Python):
 
 ```python
+import pyarrow as pa
+
 from calc_flow import Batch, PipelineBuilder
 
+batch = Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))
 plan = (
     PipelineBuilder("totals")
-    .expression("calculate", "total = quantity * unit_price")
+    .expression("calculate", "total = a + b")
     .compile()
 )
-run = plan.execute({"input": batch})
+result = plan.execute({"input": batch})
+
+assert result.outputs["output"].to_pyarrow()["total"].to_pylist() == [3, 7]
 ```
 
-The snippets in the [Python API](python-api.md) and [Rust API](rust-api.md)
-guides match these example files, so the reference and the runnable code stay
-consistent.
+The runnable inventories span both surfaces and share datasets and expressions:
+
+- Python: [`examples/README.md`](../examples/README.md) — expression pipeline,
+  SQL join, registered UDF, micro-batch recovery, async execution, and NumPy
+  arrays.
+- Rust: [`crates/calc-flow/examples/README.md`](../crates/calc-flow/examples/README.md)
+  — `expression_pipeline.rs`, `sql_join.rs`, `micro_batch_recovery.rs`, and
+  `export_schema.rs`.
 
 ## Rust modules and exports
 

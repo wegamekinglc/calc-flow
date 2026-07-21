@@ -33,3 +33,13 @@ The files cover:
 The previous v1 notebook was removed because it taught the frozen Python v1
 operator API. Historical v1 behavior remains available at the
 `v1-python-final` tag and in `tests/fixtures/v1/`.
+
+## Rust counterparts
+
+The Rust crate ships parallel examples under
+[`crates/calc-flow/examples/`](../crates/calc-flow/examples/README.md). The
+expression (`01_datafusion_pipeline.py` ↔ `expression_pipeline.rs`), SQL join
+(`02_sql_join.py` ↔ `sql_join.rs`), and micro-batch recovery
+(`04_micro_batch_recovery.py` ↔ `micro_batch_recovery.rs`) examples share their
+datasets and expressions across surfaces so the Python binding and the Rust
+crate read as one engine.

@@ -38,20 +38,15 @@ import pyarrow as pa
 
 from calc_flow import Batch, PipelineBuilder
 
+batch = Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))
 plan = (
     PipelineBuilder("totals")
-    .expression("calculate", "total = quantity * unit_price")
+    .expression("calculate", "total = a + b")
     .compile()
 )
-result = plan.execute(
-    {
-        "input": Batch.from_pyarrow(
-            pa.table({"quantity": [2, 3], "unit_price": [10, 4]})
-        )
-    }
-)
+result = plan.execute({"input": batch})
 
-assert result.outputs["output"].to_pyarrow()["total"].to_pylist() == [20, 12]
+assert result.outputs["output"].to_pyarrow()["total"].to_pylist() == [3, 7]
 ```
 
 `PipelineBuilder` is functional: every method returns a new builder and leaves
@@ -68,7 +63,9 @@ The Rust crate exposes the native data, operator, graph, runtime, project, and
 checkpoint types directly. A table `Batch` contains one or more Arrow
 `RecordBatch` values plus immutable metadata. Build a graph with
 `PipelineBuilder`, compile it against a `UdfRegistrySnapshot`, then await
-`ExecutionPlan::execute`.
+`ExecutionPlan::execute`. The canonical first example is
+[`crates/calc-flow/examples/expression_pipeline.rs`](crates/calc-flow/examples/expression_pipeline.rs),
+a true twin of the Python quickstart:
 
 ```rust
 use std::{collections::BTreeMap, sync::Arc};
@@ -80,7 +77,7 @@ use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let plan = PipelineBuilder::new("expression-example")?
+    let plan = PipelineBuilder::new("totals")?
         .add_node(
             "calculate",
             Box::new(ExpressionOperator::new(
@@ -126,11 +123,12 @@ Run the checked examples:
 
 ```bash
 cargo run -p calc-flow --example expression_pipeline
+cargo run -p calc-flow --example sql_join
 cargo run -p calc-flow --example micro_batch_recovery
 ```
 
 See [the Rust API guide](docs/rust-api.md) for paired source examples and links
-to the public types.
+to the public types, or the [Rust examples index](crates/calc-flow/examples/README.md).
 
 ## Architecture
 

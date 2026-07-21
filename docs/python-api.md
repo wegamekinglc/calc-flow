@@ -47,48 +47,63 @@ An expression node accepts exactly one calculation expression or a non-empty
 
 ```python
 plan = (
-    PipelineBuilder("join")
+    PipelineBuilder("orders-and-fees")
     .sql(
-        "query",
-        "SELECT left.a + right.b AS total FROM left CROSS JOIN right",
-        aliases=("left", "right"),
+        "join",
+        "SELECT orders.order_id, orders.amount - fees.fee AS net "
+        "FROM orders JOIN fees ON orders.order_id = fees.order_id "
+        "ORDER BY orders.order_id",
+        aliases=("orders", "fees"),
     )
     .compile()
 )
 result = plan.execute(
     {
-        "left": Batch.from_pyarrow(pa.table({"a": [2]})),
-        "right": Batch.from_pyarrow(pa.table({"b": [3]})),
+        "orders": Batch.from_pyarrow(
+            pa.table({"order_id": [1, 2, 3], "amount": [75, 120, 40]})
+        ),
+        "fees": Batch.from_pyarrow(
+            pa.table({"order_id": [1, 2, 3], "fee": [5, 12, 4]})
+        ),
     }
 )
-assert result.outputs["output"].to_pyarrow()["total"].to_pylist() == [5]
+assert result.outputs["output"].to_pyarrow()["net"].to_pylist() == [70, 108, 36]
 ```
 
-Only one read-only DataFusion `SELECT` or CTE is accepted.
+Only one read-only DataFusion `SELECT` or CTE is accepted. The full version is
+[`examples/02_sql_join.py`](../examples/02_sql_join.py), which mirrors the Rust
+`sql_join.rs` example.
 
 ## Trusted Python scalar UDFs
 
 ```python
+import pyarrow as pa
 import pyarrow.compute as pc
 
 from calc_flow import PipelineBuilder, Runtime
 
 runtime = Runtime()
+
+
+def double_amount(amount: pa.Array) -> pa.Array:
+    return pc.multiply(amount, 2)
+
+
 runtime.register_scalar_udf(
     provider="python",
-    name="double_value",
+    name="double_amount",
     version="1",
     input_types=("int64",),
     return_type="int64",
     volatility="immutable",
-    function=lambda values: pc.multiply(values, 2),
+    function=double_amount,
 )
 plan = (
-    PipelineBuilder("udf")
+    PipelineBuilder("registered-udf")
     .expression(
         "calculate",
-        "result = double_value(value)",
-        udfs=(("python", "double_value", "1"),),
+        "total = double_amount(amount)",
+        udfs=(("python", "double_amount", "1"),),
     )
     .compile(runtime)
 )
@@ -96,22 +111,24 @@ plan = (
 
 Callbacks are trusted application code, vectorized over PyArrow arrays, and
 never serialized. Registration and execution enforce exact Arrow types,
-result length/type, and explicit node references.
+result length/type, and explicit node references. The full version is
+[`examples/03_registered_udf.py`](../examples/03_registered_udf.py).
 
 ## Async execution
 
 ```python
 async def calculate() -> list[int]:
-    plan = PipelineBuilder("async").expression("calc", "b = a + 1").compile()
+    plan = PipelineBuilder("async-example").expression("calc", "total = a + b").compile()
     result = await plan.execute_async(
-        {"input": Batch.from_pyarrow(pa.table({"a": [1, 2]}))}
+        {"input": Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))}
     )
-    return result.outputs["output"].to_pyarrow()["b"].to_pylist()
+    return result.outputs["output"].to_pyarrow()["total"].to_pylist()
 ```
 
 Blocking `execute`, store, and runner methods reject a running event loop. Use
 their async forms in servers and asyncio applications. Cancelling an async
 execution or runner call waits for native cleanup before the plan is reusable.
+The full version is [`examples/05_async_execution.py`](../examples/05_async_execution.py).
 
 ## NumPy and JAX
 
@@ -123,7 +140,7 @@ from calc_flow import Batch, PipelineBuilder, Runtime, register_numpy
 runtime = Runtime()
 register_numpy(runtime)
 plan = (
-    PipelineBuilder("arrays")
+    PipelineBuilder("numpy-array")
     .external(
         "center",
         "numpy",
@@ -133,13 +150,14 @@ plan = (
     )
     .compile(runtime)
 )
-batch = Batch.from_array(np.array([1.0, 2.0, 3.0]), backend="numpy")
+batch = Batch.from_array(np.array([1.0, 2.0, 4.0, 6.0]), backend="numpy")
 centered = plan.execute({"input": batch}).outputs["output"].array
 ```
 
 Owned arrays are read-only. The bounded expression evaluator allows arithmetic,
 reductions, transpose, and reshape; it rejects Python execution features and
 backend changes. `register_jax` provides the same explicit provider boundary.
+The full version is [`examples/06_numpy_array.py`](../examples/06_numpy_array.py).
 
 ## Projects and persistence
 

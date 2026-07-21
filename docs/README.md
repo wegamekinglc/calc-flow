@@ -29,6 +29,8 @@ the historical records listed below.
 - **[CLAUDE.md](../CLAUDE.md)** — Claude Code operational guidance, kept in
   step with AGENTS.md
 - **[Examples](../examples/README.md)** — executable v2 Python examples
+- **[Rust examples](../crates/calc-flow/examples/README.md)** — executable
+  `calc-flow` crate examples
 - **[Benchmarks](../benchmarks/README.md)** — informational benchmark harness
 - **[Project schema](../schemas/project-v2.schema.json)** — the canonical
   generated v2 project contract

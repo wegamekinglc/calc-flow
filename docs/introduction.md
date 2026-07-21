@@ -10,51 +10,87 @@ The browser Studio is not part of the core wheel. The separately packaged
 `calc-flow-studio` FastAPI application hosts a local v2 API and built React
 assets.
 
-## First example
+## A first example
 
-The fastest way to see the engine is a one-node expression pipeline. Python
-builds it with the functional `PipelineBuilder`; Rust builds the same graph
-with the native `PipelineBuilder` and an `ExpressionOperator`. Both compile to
-the same v2 project model and run one DataFusion expression.
+The same calculation runs on both surfaces. A one-node expression pipeline named
+`totals` computes `total = a + b` over `a = [1, 3]` and `b = [2, 4]` and emits
+`[3, 7]`. The Python and Rust snippets below are true twins.
 
 Python:
 
 ```python
+import pyarrow as pa
+
 from calc_flow import Batch, PipelineBuilder
 
+batch = Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))
 plan = (
     PipelineBuilder("totals")
-    .expression("calculate", "total = quantity * unit_price")
+    .expression("calculate", "total = a + b")
     .compile()
 )
+result = plan.execute({"input": batch})
+
+assert result.outputs["output"].to_pyarrow()["total"].to_pylist() == [3, 7]
 ```
 
-Rust:
+Rust ([`crates/calc-flow/examples/expression_pipeline.rs`](../crates/calc-flow/examples/expression_pipeline.rs)):
 
 ```rust
-use calc_flow::{ExpressionOperator, PipelineBuilder, UdfRegistry};
+use std::{collections::BTreeMap, sync::Arc};
 
-let plan = PipelineBuilder::new("expression-example")?
-    .add_node(
-        "calculate",
-        Box::new(ExpressionOperator::new(
+use calc_flow::{
+    Batch, BatchMetadata, ExecutionOptions, ExpressionOperator, PipelineBuilder, UdfRegistry,
+};
+use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let plan = PipelineBuilder::new("totals")?
+        .add_node(
             "calculate",
-            "total = a + b",
-            Vec::new(),
-            None,
-            Vec::new(),
-        )?),
-    )?
-    .compile(&UdfRegistry::new().snapshot())?;
+            Box::new(ExpressionOperator::new(
+                "calculate",
+                "total = a + b",
+                Vec::new(),
+                None,
+                Vec::new(),
+            )?),
+        )?
+        .compile(&UdfRegistry::new().snapshot())?;
+    let input = RecordBatch::try_from_iter(vec![
+        (
+            "a",
+            Arc::new(Int64Array::from(vec![1, 3])) as Arc<dyn datafusion::arrow::array::Array>,
+        ),
+        ("b", Arc::new(Int64Array::from(vec![2, 4])) as _),
+    ])?;
+    let result = plan
+        .execute(
+            BTreeMap::from([(
+                "input".into(),
+                Batch::table(vec![input], BatchMetadata::default())?,
+            )]),
+            ExecutionOptions::default(),
+        )
+        .await?;
+    let output = result.outputs["output"].table_payload()?;
+    let totals = output.batches()[0]
+        .column_by_name("total")
+        .expect("expression output contains total")
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("total is an Int64 column");
+
+    assert_eq!(totals.values(), &[3, 7]);
+    println!("calculated totals: {totals:?}");
+    Ok(())
+}
 ```
 
-Execute with `plan.execute({"input": batch})` (Python) or
-`plan.execute(inputs, options).await?` (Rust). For complete runnable versions,
-see the indexed Python examples ([examples/README.md](../examples/README.md))
-and the Rust example
-`crates/calc-flow/examples/expression_pipeline.rs`, and the
-[Python API](python-api.md) and [Rust API](rust-api.md) guides for the full
-type reference.
+The same example is reused across the [Python](python-api.md), [Rust](rust-api.md),
+and [getting started](getting-started.md) guides so the two surfaces read as one
+engine.
 
 ## Batch contract
 
