@@ -11,6 +11,35 @@ Calc Flow has three supported surfaces:
 For examples and lifecycle detail, see [the Rust API](rust-api.md) and
 [the Python API](python-api.md).
 
+## Examples
+
+Minimal end-to-end calculation (Python):
+
+```python
+import pyarrow as pa
+
+from calc_flow import Batch, PipelineBuilder
+
+batch = Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))
+plan = (
+    PipelineBuilder("totals")
+    .expression("calculate", "total = a + b")
+    .compile()
+)
+result = plan.execute({"input": batch})
+
+assert result.outputs["output"].to_pyarrow()["total"].to_pylist() == [3, 7]
+```
+
+The runnable inventories span both surfaces and share datasets and expressions:
+
+- Python: [`examples/README.md`](../examples/README.md) — expression pipeline,
+  SQL join, registered UDF, micro-batch recovery, async execution, and NumPy
+  arrays.
+- Rust: [`crates/calc-flow/examples/README.md`](../crates/calc-flow/examples/README.md)
+  — `expression_pipeline.rs`, `sql_join.rs`, `micro_batch_recovery.rs`, and
+  `export_schema.rs`.
+
 ## Rust modules and exports
 
 The `calc_flow` crate re-exports its supported public types from

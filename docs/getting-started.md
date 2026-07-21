@@ -285,27 +285,18 @@ Run one tiny DataFusion pipeline end-to-end to confirm the package is installed
 and the native extension loads correctly.
 
 ```python
-from __future__ import annotations
-
 import pyarrow as pa
+
 from calc_flow import Batch, PipelineBuilder
 
-orders = Batch.from_pyarrow(
-    pa.table({
-        "order_id": ["A-100", "A-101", "A-102"],
-        "quantity": [3, 1, 4],
-        "unit_price": [10, 12, 10],
-    })
-)
-
+batch = Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))
 plan = (
-    PipelineBuilder("verify-install")
-    .expression("gross", "gross = quantity * unit_price")
+    PipelineBuilder("totals")
+    .expression("calculate", "total = a + b")
     .compile()
 )
-
-run = plan.execute({"input": orders})
-print(run.outputs["output"].to_pyarrow().to_pylist())
+result = plan.execute({"input": batch})
+print(result.outputs["output"].to_pyarrow()["total"].to_pylist())
 ```
 
 Save the script as `verify.py` and run it with the prepared environment's
@@ -324,7 +315,17 @@ you are verifying):
 .venv\Scripts\python.exe verify.py
 ```
 
-You should see three rows with a computed `gross` column.
+You should see the computed totals: `[3, 7]`.
+
+Rust users can run the equivalent native example, which prints
+`calculated totals: [3, 7]`:
+
+```bash
+cargo run -p calc-flow --example expression_pipeline
+```
+
+See
+[`crates/calc-flow/examples/expression_pipeline.rs`](../crates/calc-flow/examples/expression_pipeline.rs).
 
 ## Troubleshooting
 
