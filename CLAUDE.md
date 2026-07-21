@@ -26,8 +26,8 @@ data contract and execution model.
 
 ## Commands
 
-The canonical command groups live in [AGENTS.md](AGENTS.md#commands); repeat
-them exactly. Summary:
+The canonical command groups live in [AGENTS.md](AGENTS.md#commands) and are
+reproduced here for convenience; repeat them exactly.
 
 ```bash
 # Rust core
@@ -43,6 +43,7 @@ uv run maturin develop
 JAX_PLATFORMS=cpu uv run pytest python/tests -q
 uv run ruff check .
 uv run ruff format --check .
+uv run ruff format .
 
 # Studio backend
 cd web-ui/backend
@@ -55,16 +56,24 @@ npm run sync:api
 npm run build
 npm test
 npm run test:e2e
+npm audit --omit=dev
 
-# Informational benchmarks
+# Supply chain and release helpers
+cargo audit --ignore RUSTSEC-2026-0176 --ignore RUSTSEC-2026-0177
+cargo deny --locked check
+python -m unittest scripts.test_inspect_wheel scripts.test_release_config
+```
+
+Run informational benchmarks with:
+
+```bash
 CALC_FLOW_BENCHMARK_SCALE=overhead \
   JAX_PLATFORMS=cpu \
   uv run --extra benchmark pytest benchmarks --benchmark-only
-
-# Managed local Studio (API + Vite)
-./web-ui/scripts/start_web_ui.sh
-./web-ui/scripts/stop_web_ui.sh
 ```
+
+Use `./web-ui/scripts/start_web_ui.sh` and
+`./web-ui/scripts/stop_web_ui.sh` for the managed local Studio.
 
 Keep Cargo, Maturin, uv, coverage, and release outputs beneath the repository
 `target/` tree when working from a constrained mirror, and never leave a
