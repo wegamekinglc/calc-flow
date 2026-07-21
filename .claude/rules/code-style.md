@@ -54,7 +54,9 @@ surfaces, Markdown, tests, and verification.
 ## Tests
 
 * Rust unit tests live beside source under `crates/calc-flow/src/`; integration
-  tests live under `crates/calc-flow/tests/` and `crates/calc-flow-python/tests/`.
+  tests live under `crates/calc-flow/tests/`. The `calc-flow-python` PyO3
+  binding has no separate Rust integration-test directory — its behavior is
+  covered by inline unit tests and the Python suite under `python/tests/`.
 * Python binding and adapter tests live under `python/tests/`. Studio backend
   tests live under `web-ui/backend/tests/` (independent 85% coverage floor).
   Frontend unit tests use Vitest; browser workflows use Playwright.

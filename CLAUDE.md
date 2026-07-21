@@ -86,7 +86,9 @@ surface has its own runner.
 
 - **Rust core** — unit tests live beside source under
   `crates/calc-flow/src/`; integration tests live under
-  `crates/calc-flow/tests/` and `crates/calc-flow-python/tests/`. Run with
+  `crates/calc-flow/tests/`. The `calc-flow-python` PyO3 binding has no
+  separate Rust integration-test directory — its behavior is covered by inline
+  unit tests and the Python suite under `python/tests/`. Run with
   `cargo test --workspace --all-targets --all-features`, and enforce the 90%
   line floor with `cargo llvm-cov --workspace --all-features --fail-under-lines 90`.
 - **Python binding and adapters** — `python/tests/`, run with
