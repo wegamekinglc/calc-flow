@@ -67,22 +67,22 @@ be mutated through aliases. Compilation validates ports and topology and binds
 an immutable `UdfRegistrySnapshot`. `ExecutionPlan::execute` is asynchronous and
 accepts only `Batch` values.
 
-### Engine boundary migration
+### Engine boundary
 
-The table/external engine boundary intentionally changes the Rust source API
-and must ship in a breaking-release window. `ExpressionOperator` and
-`SqlOperator` are classified built-ins rather than implementations of the
-external `Operator` trait. Existing boxed calls to `PipelineBuilder::add_node`
-remain valid through `OperatorDefinition` conversions, but downstream code
-must not cast built-ins to `dyn Operator` or call their processing seam
-directly.
+`ExpressionOperator` and `SqlOperator` are built-in operators. They are not
+implementations of the external `Operator` trait, so do not cast them to
+`dyn Operator` or call their processing seam directly. Add them through
+`PipelineBuilder::add_node`, which accepts an `OperatorDefinition` produced
+from any boxed built-in, custom, or external operator.
 
-Custom and provider operators continue to implement `Operator`, whose
-`OperatorContext` now contains only `run`; code that constructed or
-destructured the previous DataFusion-bearing context must remove that field.
-`ExecutionPlan::datafusion_config()` now returns `Option<DataFusionConfig>`:
-`None` means the plan is external-only and owns no table resources. Use
-`requires_datafusion()` when only the classification is needed.
+Custom operators implement `Operator`, whose `OperatorContext` carries only the
+run-scoped context (`run`). External operators resolve through
+`ProviderRegistry` and `ExternalOperatorFactory`, covered below.
+
+`ExecutionPlan::datafusion_config()` returns `Option<DataFusionConfig>`:
+`None` means the plan is external-only and owns no table resources, so its runs
+create no DataFusion session or UDF snapshot.
+`ExecutionPlan::requires_datafusion()` returns the classification alone.
 
 ## SQL operators
 
