@@ -227,7 +227,7 @@ repository commands and constraints.
 
 - **[Documentation index](docs/README.md)** — reading order for all published docs
 - **[Introduction](docs/introduction.md)** — architecture and data flow
-- **[Getting started](docs/getting-started.md)** — installation and smoke test
+- **[getting started](docs/getting-started.md)** — installation and smoke test
 - **[Python API](docs/python-api.md)** — Python surface and examples
 - **[Rust API](docs/rust-api.md)** — native surface and examples
 - **[API reference](docs/api-reference.md)** — supported surfaces at a glance
