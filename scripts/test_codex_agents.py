@@ -57,14 +57,16 @@ class CodexAgentConfigTests(unittest.TestCase):
     def _agent_configs(self) -> dict[str, dict[str, object]]:
         agent_dir = ROOT / ".codex/agents"
         return {
-            path.stem: tomllib.loads(path.read_text())
+            path.stem: tomllib.loads(path.read_text(encoding="utf-8"))
             for path in sorted(agent_dir.glob("*.toml"))
         }
 
     def test_project_config_enables_agents_without_changing_permissions(
         self,
     ) -> None:
-        config = tomllib.loads((ROOT / ".codex/config.toml").read_text())
+        config = tomllib.loads(
+            (ROOT / ".codex/config.toml").read_text(encoding="utf-8")
+        )
 
         self.assertEqual(config["approval_policy"], "on-request")
         self.assertEqual(config["sandbox_mode"], "workspace-write")
@@ -121,7 +123,7 @@ class CodexAgentConfigTests(unittest.TestCase):
                     )
 
     def test_team_readme_lists_every_agent_and_codex_artifact_path(self) -> None:
-        readme = (ROOT / ".codex/agents/README.md").read_text()
+        readme = (ROOT / ".codex/agents/README.md").read_text(encoding="utf-8")
 
         for agent in EXPECTED_AGENTS:
             self.assertIn(f"`{agent}`", readme)
@@ -144,7 +146,7 @@ class CodexAgentConfigTests(unittest.TestCase):
                 )
 
     def test_agents_guide_points_to_codex_team(self) -> None:
-        guide = (ROOT / "AGENTS.md").read_text()
+        guide = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
 
         self.assertIn(".codex/agents/README.md", guide)
         self.assertIn(".codex/artifacts/", guide)

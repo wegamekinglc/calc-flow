@@ -106,9 +106,7 @@ exists, create a new clone:
 
 ```bash
 migration_stage=$(mktemp -d /tmp/calc-flow-codex-agent-team.XXXXXX)
-git clone --no-hardlinks \
-  /home/wegamekinglc/dev/github/my-claude/workspace/calc-flow \
-  "$migration_stage"
+git clone --no-hardlinks . "$migration_stage"
 ```
 
 Expected: the staging clone has a writable `.git` directory and writable
