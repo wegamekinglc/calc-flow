@@ -97,6 +97,31 @@ class ReleaseConfigTests(unittest.TestCase):
             rust_core.index("cargo test --workspace --all-targets --all-features"),
         )
 
+    def test_rust_core_ci_reclaims_disk_around_coverage(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        rust_core = workflow.split("  rust-core:\n", 1)[1].split(
+            "  rust-supply-chain:\n", 1
+        )[0]
+
+        rust_tests = "cargo test --workspace --all-targets --all-features"
+        clean_tests = "cargo clean"
+        coverage = "cargo llvm-cov --workspace --all-features --fail-under-lines 90"
+        clean_coverage = "cargo llvm-cov clean --workspace"
+        rustdoc = (
+            'RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps'
+        )
+
+        self.assertLess(rust_core.index(rust_tests), rust_core.index(clean_tests))
+        self.assertLess(rust_core.index(clean_tests), rust_core.index(coverage))
+        self.assertLess(
+            rust_core.index(coverage),
+            rust_core.index(clean_coverage),
+        )
+        self.assertLess(
+            rust_core.index(clean_coverage),
+            rust_core.index(rustdoc),
+        )
+
     def test_benchmark_smoke_runs_every_supported_scale(self) -> None:
         support_tree = ast.parse((ROOT / "benchmarks/support.py").read_text())
         scales_assignment = next(
