@@ -1,5 +1,7 @@
 # Studio Input Aliases and Resizable Panels Design
 
+**Status:** Implemented and merged in PR #17 (historical design)
+
 ## Goal
 
 Make SQL nodes practical for multi-upstream graphs by replacing the fragile

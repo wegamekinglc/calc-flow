@@ -1,6 +1,6 @@
 # Lazy Run-Scoped DataFusion Runtime Design
 
-**Status:** Proposed for review
+**Status:** Implemented, retained by measured evidence, and merged in PR #14
 
 **Date:** 2026-07-18
 
@@ -103,11 +103,11 @@ requests one.
 
 ## Alternatives considered
 
-| Approach                                      | Advantages                                                   | Rejected cost or risk                                                                 |
-| --------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
-| Lazy session inside `DataFusionRuntime`       | Preserves public APIs and run isolation; pays only on query  | Requires careful deferred UDF installation and first-query concurrency tests          |
-| Compile-time `requires_datafusion` plan flag  | Makes the decision explicit before execution                 | Adds operator capability plumbing and still needs an optional or dummy runtime context |
-| Cache a session on the plan or across runs    | Could also reduce setup for repeated table runs              | Violates the approved run-scoped boundary and complicates tables, UDFs, metrics, and cancellation |
+| Approach                                     | Advantages                                                  | Rejected cost or risk                                                                             |
+| -------------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Lazy session inside `DataFusionRuntime`      | Preserves public APIs and run isolation; pays only on query | Requires careful deferred UDF installation and first-query concurrency tests                      |
+| Compile-time `requires_datafusion` plan flag | Makes the decision explicit before execution                | Adds operator capability plumbing and still needs an optional or dummy runtime context            |
+| Cache a session on the plan or across runs   | Could also reduce setup for repeated table runs             | Violates the approved run-scoped boundary and complicates tables, UDFs, metrics, and cancellation |
 
 The selected approach is lazy session construction inside
 `DataFusionRuntime`. It is the narrowest change that removes the measured cost

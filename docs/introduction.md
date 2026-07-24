@@ -268,7 +268,8 @@ Recreate projects with the v2 schema and restart stateful processing from a
 chosen source boundary. No automated converter is provided. See the
 [v2 release guide](v2-release.md) for the upgrade checklist.
 
-Historical v1 documents under `docs/v1-final-api.md` and
-`docs/migration-v0.2.md` are references only. The frozen v1 implementation is
-available at the `v1-python-final` tag, while `tests/fixtures/v1/` preserves
-the semantic corpus used to prove v2 parity.
+The historical [v1 API](v1-final-api.md) and
+[v0.2 migration guide](migration-v0.2.md) are references only. The frozen v1
+implementation is available at the `v1-python-final` tag, while
+[`tests/fixtures/v1/`](../tests/fixtures/v1/) preserves the semantic corpus
+used to prove v2 parity.

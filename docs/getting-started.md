@@ -317,29 +317,20 @@ you are verifying):
 
 You should see the computed totals: `[3, 7]`.
 
-Rust users can run the equivalent native example, which prints
-`calculated totals: [3, 7]`:
-
-```bash
-cargo run -p calc-flow --example expression_pipeline
-```
-
-See
-[`crates/calc-flow/examples/expression_pipeline.rs`](../crates/calc-flow/examples/expression_pipeline.rs).
-
 ### Rust
 
 Rust users get an equivalent example in the [Rust API guide](rust-api.md): the
 `expression_pipeline` example builds the same expression pipeline over Arrow
 `RecordBatch` values and awaits `ExecutionPlan::execute`. With a source
-checkout you can also run it directly:
+checkout you can run it directly:
 
 ```bash
 cargo run -p calc-flow --example expression_pipeline
 ```
 
-The source lives at `crates/calc-flow/examples/expression_pipeline.rs`; the
-[Rust API guide](rust-api.md) walks through it step by step.
+The command prints `calculated totals: [3, 7]`. The
+[`expression_pipeline.rs`](../crates/calc-flow/examples/expression_pipeline.rs)
+source and [Rust API guide](rust-api.md) walk through the example.
 
 ## Troubleshooting
 

@@ -50,9 +50,10 @@ the dominant failure mode and refuse to cry wolf on single-run swings.
 **Worktree discipline.** Benchmarking reads source and builds artifacts but does not
 normally edit repository files; you usually do not need a worktree for the measurement
 itself. If you are asked to *add* a benchmark or fix a regression you found, follow
-`cf-implementer`'s rule: enter an isolated worktree via `superpowers:using-git-worktrees` before creating
-or editing any file. For pure measurement and reporting, working from the current
-checkout is fine — but never commit or push; that is the user's action.
+`cf-implementer`'s rule: use `superpowers:using-git-worktrees` when available, or the
+repository's `.worktrees/` fallback, before creating or editing any file. For pure
+measurement and reporting, working from the current checkout is fine — but never commit
+or push; that is the user's action.
 
 Execute these phases in order. Skipping the same-ref spread measurement (Phase 3) and
 gating on a single run is the #1 way this agent goes wrong.

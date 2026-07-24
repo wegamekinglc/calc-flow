@@ -1,5 +1,10 @@
 # Array Benchmark Regression Implementation Plan
 
+> **Historical status:** Implemented and merged in PR #13. Unchecked boxes
+> preserve the original execution plan; final Phase 1 and Phase 2 outcomes are
+> recorded in the [Phase 1](../handoffs/2026-07-16-array-benchmark-phase1.md)
+> and [Phase 2](../handoffs/2026-07-16-array-benchmark-phase2.md) evidence.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make NumPy/JAX benchmark comparisons trustworthy, isolate the regressed layer, and recover measured Python-provider overhead with a bounded expression cache and a one-copy immutable NumPy snapshot.

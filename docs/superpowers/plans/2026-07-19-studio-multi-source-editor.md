@@ -1,5 +1,8 @@
 # Studio Multi-Source Editor Implementation Plan
 
+> **Historical status:** Implemented and merged in PR #17. Unchecked boxes
+> preserve the original execution plan; they are not current pending work.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace Studio's single preview override with a persistent multi-source editor and prove that a true two-external-input graph saves, validates, and runs.

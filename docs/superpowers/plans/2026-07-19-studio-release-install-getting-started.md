@@ -1,5 +1,9 @@
 # Studio Release Install and Getting Started Implementation Plan
 
+> **Historical status:** Implemented and merged in PR #16. Unchecked boxes and
+> machine-specific staging paths preserve the original execution record; they
+> are not current instructions.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Preserve a prepared non-editable Calc Flow release installation when the managed Studio starts, and document package and source installation plus Studio startup on Linux and native Windows.

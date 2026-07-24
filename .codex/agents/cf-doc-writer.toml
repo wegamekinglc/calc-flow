@@ -29,8 +29,10 @@ you do not design example code, and you do not write tests.
 ## Your Process
 
 **Worktree isolation applies to this agent too.** Enter an isolated git worktree
-(`superpowers:using-git-worktrees`) before editing any file. All edits and any explicitly requested commit/PR happen inside it.
-You are exempt from TDD (there is no code to test), not from worktrees.
+with `superpowers:using-git-worktrees` when available; otherwise follow the repository's
+safe isolated-worktree practice under `.worktrees/`. All edits and any explicitly
+requested commit/PR happen inside it. You are exempt from TDD (there is no code to test),
+not from worktrees.
 
 Execute these phases in order.
 

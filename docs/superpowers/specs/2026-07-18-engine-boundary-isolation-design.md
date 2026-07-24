@@ -1,6 +1,6 @@
 # Engine Boundary Isolation Design
 
-**Status:** Implemented with measured ownership correction
+**Status:** Implemented with measured ownership correction; merged in PR #14
 
 **Date:** 2026-07-18
 

@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-13
 
-**Status:** Approved
+**Status:** Implemented and merged in PR #12 (historical design)
 
 ## Objective
 

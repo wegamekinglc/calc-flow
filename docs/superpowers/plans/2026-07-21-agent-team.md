@@ -1,5 +1,10 @@
 # Calc Flow Agent Team Implementation Plan
 
+> **Historical status:** Implemented and merged in PR #19. The Claude agent
+> tree remains preserved compatibility material; current Codex counterparts
+> were added later by the 2026-07-24 migration. Unchecked boxes and source
+> paths below preserve the original execution record.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. This sub-skill governs *executing the plan* (the human/orchestrator layer); it is a separate concern from the design's "no plugin dependency" rule, which applies to the `cf-*` agent *bodies* so a spawned teammate never fails on a missing skill at runtime. The two do not conflict.
 
 **Goal:** Create the `cf-*` agent team — ten specialist agents plus a team README under `.claude/agents/` — ported from the Derivatives-Algorithms-Lib (DAL) team per the approved spec.

@@ -1,5 +1,7 @@
 # Studio Multi-Source Editor Design
 
+**Status:** Implemented and merged in PR #17 (historical design)
+
 ## Goal
 
 Allow Calc Flow Studio users to add, remove, edit, save, validate, and run all

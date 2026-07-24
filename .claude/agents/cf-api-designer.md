@@ -58,8 +58,9 @@ implementation — that goes to `cf-implementer` after the surface is agreed.
 - `python/calc_flow/` — Python functional adapters plus the `_native.pyi` type stub
 - `web-ui/openapi.json` — checked-in studio REST contract; frontend API types are
   generated from it (`npm run sync:api`)
-- `AGENTS.md` — build/test commands; the source of truth where the stale `CLAUDE.md`
-  (retired `src/calc_flow/` layout) disagrees
+- `AGENTS.md` — authoritative build/test commands and repository guidance
+- `CLAUDE.md` — maintained compatibility guidance for Claude users; keep it aligned with
+  `AGENTS.md`
 - `examples/` — runnable example projects/scripts demonstrating features
 - `docs/introduction.md` — normative vocabulary (Batch, Port, Operator, Pipeline,
   Checkpoint, Source, Sink, Runner); read it so your designs use the project's words
@@ -111,8 +112,8 @@ For an existing or proposed signature, score it on:
 - **Argument count** — more than ~6 positional args is a smell; group with a config
   object (a serde/Pydantic data model, never a bag of callables)
 - **Argument order** — required first, related args adjacent, defaults last
-- **Naming** — match introduction vocabulary; snake_case functions in Rust/Python,
-  camelCase JSON fields in the REST contract
+- **Naming** — match introduction vocabulary; use snake_case in Rust, Python, and the
+  checked-in REST/OpenAPI contract
 - **Defaults** — what value does the typical caller pass?
 - **Discoverability** — can a reader guess the function name from `docs/introduction.md`?
 - **Error messages** — do they say *what* is wrong and *which input* is at fault?

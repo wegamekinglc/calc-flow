@@ -1,6 +1,6 @@
 # Array Benchmark Regression Design
 
-**Status:** Approved for implementation planning
+**Status:** Implemented with Phase 1/Phase 2 evidence and merged in PR #13
 
 **Date:** 2026-07-16
 

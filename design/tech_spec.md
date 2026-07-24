@@ -1,8 +1,11 @@
 # Tech Spec: Array Engine API Surface
 
+> **Historical status:** Completed v0.1 design record. The paths and API shape
+> below describe the removed Python v1 implementation, not the current Rust API.
+
 > This document records the v0.1 array API work. The DataFusion-only table
 > architecture and the remaining v0.2 changes are defined in
-> `design/v0.2-refactor-plan.md`.
+> [the v0.2 refactor plan](v0.2-refactor-plan.md).
 
 ## Motivation
 
@@ -54,19 +57,19 @@ Results are wrapped with `self.xp.asarray(...)` before returning to keep the
 contract consistent when backends return scalar or 0-D values (e.g.
 `sum(axis=None)`).
 
-| Category | Method | Array API function |
-|---|---|---|
-| Element-wise | `add(left, right)` | `xp.add` |
-| | `subtract(left, right)` | `xp.subtract` |
-| | `multiply(left, right)` | `xp.multiply` |
-| | `divide(left, right)` | `xp.divide` |
-| Linear algebra | `matmul(left, right)` | `xp.matmul` |
-| Reductions | `sum(data, *, axis)` | `xp.sum` |
-| | `mean(data, *, axis)` | `xp.mean` |
-| | `max(data, *, axis)` | `xp.max` |
-| | `min(data, *, axis)` | `xp.min` |
-| Shape | `transpose(data, *, axes)` | `xp.permute_dims` |
-| | `reshape(data, shape)` | `xp.reshape` |
+| Category       | Method                     | Array API function |
+| -------------- | -------------------------- | ------------------ |
+| Element-wise   | `add(left, right)`         | `xp.add`           |
+|                | `subtract(left, right)`    | `xp.subtract`      |
+|                | `multiply(left, right)`    | `xp.multiply`      |
+|                | `divide(left, right)`      | `xp.divide`        |
+| Linear algebra | `matmul(left, right)`      | `xp.matmul`        |
+| Reductions     | `sum(data, *, axis)`       | `xp.sum`           |
+|                | `mean(data, *, axis)`      | `xp.mean`          |
+|                | `max(data, *, axis)`       | `xp.max`           |
+|                | `min(data, *, axis)`       | `xp.min`           |
+| Shape          | `transpose(data, *, axes)` | `xp.permute_dims`  |
+|                | `reshape(data, shape)`     | `xp.reshape`       |
 
 All methods operate on raw arrays. Operands are coerced with `self.xp.asarray(...)`;
 results are wrapped with `self.xp.asarray(...)`.
@@ -80,10 +83,10 @@ don't have named columns.
 
 ## Files modified
 
-| File | Change |
-|---|---|
-| `src/calc_flow/engine/array.py` | Added `xp` property + operation methods. Simplified `_evaluate_expression` (arrays only). |
-| `tests/calc_flow/engine/test_array.py` | Tests for each operation method on both engines. |
+| File                                   | Change                                                                                    |
+| -------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `src/calc_flow/engine/array.py`        | Added `xp` property + operation methods. Simplified `_evaluate_expression` (arrays only). |
+| `tests/calc_flow/engine/test_array.py` | Tests for each operation method on both engines.                                          |
 
 ## Verification
 

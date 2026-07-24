@@ -195,7 +195,8 @@ must satisfy Rust's `Send + Sync` boundaries.
 ## Micro-batch recovery
 
 The complete checked example is
-`crates/calc-flow/examples/micro_batch_recovery.rs`. Its central lifecycle is:
+[`micro_batch_recovery.rs`](../crates/calc-flow/examples/micro_batch_recovery.rs).
+Its central lifecycle is:
 
 ```rust
 let mut first = MicroBatchRunner::new(

@@ -59,8 +59,8 @@ you do not design example code, and you do not write tests.
 - `CHANGELOG.md` (repo root) — the single historical record of fundamental changes; you
   are its sole curator (create it on the first qualifying change — the repo has none yet)
 - `AGENTS.md` — commands and architecture summary; must stay in sync with reality
-- `CLAUDE.md` — currently stale (describes the retired `src/calc_flow/` layout);
-  reconcile it against `AGENTS.md` when doc work touches it
+- `CLAUDE.md` — maintained compatibility guidance for Claude users; keep duplicated
+  commands and architecture claims aligned with authoritative `AGENTS.md`
 - `.claude/rules/code-style.md` — markdown conventions (aligned pipe tables, no trailing
   whitespace, final newline)
 - `examples/` — example code; reuse verbatim, never redesign
@@ -73,8 +73,9 @@ you do not design example code, and you do not write tests.
 ## Your Process
 
 **Worktree isolation applies to this agent too.** Enter an isolated git worktree
-(`EnterWorktree`) before editing any file. All edits and the commit/PR happen inside it.
-You are exempt from TDD (there is no code to test), not from worktrees.
+(`EnterWorktree`) before editing any file. All edits and any explicitly requested
+commit/PR happen inside it. You are exempt from TDD (there is no code to test), not from
+worktrees.
 
 Execute these phases in order.
 
@@ -106,8 +107,8 @@ Update the doc(s) in place to match the current source:
   file ends with a newline.
 - Reuse example code from `examples/` or `.claude/api-notes/` verbatim. If an example is
   wrong or missing, route that to `cf-api-designer` — do not fix it here.
-- Update `AGENTS.md` when commands or architecture change. Reconcile `CLAUDE.md` against
-  `AGENTS.md` when it conflicts (it is stale today).
+- Update `AGENTS.md` when commands or architecture change. Reconcile duplicated
+  `CLAUDE.md` guidance against authoritative `AGENTS.md`.
 - Cross-link new pages from `docs/introduction.md` or the nearest existing page.
 
 ### Phase 3: Decide Whether a CHANGELOG Entry Is Warranted
@@ -127,7 +128,7 @@ Self-review every changed file against the project's markdown conventions:
 - Cross-reference links resolve (relative paths from the doc's own directory).
 - Vocabulary matches `docs/introduction.md` and `AGENTS.md`.
 
-### Phase 5: Commit and PR
+### Phase 5: Commit and PR (only when explicitly requested)
 
 Follow the parent-repo conventions:
 
@@ -140,7 +141,9 @@ Follow the parent-repo conventions:
   current crate exports", "cross-checked AGENTS.md commands", "verified tables aligned
   and files end with newline").
 
-Open the PR and leave it for the user to merge. Do not merge.
+If the user explicitly requested publication, open the PR and leave it for the user to
+merge. Otherwise report the verified documentation change without committing, pushing,
+or opening a PR. Do not merge.
 
 ## The Single-Version (Latest) Rule
 
