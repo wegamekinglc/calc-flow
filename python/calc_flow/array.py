@@ -21,6 +21,8 @@ _MAX_POWER_EXPONENT_MAGNITUDE = 64
 _MAX_RESHAPE_RANK = 16
 _MAX_RESHAPE_DIMENSION = 1_000_000
 _MAX_RESHAPE_ELEMENTS = 10_000_000
+_TABLE_MATMUL_INPUT_PORTS = (("table", "table"), ("weights", "array"))
+_TABLE_MATMUL_OUTPUT_PORTS = (("output", "array"),)
 
 _ALLOWED_BINARY = {
     ast.Add: operator.add,
@@ -222,6 +224,204 @@ def _validate_provider_options(
         _validate_options(options)
 
 
+def _table_matmul_columns(options: Mapping[str, object]) -> tuple[str, ...]:
+    unknown = set(options) - {"columns"}
+    if unknown:
+        raise ValueError(
+            "invalid table_matmul options: unsupported options: "
+            + ", ".join(sorted(unknown))
+        )
+    columns = options.get("columns")
+    if isinstance(columns, (str, bytes)) or not isinstance(columns, list):
+        raise ValueError("invalid table_matmul options: columns must be a JSON array")
+    if not columns:
+        raise ValueError(
+            "invalid table_matmul options: columns must contain at least one name"
+        )
+    if not all(isinstance(column, str) and column for column in columns):
+        raise ValueError(
+            "invalid table_matmul options: columns must contain non-empty strings"
+        )
+    if len(set(columns)) != len(columns):
+        raise ValueError("invalid table_matmul options: columns must be unique")
+    return tuple(columns)
+
+
+def _table_matmul_inputs(
+    inputs: Mapping[str, _native.Batch],
+    backend: str,
+) -> tuple[_native.Batch, _native.Batch]:
+    copied = dict(inputs)
+    expected = {"table", "weights"}
+    missing = expected - set(copied)
+    unexpected = set(copied) - expected
+    if missing:
+        raise ValueError(
+            "invalid table_matmul inputs: missing required inputs: "
+            + ", ".join(sorted(missing))
+        )
+    if unexpected:
+        raise ValueError(
+            "invalid table_matmul inputs: unsupported inputs: "
+            + ", ".join(sorted(unexpected))
+        )
+    table_batch = copied["table"]
+    weights_batch = copied["weights"]
+    if not isinstance(table_batch, _native.Batch) or table_batch.kind != "table":
+        received = getattr(table_batch, "kind", type(table_batch).__name__)
+        raise TypeError(
+            f"invalid table_matmul table: expected a table batch, received {received}"
+        )
+    if not isinstance(weights_batch, _native.Batch) or weights_batch.kind != "array":
+        received = getattr(weights_batch, "kind", type(weights_batch).__name__)
+        raise TypeError(
+            "invalid table_matmul weights: "
+            f"expected an array batch, received {received}"
+        )
+    if weights_batch.backend != backend:
+        raise ValueError(
+            "invalid table_matmul weights.backend: "
+            f"expected {backend}, received {weights_batch.backend}"
+        )
+    return table_batch, weights_batch
+
+
+def _validated_table_dtypes(
+    table: object,
+    columns: tuple[str, ...],
+) -> tuple[object, ...]:
+    import numpy as np
+    import pyarrow as pa
+
+    if table.num_rows <= 0:
+        raise ValueError("invalid table_matmul table.rows: expected at least one row")
+    dtypes: list[object] = []
+    for name in columns:
+        indices = table.schema.get_all_field_indices(name)
+        if not indices:
+            raise ValueError(
+                f"invalid table_matmul columns: selected column {name!r} is missing"
+            )
+        if len(indices) != 1:
+            raise ValueError(
+                f"invalid table_matmul columns: selected column {name!r} is ambiguous"
+            )
+        column = table.column(indices[0])
+        if column.null_count:
+            raise ValueError(
+                f"invalid table_matmul columns: selected column {name!r} contains nulls"
+            )
+        data_type = column.type
+        if not (pa.types.is_integer(data_type) or pa.types.is_floating(data_type)):
+            raise TypeError(
+                "invalid table_matmul columns: "
+                f"selected column {name!r} has unsupported Arrow dtype {data_type}"
+            )
+        family = (
+            "int"
+            if pa.types.is_signed_integer(data_type)
+            else "uint"
+            if pa.types.is_unsigned_integer(data_type)
+            else "float"
+        )
+        dtypes.append(np.dtype(f"{family}{data_type.bit_width}"))
+    return tuple(dtypes)
+
+
+def _validated_weights(
+    weights_batch: _native.Batch,
+    backend: str,
+    column_count: int,
+) -> object:
+    weights = weights_batch.array
+    if backend == "numpy":
+        import numpy as np
+
+        if type(weights) is not np.ndarray:
+            raise TypeError(
+                "invalid table_matmul weights: NumPy weights must be an ndarray"
+            )
+    shape = getattr(weights, "shape", ())
+    if len(shape) != 2:
+        raise ValueError(
+            "invalid table_matmul weights.rank: "
+            f"expected rank two, received rank {len(shape)}"
+        )
+    if shape[0] != column_count:
+        raise ValueError(
+            "invalid table_matmul weights.shape[0]: "
+            f"expected {column_count}, received {shape[0]}"
+        )
+    if shape[1] <= 0:
+        raise ValueError(
+            "invalid table_matmul weights.shape[1]: expected a positive output width"
+        )
+    return weights
+
+
+def _common_matrix_dtype(
+    backend: str,
+    namespace: object,
+    table_dtypes: tuple[object, ...],
+    weights: object,
+) -> object:
+    import numpy as np
+
+    weight_dtype = np.dtype(weights.dtype)
+    involved = ", ".join(
+        [*(np.dtype(dtype).name for dtype in table_dtypes), weight_dtype.name]
+    )
+    try:
+        result_dtype = np.dtype(namespace.result_type(*table_dtypes, weight_dtype))
+    except (TypeError, ValueError) as error:
+        raise TypeError(
+            "invalid table_matmul dtype: "
+            f"{backend} cannot promote Arrow and weight dtypes [{involved}]"
+        ) from error
+    sources = (*table_dtypes, weight_dtype)
+    if not all(
+        namespace.can_cast(source, result_dtype, casting="safe") for source in sources
+    ):
+        raise TypeError(
+            "invalid table_matmul dtype: "
+            f"common dtype {result_dtype.name} is lossy for [{involved}]"
+        )
+    if backend == "numpy":
+        try:
+            _validate_numpy_dtype(result_dtype)
+        except ValueError as error:
+            raise TypeError(
+                "invalid table_matmul dtype: "
+                f"common dtype {result_dtype.name} is unsupported for [{involved}]"
+            ) from error
+    return result_dtype
+
+
+def _numpy_table_matrix(
+    table: object,
+    columns: tuple[str, ...],
+    dtype: object,
+) -> object:
+    import numpy as np
+
+    matrix, _token = _native.Batch._new_owned_numpy(
+        (table.num_rows, len(columns)),
+        np.dtype(dtype).name,
+    )
+    for column_index, name in enumerate(columns):
+        offset = 0
+        for chunk in table[name].chunks:
+            values = chunk.to_numpy(zero_copy_only=True)
+            next_offset = offset + len(values)
+            np.copyto(
+                matrix[offset:next_offset, column_index],
+                values,
+                casting="safe",
+            )
+            offset = next_offset
+    return matrix
+
+
 def _owned_numpy(value: object) -> object:
     import numpy as np
 
@@ -344,10 +544,81 @@ class _ArrayProvider:
         )
 
 
+def _jax_table_matmul(*_args: object) -> tuple[object, object]:
+    raise AssertionError("JAX table_matmul provider is not registered")
+
+
+@dataclass(frozen=True, slots=True)
+class _TableMatmulProvider:
+    backend: str
+    namespace: object
+
+    def validate(self, options: Mapping[str, object]) -> None:
+        _table_matmul_columns(options)
+
+    def __call__(
+        self,
+        inputs: Mapping[str, _native.Batch],
+        options: Mapping[str, object],
+    ) -> dict[str, _native.Batch]:
+        columns = _table_matmul_columns(options)
+        table_batch, weights_batch = _table_matmul_inputs(inputs, self.backend)
+        table = table_batch.to_pyarrow()
+        table_dtypes = _validated_table_dtypes(table, columns)
+        weights = _validated_weights(weights_batch, self.backend, len(columns))
+        result_dtype = _common_matrix_dtype(
+            self.backend,
+            self.namespace,
+            table_dtypes,
+            weights,
+        )
+        if self.backend != "numpy":
+            output, token = _jax_table_matmul(
+                table,
+                columns,
+                result_dtype,
+                weights,
+            )
+        else:
+            import numpy as np
+
+            dense = _numpy_table_matrix(table, columns, result_dtype)
+            output, token = _native.Batch._new_owned_numpy(
+                (table.num_rows, weights.shape[1]),
+                np.dtype(result_dtype).name,
+            )
+            np.matmul(dense, weights, out=output)
+
+        metadata = table_batch.metadata
+        metadata.update(
+            {
+                "backend": self.backend,
+                "columns": list(columns),
+                "operation": "table_matmul",
+            }
+        )
+        return {
+            "output": _native.Batch._from_owned_array(
+                output,
+                backend=self.backend,
+                token=token,
+                metadata=metadata,
+            )
+        }
+
+
 def register_numpy(runtime: Runtime) -> None:
     import numpy as np
 
     runtime.register_provider("numpy", "expression", "1", _ArrayProvider("numpy", np))
+    runtime._register_mapping_provider(
+        "numpy",
+        "table_matmul",
+        "1",
+        _TableMatmulProvider("numpy", np),
+        input_ports=_TABLE_MATMUL_INPUT_PORTS,
+        output_ports=_TABLE_MATMUL_OUTPUT_PORTS,
+    )
 
 
 def register_jax(runtime: Runtime) -> None:

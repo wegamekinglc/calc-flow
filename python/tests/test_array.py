@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import copy
 import gc
+import re
 import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -549,6 +550,516 @@ def test_array_batch_copies_metadata_and_reports_shape_length() -> None:
     assert not batch.array.flags.writeable
     with pytest.raises(TypeError, match="table batches do not contain an array"):
         _ = Batch.from_pyarrow(pa.table({"value": [1]})).array
+
+
+def test_numpy_table_matmul_multiplies_selected_arrow_columns() -> None:
+    runtime = Runtime()
+    register_numpy(runtime)
+    table = pa.table(
+        {
+            "quantity": [3.0, 1.0, 4.0],
+            "unit_price": [10.0, 12.0, 10.0],
+            "ignored": [99.0, 99.0, 99.0],
+        }
+    )
+    weights = Batch.from_array(
+        np.array([[2.0, 0.0], [0.0, 1.0]], dtype=np.float64),
+        backend="numpy",
+    )
+    plan = (
+        PipelineBuilder("numpy-table-matmul")
+        .table_matmul(
+            "multiply",
+            backend="numpy",
+            columns=("quantity", "unit_price"),
+        )
+        .compile(runtime)
+    )
+
+    run = plan.execute(
+        {
+            "table": Batch.from_pyarrow(table, {"source": "orders"}),
+            "weights": weights,
+        }
+    )
+    output = run.outputs["output"]
+
+    assert output.kind == "array"
+    assert output.backend == "numpy"
+    assert output.array.tolist() == [[6.0, 10.0], [2.0, 12.0], [8.0, 10.0]]
+    assert output.metadata == {
+        "backend": "numpy",
+        "columns": ["quantity", "unit_price"],
+        "operation": "table_matmul",
+        "source": "orders",
+    }
+    assert run.datafusion_metrics == []
+
+
+@pytest.mark.parametrize(
+    ("arrow_type", "weight_dtype", "result_dtype"),
+    [
+        (pa.int8(), np.int8, np.int8),
+        (pa.int16(), np.int16, np.int16),
+        (pa.int32(), np.int32, np.int32),
+        (pa.int64(), np.int64, np.int64),
+        (pa.uint8(), np.uint8, np.uint8),
+        (pa.uint16(), np.uint16, np.uint16),
+        (pa.uint32(), np.uint32, np.uint32),
+        (pa.uint64(), np.uint64, np.uint64),
+        (pa.float16(), np.float32, np.float32),
+        (pa.float32(), np.float32, np.float32),
+        (pa.float64(), np.float64, np.float64),
+    ],
+)
+def test_numpy_table_matmul_accepts_primitive_arrow_numeric_dtypes(
+    arrow_type: pa.DataType,
+    weight_dtype: type[np.generic],
+    result_dtype: type[np.generic],
+) -> None:
+    runtime = Runtime()
+    register_numpy(runtime)
+    plan = (
+        PipelineBuilder(f"numpy-table-{arrow_type}")
+        .table_matmul("multiply", backend="numpy", columns=("value",))
+        .compile(runtime)
+    )
+
+    output = plan.execute(
+        {
+            "table": Batch.from_pyarrow(
+                pa.table({"value": pa.array([2, 3], type=arrow_type)})
+            ),
+            "weights": Batch.from_array(
+                np.array([[2]], dtype=weight_dtype),
+                backend="numpy",
+            ),
+        }
+    ).outputs["output"]
+
+    assert output.array.dtype == np.dtype(result_dtype)
+    assert output.array.tolist() == [[4], [6]]
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({}, "columns must be a JSON array"),
+        ({"columns": "value"}, "columns must be a JSON array"),
+        ({"columns": []}, "columns must contain at least one name"),
+        ({"columns": [""]}, "columns must contain non-empty strings"),
+        ({"columns": ["value", "value"]}, "columns must be unique"),
+        (
+            {"columns": ["value"], "unexpected": True},
+            "unsupported options: unexpected",
+        ),
+    ],
+)
+def test_numpy_table_matmul_rejects_invalid_configuration(
+    options: dict[str, object],
+    message: str,
+) -> None:
+    provider = array_module._TableMatmulProvider("numpy", np)
+
+    with pytest.raises(
+        ValueError,
+        match=f"^invalid table_matmul options: {message}",
+    ):
+        provider.validate(options)
+
+
+def test_numpy_table_matmul_validates_every_input_before_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    valid_table = Batch.from_pyarrow(pa.table({"value": [1.0, 2.0]}))
+    valid_weights = Batch.from_array(
+        np.array([[1.0]], dtype=np.float64),
+        backend="numpy",
+    )
+
+    def table_batch(values: object) -> Batch:
+        return Batch.from_pyarrow(pa.table({"value": values}))
+
+    unsupported_tables = [
+        table_batch(pa.array([True, False], type=pa.bool_())),
+        table_batch(pa.array(["1", "2"], type=pa.string())),
+        table_batch(pa.array([b"1", b"2"], type=pa.binary())),
+        table_batch(pa.array([1, 2], type=pa.date32())),
+        table_batch(pa.array([1, 2], type=pa.decimal128(4, 0))),
+        table_batch(pa.array([[1], [2]], type=pa.list_(pa.int64()))),
+        table_batch(
+            pa.DictionaryArray.from_arrays(
+                pa.array([0, 1], type=pa.int8()),
+                pa.array([1, 2], type=pa.int64()),
+            )
+        ),
+    ]
+    cases: list[tuple[str, dict[str, Batch], dict[str, object], str]] = [
+        ("empty inputs", {}, {"columns": ["value"]}, "inputs"),
+        (
+            "missing weights",
+            {"table": valid_table},
+            {"columns": ["value"]},
+            "inputs",
+        ),
+        (
+            "unexpected input",
+            {
+                "table": valid_table,
+                "weights": valid_weights,
+                "extra": valid_weights,
+            },
+            {"columns": ["value"]},
+            "inputs",
+        ),
+        (
+            "table kind",
+            {"table": valid_weights, "weights": valid_weights},
+            {"columns": ["value"]},
+            "table",
+        ),
+        (
+            "weights kind",
+            {"table": valid_table, "weights": valid_table},
+            {"columns": ["value"]},
+            "weights",
+        ),
+        (
+            "weights backend",
+            {
+                "table": valid_table,
+                "weights": Batch._from_external(
+                    np.array([[1.0]]),
+                    "other",
+                    1,
+                    {},
+                ),
+            },
+            {"columns": ["value"]},
+            "weights.backend",
+        ),
+        (
+            "empty table",
+            {
+                "table": Batch.from_pyarrow(
+                    pa.table({"value": pa.array([], type=pa.float64())})
+                ),
+                "weights": valid_weights,
+            },
+            {"columns": ["value"]},
+            "table.rows",
+        ),
+        (
+            "missing column",
+            {"table": valid_table, "weights": valid_weights},
+            {"columns": ["missing"]},
+            "columns",
+        ),
+        (
+            "ambiguous column",
+            {
+                "table": Batch.from_pyarrow(
+                    pa.Table.from_arrays(
+                        [pa.array([1.0]), pa.array([2.0])],
+                        names=["value", "value"],
+                    )
+                ),
+                "weights": valid_weights,
+            },
+            {"columns": ["value"]},
+            "columns",
+        ),
+        (
+            "null column",
+            {
+                "table": table_batch(pa.array([1.0, None], type=pa.float64())),
+                "weights": valid_weights,
+            },
+            {"columns": ["value"]},
+            "columns",
+        ),
+        *(
+            (
+                f"unsupported column {index}",
+                {"table": table, "weights": valid_weights},
+                {"columns": ["value"]},
+                "columns",
+            )
+            for index, table in enumerate(unsupported_tables)
+        ),
+        (
+            "weights rank",
+            {
+                "table": valid_table,
+                "weights": Batch.from_array(
+                    np.array([1.0], dtype=np.float64),
+                    backend="numpy",
+                ),
+            },
+            {"columns": ["value"]},
+            "weights.rank",
+        ),
+        (
+            "weights input width",
+            {
+                "table": valid_table,
+                "weights": Batch.from_array(
+                    np.ones((2, 1), dtype=np.float64),
+                    backend="numpy",
+                ),
+            },
+            {"columns": ["value"]},
+            "weights.shape[0]",
+        ),
+        (
+            "weights output width",
+            {
+                "table": valid_table,
+                "weights": Batch.from_array(
+                    np.empty((1, 0), dtype=np.float64),
+                    backend="numpy",
+                ),
+            },
+            {"columns": ["value"]},
+            "weights.shape[1]",
+        ),
+        (
+            "unsupported dtype",
+            {
+                "table": table_batch(pa.array([1.0, 2.0], type=pa.float16())),
+                "weights": Batch.from_array(
+                    np.ones((1, 1), dtype=np.int8),
+                    backend="numpy",
+                ),
+            },
+            {"columns": ["value"]},
+            "dtype",
+        ),
+    ]
+
+    current_case = ""
+
+    def reject_allocation(*_args: object, **_kwargs: object) -> None:
+        pytest.fail(
+            f"{current_case}: invalid inputs must fail "
+            "before the first dense allocation"
+        )
+
+    monkeypatch.setattr(Batch, "_new_owned_numpy", reject_allocation)
+    provider = array_module._TableMatmulProvider("numpy", np)
+    for name, inputs, options, field in cases:
+        current_case = name
+        with pytest.raises(
+            (TypeError, ValueError),
+            match=rf"^invalid table_matmul {re.escape(field)}:",
+        ) as caught:
+            provider(inputs, options)
+        assert field in str(caught.value), name
+
+
+def test_numpy_table_matmul_rejects_lossy_backend_promotion() -> None:
+    class LossyNamespace:
+        @staticmethod
+        def result_type(*_dtypes: object) -> np.dtype[Any]:
+            return np.dtype(np.float32)
+
+        can_cast = staticmethod(np.can_cast)
+
+    weights = np.ones((1, 1), dtype=np.int64)
+
+    with pytest.raises(
+        TypeError,
+        match=r"^invalid table_matmul dtype: common dtype float32 is lossy",
+    ):
+        array_module._common_matrix_dtype(
+            "numpy",
+            LossyNamespace(),
+            (np.dtype(np.int64),),
+            weights,
+        )
+
+
+def test_numpy_table_matmul_honors_copy_and_ownership_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table = pa.table(
+        {
+            "quantity": pa.chunked_array(
+                [
+                    pa.array([3.0, 1.0], type=pa.float64()),
+                    pa.array([4.0], type=pa.float64()),
+                ]
+            ),
+            "unit_price": pa.chunked_array(
+                [
+                    pa.array([10.0], type=pa.float64()),
+                    pa.array([12.0, 10.0], type=pa.float64()),
+                ]
+            ),
+        }
+    )
+    expected_table = table.to_pydict()
+    caller_weights = np.array(
+        [[2.0, 0.0], [0.0, 1.0]],
+        dtype=np.float64,
+    )
+    expected_caller_weights = caller_weights.copy()
+    weights_batch = Batch.from_array(caller_weights, backend="numpy")
+    weights_payload = weights_batch.array
+    expected_weights_payload = weights_payload.copy()
+    runtime = Runtime()
+    register_numpy(runtime)
+    plan = (
+        PipelineBuilder("numpy-table-copy-ceiling")
+        .table_matmul(
+            "multiply",
+            backend="numpy",
+            columns=("quantity", "unit_price"),
+        )
+        .compile(runtime)
+    )
+
+    def reject_owned_numpy(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("table_matmul execution must not use the defensive copy path")
+
+    allocations: list[tuple[tuple[int, ...], str, int]] = []
+    original_new_owned = Batch._new_owned_numpy
+
+    def counted(shape: tuple[int, ...], dtype: str) -> tuple[object, object]:
+        array, token = original_new_owned(shape, dtype)
+        allocations.append((tuple(shape), dtype, array.__array_interface__["data"][0]))
+        return array, token
+
+    seen_weights: list[object] = []
+    original_matmul = np.matmul
+
+    def tracked_matmul(
+        left: object,
+        right: object,
+        *,
+        out: object,
+    ) -> object:
+        seen_weights.append(right)
+        return original_matmul(left, right, out=out)
+
+    monkeypatch.setattr(array_module, "_owned_numpy", reject_owned_numpy)
+    monkeypatch.setattr(Batch, "_new_owned_numpy", counted)
+    monkeypatch.setattr(np, "matmul", tracked_matmul)
+
+    output_batch = plan.execute(
+        {
+            "table": Batch.from_pyarrow(table),
+            "weights": weights_batch,
+        }
+    ).outputs["output"]
+    output = output_batch.array
+
+    assert [(shape, dtype) for shape, dtype, _pointer in allocations] == [
+        ((3, 2), "float64"),
+        ((3, 2), "float64"),
+    ]
+    assert output.__array_interface__["data"][0] == allocations[1][2]
+    assert seen_weights == [weights_payload]
+    assert seen_weights[0] is weights_payload
+    assert output.tolist() == [[6.0, 10.0], [2.0, 12.0], [8.0, 10.0]]
+
+    current: object = output
+    while current is not None:
+        if isinstance(current, np.ndarray):
+            assert not current.flags.writeable
+        current = getattr(current, "base", None)
+    with pytest.raises(ValueError):
+        output.setflags(write=True)
+
+    assert table.to_pydict() == expected_table
+    np.testing.assert_array_equal(caller_weights, expected_caller_weights)
+    np.testing.assert_array_equal(weights_payload, expected_weights_payload)
+
+
+def test_numpy_table_matrix_does_not_combine_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ChunkedColumn:
+        def __init__(self, chunks: list[pa.Array]) -> None:
+            self.chunks = chunks
+
+        def combine_chunks(self) -> None:
+            pytest.fail("table_matmul must not combine Arrow chunks")
+
+    class ChunkedTable:
+        num_rows = 3
+
+        def __init__(self) -> None:
+            self.columns = {
+                "left": ChunkedColumn([pa.array([1.0, 2.0]), pa.array([3.0])]),
+                "right": ChunkedColumn([pa.array([4.0]), pa.array([5.0, 6.0])]),
+            }
+
+        def __getitem__(self, name: str) -> ChunkedColumn:
+            return self.columns[name]
+
+    def reject_combine_chunks(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("table_matmul must not combine Arrow chunks")
+
+    monkeypatch.setattr(
+        ChunkedColumn,
+        "combine_chunks",
+        reject_combine_chunks,
+    )
+
+    matrix = array_module._numpy_table_matrix(
+        ChunkedTable(),
+        ("left", "right"),
+        np.dtype(np.float64),
+    )
+
+    assert matrix.tolist() == [[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]]
+
+
+def test_numpy_table_matmul_registration_and_fingerprint_are_deterministic() -> None:
+    runtimes = [Runtime(), Runtime()]
+    for runtime in runtimes:
+        register_numpy(runtime)
+
+    registrations = runtimes[0]._registration_snapshot()
+    assert [
+        (entry["provider"], entry["name"], entry["version"]) for entry in registrations
+    ] == [
+        ("numpy", "expression", "1"),
+        ("numpy", "table_matmul", "1"),
+    ]
+
+    plans = [
+        PipelineBuilder("deterministic-numpy-table-matmul")
+        .table_matmul(
+            "multiply",
+            backend="numpy",
+            columns=("quantity", "unit_price"),
+        )
+        .compile(runtime)
+        for runtime in runtimes
+    ]
+    assert plans[0].fingerprint == plans[1].fingerprint
+
+
+def test_jax_table_matmul_guard_remains_unregistered() -> None:
+    runtime = Runtime()
+    register_jax(runtime)
+
+    with pytest.raises(
+        Exception,
+        match="provider jax:table_matmul@1 is unavailable",
+    ):
+        (
+            PipelineBuilder("jax-table-matmul-unregistered")
+            .table_matmul("multiply", backend="jax", columns=("value",))
+            .compile(runtime)
+        )
+    with pytest.raises(
+        AssertionError,
+        match="JAX table_matmul provider is not registered",
+    ):
+        array_module._jax_table_matmul()
 
 
 def test_missing_python_provider_fails_during_compile() -> None:
