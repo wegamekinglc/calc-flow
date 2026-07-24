@@ -5,7 +5,7 @@ import json
 from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, field
 from threading import RLock
-from typing import Any
+from typing import Any, Literal
 
 from calc_flow import _native
 from calc_flow.store import _copy_json_value, _run_blocking
@@ -335,6 +335,63 @@ class PipelineBuilder:
                         "options": copied_options,
                         "provider": provider,
                         "version": version,
+                    },
+                    "output_ports": [
+                        {
+                            "kind": "array",
+                            "name": "output",
+                            "required": True,
+                            "schema": [],
+                        }
+                    ],
+                }
+            )
+
+        return self._from_json(_updated_project(self._project_json, add))
+
+    def table_matmul(
+        self,
+        node_id: str,
+        *,
+        backend: Literal["numpy", "jax"],
+        columns: Sequence[str],
+    ) -> PipelineBuilder:
+        if backend not in {"numpy", "jax"}:
+            raise ValueError("backend must be 'numpy' or 'jax'")
+        if isinstance(columns, (str, bytes)) or not isinstance(columns, Sequence):
+            raise TypeError("columns must be a sequence of column names")
+        copied_columns = list(columns)
+        if not copied_columns:
+            raise ValueError("columns must contain at least one column name")
+        if not all(isinstance(column, str) and column for column in copied_columns):
+            raise TypeError("columns must contain non-empty strings")
+        if len(set(copied_columns)) != len(copied_columns):
+            raise ValueError("columns must be unique")
+
+        def add(project: dict[str, Any]) -> None:
+            project["pipeline"]["nodes"].append(
+                {
+                    "id": node_id,
+                    "input_ports": [
+                        {
+                            "kind": "table",
+                            "name": "table",
+                            "required": True,
+                            "schema": [],
+                        },
+                        {
+                            "kind": "array",
+                            "name": "weights",
+                            "required": True,
+                            "schema": [],
+                        },
+                    ],
+                    "operator": {
+                        "kind": "external",
+                        "name": "table_matmul",
+                        "options": {"columns": copied_columns},
+                        "provider": backend,
+                        "version": "1",
                     },
                     "output_ports": [
                         {
