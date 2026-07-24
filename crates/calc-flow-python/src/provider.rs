@@ -338,15 +338,26 @@ fn call_python_operator_mapping(
         .iter()
         .zip(output_ports)
         .map(|(contract, port)| {
+            let output = output
+                .get_item(&contract.name)
+                .map_err(|error| mapping_output_error(&contract.name, &error))?
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyKeyError::new_err(format!(
+                        "output {} is missing",
+                        contract.name
+                    ))
+                })?;
             let batch = output
-                .get_item(&contract.name)?
-                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(contract.name.clone()))?
-                .extract::<PyRef<'_, PyBatch>>()?
-                .clone_inner()?;
+                .extract::<PyRef<'_, PyBatch>>()
+                .map_err(|error| mapping_output_error(&contract.name, &error))?
+                .clone_inner()
+                .map_err(|error| mapping_output_error(&contract.name, &error))?;
             port.validate(&batch, &format!("provider.output {}", contract.name))
-                .map_err(crate::error::to_py_err)?;
+                .map_err(|error| mapping_output_error(&contract.name, &error))?;
             if batch.kind() == calc_flow::BatchKind::Array {
-                let payload = batch.external_payload().map_err(crate::error::to_py_err)?;
+                let payload = batch
+                    .external_payload()
+                    .map_err(|error| mapping_output_error(&contract.name, &error))?;
                 if payload.as_any().downcast_ref::<PythonPayload>().is_none() {
                     return Err(pyo3::exceptions::PyTypeError::new_err(format!(
                         "output {} payload was not created by the Python host",
@@ -354,10 +365,15 @@ fn call_python_operator_mapping(
                     )));
                 }
             }
-            let batch = rehome_python_payload(py, batch)?;
+            let batch = rehome_python_payload(py, batch)
+                .map_err(|error| mapping_output_error(&contract.name, &error))?;
             Ok((contract.name.clone(), batch))
         })
         .collect()
+}
+
+fn mapping_output_error(name: &str, error: &impl std::fmt::Display) -> PyErr {
+    pyo3::exceptions::PyTypeError::new_err(format!("output {name}: {error}"))
 }
 
 #[cfg(test)]
@@ -643,6 +659,48 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("external provider python:mapping@1"));
         assert!(message.contains("extra"));
+    }
+
+    #[tokio::test]
+    async fn mapping_operator_names_non_batch_output() {
+        Python::initialize();
+        let (root, input) = Python::attach(|py| {
+            let callback = py
+                .eval(c"lambda inputs, options: {'output': 1}", None, None)
+                .unwrap()
+                .unbind();
+            (Arc::new(PythonRoot::new(callback)), python_array_batch(py))
+        });
+        let factory = PythonOperatorFactory::new_mapping(
+            root,
+            "python",
+            "mapping",
+            "1",
+            vec![PortContract::new("input", calc_flow::BatchKind::Array)],
+            vec![PortContract::new("output", calc_flow::BatchKind::Array)],
+        );
+        let spec = calc_flow::ExternalOperatorSpec::new("python", "mapping", "1", BTreeMap::new())
+            .unwrap();
+        let mut operator = factory
+            .create(&spec, vec![array_port("input")], vec![array_port("output")])
+            .unwrap();
+        let cancellation = calc_flow::CancellationToken::new();
+        let run = calc_flow::RunContext::new(BTreeMap::new(), None, cancellation).unwrap();
+
+        let error = operator
+            .process(
+                &BTreeMap::from([("input".into(), input)]),
+                &calc_flow::OperatorContext { run: &run },
+            )
+            .await
+            .unwrap_err();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("external provider python:mapping@1"),
+            "{message}"
+        );
+        assert!(message.contains("output output"), "{message}");
     }
 
     #[test]

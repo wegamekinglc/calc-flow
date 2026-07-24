@@ -132,10 +132,13 @@ class Runtime:
             self._registrations.append(
                 {
                     "kind": "provider",
+                    "provider_mode": "mapping",
                     "provider": provider,
                     "name": name,
                     "version": version,
                     "callback": callback,
+                    "input_ports": copied_inputs,
+                    "output_ports": copied_outputs,
                 }
             )
 
@@ -185,7 +188,14 @@ class Runtime:
                     **(
                         {"input_types": tuple(registration["input_types"])}
                         if registration["kind"] == "scalar_udf"
-                        else {}
+                        else (
+                            {
+                                "input_ports": tuple(registration["input_ports"]),
+                                "output_ports": tuple(registration["output_ports"]),
+                            }
+                            if registration.get("provider_mode") == "mapping"
+                            else {}
+                        )
                     ),
                 }
                 for registration in self._registrations

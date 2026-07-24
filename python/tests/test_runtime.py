@@ -59,6 +59,13 @@ def test_registration_snapshot_is_success_only_and_defensive() -> None:
         ("provider", "identity"),
         ("scalar_udf", "identity"),
     ]
+    assert snapshot[0] == {
+        "kind": "provider",
+        "provider": "test",
+        "name": "identity",
+        "version": "1",
+        "callback": provider,
+    }
     snapshot[0]["name"] = "mutated"
     assert runtime._registration_snapshot()[0]["name"] == "identity"
 
@@ -140,6 +147,39 @@ def test_mapping_provider_registration_validates_private_arguments() -> None:
             input_ports=(("input", "scalar"),),
             output_ports=(("output", "array"),),
         )
+
+
+def test_mapping_registration_snapshot_preserves_copied_contracts() -> None:
+    runtime = Runtime()
+    input_ports = [("table", "table"), ("weights", "array")]
+    output_ports = [("output", "array")]
+
+    runtime._register_mapping_provider(
+        "test",
+        "mapping",
+        "1",
+        lambda inputs, options: {"output": inputs["weights"]},
+        input_ports=input_ports,
+        output_ports=output_ports,
+    )
+    input_ports.clear()
+    output_ports.clear()
+
+    snapshot = runtime._registration_snapshot()
+
+    assert snapshot[0]["provider_mode"] == "mapping"
+    assert snapshot[0]["input_ports"] == (
+        ("table", "table"),
+        ("weights", "array"),
+    )
+    assert snapshot[0]["output_ports"] == (("output", "array"),)
+    snapshot[0]["input_ports"] = ()
+    snapshot[0]["output_ports"] = ()
+    assert runtime._registration_snapshot()[0]["input_ports"] == (
+        ("table", "table"),
+        ("weights", "array"),
+    )
+    assert runtime._registration_snapshot()[0]["output_ports"] == (("output", "array"),)
 
 
 def test_execution_plan_lifecycle_is_async_defensive_and_guarded() -> None:
