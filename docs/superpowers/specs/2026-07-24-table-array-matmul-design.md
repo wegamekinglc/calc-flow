@@ -335,4 +335,3 @@ remain optional and no generated native module is left in `python/calc_flow/`.
   modes and run the full existing provider suite unchanged.
 - **Dtype promotion differs by backend:** test an explicit supported matrix and
   reject promotions that cannot be made consistent without loss.
-
