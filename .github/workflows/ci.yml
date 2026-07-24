@@ -299,6 +299,8 @@ jobs:
         run: cargo test --workspace --all-targets --all-features
       - name: Install Rust coverage tool
         run: cargo install cargo-llvm-cov --version 0.8.7 --locked
+      - name: Reclaim Rust build disk before coverage
+        run: cargo clean
       - name: Enforce Rust core line coverage
         run: >-
           cargo llvm-cov --workspace --all-features --fail-under-lines 90
@@ -310,6 +312,8 @@ jobs:
           path: rust-lcov.info
           if-no-files-found: error
           retention-days: 14
+      - name: Reclaim coverage build disk before docs
+        run: cargo llvm-cov clean --workspace
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
   rust-supply-chain:
     name: Rust dependency policy

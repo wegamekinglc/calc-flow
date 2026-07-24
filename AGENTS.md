@@ -72,6 +72,18 @@ Use `./web-ui/scripts/start_web_ui.sh` and
 - Preserve unrelated user changes in dirty worktrees and stage only the
   intended scope.
 
+## Specialist agents
+
+The Codex-native calc-flow specialist team is defined in
+`.codex/agents/`; its roster, workflow, and invocation examples live in
+`.codex/agents/README.md`. Team-produced specifications, API notes, and
+critiques belong under `.codex/artifacts/` with one shared kebab-case slug per
+work item.
+
+The `.claude/` tree is preserved compatibility guidance for Claude users.
+Codex agents read and write the Codex paths above and must not rewrite the
+preserved compatibility files during ordinary work.
+
 ## Coding style
 
 ### Rust
