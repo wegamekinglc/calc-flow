@@ -3,7 +3,11 @@ from __future__ import annotations
 import ast
 import copy
 import gc
+import os
 import re
+import subprocess
+import sys
+import warnings
 import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -655,11 +659,14 @@ def test_numpy_table_matmul_accepts_primitive_arrow_numeric_dtypes(
         ),
     ],
 )
-def test_numpy_table_matmul_rejects_invalid_configuration(
+@pytest.mark.parametrize("backend", ["numpy", "jax"])
+def test_table_matmul_rejects_invalid_configuration(
+    backend: str,
     options: dict[str, object],
     message: str,
 ) -> None:
-    provider = array_module._TableMatmulProvider("numpy", np)
+    namespace = np if backend == "numpy" else pytest.importorskip("jax.numpy")
+    provider = array_module._TableMatmulProvider(backend, namespace)
 
     with pytest.raises(
         ValueError,
@@ -668,14 +675,23 @@ def test_numpy_table_matmul_rejects_invalid_configuration(
         provider.validate(options)
 
 
-def test_numpy_table_matmul_validates_every_input_before_allocation(
+@pytest.mark.parametrize("backend", ["numpy", "jax"])
+def test_table_matmul_validates_every_input_before_allocation(
+    backend: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    valid_table = Batch.from_pyarrow(pa.table({"value": [1.0, 2.0]}))
-    valid_weights = Batch.from_array(
-        np.array([[1.0]], dtype=np.float64),
-        backend="numpy",
+    namespace: Any = np if backend == "numpy" else pytest.importorskip("jax.numpy")
+
+    def weights_batch(value: object, *, dtype: object = np.float32) -> Batch:
+        return Batch.from_array(
+            namespace.asarray(value, dtype=dtype),
+            backend=backend,
+        )
+
+    valid_table = Batch.from_pyarrow(
+        pa.table({"value": pa.array([1.0, 2.0], type=pa.float32())})
     )
+    valid_weights = weights_batch([[1.0]])
 
     def table_batch(values: object) -> Batch:
         return Batch.from_pyarrow(pa.table({"value": values}))
@@ -788,13 +804,28 @@ def test_numpy_table_matmul_validates_every_input_before_allocation(
             for index, table in enumerate(unsupported_tables)
         ),
         (
-            "weights rank",
+            "weights rank zero",
             {
                 "table": valid_table,
-                "weights": Batch.from_array(
-                    np.array([1.0], dtype=np.float64),
-                    backend="numpy",
-                ),
+                "weights": weights_batch(1.0),
+            },
+            {"columns": ["value"]},
+            "weights.rank",
+        ),
+        (
+            "weights rank one",
+            {
+                "table": valid_table,
+                "weights": weights_batch([1.0]),
+            },
+            {"columns": ["value"]},
+            "weights.rank",
+        ),
+        (
+            "weights rank three",
+            {
+                "table": valid_table,
+                "weights": weights_batch([[[1.0]]]),
             },
             {"columns": ["value"]},
             "weights.rank",
@@ -803,10 +834,7 @@ def test_numpy_table_matmul_validates_every_input_before_allocation(
             "weights input width",
             {
                 "table": valid_table,
-                "weights": Batch.from_array(
-                    np.ones((2, 1), dtype=np.float64),
-                    backend="numpy",
-                ),
+                "weights": weights_batch(namespace.ones((2, 1))),
             },
             {"columns": ["value"]},
             "weights.shape[0]",
@@ -815,10 +843,7 @@ def test_numpy_table_matmul_validates_every_input_before_allocation(
             "weights output width",
             {
                 "table": valid_table,
-                "weights": Batch.from_array(
-                    np.empty((1, 0), dtype=np.float64),
-                    backend="numpy",
-                ),
+                "weights": weights_batch(namespace.empty((1, 0))),
             },
             {"columns": ["value"]},
             "weights.shape[1]",
@@ -826,10 +851,15 @@ def test_numpy_table_matmul_validates_every_input_before_allocation(
         (
             "unsupported dtype",
             {
-                "table": table_batch(pa.array([1.0, 2.0], type=pa.float16())),
-                "weights": Batch.from_array(
-                    np.ones((1, 1), dtype=np.int8),
-                    backend="numpy",
+                "table": table_batch(
+                    pa.array(
+                        [1.0, 2.0],
+                        type=pa.float16() if backend == "numpy" else pa.float64(),
+                    )
+                ),
+                "weights": weights_batch(
+                    namespace.ones((1, 1)),
+                    dtype=np.int8 if backend == "numpy" else np.float32,
                 ),
             },
             {"columns": ["value"]},
@@ -846,7 +876,7 @@ def test_numpy_table_matmul_validates_every_input_before_allocation(
         )
 
     monkeypatch.setattr(Batch, "_new_owned_numpy", reject_allocation)
-    provider = array_module._TableMatmulProvider("numpy", np)
+    provider = array_module._TableMatmulProvider(backend, namespace)
     for name, inputs, options, field in cases:
         current_case = name
         with pytest.raises(
@@ -877,6 +907,96 @@ def test_numpy_table_matmul_rejects_lossy_backend_promotion() -> None:
             (np.dtype(np.int64),),
             weights,
         )
+
+
+def test_jax_table_matmul_rejects_x64_narrowing_before_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    jax = pytest.importorskip("jax")
+    jnp = pytest.importorskip("jax.numpy")
+    if jax.config.x64_enabled:
+        pytest.skip("requires JAX x64 to be disabled")
+    provider = array_module._TableMatmulProvider("jax", jnp)
+    inputs = {
+        "table": Batch.from_pyarrow(
+            pa.table({"value": pa.array([1.0], type=pa.float64())})
+        ),
+        "weights": Batch.from_array(
+            jnp.asarray([[1.0]], dtype=jnp.float32),
+            backend="jax",
+        ),
+    }
+
+    def reject_allocation(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("JAX dtype narrowing must fail before host staging allocation")
+
+    monkeypatch.setattr(Batch, "_new_owned_numpy", reject_allocation)
+    with (
+        warnings.catch_warnings(record=True) as caught_warnings,
+        pytest.raises(
+            TypeError,
+            match=(
+                r"^invalid table_matmul dtype: JAX x64 is disabled "
+                r"for \[float64, float32\]"
+            ),
+        ),
+    ):
+        provider(inputs, {"columns": ["value"]})
+
+    assert not caught_warnings
+
+
+def test_jax_table_matmul_rejects_result_dtype_narrowing_before_adoption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("jax")
+    jnp = pytest.importorskip("jax.numpy")
+    runtime = Runtime()
+    register_jax(runtime)
+    plan = (
+        PipelineBuilder("jax-result-dtype")
+        .table_matmul("multiply", backend="jax", columns=("value",))
+        .compile(runtime)
+    )
+    narrowed_result = jnp.asarray([[2.0]], dtype=jnp.float16)
+    original_from_owned = Batch._from_owned_array
+    adoptions: list[object] = []
+
+    def tracked_adoption(
+        array: object,
+        *,
+        backend: str,
+        token: object,
+        metadata: dict[str, object],
+    ) -> Batch:
+        adoptions.append(array)
+        return original_from_owned(
+            array,
+            backend=backend,
+            token=token,
+            metadata=metadata,
+        )
+
+    monkeypatch.setattr(jnp, "matmul", lambda _left, _right: narrowed_result)
+    monkeypatch.setattr(Batch, "_from_owned_array", staticmethod(tracked_adoption))
+
+    with pytest.raises(
+        ProviderError,
+        match=r"invalid table_matmul dtype: JAX changed float32 to float16",
+    ):
+        plan.execute(
+            {
+                "table": Batch.from_pyarrow(
+                    pa.table({"value": pa.array([1.0], type=pa.float32())})
+                ),
+                "weights": Batch.from_array(
+                    jnp.asarray([[2.0]], dtype=jnp.float32),
+                    backend="jax",
+                ),
+            }
+        )
+
+    assert not adoptions
 
 
 def test_numpy_table_matmul_honors_copy_and_ownership_ceiling(
@@ -1016,24 +1136,31 @@ def test_numpy_table_matrix_does_not_combine_chunks(
     assert matrix.tolist() == [[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]]
 
 
-def test_numpy_table_matmul_registration_and_fingerprint_are_deterministic() -> None:
+@pytest.mark.parametrize(
+    ("backend", "register"),
+    [("numpy", register_numpy), ("jax", register_jax)],
+)
+def test_table_matmul_registration_and_fingerprint_are_deterministic(
+    backend: str,
+    register: Callable[[Runtime], None],
+) -> None:
     runtimes = [Runtime(), Runtime()]
     for runtime in runtimes:
-        register_numpy(runtime)
+        register(runtime)
 
     registrations = runtimes[0]._registration_snapshot()
     assert [
         (entry["provider"], entry["name"], entry["version"]) for entry in registrations
     ] == [
-        ("numpy", "expression", "1"),
-        ("numpy", "table_matmul", "1"),
+        (backend, "expression", "1"),
+        (backend, "table_matmul", "1"),
     ]
 
     plans = [
-        PipelineBuilder("deterministic-numpy-table-matmul")
+        PipelineBuilder(f"deterministic-{backend}-table-matmul")
         .table_matmul(
             "multiply",
-            backend="numpy",
+            backend=backend,
             columns=("quantity", "unit_price"),
         )
         .compile(runtime)
@@ -1042,24 +1169,189 @@ def test_numpy_table_matmul_registration_and_fingerprint_are_deterministic() -> 
     assert plans[0].fingerprint == plans[1].fingerprint
 
 
-def test_jax_table_matmul_guard_remains_unregistered() -> None:
+def test_jax_table_matmul_stays_on_jax() -> None:
+    jax = pytest.importorskip("jax")
+    jnp = pytest.importorskip("jax.numpy")
     runtime = Runtime()
     register_jax(runtime)
-
-    with pytest.raises(
-        Exception,
-        match="provider jax:table_matmul@1 is unavailable",
-    ):
-        (
-            PipelineBuilder("jax-table-matmul-unregistered")
-            .table_matmul("multiply", backend="jax", columns=("value",))
-            .compile(runtime)
+    weights = Batch.from_array(
+        jnp.asarray([[2.0, 0.0], [0.0, 1.0]], dtype=jnp.float32),
+        backend="jax",
+    )
+    plan = (
+        PipelineBuilder("jax-table-matmul")
+        .table_matmul(
+            "multiply",
+            backend="jax",
+            columns=("quantity", "unit_price"),
         )
-    with pytest.raises(
-        AssertionError,
-        match="JAX table_matmul provider is not registered",
-    ):
-        array_module._jax_table_matmul()
+        .compile(runtime)
+    )
+    table = Batch.from_pyarrow(
+        pa.table(
+            {
+                "quantity": pa.array([3.0, 1.0, 4.0], type=pa.float32()),
+                "unit_price": pa.array([10.0, 12.0, 10.0], type=pa.float32()),
+            }
+        )
+    )
+
+    output = plan.execute({"table": table, "weights": weights}).outputs["output"]
+
+    assert isinstance(output.array, jax.Array)
+    assert output.backend == "jax"
+    assert output.array.tolist() == [[6.0, 10.0], [2.0, 12.0], [8.0, 10.0]]
+    assert output.array.device == weights.array.device
+
+
+def test_jax_table_matmul_preserves_device_identity_and_copy_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    jax = pytest.importorskip("jax")
+    jnp = pytest.importorskip("jax.numpy")
+    table = pa.table(
+        {
+            "a": pa.array([1.0, 2.0, 3.0], type=pa.float32()),
+            "b": pa.array([4.0, 5.0, 6.0], type=pa.float32()),
+        }
+    )
+    expected_table = table.to_pydict()
+    weights = Batch.from_array(
+        jnp.asarray([[1.0], [2.0]], dtype=jnp.float32),
+        backend="jax",
+    )
+    weights_payload = weights.array
+    expected_weights = weights_payload.tolist()
+    runtime = Runtime()
+    register_jax(runtime)
+    plan = (
+        PipelineBuilder("jax-copy-ceiling")
+        .table_matmul("multiply", backend="jax", columns=("a", "b"))
+        .compile(runtime)
+    )
+    original_asarray = np.asarray
+    original_new_owned = Batch._new_owned_numpy
+    original_device_put = jax.device_put
+    original_matmul = jnp.matmul
+    original_from_owned = Batch._from_owned_array
+    allocations: list[tuple[tuple[int, ...], str, object]] = []
+    transfers: list[tuple[object, object | None, object]] = []
+    multiplications: list[tuple[object, object, object]] = []
+    adoptions: list[object] = []
+
+    def guarded_asarray(
+        value: object, *args: object, **kwargs: object
+    ) -> np.ndarray[Any, Any]:
+        assert not isinstance(value, jax.Array)
+        return original_asarray(value, *args, **kwargs)
+
+    def counted_allocation(shape: tuple[int, ...], dtype: str) -> tuple[object, object]:
+        array, token = original_new_owned(shape, dtype)
+        allocations.append((tuple(shape), dtype, array))
+        return array, token
+
+    def tracked_device_put(value: object, device: object | None = None) -> object:
+        dense = original_device_put(value, device=device)
+        transfers.append((value, device, dense))
+        return dense
+
+    def tracked_matmul(left: object, right: object) -> object:
+        result = original_matmul(left, right)
+        multiplications.append((left, right, result))
+        return result
+
+    def tracked_adoption(
+        array: object,
+        *,
+        backend: str,
+        token: object,
+        metadata: dict[str, object],
+    ) -> Batch:
+        adoptions.append(array)
+        return original_from_owned(
+            array,
+            backend=backend,
+            token=token,
+            metadata=metadata,
+        )
+
+    monkeypatch.setattr(np, "asarray", guarded_asarray)
+    monkeypatch.setattr(Batch, "_new_owned_numpy", counted_allocation)
+    monkeypatch.setattr(jax, "device_put", tracked_device_put)
+    monkeypatch.setattr(jnp, "matmul", tracked_matmul)
+    monkeypatch.setattr(Batch, "_from_owned_array", staticmethod(tracked_adoption))
+
+    output = plan.execute(
+        {
+            "table": Batch.from_pyarrow(table),
+            "weights": weights,
+        }
+    ).outputs["output"]
+
+    assert [(shape, dtype) for shape, dtype, _array in allocations] == [
+        ((3, 2), "float32")
+    ]
+    assert allocations[0][2].flags.c_contiguous
+    assert len(transfers) == 1
+    assert transfers[0][0] is allocations[0][2]
+    assert transfers[0][1] is weights_payload.device
+    assert len(multiplications) == 1
+    assert multiplications[0][0] is transfers[0][2]
+    assert multiplications[0][1] is weights_payload
+    assert adoptions == [multiplications[0][2]]
+    assert output.array is multiplications[0][2]
+    assert output.array.device == weights_payload.device
+    assert output.array.tolist() == [[9.0], [12.0], [15.0]]
+    assert table.to_pydict() == expected_table
+    assert weights.array is weights_payload
+    assert weights_payload.tolist() == expected_weights
+
+
+def test_jax_table_matmul_accepts_float64_when_x64_is_enabled() -> None:
+    script = """
+import jax
+import jax.numpy as jnp
+import pyarrow as pa
+
+from calc_flow import Batch, PipelineBuilder, Runtime, register_jax
+
+assert jax.config.x64_enabled
+runtime = Runtime()
+register_jax(runtime)
+plan = (
+    PipelineBuilder("jax-table-matmul-x64")
+    .table_matmul("multiply", backend="jax", columns=("value",))
+    .compile(runtime)
+)
+weights = Batch.from_array(
+    jnp.asarray([[2.0]], dtype=jnp.float64),
+    backend="jax",
+)
+output = plan.execute(
+    {
+        "table": Batch.from_pyarrow(
+            pa.table({"value": pa.array([1.5, 2.5], type=pa.float64())})
+        ),
+        "weights": weights,
+    }
+).outputs["output"]
+assert output.array.dtype == jnp.dtype(jnp.float64)
+assert output.array.tolist() == [[3.0], [5.0]]
+assert output.array.device == weights.array.device
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        env={
+            **os.environ,
+            "JAX_ENABLE_X64": "true",
+            "JAX_PLATFORMS": "cpu",
+        },
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_missing_python_provider_fails_during_compile() -> None:

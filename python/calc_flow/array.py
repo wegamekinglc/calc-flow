@@ -371,6 +371,21 @@ def _common_matrix_dtype(
     involved = ", ".join(
         [*(np.dtype(dtype).name for dtype in table_dtypes), weight_dtype.name]
     )
+    if backend == "jax":
+        import jax
+
+        x64_dtypes = frozenset(
+            np.dtype(dtype)
+            for dtype in (np.int64, np.uint64, np.float64, np.complex128)
+        )
+        if not jax.config.x64_enabled and any(
+            np.dtype(source) in x64_dtypes for source in (*table_dtypes, weight_dtype)
+        ):
+            raise TypeError(
+                "invalid table_matmul dtype: "
+                f"JAX x64 is disabled for [{involved}]; enable the required dtype "
+                "or choose a lossless supported dtype"
+            )
     try:
         result_dtype = np.dtype(namespace.result_type(*table_dtypes, weight_dtype))
     except (TypeError, ValueError) as error:
@@ -544,8 +559,34 @@ class _ArrayProvider:
         )
 
 
-def _jax_table_matmul(*_args: object) -> tuple[object, object]:
-    raise AssertionError("JAX table_matmul provider is not registered")
+def _jax_table_matmul(
+    table: object,
+    columns: tuple[str, ...],
+    dtype: object,
+    weights: object,
+) -> tuple[object, None]:
+    import jax
+    import jax.numpy as jnp
+
+    host = _numpy_table_matrix(table, columns, dtype)
+    dense = jax.device_put(host, device=weights.device)
+    expected_dtype = jnp.dtype(dtype)
+    if dense.dtype != expected_dtype:
+        raise ValueError(
+            "invalid table_matmul dtype: JAX changed "
+            f"{expected_dtype} to {dense.dtype}; enable the required dtype "
+            "or choose a lossless supported dtype"
+        )
+    result = jnp.matmul(dense, weights)
+    if not isinstance(result, jax.Array):
+        raise TypeError("table_matmul JAX result must remain a jax.Array")
+    if result.dtype != expected_dtype:
+        raise ValueError(
+            "invalid table_matmul dtype: JAX changed "
+            f"{expected_dtype} to {result.dtype}; enable the required dtype "
+            "or choose a lossless supported dtype"
+        )
+    return result, None
 
 
 @dataclass(frozen=True, slots=True)
@@ -625,3 +666,11 @@ def register_jax(runtime: Runtime) -> None:
     import jax.numpy as jnp
 
     runtime.register_provider("jax", "expression", "1", _ArrayProvider("jax", jnp))
+    runtime._register_mapping_provider(
+        "jax",
+        "table_matmul",
+        "1",
+        _TableMatmulProvider("jax", jnp),
+        input_ports=_TABLE_MATMUL_INPUT_PORTS,
+        output_ports=_TABLE_MATMUL_OUTPUT_PORTS,
+    )
