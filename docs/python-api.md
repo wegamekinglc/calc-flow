@@ -192,16 +192,20 @@ plan = (
     .table_matmul("multiply", backend="numpy", columns=("quantity", "unit_price"))
     .compile(runtime)
 )
-result = plan.execute(
-    {
-        "table": Batch.from_pyarrow(
-            pa.table({"quantity": [3.0, 1.0], "unit_price": [10.0, 12.0]})
-        ),
-        "weights": Batch.from_array(
-            np.array([[2.0, 0.0], [0.0, 1.0]]), backend="numpy"
-        ),
-    }
-).outputs["output"].array
+result = (
+    plan.execute(
+        {
+            "table": Batch.from_pyarrow(
+                pa.table({"quantity": [3.0, 1.0], "unit_price": [10.0, 12.0]})
+            ),
+            "weights": Batch.from_array(
+                np.array([[2.0, 0.0], [0.0, 1.0]]), backend="numpy"
+            ),
+        }
+    )
+    .outputs["output"]
+    .array
+)
 
 assert result.tolist() == [[6.0, 10.0], [2.0, 12.0]]
 ```
