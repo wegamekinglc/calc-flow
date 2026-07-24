@@ -1,8 +1,9 @@
 # Rust V2 Migration Handoff
 
 > **Historical snapshot:** This handoff records the pre-implementation state at
-> `a43d69c`. The migration was subsequently completed and merged in PR #12; the
-> task counts below are not the current project status.
+> `a43d69c`. The design, plan, and handoff were merged in PR #12 before
+> implementation began. The Rust v2 implementation was subsequently completed
+> and merged in PR #13; the task counts below are not the current project status.
 
 ## Current State
 
