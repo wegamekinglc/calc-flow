@@ -204,15 +204,12 @@ pub(crate) fn rehome_python_payload(
 #[pymethods]
 impl PyBatch {
     #[staticmethod]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "PyO3 extracts the Python shape sequence into an owned Vec"
-    )]
     fn _new_owned_numpy(
         py: Python<'_>,
-        shape: Vec<usize>,
+        shape: &Bound<'_, PyAny>,
         dtype: &str,
     ) -> PyResult<(Py<PyAny>, Py<OwnedArrayToken>)> {
+        let shape: Vec<usize> = shape.extract()?;
         validate_owned_numpy_shape(&shape).map_err(PyValueError::new_err)?;
         match dtype {
             "int8" => owned_numpy::<i8>(py, &shape),
@@ -557,7 +554,7 @@ mod tests {
     };
     use pyo3::{
         exceptions::{PyTypeError, PyValueError},
-        types::{PyDict, PyList},
+        types::{PyDict, PyList, PyTuple},
     };
 
     use super::*;
@@ -775,7 +772,8 @@ mod tests {
     fn owned_numpy_adoption_preserves_identity_and_irreversible_read_only_state() {
         Python::initialize();
         Python::attach(|py| {
-            let (object, token) = PyBatch::_new_owned_numpy(py, vec![2, 2], "float64").unwrap();
+            let shape = PyTuple::new(py, [2, 2]).unwrap();
+            let (object, token) = PyBatch::_new_owned_numpy(py, shape.as_any(), "float64").unwrap();
             let identity = object.bind(py).as_ptr();
             let pointer: usize = object
                 .bind(py)
