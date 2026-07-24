@@ -43,6 +43,58 @@ def test_array_and_dataframe_example_uses_table_matmul(
     ]
 
 
+def test_table_matmul_docs_describe_jax_result_residency() -> None:
+    root = Path(__file__).parents[2]
+    claim = "no result-to-host round trip during operator execution"
+    documents = (
+        root / "examples" / "README.md",
+        root / "docs" / "python-api.md",
+        root / "docs" / "api-reference.md",
+    )
+
+    for document in documents:
+        assert claim in document.read_text(encoding="utf-8")
+
+
+def test_array_and_dataframe_example_defers_and_survives_missing_jax() -> None:
+    example = Path(__file__).parents[2] / "examples" / "07_array_and_dataframe.py"
+    program = f"""
+import builtins
+import runpy
+import sys
+
+import calc_flow
+
+assert not any(name == "jax" or name.startswith("jax.") for name in sys.modules)
+namespace = runpy.run_path({str(example)!r})
+assert not any(name == "jax" or name.startswith("jax.") for name in sys.modules)
+original_import = builtins.__import__
+
+def reject_jax(name, *args, **kwargs):
+    if name == "jax" or name.startswith("jax."):
+        raise ImportError("JAX intentionally unavailable")
+    return original_import(name, *args, **kwargs)
+
+builtins.__import__ = reject_jax
+namespace["main"]()
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", program],
+        capture_output=True,
+        check=False,
+        cwd=example.parents[1],
+        env={**os.environ, "JAX_PLATFORMS": "cpu"},
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == [
+        "NumPy result: [[6.0, 10.0], [2.0, 12.0], [8.0, 10.0]]",
+        "JAX result: skipped; install calc-flow[jax]",
+    ]
+
+
 def _external(
     name: str,
     provider: str,

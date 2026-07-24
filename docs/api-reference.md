@@ -113,7 +113,8 @@ named `table` and same-backend array weights named `weights`, then produce an
 array output. After input `Batch` construction they make no redundant
 execution copies: NumPy uses one dense table allocation and one result; JAX
 permits one host staging buffer, one device table buffer, and one device
-result. These are execution ceilings, not end-to-end zero-copy claims.
+result. JAX performs no result-to-host round trip during operator execution.
+These are execution ceilings, not end-to-end zero-copy claims.
 
 ### Projects and stores
 

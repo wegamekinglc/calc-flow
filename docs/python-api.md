@@ -210,7 +210,7 @@ After input `Batch` construction, the operator makes no redundant execution
 copies. NumPy allocates one dense table matrix and one result. JAX permits one
 host staging buffer, one device table buffer, and one device result; it does
 not promise a host-free transfer path. The construction of caller input
-`Batch` values is outside these execution ceilings. The runnable NumPy and
+`Batch` values is outside these execution ceilings. JAX performs no result-to-host round trip during operator execution. The runnable NumPy and
 optional JAX paths are in
 [`examples/07_array_and_dataframe.py`](../examples/07_array_and_dataframe.py).
 

@@ -47,7 +47,7 @@ and multiplies their dense matrix by an array weight matrix. After input
 `Batch` construction, execution makes no redundant copies: NumPy allocates one
 dense table matrix and one result; JAX permits one host staging buffer, one
 device table buffer, and one device result. Input `Batch` construction is
-outside these operator-execution ceilings.
+outside these operator-execution ceilings. JAX performs no result-to-host round trip during operator execution.
 
 The previous v1 notebook was removed because it taught the frozen Python v1
 operator API. Historical v1 behavior remains available at the
