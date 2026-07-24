@@ -52,6 +52,16 @@ class Runtime:
     def register_provider(
         self, provider: str, name: str, version: str, callback: object
     ) -> None: ...
+    def _register_mapping_provider(
+        self,
+        provider: str,
+        name: str,
+        version: str,
+        callback: object,
+        *,
+        input_ports: Sequence[tuple[str, str]],
+        output_ports: Sequence[tuple[str, str]],
+    ) -> None: ...
     def register_scalar_udf(
         self,
         *,

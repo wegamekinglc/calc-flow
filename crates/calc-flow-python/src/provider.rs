@@ -1,7 +1,11 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use serde_json::json;
 
 use crate::{
@@ -9,11 +13,36 @@ use crate::{
     config::{PythonRoot, json_to_python},
 };
 
+#[derive(Clone)]
+pub(crate) struct PortContract {
+    name: String,
+    kind: calc_flow::BatchKind,
+}
+
+impl PortContract {
+    pub(crate) fn new(name: &str, kind: calc_flow::BatchKind) -> Self {
+        Self {
+            name: name.into(),
+            kind,
+        }
+    }
+}
+
+#[derive(Clone)]
+enum PythonProviderMode {
+    SingleArray,
+    Mapping {
+        inputs: Vec<PortContract>,
+        outputs: Vec<PortContract>,
+    },
+}
+
 pub(crate) struct PythonOperatorFactory {
     callback: Arc<PythonRoot>,
     provider: String,
     name: String,
     version: String,
+    mode: PythonProviderMode,
 }
 
 impl PythonOperatorFactory {
@@ -28,6 +57,24 @@ impl PythonOperatorFactory {
             provider: provider.into(),
             name: name.into(),
             version: version.into(),
+            mode: PythonProviderMode::SingleArray,
+        }
+    }
+
+    pub(crate) fn new_mapping(
+        callback: Arc<PythonRoot>,
+        provider: &str,
+        name: &str,
+        version: &str,
+        inputs: Vec<PortContract>,
+        outputs: Vec<PortContract>,
+    ) -> Self {
+        Self {
+            callback,
+            provider: provider.into(),
+            name: name.into(),
+            version: version.into(),
+            mode: PythonProviderMode::Mapping { inputs, outputs },
         }
     }
 }
@@ -39,7 +86,7 @@ impl calc_flow::ExternalOperatorFactory for PythonOperatorFactory {
         inputs: Vec<calc_flow::Port>,
         outputs: Vec<calc_flow::Port>,
     ) -> calc_flow::Result<Box<dyn calc_flow::Operator>> {
-        validate_ports(&inputs, &outputs)?;
+        validate_ports(&self.mode, &inputs, &outputs)?;
         let options_json = encode_provider_options(spec.options())?;
         validate_callback(&self.callback, &options_json).map_err(|message| {
             calc_flow::CalcFlowError::InvalidArgument {
@@ -52,6 +99,7 @@ impl calc_flow::ExternalOperatorFactory for PythonOperatorFactory {
             provider: self.provider.clone(),
             name: self.name.clone(),
             version: self.version.clone(),
+            mode: self.mode.clone(),
             options: spec.options().clone(),
             options_json,
             inputs,
@@ -61,23 +109,39 @@ impl calc_flow::ExternalOperatorFactory for PythonOperatorFactory {
 }
 
 fn validate_ports(
+    mode: &PythonProviderMode,
     inputs: &[calc_flow::Port],
     outputs: &[calc_flow::Port],
 ) -> calc_flow::Result<()> {
-    let valid = |ports: &[calc_flow::Port], name: &str| {
-        ports.len() == 1
-            && ports[0].name() == name
-            && ports[0].kind() == calc_flow::BatchKind::Array
-            && ports[0].required()
-            && ports[0].schema().is_none()
+    let error = match mode {
+        PythonProviderMode::SingleArray => {
+            let expected_inputs = [PortContract::new("input", calc_flow::BatchKind::Array)];
+            let expected_outputs = [PortContract::new("output", calc_flow::BatchKind::Array)];
+            (!ports_match(inputs, &expected_inputs) || !ports_match(outputs, &expected_outputs))
+                .then_some("Python array providers require one required array input named input and one required array output named output")
+        }
+        PythonProviderMode::Mapping {
+            inputs: expected_inputs,
+            outputs: expected_outputs,
+        } => (!ports_match(inputs, expected_inputs) || !ports_match(outputs, expected_outputs))
+            .then_some("Python mapping provider ports do not match the registered contract"),
     };
-    if !valid(inputs, "input") || !valid(outputs, "output") {
-        return Err(calc_flow::CalcFlowError::InvalidArgument {
+    error.map_or(Ok(()), |message| {
+        Err(calc_flow::CalcFlowError::InvalidArgument {
             field: "provider.ports".into(),
-            message: "Python array providers require one required array input named input and one required array output named output".into(),
-        });
-    }
-    Ok(())
+            message: message.into(),
+        })
+    })
+}
+
+fn ports_match(ports: &[calc_flow::Port], expected: &[PortContract]) -> bool {
+    ports.len() == expected.len()
+        && ports.iter().zip(expected).all(|(port, contract)| {
+            port.name() == contract.name
+                && port.kind() == contract.kind
+                && port.required()
+                && port.schema().is_none()
+        })
 }
 
 fn encode_provider_options(options: &calc_flow::JsonMap) -> calc_flow::Result<String> {
@@ -108,6 +172,7 @@ struct PythonOperator {
     provider: String,
     name: String,
     version: String,
+    mode: PythonProviderMode,
     options: calc_flow::JsonMap,
     options_json: String,
     inputs: Vec<calc_flow::Port>,
@@ -153,6 +218,24 @@ impl calc_flow::Operator for PythonOperator {
         inputs: &BTreeMap<String, calc_flow::Batch>,
         _context: &calc_flow::OperatorContext<'_>,
     ) -> calc_flow::Result<BTreeMap<String, calc_flow::Batch>> {
+        if let PythonProviderMode::Mapping {
+            inputs: input_contracts,
+            outputs: output_contracts,
+        } = &self.mode
+        {
+            return Python::attach(|py| {
+                call_python_operator_mapping(
+                    py,
+                    &self.callback,
+                    inputs,
+                    input_contracts,
+                    output_contracts,
+                    &self.outputs,
+                    &self.options_json,
+                )
+            })
+            .map_err(|error| self.provider_error(error.to_string()));
+        }
         let input = inputs
             .get("input")
             .ok_or_else(|| self.provider_error("missing required input input"))?;
@@ -195,6 +278,88 @@ fn call_python_operator(
     rehome_python_payload(py, output)
 }
 
+fn call_python_operator_mapping(
+    py: Python<'_>,
+    callback: &PythonRoot,
+    batches: &BTreeMap<String, calc_flow::Batch>,
+    input_contracts: &[PortContract],
+    output_contracts: &[PortContract],
+    output_ports: &[calc_flow::Port],
+    options_json: &str,
+) -> PyResult<BTreeMap<String, calc_flow::Batch>> {
+    let inputs = PyDict::new(py);
+    for contract in input_contracts {
+        let batch = batches.get(&contract.name).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "missing required input {}",
+                contract.name
+            ))
+        })?;
+        inputs.set_item(
+            &contract.name,
+            Py::new(py, PyBatch::from_inner_python(py, batch.clone())?)?,
+        )?;
+    }
+    let options = json_to_python(py, options_json)?;
+    let output = callback.object().bind(py).call1((inputs, options))?;
+    let mapping_type = py.import("collections.abc")?.getattr("Mapping")?;
+    if !output.is_instance(&mapping_type)? {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "callback output must be a mapping",
+        ));
+    }
+    let output = py.get_type::<PyDict>().call1((output,))?;
+    let output = output.cast::<PyDict>()?;
+    let expected = output_contracts
+        .iter()
+        .map(|contract| contract.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let actual = output
+        .keys()
+        .extract::<Vec<String>>()?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let missing = expected
+        .iter()
+        .filter(|name| !actual.contains(**name))
+        .copied()
+        .collect::<Vec<_>>();
+    let extra = actual
+        .iter()
+        .filter(|name| !expected.contains(name.as_str()))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if !missing.is_empty() || !extra.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "callback outputs must exactly match declared outputs; missing {missing:?}, extra {extra:?}"
+        )));
+    }
+    output_contracts
+        .iter()
+        .zip(output_ports)
+        .map(|(contract, port)| {
+            let batch = output
+                .get_item(&contract.name)?
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(contract.name.clone()))?
+                .extract::<PyRef<'_, PyBatch>>()?
+                .clone_inner()?;
+            port.validate(&batch, &format!("provider.output {}", contract.name))
+                .map_err(crate::error::to_py_err)?;
+            if batch.kind() == calc_flow::BatchKind::Array {
+                let payload = batch.external_payload().map_err(crate::error::to_py_err)?;
+                if payload.as_any().downcast_ref::<PythonPayload>().is_none() {
+                    return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                        "output {} payload was not created by the Python host",
+                        contract.name
+                    )));
+                }
+            }
+            let batch = rehome_python_payload(py, batch)?;
+            Ok((contract.name.clone(), batch))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -222,6 +387,28 @@ mod tests {
 
     fn array_port(name: &str) -> calc_flow::Port {
         calc_flow::Port::new(name, calc_flow::BatchKind::Array, true, None).unwrap()
+    }
+
+    fn table_port(name: &str) -> calc_flow::Port {
+        calc_flow::Port::new(name, calc_flow::BatchKind::Table, true, None).unwrap()
+    }
+
+    fn python_array_batch(py: Python<'_>) -> calc_flow::Batch {
+        py.get_type::<PyBatch>()
+            .call_method1(
+                "_from_external",
+                (
+                    PyDict::new(py).into_any(),
+                    "python",
+                    1,
+                    PyDict::new(py).as_any(),
+                ),
+            )
+            .unwrap()
+            .extract::<PyRef<'_, PyBatch>>()
+            .unwrap()
+            .clone_inner()
+            .unwrap()
     }
 
     #[test]
@@ -281,7 +468,10 @@ mod tests {
                 Ok(_) => panic!("invalid ports should be rejected"),
                 Err(error) => error,
             };
-            assert!(error.to_string().contains("Python array providers require"));
+            assert_eq!(
+                error.to_string(),
+                "invalid provider.ports: Python array providers require one required array input named input and one required array output named output"
+            );
         });
     }
 
@@ -346,6 +536,316 @@ mod tests {
 
             assert_eq!(output.num_rows(), 1);
             assert_eq!(options, BTreeMap::from([("value".into(), json!(1))]));
+        });
+    }
+
+    #[tokio::test]
+    async fn mapping_operator_round_trips_exact_named_batches() {
+        Python::initialize();
+        let root = Python::attach(|py| {
+            let locals = PyDict::new(py);
+            py.run(
+                c"class Callback:\n    def __call__(self, inputs, options):\n        assert sorted(inputs) == ['table', 'weights']\n        assert options == {'columns': ['a']}\n        return {'output': inputs['weights']}\ncallback = Callback()",
+                None,
+                Some(&locals),
+            )
+            .unwrap();
+            Arc::new(PythonRoot::new(
+                locals.get_item("callback").unwrap().unwrap().unbind(),
+            ))
+        });
+        let factory = PythonOperatorFactory::new_mapping(
+            root,
+            "python",
+            "table_matmul",
+            "1",
+            vec![
+                PortContract::new("table", calc_flow::BatchKind::Table),
+                PortContract::new("weights", calc_flow::BatchKind::Array),
+            ],
+            vec![PortContract::new("output", calc_flow::BatchKind::Array)],
+        );
+        let spec = calc_flow::ExternalOperatorSpec::new(
+            "python",
+            "table_matmul",
+            "1",
+            BTreeMap::from([("columns".into(), json!(["a"]))]),
+        )
+        .unwrap();
+        let mut operator = factory
+            .create(
+                &spec,
+                vec![table_port("table"), array_port("weights")],
+                vec![array_port("output")],
+            )
+            .unwrap();
+
+        let table = calc_flow::Batch::table(
+            vec![datafusion::arrow::record_batch::RecordBatch::new_empty(
+                Arc::new(datafusion::arrow::datatypes::Schema::empty()),
+            )],
+            calc_flow::BatchMetadata::default(),
+        )
+        .unwrap();
+        let weights = Python::attach(python_array_batch);
+        let cancellation = calc_flow::CancellationToken::new();
+        let run = calc_flow::RunContext::new(BTreeMap::new(), None, cancellation).unwrap();
+        let outputs = operator
+            .process(
+                &BTreeMap::from([("table".into(), table), ("weights".into(), weights.clone())]),
+                &calc_flow::OperatorContext { run: &run },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outputs["output"].num_rows(), weights.num_rows());
+    }
+
+    #[tokio::test]
+    async fn mapping_operator_rejects_extra_outputs_by_name() {
+        Python::initialize();
+        let (root, input) = Python::attach(|py| {
+            let callback = py
+                .eval(
+                    c"lambda inputs, options: {'output': inputs['input'], 'extra': inputs['input']}",
+                    None,
+                    None,
+                )
+                .unwrap()
+                .unbind();
+            let batch = python_array_batch(py);
+            (Arc::new(PythonRoot::new(callback)), batch)
+        });
+        let factory = PythonOperatorFactory::new_mapping(
+            root,
+            "python",
+            "mapping",
+            "1",
+            vec![PortContract::new("input", calc_flow::BatchKind::Array)],
+            vec![PortContract::new("output", calc_flow::BatchKind::Array)],
+        );
+        let spec = calc_flow::ExternalOperatorSpec::new("python", "mapping", "1", BTreeMap::new())
+            .unwrap();
+        let mut operator = factory
+            .create(&spec, vec![array_port("input")], vec![array_port("output")])
+            .unwrap();
+        let cancellation = calc_flow::CancellationToken::new();
+        let run = calc_flow::RunContext::new(BTreeMap::new(), None, cancellation).unwrap();
+
+        let error = operator
+            .process(
+                &BTreeMap::from([("input".into(), input)]),
+                &calc_flow::OperatorContext { run: &run },
+            )
+            .await
+            .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("external provider python:mapping@1"));
+        assert!(message.contains("extra"));
+    }
+
+    #[test]
+    fn mapping_factory_requires_exact_registered_ports() {
+        Python::initialize();
+        Python::attach(|py| {
+            let root = Arc::new(PythonRoot::new(
+                py.eval(c"lambda inputs, options: inputs", None, None)
+                    .unwrap()
+                    .unbind(),
+            ));
+            let factory = PythonOperatorFactory::new_mapping(
+                root,
+                "python",
+                "mapping",
+                "1",
+                vec![
+                    PortContract::new("table", calc_flow::BatchKind::Table),
+                    PortContract::new("weights", calc_flow::BatchKind::Array),
+                ],
+                vec![PortContract::new("output", calc_flow::BatchKind::Array)],
+            );
+            let spec =
+                calc_flow::ExternalOperatorSpec::new("python", "mapping", "1", BTreeMap::new())
+                    .unwrap();
+
+            let error = match factory.create(
+                &spec,
+                vec![array_port("weights"), table_port("table")],
+                vec![array_port("output")],
+            ) {
+                Ok(_) => panic!("reordered ports should be rejected"),
+                Err(error) => error,
+            };
+
+            assert_eq!(
+                error.to_string(),
+                "invalid provider.ports: Python mapping provider ports do not match the registered contract"
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn mapping_operator_names_foreign_host_output() {
+        Python::initialize();
+        let (root, input) = Python::attach(|py| {
+            let locals = PyDict::new(py);
+            let foreign = calc_flow::Batch::external(
+                Arc::new(ForeignPayload),
+                calc_flow::BatchMetadata::default(),
+            )
+            .unwrap();
+            locals
+                .set_item(
+                    "foreign",
+                    Py::new(py, PyBatch::from_inner(foreign)).unwrap(),
+                )
+                .unwrap();
+            let callback = py
+                .eval(
+                    c"lambda inputs, options: {'output': foreign}",
+                    Some(&locals),
+                    None,
+                )
+                .unwrap()
+                .unbind();
+            (Arc::new(PythonRoot::new(callback)), python_array_batch(py))
+        });
+        let factory = PythonOperatorFactory::new_mapping(
+            root,
+            "python",
+            "mapping",
+            "1",
+            vec![PortContract::new("input", calc_flow::BatchKind::Array)],
+            vec![PortContract::new("output", calc_flow::BatchKind::Array)],
+        );
+        let spec = calc_flow::ExternalOperatorSpec::new("python", "mapping", "1", BTreeMap::new())
+            .unwrap();
+        let mut operator = factory
+            .create(&spec, vec![array_port("input")], vec![array_port("output")])
+            .unwrap();
+        let cancellation = calc_flow::CancellationToken::new();
+        let run = calc_flow::RunContext::new(BTreeMap::new(), None, cancellation).unwrap();
+
+        let error = operator
+            .process(
+                &BTreeMap::from([("input".into(), input)]),
+                &calc_flow::OperatorContext { run: &run },
+            )
+            .await
+            .unwrap_err();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("external provider python:mapping@1"),
+            "{message}"
+        );
+        assert!(
+            message.contains("output output payload was not created by the Python host"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn mapping_callback_copies_generic_mapping_outputs() {
+        Python::initialize();
+        Python::attach(|py| {
+            let locals = PyDict::new(py);
+            py.run(
+                c"callback = lambda inputs, options: __import__('collections').UserDict(output=inputs['input'])",
+                None,
+                Some(&locals),
+            )
+            .unwrap();
+            let root = PythonRoot::new(locals.get_item("callback").unwrap().unwrap().unbind());
+            let outputs = call_python_operator_mapping(
+                py,
+                &root,
+                &BTreeMap::from([("input".into(), python_array_batch(py))]),
+                &[PortContract::new("input", calc_flow::BatchKind::Array)],
+                &[PortContract::new("output", calc_flow::BatchKind::Array)],
+                &[array_port("output")],
+                "{}",
+            )
+            .unwrap();
+
+            assert_eq!(outputs["output"].num_rows(), 1);
+        });
+    }
+
+    #[test]
+    fn mapping_callback_names_wrong_output_kind() {
+        Python::initialize();
+        Python::attach(|py| {
+            let root = PythonRoot::new(
+                py.eval(
+                    c"lambda inputs, options: {'output': inputs['table']}",
+                    None,
+                    None,
+                )
+                .unwrap()
+                .unbind(),
+            );
+            let table = calc_flow::Batch::table(
+                vec![datafusion::arrow::record_batch::RecordBatch::new_empty(
+                    Arc::new(datafusion::arrow::datatypes::Schema::empty()),
+                )],
+                calc_flow::BatchMetadata::default(),
+            )
+            .unwrap();
+
+            let error = call_python_operator_mapping(
+                py,
+                &root,
+                &BTreeMap::from([("table".into(), table)]),
+                &[PortContract::new("table", calc_flow::BatchKind::Table)],
+                &[PortContract::new("output", calc_flow::BatchKind::Array)],
+                &[array_port("output")],
+                "{}",
+            )
+            .unwrap_err();
+
+            let message = error.to_string();
+            assert!(
+                message.contains("provider.output output expects a Array batch, received Table"),
+                "{message}"
+            );
+        });
+    }
+
+    #[test]
+    fn mapping_callback_round_trips_table_outputs() {
+        Python::initialize();
+        Python::attach(|py| {
+            let root = PythonRoot::new(
+                py.eval(
+                    c"lambda inputs, options: {'output': inputs['table']}",
+                    None,
+                    None,
+                )
+                .unwrap()
+                .unbind(),
+            );
+            let table = calc_flow::Batch::table(
+                vec![datafusion::arrow::record_batch::RecordBatch::new_empty(
+                    Arc::new(datafusion::arrow::datatypes::Schema::empty()),
+                )],
+                calc_flow::BatchMetadata::default(),
+            )
+            .unwrap();
+
+            let outputs = call_python_operator_mapping(
+                py,
+                &root,
+                &BTreeMap::from([("table".into(), table)]),
+                &[PortContract::new("table", calc_flow::BatchKind::Table)],
+                &[PortContract::new("output", calc_flow::BatchKind::Table)],
+                &[table_port("output")],
+                "{}",
+            )
+            .unwrap();
+
+            assert_eq!(outputs["output"].kind(), calc_flow::BatchKind::Table);
         });
     }
 }

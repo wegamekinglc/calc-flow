@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import json
 import subprocess
 import sys
 import textwrap
@@ -74,6 +75,71 @@ def test_registration_snapshot_is_success_only_and_defensive() -> None:
             function=identity,
         )
     assert len(runtime._registration_snapshot()) == 2
+
+
+def test_mapping_provider_executes_mixed_named_inputs() -> None:
+    runtime = Runtime()
+
+    def callback(
+        inputs: dict[str, Batch],
+        options: dict[str, object],
+    ) -> dict[str, Batch]:
+        assert sorted(inputs) == ["table", "weights"]
+        assert options == {"columns": ["value"]}
+        assert (
+            inputs["table"].to_pyarrow()["value"].chunk(0).buffers()[1].address
+            == table.to_pyarrow()["value"].chunk(0).buffers()[1].address
+        )
+        assert inputs["weights"].array is weights.array
+        return {"output": inputs["weights"]}
+
+    runtime._register_mapping_provider(
+        "test",
+        "table_matmul",
+        "1",
+        callback,
+        input_ports=(("table", "table"), ("weights", "array")),
+        output_ports=(("output", "array"),),
+    )
+    project = (
+        PipelineBuilder("mapping")
+        .table_matmul("multiply", backend="numpy", columns=("value",))
+        .project
+    )
+    project["pipeline"]["nodes"][0]["operator"]["provider"] = "test"
+    plan = runtime.compile_project(json.dumps(project))
+    table = _batch(3)
+    weights = Batch.from_array(np.array([[2.0]]), backend="numpy")
+
+    result = plan.execute({"table": table, "weights": weights})
+
+    assert result.outputs["output"].array.tolist() == [[2.0]]
+
+
+def test_mapping_provider_registration_validates_private_arguments() -> None:
+    runtime = Runtime()
+
+    with pytest.raises(TypeError, match="provider callback must be callable"):
+        runtime._register_mapping_provider(
+            "test",
+            "mapping",
+            "1",
+            object(),
+            input_ports=(("input", "array"),),
+            output_ports=(("output", "array"),),
+        )
+    with pytest.raises(
+        ValueError,
+        match="mapping provider port kind must be 'table' or 'array'",
+    ):
+        runtime._register_mapping_provider(
+            "test",
+            "mapping",
+            "1",
+            lambda inputs, options: inputs,
+            input_ports=(("input", "scalar"),),
+            output_ports=(("output", "array"),),
+        )
 
 
 def test_execution_plan_lifecycle_is_async_defensive_and_guarded() -> None:

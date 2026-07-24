@@ -108,6 +108,37 @@ class Runtime:
                 }
             )
 
+    def _register_mapping_provider(
+        self,
+        provider: str,
+        name: str,
+        version: str,
+        callback: Any,
+        *,
+        input_ports: Sequence[tuple[str, str]],
+        output_ports: Sequence[tuple[str, str]],
+    ) -> None:
+        copied_inputs = tuple((port, kind) for port, kind in input_ports)
+        copied_outputs = tuple((port, kind) for port, kind in output_ports)
+        with self._registration_lock:
+            self._inner._register_mapping_provider(
+                provider,
+                name,
+                version,
+                callback,
+                input_ports=copied_inputs,
+                output_ports=copied_outputs,
+            )
+            self._registrations.append(
+                {
+                    "kind": "provider",
+                    "provider": provider,
+                    "name": name,
+                    "version": version,
+                    "callback": callback,
+                }
+            )
+
     def register_scalar_udf(
         self,
         *,
