@@ -1,6 +1,16 @@
-use std::{collections::HashSet, fmt, sync::Arc};
+use std::{
+    collections::HashSet,
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use datafusion::arrow::record_batch::RecordBatch;
+use ndarray::{ArrayD, IxDyn};
+use num_complex::{Complex32, Complex64};
+use numpy::{Element, IntoPyArray};
 use parking_lot::RwLock;
 use pyo3::{
     PyTraverseError, PyVisit,
@@ -15,6 +25,76 @@ const MAX_METADATA_DEPTH: usize = calc_flow::MAX_JSON_DEPTH;
 const METADATA_TYPE_MESSAGE: &str = "metadata must be a JSON-compatible mapping";
 const METADATA_INTEGER_MESSAGE: &str = "metadata integers must be in the portable JSON range -9223372036854775808 to 18446744073709551615";
 const CLEARED_BATCH_MESSAGE: &str = "Batch has been cleared by garbage collection";
+const MAX_OWNED_NUMPY_RANK: usize = 16;
+const MAX_OWNED_NUMPY_DIMENSION: usize = 1_000_000;
+const MAX_OWNED_NUMPY_ELEMENTS: usize = 10_000_000;
+
+fn validate_owned_numpy_shape(shape: &[usize]) -> Result<(), &'static str> {
+    if shape.is_empty() {
+        return Err("owned NumPy shape must have at least one dimension");
+    }
+    if shape.len() > MAX_OWNED_NUMPY_RANK {
+        return Err("owned NumPy shape must have at most 16 dimensions");
+    }
+
+    let mut elements = 1_usize;
+    for &dimension in shape {
+        if dimension == 0 {
+            return Err("owned NumPy shape dimensions must be positive");
+        }
+        if dimension > MAX_OWNED_NUMPY_DIMENSION {
+            return Err("owned NumPy shape dimension exceeds 1000000");
+        }
+        if elements > MAX_OWNED_NUMPY_ELEMENTS / dimension {
+            return Err("owned NumPy shape element count exceeds 10000000");
+        }
+        elements *= dimension;
+    }
+    Ok(())
+}
+
+#[pyclass(name = "_OwnedArrayToken", frozen, module = "calc_flow._native")]
+struct OwnedArrayToken {
+    object: RwLock<Option<Py<PyAny>>>,
+    consumed: AtomicBool,
+}
+
+impl OwnedArrayToken {
+    fn consume(&self, object: &Bound<'_, PyAny>) -> PyResult<()> {
+        let mut expected = self.object.write();
+        let Some(expected_object) = expected.as_ref() else {
+            return Err(PyValueError::new_err(
+                "owned array token was already consumed",
+            ));
+        };
+        if !expected_object.bind(object.py()).is(object) {
+            return Err(PyValueError::new_err(
+                "owned array token does not match the array",
+            ));
+        }
+        self.consumed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| PyValueError::new_err("owned array token was already consumed"))?;
+        expected.take();
+        Ok(())
+    }
+}
+
+fn owned_numpy<T>(py: Python<'_>, shape: &[usize]) -> PyResult<(Py<PyAny>, Py<OwnedArrayToken>)>
+where
+    T: Clone + Default + Element,
+{
+    let array = ArrayD::<T>::default(IxDyn(shape)).into_pyarray(py);
+    let object = array.into_any().unbind();
+    let token = Py::new(
+        py,
+        OwnedArrayToken {
+            object: RwLock::new(Some(object.clone_ref(py))),
+            consumed: AtomicBool::new(false),
+        },
+    )?;
+    Ok((object, token))
+}
 
 pub(crate) struct PythonPayload {
     #[allow(
@@ -123,6 +203,93 @@ pub(crate) fn rehome_python_payload(
 
 #[pymethods]
 impl PyBatch {
+    #[staticmethod]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 extracts the Python shape sequence into an owned Vec"
+    )]
+    fn _new_owned_numpy(
+        py: Python<'_>,
+        shape: Vec<usize>,
+        dtype: &str,
+    ) -> PyResult<(Py<PyAny>, Py<OwnedArrayToken>)> {
+        validate_owned_numpy_shape(&shape).map_err(PyValueError::new_err)?;
+        match dtype {
+            "int8" => owned_numpy::<i8>(py, &shape),
+            "int16" => owned_numpy::<i16>(py, &shape),
+            "int32" => owned_numpy::<i32>(py, &shape),
+            "int64" => owned_numpy::<i64>(py, &shape),
+            "uint8" => owned_numpy::<u8>(py, &shape),
+            "uint16" => owned_numpy::<u16>(py, &shape),
+            "uint32" => owned_numpy::<u32>(py, &shape),
+            "uint64" => owned_numpy::<u64>(py, &shape),
+            "float32" => owned_numpy::<f32>(py, &shape),
+            "float64" => owned_numpy::<f64>(py, &shape),
+            "complex64" => owned_numpy::<Complex32>(py, &shape),
+            "complex128" => owned_numpy::<Complex64>(py, &shape),
+            _ => Err(PyValueError::new_err(format!(
+                "owned NumPy arrays require a supported native numeric dtype; received {dtype}"
+            ))),
+        }
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (array, *, backend, token, metadata))]
+    fn _from_owned_array(
+        py: Python<'_>,
+        array: Py<PyAny>,
+        backend: String,
+        token: Option<PyRef<'_, OwnedArrayToken>>,
+        metadata: &Bound<'_, PyAny>,
+    ) -> PyResult<Self> {
+        let len = match (backend.as_str(), token) {
+            ("numpy", Some(token)) => {
+                token.consume(array.bind(py))?;
+                let flags = array.bind(py).getattr("flags")?;
+                if flags.getattr("owndata")?.extract::<bool>()? {
+                    return Err(PyValueError::new_err(
+                        "owned NumPy array must use binding-owned storage",
+                    ));
+                }
+                array.bind(py).call_method1("setflags", (false,))?;
+                let shape: Vec<usize> = array.bind(py).getattr("shape")?.extract()?;
+                shape.first().copied().unwrap_or(1)
+            }
+            ("numpy", None) => {
+                return Err(PyTypeError::new_err(
+                    "NumPy owned arrays require an ownership token",
+                ));
+            }
+            ("jax", None) => {
+                let jax = py.import("jax")?;
+                if !array.bind(py).is_instance(&jax.getattr("Array")?)? {
+                    return Err(PyTypeError::new_err("JAX owned arrays require a jax.Array"));
+                }
+                let shape: Vec<usize> = array.bind(py).getattr("shape")?.extract()?;
+                shape.first().copied().unwrap_or(1)
+            }
+            ("jax", Some(_)) => {
+                return Err(PyTypeError::new_err(
+                    "JAX owned arrays do not accept a NumPy ownership token",
+                ));
+            }
+            _ => {
+                return Err(PyValueError::new_err(
+                    "owned array backend must be 'numpy' or 'jax'",
+                ));
+            }
+        };
+        let metadata = metadata_from_python(py, Some(metadata))?;
+        let payload = PythonPayload {
+            object: array,
+            backend,
+            len,
+        };
+        let inner = calc_flow::Batch::external(Arc::new(payload), metadata)
+            .map_err(crate::error::to_py_err)?;
+        Ok(Self::from_inner(inner))
+    }
+
     #[staticmethod]
     #[pyo3(signature = (table, metadata=None))]
     fn from_pyarrow(
@@ -269,6 +436,7 @@ impl PyBatch {
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<OwnedArrayToken>()?;
     module.add_class::<PyBatch>()
 }
 
@@ -577,5 +745,103 @@ mod tests {
 
         std::thread::spawn(move || drop(inner)).join().unwrap();
         Python::attach(|_| {});
+    }
+
+    #[test]
+    fn owned_numpy_shape_validation_rejects_every_allocation_bound() {
+        assert_eq!(
+            validate_owned_numpy_shape(&[]).unwrap_err(),
+            "owned NumPy shape must have at least one dimension"
+        );
+        assert_eq!(
+            validate_owned_numpy_shape(&[1; 17]).unwrap_err(),
+            "owned NumPy shape must have at most 16 dimensions"
+        );
+        assert_eq!(
+            validate_owned_numpy_shape(&[0]).unwrap_err(),
+            "owned NumPy shape dimensions must be positive"
+        );
+        assert_eq!(
+            validate_owned_numpy_shape(&[1_000_001]).unwrap_err(),
+            "owned NumPy shape dimension exceeds 1000000"
+        );
+        assert_eq!(
+            validate_owned_numpy_shape(&[1_000_000, 11]).unwrap_err(),
+            "owned NumPy shape element count exceeds 10000000"
+        );
+    }
+
+    #[test]
+    fn owned_numpy_adoption_preserves_identity_and_irreversible_read_only_state() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (object, token) = PyBatch::_new_owned_numpy(py, vec![2, 2], "float64").unwrap();
+            let identity = object.bind(py).as_ptr();
+            let pointer: usize = object
+                .bind(py)
+                .getattr("__array_interface__")
+                .unwrap()
+                .get_item("data")
+                .unwrap()
+                .get_item(0)
+                .unwrap()
+                .extract()
+                .unwrap();
+            let metadata = PyDict::new(py);
+
+            let batch = PyBatch::_from_owned_array(
+                py,
+                object,
+                "numpy".into(),
+                Some(token.bind(py).borrow()),
+                metadata.as_any(),
+            )
+            .unwrap();
+            let output = batch.array(py).unwrap();
+
+            assert_eq!(output.bind(py).as_ptr(), identity);
+            assert_eq!(
+                output
+                    .bind(py)
+                    .getattr("__array_interface__")
+                    .unwrap()
+                    .get_item("data")
+                    .unwrap()
+                    .get_item(0)
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                pointer
+            );
+            let flags = output.bind(py).getattr("flags").unwrap();
+            assert!(!flags.getattr("owndata").unwrap().extract::<bool>().unwrap());
+            assert!(
+                !flags
+                    .getattr("writeable")
+                    .unwrap()
+                    .extract::<bool>()
+                    .unwrap()
+            );
+            let error = output
+                .bind(py)
+                .call_method1("setflags", (true,))
+                .unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+
+            let error = match PyBatch::_from_owned_array(
+                py,
+                output,
+                "numpy".into(),
+                Some(token.bind(py).borrow()),
+                metadata.as_any(),
+            ) {
+                Ok(_) => panic!("an ownership token must be one-use"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.value(py).to_string(),
+                "owned array token was already consumed"
+            );
+        });
     }
 }

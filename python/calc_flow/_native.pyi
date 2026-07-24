@@ -34,6 +34,20 @@ class Batch:
     ) -> Batch:
         """Build an internal Python-provider batch; this is not a stable public API."""
         ...
+    @staticmethod
+    def _new_owned_numpy(shape: Sequence[int], dtype: str) -> tuple[object, object]:
+        """Allocate private Rust-owned NumPy storage."""
+        ...
+    @staticmethod
+    def _from_owned_array(
+        array: object,
+        *,
+        backend: str,
+        token: object | None,
+        metadata: Mapping[str, object],
+    ) -> Batch:
+        """Adopt a trusted provider result; this is not a stable public API."""
+        ...
 
     def to_pyarrow(self) -> pa.Table: ...
     @property

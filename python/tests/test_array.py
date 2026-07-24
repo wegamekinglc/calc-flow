@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import gc
 import weakref
 from collections.abc import Callable
@@ -181,6 +182,233 @@ def test_numpy_ownership_avoids_intermediate_array_copy(
     output = array_module._owned_numpy(source)
 
     np.testing.assert_array_equal(output, expected)
+
+
+def test_owned_numpy_result_is_adopted_without_copy_and_cannot_be_reopened() -> None:
+    owned, token = Batch._new_owned_numpy((2, 2), "float64")
+    assert type(owned) is np.ndarray
+    assert owned.flags.writeable
+    assert not owned.flags.owndata
+    owned[:] = [[1.0, 2.0], [3.0, 4.0]]
+    pointer = owned.__array_interface__["data"][0]
+
+    batch = Batch._from_owned_array(
+        owned,
+        backend="numpy",
+        token=token,
+        metadata={"operation": "table_matmul"},
+    )
+    output = batch.array
+
+    assert output is owned
+    assert output.__array_interface__["data"][0] == pointer
+    assert output.tolist() == [[1.0, 2.0], [3.0, 4.0]]
+    assert output.flags.writeable is False
+    assert not isinstance(output.base, np.ndarray)
+    assert not hasattr(output.base, "ptr")
+    with pytest.raises(ValueError):
+        output.setflags(write=True)
+    with pytest.raises(ValueError, match="already consumed"):
+        Batch._from_owned_array(
+            owned,
+            backend="numpy",
+            token=token,
+            metadata={},
+        )
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "float32",
+        "float64",
+        "complex64",
+        "complex128",
+    ],
+)
+def test_owned_numpy_supports_exact_native_numeric_dtypes(dtype: str) -> None:
+    owned, _ = Batch._new_owned_numpy((2, 1), dtype)
+
+    assert type(owned) is np.ndarray
+    assert owned.dtype == np.dtype(dtype)
+    assert owned.shape == (2, 1)
+    assert owned.tolist() == [[0], [0]]
+    assert owned.flags.writeable
+    assert not owned.flags.owndata
+
+
+@pytest.mark.parametrize("dtype", ["bool", "float16", "object", ">f8"])
+def test_owned_numpy_rejects_unsupported_dtypes(dtype: str) -> None:
+    with pytest.raises(
+        ValueError,
+        match=(
+            "owned NumPy arrays require a supported native numeric dtype; "
+            f"received {dtype}"
+        ),
+    ):
+        Batch._new_owned_numpy((1, 1), dtype)
+
+
+@pytest.mark.parametrize(
+    ("shape", "message"),
+    [
+        ((), "must have at least one dimension"),
+        ((1,) * 17, "must have at most 16 dimensions"),
+        ((0,), "dimensions must be positive"),
+        ((1_000_001,), "dimension exceeds 1000000"),
+        ((1_000_000, 11), "element count exceeds 10000000"),
+    ],
+)
+def test_owned_numpy_validates_shape_before_allocation(
+    shape: tuple[int, ...],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        Batch._new_owned_numpy(shape, "float64")
+
+
+def test_owned_numpy_token_rejects_a_different_array() -> None:
+    first, token = Batch._new_owned_numpy((1, 1), "float32")
+    second, _ = Batch._new_owned_numpy((1, 1), "float32")
+    with pytest.raises(ValueError, match="does not match"):
+        Batch._from_owned_array(
+            second,
+            backend="numpy",
+            token=token,
+            metadata={},
+        )
+    assert first.flags.writeable
+    batch = Batch._from_owned_array(
+        first,
+        backend="numpy",
+        token=token,
+        metadata={},
+    )
+    assert batch.array is first
+
+
+def test_owned_array_token_is_private_frozen_and_non_cloneable() -> None:
+    _, token = Batch._new_owned_numpy((1,), "float32")
+
+    assert type(token).__name__ == "_OwnedArrayToken"
+    assert not hasattr(token, "object_identity")
+    assert not hasattr(token, "consumed")
+    with pytest.raises(AttributeError):
+        token.extra = True
+    with pytest.raises(TypeError):
+        type(token)()
+    with pytest.raises(TypeError):
+        copy.copy(token)
+
+
+def test_owned_array_token_anchors_exact_identity_until_adoption() -> None:
+    owned, token = Batch._new_owned_numpy((1,), "float32")
+    owned_ref = weakref.ref(owned)
+
+    del owned
+    gc.collect()
+    assert owned_ref() is not None
+
+    del token
+    gc.collect()
+    assert owned_ref() is None
+
+
+def test_owned_numpy_storage_lives_until_the_last_exported_object_is_gone() -> None:
+    owned, token = Batch._new_owned_numpy((2,), "float64")
+    owned_ref = weakref.ref(owned)
+    batch = Batch._from_owned_array(
+        owned,
+        backend="numpy",
+        token=token,
+        metadata={},
+    )
+
+    del owned
+    del token
+    gc.collect()
+    assert owned_ref() is batch.array
+
+    exported = batch.array
+    del batch
+    gc.collect()
+    assert owned_ref() is exported
+
+    del exported
+    gc.collect()
+    assert owned_ref() is None
+
+
+def test_owned_array_adoption_rejects_backend_and_token_mismatches() -> None:
+    owned, token = Batch._new_owned_numpy((1,), "float64")
+    with pytest.raises(TypeError, match="require an ownership token"):
+        Batch._from_owned_array(
+            owned,
+            backend="numpy",
+            token=None,
+            metadata={},
+        )
+    with pytest.raises(TypeError, match="do not accept"):
+        Batch._from_owned_array(
+            owned,
+            backend="jax",
+            token=token,
+            metadata={},
+        )
+    with pytest.raises(ValueError, match="must be 'numpy' or 'jax'"):
+        Batch._from_owned_array(
+            owned,
+            backend="other",
+            token=token,
+            metadata={},
+        )
+    with pytest.raises(TypeError, match="require a jax.Array"):
+        Batch._from_owned_array(
+            owned,
+            backend="jax",
+            token=None,
+            metadata={},
+        )
+
+    batch = Batch._from_owned_array(
+        owned,
+        backend="numpy",
+        token=token,
+        metadata={},
+    )
+    assert batch.array is owned
+
+
+def test_owned_jax_result_retains_identity_and_device_without_numpy_conversion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    jax = pytest.importorskip("jax")
+    jnp = pytest.importorskip("jax.numpy")
+    result = jnp.asarray([[1.0, 2.0]])
+    device = result.device
+
+    def reject_numpy_conversion(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("owned JAX adoption must not convert through NumPy")
+
+    monkeypatch.setattr(np, "asarray", reject_numpy_conversion)
+    batch = Batch._from_owned_array(
+        result,
+        backend="jax",
+        token=None,
+        metadata={},
+    )
+
+    assert isinstance(batch.array, jax.Array)
+    assert batch.array is result
+    assert batch.array.device == device
 
 
 def test_array_expression_cache_reuses_successful_exact_strings() -> None:
