@@ -5,12 +5,14 @@ import copy
 import gc
 import os
 import re
+import runpy
 import subprocess
 import sys
 import warnings
 import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -26,6 +28,19 @@ from calc_flow import (
     register_jax,
     register_numpy,
 )
+
+
+def test_array_and_dataframe_example_uses_table_matmul(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    example = Path(__file__).parents[2] / "examples" / "07_array_and_dataframe.py"
+
+    runpy.run_path(example, run_name="__main__")
+
+    assert capsys.readouterr().out.splitlines() == [
+        "NumPy result: [[6.0, 10.0], [2.0, 12.0], [8.0, 10.0]]",
+        "JAX result: [[6.0, 10.0], [2.0, 12.0], [8.0, 10.0]]",
+    ]
 
 
 def _external(

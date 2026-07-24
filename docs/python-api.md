@@ -8,6 +8,7 @@ small functional adapters. Python 3.13 or newer is required.
 ```bash
 uv add calc-flow
 uv add "calc-flow[numpy]"  # optional
+uv add "calc-flow[jax]"    # optional
 ```
 
 From a source checkout:
@@ -158,6 +159,60 @@ Owned arrays are read-only. The bounded expression evaluator allows arithmetic,
 reductions, transpose, and reshape; it rejects Python execution features and
 backend changes. `register_jax` provides the same explicit provider boundary.
 The full version is [`examples/06_numpy_array.py`](../examples/06_numpy_array.py).
+
+### Table-array matrix multiplication
+
+`pyarrow.Table` is the table input for table-array matrix multiplication. The
+immutable builder method is:
+
+```python
+def table_matmul(
+    self,
+    node_id: str,
+    *,
+    backend: Literal["numpy", "jax"],
+    columns: Sequence[str],
+) -> PipelineBuilder: ...
+```
+
+It selects `columns` in the supplied order, accepts a rank-two `weights` array
+with shape `(len(columns), output_width)`, and returns a same-backend array
+batch named `output`.
+
+```python
+import numpy as np
+import pyarrow as pa
+
+from calc_flow import Batch, PipelineBuilder, Runtime, register_numpy
+
+runtime = Runtime()
+register_numpy(runtime)
+plan = (
+    PipelineBuilder("table-matrix")
+    .table_matmul("multiply", backend="numpy", columns=("quantity", "unit_price"))
+    .compile(runtime)
+)
+result = plan.execute(
+    {
+        "table": Batch.from_pyarrow(
+            pa.table({"quantity": [3.0, 1.0], "unit_price": [10.0, 12.0]})
+        ),
+        "weights": Batch.from_array(
+            np.array([[2.0, 0.0], [0.0, 1.0]]), backend="numpy"
+        ),
+    }
+).outputs["output"].array
+
+assert result.tolist() == [[6.0, 10.0], [2.0, 12.0]]
+```
+
+After input `Batch` construction, the operator makes no redundant execution
+copies. NumPy allocates one dense table matrix and one result. JAX permits one
+host staging buffer, one device table buffer, and one device result; it does
+not promise a host-free transfer path. The construction of caller input
+`Batch` values is outside these execution ceilings. The runnable NumPy and
+optional JAX paths are in
+[`examples/07_array_and_dataframe.py`](../examples/07_array_and_dataframe.py).
 
 ## Projects and persistence
 
