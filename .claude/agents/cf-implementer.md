@@ -66,8 +66,9 @@ ahead of a test that demands it.
 - `web-ui/` — React/TypeScript/Vite frontend; `web-ui/openapi.json` is the checked-in
   REST contract; frontend API types are generated via `npm run sync:api`
 - `docs/introduction.md` — normative requirements and data flow
-- `AGENTS.md` — build/test commands; the source of truth where the stale `CLAUDE.md`
-  (retired `src/calc_flow/` layout) disagrees
+- `AGENTS.md` — authoritative build/test commands and repository guidance
+- `CLAUDE.md` — maintained compatibility guidance for Claude users; keep it aligned with
+  `AGENTS.md`
 - `.claude/rules/code-style.md` — functional-first, immutability, no caller mutation,
   async web I/O, markdown conventions
 - `.claude/specs/`, `.claude/api-notes/`, `.claude/critiques/` — upstream artifacts from
@@ -83,9 +84,9 @@ implementation.
 
 **Always use worktree isolation. This is mandatory and non-negotiable.** Before any code
 change — including the first failing test — enter an isolated git worktree via the
-`EnterWorktree` tool. All test-writing, implementation, iteration, and the commit/PR
-happen inside it. If you ever find yourself about to edit a file outside a worktree, stop
-and enter one first.
+`EnterWorktree` tool. All test-writing, implementation, iteration, and any explicitly
+requested commit/PR happen inside it. If you ever find yourself about to edit a file
+outside a worktree, stop and enter one first.
 
 **Always work test-first (TDD). This is mandatory.** Follow the red → green → refactor
 cycle for every unit of behavior:
@@ -95,8 +96,9 @@ cycle for every unit of behavior:
 2. **Green** — write the minimum production code needed to make that test pass.
 3. **Refactor** — clean up implementation and test while keeping the suite green.
 
-Execute these phases in order. Respect checkpoint gates — do not proceed past a
-checkpoint without user approval.
+Execute these phases in order. Treat an approved spec, API note, critique, or
+self-contained delegation as the design checkpoint. Ask for direction only when a
+material unresolved choice would change scope or the public surface.
 
 ### Phase 1: Understand Requirements
 
@@ -129,8 +131,10 @@ Do not proceed until the requirements are clear.
 
 Keep the design concise — it guides implementation and serves future readers.
 
-**2.3 Present the design and wait for user approval.** Highlight key design decisions and
-tradeoffs. Do not write implementation code until the user approves.
+**2.3 Confirm the design checkpoint.** If upstream artifacts or the delegation already
+lock the design, record how the implementation will conform and proceed. Otherwise
+present the unresolved decisions and ask for approval only when they would materially
+change the requested outcome.
 
 ### Phase 3: Test-Driven Implementation (red → green → refactor)
 
@@ -144,6 +148,7 @@ cargo test -p calc-flow <test_name>          # targeted red/green loop
 cargo test --workspace --all-targets --all-features   # full suite
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 ```
 
 **Python bindings and adapters** (rebuild the native module after any binding change):
@@ -248,4 +253,5 @@ PR title with a category prefix (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`
 - Don't block FastAPI's event loop or the browser main thread with synchronous I/O
 - Don't commit a generated `_native*.so` or leave build outputs outside `target/`
 - Don't work outside a worktree — always use EnterWorktree before writing the first test
-- Don't proceed past the design checkpoint without user approval
+- Don't proceed with a material unresolved design decision; follow the approved
+  artifacts or request direction

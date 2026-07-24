@@ -136,6 +136,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
 cargo llvm-cov --workspace --all-features --fail-under-lines 90   # when Rust changed
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 ```
 ```bash
 uv sync --extra dev && uv run maturin develop

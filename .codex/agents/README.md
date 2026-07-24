@@ -24,15 +24,15 @@ bounded responsibility and returns a concise, verified hand-off.
 
 ```text
 request -> spec writer -> API designer when public -> critic
-        -> implementer and tester -> reviewer -> doc writer
+        -> implementer -> tester -> reviewer -> doc writer
 
 out of band and on demand: performancer, simplifier
 ```
 
-The orchestrator may shorten the route for narrow work, but it does not invent
-missing requirements or bypass a requested review. A `Block` verdict returns
-to the upstream author. Reviewer findings return to the implementer and
-tester, followed by another review of the updated head.
+The orchestrator may shorten the route for narrow work, but it never skips the
+reviewer. It does not invent missing requirements. A `Block` verdict returns to
+the upstream author. Reviewer findings return to the implementer and tester,
+followed by another review of the updated head.
 
 ## Artifact Layout
 
@@ -70,7 +70,8 @@ critique.
 
 - File-changing specialists use `superpowers:using-git-worktrees` when
   available and otherwise follow the repository's safe isolated-worktree
-  practice.
+  practice. The skill is an optional external installation; this repository
+  does not vendor its `SKILL.md`.
 - Behavior changes proceed red, green, refactor: observe the focused test fail
   for the expected reason before implementation.
 - Planning agents write only their assigned artifact. One agent owns an

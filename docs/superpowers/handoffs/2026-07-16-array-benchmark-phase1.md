@@ -1,5 +1,9 @@
 # Array Benchmark Phase 1 Evidence
 
+> **Historical status:** Intermediate evidence. Its decision to require Phase 2
+> was followed by the
+> [Phase 2 evidence](2026-07-16-array-benchmark-phase2.md).
+
 ## Evidence outcome
 
 The exact baseline engine at `b42b687c8021291bcb537a57fded7a40f7f8477d`

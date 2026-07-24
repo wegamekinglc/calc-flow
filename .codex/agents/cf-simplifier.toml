@@ -74,8 +74,9 @@ an axis that is clean rather than manufacturing findings.
 
 **Worktree discipline.** Reading and reporting does not need a worktree — work from the
 current checkout. If the user has opted into apply/fix mode, you must enter an isolated
-worktree via `superpowers:using-git-worktrees` before editing any file, exactly like `cf-implementer`.
-Never commit or push; that is the user's action.
+worktree with `superpowers:using-git-worktrees` when available, or use the repository's
+`.worktrees/` fallback, before editing any file, exactly like `cf-implementer`. Never
+commit or push; that is the user's action.
 
 ### Step 1: Define the Target
 
@@ -142,7 +143,8 @@ spamming the report.
 If the user has explicitly asked you to apply the fixes ("apply the duplication fixes",
 "fix mode", "collapse the branches in <file>"), then and only then:
 
-1. Enter a worktree via `superpowers:using-git-worktrees`.
+1. Enter a worktree with `superpowers:using-git-worktrees` when available, or use the
+   repository's `.worktrees/` fallback.
 2. Apply the agreed findings one at a time, re-running the affected surface's suite
    after each change to prove behavior is unchanged:
    ```bash

@@ -3,9 +3,9 @@
 This directory holds the published documentation for Calc Flow. The docs
 describe a single current version: they always reflect the latest state of the
 project on `main`. Overwrite them in place when the code changes; do not
-maintain per-release copies. Fundamental changes are recorded in the
-repo-root `CHANGELOG.md`, and the v1-to-v2 migration boundary is preserved in
-the historical records listed below.
+maintain per-release copies. Fundamental changes are recorded in the repo-root
+`CHANGELOG.md` once the first qualifying change creates it, and the v1-to-v2
+migration boundary is preserved in the historical records listed below.
 
 ## Start here
 
@@ -28,6 +28,10 @@ the historical records listed below.
   coding style, architecture summary, test layout, and release invariants
 - **[CLAUDE.md](../CLAUDE.md)** — Claude Code operational guidance, kept in
   step with AGENTS.md
+- **[Codex agent team](../.codex/agents/README.md)** — Codex-native roster,
+  workflow, artifact layout, and invocation examples
+- **[Claude agent team](../.claude/agents/README.md)** — preserved Claude
+  compatibility roster and workflow
 - **[Examples](../examples/README.md)** — executable v2 Python examples
 - **[Rust examples](../crates/calc-flow/examples/README.md)** — executable
   `calc-flow` crate examples
@@ -51,8 +55,9 @@ surfaces and are preserved for audit; leave them untouched. The current
 - **[v0.2 migration](migration-v0.2.md)** — the v0.1-to-v0.2 prototype
   migration, predating v1.
 
-Immutable v1 semantic fixtures live under `tests/fixtures/v1/` as v2 parity
-evidence; they are not a v2 runtime or package path.
+Immutable v1 semantic fixtures live under
+[`tests/fixtures/v1/`](../tests/fixtures/v1/) as v2 parity evidence; they are
+not a v2 runtime or package path.
 
 ## Conventions
 

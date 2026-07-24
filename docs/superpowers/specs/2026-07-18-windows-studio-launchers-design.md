@@ -1,5 +1,7 @@
 # Windows Studio Launchers Design
 
+**Status:** Implemented and merged in PR #15 (historical design)
+
 ## Goal
 
 Provide native PowerShell commands that start and stop Calc Flow Studio on

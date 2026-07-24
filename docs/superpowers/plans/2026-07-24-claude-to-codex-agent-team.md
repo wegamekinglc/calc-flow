@@ -1,5 +1,9 @@
 # Claude-to-Codex Agent Team Migration Implementation Plan
 
+> **Historical status:** Implemented and merged in PR #25. Unchecked boxes and
+> temporary-clone procedures preserve the original execution plan; they are not
+> current pending work.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > `superpowers:subagent-driven-development` (recommended) or
 > `superpowers:executing-plans` to implement this plan task-by-task. Steps use

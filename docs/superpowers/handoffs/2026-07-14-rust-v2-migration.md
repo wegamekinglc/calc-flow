@@ -1,5 +1,10 @@
 # Rust V2 Migration Handoff
 
+> **Historical snapshot:** This handoff records the pre-implementation state at
+> `a43d69c`. The design, plan, and handoff were merged in PR #12 before
+> implementation began. The Rust v2 implementation was subsequently completed
+> and merged in PR #13; the task counts below are not the current project status.
+
 ## Current State
 
 - Branch: `feature/rust-v2-migration`
@@ -13,11 +18,11 @@ v2 change has been implemented yet.
 
 ## Committed Work
 
-| Commit | Subject | Contents |
-| ------ | ------- | -------- |
-| `f9f781b` | `docs: design Rust v2 migration` | Approved architecture, API boundaries, compatibility decisions, rollout, and risk controls. |
-| `f6b004a` | `docs: plan Rust v2 migration` | Twenty-five test-driven implementation tasks with exact paths, commands, interfaces, and release gates. |
-| `a43d69c` | `chore: ignore local worktrees` | Ignores `.worktrees/` so an isolated checkout can be created safely. |
+| Commit    | Subject                          | Contents                                                                                                |
+| --------- | -------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `f9f781b` | `docs: design Rust v2 migration` | Approved architecture, API boundaries, compatibility decisions, rollout, and risk controls.             |
+| `f6b004a` | `docs: plan Rust v2 migration`   | Twenty-five test-driven implementation tasks with exact paths, commands, interfaces, and release gates. |
+| `a43d69c` | `chore: ignore local worktrees`  | Ignores `.worktrees/` so an isolated checkout can be created safely.                                    |
 
 Primary artifacts:
 

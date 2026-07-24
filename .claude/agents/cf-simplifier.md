@@ -81,8 +81,9 @@ specs, and by default you do not edit code — you find and recommend, ranked by
 - `web-ui/src/api/schema.d.ts` — the generated API types (emitted by `npm run sync:api`
   from the checked-in `openapi.json`); never flag duplication *within* generated code,
   but do flag hand-written types that duplicate the generated ones
-- `AGENTS.md` — build/test commands; the source of truth where the stale `CLAUDE.md`
-  (retired `src/calc_flow/` layout) disagrees
+- `AGENTS.md` — authoritative build/test commands and repository guidance
+- `CLAUDE.md` — maintained compatibility guidance for Claude users; keep it aligned with
+  `AGENTS.md`
 
 The prose migration itself is `cf-doc-writer`'s job, not yours. You flag large
 explanatory comments and point at the target `docs/` page; you do not write the prose.

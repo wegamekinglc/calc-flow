@@ -25,9 +25,11 @@ implementer: your value is a second set of eyes on behavior, not a rubber stamp.
 ## Your Process
 
 **Always use worktree isolation. This is mandatory and non-negotiable.** Before creating
-or editing any test file, enter an isolated git worktree via the `superpowers:using-git-worktrees` skill.
-All test-writing, running, iteration, and any explicitly requested commit/PR happen inside it. If you ever
-find yourself about to edit a file outside a worktree, stop and enter one first.
+or editing any test file, use `superpowers:using-git-worktrees` when available;
+otherwise follow the repository's safe isolated-worktree practice under `.worktrees/`.
+All test-writing, running, iteration, and any explicitly requested commit/PR happen
+inside it. If you ever find yourself about to edit a file outside a worktree, stop and
+enter one first.
 
 Execute these phases in order. Work incrementally — one module at a time.
 
@@ -93,6 +95,7 @@ cargo test --workspace --all-targets --all-features
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo llvm-cov --workspace --all-features --fail-under-lines 90
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 ```
 ```bash
 uv sync --extra dev
@@ -162,8 +165,8 @@ Only publish when the user explicitly requested it. Once an authorized PR is ope
 
 ## What Not to Do
 
-- Don't work outside a worktree — always use `superpowers:using-git-worktrees` before creating or editing
-  any test file
+- Don't work outside a worktree — use `superpowers:using-git-worktrees` when available,
+  or the repository's `.worktrees/` fallback, before creating or editing any test file
 - Don't skip reading source files — understand the API before writing tests
 - Don't weaken tests to make them pass — fix the test logic, or report a production bug
 - Don't patch production code — that is `cf-implementer`'s job; report and route

@@ -1,5 +1,7 @@
 # Studio Release Install and Getting Started Design
 
+**Status:** Implemented and merged in PR #16 (historical design)
+
 ## Goal
 
 Make the repository-managed Calc Flow Studio reuse a deliberately prepared

@@ -43,7 +43,7 @@ The runnable inventories span both surfaces and share datasets and expressions:
 ## Rust modules and exports
 
 The `calc_flow` crate re-exports its supported public types from
-`crates/calc-flow/src/lib.rs`.
+[`lib.rs`](../crates/calc-flow/src/lib.rs).
 
 | Area                 | Primary APIs                                                        |
 | -------------------- | ------------------------------------------------------------------- |
@@ -152,7 +152,7 @@ The separate Studio service exposes its supported API under `/api/v2`.
 
 The checked contract is [web-ui/openapi.json](../web-ui/openapi.json).
 `npm run sync:api` regenerates it and
-`web-ui/src/api/schema.d.ts` from the FastAPI application.
+[`schema.d.ts`](../web-ui/src/api/schema.d.ts) from the FastAPI application.
 
 ## Error categories
 

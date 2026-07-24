@@ -34,21 +34,21 @@ fully committed before measurement.
 
 ## Environment
 
-| Item                   | Value                                                              |
-| ---------------------- | ------------------------------------------------------------------ |
-| Operating system       | Linux `5.15.167.4-microsoft-standard-WSL2`                         |
-| Architecture           | `x86_64`                                                           |
-| CPU                     | 13th Gen Intel Core i9-13900HX                                     |
-| Logical CPUs           | `32`                                                               |
-| Rust                   | `rustc 1.88.0 (6b00bc388 2025-06-23)`                              |
-| Cargo                  | `cargo 1.88.0 (873a06493 2025-05-10)`                              |
-| Python                 | `3.13.13`                                                          |
-| NumPy                  | `2.5.1`                                                            |
-| JAX / JAXlib           | `0.11.0` / `0.11.0`                                                |
-| JAX execution          | CPU; x64 disabled                                                  |
-| Machine fingerprint    | `fe554238f5c55b49c8d1961066a86debe87eb538f7fbb6fc19a72f926e264a56` |
-| NumPy dependency hash  | `dc347e7721846de1ab42e877047ff66a9ca37f6e95855ef46e85274559dbf302` |
-| JAX dependency hash    | `ef27ba28ef2b53bf88ad5c1fb510e368a95f4ebbc0cd08537da625bbd0d200a4` |
+| Item                  | Value                                                              |
+| --------------------- | ------------------------------------------------------------------ |
+| Operating system      | Linux `5.15.167.4-microsoft-standard-WSL2`                         |
+| Architecture          | `x86_64`                                                           |
+| CPU                   | 13th Gen Intel Core i9-13900HX                                     |
+| Logical CPUs          | `32`                                                               |
+| Rust                  | `rustc 1.88.0 (6b00bc388 2025-06-23)`                              |
+| Cargo                 | `cargo 1.88.0 (873a06493 2025-05-10)`                              |
+| Python                | `3.13.13`                                                          |
+| NumPy                 | `2.5.1`                                                            |
+| JAX / JAXlib          | `0.11.0` / `0.11.0`                                                |
+| JAX execution         | CPU; x64 disabled                                                  |
+| Machine fingerprint   | `fe554238f5c55b49c8d1961066a86debe87eb538f7fbb6fc19a72f926e264a56` |
+| NumPy dependency hash | `dc347e7721846de1ab42e877047ff66a9ca37f6e95855ef46e85274559dbf302` |
+| JAX dependency hash   | `ef27ba28ef2b53bf88ad5c1fb510e368a95f4ebbc0cd08537da625bbd0d200a4` |
 
 ## Commands
 

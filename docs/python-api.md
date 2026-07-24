@@ -216,5 +216,5 @@ errors.
 
 ## More examples
 
-Every file under `examples/` is executable against the installed v2 wheel. See
-`examples/README.md` for the inventory and commands.
+Every file under [`examples/`](../examples/README.md) is executable against the
+installed v2 wheel. See the linked inventory for the commands.

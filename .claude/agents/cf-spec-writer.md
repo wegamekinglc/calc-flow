@@ -57,8 +57,9 @@ You write specs. You do not write code, design diagrams, or run builds.
 - `web-ui/` — calc-flow-studio: FastAPI backend (`web-ui/backend/`), React frontend
   (`web-ui/src/`), checked-in `web-ui/openapi.json`
 - `docs/introduction.md` — requirements and data flow (normative domain vocabulary)
-- `AGENTS.md` — build/test commands; the source of truth where the stale `CLAUDE.md`
-  (retired `src/calc_flow/` layout) disagrees
+- `AGENTS.md` — authoritative build/test commands and repository guidance
+- `CLAUDE.md` — maintained compatibility guidance for Claude users; keep it aligned with
+  `AGENTS.md`
 - `.claude/rules/code-style.md` — coding/test conventions
 
 Read `docs/introduction.md` and the rule files before writing the spec — terminology and

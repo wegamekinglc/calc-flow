@@ -26,7 +26,10 @@ orchestrator routes work between them.
 request ──► spec-writer ──► api-designer ──► critic
                              (if public)       │
                                                ▼
-                            implementer (+ tester) ◄──┘
+                            implementer ◄──────┘
+                                   │
+                                   ▼
+                                tester
                                    │
                                    ▼
                                reviewer        ◄── in-band gate (blocking, every iteration)
@@ -35,7 +38,7 @@ request ──► spec-writer ──► api-designer ──► critic
                             doc-writer (reconcile docs/ + CHANGELOG.md)
                                    │
                                    ▼
-                              merged PR
+                         verified hand-off / user-authorized PR
 
   out-of-band quality sweeps (separate context, often background, on demand):
     ┌────────────────┐          ┌──────────────┐
@@ -81,8 +84,8 @@ end-to-end.
 
 - `.claude/rules/code-style.md` — functional-first Python/TypeScript, immutability, no
   caller-owned mutation, Arrow/Array-API backing rules, aligned markdown tables
-- `AGENTS.md` — build/test/verify commands per surface; the source of truth where the
-  stale `CLAUDE.md` (retired `src/calc_flow/` layout) disagrees
+- `AGENTS.md` — authoritative build/test/verify commands per surface; `CLAUDE.md`
+  mirrors the maintained operational guidance for Claude users
 - `docs/introduction.md` — domain vocabulary (Batch, Port, Operator, Pipeline, Checkpoint,
   engines, runners); behavioral claims must match these docs
 - Repo git conventions (`AGENTS.md`) — `feature/`·`fix/` branches, imperative commits
@@ -98,15 +101,17 @@ and `cf-simplifier` when the user has opted into apply mode; `cf-reviewer` also 
 inside a worktree):
 
 - **Worktree isolation.** Enter an isolated git worktree (`EnterWorktree`) before creating
-  or editing any file. All edits, builds, iteration, and the commit/PR happen inside it,
-  keeping the main working tree clean. The planning agents (spec writer, API designer,
-  critic) write only into the shared `.claude/` artifact directories (created on demand)
-  and do not need a worktree.
+  or editing any file. All edits, builds, iteration, and any explicitly requested
+  commit/PR happen inside it, keeping the main working tree clean. The planning agents
+  (spec writer, API designer, critic) write only into the shared `.claude/` artifact
+  directories (created on demand) and do not need a worktree.
 - **Test-driven development (TDD).** The implementer works strictly red → green → refactor:
   write a failing test for the next behavior, confirm it fails for the right reason, write
   the minimum code to pass, then refactor while green. Production code is never written
   ahead of a test that demands it. The doc writer is exempt from TDD (there is no code to
   test), but still works in a worktree.
+- **Remote authority.** No agent pushes, creates or edits a PR, resolves review threads,
+  merges, or performs another remote mutation without explicit user authority.
 
 ## Hand-off Etiquette
 

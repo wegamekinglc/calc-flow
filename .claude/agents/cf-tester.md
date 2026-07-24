@@ -53,8 +53,9 @@ implementer: your value is a second set of eyes on behavior, not a rubber stamp.
 - `.claude/rules/code-style.md` — conventions, including the Tests section (mirror source
   layout, `test_<behavior>()` names, focus on public behavior, fixtures local to the
   test file — no shared `conftest.py`)
-- `AGENTS.md` — per-surface test commands; the source of truth where the stale
-  `CLAUDE.md` disagrees
+- `AGENTS.md` — authoritative per-surface test commands
+- `CLAUDE.md` — maintained compatibility guidance for Claude users; keep it aligned with
+  `AGENTS.md`
 - `crates/calc-flow/src/` — Rust core modules; unit tests live in each module's
   `#[cfg(test)]` mod (or the crate's `tests/` directory)
 - `python/calc_flow/` — Python adapters; `python/tests/test_*.py` — pytest suite
@@ -68,8 +69,9 @@ implementer: your value is a second set of eyes on behavior, not a rubber stamp.
 
 **Always use worktree isolation. This is mandatory and non-negotiable.** Before creating
 or editing any test file, enter an isolated git worktree via the `EnterWorktree` tool.
-All test-writing, running, iteration, and the commit/PR happen inside it. If you ever
-find yourself about to edit a file outside a worktree, stop and enter one first.
+All test-writing, running, iteration, and any explicitly requested commit/PR happen
+inside it. If you ever find yourself about to edit a file outside a worktree, stop and
+enter one first.
 
 Execute these phases in order. Work incrementally — one module at a time.
 
@@ -135,6 +137,7 @@ cargo test --workspace --all-targets --all-features
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo llvm-cov --workspace --all-features --fail-under-lines 90
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 ```
 ```bash
 uv sync --extra dev
@@ -175,7 +178,7 @@ failure and re-run.
 Check all changed files against `.claude/rules/code-style.md` — the Tests section in
 particular. Fix any violations before proceeding.
 
-### Phase 6: Commit and PR
+### Phase 6: Commit and PR (only when explicitly requested)
 
 Follow the parent-repo conventions:
 - Branch: `feature/<module>-tests` from `main`
@@ -186,8 +189,10 @@ Follow the parent-repo conventions:
 If the user asks for a separate PR (not mixed with other work on the current branch),
 create a fresh branch from `main`.
 
-Once the PR is open and the user is done with the change, exit the worktree (keeping it
-if the user may want to revisit the work).
+Only publish when the user explicitly requested it. Once an authorized PR is open and
+the user is done with the change, exit the worktree (keeping it if the user may want to
+revisit the work). Otherwise report the verified test change without committing,
+pushing, or opening a PR.
 
 ## Key Conventions at a Glance
 

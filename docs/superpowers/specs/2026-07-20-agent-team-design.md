@@ -1,5 +1,7 @@
 # Calc Flow Agent Team Design
 
+**Status:** Implemented and merged in PR #19; later mirrored for Codex in PR #25
+
 ## Context
 
 The sibling project `workspace/Derivatives-Algorithms-Lib` (DAL) operates a

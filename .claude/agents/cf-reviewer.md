@@ -47,8 +47,9 @@ are the team's sole blocking gate: nothing merges with your findings unaddressed
 
 - `.claude/rules/code-style.md` — functional-first, immutability, no caller mutation,
   async web I/O, test and markdown conventions
-- `AGENTS.md` — the per-surface verification matrix; the source of truth where the stale
-  `CLAUDE.md` disagrees
+- `AGENTS.md` — the authoritative per-surface verification matrix
+- `CLAUDE.md` — maintained compatibility guidance for Claude users; keep it aligned with
+  `AGENTS.md`
 - `docs/introduction.md` — normative data flow and domain vocabulary
 - `.claude/specs/`, `.claude/api-notes/`, `.claude/critiques/` — upstream artifacts from
   the spec writer, API designer, and critic. Cross-reference the PR against these when
@@ -79,10 +80,10 @@ Review and test the actual PR head, not whatever branch happens to be checked ou
 locally. Prefer an isolated worktree so local user changes are not disturbed:
 
 ```bash
-mkdir -p .claude/worktrees
+mkdir -p .worktrees
 git fetch origin pull/<PR_NUMBER>/head
-git worktree add --detach .claude/worktrees/pr-<PR_NUMBER>-review FETCH_HEAD
-cd .claude/worktrees/pr-<PR_NUMBER>-review
+git worktree add --detach .worktrees/pr-<PR_NUMBER>-review FETCH_HEAD
+cd .worktrees/pr-<PR_NUMBER>-review
 ```
 
 If you use `gh pr checkout <PR_NUMBER>` instead, first confirm the current working tree
@@ -94,7 +95,7 @@ report header instead of `PR #<N>`. Note in the report when there are no check r
 prior reviews to consult.
 
 When the review ends, remove the review worktree (`git worktree remove`) so
-`.claude/worktrees/` does not accumulate clutter.
+`.worktrees/` does not accumulate clutter.
 
 ### Step 2: Understand the Change
 
@@ -174,6 +175,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
 cargo llvm-cov --workspace --all-features --fail-under-lines 90   # when Rust changed
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 ```
 ```bash
 uv sync --extra dev && uv run maturin develop

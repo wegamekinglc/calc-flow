@@ -1,5 +1,7 @@
 # All-Scale Benchmark CI Design
 
+**Status:** Implemented and merged in PR #18 (historical design)
+
 ## Goal
 
 Expand the pull-request and main-branch benchmark smoke job from the

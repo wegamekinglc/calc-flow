@@ -2,7 +2,9 @@
 
 **Date:** 2026-07-13
 
-**Status:** Approved
+**Status:** Historical design; the design, plan, and handoff were merged in PR
+#12 before implementation began, and the Rust v2 implementation was completed
+and merged in PR #13.
 
 ## Objective
 

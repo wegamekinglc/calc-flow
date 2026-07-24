@@ -1,5 +1,9 @@
 # Lazy Run-Scoped DataFusion Runtime Implementation Plan
 
+> **Historical status:** Implemented, retained by the measured evidence in
+> the [lazy-runtime handoff](../handoffs/2026-07-18-lazy-datafusion-runtime.md),
+> and merged in PR #14. Unchecked boxes preserve the original execution plan.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Remove DataFusion session-construction cost from external-only NumPy/JAX plans while preserving one isolated session per run for table execution and every public execution contract.

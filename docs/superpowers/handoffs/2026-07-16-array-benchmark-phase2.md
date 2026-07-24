@@ -1,5 +1,9 @@
 # Array Benchmark Phase 2 Evidence
 
+> **Historical status:** Final evidence for the two-phase investigation. Its
+> redesign decision was followed by the lazy-runtime and engine-boundary design,
+> plan, and handoff records dated 2026-07-18.
+
 ## Evidence outcome
 
 Phase 2 measured the Rust execution components named by the Phase 1 handoff.

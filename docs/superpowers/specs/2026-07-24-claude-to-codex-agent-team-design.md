@@ -1,5 +1,7 @@
 # Claude-to-Codex Agent Team Migration Design
 
+**Status:** Implemented and merged in PR #25 (historical design)
+
 ## Goal
 
 Create a complete Codex-native mirror of the repository's Claude guidance,
@@ -138,18 +140,18 @@ The conversion follows these rules:
 
 The migrated roster and phase ownership remain unchanged:
 
-| Role           | Agent              | Primary responsibility                                  |
-| -------------- | ------------------ | ------------------------------------------------------- |
-| Orchestrator   | `cf-orchestrator`  | route work and coordinate specialist hand-offs          |
-| Spec writer    | `cf-spec-writer`   | write testable requirements                              |
-| API designer   | `cf-api-designer`  | design Rust, Python, and Studio developer-facing APIs    |
-| Critic         | `cf-critic`        | adversarially review specs and API notes                 |
-| Implementer    | `cf-implementer`   | implement through red, green, and refactor               |
-| Tester         | `cf-tester`        | add and repair tests across the affected surfaces        |
-| Reviewer       | `cf-reviewer`      | review correctness and run the relevant verification     |
-| Performancer   | `cf-performancer`  | perform noise-aware benchmark analysis                   |
-| Simplifier     | `cf-simplifier`    | identify or apply behavior-preserving simplifications    |
-| Doc writer     | `cf-doc-writer`    | reconcile normative docs and `CHANGELOG.md`              |
+| Role         | Agent             | Primary responsibility                                |
+| ------------ | ----------------- | ----------------------------------------------------- |
+| Orchestrator | `cf-orchestrator` | route work and coordinate specialist hand-offs        |
+| Spec writer  | `cf-spec-writer`  | write testable requirements                           |
+| API designer | `cf-api-designer` | design Rust, Python, and Studio developer-facing APIs |
+| Critic       | `cf-critic`       | adversarially review specs and API notes              |
+| Implementer  | `cf-implementer`  | implement through red, green, and refactor            |
+| Tester       | `cf-tester`       | add and repair tests across the affected surfaces     |
+| Reviewer     | `cf-reviewer`     | review correctness and run the relevant verification  |
+| Performancer | `cf-performancer` | perform noise-aware benchmark analysis                |
+| Simplifier   | `cf-simplifier`   | identify or apply behavior-preserving simplifications |
+| Doc writer   | `cf-doc-writer`   | reconcile normative docs and `CHANGELOG.md`           |
 
 The default route remains:
 

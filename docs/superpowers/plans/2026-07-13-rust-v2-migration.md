@@ -1,5 +1,10 @@
 # Calc Flow Rust V2 Migration Implementation Plan
 
+> **Historical status:** The design, plan, and handoff were merged in PR #12
+> before implementation began. The Rust v2 implementation was completed and
+> merged in PR #13. Unchecked boxes preserve the original execution plan; they
+> are not current pending work.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace Calc Flow's Python core with a Rust core that has native Rust and Rust-backed Python APIs while retaining the Python/FastAPI Studio backend.

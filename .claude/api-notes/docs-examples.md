@@ -10,6 +10,10 @@ Goal: every user-facing doc that describes an API or feature embeds or links a
 runnable example, and the same example is reused across docs so snippets stop
 diverging.
 
+Status: the documentation reconciliation described by this note has landed.
+The per-doc divergence column records the pre-reconciliation state and remains
+here as historical evidence, not as a claim about the current docs.
+
 ## Audiences
 
 - Rust users: the `calc-flow` crate examples under
@@ -21,25 +25,25 @@ diverging.
 
 ### Rust (`crates/calc-flow/examples/`)
 
-| File                      | Demonstrates                                                      | API surface        | Status    |
-| ------------------------- | ---------------------------------------------------------------- | ------------------ | --------- |
-| `expression_pipeline.rs`  | One-node `ExpressionOperator`; `total = a + b` to `[3, 7]`       | Rust core          | Aligned   |
-| `sql_join.rs`             | Multi-input `SqlOperator`; orders + fees to net `[70, 108, 36]`  | Rust core          | NEW       |
-| `micro_batch_recovery.rs` | Replay `Source`, recording `Sink`, checkpoint commit + recovery  | Rust core runners  | Unchanged |
-| `export_schema.rs`        | Print the canonical v2 project JSON Schema                       | Rust core projects | Unchanged |
-| `README.md`               | Index of the four examples with run commands                     | Rust core          | NEW       |
+| File                      | Demonstrates                                                    | API surface        | Status    |
+| ------------------------- | --------------------------------------------------------------- | ------------------ | --------- |
+| `expression_pipeline.rs`  | One-node `ExpressionOperator`; `total = a + b` to `[3, 7]`      | Rust core          | Aligned   |
+| `sql_join.rs`             | Multi-input `SqlOperator`; orders + fees to net `[70, 108, 36]` | Rust core          | NEW       |
+| `micro_batch_recovery.rs` | Replay `Source`, recording `Sink`, checkpoint commit + recovery | Rust core runners  | Unchanged |
+| `export_schema.rs`        | Print the canonical v2 project JSON Schema                      | Rust core projects | Unchanged |
+| `README.md`               | Index of the four examples with run commands                    | Rust core          | NEW       |
 
 ### Python (`examples/`)
 
-| File                          | Demonstrates                                                  | API surface       | Status    |
-| ----------------------------- | ------------------------------------------------------------ | ----------------- | --------- |
-| `01_datafusion_pipeline.py`   | Expression node + projection + filter over an orders table   | Python binding    | Unchanged |
-| `02_sql_join.py`              | `SqlOperator` join of orders + fees to net                   | Python binding    | Unchanged |
-| `03_registered_udf.py`        | Trusted Python scalar UDF `double_amount`                    | Python binding    | Unchanged |
-| `04_micro_batch_recovery.py`  | Replay source, checkpoint commit, cursor recovery            | Python runners    | Unchanged |
-| `05_async_execution.py`       | `execute_async()` inside asyncio                             | Python binding    | Unchanged |
-| `06_numpy_array.py`           | NumPy provider + bounded array expression `x - mean(x)`      | Python arrays     | Unchanged |
-| `README.md`                   | Index of the six scripts + Rust counterpart cross-reference  | Python binding    | Aligned   |
+| File                         | Demonstrates                                                | API surface    | Status    |
+| ---------------------------- | ----------------------------------------------------------- | -------------- | --------- |
+| `01_datafusion_pipeline.py`  | Expression node + projection + filter over an orders table  | Python binding | Unchanged |
+| `02_sql_join.py`             | `SqlOperator` join of orders + fees to net                  | Python binding | Unchanged |
+| `03_registered_udf.py`       | Trusted Python scalar UDF `double_amount`                   | Python binding | Unchanged |
+| `04_micro_batch_recovery.py` | Replay source, checkpoint commit, cursor recovery           | Python runners | Unchanged |
+| `05_async_execution.py`      | `execute_async()` inside asyncio                            | Python binding | Unchanged |
+| `06_numpy_array.py`          | NumPy provider + bounded array expression `x - mean(x)`     | Python arrays  | Unchanged |
+| `README.md`                  | Index of the six scripts + Rust counterpart cross-reference | Python binding | Aligned   |
 
 The six Python scripts are unchanged: they already cover the documented
 features one-to-one and pass `ruff check` and `ruff format --check`. The work on
@@ -160,27 +164,27 @@ so the differing expressions are acceptable and should NOT be force-aligned.
 
 ## Per-doc mapping (what each doc should embed or reference)
 
-| Doc                         | Section                  | Use                                                                           | Divergence to fix                                                                  |
-| --------------------------- | ------------------------ | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `README.md`                 | Python quickstart        | Embed Tier-1 Python                                                           | Now `quantity * unit_price` `[2,3]/[10,4]` to `[20,12]`; change to `a + b`         |
-| `README.md`                 | Rust quickstart          | Embed `expression_pipeline.rs` verbatim                                       | Was byte-copy with pipeline `expression-example`; re-copy (now `totals`)           |
-| `README.md`                 | "Run the checked examples" | Keep the two `cargo run` lines; optionally add `sql_join`                   | None (optionally add the SQL example command)                                      |
-| `docs/introduction.md`      | First example            | Embed Tier-1 Python AND Tier-1 Rust, side by side (now true twins)           | Python now `quantity * unit_price`; Rust pipeline now `expression-example`; align both to Tier-1 |
-| `docs/getting-started.md`   | Smoke-test the engine    | Embed Tier-1 Python                                                           | Now `gross = quantity * unit_price` over orders; change to `a + b`                 |
-| `docs/getting-started.md`   | Rust smoke pointer       | Reference `expression_pipeline.rs` + `cargo run` (already correct)            | None                                                                               |
-| `docs/python-api.md`        | Table batches and builder | Embed Tier-1 Python (already canonical; keep)                                | None                                                                               |
-| `docs/python-api.md`        | Multi-input SQL          | Align to `02_sql_join.py` dataset (orders/fees/net)                           | Now `left.a + right.b` cross join; switch to the file's dataset                    |
-| `docs/python-api.md`        | Trusted Python scalar UDFs | Align to `03_registered_udf.py` (`double_amount`, column `amount`, `[100,250,400]`) | Now `double_value`/`value`; switch to the file's names                            |
-| `docs/python-api.md`        | Async execution          | Align to `05_async_execution.py` (`total = a + b`, `[1,3]/[2,4]`)             | Now `b = a + 1` over `[1,2]`; switch to the file's expression                      |
-| `docs/python-api.md`        | NumPy and JAX            | Align to `06_numpy_array.py` data (`[1.0, 2.0, 4.0, 6.0]`)                    | Now `[1.0, 2.0, 3.0]`; switch to the file's data                                   |
-| `docs/python-api.md`        | More examples            | Keep pointer to `examples/README.md`                                          | None                                                                               |
-| `docs/rust-api.md`          | Expression pipeline      | Embed `expression_pipeline.rs` verbatim (already; re-copy for `totals`)       | Pipeline name now `expression-example` in file? no longer; re-copy                 |
-| `docs/rust-api.md`          | SQL operators            | Embed `sql_join.rs` verbatim (NEW)                                            | No runnable example today; add one                                                 |
-| `docs/rust-api.md`          | Micro-batch recovery     | Keep the `micro_batch_recovery.rs` excerpt (already)                          | None                                                                               |
-| `docs/rust-api.md`          | Projects and stores      | Reference `export_schema.rs`                                                  | None (optionally add a pointer)                                                    |
-| `docs/rust-api.md`          | "Run both paired examples" | Add the `sql_join` command to the existing two                              | Add `cargo run -p calc-flow --example sql_join`                                    |
-| `docs/api-reference.md`     | Examples section         | Reference `examples/README.md` and the NEW `crates/calc-flow/examples/README.md`; minimal snippet = Tier-1 Python | Rust list omits `sql_join.rs`; minimal snippet now `quantity * unit_price`; align to Tier-1 and add the SQL file |
-| `docs/README.md`            | Project orientation      | Add a pointer to the Rust examples index (optional)                           | None                                                                               |
+| Doc                       | Section                    | Use                                                                                                               | Pre-reconciliation divergence                                                                                    |
+| ------------------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `README.md`               | Python quickstart          | Embed Tier-1 Python                                                                                               | Now `quantity * unit_price` `[2,3]/[10,4]` to `[20,12]`; change to `a + b`                                       |
+| `README.md`               | Rust quickstart            | Embed `expression_pipeline.rs` verbatim                                                                           | Was byte-copy with pipeline `expression-example`; re-copy (now `totals`)                                         |
+| `README.md`               | "Run the checked examples" | Keep the two `cargo run` lines; optionally add `sql_join`                                                         | None (optionally add the SQL example command)                                                                    |
+| `docs/introduction.md`    | First example              | Embed Tier-1 Python AND Tier-1 Rust, side by side (now true twins)                                                | Python now `quantity * unit_price`; Rust pipeline now `expression-example`; align both to Tier-1                 |
+| `docs/getting-started.md` | Smoke-test the engine      | Embed Tier-1 Python                                                                                               | Now `gross = quantity * unit_price` over orders; change to `a + b`                                               |
+| `docs/getting-started.md` | Rust smoke pointer         | Reference `expression_pipeline.rs` + `cargo run` (already correct)                                                | None                                                                                                             |
+| `docs/python-api.md`      | Table batches and builder  | Embed Tier-1 Python (already canonical; keep)                                                                     | None                                                                                                             |
+| `docs/python-api.md`      | Multi-input SQL            | Align to `02_sql_join.py` dataset (orders/fees/net)                                                               | Now `left.a + right.b` cross join; switch to the file's dataset                                                  |
+| `docs/python-api.md`      | Trusted Python scalar UDFs | Align to `03_registered_udf.py` (`double_amount`, column `amount`, `[100,250,400]`)                               | Now `double_value`/`value`; switch to the file's names                                                           |
+| `docs/python-api.md`      | Async execution            | Align to `05_async_execution.py` (`total = a + b`, `[1,3]/[2,4]`)                                                 | Now `b = a + 1` over `[1,2]`; switch to the file's expression                                                    |
+| `docs/python-api.md`      | NumPy and JAX              | Align to `06_numpy_array.py` data (`[1.0, 2.0, 4.0, 6.0]`)                                                        | Now `[1.0, 2.0, 3.0]`; switch to the file's data                                                                 |
+| `docs/python-api.md`      | More examples              | Keep pointer to `examples/README.md`                                                                              | None                                                                                                             |
+| `docs/rust-api.md`        | Expression pipeline        | Embed `expression_pipeline.rs` verbatim (already; re-copy for `totals`)                                           | Pipeline name now `expression-example` in file? no longer; re-copy                                               |
+| `docs/rust-api.md`        | SQL operators              | Embed `sql_join.rs` verbatim (NEW)                                                                                | No runnable example today; add one                                                                               |
+| `docs/rust-api.md`        | Micro-batch recovery       | Keep the `micro_batch_recovery.rs` excerpt (already)                                                              | None                                                                                                             |
+| `docs/rust-api.md`        | Projects and stores        | Reference `export_schema.rs`                                                                                      | None (optionally add a pointer)                                                                                  |
+| `docs/rust-api.md`        | "Run both paired examples" | Add the `sql_join` command to the existing two                                                                    | Add `cargo run -p calc-flow --example sql_join`                                                                  |
+| `docs/api-reference.md`   | Examples section           | Reference `examples/README.md` and the NEW `crates/calc-flow/examples/README.md`; minimal snippet = Tier-1 Python | Rust list omits `sql_join.rs`; minimal snippet now `quantity * unit_price`; align to Tier-1 and add the SQL file |
+| `docs/README.md`          | Project orientation        | Add a pointer to the Rust examples index (optional)                                                               | None                                                                                                             |
 
 ## What changed in this pass (example files only)
 
@@ -210,23 +214,16 @@ uv run ruff check examples/                   # All checks passed!
 uv run ruff format --check examples/          # 6 files already formatted
 ```
 
-## Open questions for cf-doc-writer
+## Hand-off outcomes
 
-1. **Rust native UDF example.** `docs/rust-api.md` describes `UdfRegistry` for
-   native DataFusion scalar UDFs but no runnable Rust UDF example exists, and
-   writing one (implementing a `ScalarUDF`) is substantial. Recommendation: keep
-   the prose description for now and do NOT add a Rust UDF example in this pass.
-   Flag as a future gap if reviewers want one.
-2. **getting-started smoke narrative.** Switching the smoke test from the orders
-   dataset to Tier-1 (`a + b`) slightly simplifies the "three rows with a
-   computed `gross` column" closing line. Rewrite the closing line to match
-   Tier-1 output (`[3, 7]`).
-3. **api-reference Rust examples list.** Update the Rust list from three files
-   to four (`expression_pipeline`, `sql_join`, `micro_batch_recovery`,
-   `export_schema`) and link the new `crates/calc-flow/examples/README.md`.
-4. **SQL snippet in python-api.md.** The current `left.a + right.b` CROSS JOIN
-   is a fine minimal illustration; if the doc-writer prefers to keep it short
-   rather than switch to the orders/fees dataset, that is acceptable as long as
-   the section also links `02_sql_join.py` as the full version. The preferred
-   option (per decision 4) is to use the file's dataset so there is one SQL
-   example, not two.
+1. **Rust native UDF example — scoped separately.** `docs/rust-api.md`
+   accurately describes `UdfRegistry`. A new runnable example would require
+   Rust example code, not a Markdown correction, so this documentation-only
+   reconciliation does not add one.
+2. **getting-started smoke narrative — resolved.** The smoke test and closing
+   output now use Tier-1 (`a + b`, `[3, 7]`).
+3. **api-reference Rust examples list — resolved.** The list now includes
+   `expression_pipeline`, `sql_join`, `micro_batch_recovery`, and
+   `export_schema`, with a link to `crates/calc-flow/examples/README.md`.
+4. **SQL snippet in python-api.md — resolved.** The guide now uses the
+   orders/fees dataset and links `examples/02_sql_join.py`.
