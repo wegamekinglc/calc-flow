@@ -534,12 +534,22 @@ def _restore_registrations(
 ) -> None:
     for registration in registrations:
         if registration["kind"] == "provider":
-            runtime.register_provider(
-                registration["provider"],
-                registration["name"],
-                registration["version"],
-                registration["callback"],
-            )
+            if registration.get("provider_mode") == "mapping":
+                runtime._register_mapping_provider(
+                    registration["provider"],
+                    registration["name"],
+                    registration["version"],
+                    registration["callback"],
+                    input_ports=registration["input_ports"],
+                    output_ports=registration["output_ports"],
+                )
+            else:
+                runtime.register_provider(
+                    registration["provider"],
+                    registration["name"],
+                    registration["version"],
+                    registration["callback"],
+                )
         elif registration["kind"] == "scalar_udf":
             runtime.register_scalar_udf(
                 provider=registration["provider"],

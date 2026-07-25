@@ -5,7 +5,7 @@ import json
 from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, field
 from threading import RLock
-from typing import Any
+from typing import Any, Literal
 
 from calc_flow import _native
 from calc_flow.store import _copy_json_value, _run_blocking
@@ -108,6 +108,40 @@ class Runtime:
                 }
             )
 
+    def _register_mapping_provider(
+        self,
+        provider: str,
+        name: str,
+        version: str,
+        callback: Any,
+        *,
+        input_ports: Sequence[tuple[str, str]],
+        output_ports: Sequence[tuple[str, str]],
+    ) -> None:
+        copied_inputs = tuple((port, kind) for port, kind in input_ports)
+        copied_outputs = tuple((port, kind) for port, kind in output_ports)
+        with self._registration_lock:
+            self._inner._register_mapping_provider(
+                provider,
+                name,
+                version,
+                callback,
+                input_ports=copied_inputs,
+                output_ports=copied_outputs,
+            )
+            self._registrations.append(
+                {
+                    "kind": "provider",
+                    "provider_mode": "mapping",
+                    "provider": provider,
+                    "name": name,
+                    "version": version,
+                    "callback": callback,
+                    "input_ports": copied_inputs,
+                    "output_ports": copied_outputs,
+                }
+            )
+
     def register_scalar_udf(
         self,
         *,
@@ -154,7 +188,14 @@ class Runtime:
                     **(
                         {"input_types": tuple(registration["input_types"])}
                         if registration["kind"] == "scalar_udf"
-                        else {}
+                        else (
+                            {
+                                "input_ports": tuple(registration["input_ports"]),
+                                "output_ports": tuple(registration["output_ports"]),
+                            }
+                            if registration.get("provider_mode") == "mapping"
+                            else {}
+                        )
                     ),
                 }
                 for registration in self._registrations
@@ -335,6 +376,63 @@ class PipelineBuilder:
                         "options": copied_options,
                         "provider": provider,
                         "version": version,
+                    },
+                    "output_ports": [
+                        {
+                            "kind": "array",
+                            "name": "output",
+                            "required": True,
+                            "schema": [],
+                        }
+                    ],
+                }
+            )
+
+        return self._from_json(_updated_project(self._project_json, add))
+
+    def table_matmul(
+        self,
+        node_id: str,
+        *,
+        backend: Literal["numpy", "jax"],
+        columns: Sequence[str],
+    ) -> PipelineBuilder:
+        if backend not in {"numpy", "jax"}:
+            raise ValueError("backend must be 'numpy' or 'jax'")
+        if isinstance(columns, (str, bytes)) or not isinstance(columns, Sequence):
+            raise TypeError("columns must be a sequence of column names")
+        copied_columns = list(columns)
+        if not copied_columns:
+            raise ValueError("columns must contain at least one column name")
+        if not all(isinstance(column, str) and column for column in copied_columns):
+            raise TypeError("columns must contain non-empty strings")
+        if len(set(copied_columns)) != len(copied_columns):
+            raise ValueError("columns must be unique")
+
+        def add(project: dict[str, Any]) -> None:
+            project["pipeline"]["nodes"].append(
+                {
+                    "id": node_id,
+                    "input_ports": [
+                        {
+                            "kind": "table",
+                            "name": "table",
+                            "required": True,
+                            "schema": [],
+                        },
+                        {
+                            "kind": "array",
+                            "name": "weights",
+                            "required": True,
+                            "schema": [],
+                        },
+                    ],
+                    "operator": {
+                        "kind": "external",
+                        "name": "table_matmul",
+                        "options": {"columns": copied_columns},
+                        "provider": backend,
+                        "version": "1",
                     },
                     "output_ports": [
                         {

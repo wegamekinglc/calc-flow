@@ -21,6 +21,7 @@ from calc_flow_studio.run_manager import (
     _decode_source,
     _json_safe,
     _register_referenced_builtins,
+    _restore_registrations,
     _result_payload,
     _selected_registrations,
     _serialize_worker_payload,
@@ -517,6 +518,54 @@ def test_worker_payload_rejects_a_registration_that_captures_runtime() -> None:
 
     with pytest.raises(RunManagerError, match="trusted registrations"):
         _serialize_worker_payload(project, prepared, options, registrations)
+
+
+def test_worker_restores_mapping_and_legacy_provider_modes() -> None:
+    calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+
+    class RecordingRuntime:
+        def register_provider(self, *args: object, **kwargs: object) -> None:
+            calls.append(("legacy", args, kwargs))
+
+        def _register_mapping_provider(self, *args: object, **kwargs: object) -> None:
+            calls.append(("mapping", args, kwargs))
+
+    def callback(*_: object) -> None:
+        return None
+
+    registrations = (
+        {
+            "kind": "provider",
+            "provider": "test",
+            "name": "identity",
+            "version": "1",
+            "callback": callback,
+        },
+        {
+            "kind": "provider",
+            "provider_mode": "mapping",
+            "provider": "test",
+            "name": "table_matmul",
+            "version": "1",
+            "callback": callback,
+            "input_ports": (("table", "table"), ("weights", "array")),
+            "output_ports": (("output", "array"),),
+        },
+    )
+
+    _restore_registrations(RecordingRuntime(), registrations)  # type: ignore[arg-type]
+
+    assert calls == [
+        ("legacy", ("test", "identity", "1", callback), {}),
+        (
+            "mapping",
+            ("test", "table_matmul", "1", callback),
+            {
+                "input_ports": (("table", "table"), ("weights", "array")),
+                "output_ports": (("output", "array"),),
+            },
+        ),
+    ]
 
 
 def test_worker_registers_only_exact_referenced_builtin_providers(

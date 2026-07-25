@@ -3,6 +3,15 @@
 These executable examples use the Rust-native v2 engine through the PyO3
 Python package. Table batches contain PyArrow tables and every table expression
 or query runs in DataFusion. NumPy remains an explicit optional provider.
+DataFrame-style data means `pyarrow.Table`; pandas and Polars are not part of
+this example surface.
+
+Install the optional array providers as needed:
+
+```bash
+uv add "calc-flow[numpy]"
+uv add "calc-flow[jax]"
+```
 
 After `uv sync --extra dev && uv run maturin develop`, run:
 
@@ -13,6 +22,7 @@ uv run python examples/03_registered_udf.py
 uv run python examples/04_micro_batch_recovery.py
 uv run python examples/05_async_execution.py
 JAX_PLATFORMS=cpu uv run python examples/06_numpy_array.py
+JAX_PLATFORMS=cpu uv run python examples/07_array_and_dataframe.py
 ```
 
 The files cover:
@@ -29,6 +39,15 @@ The files cover:
   asyncio application.
 - `06_numpy_array.py` — explicit NumPy provider registration and a restricted
   array expression over an immutable array batch.
+- `07_array_and_dataframe.py` — explicit `pyarrow.Table`-to-array matrix
+  multiplication using NumPy and, when installed, JAX.
+
+`07_array_and_dataframe.py` selects ordered numeric `pyarrow.Table` columns
+and multiplies their dense matrix by an array weight matrix. After input
+`Batch` construction, execution makes no redundant copies: NumPy allocates one
+dense table matrix and one result; JAX permits one host staging buffer, one
+device table buffer, and one device result. Input `Batch` construction is
+outside these operator-execution ceilings. JAX performs no result-to-host round trip during operator execution.
 
 The previous v1 notebook was removed because it taught the frozen Python v1
 operator API. Historical v1 behavior remains available at the

@@ -35,7 +35,7 @@ The runnable inventories span both surfaces and share datasets and expressions:
 
 - Python: [`examples/README.md`](../examples/README.md) — expression pipeline,
   SQL join, registered UDF, micro-batch recovery, async execution, and NumPy
-  arrays.
+  arrays plus NumPy/JAX `pyarrow.Table` matrix multiplication.
 - Rust: [`crates/calc-flow/examples/README.md`](../crates/calc-flow/examples/README.md)
   — `expression_pipeline.rs`, `sql_join.rs`, `micro_batch_recovery.rs`, and
   `export_schema.rs`.
@@ -85,6 +85,8 @@ Import the main surface from `calc_flow`.
 - `expression(name, expression, *, select=(), filter=None, udfs=())`;
 - `sql(name, query, *, aliases=("input",), udfs=())`;
 - `external(node_id, provider, name, version, options)`;
+- `table_matmul(node_id, *, backend: Literal["numpy", "jax"],
+  columns: Sequence[str])`;
 - `connect(source_node, target_node, *, source_port="output",
   target_port="input")`;
 - `compile(runtime=None) -> ExecutionPlan`.
@@ -104,8 +106,15 @@ trusted providers/scalar UDFs, and returns a redacted metadata catalog.
 `register_scalar_udf` requires provider/name/version, exact input type names,
 return type, volatility, and a vectorized callable.
 
-`register_numpy(runtime)` and `register_jax(runtime)` install the optional
-array expression providers.
+`register_numpy(runtime)` installs `numpy:expression@1` and
+`numpy:table_matmul@1`; `register_jax(runtime)` installs `jax:expression@1`
+and `jax:table_matmul@1`. The matrix providers accept an Arrow table input
+named `table` and same-backend array weights named `weights`, then produce an
+array output. After input `Batch` construction they make no redundant
+execution copies: NumPy uses one dense table allocation and one result; JAX
+permits one host staging buffer, one device table buffer, and one device
+result. JAX performs no result-to-host round trip during operator execution.
+These are execution ceilings, not end-to-end zero-copy claims.
 
 ### Projects and stores
 

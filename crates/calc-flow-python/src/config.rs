@@ -41,6 +41,19 @@ pub(crate) fn deduplicate_python_roots(
     })
 }
 
+fn mapping_port_contract(name: &str, kind: &str) -> PyResult<crate::provider::PortContract> {
+    let kind = match kind {
+        "table" => calc_flow::BatchKind::Table,
+        "array" => calc_flow::BatchKind::Array,
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "mapping provider port kind must be 'table' or 'array'",
+            ));
+        }
+    };
+    Ok(crate::provider::PortContract::new(name, kind))
+}
+
 struct RuntimeState {
     providers: Arc<calc_flow::ProviderRegistry>,
     udfs: Arc<RwLock<calc_flow::UdfRegistry>>,
@@ -239,6 +252,47 @@ impl PyRuntime {
         let factory: Arc<dyn calc_flow::ExternalOperatorFactory> = Arc::new(
             crate::provider::PythonOperatorFactory::new(Arc::clone(&root), provider, name, version),
         );
+        self.register_provider_factory(provider, name, version, &factory, root)
+    }
+
+    #[pyo3(signature = (provider, name, version, callback, *, input_ports, output_ports))]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the private binding preserves the explicit mapping provider contract"
+    )]
+    fn _register_mapping_provider(
+        &self,
+        py: Python<'_>,
+        provider: &str,
+        name: &str,
+        version: &str,
+        callback: Py<PyAny>,
+        input_ports: Vec<(String, String)>,
+        output_ports: Vec<(String, String)>,
+    ) -> PyResult<()> {
+        if !callback.bind(py).is_callable() {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "provider callback must be callable",
+            ));
+        }
+        let inputs = input_ports
+            .into_iter()
+            .map(|(port, kind)| mapping_port_contract(&port, &kind))
+            .collect::<PyResult<Vec<_>>>()?;
+        let outputs = output_ports
+            .into_iter()
+            .map(|(port, kind)| mapping_port_contract(&port, &kind))
+            .collect::<PyResult<Vec<_>>>()?;
+        let root = Arc::new(PythonRoot::new(callback));
+        let factory: Arc<dyn calc_flow::ExternalOperatorFactory> =
+            Arc::new(crate::provider::PythonOperatorFactory::new_mapping(
+                Arc::clone(&root),
+                provider,
+                name,
+                version,
+                inputs,
+                outputs,
+            ));
         self.register_provider_factory(provider, name, version, &factory, root)
     }
 

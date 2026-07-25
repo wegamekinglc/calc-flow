@@ -67,6 +67,99 @@ def test_builder_is_functional_and_project_values_are_defensive() -> None:
     assert output.to_pyarrow()["c"].to_pylist() == [6]
 
 
+def test_table_matmul_builder_is_functional_and_defensive() -> None:
+    columns = ["quantity", "unit_price"]
+    original = PipelineBuilder("matrix")
+    builder = original.table_matmul(
+        "multiply",
+        backend="numpy",
+        columns=columns,
+    )
+    columns[0] = "mutated"
+
+    assert original.project["pipeline"]["nodes"] == []
+    assert builder.project["data_sources"] == [
+        {
+            "data": [],
+            "format": "inline_json",
+            "id": "source_1",
+            "input": "table",
+        },
+        {
+            "data": [],
+            "format": "inline_json",
+            "id": "source_2",
+            "input": "weights",
+        },
+    ]
+    assert builder.project["pipeline"]["nodes"] == [
+        {
+            "id": "multiply",
+            "input_ports": [
+                {
+                    "kind": "table",
+                    "name": "table",
+                    "required": True,
+                    "schema": [],
+                },
+                {
+                    "kind": "array",
+                    "name": "weights",
+                    "required": True,
+                    "schema": [],
+                },
+            ],
+            "operator": {
+                "kind": "external",
+                "name": "table_matmul",
+                "options": {"columns": ["quantity", "unit_price"]},
+                "provider": "numpy",
+                "version": "1",
+            },
+            "output_ports": [
+                {
+                    "kind": "array",
+                    "name": "output",
+                    "required": True,
+                    "schema": [],
+                }
+            ],
+        }
+    ]
+
+
+@pytest.mark.parametrize("backend", ["", "numpy ", "pandas", "JAX"])
+def test_table_matmul_rejects_unknown_backends(backend: str) -> None:
+    with pytest.raises(ValueError, match="backend must be 'numpy' or 'jax'"):
+        PipelineBuilder("matrix").table_matmul(
+            "multiply",
+            backend=backend,  # type: ignore[arg-type]
+            columns=("a",),
+        )
+
+
+@pytest.mark.parametrize(
+    ("columns", "message"),
+    [
+        ((), "at least one"),
+        (("a", "a"), "unique"),
+        (("",), "non-empty strings"),
+        (("a", 1), "non-empty strings"),
+        ("a", "sequence of column names"),
+    ],
+)
+def test_table_matmul_rejects_invalid_columns(
+    columns: object,
+    message: str,
+) -> None:
+    with pytest.raises((TypeError, ValueError), match=message):
+        PipelineBuilder("matrix").table_matmul(
+            "multiply",
+            backend="numpy",
+            columns=columns,  # type: ignore[arg-type]
+        )
+
+
 def test_builder_derives_exact_qualified_inputs_for_sql() -> None:
     builder = PipelineBuilder("join").sql(
         "query",
