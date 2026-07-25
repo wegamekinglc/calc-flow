@@ -5,7 +5,7 @@ import json
 import threading
 import time
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum
 
@@ -37,6 +37,7 @@ from calc_flow_studio.run_manager import (
     _register_referenced_builtins,
     _restore_registrations,
     _result_payload,
+    _RunHandle,
     _selected_registrations,
     _serialize_worker_payload,
     prepare_run,
@@ -671,6 +672,73 @@ def test_capabilities_separate_parent_compile_and_worker_transport_snapshots(
     manager.shutdown()
 
 
+def test_capabilities_deduplicate_lazy_builtins_by_registration_kind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        run_manager_module,
+        "_preflight_lazy_builtins",
+        lambda: (("numpy", "expression", "1"),),
+    )
+    scalar_runtime = Runtime()
+    scalar_runtime.register_scalar_udf(
+        provider="numpy",
+        name="expression",
+        version="1",
+        input_types=("int64",),
+        return_type="int64",
+        volatility="immutable",
+        function=lambda value: value,
+    )
+    scalar_manager = RunManager(runtime=scalar_runtime, use_processes=False)
+
+    scalar_document = scalar_manager.capabilities().model_dump(
+        mode="json", by_alias=True
+    )
+
+    assert scalar_document["preview"]["workerRegistrations"] == [
+        {
+            "reconstruction": "serialized",
+            "registrationKind": "dataFusionScalar",
+            "provider": "numpy",
+            "name": "expression",
+            "version": "1",
+        },
+        {
+            "reconstruction": "lazyBuiltin",
+            "registrationKind": "provider",
+            "provider": "numpy",
+            "name": "expression",
+            "version": "1",
+        },
+    ]
+    scalar_manager.shutdown()
+
+    provider_runtime = Runtime()
+    provider_runtime.register_provider(
+        "numpy",
+        "expression",
+        "1",
+        lambda batch, _options: batch,
+    )
+    provider_manager = RunManager(runtime=provider_runtime, use_processes=False)
+
+    provider_document = provider_manager.capabilities().model_dump(
+        mode="json", by_alias=True
+    )
+
+    assert provider_document["preview"]["workerRegistrations"] == [
+        {
+            "reconstruction": "serialized",
+            "registrationKind": "provider",
+            "provider": "numpy",
+            "name": "expression",
+            "version": "1",
+        }
+    ]
+    provider_manager.shutdown()
+
+
 def test_capabilities_reject_a_malformed_runtime_snapshot() -> None:
     runtime = Runtime()
     snapshot, registrations = runtime._capability_registration_snapshot()
@@ -1059,6 +1127,114 @@ def test_other_malformed_worker_results_are_redacted_before_completed_state(
         )
         assert "must-not-leak" not in failed.error
         manager.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("field", "malformed_output", "node_timings", "error_location"),
+    [
+        pytest.param(
+            "total_rows",
+            {
+                "kind": "table",
+                "total_rows": "1",
+                "truncated": False,
+                "schema": [],
+                "rows": [],
+                "metadata": {},
+            },
+            {},
+            "outputs.output.table.total_rows",
+            id="string-total-rows",
+        ),
+        pytest.param(
+            "truncated",
+            {
+                "kind": "table",
+                "total_rows": 1,
+                "truncated": "false",
+                "schema": [],
+                "rows": [],
+                "metadata": {},
+            },
+            {},
+            "outputs.output.table.truncated",
+            id="string-truncated",
+        ),
+        pytest.param(
+            "nullable",
+            {
+                "kind": "table",
+                "total_rows": 1,
+                "truncated": False,
+                "schema": [{"name": "value", "type": "int64", "nullable": "false"}],
+                "rows": [],
+                "metadata": {},
+            },
+            {},
+            "outputs.output.table.schema.0.nullable",
+            id="string-nullable",
+        ),
+        pytest.param(
+            "input_rows",
+            {
+                "kind": "table",
+                "total_rows": 1,
+                "truncated": False,
+                "schema": [],
+                "rows": [],
+                "metadata": {},
+            },
+            {
+                "calculate": {
+                    "duration_ns": 1,
+                    "input_rows": {"input": "1"},
+                    "output_rows": {"output": 1},
+                }
+            },
+            "node_timings.calculate.input_rows.input",
+            id="string-count-mapping",
+        ),
+    ],
+)
+def test_direct_worker_message_rejects_coercible_result_scalars(
+    field: str,
+    malformed_output: dict[str, object],
+    node_timings: dict[str, object],
+    error_location: str,
+) -> None:
+    manager = RunManager(use_processes=False)
+    run_id = f"malformed-{field}"
+    now = datetime.now(UTC)
+    manager._runs[run_id] = _RunHandle(
+        id=run_id,
+        project_id="demo",
+        status=RunStatus.RUNNING,
+        created_at=now,
+        started_at=now,
+    )
+
+    manager._finish_from_message(
+        run_id,
+        {
+            "ok": True,
+            "result": {
+                "outputs": {"output": malformed_output},
+                "node_timings": node_timings,
+                "datafusion_metrics": [],
+                "metadata": {},
+            },
+        },
+    )
+
+    failed = manager.get(run_id)
+    assert failed.status is RunStatus.FAILED
+    assert failed.result is None
+    assert failed.error is not None
+    assert failed.error.startswith(
+        f"run result violates the v2 preview contract at {error_location}:"
+    )
+    assert repr(malformed_output) not in failed.error
+    manager.shutdown()
 
 
 def test_spawned_worker_executes_rust_plan_and_cleans_resources() -> None:

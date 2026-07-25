@@ -49,7 +49,7 @@ from calc_flow_studio.models import (
 type PreparedInput = tuple[pa.Table, dict[str, JSONValue]]
 type PreparedInputs = dict[str, PreparedInput]
 type RegistrationRecord = dict[str, Any]
-type RegistrationIdentity = tuple[str, str, str]
+type LazyBuiltinIdentity = tuple[str, str, str]
 
 
 class RunManagerError(RuntimeError):
@@ -81,8 +81,8 @@ def _capability_snapshot_error(
 
 
 @lru_cache(maxsize=1)
-def _preflight_lazy_builtins() -> tuple[RegistrationIdentity, ...]:
-    available: list[RegistrationIdentity] = []
+def _preflight_lazy_builtins() -> tuple[LazyBuiltinIdentity, ...]:
+    available: list[LazyBuiltinIdentity] = []
     for provider, register in (("jax", register_jax), ("numpy", register_numpy)):
         try:
             register(Runtime())
@@ -775,6 +775,11 @@ class RunManager:
             runtime_document["scope"]["kind"] = "runtimeSession"
             parent_identities = {
                 (
+                    (
+                        "dataFusionScalar"
+                        if registration["kind"] == "scalar_udf"
+                        else "provider"
+                    ),
                     registration["provider"],
                     registration["name"],
                     registration["version"],
@@ -793,7 +798,7 @@ class RunManager:
                     version=version,
                 )
                 for provider, name, version in self._lazy_builtins
-                if (provider, name, version) not in parent_identities
+                if ("provider", provider, name, version) not in parent_identities
             )
             worker_registrations.sort(
                 key=lambda item: (

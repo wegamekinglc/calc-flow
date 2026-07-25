@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 
 import pytest
 
@@ -113,6 +114,36 @@ def test_provider_options_schema_rejects_non_data_and_unsupported_shapes() -> No
                 ProviderOption("expression", "boolean"),
             )
         )
+
+
+@pytest.mark.parametrize(
+    ("value_type", "type_name", "secret"),
+    [
+        pytest.param(lambda: None, "function", "<lambda>", id="callable"),
+        pytest.param(
+            Path("/secret/provider-option"),
+            "PosixPath",
+            "/secret/provider-option",
+            id="path",
+        ),
+        pytest.param(
+            ["secret-container-value"], "list", "secret-container-value", id="list"
+        ),
+    ],
+)
+def test_provider_option_rejects_non_string_value_types_without_echoing_them(
+    value_type: object,
+    type_name: str,
+    secret: str,
+) -> None:
+    with pytest.raises(TypeError) as raised:
+        ProviderOption("expression", value_type)  # type: ignore[arg-type]
+
+    assert str(raised.value) == (
+        "provider options_schema at 'fields[0].value_type' must contain strict "
+        f"data; found {type_name}"
+    )
+    assert secret not in str(raised.value)
 
 
 @pytest.mark.parametrize(

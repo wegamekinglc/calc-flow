@@ -44,6 +44,11 @@ class ProviderOption:
                 "provider options_schema at 'fields[0].name' must contain strict "
                 f"data; found {type(self.name).__name__}"
             )
+        if type(self.value_type) is not str:
+            raise TypeError(
+                "provider options_schema at 'fields[0].value_type' must contain "
+                f"strict data; found {type(self.value_type).__name__}"
+            )
         if self.value_type not in {"string", "integer", "number", "boolean"}:
             raise ValueError(
                 f"provider options_schema field {self.name!r}.value_type must be "

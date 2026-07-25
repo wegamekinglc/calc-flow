@@ -6,7 +6,15 @@ from enum import StrEnum
 from typing import Annotated, Literal
 
 from calc_flow import ProjectDocument
-from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    RootModel,
+    StrictBool,
+    StrictInt,
+    field_validator,
+)
 
 type JSONValue = (
     None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
@@ -285,13 +293,13 @@ class RunEvent(StrictModel):
 class OutputFieldPreview(StrictModel):
     name: str
     type: str
-    nullable: bool
+    nullable: StrictBool
 
 
 class TableOutputPreview(StrictModel):
     kind: Literal["table"] = "table"
-    total_rows: int = Field(ge=0)
-    truncated: bool
+    total_rows: StrictInt = Field(ge=0)
+    truncated: StrictBool
     schema_: tuple[OutputFieldPreview, ...] = Field(
         alias="schema",
         serialization_alias="schema",
@@ -313,8 +321,8 @@ class TableOutputPreview(StrictModel):
 class ArrayOutputPreview(StrictModel):
     kind: Literal["array"] = "array"
     backend: str
-    total_rows: int = Field(ge=0)
-    truncated: bool
+    total_rows: StrictInt = Field(ge=0)
+    truncated: StrictBool
     data: JSONValue
     metadata: dict[str, JSONValue]
 
@@ -331,17 +339,17 @@ type OutputPreview = Annotated[
 
 
 class NodeTimingPreview(StrictModel):
-    duration_ns: int = Field(ge=0)
-    input_rows: dict[str, int]
-    output_rows: dict[str, int]
+    duration_ns: StrictInt = Field(ge=0)
+    input_rows: dict[str, StrictInt]
+    output_rows: dict[str, StrictInt]
 
 
 class DataFusionMetricPreview(StrictModel):
-    query_id: int = Field(ge=0)
+    query_id: StrictInt = Field(ge=0)
     node_id: str | None
-    planning_ns: int = Field(ge=0)
-    execution_ns: int = Field(ge=0)
-    output_rows: int = Field(ge=0)
+    planning_ns: StrictInt = Field(ge=0)
+    execution_ns: StrictInt = Field(ge=0)
+    output_rows: StrictInt = Field(ge=0)
     logical_plan: str
     physical_plan: str
 
