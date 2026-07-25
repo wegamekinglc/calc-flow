@@ -79,10 +79,12 @@ class ReleaseConfigTests(unittest.TestCase):
         setup_python = (
             "uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"
         )
-        install_pyarrow = 'python -m pip install "pyarrow==24.0.0"'
+        install_test_dependencies = (
+            'python -m pip install "numpy>=2.0.0" "pyarrow==24.0.0"'
+        )
         self.assertIn(setup_python, rust_core)
         self.assertIn("python-version-file: .python-version", rust_core)
-        self.assertIn(install_pyarrow, rust_core)
+        self.assertIn(install_test_dependencies, rust_core)
         rust_core_header = rust_core.split("    steps:\n", 1)[0]
         self.assertIn(
             "    env:\n      RUST_TEST_THREADS: 1\n",
@@ -93,7 +95,7 @@ class ReleaseConfigTests(unittest.TestCase):
             rust_core.index("cargo clippy --workspace --all-targets --all-features"),
         )
         self.assertLess(
-            rust_core.index(install_pyarrow),
+            rust_core.index(install_test_dependencies),
             rust_core.index("cargo test --workspace --all-targets --all-features"),
         )
 
