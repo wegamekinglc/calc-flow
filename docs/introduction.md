@@ -127,9 +127,14 @@ batch kind, required flag, and optional exact Arrow schema. Compilation checks:
 - deterministic graph inputs, outputs, order, and fingerprint.
 
 The Python `PipelineBuilder` is a functional projection of the same v2 project
-model. Its `expression`, `sql`, `external`, and `connect` methods return
-new builders. `compile()` serializes the strict project and asks the Rust
-`Runtime` to validate and compile it.
+model. Its `expression`, `sql`, `external`, `table_matmul`, and `connect`
+methods return new builders. `compile()` serializes the strict project and
+asks the Rust `Runtime` to validate and compile it.
+
+`table_matmul` creates a provider-backed `table_matmul@1` external node with
+the required mixed-kind inputs `table` (table) and `weights` (array), and the
+array output `output`. It selects ordered numeric table columns and multiplies
+the resulting table matrix by same-backend weights.
 
 Unconnected required inputs become named graph inputs. Duplicate port names are
 qualified with the node ID. Unconnected outputs become named graph outputs.
@@ -182,8 +187,18 @@ does not expose callback objects.
 ## Optional array providers
 
 NumPy and JAX are Python-owned providers registered with `register_numpy` or
-`register_jax`. An external v2 node selects provider `numpy` or `jax`,
-operator `expression`, version `1`, and a bounded expression.
+`register_jax`. Where explicitly registered, each provides `expression@1` for
+bounded array expressions and mapped `table_matmul@1` for table-array matrix
+multiplication. An external v2 node selects provider `numpy` or `jax`, an
+operator, and version `1`.
+
+The mapped matrix operator receives a `table` batch and same-backend `weights`
+array batch and returns an `output` array batch. It borrows Arrow column
+buffers zero-copy at the provider boundary while building one dense host
+staging matrix from the selected ordered columns; this is not an end-to-end
+zero-copy path. NumPy writes the multiplication into a Rust-owned result.
+JAX performs one host-to-device transfer for the table matrix and keeps the
+result on the weights device.
 
 External operators receive an engine-neutral run context. They share graph
 validation, cancellation, rollback, node timing, runners, and checkpoints with

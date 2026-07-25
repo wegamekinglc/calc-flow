@@ -1013,6 +1013,46 @@ def test_jax_table_matmul_rejects_x64_narrowing_before_allocation(
     assert not caught_warnings
 
 
+@pytest.mark.parametrize(
+    ("arrow_type", "weight_dtype", "common_dtype", "involved_dtypes"),
+    [
+        (pa.float16(), "float16", "float16", "float16, float16"),
+        (pa.int8(), "bfloat16", "bfloat16", "int8, bfloat16"),
+    ],
+)
+def test_jax_table_matmul_rejects_unsupported_staging_dtype_before_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+    arrow_type: pa.DataType,
+    weight_dtype: str,
+    common_dtype: str,
+    involved_dtypes: str,
+) -> None:
+    jnp = pytest.importorskip("jax.numpy")
+    provider = array_module._TableMatmulProvider("jax", jnp)
+    inputs = {
+        "table": Batch.from_pyarrow(
+            pa.table({"value": pa.array([1], type=arrow_type)})
+        ),
+        "weights": Batch.from_array(
+            jnp.asarray([[1]], dtype=jnp.dtype(weight_dtype)),
+            backend="jax",
+        ),
+    }
+
+    def reject_allocation(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("unsupported staging dtype must fail before host allocation")
+
+    monkeypatch.setattr(Batch, "_new_owned_numpy", reject_allocation)
+    with pytest.raises(
+        TypeError,
+        match=(
+            rf"^invalid table_matmul dtype: common dtype {common_dtype} "
+            rf"is unsupported for \[{involved_dtypes}\]"
+        ),
+    ):
+        provider(inputs, {"columns": ["value"]})
+
+
 def test_jax_table_matmul_rejects_result_dtype_narrowing_before_adoption(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

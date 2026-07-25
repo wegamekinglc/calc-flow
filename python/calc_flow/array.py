@@ -401,14 +401,13 @@ def _common_matrix_dtype(
             "invalid table_matmul dtype: "
             f"common dtype {result_dtype.name} is lossy for [{involved}]"
         )
-    if backend == "numpy":
-        try:
-            _validate_numpy_dtype(result_dtype)
-        except ValueError as error:
-            raise TypeError(
-                "invalid table_matmul dtype: "
-                f"common dtype {result_dtype.name} is unsupported for [{involved}]"
-            ) from error
+    try:
+        _validate_numpy_dtype(result_dtype)
+    except ValueError as error:
+        raise TypeError(
+            "invalid table_matmul dtype: "
+            f"common dtype {result_dtype.name} is unsupported for [{involved}]"
+        ) from error
     return result_dtype
 
 
