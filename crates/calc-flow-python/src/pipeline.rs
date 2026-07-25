@@ -673,6 +673,11 @@ mod tests {
         release: Arc<tokio::sync::Notify>,
     }
 
+    #[pyclass]
+    struct DeadlineSignal {
+        deadline: chrono::DateTime<chrono::Utc>,
+    }
+
     #[pymethods]
     impl ReleaseSignal {
         fn fire(&self) {
@@ -686,6 +691,21 @@ mod tests {
             let started = Arc::clone(&self.started);
             pyo3_async_runtimes::tokio::future_into_py(py, async move {
                 started.notified().await;
+                Ok(())
+            })
+        }
+    }
+
+    #[pymethods]
+    impl DeadlineSignal {
+        fn wait_until_crossed<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+            let remaining = self
+                .deadline
+                .signed_duration_since(chrono::Utc::now())
+                .to_std()
+                .unwrap_or_default();
+            pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                tokio::time::sleep(remaining + std::time::Duration::from_millis(10)).await;
                 Ok(())
             })
         }
@@ -1081,6 +1101,109 @@ mod tests {
             py.run(
                 pyo3::ffi::c_str!(
                     "import asyncio\nasync def run():\n    execution, cancellation = plan._execute_async_cancellable({'input': batch})\n    await started.wait()\n    cancellation.cancel()\n    release.fire()\n    try:\n        await execution\n    except Exception as error:\n        assert type(error).__name__ == 'CancelledError'\n    else:\n        raise AssertionError('cancelled native execution unexpectedly succeeded')\n    rolled_back = await plan.snapshot_async()\n    recovered = await plan.execute_async({'input': batch})\n    after_recovery = await plan.snapshot_async()\n    return rolled_back, after_recovery, recovered\nstates = asyncio.run(run())"
+                ),
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+
+            let states = locals
+                .get_item("states")
+                .unwrap()
+                .unwrap()
+                .cast_into::<PyTuple>()
+                .unwrap();
+            let rolled_back = states.get_item(0).unwrap().cast_into::<PyDict>().unwrap();
+            assert_eq!(
+                rolled_back
+                    .get_item("gate")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                0
+            );
+            assert!(
+                rolled_back
+                    .get_item("downstream")
+                    .unwrap()
+                    .unwrap()
+                    .is_none()
+            );
+            let after_recovery = states.get_item(1).unwrap().cast_into::<PyDict>().unwrap();
+            assert_eq!(
+                after_recovery
+                    .get_item("gate")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                states
+                    .get_item(2)
+                    .unwrap()
+                    .getattr("outputs")
+                    .unwrap()
+                    .len()
+                    .unwrap(),
+                1
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            assert_eq!(*baselines.lock(), vec![0, 0]);
+            assert_eq!(downstream_calls.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn async_deadline_crossing_rolls_back_state_and_skips_downstream() {
+        Python::initialize();
+        Python::attach(|py| {
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let calls = Arc::new(AtomicUsize::new(0));
+            let baselines = Arc::new(Mutex::new(Vec::new()));
+            let downstream_calls = Arc::new(AtomicUsize::new(0));
+            let deadline = chrono::Utc::now() + chrono::Duration::seconds(1);
+            let plan = PyExecutionPlan::new(
+                stateful_cancellation_plan(
+                    Arc::clone(&started),
+                    Arc::clone(&release),
+                    Arc::clone(&calls),
+                    Arc::clone(&baselines),
+                    Arc::clone(&downstream_calls),
+                ),
+                Arc::new(tokio::runtime::Runtime::new().unwrap()),
+                Vec::new(),
+            );
+            let locals = PyDict::new(py);
+            locals.set_item("plan", Py::new(py, plan).unwrap()).unwrap();
+            locals
+                .set_item("batch", Py::new(py, batch()).unwrap())
+                .unwrap();
+            locals
+                .set_item(
+                    "options",
+                    Py::new(
+                        py,
+                        PyExecutionOptions::for_test(BTreeMap::new(), Some(deadline)),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            locals
+                .set_item("started", Py::new(py, StartSignal { started }).unwrap())
+                .unwrap();
+            locals
+                .set_item("release", Py::new(py, ReleaseSignal { release }).unwrap())
+                .unwrap();
+            let deadline_signal = Py::new(py, DeadlineSignal { deadline }).unwrap();
+            locals.set_item("deadline", deadline_signal).unwrap();
+
+            py.run(
+                pyo3::ffi::c_str!(
+                    "import asyncio\nasync def run():\n    execution = plan.execute_async({'input': batch}, options=options)\n    await started.wait()\n    await deadline.wait_until_crossed()\n    release.fire()\n    try:\n        await execution\n    except Exception as error:\n        assert type(error).__name__ == 'CancelledError'\n    else:\n        raise AssertionError('expired execution unexpectedly succeeded')\n    rolled_back = await plan.snapshot_async()\n    recovered = await plan.execute_async({'input': batch})\n    after_recovery = await plan.snapshot_async()\n    return rolled_back, after_recovery, recovered\nstates = asyncio.run(run())"
                 ),
                 Some(&locals),
                 None,

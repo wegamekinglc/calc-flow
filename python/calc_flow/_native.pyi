@@ -26,7 +26,7 @@ class CancelledError(ExecutionError): ...
 class ExecutionOptions:
     def __init__(
         self,
-        settings: Mapping[str, JSONValue] = ...,
+        settings: Mapping[str, JSONValue] = {},
         deadline: datetime | None = None,
     ) -> None: ...
     @property

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import inspect
 import json
 import math
 import threading
@@ -49,6 +50,31 @@ def test_execution_options_defaults_identity_and_frozen_fields() -> None:
         options.deadline = datetime.now(UTC)  # type: ignore[misc]
     with pytest.raises(AttributeError):
         options.extra = True  # type: ignore[attr-defined]
+
+
+def test_native_execution_and_provider_signatures_are_canonical() -> None:
+    assert str(inspect.signature(ExecutionOptions)) == "(settings={}, deadline=None)"
+
+    runtime = calc_flow._native.Runtime()
+    assert str(inspect.signature(runtime.register_provider)) == (
+        "(provider, name, version, callback, *, accepts_context=False)"
+    )
+    assert str(inspect.signature(runtime._register_mapping_provider)) == (
+        "(provider, name, version, callback, *, input_ports, output_ports, "
+        "accepts_context=False)"
+    )
+    assert (
+        inspect.signature(runtime.register_provider)
+        .parameters["accepts_context"]
+        .default
+        is False
+    )
+    assert (
+        inspect.signature(runtime._register_mapping_provider)
+        .parameters["accepts_context"]
+        .default
+        is False
+    )
 
 
 def test_execution_options_snapshots_settings_and_returns_fresh_copies() -> None:

@@ -96,14 +96,15 @@ loop. `execute_async(inputs, *, options=None)` is the asynchronous form.
 `RunResult` exposes defensive `outputs`, `metadata`, `node_timings`, and
 `datafusion_metrics` values.
 
-`ExecutionOptions(settings=..., deadline=None)` is frozen and reusable; an
+`ExecutionOptions(settings={}, deadline=None)` is frozen and reusable; an
 omitted settings argument creates an empty mapping.
 `settings` must be a mapping whose complete object graph is strict JSON:
 string keys; exact `None`, `bool`, `int`, finite `float`, `str`, `list`, and
-`dict` values; 64-bit integer bounds; no cycles; and at most 32 container
-levels. Calc Flow copies the caller's graph at construction and returns fresh
-copies from the getter. `deadline` must be a timezone-aware UTC `datetime`
-with a zero offset and is normalized without losing microseconds.
+`dict` values; integers in the inclusive range `-2**63 .. 2**64-1`; and no
+cycles. The root settings mapping is depth 0, and every child value must be at
+depth 32 or less. Calc Flow copies the caller's graph at construction and
+returns fresh copies from the getter. `deadline` must be a timezone-aware UTC
+`datetime` with a zero offset and is normalized without losing microseconds.
 
 An expired or crossed deadline raises `calc_flow.CancelledError`. Native
 deadline and cancellation checks are cooperative at safe execution
@@ -121,12 +122,14 @@ exposes an immutable runtime-session capability snapshot through
 return type, volatility, and a vectorized callable.
 
 `register_provider` and `_register_mapping_provider` accept keyword-only
-`accepts_context=False`. The default preserves the two-argument callback ABI
-`(inputs, options)`. When set to the exact boolean `True`, the callback is
-invoked once as `(inputs, options, context)`. The frozen, engine-created
-`ProviderContext` exposes defensive `settings` and `deadline` observations.
-Calc Flow does not inspect callback signatures or retry a call with another
-arity.
+`accepts_context=False`. A single provider registered with `register_provider`
+receives one `Batch` as its first argument: `(batch, options)` by default or
+`(batch, options, context)` when opted in. A mapping provider registered with
+`_register_mapping_provider` receives a named input mapping:
+`(inputs, options)` or `(inputs, options, context)`. The frozen,
+engine-created `ProviderContext` exposes defensive `settings` and `deadline`
+observations. Calc Flow does not inspect callback signatures or retry a call
+with another arity.
 
 Capability schema version 1 contains only frozen data:
 `RuntimeSessionScope`, `OperatorCapability`, `UdfCapability`,

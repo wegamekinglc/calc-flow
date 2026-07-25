@@ -253,12 +253,23 @@ impl PyExecutionOptions {
             cancellation: calc_flow::CancellationToken::new(),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test(
+        settings: calc_flow::JsonMap,
+        deadline: Option<chrono::DateTime<Utc>>,
+    ) -> Self {
+        Self { settings, deadline }
+    }
 }
 
 #[pymethods]
 impl PyExecutionOptions {
     #[new]
-    #[pyo3(signature = (*args, **kwargs))]
+    #[pyo3(
+        signature = (*args, **kwargs),
+        text_signature = "(settings={}, deadline=None)"
+    )]
     fn new(
         py: Python<'_>,
         args: &Bound<'_, PyTuple>,

@@ -256,7 +256,10 @@ impl PyRuntime {
     }
 
     #[pyo3(name = "register_provider")]
-    #[pyo3(signature = (provider, name, version, callback, *, accepts_context = ExactBool(false)))]
+    #[pyo3(
+        signature = (provider, name, version, callback, *, accepts_context = ExactBool(false)),
+        text_signature = "($self, provider, name, version, callback, *, accepts_context=False)"
+    )]
     fn register_python_provider(
         &self,
         py: Python<'_>,
@@ -281,7 +284,10 @@ impl PyRuntime {
         self.register_provider_factory(provider, name, version, &factory, root)
     }
 
-    #[pyo3(signature = (provider, name, version, callback, *, input_ports, output_ports, accepts_context = ExactBool(false)))]
+    #[pyo3(
+        signature = (provider, name, version, callback, *, input_ports, output_ports, accepts_context = ExactBool(false)),
+        text_signature = "($self, provider, name, version, callback, *, input_ports, output_ports, accepts_context=False)"
+    )]
     #[allow(
         clippy::too_many_arguments,
         reason = "the private binding preserves the explicit mapping provider contract"

@@ -185,11 +185,13 @@ result = plan.execute({"input": batch}, options=options)
 
 `settings` is copied when the options are constructed. It must be a strict
 JSON mapping with string keys, exact JSON primitive/container types, finite
-numbers, 64-bit integers, no cycles, and no more than 32 container levels.
-Mutating the source mapping or a value returned from `options.settings` never
-changes a later execution. `deadline` must be a timezone-aware zero-offset UTC
-`datetime`; Calc Flow normalizes it to `datetime.UTC` and preserves
-microseconds. Omitting `settings` creates an empty settings mapping.
+numbers, integers in the inclusive range `-2**63 .. 2**64-1`, and no cycles.
+The root settings mapping is depth 0, and every child value must be at depth 32
+or less. Mutating the source mapping or a value returned from
+`options.settings` never changes a later execution. `deadline` must be a
+timezone-aware zero-offset UTC `datetime`; Calc Flow normalizes it to
+`datetime.UTC` and preserves microseconds. Omitting `settings` creates an empty
+settings mapping.
 
 Provider callbacks remain two-argument callables unless the registration
 explicitly opts into run context:
@@ -209,13 +211,15 @@ runtime.register_provider(
 )
 ```
 
-An opted-in callback is invoked exactly once as
-`(inputs, provider_options, context)`. The frozen, engine-created
-`ProviderContext` returns fresh settings copies and the normalized deadline.
-The default `accepts_context=False` preserves the exact historical
-`(inputs, provider_options)` ABI. The flag must be an exact `bool`; Calc Flow
-does not infer arity or retry a callback after `TypeError`. Native cancellation
-tokens are intentionally not exposed to Python.
+A single provider callback receives one `Batch`: `(batch, provider_options)`
+by default or `(batch, provider_options, context)` when opted in. A mapping
+provider registered with `_register_mapping_provider` receives its named input
+mapping instead: `(inputs, provider_options)` or
+`(inputs, provider_options, context)`. Each callback is invoked exactly once.
+The frozen, engine-created `ProviderContext` returns fresh settings copies and
+the normalized deadline. The flag must be an exact `bool`; Calc Flow does not
+infer arity or retry a callback after `TypeError`. Native cancellation tokens
+are intentionally not exposed to Python.
 
 ## Async execution
 
