@@ -6,8 +6,14 @@ from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, field
 from threading import RLock
 from typing import Any, Literal
+from uuid import uuid4
 
 from calc_flow import _native
+from calc_flow.capabilities import (
+    ProviderOptionsSchema,
+    RuntimeCapabilities,
+    runtime_capabilities,
+)
 from calc_flow.store import _copy_json_value, _run_blocking
 
 JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
@@ -85,6 +91,9 @@ def _updated_project(project_json: str, update: Any) -> str:
 class Runtime:
     _inner: _native.Runtime = field(default_factory=_native.Runtime, repr=False)
     _registration_lock: RLock = field(default_factory=RLock, repr=False, compare=False)
+    _session_id: str = field(
+        default_factory=lambda: str(uuid4()), repr=False, compare=False
+    )
     _registrations: list[dict[str, Any]] = field(
         default_factory=list, repr=False, compare=False
     )
@@ -95,7 +104,16 @@ class Runtime:
         name: str,
         version: str,
         callback: Any,
+        *,
+        options_schema: ProviderOptionsSchema | None = None,
     ) -> None:
+        if options_schema is not None and not isinstance(
+            options_schema, ProviderOptionsSchema
+        ):
+            raise TypeError(
+                "options_schema must be a ProviderOptionsSchema or None; "
+                f"found {type(options_schema).__name__}"
+            )
         with self._registration_lock:
             self._inner.register_provider(provider, name, version, callback)
             self._registrations.append(
@@ -105,6 +123,7 @@ class Runtime:
                     "name": name,
                     "version": version,
                     "callback": callback,
+                    "options_schema": options_schema,
                 }
             )
 
@@ -117,7 +136,15 @@ class Runtime:
         *,
         input_ports: Sequence[tuple[str, str]],
         output_ports: Sequence[tuple[str, str]],
+        options_schema: ProviderOptionsSchema | None = None,
     ) -> None:
+        if options_schema is not None and not isinstance(
+            options_schema, ProviderOptionsSchema
+        ):
+            raise TypeError(
+                "options_schema must be a ProviderOptionsSchema or None; "
+                f"found {type(options_schema).__name__}"
+            )
         copied_inputs = tuple((port, kind) for port, kind in input_ports)
         copied_outputs = tuple((port, kind) for port, kind in output_ports)
         with self._registration_lock:
@@ -139,6 +166,7 @@ class Runtime:
                     "callback": callback,
                     "input_ports": copied_inputs,
                     "output_ports": copied_outputs,
+                    "options_schema": options_schema,
                 }
             )
 
@@ -179,30 +207,51 @@ class Runtime:
                 }
             )
 
+    def _copied_registrations(self) -> tuple[dict[str, Any], ...]:
+        return tuple(
+            {
+                **registration,
+                **(
+                    {"input_types": tuple(registration["input_types"])}
+                    if registration["kind"] == "scalar_udf"
+                    else (
+                        {
+                            "input_ports": tuple(registration["input_ports"]),
+                            "output_ports": tuple(registration["output_ports"]),
+                        }
+                        if registration.get("provider_mode") == "mapping"
+                        else {}
+                    )
+                ),
+            }
+            for registration in self._registrations
+        )
+
     def _registration_snapshot(self) -> tuple[dict[str, Any], ...]:
         """Return successful trusted registrations as defensive plain records."""
         with self._registration_lock:
-            return tuple(
-                {
-                    **registration,
-                    **(
-                        {"input_types": tuple(registration["input_types"])}
-                        if registration["kind"] == "scalar_udf"
-                        else (
-                            {
-                                "input_ports": tuple(registration["input_ports"]),
-                                "output_ports": tuple(registration["output_ports"]),
-                            }
-                            if registration.get("provider_mode") == "mapping"
-                            else {}
-                        )
-                    ),
-                }
-                for registration in self._registrations
-            )
+            return self._copied_registrations()
 
     def catalog(self) -> list[dict[str, Any]]:
         return self._inner.catalog()
+
+    def capabilities(self) -> RuntimeCapabilities:
+        snapshot, _ = self._capability_registration_snapshot()
+        return snapshot
+
+    def _capability_registration_snapshot(
+        self,
+    ) -> tuple[RuntimeCapabilities, tuple[dict[str, Any], ...]]:
+        """Capture safe metadata and private worker records at one revision."""
+        with self._registration_lock:
+            registrations = self._copied_registrations()
+            snapshot = runtime_capabilities(
+                session_id=self._session_id,
+                revision=len(registrations),
+                package_version=_native.version(),
+                registrations=registrations,
+            )
+            return snapshot, registrations
 
     def validation_report(self, project_json: str) -> dict[str, Any]:
         if not isinstance(project_json, str):

@@ -37,15 +37,20 @@ class FakeEventSource {
   }
 }
 
-const run = (status: RunResponse['status']): RunResponse => ({
+const run = (): RunResponse => ({
   id: 'run-1',
   project_id: 'project-1',
-  status,
+  status: 'completed',
   created_at: '2026-01-01T00:00:00Z',
-  started_at: null,
-  finished_at: status === 'completed' ? '2026-01-01T00:00:01Z' : null,
+  started_at: '2026-01-01T00:00:00Z',
+  finished_at: '2026-01-01T00:00:01Z',
   error: null,
-  result: status === 'completed' ? { outputs: {} } : null,
+  result: {
+    outputs: {},
+    node_timings: {},
+    datafusion_metrics: [],
+    metadata: {},
+  },
 });
 
 afterEach(() => {
@@ -61,7 +66,7 @@ describe('useRunEvents', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
-        new Response(JSON.stringify(run('completed')), {
+        new Response(JSON.stringify(run()), {
           headers: { 'Content-Type': 'application/json' },
         }),
       ),
@@ -71,7 +76,7 @@ describe('useRunEvents', () => {
     const source = FakeEventSource.instances[0];
     act(() => source.emit('completed'));
 
-    await waitFor(() => expect(onUpdate).toHaveBeenCalledWith(run('completed')));
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledWith(run()));
     expect(source.url).toBe('/api/v2/runs/run-1/events');
     expect(source.close).toHaveBeenCalledOnce();
   });
@@ -82,7 +87,7 @@ describe('useRunEvents', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
-        new Response(JSON.stringify(run('completed')), {
+        new Response(JSON.stringify(run()), {
           headers: { 'Content-Type': 'application/json' },
         }),
       ),
@@ -95,7 +100,7 @@ describe('useRunEvents', () => {
       source.emit('error');
     });
 
-    await waitFor(() => expect(onUpdate).toHaveBeenCalledWith(run('completed')));
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledWith(run()));
     expect(source.close).toHaveBeenCalledOnce();
   });
 

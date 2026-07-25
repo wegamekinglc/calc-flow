@@ -21,11 +21,7 @@ import pyarrow as pa
 from calc_flow import Batch, PipelineBuilder
 
 batch = Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))
-plan = (
-    PipelineBuilder("totals")
-    .expression("calculate", "total = a + b")
-    .compile()
-)
+plan = PipelineBuilder("totals").expression("calculate", "total = a + b").compile()
 result = plan.execute({"input": batch})
 
 assert result.outputs["output"].to_pyarrow()["total"].to_pylist() == [3, 7]
@@ -102,9 +98,20 @@ Import the main surface from `calc_flow`.
 ### Runtime and UDFs
 
 `Runtime` compiles strict project JSON, reports validation results, registers
-trusted providers/scalar UDFs, and returns a redacted metadata catalog.
+trusted providers/scalar UDFs, returns the compatibility UDF catalog, and
+exposes an immutable runtime-session capability snapshot through
+`capabilities()`.
 `register_scalar_udf` requires provider/name/version, exact input type names,
 return type, volatility, and a vectorized callable.
+
+Capability schema version 1 contains only frozen data:
+`RuntimeSessionScope`, `OperatorCapability`, `UdfCapability`,
+`ProviderCapability`, `ProviderPort`, `ProviderOptionsSchema`, and
+`ProviderOption`. Its session ID is stable for one `Runtime`; its revision
+advances once for each successful registry entry. Failed duplicates do not
+advance it, while the two-entry NumPy and JAX helpers can expose a real partial
+success. Snapshots already returned to callers do not change when later
+registrations advance the revision.
 
 `register_numpy(runtime)` installs `numpy:expression@1` and
 `numpy:table_matmul@1`; `register_jax(runtime)` installs `jax:expression@1`
@@ -144,20 +151,44 @@ runners expose reset and plan-snapshot operations.
 
 The separate Studio service exposes its supported API under `/api/v2`.
 
-| Method                 | Route                       | Purpose                                  |
-| ---------------------- | --------------------------- | ---------------------------------------- |
-| `GET`                  | `/catalog`                  | Operators, UDFs, Arrow types, limits     |
-| `GET`                  | `/schema/project`           | Rust-generated v2 project JSON Schema    |
-| `GET`, `POST`          | `/projects`                 | List or create projects                  |
-| `POST`                 | `/projects/import`          | Safely import JSON or YAML               |
-| `GET`, `PUT`, `DELETE` | `/projects/{id}`            | Read, replace, or delete a project       |
-| `GET`                  | `/projects/{id}/export`     | Export canonical JSON or safe YAML       |
-| `POST`                 | `/projects/{id}/validate`   | Validate and compile a stored graph      |
-| `GET`, `DELETE`        | `/projects/{id}/checkpoint` | Inspect or reset recovery state          |
-| `POST`                 | `/projects/{id}/runs`       | Start a bounded preview worker           |
-| `GET`                  | `/runs/{id}`                | Read preview status/results              |
-| `GET`                  | `/runs/{id}/events`         | Stream run events                        |
-| `DELETE`               | `/runs/{id}`                | Cancel a managed preview                 |
+| Method                 | Route                       | Purpose                                      |
+| ---------------------- | --------------------------- | -------------------------------------------- |
+| `GET`                  | `/catalog`                  | Compatibility UDF-only top-level array       |
+| `GET`                  | `/capabilities`             | Runtime and preview-worker capabilities      |
+| `GET`                  | `/schema/project`           | Rust-generated v2 project JSON Schema        |
+| `GET`, `POST`          | `/projects`                 | List or create projects                      |
+| `POST`                 | `/projects/import`          | Safely import JSON or YAML                   |
+| `GET`, `PUT`, `DELETE` | `/projects/{id}`            | Read, replace, or delete a project           |
+| `GET`                  | `/projects/{id}/export`     | Export canonical JSON or safe YAML           |
+| `POST`                 | `/projects/{id}/validate`   | Validate and compile a stored graph          |
+| `GET`, `DELETE`        | `/projects/{id}/checkpoint` | Inspect or reset recovery state              |
+| `POST`                 | `/projects/{id}/runs`       | Start a bounded preview worker               |
+| `GET`                  | `/runs/{id}`                | Read typed preview status/results            |
+| `GET`                  | `/runs/{id}/events`         | Stream run events                            |
+| `DELETE`               | `/runs/{id}`                | Cancel a managed preview                     |
+
+`/capabilities` deliberately separates two scopes. `runtime` is the parent
+session snapshot used for compilation. `preview.workerRegistrations` describes
+whether a matching registration can be reconstructed as `serialized`,
+`lazyBuiltin`, or `unavailable` in a spawned preview worker. Transportability
+is not a promise that arbitrary project input is executable: normal compile,
+Port, option, input-format, and resource-limit checks still apply.
+
+Only NumPy/JAX `expression@1` is eligible for lazy built-in reconstruction in
+schema version 1. There is no lazy `table_matmul@1`; a parent registration may
+therefore be compile-capable while preview reconstruction is unavailable.
+Clients should disable only the unsupported preview action and keep project
+editing and parent-runtime validation available.
+
+Capability schema version 1 is closed. The browser decoder rejects an unknown
+version or any extra field before React receives it. Validation and run
+responses now use generated discriminated unions, which is an intentional
+generated-client source break and requires backend/frontend deployment
+coupling. The current compatibility gate covers a version-1 client against
+newer or extended payloads and the new client against the old response shape.
+An explicit version-2 decoder that can fall back to the version-1 fixture is
+deferred until a real version-2 schema exists; no synthetic version-2
+migration fixture is claimed in this release.
 
 The checked contract is [web-ui/openapi.json](../web-ui/openapi.json).
 `npm run sync:api` regenerates it and

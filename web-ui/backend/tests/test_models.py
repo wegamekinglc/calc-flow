@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from calc_flow_studio.models import (
+    CapabilitiesResponse,
     CheckpointSummary,
     InputPayload,
     ProjectCreateRequest,
@@ -14,6 +15,7 @@ from calc_flow_studio.models import (
     RunRequest,
     RunResponse,
     RunStatus,
+    ValidationReport,
 )
 
 
@@ -122,6 +124,119 @@ def test_run_options_enforce_preview_limits() -> None:
             RunOptions.model_validate({field: value})
 
 
+def test_capabilities_response_is_a_closed_camel_case_v1_contract() -> None:
+    document = {
+        "schemaVersion": 1,
+        "runtime": {
+            "scope": {
+                "kind": "runtimeSession",
+                "sessionId": "session",
+                "revision": 0,
+            },
+            "packageVersion": "2.0.0",
+            "projectFormatVersions": [2],
+            "batchKinds": ["array", "table"],
+            "portableArrowTypes": ["int64"],
+            "operators": [],
+            "udfs": [],
+            "providers": [],
+        },
+        "preview": {
+            "inputBatchKinds": ["table"],
+            "requestInputFormats": ["arrow_ipc", "columns", "records"],
+            "projectInputFormats": ["arrow_ipc", "csv", "inline_json", "json"],
+            "workerRegistrations": [],
+            "limits": {
+                "maxInputBytes": {
+                    "default": 10 * 1024 * 1024,
+                    "minimum": 1,
+                    "maximum": 10 * 1024 * 1024,
+                },
+                "maxRows": {
+                    "default": 100_000,
+                    "minimum": 1,
+                    "maximum": 100_000,
+                },
+                "timeoutSeconds": {
+                    "default": 30,
+                    "minimum": 1,
+                    "maximum": 300,
+                },
+                "memoryLimitMb": {
+                    "default": 512,
+                    "minimum": 64,
+                    "maximum": 4096,
+                },
+                "outputRows": {
+                    "default": 1000,
+                    "minimum": 1,
+                    "maximum": 10_000,
+                },
+            },
+        },
+    }
+
+    response = CapabilitiesResponse.model_validate(document)
+
+    assert response.model_dump(mode="json", by_alias=True) == document
+    with pytest.raises(ValidationError):
+        CapabilitiesResponse.model_validate({**document, "optionalFutureField": True})
+    with pytest.raises(ValidationError):
+        CapabilitiesResponse.model_validate({**document, "schemaVersion": 2})
+
+
+def test_validation_report_discriminator_enforces_status_invariants() -> None:
+    adapter = TypeAdapter(ValidationReport)
+
+    valid = adapter.validate_python(
+        {
+            "kind": "valid",
+            "valid": True,
+            "issues": [],
+            "fingerprint": "fingerprint",
+        }
+    )
+    invalid = adapter.validate_python(
+        {
+            "kind": "invalid",
+            "valid": False,
+            "issues": [
+                {
+                    "path": "pipeline.nodes[0]",
+                    "code": "invalid_expression",
+                    "message": "bad expression",
+                }
+            ],
+            "fingerprint": None,
+        }
+    )
+
+    assert valid.kind == "valid"
+    assert invalid.kind == "invalid"
+    for malformed in (
+        {
+            "kind": "valid",
+            "valid": True,
+            "issues": [{"path": "x", "code": "bad", "message": "bad"}],
+            "fingerprint": "fingerprint",
+        },
+        {
+            "kind": "invalid",
+            "valid": False,
+            "issues": [],
+            "fingerprint": None,
+        },
+        {
+            "kind": "valid",
+            "valid": False,
+            "issues": [],
+            "fingerprint": None,
+        },
+    ):
+        with pytest.raises(ValidationError):
+            adapter.validate_python(malformed)
+
+
 def test_project_and_checkpoint_summaries_are_json_transport_values() -> None:
     source_cursor = {"offsets": [10]}
     project = ProjectSummary(
@@ -145,21 +260,54 @@ def test_project_and_checkpoint_summaries_are_json_transport_values() -> None:
 
 
 def test_run_response_serializes_status_and_timestamps() -> None:
-    result = {"outputs": {"rows": [1]}}
-    response = RunResponse(
-        id="run",
-        project_id="project_alpha",
-        status=RunStatus.COMPLETED,
-        created_at=datetime(2026, 1, 1, tzinfo=UTC),
-        result=result,
+    result = {
+        "outputs": {},
+        "node_timings": {},
+        "datafusion_metrics": [],
+        "metadata": {"values": [1]},
+    }
+    response = RunResponse.model_validate(
+        {
+            "id": "run",
+            "project_id": "project_alpha",
+            "status": RunStatus.COMPLETED,
+            "created_at": datetime(2026, 1, 1, tzinfo=UTC),
+            "started_at": datetime(2026, 1, 1, tzinfo=UTC),
+            "finished_at": datetime(2026, 1, 1, tzinfo=UTC),
+            "error": None,
+            "result": result,
+        }
     )
-    result["outputs"]["rows"].append(2)
+    result["metadata"]["values"].append(2)
 
     data = response.model_dump(mode="json")
 
     assert data["status"] == "completed"
     assert data["created_at"] == "2026-01-01T00:00:00Z"
-    assert data["result"] == {"outputs": {"rows": [1]}}
+    assert data["result"]["metadata"] == {"values": [1]}
+
+    for malformed in (
+        {
+            **data,
+            "status": "completed",
+            "result": None,
+        },
+        {
+            **data,
+            "status": "failed",
+            "result": None,
+            "error": "",
+        },
+        {
+            **data,
+            "status": "pending",
+            "started_at": "2026-01-01T00:00:00Z",
+            "finished_at": None,
+            "result": None,
+        },
+    ):
+        with pytest.raises(ValidationError):
+            RunResponse.model_validate(malformed)
 
 
 @pytest.mark.parametrize("invalid", [object(), float("nan"), float("inf")])

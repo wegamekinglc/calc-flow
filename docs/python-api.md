@@ -115,11 +115,64 @@ never serialized. Registration and execution enforce exact Arrow types,
 result length/type, and explicit node references. The full version is
 [`examples/03_registered_udf.py`](../examples/03_registered_udf.py).
 
+## Runtime capabilities
+
+`Runtime.capabilities()` returns a frozen `RuntimeCapabilities` value. It is a
+data-only snapshot: callbacks and source/import paths are neither returned nor
+inspected.
+
+```python
+from calc_flow import (
+    ProviderOption,
+    ProviderOptionsSchema,
+    Runtime,
+)
+
+
+def normalize_callback(batch, options):
+    return batch
+
+
+runtime = Runtime()
+runtime.register_provider(
+    "acme",
+    "normalize",
+    "1",
+    normalize_callback,
+    options_schema=ProviderOptionsSchema(
+        fields=(ProviderOption("scale", "number", required=True),)
+    ),
+)
+snapshot = runtime.capabilities()
+
+assert snapshot.schema_version == 1
+assert snapshot.scope.kind == "runtime_session"
+assert snapshot.scope.revision == 1
+assert snapshot.providers[0].name == "normalize"
+```
+
+The public frozen values are `ProviderOption`, `ProviderOptionsSchema`,
+`ProviderPort`, `ProviderCapability`, `UdfCapability`, `OperatorCapability`,
+`RuntimeSessionScope`, and `RuntimeCapabilities`. Provider option schema
+version 1 supports only named scalar string, integer, number, or boolean
+fields. `options_schema=None` means no declarative editor is available; it
+does not mean every option is valid. The provider callback remains
+authoritative during compilation.
+
+The session ID is stable for one runtime. A successful registry entry advances
+the revision exactly once; rejected duplicates do not. NumPy/JAX helpers add
+`expression@1` and mapped `table_matmul@1` as separate entries, so one helper
+normally advances by two and can expose a real partial success if its second
+entry already exists. Previously returned snapshots remain isolated from
+later revisions.
+
 ## Async execution
 
 ```python
 async def calculate() -> list[int]:
-    plan = PipelineBuilder("async-example").expression("calc", "total = a + b").compile()
+    plan = (
+        PipelineBuilder("async-example").expression("calc", "total = a + b").compile()
+    )
     result = await plan.execute_async(
         {"input": Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))}
     )

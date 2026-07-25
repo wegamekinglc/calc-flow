@@ -299,6 +299,7 @@ describe('Calc Flow Studio', () => {
       }
       if (path.includes('/projects/project_') && path.endsWith('/validate')) {
         return response({
+          kind: 'valid',
           valid: true,
           issues: [],
           fingerprint: 'abc',
@@ -381,6 +382,10 @@ describe('Calc Flow Studio', () => {
             project_id: loadedProject.id,
             status: 'pending',
             created_at: '2026-01-01T00:00:00Z',
+            started_at: null,
+            finished_at: null,
+            error: null,
+            result: null,
           },
           202,
         );

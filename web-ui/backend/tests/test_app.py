@@ -23,6 +23,7 @@ from starlette.requests import Request as StarletteRequest
 import calc_flow_studio.app as app_module
 from calc_flow_studio.app import API_PREFIX, create_app, validate_bind_host
 from calc_flow_studio.models import RunEvent, RunResponse, RunStatus
+from calc_flow_studio.run_manager import CapabilitySnapshotError, RunManagerError
 
 
 def _project(
@@ -60,11 +61,14 @@ class FakeManager:
     def __init__(self) -> None:
         self.shutdown_calls = 0
         self.wait_calls: list[tuple[str, int, float]] = []
-        self.run = RunResponse(
-            id="run_1",
-            project_id="project_alpha",
-            status=RunStatus.RUNNING,
-            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        self.run = RunResponse.model_validate(
+            {
+                "id": "run_1",
+                "project_id": "project_alpha",
+                "status": RunStatus.RUNNING,
+                "created_at": datetime(2026, 1, 1, tzinfo=UTC),
+                "started_at": datetime(2026, 1, 1, tzinfo=UTC),
+            }
         )
 
     def submit(self, project: ProjectDocument, request: object) -> RunResponse:
@@ -93,7 +97,13 @@ class FakeManager:
 
     def cancel(self, run_id: str) -> RunResponse:
         current = self.get(run_id)
-        return current.model_copy(update={"status": RunStatus.CANCELLED})
+        return RunResponse.model_validate(
+            {
+                **current.model_dump(),
+                "status": RunStatus.CANCELLED,
+                "finished_at": datetime(2026, 1, 1, tzinfo=UTC),
+            }
+        )
 
     def shutdown(self) -> None:
         self.shutdown_calls += 1
@@ -225,6 +235,7 @@ def test_catalog_is_exact_runtime_metadata_and_validation_uses_canonical_json(
 
     assert catalog.json() == [{"kind": "test", "name": "only-runtime-metadata"}]
     assert validation.json() == {
+        "kind": "valid",
         "valid": True,
         "issues": [],
         "fingerprint": "fake",
@@ -234,6 +245,77 @@ def test_catalog_is_exact_runtime_metadata_and_validation_uses_canonical_json(
         "project_alpha",
         "project_alpha",
     ]
+
+
+def test_capabilities_route_exposes_the_typed_runtime_session_snapshot(
+    tmp_path,
+) -> None:
+    runtime = Runtime()
+    runtime.register_provider("test", "identity", "1", lambda batch, _options: batch)
+
+    with _client(tmp_path, runtime=runtime) as client:
+        response = client.get(f"{API_PREFIX}/capabilities")
+        catalog = client.get(f"{API_PREFIX}/catalog")
+        openapi = client.get("/openapi.json").json()
+
+    assert response.status_code == 200
+    document = response.json()
+    assert document["schemaVersion"] == 1
+    assert document["runtime"]["scope"]["kind"] == "runtimeSession"
+    assert document["runtime"]["scope"]["revision"] == 1
+    assert document["runtime"]["providers"][0]["name"] == "identity"
+    assert document["preview"]["inputBatchKinds"] == ["table"]
+    assert catalog.json() == []
+    capability_operation = openapi["paths"][f"{API_PREFIX}/capabilities"]["get"]
+    assert capability_operation["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ] == {"$ref": "#/components/schemas/CapabilitiesResponse"}
+
+
+def test_capabilities_route_reports_a_malformed_runtime_snapshot_as_internal(
+    tmp_path,
+) -> None:
+    class MalformedCapabilityManager(FakeManager):
+        def capabilities(self):
+            raise CapabilitySnapshotError(
+                "runtime capability snapshot violates schema version 1 at "
+                "runtime.batchKinds.0: Input should be 'table' or 'array'"
+            )
+
+    with _client(
+        tmp_path,
+        runtime=Runtime(),
+        run_manager=MalformedCapabilityManager(),
+    ) as client:
+        response = client.get(f"{API_PREFIX}/capabilities")
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "detail": (
+            "runtime capability snapshot violates schema version 1 at "
+            "runtime.batchKinds.0: Input should be 'table' or 'array'"
+        )
+    }
+
+
+def test_capabilities_route_reports_an_unavailable_runtime_session(
+    tmp_path,
+) -> None:
+    class UnavailableCapabilityManager(FakeManager):
+        def capabilities(self):
+            raise RunManagerError("no parent runtime")
+
+    with _client(
+        tmp_path,
+        runtime=Runtime(),
+        run_manager=UnavailableCapabilityManager(),
+    ) as client:
+        response = client.get(f"{API_PREFIX}/capabilities")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "runtime capability snapshot is unavailable for this session"
+    }
 
 
 def test_mutating_routes_use_the_injected_runtime_before_store_mutation(
@@ -324,8 +406,53 @@ def test_mutating_routes_reject_malformed_runtime_validation_reports(
         response = _create(client)
         listed = client.get(f"{API_PREFIX}/projects")
 
-    assert response.status_code == 422
+    assert response.status_code == 500
     assert listed.json() == []
+
+
+def test_every_validation_caller_treats_malformed_runtime_data_as_internal(
+    tmp_path,
+) -> None:
+    class SwitchingRuntime:
+        malformed = False
+
+        def validation_report(self, project_json: str) -> dict[str, object]:
+            json.loads(project_json)
+            if self.malformed:
+                return {"valid": False, "issues": [], "fingerprint": None}
+            return {"valid": True, "issues": [], "fingerprint": "valid"}
+
+    runtime = SwitchingRuntime()
+    with _client(tmp_path, runtime=runtime) as client:
+        assert _create(client).status_code == 201
+        runtime.malformed = True
+        responses = (
+            client.post(f"{API_PREFIX}/projects/project_alpha/validate"),
+            client.post(
+                f"{API_PREFIX}/projects",
+                json=_project("project_new", name="New"),
+            ),
+            client.put(
+                f"{API_PREFIX}/projects/project_alpha",
+                json={**_project(), "name": "Overwritten"},
+            ),
+            client.post(
+                f"{API_PREFIX}/projects/import?format=json&replace=true",
+                content=json.dumps({**_project(), "name": "Imported"}),
+            ),
+        )
+        stored = client.get(f"{API_PREFIX}/projects/project_alpha")
+        listed = client.get(f"{API_PREFIX}/projects")
+
+    assert [response.status_code for response in responses] == [500, 500, 500, 500]
+    assert all(
+        response.json()["detail"].startswith(
+            "runtime validation report violates the v1 contract at "
+        )
+        for response in responses
+    )
+    assert stored.json()["name"] == "Alpha"
+    assert [project["id"] for project in listed.json()] == ["project_alpha"]
 
 
 def test_project_crud_preserves_client_ids_sorting_and_request_values(tmp_path) -> None:

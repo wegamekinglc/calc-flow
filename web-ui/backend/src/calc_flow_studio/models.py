@@ -3,10 +3,10 @@ from __future__ import annotations
 import math
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 
 from calc_flow import ProjectDocument
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator
 
 type JSONValue = (
     None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
@@ -40,6 +40,143 @@ def _copy_json_value(value: object, *, depth: int = 0) -> JSONValue:
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+def _camel_case(name: str) -> str:
+    head, *tail = name.split("_")
+    return head + "".join(part.capitalize() for part in tail)
+
+
+class CapabilityModel(BaseModel):
+    model_config = ConfigDict(
+        alias_generator=_camel_case,
+        extra="forbid",
+        frozen=True,
+        populate_by_name=True,
+    )
+
+
+class RuntimeSessionScopeResponse(CapabilityModel):
+    kind: Literal["runtimeSession"]
+    session_id: str
+    revision: int = Field(ge=0)
+
+
+class OperatorCapabilityResponse(CapabilityModel):
+    kind: str
+    input_kinds: tuple[Literal["table", "array"], ...]
+    output_kinds: tuple[Literal["table", "array"], ...]
+    requires_datafusion: bool
+
+
+class UdfCapabilityResponse(CapabilityModel):
+    provider: str
+    name: str
+    version: str
+    kind: Literal["data_fusion_scalar"]
+    input_types: tuple[str, ...]
+    return_type: str
+    volatility: str
+
+
+class ProviderPortResponse(CapabilityModel):
+    name: str
+    kind: Literal["table", "array"]
+    required: bool
+
+
+class ProviderOptionResponse(CapabilityModel):
+    name: str
+    value_type: Literal["string", "integer", "number", "boolean"]
+    required: bool = False
+
+
+class ProviderOptionsSchemaResponse(CapabilityModel):
+    fields: tuple[ProviderOptionResponse, ...] = ()
+    additional_properties: Literal[False] = False
+
+
+class ProviderCapabilityResponse(CapabilityModel):
+    provider: str
+    name: str
+    version: str
+    input_ports: tuple[ProviderPortResponse, ...]
+    output_ports: tuple[ProviderPortResponse, ...]
+    options_schema: ProviderOptionsSchemaResponse | None
+
+
+class RuntimeCapabilitiesResponse(CapabilityModel):
+    scope: RuntimeSessionScopeResponse
+    package_version: str
+    project_format_versions: tuple[int, ...]
+    batch_kinds: tuple[Literal["table", "array"], ...]
+    portable_arrow_types: tuple[str, ...]
+    operators: tuple[OperatorCapabilityResponse, ...]
+    udfs: tuple[UdfCapabilityResponse, ...]
+    providers: tuple[ProviderCapabilityResponse, ...]
+
+
+class SerializedWorkerRegistration(CapabilityModel):
+    reconstruction: Literal["serialized"]
+    registration_kind: Literal["provider", "dataFusionScalar"]
+    provider: str
+    name: str
+    version: str
+
+
+class LazyBuiltinWorkerRegistration(CapabilityModel):
+    reconstruction: Literal["lazyBuiltin"]
+    registration_kind: Literal["provider", "dataFusionScalar"]
+    provider: str
+    name: str
+    version: str
+
+
+class UnavailableWorkerRegistration(CapabilityModel):
+    reconstruction: Literal["unavailable"]
+    registration_kind: Literal["provider", "dataFusionScalar"]
+    provider: str
+    name: str
+    version: str
+    reason_code: Literal["serializationFailed"]
+
+
+type WorkerRegistrationCapability = Annotated[
+    SerializedWorkerRegistration
+    | LazyBuiltinWorkerRegistration
+    | UnavailableWorkerRegistration,
+    Field(discriminator="reconstruction"),
+]
+
+
+class PreviewLimit(CapabilityModel):
+    default: int
+    minimum: int
+    maximum: int
+
+
+class PreviewLimitsResponse(CapabilityModel):
+    max_input_bytes: PreviewLimit
+    max_rows: PreviewLimit
+    timeout_seconds: PreviewLimit
+    memory_limit_mb: PreviewLimit
+    output_rows: PreviewLimit
+
+
+class PreviewCapabilitiesResponse(CapabilityModel):
+    input_batch_kinds: tuple[Literal["table", "array"], ...]
+    request_input_formats: tuple[Literal["arrow_ipc", "columns", "records"], ...]
+    project_input_formats: tuple[
+        Literal["arrow_ipc", "csv", "inline_json", "json"], ...
+    ]
+    worker_registrations: tuple[WorkerRegistrationCapability, ...]
+    limits: PreviewLimitsResponse
+
+
+class CapabilitiesResponse(CapabilityModel):
+    schema_version: Literal[1]
+    runtime: RuntimeCapabilitiesResponse
+    preview: PreviewCapabilitiesResponse
 
 
 class RunStatus(StrEnum):
@@ -112,6 +249,32 @@ class CheckpointSummary(StrictModel):
         return _copy_json_value(value)
 
 
+class ValidationIssue(StrictModel):
+    path: str
+    code: str
+    message: str
+
+
+class ValidValidationReport(StrictModel):
+    kind: Literal["valid"] = "valid"
+    valid: Literal[True] = True
+    issues: tuple[ValidationIssue, ...] = Field(default=(), max_length=0)
+    fingerprint: str = Field(min_length=1)
+
+
+class InvalidValidationReport(StrictModel):
+    kind: Literal["invalid"] = "invalid"
+    valid: Literal[False] = False
+    issues: tuple[ValidationIssue, ...] = Field(min_length=1)
+    fingerprint: None = None
+
+
+type ValidationReport = Annotated[
+    ValidValidationReport | InvalidValidationReport,
+    Field(discriminator="kind"),
+]
+
+
 class RunEvent(StrictModel):
     sequence: int
     timestamp: datetime
@@ -119,17 +282,178 @@ class RunEvent(StrictModel):
     message: str
 
 
-class RunResponse(StrictModel):
+class OutputFieldPreview(StrictModel):
+    name: str
+    type: str
+    nullable: bool
+
+
+class TableOutputPreview(StrictModel):
+    kind: Literal["table"] = "table"
+    total_rows: int = Field(ge=0)
+    truncated: bool
+    schema_: tuple[OutputFieldPreview, ...] = Field(
+        alias="schema",
+        serialization_alias="schema",
+    )
+    rows: tuple[dict[str, JSONValue], ...]
+    metadata: dict[str, JSONValue]
+
+    @field_validator("rows", mode="before")
+    @classmethod
+    def copy_rows(cls, value: object) -> JSONValue:
+        return _copy_json_value(value)
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def copy_metadata(cls, value: object) -> JSONValue:
+        return _copy_json_value(value)
+
+
+class ArrayOutputPreview(StrictModel):
+    kind: Literal["array"] = "array"
+    backend: str
+    total_rows: int = Field(ge=0)
+    truncated: bool
+    data: JSONValue
+    metadata: dict[str, JSONValue]
+
+    @field_validator("data", "metadata", mode="before")
+    @classmethod
+    def copy_json(cls, value: object) -> JSONValue:
+        return _copy_json_value(value)
+
+
+type OutputPreview = Annotated[
+    TableOutputPreview | ArrayOutputPreview,
+    Field(discriminator="kind"),
+]
+
+
+class NodeTimingPreview(StrictModel):
+    duration_ns: int = Field(ge=0)
+    input_rows: dict[str, int]
+    output_rows: dict[str, int]
+
+
+class DataFusionMetricPreview(StrictModel):
+    query_id: int = Field(ge=0)
+    node_id: str | None
+    planning_ns: int = Field(ge=0)
+    execution_ns: int = Field(ge=0)
+    output_rows: int = Field(ge=0)
+    logical_plan: str
+    physical_plan: str
+
+
+class RunResultPreview(StrictModel):
+    outputs: dict[str, OutputPreview]
+    node_timings: dict[str, NodeTimingPreview]
+    datafusion_metrics: tuple[DataFusionMetricPreview, ...]
+    metadata: dict[str, JSONValue]
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def copy_metadata(cls, value: object) -> JSONValue:
+        return _copy_json_value(value)
+
+
+class RunResponseBase(StrictModel):
     id: str
     project_id: str
-    status: RunStatus
     created_at: datetime
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
-    error: str | None = None
-    result: dict[str, JSONValue] | None = None
 
-    @field_validator("result", mode="before")
-    @classmethod
-    def copy_result(cls, value: object) -> JSONValue:
-        return _copy_json_value(value)
+
+class PendingRunResponse(RunResponseBase):
+    status: Literal[RunStatus.PENDING]
+    started_at: None = None
+    finished_at: None = None
+    error: None = None
+    result: None = None
+
+
+class RunningRunResponse(RunResponseBase):
+    status: Literal[RunStatus.RUNNING]
+    started_at: datetime
+    finished_at: None = None
+    error: None = None
+    result: None = None
+
+
+class CompletedRunResponse(RunResponseBase):
+    status: Literal[RunStatus.COMPLETED]
+    started_at: datetime
+    finished_at: datetime
+    error: None = None
+    result: RunResultPreview
+
+
+class FailedRunResponse(RunResponseBase):
+    status: Literal[RunStatus.FAILED]
+    started_at: datetime
+    finished_at: datetime
+    error: str = Field(min_length=1)
+    result: None = None
+
+
+class TimedOutRunResponse(RunResponseBase):
+    status: Literal[RunStatus.TIMED_OUT]
+    started_at: datetime
+    finished_at: datetime
+    error: str = Field(min_length=1)
+    result: None = None
+
+
+class CancelledRunResponse(RunResponseBase):
+    status: Literal[RunStatus.CANCELLED]
+    started_at: datetime | None = None
+    finished_at: datetime
+    error: None = None
+    result: None = None
+
+
+type RunResponseVariant = Annotated[
+    PendingRunResponse
+    | RunningRunResponse
+    | CompletedRunResponse
+    | FailedRunResponse
+    | TimedOutRunResponse
+    | CancelledRunResponse,
+    Field(discriminator="status"),
+]
+
+
+class RunResponse(RootModel[RunResponseVariant]):
+    model_config = ConfigDict(frozen=True)
+
+    @property
+    def id(self) -> str:
+        return self.root.id
+
+    @property
+    def project_id(self) -> str:
+        return self.root.project_id
+
+    @property
+    def status(self) -> RunStatus:
+        return self.root.status
+
+    @property
+    def created_at(self) -> datetime:
+        return self.root.created_at
+
+    @property
+    def started_at(self) -> datetime | None:
+        return self.root.started_at
+
+    @property
+    def finished_at(self) -> datetime | None:
+        return self.root.finished_at
+
+    @property
+    def error(self) -> str | None:
+        return self.root.error
+
+    @property
+    def result(self) -> RunResultPreview | None:
+        return self.root.result

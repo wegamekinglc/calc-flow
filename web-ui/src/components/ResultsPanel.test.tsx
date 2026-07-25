@@ -11,13 +11,18 @@ describe('ResultsPanel', () => {
       project_id: 'demo',
       status: 'completed',
       created_at: '2026-01-01T00:00:00Z',
+      started_at: '2026-01-01T00:00:00Z',
+      finished_at: '2026-01-01T00:00:01Z',
+      error: null,
       result: {
         outputs: {
           output: {
             kind: 'table',
             total_rows: 1,
+            truncated: false,
             schema: [{ name: 'total', type: 'int64', nullable: true }],
             rows: [{ total: 3 }],
+            metadata: {},
           },
         },
         node_timings: {
@@ -60,6 +65,7 @@ describe('ResultsPanel', () => {
     render(
       <ResultsPanel
         validation={{
+          kind: 'invalid',
           valid: false,
           issues: [
             { path: 'pipeline.nodes[0]', code: 'invalid_expression', message: 'bad expression' },
@@ -78,6 +84,48 @@ describe('ResultsPanel', () => {
     expect(screen.getByText('bad expression')).toBeInTheDocument();
   });
 
+  it('renders zero-length and Unicode array outputs from the generated union', () => {
+    const run: RunResponse = {
+      id: 'run',
+      project_id: 'demo',
+      status: 'completed',
+      created_at: '2026-01-01T00:00:00Z',
+      started_at: '2026-01-01T00:00:00Z',
+      finished_at: '2026-01-01T00:00:01Z',
+      error: null,
+      result: {
+        outputs: {
+          空数组: {
+            kind: 'array',
+            backend: 'numpy',
+            total_rows: 0,
+            truncated: false,
+            data: [],
+            metadata: { source: '数组' },
+          },
+        },
+        node_timings: {},
+        datafusion_metrics: [],
+        metadata: {},
+      },
+    };
+
+    render(
+      <ResultsPanel
+        validation={null}
+        run={run}
+        metricsWidth={330}
+        onMetricsWidthChange={vi.fn()}
+        onMetricsWidthReset={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('空数组')).toBeInTheDocument();
+    expect(screen.getByText('0 rows')).toBeInTheDocument();
+    expect(screen.getByText('[]')).toBeInTheDocument();
+  });
+
   it('resizes the metrics panel with an end-growing separator', () => {
     const onMetricsWidthChange = vi.fn();
     const run: RunResponse = {
@@ -85,13 +133,18 @@ describe('ResultsPanel', () => {
       project_id: 'demo',
       status: 'completed',
       created_at: '2026-01-01T00:00:00Z',
+      started_at: '2026-01-01T00:00:00Z',
+      finished_at: '2026-01-01T00:00:01Z',
+      error: null,
       result: {
         outputs: {
           output: {
             kind: 'table',
             total_rows: 1,
+            truncated: false,
             schema: [{ name: 'total', type: 'int64', nullable: true }],
             rows: [{ total: 3 }],
+            metadata: {},
           },
         },
         node_timings: {},
