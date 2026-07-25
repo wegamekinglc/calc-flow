@@ -215,11 +215,7 @@ def create_app(
                 selected_runtime.validation_report, project.canonical_json()
             )
         except CalcFlowError as error:
-            raise _http_error(
-                status.HTTP_500_INTERNAL_SERVER_ERROR,
-                "runtime validation report violates the v1 contract at "
-                f"<root>: {type(error).__name__}",
-            ) from error
+            raise _native_error(error, operation="validate") from error
         normalized = dict(report) if type(report) is dict else report
         if isinstance(normalized, dict) and "kind" not in normalized:
             valid = normalized.get("valid")

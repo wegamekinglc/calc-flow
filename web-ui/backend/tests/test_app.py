@@ -10,6 +10,7 @@ from typing import Any
 import pyarrow as pa
 import pytest
 from calc_flow import (
+    CalcFlowError,
     FileCheckpointStore,
     FileProjectStore,
     PipelineBuilder,
@@ -453,6 +454,32 @@ def test_every_validation_caller_treats_malformed_runtime_data_as_internal(
     )
     assert stored.json()["name"] == "Alpha"
     assert [project["id"] for project in listed.json()] == ["project_alpha"]
+
+
+def test_validation_route_preserves_native_calc_flow_error_details(
+    tmp_path,
+) -> None:
+    class FailingRuntime:
+        should_fail = False
+
+        def validation_report(self, project_json: str) -> dict[str, object]:
+            json.loads(project_json)
+            if self.should_fail:
+                raise CalcFlowError(
+                    "pipeline.nodes[0]: provider test:missing@1 is not registered"
+                )
+            return {"valid": True, "issues": [], "fingerprint": "valid"}
+
+    runtime = FailingRuntime()
+    with _client(tmp_path, runtime=runtime) as client:
+        assert _create(client).status_code == 201
+        runtime.should_fail = True
+        response = client.post(f"{API_PREFIX}/projects/project_alpha/validate")
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": "pipeline.nodes[0]: provider test:missing@1 is not registered"
+    }
 
 
 def test_project_crud_preserves_client_ids_sorting_and_request_values(tmp_path) -> None:
