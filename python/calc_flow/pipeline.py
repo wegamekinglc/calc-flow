@@ -106,7 +106,13 @@ class Runtime:
         callback: Any,
         *,
         options_schema: ProviderOptionsSchema | None = None,
+        accepts_context: bool = False,
     ) -> None:
+        if type(accepts_context) is not bool:
+            raise TypeError(
+                "accepts_context must be an exact bool; "
+                f"found {type(accepts_context).__name__}"
+            )
         if options_schema is not None and not isinstance(
             options_schema, ProviderOptionsSchema
         ):
@@ -115,17 +121,24 @@ class Runtime:
                 f"found {type(options_schema).__name__}"
             )
         with self._registration_lock:
-            self._inner.register_provider(provider, name, version, callback)
-            self._registrations.append(
-                {
-                    "kind": "provider",
-                    "provider": provider,
-                    "name": name,
-                    "version": version,
-                    "callback": callback,
-                    "options_schema": options_schema,
-                }
+            self._inner.register_provider(
+                provider,
+                name,
+                version,
+                callback,
+                accepts_context=accepts_context,
             )
+            registration = {
+                "kind": "provider",
+                "provider": provider,
+                "name": name,
+                "version": version,
+                "callback": callback,
+                "options_schema": options_schema,
+            }
+            if accepts_context:
+                registration["accepts_context"] = True
+            self._registrations.append(registration)
 
     def _register_mapping_provider(
         self,
@@ -137,7 +150,13 @@ class Runtime:
         input_ports: Sequence[tuple[str, str]],
         output_ports: Sequence[tuple[str, str]],
         options_schema: ProviderOptionsSchema | None = None,
+        accepts_context: bool = False,
     ) -> None:
+        if type(accepts_context) is not bool:
+            raise TypeError(
+                "accepts_context must be an exact bool; "
+                f"found {type(accepts_context).__name__}"
+            )
         if options_schema is not None and not isinstance(
             options_schema, ProviderOptionsSchema
         ):
@@ -155,20 +174,22 @@ class Runtime:
                 callback,
                 input_ports=copied_inputs,
                 output_ports=copied_outputs,
+                accepts_context=accepts_context,
             )
-            self._registrations.append(
-                {
-                    "kind": "provider",
-                    "provider_mode": "mapping",
-                    "provider": provider,
-                    "name": name,
-                    "version": version,
-                    "callback": callback,
-                    "input_ports": copied_inputs,
-                    "output_ports": copied_outputs,
-                    "options_schema": options_schema,
-                }
-            )
+            registration = {
+                "kind": "provider",
+                "provider_mode": "mapping",
+                "provider": provider,
+                "name": name,
+                "version": version,
+                "callback": callback,
+                "input_ports": copied_inputs,
+                "output_ports": copied_outputs,
+                "options_schema": options_schema,
+            }
+            if accepts_context:
+                registration["accepts_context"] = True
+            self._registrations.append(registration)
 
     def register_scalar_udf(
         self,
@@ -276,7 +297,14 @@ class ExecutionPlan:
     def fingerprint(self) -> str:
         return self._inner.fingerprint
 
-    def execute(self, inputs: Mapping[str, _native.Batch]) -> _native.RunResult:
+    def execute(
+        self,
+        inputs: Mapping[str, _native.Batch],
+        *,
+        options: _native.ExecutionOptions | None = None,
+    ) -> _native.RunResult:
+        if options is not None and type(options) is not _native.ExecutionOptions:
+            raise TypeError("options must be a calc_flow.ExecutionOptions or None")
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -285,15 +313,36 @@ class ExecutionPlan:
             raise RuntimeError(
                 "execute() cannot run inside an event loop; use execute_async()"
             )
-        return self._inner.execute(dict(inputs))
+        return self._inner.execute(dict(inputs), options=options)
 
     def execute_async(
-        self, inputs: Mapping[str, _native.Batch]
+        self,
+        inputs: Mapping[str, _native.Batch],
+        *,
+        options: _native.ExecutionOptions | None = None,
     ) -> Awaitable[_native.RunResult]:
+        if options is not None and type(options) is not _native.ExecutionOptions:
+            raise TypeError("options must be a calc_flow.ExecutionOptions or None")
         copied = dict(inputs)
 
         async def execute() -> _native.RunResult:
-            return await self._inner.execute_async(copied)
+            native, cancellation = self._inner._execute_async_cancellable(
+                copied, options=options
+            )
+            try:
+                return await asyncio.shield(native)
+            except asyncio.CancelledError as cancelled:
+                if native.done():
+                    return native.result()
+                cancellation.cancel()
+                while not native.done():
+                    try:
+                        await asyncio.shield(native)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                raise cancelled
 
         return execute()
 

@@ -637,6 +637,7 @@ def _restore_registrations(
                     registration["callback"],
                     input_ports=registration["input_ports"],
                     output_ports=registration["output_ports"],
+                    accepts_context=registration.get("accepts_context", False),
                     **options,
                 )
             else:
@@ -645,6 +646,7 @@ def _restore_registrations(
                     registration["name"],
                     registration["version"],
                     registration["callback"],
+                    accepts_context=registration.get("accepts_context", False),
                     **options,
                 )
         elif registration["kind"] == "scalar_udf":

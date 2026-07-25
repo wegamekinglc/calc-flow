@@ -759,7 +759,7 @@ def test_capabilities_reject_a_malformed_runtime_snapshot() -> None:
     manager.shutdown()
 
 
-def test_worker_restores_mapping_and_legacy_provider_modes() -> None:
+def test_worker_restores_mapping_and_context_provider_modes() -> None:
     calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
     options_schema = ProviderOptionsSchema(
         fields=(ProviderOption("expression", "string", required=True),)
@@ -779,10 +779,31 @@ def test_worker_restores_mapping_and_legacy_provider_modes() -> None:
         {
             "kind": "provider",
             "provider": "test",
+            "name": "context_identity",
+            "version": "1",
+            "callback": callback,
+            "options_schema": options_schema,
+            "accepts_context": True,
+        },
+        {
+            "kind": "provider",
+            "provider": "test",
             "name": "identity",
             "version": "1",
             "callback": callback,
             "options_schema": options_schema,
+        },
+        {
+            "kind": "provider",
+            "provider_mode": "mapping",
+            "provider": "test",
+            "name": "context_table_matmul",
+            "version": "1",
+            "callback": callback,
+            "input_ports": (("table", "table"), ("weights", "array")),
+            "output_ports": (("output", "array"),),
+            "options_schema": options_schema,
+            "accepts_context": True,
         },
         {
             "kind": "provider",
@@ -802,8 +823,23 @@ def test_worker_restores_mapping_and_legacy_provider_modes() -> None:
     assert calls == [
         (
             "legacy",
+            ("test", "context_identity", "1", callback),
+            {"accepts_context": True, "options_schema": options_schema},
+        ),
+        (
+            "legacy",
             ("test", "identity", "1", callback),
-            {"options_schema": options_schema},
+            {"accepts_context": False, "options_schema": options_schema},
+        ),
+        (
+            "mapping",
+            ("test", "context_table_matmul", "1", callback),
+            {
+                "input_ports": (("table", "table"), ("weights", "array")),
+                "output_ports": (("output", "array"),),
+                "accepts_context": True,
+                "options_schema": options_schema,
+            },
         ),
         (
             "mapping",
@@ -811,6 +847,7 @@ def test_worker_restores_mapping_and_legacy_provider_modes() -> None:
             {
                 "input_ports": (("table", "table"), ("weights", "array")),
                 "output_ports": (("output", "array"),),
+                "accepts_context": False,
                 "options_schema": options_schema,
             },
         ),

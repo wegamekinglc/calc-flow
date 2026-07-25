@@ -9,6 +9,7 @@ use pyo3::{
 };
 
 use crate::batch::PyBatch;
+use crate::execution_options::{PyExecutionCancellation, PyExecutionOptions};
 
 const CLEARED_PLAN_MESSAGE: &str = "ExecutionPlan has been cleared by garbage collection";
 const CLEARED_RESULT_MESSAGE: &str = "RunResult has been cleared by garbage collection";
@@ -127,6 +128,30 @@ impl PyExecutionPlan {
             owner,
         })
     }
+
+    fn execute_async_future<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        inputs: &Bound<'py, PyDict>,
+        options: Option<PyRef<'py, PyExecutionOptions>>,
+    ) -> PyResult<(Bound<'py, PyAny>, calc_flow::CancellationToken)> {
+        let inputs = extract_inputs(inputs)?;
+        let options = options.map_or_else(calc_flow::ExecutionOptions::default, |value| {
+            value.to_core()
+        });
+        let cancellation = options.cancellation.clone();
+        let ExecutionPlanOwner { inner, owner, .. } = Self::owned(slf, py)?;
+        let future = pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let result = inner
+                .execute(inputs, options)
+                .await
+                .map_err(crate::error::to_py_err)?;
+            let result = Python::attach(|py| PyRunResult::from_inner(py, result));
+            drop(owner);
+            result
+        })?;
+        Ok((future, cancellation))
+    }
 }
 
 #[pymethods]
@@ -141,33 +166,48 @@ impl PyExecutionPlan {
         self.identity().map(|(_, fingerprint)| fingerprint)
     }
 
-    fn execute(&self, py: Python<'_>, inputs: &Bound<'_, PyDict>) -> PyResult<PyRunResult> {
+    #[pyo3(signature = (inputs, *, options = None))]
+    fn execute(
+        &self,
+        py: Python<'_>,
+        inputs: &Bound<'_, PyDict>,
+        options: Option<PyRef<'_, PyExecutionOptions>>,
+    ) -> PyResult<PyRunResult> {
         let inputs = extract_inputs(inputs)?;
+        let options = options.map_or_else(calc_flow::ExecutionOptions::default, |value| {
+            value.to_core()
+        });
         let (plan, runtime) = self.execution_handles()?;
         let result = py.detach(move || {
             runtime
-                .block_on(plan.execute(inputs, calc_flow::ExecutionOptions::default()))
+                .block_on(plan.execute(inputs, options))
                 .map_err(crate::error::to_py_err)
         })?;
         PyRunResult::from_inner(py, result)
     }
 
+    #[pyo3(signature = (inputs, *, options = None))]
     fn execute_async<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
         inputs: &Bound<'py, PyDict>,
+        options: Option<PyRef<'py, PyExecutionOptions>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let inputs = extract_inputs(inputs)?;
-        let ExecutionPlanOwner { inner, owner, .. } = Self::owned(slf, py)?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result = inner
-                .execute(inputs, calc_flow::ExecutionOptions::default())
-                .await
-                .map_err(crate::error::to_py_err)?;
-            let result = Python::attach(|py| PyRunResult::from_inner(py, result));
-            drop(owner);
-            result
-        })
+        Self::execute_async_future(slf, py, inputs, options).map(|(future, _)| future)
+    }
+
+    #[pyo3(signature = (inputs, *, options = None))]
+    fn _execute_async_cancellable<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        inputs: &Bound<'py, PyDict>,
+        options: Option<PyRef<'py, PyExecutionOptions>>,
+    ) -> PyResult<(Bound<'py, PyAny>, Py<PyExecutionCancellation>)> {
+        let (future, cancellation) = Self::execute_async_future(slf, py, inputs, options)?;
+        Ok((
+            future,
+            Py::new(py, PyExecutionCancellation::new(cancellation))?,
+        ))
     }
 
     fn snapshot_async<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -726,7 +766,7 @@ mod tests {
             inputs
                 .set_item("input", Py::new(py, batch()).unwrap())
                 .unwrap();
-            let result = plan().execute(py, &inputs).unwrap();
+            let result = plan().execute(py, &inputs, None).unwrap();
 
             let outputs = result.outputs(py).unwrap();
             assert_eq!(outputs.len(), 1);
@@ -930,7 +970,7 @@ mod tests {
                     .unwrap();
                 let inputs = PyDict::new(py);
                 inputs.set_item("input", &batch).unwrap();
-                let result = Py::new(py, native_plan.execute(py, &inputs).unwrap()).unwrap();
+                let result = Py::new(py, native_plan.execute(py, &inputs, None).unwrap()).unwrap();
                 let outputs = result.bind(py).getattr("outputs").unwrap();
                 let output = outputs.get_item("output").unwrap();
                 holder.setattr("input", &batch).unwrap();
@@ -985,7 +1025,7 @@ mod tests {
             inputs
                 .set_item("input", Py::new(py, batch()).unwrap())
                 .unwrap();
-            let result = plan.borrow(py).execute(py, &inputs).unwrap();
+            let result = plan.borrow(py).execute(py, &inputs, None).unwrap();
 
             result.__clear__();
             let result_errors = [
@@ -1007,7 +1047,7 @@ mod tests {
 
             plan.borrow(py).__clear__();
             let plan_errors = [
-                match plan.borrow(py).execute(py, &inputs) {
+                match plan.borrow(py).execute(py, &inputs, None) {
                     Ok(_) => panic!("a cleared plan must reject blocking execution"),
                     Err(error) => error,
                 },

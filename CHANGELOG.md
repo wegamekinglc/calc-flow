@@ -5,6 +5,9 @@ engine or Studio capabilities.
 
 ## 2026-07
 
+- Add frozen Python `ExecutionOptions(settings, deadline)` to blocking and
+  async plan execution, with strict copied JSON settings, cooperative UTC
+  deadlines, cancellation cleanup, and opt-in provider `ProviderContext`.
 - Add versioned Studio runtime and preview-worker discovery at
   `GET /api/v2/capabilities`, and model validation, run-state, and table/array
   result responses as closed unions. This is an intentional generated

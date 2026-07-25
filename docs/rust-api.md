@@ -256,3 +256,7 @@ checkpoint errors, I/O paths, and cancellation.
 
 `ExecutionOptions` carries cancellation/deadline controls. Operators receive a
 `RunContext` and must check cancellation at safe work boundaries.
+`RunContext::settings()` returns the immutable run settings and
+`RunContext::deadline()` returns the optional absolute UTC deadline by
+reference, allowing providers to observe the authoritative run context without
+duplicating it.

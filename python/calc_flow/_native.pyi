@@ -1,7 +1,13 @@
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Protocol, TypedDict
+from datetime import datetime
+from typing import Never, Protocol, TypedDict, final
 
 import pyarrow as pa
+
+type JSONValue = (
+    None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
+)
 
 class _ArrowCStream(Protocol):
     def __arrow_c_stream__(
@@ -15,6 +21,31 @@ class ExecutionError(CalcFlowError): ...
 class ProviderError(ExecutionError): ...
 class CheckpointError(CalcFlowError): ...
 class CancelledError(ExecutionError): ...
+
+@final
+class ExecutionOptions:
+    def __init__(
+        self,
+        settings: Mapping[str, JSONValue] = ...,
+        deadline: datetime | None = None,
+    ) -> None: ...
+    @property
+    def settings(self) -> dict[str, JSONValue]: ...
+    @property
+    def deadline(self) -> datetime | None: ...
+
+@final
+class ProviderContext:
+    def __new__(cls) -> Never:
+        """Engine-created; application construction is not public API."""
+        ...
+    @property
+    def settings(self) -> dict[str, JSONValue]: ...
+    @property
+    def deadline(self) -> datetime | None: ...
+
+class _ExecutionCancellation:
+    def cancel(self) -> None: ...
 
 class Batch:
     @staticmethod
@@ -64,7 +95,13 @@ class Batch:
 class Runtime:
     def __init__(self) -> None: ...
     def register_provider(
-        self, provider: str, name: str, version: str, callback: object
+        self,
+        provider: str,
+        name: str,
+        version: str,
+        callback: object,
+        *,
+        accepts_context: bool = False,
     ) -> None: ...
     def _register_mapping_provider(
         self,
@@ -75,6 +112,7 @@ class Runtime:
         *,
         input_ports: Sequence[tuple[str, str]],
         output_ports: Sequence[tuple[str, str]],
+        accepts_context: bool = False,
     ) -> None: ...
     def register_scalar_udf(
         self,
@@ -96,8 +134,24 @@ class ExecutionPlan:
     def name(self) -> str: ...
     @property
     def fingerprint(self) -> str: ...
-    def execute(self, inputs: dict[str, Batch]) -> RunResult: ...
-    def execute_async(self, inputs: dict[str, Batch]) -> Awaitable[RunResult]: ...
+    def execute(
+        self,
+        inputs: dict[str, Batch],
+        *,
+        options: ExecutionOptions | None = None,
+    ) -> RunResult: ...
+    def execute_async(
+        self,
+        inputs: dict[str, Batch],
+        *,
+        options: ExecutionOptions | None = None,
+    ) -> Awaitable[RunResult]: ...
+    def _execute_async_cancellable(
+        self,
+        inputs: dict[str, Batch],
+        *,
+        options: ExecutionOptions | None = None,
+    ) -> tuple[asyncio.Future[RunResult], _ExecutionCancellation]: ...
     def snapshot_async(self) -> Awaitable[dict[str, object]]: ...
     def restore_async(self, state_json: str) -> Awaitable[None]: ...
     def reset_async(self) -> Awaitable[None]: ...

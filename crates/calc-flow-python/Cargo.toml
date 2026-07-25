@@ -15,6 +15,7 @@ crate-type = ["cdylib"]
 [dependencies]
 async-trait.workspace = true
 calc-flow = { path = "../calc-flow", version = "=2.0.0" }
+chrono.workspace = true
 datafusion.workspace = true
 ndarray = "0.17.2"
 num-complex = "0.4.6"

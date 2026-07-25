@@ -34,17 +34,21 @@ calc-flow = "2.0.0"
 ## Python quickstart
 
 ```python
+from datetime import UTC, datetime, timedelta
+
 import pyarrow as pa
 
-from calc_flow import Batch, PipelineBuilder
+from calc_flow import Batch, ExecutionOptions, PipelineBuilder
 
 batch = Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))
-plan = (
-    PipelineBuilder("totals")
-    .expression("calculate", "total = a + b")
-    .compile()
+plan = PipelineBuilder("totals").expression("calculate", "total = a + b").compile()
+result = plan.execute(
+    {"input": batch},
+    options=ExecutionOptions(
+        settings={"request": {"source": "readme"}},
+        deadline=datetime.now(UTC) + timedelta(seconds=30),
+    ),
 )
-result = plan.execute({"input": batch})
 
 assert result.outputs["output"].to_pyarrow()["total"].to_pylist() == [3, 7]
 ```
@@ -52,6 +56,8 @@ assert result.outputs["output"].to_pyarrow()["total"].to_pylist() == [3, 7]
 `PipelineBuilder` is functional: every method returns a new builder and leaves
 its input unchanged. Unconnected input ports become graph inputs; unconnected
 output ports become graph outputs. Use `execute_async()` inside an event loop.
+Both execution forms accept keyword-only, frozen `ExecutionOptions` carrying
+copied strict-JSON settings and an optional timezone-aware UTC deadline.
 
 See [the Python API guide](docs/python-api.md) and the executable
 [examples](examples/README.md) for SQL, Python scalar UDFs, micro-batch
@@ -171,6 +177,8 @@ Python package is not a second engine.
   return an empty DataFusion metrics list.
 - Every graph run returns named outputs, per-node row counts/timings, and run
   metadata; table work additionally reports DataFusion plans and timings.
+- Python executions accept reusable frozen `ExecutionOptions` with copied
+  strict-JSON settings and a cooperative timezone-aware UTC deadline.
 - Micro-batch and streaming runners deliver sinks before committing
   checkpoints. Delivery is at least once, and failed delivery restores owned
   in-memory state.

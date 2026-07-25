@@ -88,12 +88,28 @@ Import the main surface from `calc_flow`.
 - `compile(runtime=None) -> ExecutionPlan`.
 
 `ExecutionPlan` exposes immutable `name` and `fingerprint`.
-`execute(inputs)` is blocking and rejects a running event loop.
-`execute_async(inputs)` is the asynchronous form. `snapshot[_async]`,
+`execute(inputs, *, options=None)` is blocking and rejects a running event
+loop. `execute_async(inputs, *, options=None)` is the asynchronous form.
+`snapshot[_async]`,
 `restore[_async]`, and `reset[_async]` provide the plan-state lifecycle.
 
 `RunResult` exposes defensive `outputs`, `metadata`, `node_timings`, and
 `datafusion_metrics` values.
+
+`ExecutionOptions(settings=..., deadline=None)` is frozen and reusable; an
+omitted settings argument creates an empty mapping.
+`settings` must be a mapping whose complete object graph is strict JSON:
+string keys; exact `None`, `bool`, `int`, finite `float`, `str`, `list`, and
+`dict` values; 64-bit integer bounds; no cycles; and at most 32 container
+levels. Calc Flow copies the caller's graph at construction and returns fresh
+copies from the getter. `deadline` must be a timezone-aware UTC `datetime`
+with a zero offset and is normalized without losing microseconds.
+
+An expired or crossed deadline raises `calc_flow.CancelledError`. Native
+deadline and cancellation checks are cooperative at safe execution
+boundaries, with state rolled back before the plan is reusable. Cancelling the
+Python task returned by `execute_async` raises `asyncio.CancelledError` only
+after native cleanup. Python does not expose a native cancellation token.
 
 ### Runtime and UDFs
 
@@ -103,6 +119,14 @@ exposes an immutable runtime-session capability snapshot through
 `capabilities()`.
 `register_scalar_udf` requires provider/name/version, exact input type names,
 return type, volatility, and a vectorized callable.
+
+`register_provider` and `register_mapping_provider` accept keyword-only
+`accepts_context=False`. The default preserves the two-argument callback ABI
+`(inputs, options)`. When set to the exact boolean `True`, the callback is
+invoked once as `(inputs, options, context)`. The frozen, engine-created
+`ProviderContext` exposes defensive `settings` and `deadline` observations.
+Calc Flow does not inspect callback signatures or retry a call with another
+arity.
 
 Capability schema version 1 contains only frozen data:
 `RuntimeSessionScope`, `OperatorCapability`, `UdfCapability`,
