@@ -437,7 +437,8 @@ mod tests {
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     };
-    use pyo3::types::{PyDict, PyList};
+    use parking_lot::Mutex;
+    use pyo3::types::{PyDict, PyList, PyTuple};
 
     use super::*;
 
@@ -487,6 +488,22 @@ mod tests {
         release: Arc<tokio::sync::Notify>,
         calls: Arc<AtomicUsize>,
         validations: Arc<AtomicUsize>,
+        input: Vec<calc_flow::Port>,
+        output: Vec<calc_flow::Port>,
+    }
+
+    struct StatefulGatedPassthrough {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        calls: Arc<AtomicUsize>,
+        baselines: Arc<Mutex<Vec<usize>>>,
+        state: usize,
+        input: Vec<calc_flow::Port>,
+        output: Vec<calc_flow::Port>,
+    }
+
+    struct CountingPassthrough {
+        calls: Arc<AtomicUsize>,
         input: Vec<calc_flow::Port>,
         output: Vec<calc_flow::Port>,
     }
@@ -566,6 +583,82 @@ mod tests {
                 self.started.notify_one();
                 std::future::pending::<()>().await;
             }
+            Ok(BTreeMap::from([("output".into(), inputs["input"].clone())]))
+        }
+    }
+
+    #[async_trait]
+    impl calc_flow::Operator for StatefulGatedPassthrough {
+        fn name(&self) -> &'static str {
+            "stateful_gate"
+        }
+
+        fn input_ports(&self) -> &[calc_flow::Port] {
+            &self.input
+        }
+
+        fn output_ports(&self) -> &[calc_flow::Port] {
+            &self.output
+        }
+
+        fn configuration(&self) -> calc_flow::JsonMap {
+            BTreeMap::new()
+        }
+
+        async fn process(
+            &mut self,
+            inputs: &BTreeMap<String, calc_flow::Batch>,
+            _context: &calc_flow::OperatorContext<'_>,
+        ) -> calc_flow::Result<BTreeMap<String, calc_flow::Batch>> {
+            self.baselines.lock().push(self.state);
+            self.state += 1;
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.started.notify_one();
+                self.release.notified().await;
+            }
+            Ok(BTreeMap::from([("output".into(), inputs["input"].clone())]))
+        }
+
+        fn snapshot(&self) -> calc_flow::Result<serde_json::Value> {
+            Ok(serde_json::json!(self.state))
+        }
+
+        fn restore(&mut self, state: &serde_json::Value) -> calc_flow::Result<()> {
+            let state = state
+                .as_u64()
+                .and_then(|state| usize::try_from(state).ok())
+                .ok_or_else(|| calc_flow::CalcFlowError::Format {
+                    message: "stateful gate snapshot must be an unsigned integer".into(),
+                })?;
+            self.state = state;
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl calc_flow::Operator for CountingPassthrough {
+        fn name(&self) -> &'static str {
+            "downstream"
+        }
+
+        fn input_ports(&self) -> &[calc_flow::Port] {
+            &self.input
+        }
+
+        fn output_ports(&self) -> &[calc_flow::Port] {
+            &self.output
+        }
+
+        fn configuration(&self) -> calc_flow::JsonMap {
+            BTreeMap::new()
+        }
+
+        async fn process(
+            &mut self,
+            inputs: &BTreeMap<String, calc_flow::Batch>,
+            _context: &calc_flow::OperatorContext<'_>,
+        ) -> calc_flow::Result<BTreeMap<String, calc_flow::Batch>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(BTreeMap::from([("output".into(), inputs["input"].clone())]))
         }
     }
@@ -673,6 +766,56 @@ mod tests {
                         output: vec![output],
                     }),
                 )
+                .unwrap()
+                .compile(&calc_flow::UdfRegistry::new().snapshot())
+                .unwrap(),
+        )
+    }
+
+    fn stateful_cancellation_plan(
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        calls: Arc<AtomicUsize>,
+        baselines: Arc<Mutex<Vec<usize>>>,
+        downstream_calls: Arc<AtomicUsize>,
+    ) -> Arc<calc_flow::ExecutionPlan> {
+        let gate_input =
+            calc_flow::Port::new("input", calc_flow::BatchKind::Table, true, None).unwrap();
+        let gate_output =
+            calc_flow::Port::new("output", calc_flow::BatchKind::Table, true, None).unwrap();
+        let downstream_input =
+            calc_flow::Port::new("input", calc_flow::BatchKind::Table, true, None).unwrap();
+        let downstream_output =
+            calc_flow::Port::new("output", calc_flow::BatchKind::Table, true, None).unwrap();
+        Arc::new(
+            calc_flow::PipelineBuilder::new("stateful_cancellation")
+                .unwrap()
+                .add_node(
+                    "gate",
+                    Box::new(StatefulGatedPassthrough {
+                        started,
+                        release,
+                        calls,
+                        baselines,
+                        state: 0,
+                        input: vec![gate_input],
+                        output: vec![gate_output],
+                    }),
+                )
+                .unwrap()
+                .add_node(
+                    "downstream",
+                    Box::new(CountingPassthrough {
+                        calls: downstream_calls,
+                        input: vec![downstream_input],
+                        output: vec![downstream_output],
+                    }),
+                )
+                .unwrap()
+                .connect(calc_flow::Edge::new(
+                    calc_flow::PortEndpoint::new("gate", "output").unwrap(),
+                    calc_flow::PortEndpoint::new("downstream", "input").unwrap(),
+                ))
                 .unwrap()
                 .compile(&calc_flow::UdfRegistry::new().snapshot())
                 .unwrap(),
@@ -900,6 +1043,96 @@ mod tests {
                     .unwrap(),
                 1
             );
+        });
+    }
+
+    #[test]
+    fn private_async_cancellation_rolls_back_state_and_skips_downstream() {
+        Python::initialize();
+        Python::attach(|py| {
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let calls = Arc::new(AtomicUsize::new(0));
+            let baselines = Arc::new(Mutex::new(Vec::new()));
+            let downstream_calls = Arc::new(AtomicUsize::new(0));
+            let plan = PyExecutionPlan::new(
+                stateful_cancellation_plan(
+                    Arc::clone(&started),
+                    Arc::clone(&release),
+                    Arc::clone(&calls),
+                    Arc::clone(&baselines),
+                    Arc::clone(&downstream_calls),
+                ),
+                Arc::new(tokio::runtime::Runtime::new().unwrap()),
+                Vec::new(),
+            );
+            let locals = PyDict::new(py);
+            locals.set_item("plan", Py::new(py, plan).unwrap()).unwrap();
+            locals
+                .set_item("batch", Py::new(py, batch()).unwrap())
+                .unwrap();
+            locals
+                .set_item("started", Py::new(py, StartSignal { started }).unwrap())
+                .unwrap();
+            locals
+                .set_item("release", Py::new(py, ReleaseSignal { release }).unwrap())
+                .unwrap();
+
+            py.run(
+                pyo3::ffi::c_str!(
+                    "import asyncio\nasync def run():\n    execution, cancellation = plan._execute_async_cancellable({'input': batch})\n    await started.wait()\n    cancellation.cancel()\n    release.fire()\n    try:\n        await execution\n    except Exception as error:\n        assert type(error).__name__ == 'CancelledError'\n    else:\n        raise AssertionError('cancelled native execution unexpectedly succeeded')\n    rolled_back = await plan.snapshot_async()\n    recovered = await plan.execute_async({'input': batch})\n    after_recovery = await plan.snapshot_async()\n    return rolled_back, after_recovery, recovered\nstates = asyncio.run(run())"
+                ),
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+
+            let states = locals
+                .get_item("states")
+                .unwrap()
+                .unwrap()
+                .cast_into::<PyTuple>()
+                .unwrap();
+            let rolled_back = states.get_item(0).unwrap().cast_into::<PyDict>().unwrap();
+            assert_eq!(
+                rolled_back
+                    .get_item("gate")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                0
+            );
+            assert!(
+                rolled_back
+                    .get_item("downstream")
+                    .unwrap()
+                    .unwrap()
+                    .is_none()
+            );
+            let after_recovery = states.get_item(1).unwrap().cast_into::<PyDict>().unwrap();
+            assert_eq!(
+                after_recovery
+                    .get_item("gate")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                states
+                    .get_item(2)
+                    .unwrap()
+                    .getattr("outputs")
+                    .unwrap()
+                    .len()
+                    .unwrap(),
+                1
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            assert_eq!(*baselines.lock(), vec![0, 0]);
+            assert_eq!(downstream_calls.load(Ordering::SeqCst), 1);
         });
     }
 

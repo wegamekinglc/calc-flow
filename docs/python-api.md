@@ -195,9 +195,9 @@ Provider callbacks remain two-argument callables unless the registration
 explicitly opts into run context:
 
 ```python
-def contextual_provider(inputs, provider_options, context):
+def contextual_provider(batch, provider_options, context):
     tenant = (context.settings or {}).get("request", {}).get("tenant")
-    return inputs["input"]
+    return batch
 
 
 runtime.register_provider(

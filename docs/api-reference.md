@@ -120,7 +120,7 @@ exposes an immutable runtime-session capability snapshot through
 `register_scalar_udf` requires provider/name/version, exact input type names,
 return type, volatility, and a vectorized callable.
 
-`register_provider` and `register_mapping_provider` accept keyword-only
+`register_provider` and `_register_mapping_provider` accept keyword-only
 `accepts_context=False`. The default preserves the two-argument callback ABI
 `(inputs, options)`. When set to the exact boolean `True`, the callback is
 invoked once as `(inputs, options, context)`. The frozen, engine-created

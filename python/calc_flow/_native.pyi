@@ -44,7 +44,7 @@ class ProviderContext:
     @property
     def deadline(self) -> datetime | None: ...
 
-class _ExecutionCancellation:
+class _ExecutionCancellation(Protocol):
     def cancel(self) -> None: ...
 
 class Batch:

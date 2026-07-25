@@ -732,3 +732,72 @@ def test_async_task_cancellation_waits_for_cleanup_and_reuses_options() -> None:
     assert calls == 2
     assert payload_ref() is None
     assert options.settings == {"request": 7}
+
+
+def test_async_task_cancellation_wins_when_native_completes_after_acceptance() -> None:
+    class Cancellation:
+        cancelled = False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    class Inner:
+        def __init__(
+            self, future: asyncio.Future[object], cancellation: Cancellation
+        ) -> None:
+            self.future = future
+            self.cancellation = cancellation
+
+        def _execute_async_cancellable(
+            self, _inputs: dict[str, Batch], *, options: object
+        ) -> tuple[asyncio.Future[object], Cancellation]:
+            return self.future, self.cancellation
+
+    async def exercise() -> None:
+        future: asyncio.Future[object] = asyncio.get_running_loop().create_future()
+        cancellation = Cancellation()
+        plan = calc_flow.pipeline.ExecutionPlan(Inner(future, cancellation))  # type: ignore[arg-type]
+        execution = asyncio.create_task(plan.execute_async({}))
+        await asyncio.sleep(0)
+
+        assert execution.cancel()
+        future.set_result("core-result")
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+        assert cancellation.cancelled
+
+    asyncio.run(exercise())
+
+
+def test_native_completion_wins_when_it_precedes_task_cancellation() -> None:
+    class Cancellation:
+        cancelled = False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    class Inner:
+        def __init__(
+            self, future: asyncio.Future[object], cancellation: Cancellation
+        ) -> None:
+            self.future = future
+            self.cancellation = cancellation
+
+        def _execute_async_cancellable(
+            self, _inputs: dict[str, Batch], *, options: object
+        ) -> tuple[asyncio.Future[object], Cancellation]:
+            return self.future, self.cancellation
+
+    async def exercise() -> None:
+        future: asyncio.Future[object] = asyncio.get_running_loop().create_future()
+        cancellation = Cancellation()
+        plan = calc_flow.pipeline.ExecutionPlan(Inner(future, cancellation))  # type: ignore[arg-type]
+        execution = asyncio.create_task(plan.execute_async({}))
+        await asyncio.sleep(0)
+
+        future.set_result("core-result")
+        assert execution.cancel()
+        assert await execution == "core-result"
+        assert not cancellation.cancelled
+
+    asyncio.run(exercise())

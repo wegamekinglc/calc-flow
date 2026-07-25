@@ -329,10 +329,19 @@ class ExecutionPlan:
             native, cancellation = self._inner._execute_async_cancellable(
                 copied, options=options
             )
+            native_completed = False
+
+            def record_native_completion(
+                _future: asyncio.Future[_native.RunResult],
+            ) -> None:
+                nonlocal native_completed
+                native_completed = True
+
+            native.add_done_callback(record_native_completion)
             try:
                 return await asyncio.shield(native)
             except asyncio.CancelledError as cancelled:
-                if native.done():
+                if native_completed:
                     return native.result()
                 cancellation.cancel()
                 while not native.done():
