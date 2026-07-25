@@ -174,6 +174,12 @@ whether a matching registration can be reconstructed as `serialized`,
 is not a promise that arbitrary project input is executable: normal compile,
 Port, option, input-format, and resource-limit checks still apply.
 
+When an older Studio server returns `404` for `/capabilities`, clients may use
+`/catalog` only to populate a scalar-UDF picker. That fallback does not
+discover providers, built-in Operators, portable Arrow types, preview limits,
+worker reconstruction, or transportability; clients must not infer any of
+those capabilities from it.
+
 Only NumPy/JAX `expression@1` is eligible for lazy built-in reconstruction in
 schema version 1. There is no lazy `table_matmul@1`; a parent registration may
 therefore be compile-capable while preview reconstruction is unavailable.
