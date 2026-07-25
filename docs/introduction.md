@@ -24,11 +24,7 @@ import pyarrow as pa
 from calc_flow import Batch, PipelineBuilder
 
 batch = Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))
-plan = (
-    PipelineBuilder("totals")
-    .expression("calculate", "total = a + b")
-    .compile()
-)
+plan = PipelineBuilder("totals").expression("calculate", "total = a + b").compile()
 result = plan.execute({"input": batch})
 
 assert result.outputs["output"].to_pyarrow()["total"].to_pylist() == [3, 7]
@@ -267,6 +263,10 @@ There is no `src/calc_flow/` execution path in v2.
 FastAPI routes are under `/api/v2`. The service stores projects and
 checkpoints asynchronously and executes bounded previews in spawned workers
 with timeout, CPU, memory, output, cancellation, and lifecycle controls.
+The UDF-only `/catalog` compatibility route remains unchanged.
+`/capabilities` separately reports the parent runtime-session compile snapshot
+and the spawned worker's serialized, lazy-built-in, or unavailable
+reconstruction projection.
 
 `web-ui/` is a React/TypeScript/Vite application using React Flow. API types
 are generated from `web-ui/openapi.json`. The Studio edits v2 project

@@ -26,9 +26,11 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, st
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import TypeAdapter, ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from calc_flow_studio.models import (
+    CapabilitiesResponse,
     CheckpointSummary,
     ProjectCreateRequest,
     ProjectSummary,
@@ -36,11 +38,17 @@ from calc_flow_studio.models import (
     RunRequest,
     RunResponse,
     RunStatus,
+    ValidationReport,
 )
-from calc_flow_studio.run_manager import RunManager
+from calc_flow_studio.run_manager import (
+    CapabilitySnapshotError,
+    RunManager,
+    RunManagerError,
+)
 
 API_PREFIX = "/api/v2"
 MAX_PROJECT_IMPORT_BYTES = 10 * 1024 * 1024
+_VALIDATION_REPORT_ADAPTER = TypeAdapter(ValidationReport)
 
 
 class ProjectStoreProtocol(Protocol):
@@ -70,6 +78,8 @@ class RuntimeProtocol(Protocol):
 
 
 class RunManagerProtocol(Protocol):
+    def capabilities(self) -> CapabilitiesResponse: ...
+
     def submit(self, project: ProjectDocument, request: RunRequest) -> RunResponse: ...
 
     def get(self, run_id: str) -> RunResponse: ...
@@ -199,57 +209,38 @@ def create_app(
 
     async def runtime_validation_report(
         project: ProjectDocument,
-    ) -> dict[str, object]:
+    ) -> ValidationReport:
         try:
             report = await run_in_threadpool(
                 selected_runtime.validation_report, project.canonical_json()
             )
         except CalcFlowError as error:
             raise _native_error(error, operation="validate") from error
-        if type(report) is not dict:
-            raise _http_error(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                "runtime returned an invalid project validation report",
-            )
+        normalized = dict(report) if type(report) is dict else report
+        if isinstance(normalized, dict) and "kind" not in normalized:
+            valid = normalized.get("valid")
+            if type(valid) is bool:
+                normalized["kind"] = "valid" if valid else "invalid"
         try:
-            report = json.loads(
-                json.dumps(
-                    report,
-                    allow_nan=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                )
-            )
-        except (RecursionError, TypeError, ValueError) as error:
+            return _VALIDATION_REPORT_ADAPTER.validate_python(normalized)
+        except ValidationError as error:
+            first = error.errors(
+                include_input=False,
+                include_url=False,
+            )[0]
+            location = ".".join(str(part) for part in first["loc"]) or "<root>"
             raise _http_error(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                "runtime returned an invalid project validation report",
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                "runtime validation report violates the v1 contract at "
+                f"{location}: {first['msg']}",
             ) from error
-        assert isinstance(report, dict)
-        valid = report.get("valid")
-        issues = report.get("issues", [])
-        if (
-            type(valid) is not bool
-            or type(issues) is not list
-            or any(type(issue) is not dict for issue in issues)
-            or (valid is True and bool(issues))
-        ):
-            raise _http_error(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                "runtime returned an invalid project validation report",
-            )
-        return report
 
     async def validate_for_storage(project: ProjectDocument) -> None:
         report = await runtime_validation_report(project)
-        if report["valid"] is True:
+        if report.valid is True:
             return
-        issues = report["issues"]
-        assert isinstance(issues, list)
         details = "; ".join(
-            str(issue.get("message", "invalid project"))
-            for issue in issues
-            if isinstance(issue, dict)
+            issue.message or "invalid project" for issue in report.issues
         )
         raise _http_error(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -259,6 +250,24 @@ def create_app(
     @app.get(f"{API_PREFIX}/catalog")
     def get_catalog() -> list[dict[str, object]]:
         return selected_runtime.catalog()
+
+    @app.get(
+        f"{API_PREFIX}/capabilities",
+        response_model=CapabilitiesResponse,
+    )
+    def get_capabilities() -> CapabilitiesResponse:
+        try:
+            return selected_run_manager.capabilities()
+        except CapabilitySnapshotError as error:
+            raise _http_error(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                str(error),
+            ) from error
+        except RunManagerError as error:
+            raise _http_error(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "runtime capability snapshot is unavailable for this session",
+            ) from error
 
     @app.get(f"{API_PREFIX}/schema/project")
     def get_project_schema() -> dict[str, object]:
@@ -364,8 +373,11 @@ def create_app(
             headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
         )
 
-    @app.post(f"{API_PREFIX}/projects/{{project_id}}/validate")
-    async def validate_stored_project(project_id: str) -> dict[str, object]:
+    @app.post(
+        f"{API_PREFIX}/projects/{{project_id}}/validate",
+        response_model=ValidationReport,
+    )
+    async def validate_stored_project(project_id: str) -> ValidationReport:
         project = await stored_project(project_id)
         return await runtime_validation_report(project)
 

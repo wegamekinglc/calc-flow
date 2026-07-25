@@ -6,7 +6,7 @@ import {
   maxMetricsWidth,
   useElementWidth,
 } from './panelLayout';
-import type { RunResponse, RunResultPreview, ValidationReport } from '../types';
+import type { RunResponse, ValidationReport } from '../types';
 
 interface ResultsPanelProps {
   validation: ValidationReport | null;
@@ -27,7 +27,7 @@ export function ResultsPanel({
   onMetricsWidthReset,
   onCancel,
 }: ResultsPanelProps) {
-  const result = run?.result as unknown as RunResultPreview | null | undefined;
+  const result = run?.status === 'completed' ? run.result : null;
   const { ref: resultGridRef, width: resultGridWidth } = useElementWidth<HTMLDivElement>();
   const metricsMaximum = resultGridWidth > 0
     ? maxMetricsWidth(resultGridWidth)
@@ -92,15 +92,15 @@ export function ResultsPanel({
                   </div>
                   <span>{output.total_rows.toLocaleString()} rows{output.truncated ? ' · preview' : ''}</span>
                 </header>
-                {output.kind === 'table' && output.rows && (
+                {output.kind === 'table' && (
                   <div className="table-wrap">
                     <table>
                       <thead>
-                        <tr>{(output.schema ?? []).map((field) => <th key={field.name}>{field.name}<small>{field.type}</small></th>)}</tr>
+                        <tr>{output.schema.map((field) => <th key={field.name}>{field.name}<small>{field.type}</small></th>)}</tr>
                       </thead>
                       <tbody>
                         {output.rows.map((row, index) => (
-                          <tr key={index}>{(output.schema ?? []).map((field) => <td key={field.name}>{String(row[field.name] ?? 'null')}</td>)}</tr>
+                          <tr key={index}>{output.schema.map((field) => <td key={field.name}>{String(row[field.name] ?? 'null')}</td>)}</tr>
                         ))}
                       </tbody>
                     </table>

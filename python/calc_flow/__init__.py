@@ -2,6 +2,16 @@ from __future__ import annotations
 
 from calc_flow import _native as _native
 from calc_flow.array import register_jax, register_numpy
+from calc_flow.capabilities import (
+    OperatorCapability,
+    ProviderCapability,
+    ProviderOption,
+    ProviderOptionsSchema,
+    ProviderPort,
+    RuntimeCapabilities,
+    RuntimeSessionScope,
+    UdfCapability,
+)
 from calc_flow.config import ProjectDocument
 from calc_flow.errors import (
     CalcFlowError,
@@ -40,10 +50,18 @@ __all__ = [
     "ProjectDocument",
     "ExecutionPlan",
     "PipelineBuilder",
+    "OperatorCapability",
+    "ProviderCapability",
+    "ProviderOption",
+    "ProviderOptionsSchema",
+    "ProviderPort",
     "MicroBatchRunner",
     "Runtime",
+    "RuntimeCapabilities",
+    "RuntimeSessionScope",
     "RunResult",
     "StreamingRunner",
+    "UdfCapability",
     "register_jax",
     "register_numpy",
     "project_json_schema",

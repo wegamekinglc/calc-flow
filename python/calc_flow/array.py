@@ -9,6 +9,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from calc_flow import _native
+from calc_flow.capabilities import ProviderOption, ProviderOptionsSchema
 
 if TYPE_CHECKING:
     from calc_flow.pipeline import Runtime
@@ -23,6 +24,9 @@ _MAX_RESHAPE_DIMENSION = 1_000_000
 _MAX_RESHAPE_ELEMENTS = 10_000_000
 _TABLE_MATMUL_INPUT_PORTS = (("table", "table"), ("weights", "array"))
 _TABLE_MATMUL_OUTPUT_PORTS = (("output", "array"),)
+_EXPRESSION_OPTIONS_SCHEMA = ProviderOptionsSchema(
+    fields=(ProviderOption("expression", "string", required=True),)
+)
 
 _ALLOWED_BINARY = {
     ast.Add: operator.add,
@@ -650,7 +654,13 @@ class _TableMatmulProvider:
 def register_numpy(runtime: Runtime) -> None:
     import numpy as np
 
-    runtime.register_provider("numpy", "expression", "1", _ArrayProvider("numpy", np))
+    runtime.register_provider(
+        "numpy",
+        "expression",
+        "1",
+        _ArrayProvider("numpy", np),
+        options_schema=_EXPRESSION_OPTIONS_SCHEMA,
+    )
     runtime._register_mapping_provider(
         "numpy",
         "table_matmul",
@@ -664,7 +674,13 @@ def register_numpy(runtime: Runtime) -> None:
 def register_jax(runtime: Runtime) -> None:
     import jax.numpy as jnp
 
-    runtime.register_provider("jax", "expression", "1", _ArrayProvider("jax", jnp))
+    runtime.register_provider(
+        "jax",
+        "expression",
+        "1",
+        _ArrayProvider("jax", jnp),
+        options_schema=_EXPRESSION_OPTIONS_SCHEMA,
+    )
     runtime._register_mapping_provider(
         "jax",
         "table_matmul",

@@ -1,6 +1,129 @@
 {
   "components": {
     "schemas": {
+      "ArrayOutputPreview": {
+        "additionalProperties": false,
+        "properties": {
+          "backend": {
+            "title": "Backend",
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/calc_flow_studio__models__JSONValue-Output"
+          },
+          "kind": {
+            "const": "array",
+            "default": "array",
+            "title": "Kind",
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/calc_flow_studio__models__JSONValue-Output"
+            },
+            "title": "Metadata",
+            "type": "object"
+          },
+          "total_rows": {
+            "minimum": 0.0,
+            "title": "Total Rows",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "backend",
+          "total_rows",
+          "truncated",
+          "data",
+          "metadata"
+        ],
+        "title": "ArrayOutputPreview",
+        "type": "object"
+      },
+      "CancelledRunResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error": {
+            "title": "Error",
+            "type": "null"
+          },
+          "finished_at": {
+            "format": "date-time",
+            "title": "Finished At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "result": {
+            "title": "Result",
+            "type": "null"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "const": "cancelled",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "project_id",
+          "created_at",
+          "status",
+          "finished_at"
+        ],
+        "title": "CancelledRunResponse",
+        "type": "object"
+      },
+      "CapabilitiesResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "preview": {
+            "$ref": "#/components/schemas/PreviewCapabilitiesResponse"
+          },
+          "runtime": {
+            "$ref": "#/components/schemas/RuntimeCapabilitiesResponse"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "title": "Schemaversion",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "runtime",
+          "preview"
+        ],
+        "title": "CapabilitiesResponse",
+        "type": "object"
+      },
       "CheckpointSummary": {
         "additionalProperties": false,
         "properties": {
@@ -76,6 +199,165 @@
         "title": "CheckpointSummary",
         "type": "object"
       },
+      "CompletedRunResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error": {
+            "title": "Error",
+            "type": "null"
+          },
+          "finished_at": {
+            "format": "date-time",
+            "title": "Finished At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "result": {
+            "$ref": "#/components/schemas/RunResultPreview"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "status": {
+            "const": "completed",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "project_id",
+          "created_at",
+          "status",
+          "started_at",
+          "finished_at",
+          "result"
+        ],
+        "title": "CompletedRunResponse",
+        "type": "object"
+      },
+      "DataFusionMetricPreview": {
+        "additionalProperties": false,
+        "properties": {
+          "execution_ns": {
+            "minimum": 0.0,
+            "title": "Execution Ns",
+            "type": "integer"
+          },
+          "logical_plan": {
+            "title": "Logical Plan",
+            "type": "string"
+          },
+          "node_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Id"
+          },
+          "output_rows": {
+            "minimum": 0.0,
+            "title": "Output Rows",
+            "type": "integer"
+          },
+          "physical_plan": {
+            "title": "Physical Plan",
+            "type": "string"
+          },
+          "planning_ns": {
+            "minimum": 0.0,
+            "title": "Planning Ns",
+            "type": "integer"
+          },
+          "query_id": {
+            "minimum": 0.0,
+            "title": "Query Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query_id",
+          "node_id",
+          "planning_ns",
+          "execution_ns",
+          "output_rows",
+          "logical_plan",
+          "physical_plan"
+        ],
+        "title": "DataFusionMetricPreview",
+        "type": "object"
+      },
+      "FailedRunResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error": {
+            "minLength": 1,
+            "title": "Error",
+            "type": "string"
+          },
+          "finished_at": {
+            "format": "date-time",
+            "title": "Finished At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "result": {
+            "title": "Result",
+            "type": "null"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "status": {
+            "const": "failed",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "project_id",
+          "created_at",
+          "status",
+          "started_at",
+          "finished_at",
+          "error"
+        ],
+        "title": "FailedRunResponse",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -124,6 +406,354 @@
           "data"
         ],
         "title": "InputPayload",
+        "type": "object"
+      },
+      "InvalidValidationReport": {
+        "additionalProperties": false,
+        "properties": {
+          "fingerprint": {
+            "title": "Fingerprint",
+            "type": "null"
+          },
+          "issues": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationIssue"
+            },
+            "minItems": 1,
+            "title": "Issues",
+            "type": "array"
+          },
+          "kind": {
+            "const": "invalid",
+            "default": "invalid",
+            "title": "Kind",
+            "type": "string"
+          },
+          "valid": {
+            "const": false,
+            "default": false,
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "issues"
+        ],
+        "title": "InvalidValidationReport",
+        "type": "object"
+      },
+      "LazyBuiltinWorkerRegistration": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "reconstruction": {
+            "const": "lazyBuiltin",
+            "title": "Reconstruction",
+            "type": "string"
+          },
+          "registrationKind": {
+            "enum": [
+              "provider",
+              "dataFusionScalar"
+            ],
+            "title": "Registrationkind",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reconstruction",
+          "registrationKind",
+          "provider",
+          "name",
+          "version"
+        ],
+        "title": "LazyBuiltinWorkerRegistration",
+        "type": "object"
+      },
+      "NodeTimingPreview": {
+        "additionalProperties": false,
+        "properties": {
+          "duration_ns": {
+            "minimum": 0.0,
+            "title": "Duration Ns",
+            "type": "integer"
+          },
+          "input_rows": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Input Rows",
+            "type": "object"
+          },
+          "output_rows": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Output Rows",
+            "type": "object"
+          }
+        },
+        "required": [
+          "duration_ns",
+          "input_rows",
+          "output_rows"
+        ],
+        "title": "NodeTimingPreview",
+        "type": "object"
+      },
+      "OperatorCapabilityResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "inputKinds": {
+            "items": {
+              "enum": [
+                "table",
+                "array"
+              ],
+              "type": "string"
+            },
+            "title": "Inputkinds",
+            "type": "array"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "outputKinds": {
+            "items": {
+              "enum": [
+                "table",
+                "array"
+              ],
+              "type": "string"
+            },
+            "title": "Outputkinds",
+            "type": "array"
+          },
+          "requiresDatafusion": {
+            "title": "Requiresdatafusion",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind",
+          "inputKinds",
+          "outputKinds",
+          "requiresDatafusion"
+        ],
+        "title": "OperatorCapabilityResponse",
+        "type": "object"
+      },
+      "OutputFieldPreview": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "nullable": {
+            "title": "Nullable",
+            "type": "boolean"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "type",
+          "nullable"
+        ],
+        "title": "OutputFieldPreview",
+        "type": "object"
+      },
+      "OutputPreview": {
+        "discriminator": {
+          "mapping": {
+            "array": "#/components/schemas/ArrayOutputPreview",
+            "table": "#/components/schemas/TableOutputPreview"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/TableOutputPreview"
+          },
+          {
+            "$ref": "#/components/schemas/ArrayOutputPreview"
+          }
+        ]
+      },
+      "PendingRunResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error": {
+            "title": "Error",
+            "type": "null"
+          },
+          "finished_at": {
+            "title": "Finished At",
+            "type": "null"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "result": {
+            "title": "Result",
+            "type": "null"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "null"
+          },
+          "status": {
+            "const": "pending",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "project_id",
+          "created_at",
+          "status"
+        ],
+        "title": "PendingRunResponse",
+        "type": "object"
+      },
+      "PreviewCapabilitiesResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "inputBatchKinds": {
+            "items": {
+              "enum": [
+                "table",
+                "array"
+              ],
+              "type": "string"
+            },
+            "title": "Inputbatchkinds",
+            "type": "array"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/PreviewLimitsResponse"
+          },
+          "projectInputFormats": {
+            "items": {
+              "enum": [
+                "arrow_ipc",
+                "csv",
+                "inline_json",
+                "json"
+              ],
+              "type": "string"
+            },
+            "title": "Projectinputformats",
+            "type": "array"
+          },
+          "requestInputFormats": {
+            "items": {
+              "enum": [
+                "arrow_ipc",
+                "columns",
+                "records"
+              ],
+              "type": "string"
+            },
+            "title": "Requestinputformats",
+            "type": "array"
+          },
+          "workerRegistrations": {
+            "items": {
+              "$ref": "#/components/schemas/WorkerRegistrationCapability"
+            },
+            "title": "Workerregistrations",
+            "type": "array"
+          }
+        },
+        "required": [
+          "inputBatchKinds",
+          "requestInputFormats",
+          "projectInputFormats",
+          "workerRegistrations",
+          "limits"
+        ],
+        "title": "PreviewCapabilitiesResponse",
+        "type": "object"
+      },
+      "PreviewLimit": {
+        "additionalProperties": false,
+        "properties": {
+          "default": {
+            "title": "Default",
+            "type": "integer"
+          },
+          "maximum": {
+            "title": "Maximum",
+            "type": "integer"
+          },
+          "minimum": {
+            "title": "Minimum",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "default",
+          "minimum",
+          "maximum"
+        ],
+        "title": "PreviewLimit",
+        "type": "object"
+      },
+      "PreviewLimitsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "maxInputBytes": {
+            "$ref": "#/components/schemas/PreviewLimit"
+          },
+          "maxRows": {
+            "$ref": "#/components/schemas/PreviewLimit"
+          },
+          "memoryLimitMb": {
+            "$ref": "#/components/schemas/PreviewLimit"
+          },
+          "outputRows": {
+            "$ref": "#/components/schemas/PreviewLimit"
+          },
+          "timeoutSeconds": {
+            "$ref": "#/components/schemas/PreviewLimit"
+          }
+        },
+        "required": [
+          "maxInputBytes",
+          "maxRows",
+          "timeoutSeconds",
+          "memoryLimitMb",
+          "outputRows"
+        ],
+        "title": "PreviewLimitsResponse",
         "type": "object"
       },
       "ProjectCreateRequest": {
@@ -1013,6 +1643,136 @@
         "title": "ProjectSummary",
         "type": "object"
       },
+      "ProviderCapabilityResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "inputPorts": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderPortResponse"
+            },
+            "title": "Inputports",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "optionsSchema": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderOptionsSchemaResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "outputPorts": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderPortResponse"
+            },
+            "title": "Outputports",
+            "type": "array"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "name",
+          "version",
+          "inputPorts",
+          "outputPorts",
+          "optionsSchema"
+        ],
+        "title": "ProviderCapabilityResponse",
+        "type": "object"
+      },
+      "ProviderOptionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "required": {
+            "default": false,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "valueType": {
+            "enum": [
+              "string",
+              "integer",
+              "number",
+              "boolean"
+            ],
+            "title": "Valuetype",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "valueType"
+        ],
+        "title": "ProviderOptionResponse",
+        "type": "object"
+      },
+      "ProviderOptionsSchemaResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "additionalProperties": {
+            "const": false,
+            "default": false,
+            "title": "Additionalproperties",
+            "type": "boolean"
+          },
+          "fields": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProviderOptionResponse"
+            },
+            "title": "Fields",
+            "type": "array"
+          }
+        },
+        "title": "ProviderOptionsSchemaResponse",
+        "type": "object"
+      },
+      "ProviderPortResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "table",
+              "array"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "required": {
+            "title": "Required",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "required"
+        ],
+        "title": "ProviderPortResponse",
+        "type": "object"
+      },
       "RunOptions": {
         "additionalProperties": false,
         "properties": {
@@ -1080,6 +1840,84 @@
         "type": "object"
       },
       "RunResponse": {
+        "$ref": "#/components/schemas/RunResponseVariant",
+        "title": "RunResponse"
+      },
+      "RunResponseVariant": {
+        "discriminator": {
+          "mapping": {
+            "cancelled": "#/components/schemas/CancelledRunResponse",
+            "completed": "#/components/schemas/CompletedRunResponse",
+            "failed": "#/components/schemas/FailedRunResponse",
+            "pending": "#/components/schemas/PendingRunResponse",
+            "running": "#/components/schemas/RunningRunResponse",
+            "timed_out": "#/components/schemas/TimedOutRunResponse"
+          },
+          "propertyName": "status"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/PendingRunResponse"
+          },
+          {
+            "$ref": "#/components/schemas/RunningRunResponse"
+          },
+          {
+            "$ref": "#/components/schemas/CompletedRunResponse"
+          },
+          {
+            "$ref": "#/components/schemas/FailedRunResponse"
+          },
+          {
+            "$ref": "#/components/schemas/TimedOutRunResponse"
+          },
+          {
+            "$ref": "#/components/schemas/CancelledRunResponse"
+          }
+        ]
+      },
+      "RunResultPreview": {
+        "additionalProperties": false,
+        "properties": {
+          "datafusion_metrics": {
+            "items": {
+              "$ref": "#/components/schemas/DataFusionMetricPreview"
+            },
+            "title": "Datafusion Metrics",
+            "type": "array"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/calc_flow_studio__models__JSONValue-Output"
+            },
+            "title": "Metadata",
+            "type": "object"
+          },
+          "node_timings": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/NodeTimingPreview"
+            },
+            "title": "Node Timings",
+            "type": "object"
+          },
+          "outputs": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/OutputPreview"
+            },
+            "title": "Outputs",
+            "type": "object"
+          }
+        },
+        "required": [
+          "outputs",
+          "node_timings",
+          "datafusion_metrics",
+          "metadata"
+        ],
+        "title": "RunResultPreview",
+        "type": "object"
+      },
+      "RunningRunResponse": {
         "additionalProperties": false,
         "properties": {
           "created_at": {
@@ -1088,27 +1926,12 @@
             "type": "string"
           },
           "error": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Error"
+            "title": "Error",
+            "type": "null"
           },
           "finished_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Finished At"
+            "title": "Finished At",
+            "type": "null"
           },
           "id": {
             "title": "Id",
@@ -1119,55 +1942,399 @@
             "type": "string"
           },
           "result": {
-            "anyOf": [
-              {
-                "additionalProperties": {
-                  "$ref": "#/components/schemas/calc_flow_studio__models__JSONValue-Output"
-                },
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Result"
+            "title": "Result",
+            "type": "null"
           },
           "started_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Started At"
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
           },
           "status": {
-            "$ref": "#/components/schemas/RunStatus"
+            "const": "running",
+            "title": "Status",
+            "type": "string"
           }
         },
         "required": [
           "id",
           "project_id",
+          "created_at",
           "status",
-          "created_at"
+          "started_at"
         ],
-        "title": "RunResponse",
+        "title": "RunningRunResponse",
         "type": "object"
       },
-      "RunStatus": {
-        "enum": [
-          "pending",
-          "running",
-          "completed",
-          "failed",
-          "cancelled",
-          "timed_out"
+      "RuntimeCapabilitiesResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "batchKinds": {
+            "items": {
+              "enum": [
+                "table",
+                "array"
+              ],
+              "type": "string"
+            },
+            "title": "Batchkinds",
+            "type": "array"
+          },
+          "operators": {
+            "items": {
+              "$ref": "#/components/schemas/OperatorCapabilityResponse"
+            },
+            "title": "Operators",
+            "type": "array"
+          },
+          "packageVersion": {
+            "title": "Packageversion",
+            "type": "string"
+          },
+          "portableArrowTypes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Portablearrowtypes",
+            "type": "array"
+          },
+          "projectFormatVersions": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Projectformatversions",
+            "type": "array"
+          },
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderCapabilityResponse"
+            },
+            "title": "Providers",
+            "type": "array"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/RuntimeSessionScopeResponse"
+          },
+          "udfs": {
+            "items": {
+              "$ref": "#/components/schemas/UdfCapabilityResponse"
+            },
+            "title": "Udfs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "scope",
+          "packageVersion",
+          "projectFormatVersions",
+          "batchKinds",
+          "portableArrowTypes",
+          "operators",
+          "udfs",
+          "providers"
         ],
-        "title": "RunStatus",
-        "type": "string"
+        "title": "RuntimeCapabilitiesResponse",
+        "type": "object"
+      },
+      "RuntimeSessionScopeResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "runtimeSession",
+            "title": "Kind",
+            "type": "string"
+          },
+          "revision": {
+            "minimum": 0.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "sessionId": {
+            "title": "Sessionid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "sessionId",
+          "revision"
+        ],
+        "title": "RuntimeSessionScopeResponse",
+        "type": "object"
+      },
+      "SerializedWorkerRegistration": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "reconstruction": {
+            "const": "serialized",
+            "title": "Reconstruction",
+            "type": "string"
+          },
+          "registrationKind": {
+            "enum": [
+              "provider",
+              "dataFusionScalar"
+            ],
+            "title": "Registrationkind",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reconstruction",
+          "registrationKind",
+          "provider",
+          "name",
+          "version"
+        ],
+        "title": "SerializedWorkerRegistration",
+        "type": "object"
+      },
+      "TableOutputPreview": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "table",
+            "default": "table",
+            "title": "Kind",
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/calc_flow_studio__models__JSONValue-Output"
+            },
+            "title": "Metadata",
+            "type": "object"
+          },
+          "rows": {
+            "items": {
+              "additionalProperties": {
+                "$ref": "#/components/schemas/calc_flow_studio__models__JSONValue-Output"
+              },
+              "type": "object"
+            },
+            "title": "Rows",
+            "type": "array"
+          },
+          "schema": {
+            "items": {
+              "$ref": "#/components/schemas/OutputFieldPreview"
+            },
+            "title": "Schema",
+            "type": "array"
+          },
+          "total_rows": {
+            "minimum": 0.0,
+            "title": "Total Rows",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "total_rows",
+          "truncated",
+          "schema",
+          "rows",
+          "metadata"
+        ],
+        "title": "TableOutputPreview",
+        "type": "object"
+      },
+      "TimedOutRunResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error": {
+            "minLength": 1,
+            "title": "Error",
+            "type": "string"
+          },
+          "finished_at": {
+            "format": "date-time",
+            "title": "Finished At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "result": {
+            "title": "Result",
+            "type": "null"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "status": {
+            "const": "timed_out",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "project_id",
+          "created_at",
+          "status",
+          "started_at",
+          "finished_at",
+          "error"
+        ],
+        "title": "TimedOutRunResponse",
+        "type": "object"
+      },
+      "UdfCapabilityResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "inputTypes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Inputtypes",
+            "type": "array"
+          },
+          "kind": {
+            "const": "data_fusion_scalar",
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "returnType": {
+            "title": "Returntype",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          },
+          "volatility": {
+            "title": "Volatility",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "name",
+          "version",
+          "kind",
+          "inputTypes",
+          "returnType",
+          "volatility"
+        ],
+        "title": "UdfCapabilityResponse",
+        "type": "object"
+      },
+      "UnavailableWorkerRegistration": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "reasonCode": {
+            "const": "serializationFailed",
+            "title": "Reasoncode",
+            "type": "string"
+          },
+          "reconstruction": {
+            "const": "unavailable",
+            "title": "Reconstruction",
+            "type": "string"
+          },
+          "registrationKind": {
+            "enum": [
+              "provider",
+              "dataFusionScalar"
+            ],
+            "title": "Registrationkind",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reconstruction",
+          "registrationKind",
+          "provider",
+          "name",
+          "version",
+          "reasonCode"
+        ],
+        "title": "UnavailableWorkerRegistration",
+        "type": "object"
+      },
+      "ValidValidationReport": {
+        "additionalProperties": false,
+        "properties": {
+          "fingerprint": {
+            "minLength": 1,
+            "title": "Fingerprint",
+            "type": "string"
+          },
+          "issues": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ValidationIssue"
+            },
+            "maxItems": 0,
+            "title": "Issues",
+            "type": "array"
+          },
+          "kind": {
+            "const": "valid",
+            "default": "valid",
+            "title": "Kind",
+            "type": "string"
+          },
+          "valid": {
+            "const": true,
+            "default": true,
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "fingerprint"
+        ],
+        "title": "ValidValidationReport",
+        "type": "object"
       },
       "ValidationError": {
         "properties": {
@@ -1208,6 +2375,68 @@
         ],
         "title": "ValidationError",
         "type": "object"
+      },
+      "ValidationIssue": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "code",
+          "message"
+        ],
+        "title": "ValidationIssue",
+        "type": "object"
+      },
+      "ValidationReport": {
+        "discriminator": {
+          "mapping": {
+            "invalid": "#/components/schemas/InvalidValidationReport",
+            "valid": "#/components/schemas/ValidValidationReport"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ValidValidationReport"
+          },
+          {
+            "$ref": "#/components/schemas/InvalidValidationReport"
+          }
+        ]
+      },
+      "WorkerRegistrationCapability": {
+        "discriminator": {
+          "mapping": {
+            "lazyBuiltin": "#/components/schemas/LazyBuiltinWorkerRegistration",
+            "serialized": "#/components/schemas/SerializedWorkerRegistration",
+            "unavailable": "#/components/schemas/UnavailableWorkerRegistration"
+          },
+          "propertyName": "reconstruction"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SerializedWorkerRegistration"
+          },
+          {
+            "$ref": "#/components/schemas/LazyBuiltinWorkerRegistration"
+          },
+          {
+            "$ref": "#/components/schemas/UnavailableWorkerRegistration"
+          }
+        ]
       },
       "calc_flow__config__JSONValue-Input": {
         "anyOf": [
@@ -1341,6 +2570,24 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v2/capabilities": {
+      "get": {
+        "operationId": "get_capabilities_api_v2_capabilities_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilitiesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Capabilities"
+      }
+    },
     "/api/v2/catalog": {
       "get": {
         "operationId": "get_catalog_api_v2_catalog_get",
@@ -1780,9 +3027,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Validate Stored Project Api V2 Projects  Project Id  Validate Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ValidationReport"
                 }
               }
             },

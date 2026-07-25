@@ -65,6 +65,7 @@ def test_registration_snapshot_is_success_only_and_defensive() -> None:
         "name": "identity",
         "version": "1",
         "callback": provider,
+        "options_schema": None,
     }
     snapshot[0]["name"] = "mutated"
     assert runtime._registration_snapshot()[0]["name"] == "identity"

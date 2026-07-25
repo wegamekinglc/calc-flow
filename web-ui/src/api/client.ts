@@ -1,4 +1,5 @@
 import type {
+  CapabilitiesResponse,
   CatalogResponse,
   CheckpointSummary,
   ProjectCreateRequest,
@@ -8,6 +9,14 @@ import type {
   RunResponse,
   ValidationReport,
 } from '../types';
+import {
+  ApiContractError,
+  decodeCapabilitiesResponse,
+  decodeRunResponse,
+  decodeValidationReport,
+} from './decoders';
+
+export { ApiContractError };
 
 const API_PREFIX = '/api/v2';
 
@@ -56,10 +65,17 @@ async function response(path: string, init?: RequestInit): Promise<Response> {
   return response;
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+type Decoder<T> = (value: unknown) => T;
+
+async function request<T>(
+  path: string,
+  decoder: Decoder<T> | null,
+  init?: RequestInit,
+): Promise<T> {
   const result = await response(path, init);
   if (result.status === 204) return undefined as T;
-  return (await result.json()) as T;
+  const value: unknown = await result.json();
+  return decoder ? decoder(value) : value as T;
 }
 
 async function requestText(
@@ -87,24 +103,32 @@ async function requestText(
 }
 
 export const api = {
-  catalog: () => request<CatalogResponse>(`${API_PREFIX}/catalog`),
-  projects: () => request<ProjectSummary[]>(`${API_PREFIX}/projects`),
+  catalog: () => request<CatalogResponse>(`${API_PREFIX}/catalog`, null),
+  capabilities: () => request<CapabilitiesResponse>(
+    `${API_PREFIX}/capabilities`,
+    decodeCapabilitiesResponse,
+  ),
+  projects: () => request<ProjectSummary[]>(`${API_PREFIX}/projects`, null),
   createProject: (project: ProjectCreateRequest) =>
-    request<ProjectDocument>(`${API_PREFIX}/projects`, {
+    request<ProjectDocument>(`${API_PREFIX}/projects`, null, {
       method: 'POST',
       body: JSON.stringify(project),
     }),
-  project: (id: string) => request<ProjectDocument>(`${API_PREFIX}/projects/${id}`),
+  project: (id: string) => request<ProjectDocument>(
+    `${API_PREFIX}/projects/${id}`,
+    null,
+  ),
   saveProject: (project: ProjectDocument) =>
-    request<ProjectDocument>(`${API_PREFIX}/projects/${project.id}`, {
+    request<ProjectDocument>(`${API_PREFIX}/projects/${project.id}`, null, {
       method: 'PUT',
       body: JSON.stringify(project),
     }),
   deleteProject: (id: string) =>
-    request<void>(`${API_PREFIX}/projects/${id}`, { method: 'DELETE' }),
+    request<void>(`${API_PREFIX}/projects/${id}`, null, { method: 'DELETE' }),
   importProject: (document: string, format: 'json' | 'yaml', replace = false) =>
     request<ProjectDocument>(
       `${API_PREFIX}/projects/import?format=${format}&replace=${String(replace)}`,
+      null,
       {
         method: 'POST',
         headers: {
@@ -116,21 +140,35 @@ export const api = {
   exportProject: (id: string, format: 'json' | 'yaml') =>
     requestText(`${API_PREFIX}/projects/${id}/export?format=${format}`),
   validateProject: (id: string) =>
-    request<ValidationReport>(`${API_PREFIX}/projects/${id}/validate`, {
-      method: 'POST',
-    }),
+    request<ValidationReport>(
+      `${API_PREFIX}/projects/${id}/validate`,
+      decodeValidationReport,
+      { method: 'POST' },
+    ),
   checkpoint: (id: string) =>
-    request<CheckpointSummary>(`${API_PREFIX}/projects/${id}/checkpoint`),
+    request<CheckpointSummary>(
+      `${API_PREFIX}/projects/${id}/checkpoint`,
+      null,
+    ),
   resetCheckpoint: (id: string) =>
-    request<CheckpointSummary>(`${API_PREFIX}/projects/${id}/checkpoint`, {
-      method: 'DELETE',
-    }),
+    request<CheckpointSummary>(
+      `${API_PREFIX}/projects/${id}/checkpoint`,
+      null,
+      { method: 'DELETE' },
+    ),
   runProject: (id: string, run: RunRequest) =>
-    request<RunResponse>(`${API_PREFIX}/projects/${id}/runs`, {
+    request<RunResponse>(`${API_PREFIX}/projects/${id}/runs`, decodeRunResponse, {
       method: 'POST',
       body: JSON.stringify(run),
     }),
-  run: (id: string) => request<RunResponse>(`${API_PREFIX}/runs/${id}`),
+  run: (id: string) => request<RunResponse>(
+    `${API_PREFIX}/runs/${id}`,
+    decodeRunResponse,
+  ),
   cancelRun: (id: string) =>
-    request<RunResponse>(`${API_PREFIX}/runs/${id}`, { method: 'DELETE' }),
+    request<RunResponse>(
+      `${API_PREFIX}/runs/${id}`,
+      decodeRunResponse,
+      { method: 'DELETE' },
+    ),
 };

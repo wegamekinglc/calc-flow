@@ -8,10 +8,11 @@ import multiprocessing
 import os
 import queue
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from enum import Enum
+from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 from threading import Condition, RLock, Thread, current_thread
@@ -24,23 +25,112 @@ import pyarrow as pa
 import pyarrow.csv as pa_csv
 import pyarrow.json as pa_json
 from calc_flow import Batch, ProjectDocument, Runtime, register_jax, register_numpy
+from pydantic import ValidationError
 
 from calc_flow_studio.models import (
+    CapabilitiesResponse,
     JSONValue,
+    LazyBuiltinWorkerRegistration,
+    PreviewCapabilitiesResponse,
+    PreviewLimit,
+    PreviewLimitsResponse,
     RunEvent,
     RunOptions,
     RunRequest,
     RunResponse,
+    RunResultPreview,
     RunStatus,
+    RuntimeCapabilitiesResponse,
+    SerializedWorkerRegistration,
+    UnavailableWorkerRegistration,
+    WorkerRegistrationCapability,
 )
 
 type PreparedInput = tuple[pa.Table, dict[str, JSONValue]]
 type PreparedInputs = dict[str, PreparedInput]
 type RegistrationRecord = dict[str, Any]
+type LazyBuiltinIdentity = tuple[str, str, str]
 
 
 class RunManagerError(RuntimeError):
     """Raised when a preview run cannot be prepared or managed."""
+
+
+class CapabilitySnapshotError(RunManagerError):
+    """Raised when trusted runtime capability data violates schema version 1."""
+
+
+def _capability_snapshot_error(
+    error: ValidationError, *, prefix: str = ""
+) -> CapabilitySnapshotError:
+    first = error.errors(include_input=False, include_url=False)[0]
+
+    def wire_name(part: object) -> str:
+        if not isinstance(part, str):
+            return str(part)
+        head, *tail = part.split("_")
+        return head + "".join(item.capitalize() for item in tail)
+
+    location = ".".join(
+        filter(None, (prefix, *(wire_name(part) for part in first["loc"])))
+    )
+    return CapabilitySnapshotError(
+        "runtime capability snapshot violates schema version 1 at "
+        f"{location or '<root>'}: {first['msg']}"
+    )
+
+
+@lru_cache(maxsize=1)
+def _preflight_lazy_builtins() -> tuple[LazyBuiltinIdentity, ...]:
+    available: list[LazyBuiltinIdentity] = []
+    for provider, register in (("jax", register_jax), ("numpy", register_numpy)):
+        try:
+            register(Runtime())
+        except (ImportError, RuntimeError):
+            continue
+        available.append((provider, "expression", "1"))
+    return tuple(sorted(available))
+
+
+def _worker_registration(
+    registration: RegistrationRecord,
+) -> WorkerRegistrationCapability:
+    registration_kind = (
+        "dataFusionScalar" if registration["kind"] == "scalar_udf" else "provider"
+    )
+    identity = {
+        "registration_kind": registration_kind,
+        "provider": registration["provider"],
+        "name": registration["name"],
+        "version": registration["version"],
+    }
+    try:
+        cloudpickle.dumps((dict(registration),))
+    except Exception:
+        return UnavailableWorkerRegistration(
+            reconstruction="unavailable",
+            reason_code="serializationFailed",
+            **identity,
+        )
+    return SerializedWorkerRegistration(reconstruction="serialized", **identity)
+
+
+def _run_result_contract_error(
+    result: object,
+    error: ValidationError,
+) -> str:
+    if isinstance(result, dict) and isinstance(result.get("outputs"), dict):
+        for name, output in result["outputs"].items():
+            if isinstance(output, dict):
+                kind = output.get("kind")
+                if kind not in {"table", "array"}:
+                    return (
+                        f"run result output {name!r} has unsupported kind {kind!r}; "
+                        "expected 'table' or 'array'"
+                    )
+    first = error.errors(include_input=False, include_url=False)[0]
+    location = ".".join(str(part) for part in first["loc"]) or "<root>"
+    return f"run result violates the v2 preview contract at {location}: {first['msg']}"
 
 
 def _json_size(value: JSONValue) -> int:
@@ -534,6 +624,11 @@ def _restore_registrations(
 ) -> None:
     for registration in registrations:
         if registration["kind"] == "provider":
+            options = (
+                {"options_schema": registration["options_schema"]}
+                if "options_schema" in registration
+                else {}
+            )
             if registration.get("provider_mode") == "mapping":
                 runtime._register_mapping_provider(
                     registration["provider"],
@@ -542,6 +637,7 @@ def _restore_registrations(
                     registration["callback"],
                     input_ports=registration["input_ports"],
                     output_ports=registration["output_ports"],
+                    **options,
                 )
             else:
                 runtime.register_provider(
@@ -549,6 +645,7 @@ def _restore_registrations(
                     registration["name"],
                     registration["version"],
                     registration["callback"],
+                    **options,
                 )
         elif registration["kind"] == "scalar_udf":
             runtime.register_scalar_udf(
@@ -626,7 +723,7 @@ class _RunHandle:
     started_at: datetime | None = None
     finished_at: datetime | None = None
     error: str | None = None
-    result: dict[str, JSONValue] | None = None
+    result: RunResultPreview | None = None
     events: tuple[RunEvent, ...] = ()
     worker: Any = None
     output_queue: Any = None
@@ -651,6 +748,8 @@ class RunManager:
         self._event_condition = Condition(self._lock)
         self._runs: dict[str, _RunHandle] = {}
         self._runtime = runtime
+        self._lazy_builtins = _preflight_lazy_builtins()
+        self._capability_cache: dict[tuple[str, int], CapabilitiesResponse] = {}
         self._use_processes = use_processes
         self._max_workers = max_workers
         self._max_history = max_history
@@ -658,6 +757,111 @@ class RunManager:
         self._process_context = (
             multiprocessing.get_context("spawn") if use_processes else None
         )
+
+    def capabilities(self) -> CapabilitiesResponse:
+        if self._runtime is None:
+            raise RunManagerError(
+                "runtime capability snapshot is unavailable for this session"
+            )
+        snapshot, registrations = self._runtime._capability_registration_snapshot()
+        key = (snapshot.scope.session_id, snapshot.scope.revision)
+        with self._lock:
+            cached = self._capability_cache.get(key)
+            if cached is not None:
+                return cached
+
+            runtime_document = asdict(snapshot)
+            runtime_document.pop("schema_version")
+            runtime_document["scope"]["kind"] = "runtimeSession"
+            parent_identities = {
+                (
+                    (
+                        "dataFusionScalar"
+                        if registration["kind"] == "scalar_udf"
+                        else "provider"
+                    ),
+                    registration["provider"],
+                    registration["name"],
+                    registration["version"],
+                )
+                for registration in registrations
+            }
+            worker_registrations: list[WorkerRegistrationCapability] = [
+                _worker_registration(registration) for registration in registrations
+            ]
+            worker_registrations.extend(
+                LazyBuiltinWorkerRegistration(
+                    reconstruction="lazyBuiltin",
+                    registration_kind="provider",
+                    provider=provider,
+                    name=name,
+                    version=version,
+                )
+                for provider, name, version in self._lazy_builtins
+                if ("provider", provider, name, version) not in parent_identities
+            )
+            worker_registrations.sort(
+                key=lambda item: (
+                    item.registration_kind,
+                    item.provider,
+                    item.name,
+                    item.version,
+                )
+            )
+            default_options = RunOptions()
+            try:
+                runtime_response = RuntimeCapabilitiesResponse.model_validate(
+                    runtime_document
+                )
+            except ValidationError as error:
+                raise _capability_snapshot_error(error, prefix="runtime") from error
+            try:
+                response = CapabilitiesResponse(
+                    schema_version=snapshot.schema_version,
+                    runtime=runtime_response,
+                    preview=PreviewCapabilitiesResponse(
+                        input_batch_kinds=("table",),
+                        request_input_formats=("arrow_ipc", "columns", "records"),
+                        project_input_formats=(
+                            "arrow_ipc",
+                            "csv",
+                            "inline_json",
+                            "json",
+                        ),
+                        worker_registrations=tuple(worker_registrations),
+                        limits=PreviewLimitsResponse(
+                            max_input_bytes=PreviewLimit(
+                                default=default_options.max_input_bytes,
+                                minimum=1,
+                                maximum=default_options.max_input_bytes,
+                            ),
+                            max_rows=PreviewLimit(
+                                default=default_options.max_rows,
+                                minimum=1,
+                                maximum=default_options.max_rows,
+                            ),
+                            timeout_seconds=PreviewLimit(
+                                default=default_options.timeout_seconds,
+                                minimum=1,
+                                maximum=300,
+                            ),
+                            memory_limit_mb=PreviewLimit(
+                                default=default_options.memory_limit_mb,
+                                minimum=64,
+                                maximum=4096,
+                            ),
+                            output_rows=PreviewLimit(
+                                default=default_options.output_rows,
+                                minimum=1,
+                                maximum=10_000,
+                            ),
+                        ),
+                    ),
+                )
+            except ValidationError as error:
+                raise _capability_snapshot_error(error) from error
+            self._capability_cache = {key: response}
+            return response
 
     def submit(self, project: ProjectDocument, request: RunRequest) -> RunResponse:
         with self._lock:
@@ -891,13 +1095,24 @@ class RunManager:
                 error="worker returned an invalid result",
                 event_type="failed",
             )
-        elif message.get("ok") is True and isinstance(message.get("result"), dict):
-            self._finish(
-                run_id,
-                RunStatus.COMPLETED,
-                result=message["result"],
-                event_type="completed",
-            )
+        elif message.get("ok") is True:
+            result = message.get("result")
+            try:
+                validated = RunResultPreview.model_validate(result)
+            except ValidationError as error:
+                self._finish(
+                    run_id,
+                    RunStatus.FAILED,
+                    error=_run_result_contract_error(result, error),
+                    event_type="failed",
+                )
+            else:
+                self._finish(
+                    run_id,
+                    RunStatus.COMPLETED,
+                    result=validated,
+                    event_type="completed",
+                )
         else:
             self._finish(
                 run_id,
@@ -913,7 +1128,7 @@ class RunManager:
         *,
         event_type: str,
         error: str | None = None,
-        result: dict[str, JSONValue] | None = None,
+        result: RunResultPreview | None = None,
     ) -> None:
         with self._lock:
             handle = self._require(run_id)
@@ -977,15 +1192,17 @@ class RunManager:
 
     @staticmethod
     def _response(handle: _RunHandle) -> RunResponse:
-        return RunResponse(
-            id=handle.id,
-            project_id=handle.project_id,
-            status=handle.status,
-            created_at=handle.created_at,
-            started_at=handle.started_at,
-            finished_at=handle.finished_at,
-            error=handle.error,
-            result=handle.result,
+        return RunResponse.model_validate(
+            {
+                "id": handle.id,
+                "project_id": handle.project_id,
+                "status": handle.status,
+                "created_at": handle.created_at,
+                "started_at": handle.started_at,
+                "finished_at": handle.finished_at,
+                "error": handle.error,
+                "result": handle.result,
+            }
         )
 
     @staticmethod

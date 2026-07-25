@@ -1,11 +1,54 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { api, ApiError } from './client';
+import { api, ApiContractError, ApiError } from './client';
 import { blankProject } from '../types';
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe('API client', () => {
+  it('decodes the closed v1 capabilities document at the raw HTTP boundary', async () => {
+    const capabilities = {
+      schemaVersion: 1,
+      runtime: {
+        scope: { kind: 'runtimeSession', sessionId: 'session', revision: 0 },
+        packageVersion: '2.0.0',
+        projectFormatVersions: [2],
+        batchKinds: ['array', 'table'],
+        portableArrowTypes: ['int64'],
+        operators: [],
+        udfs: [],
+        providers: [],
+      },
+      preview: {
+        inputBatchKinds: ['table'],
+        requestInputFormats: ['arrow_ipc', 'columns', 'records'],
+        projectInputFormats: ['arrow_ipc', 'csv', 'inline_json', 'json'],
+        workerRegistrations: [],
+        limits: {
+          maxInputBytes: { default: 10, minimum: 1, maximum: 10 },
+          maxRows: { default: 10, minimum: 1, maximum: 10 },
+          timeoutSeconds: { default: 30, minimum: 1, maximum: 300 },
+          memoryLimitMb: { default: 512, minimum: 64, maximum: 4096 },
+          outputRows: { default: 1000, minimum: 1, maximum: 10_000 },
+        },
+      },
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(capabilities)))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ schemaVersion: 2 })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        ...capabilities,
+        optionalFutureField: true,
+      })));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(api.capabilities()).resolves.toEqual(capabilities);
+    await expect(api.capabilities()).rejects.toEqual(
+      new ApiContractError('capabilities schema version 2 is unsupported; expected 1'),
+    );
+    await expect(api.capabilities()).rejects.toBeInstanceOf(ApiContractError);
+  });
+
   it('loads the bare v2 UDF catalog', async () => {
     const entries = [
       {
@@ -46,6 +89,109 @@ describe('API client', () => {
     await expect(api.validateProject('bad')).rejects.toEqual(
       new ApiError('invalid graph', 422),
     );
+  });
+
+  it('rejects an old validation response before application code sees it', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({
+          valid: true,
+          issues: [],
+          fingerprint: 'old-server',
+        })),
+      ),
+    );
+
+    await expect(api.validateProject('project')).rejects.toBeInstanceOf(
+      ApiContractError,
+    );
+  });
+
+  it('rejects unknown run states and output kinds from raw responses', async () => {
+    const base = {
+      id: 'run',
+      project_id: 'project',
+      created_at: '2026-01-01T00:00:00Z',
+      started_at: '2026-01-01T00:00:00Z',
+      finished_at: '2026-01-01T00:00:01Z',
+      error: null,
+      result: null,
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ...base, status: 'unknown' })),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          ...base,
+          status: 'completed',
+          result: {
+            outputs: {
+              output: {
+                kind: 'tensor',
+                total_rows: 1,
+                truncated: false,
+                data: [1],
+                metadata: {},
+              },
+            },
+            node_timings: {},
+            datafusion_metrics: [],
+            metadata: {},
+          },
+        })),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(api.run('run')).rejects.toBeInstanceOf(ApiContractError);
+    await expect(api.run('run')).rejects.toEqual(
+      new ApiContractError(
+        "run result output 'output' has unsupported kind 'tensor'; "
+        + "expected 'table' or 'array'",
+      ),
+    );
+  });
+
+  it('decodes table and array boundary outputs before returning a run', async () => {
+    const run = {
+      id: 'run',
+      project_id: 'project',
+      status: 'completed',
+      created_at: '2026-01-01T00:00:00Z',
+      started_at: '2026-01-01T00:00:00Z',
+      finished_at: '2026-01-01T00:00:01Z',
+      error: null,
+      result: {
+        outputs: {
+          空表: {
+            kind: 'table',
+            total_rows: 0,
+            truncated: false,
+            schema: [{ name: '值', type: 'int64', nullable: true }],
+            rows: [],
+            metadata: { source: '表' },
+          },
+          精确数组: {
+            kind: 'array',
+            backend: 'numpy',
+            total_rows: 2,
+            truncated: false,
+            data: [null, 2],
+            metadata: { source: '数组' },
+          },
+        },
+        node_timings: {},
+        datafusion_metrics: [],
+        metadata: {},
+      },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response(JSON.stringify(run))),
+    );
+
+    await expect(api.run('run')).resolves.toEqual(run);
   });
 
   it('formats structured FastAPI validation errors', async () => {

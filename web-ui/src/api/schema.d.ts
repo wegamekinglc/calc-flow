@@ -4,6 +4,23 @@
  */
 
 export interface paths {
+    "/api/v2/capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Capabilities */
+        get: operations["get_capabilities_api_v2_capabilities_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/catalog": {
         parameters: {
             query?: never;
@@ -200,6 +217,63 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** ArrayOutputPreview */
+        ArrayOutputPreview: {
+            /** Backend */
+            backend: string;
+            data: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "array";
+            /** Metadata */
+            metadata: {
+                [key: string]: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
+            };
+            /** Total Rows */
+            total_rows: number;
+            /** Truncated */
+            truncated: boolean;
+        };
+        /** CancelledRunResponse */
+        CancelledRunResponse: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Error */
+            error?: null;
+            /**
+             * Finished At
+             * Format: date-time
+             */
+            finished_at: string;
+            /** Id */
+            id: string;
+            /** Project Id */
+            project_id: string;
+            /** Result */
+            result?: null;
+            /** Started At */
+            started_at?: string | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            status: "cancelled";
+        };
+        /** CapabilitiesResponse */
+        CapabilitiesResponse: {
+            preview: components["schemas"]["PreviewCapabilitiesResponse"];
+            runtime: components["schemas"]["RuntimeCapabilitiesResponse"];
+            /**
+             * Schemaversion
+             * @constant
+             */
+            schemaVersion: 1;
+        };
         /** CheckpointSummary */
         CheckpointSummary: {
             /** Compatible */
@@ -221,6 +295,84 @@ export interface components {
              */
             state_nodes: string[];
         };
+        /** CompletedRunResponse */
+        CompletedRunResponse: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Error */
+            error?: null;
+            /**
+             * Finished At
+             * Format: date-time
+             */
+            finished_at: string;
+            /** Id */
+            id: string;
+            /** Project Id */
+            project_id: string;
+            result: components["schemas"]["RunResultPreview"];
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            status: "completed";
+        };
+        /** DataFusionMetricPreview */
+        DataFusionMetricPreview: {
+            /** Execution Ns */
+            execution_ns: number;
+            /** Logical Plan */
+            logical_plan: string;
+            /** Node Id */
+            node_id: string | null;
+            /** Output Rows */
+            output_rows: number;
+            /** Physical Plan */
+            physical_plan: string;
+            /** Planning Ns */
+            planning_ns: number;
+            /** Query Id */
+            query_id: number;
+        };
+        /** FailedRunResponse */
+        FailedRunResponse: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Error */
+            error: string;
+            /**
+             * Finished At
+             * Format: date-time
+             */
+            finished_at: string;
+            /** Id */
+            id: string;
+            /** Project Id */
+            project_id: string;
+            /** Result */
+            result?: null;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            status: "failed";
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -236,6 +388,131 @@ export interface components {
             format: "records" | "columns" | "arrow_ipc";
             /** Source Id */
             source_id?: string | null;
+        };
+        /** InvalidValidationReport */
+        InvalidValidationReport: {
+            /** Fingerprint */
+            fingerprint?: null;
+            /** Issues */
+            issues: components["schemas"]["ValidationIssue"][];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "invalid";
+            /**
+             * Valid
+             * @default false
+             * @constant
+             */
+            valid: false;
+        };
+        /** LazyBuiltinWorkerRegistration */
+        LazyBuiltinWorkerRegistration: {
+            /** Name */
+            name: string;
+            /** Provider */
+            provider: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            reconstruction: "lazyBuiltin";
+            /**
+             * Registrationkind
+             * @enum {string}
+             */
+            registrationKind: "provider" | "dataFusionScalar";
+            /** Version */
+            version: string;
+        };
+        /** NodeTimingPreview */
+        NodeTimingPreview: {
+            /** Duration Ns */
+            duration_ns: number;
+            /** Input Rows */
+            input_rows: {
+                [key: string]: number;
+            };
+            /** Output Rows */
+            output_rows: {
+                [key: string]: number;
+            };
+        };
+        /** OperatorCapabilityResponse */
+        OperatorCapabilityResponse: {
+            /** Inputkinds */
+            inputKinds: ("table" | "array")[];
+            /** Kind */
+            kind: string;
+            /** Outputkinds */
+            outputKinds: ("table" | "array")[];
+            /** Requiresdatafusion */
+            requiresDatafusion: boolean;
+        };
+        /** OutputFieldPreview */
+        OutputFieldPreview: {
+            /** Name */
+            name: string;
+            /** Nullable */
+            nullable: boolean;
+            /** Type */
+            type: string;
+        };
+        OutputPreview: components["schemas"]["TableOutputPreview"] | components["schemas"]["ArrayOutputPreview"];
+        /** PendingRunResponse */
+        PendingRunResponse: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Error */
+            error?: null;
+            /** Finished At */
+            finished_at?: null;
+            /** Id */
+            id: string;
+            /** Project Id */
+            project_id: string;
+            /** Result */
+            result?: null;
+            /** Started At */
+            started_at?: null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            status: "pending";
+        };
+        /** PreviewCapabilitiesResponse */
+        PreviewCapabilitiesResponse: {
+            /** Inputbatchkinds */
+            inputBatchKinds: ("table" | "array")[];
+            limits: components["schemas"]["PreviewLimitsResponse"];
+            /** Projectinputformats */
+            projectInputFormats: ("arrow_ipc" | "csv" | "inline_json" | "json")[];
+            /** Requestinputformats */
+            requestInputFormats: ("arrow_ipc" | "columns" | "records")[];
+            /** Workerregistrations */
+            workerRegistrations: components["schemas"]["WorkerRegistrationCapability"][];
+        };
+        /** PreviewLimit */
+        PreviewLimit: {
+            /** Default */
+            default: number;
+            /** Maximum */
+            maximum: number;
+            /** Minimum */
+            minimum: number;
+        };
+        /** PreviewLimitsResponse */
+        PreviewLimitsResponse: {
+            maxInputBytes: components["schemas"]["PreviewLimit"];
+            maxRows: components["schemas"]["PreviewLimit"];
+            memoryLimitMb: components["schemas"]["PreviewLimit"];
+            outputRows: components["schemas"]["PreviewLimit"];
+            timeoutSeconds: components["schemas"]["PreviewLimit"];
         };
         /** Calc Flow Project V2 */
         ProjectCreateRequest: {
@@ -562,6 +839,61 @@ export interface components {
             /** Node Count */
             node_count: number;
         };
+        /** ProviderCapabilityResponse */
+        ProviderCapabilityResponse: {
+            /** Inputports */
+            inputPorts: components["schemas"]["ProviderPortResponse"][];
+            /** Name */
+            name: string;
+            optionsSchema: components["schemas"]["ProviderOptionsSchemaResponse"] | null;
+            /** Outputports */
+            outputPorts: components["schemas"]["ProviderPortResponse"][];
+            /** Provider */
+            provider: string;
+            /** Version */
+            version: string;
+        };
+        /** ProviderOptionResponse */
+        ProviderOptionResponse: {
+            /** Name */
+            name: string;
+            /**
+             * Required
+             * @default false
+             */
+            required: boolean;
+            /**
+             * Valuetype
+             * @enum {string}
+             */
+            valueType: "string" | "integer" | "number" | "boolean";
+        };
+        /** ProviderOptionsSchemaResponse */
+        ProviderOptionsSchemaResponse: {
+            /**
+             * Additionalproperties
+             * @default false
+             * @constant
+             */
+            additionalProperties: false;
+            /**
+             * Fields
+             * @default []
+             */
+            fields: components["schemas"]["ProviderOptionResponse"][];
+        };
+        /** ProviderPortResponse */
+        ProviderPortResponse: {
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "table" | "array";
+            /** Name */
+            name: string;
+            /** Required */
+            required: boolean;
+        };
         /** RunOptions */
         RunOptions: {
             /**
@@ -599,33 +931,220 @@ export interface components {
             options?: components["schemas"]["RunOptions"] | null;
         };
         /** RunResponse */
-        RunResponse: {
+        RunResponse: components["schemas"]["RunResponseVariant"];
+        RunResponseVariant: components["schemas"]["PendingRunResponse"] | components["schemas"]["RunningRunResponse"] | components["schemas"]["CompletedRunResponse"] | components["schemas"]["FailedRunResponse"] | components["schemas"]["TimedOutRunResponse"] | components["schemas"]["CancelledRunResponse"];
+        /** RunResultPreview */
+        RunResultPreview: {
+            /** Datafusion Metrics */
+            datafusion_metrics: components["schemas"]["DataFusionMetricPreview"][];
+            /** Metadata */
+            metadata: {
+                [key: string]: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
+            };
+            /** Node Timings */
+            node_timings: {
+                [key: string]: components["schemas"]["NodeTimingPreview"];
+            };
+            /** Outputs */
+            outputs: {
+                [key: string]: components["schemas"]["OutputPreview"];
+            };
+        };
+        /** RunningRunResponse */
+        RunningRunResponse: {
             /**
              * Created At
              * Format: date-time
              */
             created_at: string;
             /** Error */
-            error?: string | null;
+            error?: null;
             /** Finished At */
-            finished_at?: string | null;
+            finished_at?: null;
             /** Id */
             id: string;
             /** Project Id */
             project_id: string;
             /** Result */
-            result?: {
-                [key: string]: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
-            } | null;
-            /** Started At */
-            started_at?: string | null;
-            status: components["schemas"]["RunStatus"];
+            result?: null;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            status: "running";
         };
-        /**
-         * RunStatus
-         * @enum {string}
-         */
-        RunStatus: "pending" | "running" | "completed" | "failed" | "cancelled" | "timed_out";
+        /** RuntimeCapabilitiesResponse */
+        RuntimeCapabilitiesResponse: {
+            /** Batchkinds */
+            batchKinds: ("table" | "array")[];
+            /** Operators */
+            operators: components["schemas"]["OperatorCapabilityResponse"][];
+            /** Packageversion */
+            packageVersion: string;
+            /** Portablearrowtypes */
+            portableArrowTypes: string[];
+            /** Projectformatversions */
+            projectFormatVersions: number[];
+            /** Providers */
+            providers: components["schemas"]["ProviderCapabilityResponse"][];
+            scope: components["schemas"]["RuntimeSessionScopeResponse"];
+            /** Udfs */
+            udfs: components["schemas"]["UdfCapabilityResponse"][];
+        };
+        /** RuntimeSessionScopeResponse */
+        RuntimeSessionScopeResponse: {
+            /**
+             * Kind
+             * @constant
+             */
+            kind: "runtimeSession";
+            /** Revision */
+            revision: number;
+            /** Sessionid */
+            sessionId: string;
+        };
+        /** SerializedWorkerRegistration */
+        SerializedWorkerRegistration: {
+            /** Name */
+            name: string;
+            /** Provider */
+            provider: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            reconstruction: "serialized";
+            /**
+             * Registrationkind
+             * @enum {string}
+             */
+            registrationKind: "provider" | "dataFusionScalar";
+            /** Version */
+            version: string;
+        };
+        /** TableOutputPreview */
+        TableOutputPreview: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "table";
+            /** Metadata */
+            metadata: {
+                [key: string]: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
+            };
+            /** Rows */
+            rows: {
+                [key: string]: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
+            }[];
+            /** Schema */
+            schema: components["schemas"]["OutputFieldPreview"][];
+            /** Total Rows */
+            total_rows: number;
+            /** Truncated */
+            truncated: boolean;
+        };
+        /** TimedOutRunResponse */
+        TimedOutRunResponse: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Error */
+            error: string;
+            /**
+             * Finished At
+             * Format: date-time
+             */
+            finished_at: string;
+            /** Id */
+            id: string;
+            /** Project Id */
+            project_id: string;
+            /** Result */
+            result?: null;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            status: "timed_out";
+        };
+        /** UdfCapabilityResponse */
+        UdfCapabilityResponse: {
+            /** Inputtypes */
+            inputTypes: string[];
+            /**
+             * Kind
+             * @constant
+             */
+            kind: "data_fusion_scalar";
+            /** Name */
+            name: string;
+            /** Provider */
+            provider: string;
+            /** Returntype */
+            returnType: string;
+            /** Version */
+            version: string;
+            /** Volatility */
+            volatility: string;
+        };
+        /** UnavailableWorkerRegistration */
+        UnavailableWorkerRegistration: {
+            /** Name */
+            name: string;
+            /** Provider */
+            provider: string;
+            /**
+             * Reasoncode
+             * @constant
+             */
+            reasonCode: "serializationFailed";
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            reconstruction: "unavailable";
+            /**
+             * Registrationkind
+             * @enum {string}
+             */
+            registrationKind: "provider" | "dataFusionScalar";
+            /** Version */
+            version: string;
+        };
+        /** ValidValidationReport */
+        ValidValidationReport: {
+            /** Fingerprint */
+            fingerprint: string;
+            /**
+             * Issues
+             * @default []
+             */
+            issues: components["schemas"]["ValidationIssue"][];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "valid";
+            /**
+             * Valid
+             * @default true
+             * @constant
+             */
+            valid: true;
+        };
         /** ValidationError */
         ValidationError: {
             /** Context */
@@ -639,6 +1158,17 @@ export interface components {
             /** Error Type */
             type: string;
         };
+        /** ValidationIssue */
+        ValidationIssue: {
+            /** Code */
+            code: string;
+            /** Message */
+            message: string;
+            /** Path */
+            path: string;
+        };
+        ValidationReport: components["schemas"]["ValidValidationReport"] | components["schemas"]["InvalidValidationReport"];
+        WorkerRegistrationCapability: components["schemas"]["SerializedWorkerRegistration"] | components["schemas"]["LazyBuiltinWorkerRegistration"] | components["schemas"]["UnavailableWorkerRegistration"];
         "calc_flow__config__JSONValue-Input": boolean | number | string | components["schemas"]["calc_flow__config__JSONValue-Input"][] | {
             [key: string]: components["schemas"]["calc_flow__config__JSONValue-Input"];
         } | null;
@@ -660,6 +1190,26 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    get_capabilities_api_v2_capabilities_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CapabilitiesResponse"];
+                };
+            };
+        };
+    };
     get_catalog_api_v2_catalog_get: {
         parameters: {
             query?: never;
@@ -1009,9 +1559,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ValidationReport"];
                 };
             };
             /** @description Validation Error */

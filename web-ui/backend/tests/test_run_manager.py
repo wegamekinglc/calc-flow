@@ -4,18 +4,32 @@ import base64
 import json
 import threading
 import time
-from datetime import date
+from dataclasses import replace
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum
 
 import cloudpickle
 import pyarrow as pa
 import pytest
-from calc_flow import ProjectDocument, Runtime
+from calc_flow import (
+    Batch,
+    ProjectDocument,
+    ProviderOption,
+    ProviderOptionsSchema,
+    Runtime,
+)
 
 import calc_flow_studio.run_manager as run_manager_module
-from calc_flow_studio.models import InputPayload, RunOptions, RunRequest, RunStatus
+from calc_flow_studio.models import (
+    InputPayload,
+    RunOptions,
+    RunRequest,
+    RunResultPreview,
+    RunStatus,
+)
 from calc_flow_studio.run_manager import (
+    CapabilitySnapshotError,
     RunManager,
     RunManagerError,
     _decode_source,
@@ -23,6 +37,7 @@ from calc_flow_studio.run_manager import (
     _register_referenced_builtins,
     _restore_registrations,
     _result_payload,
+    _RunHandle,
     _selected_registrations,
     _serialize_worker_payload,
     prepare_run,
@@ -438,6 +453,63 @@ def test_prepare_run_rejects_array_external_inputs_before_worker_creation() -> N
         prepare_run(project, RunRequest())
 
 
+def test_worker_transportability_does_not_override_input_execution_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        run_manager_module,
+        "_preflight_lazy_builtins",
+        lambda: (("numpy", "expression", "1"),),
+    )
+    manager = RunManager(runtime=Runtime(), use_processes=False)
+
+    capabilities = manager.capabilities()
+
+    assert capabilities.preview.worker_registrations[0].reconstruction == "lazyBuiltin"
+    with pytest.raises(RunManagerError, match="table graph inputs only"):
+        prepare_run(
+            ProjectDocument.model_validate(
+                {
+                    "format_version": 2,
+                    "id": "array",
+                    "name": "Array",
+                    "pipeline": {
+                        "name": "Array",
+                        "nodes": [
+                            {
+                                "id": "array",
+                                "operator": {
+                                    "kind": "external",
+                                    "provider": "numpy",
+                                    "name": "expression",
+                                    "version": "1",
+                                    "options": {"expression": "x + 1"},
+                                },
+                                "input_ports": [
+                                    {
+                                        "name": "input",
+                                        "kind": "array",
+                                        "required": True,
+                                    }
+                                ],
+                                "output_ports": [
+                                    {
+                                        "name": "output",
+                                        "kind": "array",
+                                        "required": True,
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    "data_sources": [_source()],
+                }
+            ),
+            RunRequest(),
+        )
+    manager.shutdown()
+
+
 def test_parent_payload_contains_no_calc_flow_extension_objects() -> None:
     runtime = Runtime()
 
@@ -520,8 +592,178 @@ def test_worker_payload_rejects_a_registration_that_captures_runtime() -> None:
         _serialize_worker_payload(project, prepared, options, registrations)
 
 
+def test_capabilities_separate_parent_compile_and_worker_transport_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        run_manager_module,
+        "_preflight_lazy_builtins",
+        lambda: (("numpy", "expression", "1"),),
+        raising=False,
+    )
+    runtime = Runtime()
+    runtime.register_provider(
+        "test",
+        "serializable",
+        "1",
+        lambda batch, _options: batch,
+        options_schema=ProviderOptionsSchema(
+            fields=(ProviderOption("scale", "number"),)
+        ),
+    )
+
+    def captures_runtime(batch: object, _options: object) -> object:
+        runtime.catalog()
+        return batch
+
+    runtime.register_provider("test", "unavailable", "1", captures_runtime)
+    manager = RunManager(runtime=runtime, use_processes=False)
+
+    first = manager.capabilities()
+    repeated = manager.capabilities()
+    document = first.model_dump(mode="json", by_alias=True)
+
+    assert repeated is first
+    assert document["runtime"]["scope"]["revision"] == 2
+    assert [item["name"] for item in document["runtime"]["providers"]] == [
+        "serializable",
+        "unavailable",
+    ]
+    assert document["preview"]["workerRegistrations"] == [
+        {
+            "reconstruction": "lazyBuiltin",
+            "registrationKind": "provider",
+            "provider": "numpy",
+            "name": "expression",
+            "version": "1",
+        },
+        {
+            "reconstruction": "serialized",
+            "registrationKind": "provider",
+            "provider": "test",
+            "name": "serializable",
+            "version": "1",
+        },
+        {
+            "reconstruction": "unavailable",
+            "registrationKind": "provider",
+            "provider": "test",
+            "name": "unavailable",
+            "version": "1",
+            "reasonCode": "serializationFailed",
+        },
+    ]
+    encoded = json.dumps(document)
+    for forbidden in (
+        "callback",
+        "source",
+        "path",
+        "secret",
+        "cloudpickle",
+        "table_matmul",
+    ):
+        assert forbidden not in encoded
+
+    runtime.register_provider("test", "later", "1", lambda batch, _options: batch)
+    advanced = manager.capabilities()
+    assert first.runtime.scope.revision == 2
+    assert advanced.runtime.scope.revision == 3
+    assert advanced is not first
+    manager.shutdown()
+
+
+def test_capabilities_deduplicate_lazy_builtins_by_registration_kind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        run_manager_module,
+        "_preflight_lazy_builtins",
+        lambda: (("numpy", "expression", "1"),),
+    )
+    scalar_runtime = Runtime()
+    scalar_runtime.register_scalar_udf(
+        provider="numpy",
+        name="expression",
+        version="1",
+        input_types=("int64",),
+        return_type="int64",
+        volatility="immutable",
+        function=lambda value: value,
+    )
+    scalar_manager = RunManager(runtime=scalar_runtime, use_processes=False)
+
+    scalar_document = scalar_manager.capabilities().model_dump(
+        mode="json", by_alias=True
+    )
+
+    assert scalar_document["preview"]["workerRegistrations"] == [
+        {
+            "reconstruction": "serialized",
+            "registrationKind": "dataFusionScalar",
+            "provider": "numpy",
+            "name": "expression",
+            "version": "1",
+        },
+        {
+            "reconstruction": "lazyBuiltin",
+            "registrationKind": "provider",
+            "provider": "numpy",
+            "name": "expression",
+            "version": "1",
+        },
+    ]
+    scalar_manager.shutdown()
+
+    provider_runtime = Runtime()
+    provider_runtime.register_provider(
+        "numpy",
+        "expression",
+        "1",
+        lambda batch, _options: batch,
+    )
+    provider_manager = RunManager(runtime=provider_runtime, use_processes=False)
+
+    provider_document = provider_manager.capabilities().model_dump(
+        mode="json", by_alias=True
+    )
+
+    assert provider_document["preview"]["workerRegistrations"] == [
+        {
+            "reconstruction": "serialized",
+            "registrationKind": "provider",
+            "provider": "numpy",
+            "name": "expression",
+            "version": "1",
+        }
+    ]
+    provider_manager.shutdown()
+
+
+def test_capabilities_reject_a_malformed_runtime_snapshot() -> None:
+    runtime = Runtime()
+    snapshot, registrations = runtime._capability_registration_snapshot()
+    malformed = replace(snapshot, batch_kinds=("tensor",))
+
+    class MalformedRuntime:
+        def _capability_registration_snapshot(self):
+            return malformed, registrations
+
+    manager = RunManager(runtime=MalformedRuntime(), use_processes=False)  # type: ignore[arg-type]
+
+    with pytest.raises(
+        CapabilitySnapshotError,
+        match=r"runtime capability snapshot violates schema version 1 at .*batch.*",
+    ):
+        manager.capabilities()
+
+    manager.shutdown()
+
+
 def test_worker_restores_mapping_and_legacy_provider_modes() -> None:
     calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+    options_schema = ProviderOptionsSchema(
+        fields=(ProviderOption("expression", "string", required=True),)
+    )
 
     class RecordingRuntime:
         def register_provider(self, *args: object, **kwargs: object) -> None:
@@ -540,6 +782,7 @@ def test_worker_restores_mapping_and_legacy_provider_modes() -> None:
             "name": "identity",
             "version": "1",
             "callback": callback,
+            "options_schema": options_schema,
         },
         {
             "kind": "provider",
@@ -550,19 +793,25 @@ def test_worker_restores_mapping_and_legacy_provider_modes() -> None:
             "callback": callback,
             "input_ports": (("table", "table"), ("weights", "array")),
             "output_ports": (("output", "array"),),
+            "options_schema": options_schema,
         },
     )
 
     _restore_registrations(RecordingRuntime(), registrations)  # type: ignore[arg-type]
 
     assert calls == [
-        ("legacy", ("test", "identity", "1", callback), {}),
+        (
+            "legacy",
+            ("test", "identity", "1", callback),
+            {"options_schema": options_schema},
+        ),
         (
             "mapping",
             ("test", "table_matmul", "1", callback),
             {
                 "input_ports": (("table", "table"), ("weights", "array")),
                 "output_ports": (("output", "array"),),
+                "options_schema": options_schema,
             },
         ),
     ]
@@ -666,9 +915,71 @@ def test_worker_executes_only_the_referenced_trusted_udf(
     )
 
     assert _wait(manager, run.id, timeout=20) is RunStatus.COMPLETED
-    assert manager.get(run.id).result["outputs"]["output"]["rows"] == [
-        {"value": 7, "result": 7}
-    ]
+    result = manager.get(run.id).result
+    assert result is not None
+    output = result.outputs["output"]
+    assert output.kind == "table"
+    assert output.rows == ({"value": 7, "result": 7},)
+    manager.shutdown()
+
+
+@pytest.mark.parametrize("use_processes", [False, True])
+def test_worker_restores_and_executes_a_mapped_table_provider(
+    use_processes: bool,
+) -> None:
+    runtime = Runtime()
+
+    def identity(inputs: dict[str, Batch], _options: object) -> dict[str, Batch]:
+        return {"output": inputs["input"]}
+
+    runtime._register_mapping_provider(
+        "test",
+        "mapped_identity",
+        "1",
+        identity,
+        input_ports=(("input", "table"),),
+        output_ports=(("output", "table"),),
+        options_schema=ProviderOptionsSchema(),
+    )
+    project = ProjectDocument.model_validate(
+        {
+            "format_version": 2,
+            "id": "mapped",
+            "name": "Mapped provider",
+            "pipeline": {
+                "name": "Mapped provider",
+                "nodes": [
+                    {
+                        "id": "mapped",
+                        "operator": {
+                            "kind": "external",
+                            "provider": "test",
+                            "name": "mapped_identity",
+                            "version": "1",
+                            "options": {},
+                        },
+                        "input_ports": [
+                            {"name": "input", "kind": "table", "required": True}
+                        ],
+                        "output_ports": [
+                            {"name": "output", "kind": "table", "required": True}
+                        ],
+                    }
+                ],
+            },
+            "data_sources": [_source(data=[{"value": 7}])],
+        }
+    )
+    manager = RunManager(runtime=runtime, use_processes=use_processes)
+
+    run = manager.submit(project, RunRequest())
+
+    assert _wait(manager, run.id, timeout=20) is RunStatus.COMPLETED
+    result = manager.get(run.id).result
+    assert result is not None
+    output = result.outputs["output"]
+    assert output.kind == "table"
+    assert output.rows == ({"value": 7},)
     manager.shutdown()
 
 
@@ -689,18 +1000,19 @@ def test_thread_worker_executes_rust_plan_with_bounded_result() -> None:
 
     result = manager.get(run.id).result
     assert result is not None
-    output = result["outputs"]["output"]
-    assert output["rows"] == [{"value": 1, "result": 2}]
-    assert output["total_rows"] == 2
-    assert output["truncated"] is True
-    assert result["node_timings"]["calculate"]["input_rows"] == {"input": 2}
-    assert result["metadata"]["pipeline_name"] == "Main"
-    assert result["metadata"]["pipeline_fingerprint"]
-    assert result["metadata"]["run_id"]
-    assert result["datafusion_metrics"][0]["query_id"] > 0
-    assert result["datafusion_metrics"][0]["node_id"] == "calculate"
-    assert result["datafusion_metrics"][0]["logical_plan"]
-    assert result["datafusion_metrics"][0]["physical_plan"]
+    output = result.outputs["output"]
+    assert output.kind == "table"
+    assert output.rows == ({"value": 1, "result": 2},)
+    assert output.total_rows == 2
+    assert output.truncated is True
+    assert result.node_timings["calculate"].input_rows == {"input": 2}
+    assert result.metadata["pipeline_name"] == "Main"
+    assert result.metadata["pipeline_fingerprint"]
+    assert result.metadata["run_id"]
+    assert result.datafusion_metrics[0].query_id > 0
+    assert result.datafusion_metrics[0].node_id == "calculate"
+    assert result.datafusion_metrics[0].logical_plan
+    assert result.datafusion_metrics[0].physical_plan
     assert [event.type for event in manager.events(run.id)] == [
         "created",
         "running",
@@ -708,6 +1020,220 @@ def test_thread_worker_executes_rust_plan_with_bounded_result() -> None:
     ]
     assert manager._runs[run.id].worker is None
     assert manager._runs[run.id].output_queue is None
+    manager.shutdown()
+
+
+def test_malformed_worker_result_fails_before_completed_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def return_unknown_output(
+        _worker_payload: bytes,
+        output_queue: object,
+        _apply_limits: bool,
+    ) -> None:
+        output_queue.put(  # type: ignore[attr-defined]
+            {
+                "ok": True,
+                "result": {
+                    "outputs": {
+                        "output": {
+                            "kind": "tensor",
+                            "total_rows": 1,
+                            "truncated": False,
+                            "data": [1],
+                            "metadata": {},
+                        }
+                    },
+                    "node_timings": {},
+                    "datafusion_metrics": [],
+                    "metadata": {},
+                },
+            }
+        )
+
+    monkeypatch.setattr(
+        run_manager_module,
+        "_execute_worker",
+        return_unknown_output,
+    )
+    manager = RunManager(use_processes=False)
+
+    submitted = manager.submit(_project(), RunRequest())
+
+    assert _wait(manager, submitted.id) is RunStatus.FAILED
+    failed = manager.get(submitted.id)
+    assert failed.result is None
+    assert failed.error == (
+        "run result output 'output' has unsupported kind 'tensor'; "
+        "expected 'table' or 'array'"
+    )
+    manager.shutdown()
+
+
+def test_other_malformed_worker_results_are_redacted_before_completed_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    too_deep: object = "leaf"
+    for _ in range(34):
+        too_deep = {"nested": too_deep}
+    malformed_results = (
+        {
+            "outputs": {},
+            "node_timings": {},
+            "datafusion_metrics": [],
+        },
+        {
+            "outputs": {},
+            "node_timings": {},
+            "datafusion_metrics": [],
+            "metadata": {},
+            "secret_token": "must-not-leak",
+        },
+        {
+            "outputs": {},
+            "node_timings": {},
+            "datafusion_metrics": [],
+            "metadata": {"value": float("inf")},
+        },
+        {
+            "outputs": {},
+            "node_timings": {},
+            "datafusion_metrics": [],
+            "metadata": {"value": too_deep},
+        },
+    )
+
+    for malformed in malformed_results:
+
+        def return_malformed(
+            _worker_payload: bytes,
+            output_queue: object,
+            _apply_limits: bool,
+            *,
+            result: object = malformed,
+        ) -> None:
+            output_queue.put({"ok": True, "result": result})  # type: ignore[attr-defined]
+
+        monkeypatch.setattr(run_manager_module, "_execute_worker", return_malformed)
+        manager = RunManager(use_processes=False)
+        submitted = manager.submit(_project(), RunRequest())
+
+        assert _wait(manager, submitted.id) is RunStatus.FAILED
+        failed = manager.get(submitted.id)
+        assert failed.result is None
+        assert failed.error is not None
+        assert failed.error.startswith(
+            "run result violates the v2 preview contract at "
+        )
+        assert "must-not-leak" not in failed.error
+        manager.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("field", "malformed_output", "node_timings", "error_location"),
+    [
+        pytest.param(
+            "total_rows",
+            {
+                "kind": "table",
+                "total_rows": "1",
+                "truncated": False,
+                "schema": [],
+                "rows": [],
+                "metadata": {},
+            },
+            {},
+            "outputs.output.table.total_rows",
+            id="string-total-rows",
+        ),
+        pytest.param(
+            "truncated",
+            {
+                "kind": "table",
+                "total_rows": 1,
+                "truncated": "false",
+                "schema": [],
+                "rows": [],
+                "metadata": {},
+            },
+            {},
+            "outputs.output.table.truncated",
+            id="string-truncated",
+        ),
+        pytest.param(
+            "nullable",
+            {
+                "kind": "table",
+                "total_rows": 1,
+                "truncated": False,
+                "schema": [{"name": "value", "type": "int64", "nullable": "false"}],
+                "rows": [],
+                "metadata": {},
+            },
+            {},
+            "outputs.output.table.schema.0.nullable",
+            id="string-nullable",
+        ),
+        pytest.param(
+            "input_rows",
+            {
+                "kind": "table",
+                "total_rows": 1,
+                "truncated": False,
+                "schema": [],
+                "rows": [],
+                "metadata": {},
+            },
+            {
+                "calculate": {
+                    "duration_ns": 1,
+                    "input_rows": {"input": "1"},
+                    "output_rows": {"output": 1},
+                }
+            },
+            "node_timings.calculate.input_rows.input",
+            id="string-count-mapping",
+        ),
+    ],
+)
+def test_direct_worker_message_rejects_coercible_result_scalars(
+    field: str,
+    malformed_output: dict[str, object],
+    node_timings: dict[str, object],
+    error_location: str,
+) -> None:
+    manager = RunManager(use_processes=False)
+    run_id = f"malformed-{field}"
+    now = datetime.now(UTC)
+    manager._runs[run_id] = _RunHandle(
+        id=run_id,
+        project_id="demo",
+        status=RunStatus.RUNNING,
+        created_at=now,
+        started_at=now,
+    )
+
+    manager._finish_from_message(
+        run_id,
+        {
+            "ok": True,
+            "result": {
+                "outputs": {"output": malformed_output},
+                "node_timings": node_timings,
+                "datafusion_metrics": [],
+                "metadata": {},
+            },
+        },
+    )
+
+    failed = manager.get(run_id)
+    assert failed.status is RunStatus.FAILED
+    assert failed.result is None
+    assert failed.error is not None
+    assert failed.error.startswith(
+        f"run result violates the v2 preview contract at {error_location}:"
+    )
+    assert repr(malformed_output) not in failed.error
     manager.shutdown()
 
 
@@ -723,8 +1249,10 @@ def test_spawned_worker_executes_rust_plan_and_cleans_resources() -> None:
     assert _wait(manager, run.id, timeout=20) is RunStatus.COMPLETED
     result = manager.get(run.id).result
     assert result is not None
-    assert result["outputs"]["output"]["rows"] == [{"value": 4, "result": 5}]
-    assert result["datafusion_metrics"][0]["logical_plan"]
+    output = result.outputs["output"]
+    assert output.kind == "table"
+    assert output.rows == ({"value": 4, "result": 5},)
+    assert result.datafusion_metrics[0].logical_plan
     assert manager._runs[run.id].worker is None
     assert manager._runs[run.id].output_queue is None
     manager.shutdown()
@@ -1125,6 +1653,72 @@ def test_json_safe_and_result_payload_normalize_transport_values() -> None:
         "metadata": {"decimal": "1.2"},
     }
     assert payload["metadata"] == {"run_id": "run", "value": None}
+
+
+def test_result_payload_preserves_table_and_array_boundary_cases() -> None:
+    class TableBatch:
+        kind = "table"
+        metadata = {"源": "表"}
+
+        def __init__(self, table: pa.Table) -> None:
+            self._table = table
+
+        def to_pyarrow(self) -> pa.Table:
+            return self._table
+
+    class ArrayBatch:
+        kind = "array"
+        backend = "numpy"
+        metadata = {"源": "数组"}
+
+        def __init__(self, data: list[object]) -> None:
+            self.array = data
+            self.num_rows = len(data)
+
+    class Result:
+        node_timings = {}
+        datafusion_metrics = []
+        metadata = {}
+
+        def __init__(self, name: str, batch: object) -> None:
+            self.outputs = {name: batch}
+
+    table_cases = (
+        ("空表", pa.table({"值": pa.array([], type=pa.int64())}), 2, 0, False),
+        ("单行", pa.table({"值": [None]}), 2, 1, False),
+        ("精确", pa.table({"值": [1, 2]}), 2, 2, False),
+        ("超限", pa.table({"值": [1, 2, 3]}), 2, 3, True),
+    )
+    for name, table, limit, total_rows, truncated in table_cases:
+        payload = _result_payload(Result(name, TableBatch(table)), output_rows=limit)
+        validated = RunResultPreview.model_validate(payload)
+        output = validated.outputs[name]
+        assert output.kind == "table"
+        assert output.total_rows == total_rows
+        assert output.truncated is truncated
+        assert len(output.rows) == min(total_rows, limit)
+        assert output.metadata == {"源": "表"}
+
+    array_cases = (
+        ("空数组", [], 2, 0, False),
+        ("单值", [None], 2, 1, False),
+        ("精确数组", [1, 2], 2, 2, False),
+        ("超限数组", [1, 2, 3], 2, 3, True),
+    )
+    for name, data, limit, total_rows, truncated in array_cases:
+        payload = _result_payload(Result(name, ArrayBatch(data)), output_rows=limit)
+        validated = RunResultPreview.model_validate(payload)
+        output = validated.outputs[name]
+        assert output.kind == "array"
+        assert output.total_rows == total_rows
+        assert output.truncated is truncated
+        assert output.data == data[:limit]
+        assert output.metadata == {"源": "数组"}
+
+    empty = _result_payload(Result("ignored", ArrayBatch([])), output_rows=2)
+    empty["outputs"] = {}
+    assert RunResultPreview.model_validate(empty).outputs == {}
+    assert RunResultPreview.model_validate(empty).datafusion_metrics == ()
 
 
 def test_decode_arrow_checks_encoded_and_decoded_bounds() -> None:
