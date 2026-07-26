@@ -157,7 +157,25 @@ An `ExecutionPlan` returns a `RunResult` containing:
 
 Python's blocking `execute()` rejects calls from a running event loop.
 `execute_async()` releases Python execution while Rust runs and supports
-cooperative cancellation.
+cooperative cancellation. Both accept a keyword-only `ExecutionOptions` value.
+Its `settings` are a deep-copied, strict JSON mapping and its optional
+`deadline` is an absolute, aware `datetime` with an exactly zero UTC offset.
+Accepted deadlines are normalized to `datetime.UTC`. A deadline that is
+already expired, or is crossed at an execution boundary, raises
+`calc_flow.CancelledError` after rollback; cancelling a still-pending
+surrounding asyncio task instead raises `asyncio.CancelledError` after native
+cleanup completes. These checks do not preempt a non-cooperative callback
+already in progress. One options value can be reused safely because each
+execution receives a fresh native cancellation token.
+
+Single-input and mapping provider callbacks keep their historical
+`(batch_or_inputs, provider_options)` ABI when `accepts_context=False`, the
+default. Registrations with `accepts_context=True` instead receive
+`(batch_or_inputs, provider_options, context)`, where the frozen,
+engine-created `ProviderContext` exposes fresh copies of the authoritative run
+settings and the normalized deadline. Context delivery is explicit: Calc Flow
+does not infer callback arity or retry after `TypeError`, and Python never
+exposes the native cancellation token through its public API.
 
 ## Trusted extensions
 

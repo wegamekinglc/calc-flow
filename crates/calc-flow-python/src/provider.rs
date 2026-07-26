@@ -11,6 +11,7 @@ use serde_json::json;
 use crate::{
     batch::{PyBatch, PythonPayload, rehome_python_payload},
     config::{PythonRoot, json_to_python},
+    execution_options::PyProviderContext,
 };
 
 #[derive(Clone)]
@@ -43,14 +44,26 @@ pub(crate) struct PythonOperatorFactory {
     name: String,
     version: String,
     mode: PythonProviderMode,
+    accepts_context: bool,
 }
 
 impl PythonOperatorFactory {
+    #[cfg(test)]
     pub(crate) fn new(
         callback: Arc<PythonRoot>,
         provider: &str,
         name: &str,
         version: &str,
+    ) -> Self {
+        Self::new_with_context(callback, provider, name, version, false)
+    }
+
+    pub(crate) fn new_with_context(
+        callback: Arc<PythonRoot>,
+        provider: &str,
+        name: &str,
+        version: &str,
+        accepts_context: bool,
     ) -> Self {
         Self {
             callback,
@@ -58,9 +71,11 @@ impl PythonOperatorFactory {
             name: name.into(),
             version: version.into(),
             mode: PythonProviderMode::SingleArray,
+            accepts_context,
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn new_mapping(
         callback: Arc<PythonRoot>,
         provider: &str,
@@ -69,12 +84,29 @@ impl PythonOperatorFactory {
         inputs: Vec<PortContract>,
         outputs: Vec<PortContract>,
     ) -> Self {
+        Self::new_mapping_with_context(callback, provider, name, version, inputs, outputs, false)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the factory retains the complete explicit provider registration contract"
+    )]
+    pub(crate) fn new_mapping_with_context(
+        callback: Arc<PythonRoot>,
+        provider: &str,
+        name: &str,
+        version: &str,
+        inputs: Vec<PortContract>,
+        outputs: Vec<PortContract>,
+        accepts_context: bool,
+    ) -> Self {
         Self {
             callback,
             provider: provider.into(),
             name: name.into(),
             version: version.into(),
             mode: PythonProviderMode::Mapping { inputs, outputs },
+            accepts_context,
         }
     }
 }
@@ -100,6 +132,7 @@ impl calc_flow::ExternalOperatorFactory for PythonOperatorFactory {
             name: self.name.clone(),
             version: self.version.clone(),
             mode: self.mode.clone(),
+            accepts_context: self.accepts_context,
             options: spec.options().clone(),
             options_json,
             inputs,
@@ -173,6 +206,7 @@ struct PythonOperator {
     name: String,
     version: String,
     mode: PythonProviderMode,
+    accepts_context: bool,
     options: calc_flow::JsonMap,
     options_json: String,
     inputs: Vec<calc_flow::Port>,
@@ -216,7 +250,7 @@ impl calc_flow::Operator for PythonOperator {
     async fn process(
         &mut self,
         inputs: &BTreeMap<String, calc_flow::Batch>,
-        _context: &calc_flow::OperatorContext<'_>,
+        context: &calc_flow::OperatorContext<'_>,
     ) -> calc_flow::Result<BTreeMap<String, calc_flow::Batch>> {
         if let PythonProviderMode::Mapping {
             inputs: input_contracts,
@@ -232,6 +266,7 @@ impl calc_flow::Operator for PythonOperator {
                     output_contracts,
                     &self.outputs,
                     &self.options_json,
+                    self.accepts_context.then_some(context.run),
                 )
             })
             .map_err(|error| self.provider_error(error.to_string()));
@@ -249,7 +284,13 @@ impl calc_flow::Operator for PythonOperator {
                 self.provider_error("input payload was not created by the Python host")
             })?;
         let output = Python::attach(|py| {
-            call_python_operator(py, &self.callback, input, &self.options_json)
+            call_python_operator(
+                py,
+                &self.callback,
+                input,
+                &self.options_json,
+                self.accepts_context.then_some(context.run),
+            )
         })
         .map_err(|error| self.provider_error(error.to_string()))?;
         let output_payload = output
@@ -270,14 +311,25 @@ fn call_python_operator(
     callback: &PythonRoot,
     input: &calc_flow::Batch,
     options_json: &str,
+    run: Option<&calc_flow::RunContext>,
 ) -> PyResult<calc_flow::Batch> {
     let input = Py::new(py, PyBatch::from_inner_python(py, input.clone())?)?;
     let options = json_to_python(py, options_json)?;
-    let output = callback.object().bind(py).call1((input, options))?;
+    let callback = callback.object().bind(py);
+    let output = if let Some(run) = run {
+        let context = Py::new(py, PyProviderContext::from_run(run))?;
+        callback.call1((input, options, context))?
+    } else {
+        callback.call1((input, options))?
+    };
     let output = output.extract::<PyRef<'_, PyBatch>>()?.python_payload()?;
     rehome_python_payload(py, output)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the callback adapter needs both declared and compiled mapping port contracts"
+)]
 fn call_python_operator_mapping(
     py: Python<'_>,
     callback: &PythonRoot,
@@ -286,6 +338,7 @@ fn call_python_operator_mapping(
     output_contracts: &[PortContract],
     output_ports: &[calc_flow::Port],
     options_json: &str,
+    run: Option<&calc_flow::RunContext>,
 ) -> PyResult<BTreeMap<String, calc_flow::Batch>> {
     let inputs = PyDict::new(py);
     for contract in input_contracts {
@@ -301,7 +354,13 @@ fn call_python_operator_mapping(
         )?;
     }
     let options = json_to_python(py, options_json)?;
-    let output = callback.object().bind(py).call1((inputs, options))?;
+    let callback = callback.object().bind(py);
+    let output = if let Some(run) = run {
+        let context = Py::new(py, PyProviderContext::from_run(run))?;
+        callback.call1((inputs, options, context))?
+    } else {
+        callback.call1((inputs, options))?
+    };
     let mapping_type = py.import("collections.abc")?.getattr("Mapping")?;
     if !output.is_instance(&mapping_type)? {
         return Err(pyo3::exceptions::PyTypeError::new_err(
@@ -548,7 +607,7 @@ mod tests {
             let options = BTreeMap::from([("value".into(), json!(1))]);
             let options_json = encode_provider_options(&options).unwrap();
 
-            let output = call_python_operator(py, &root, &batch, &options_json).unwrap();
+            let output = call_python_operator(py, &root, &batch, &options_json, None).unwrap();
 
             assert_eq!(output.num_rows(), 1);
             assert_eq!(options, BTreeMap::from([("value".into(), json!(1))]));
@@ -824,6 +883,7 @@ mod tests {
                 &[PortContract::new("output", calc_flow::BatchKind::Array)],
                 &[array_port("output")],
                 "{}",
+                None,
             )
             .unwrap();
 
@@ -860,6 +920,7 @@ mod tests {
                 &[PortContract::new("output", calc_flow::BatchKind::Array)],
                 &[array_port("output")],
                 "{}",
+                None,
             )
             .unwrap_err();
 
@@ -900,6 +961,7 @@ mod tests {
                 &[PortContract::new("output", calc_flow::BatchKind::Table)],
                 &[table_port("output")],
                 "{}",
+                None,
             )
             .unwrap();
 

@@ -34,6 +34,8 @@ from calc_flow.store import FileCheckpointStore, FileProjectStore
 
 __version__ = "2.0.0"
 Batch = _native.Batch
+ExecutionOptions = _native.ExecutionOptions
+ProviderContext = _native.ProviderContext
 RunResult = _native.RunResult
 
 __all__ = [
@@ -44,9 +46,11 @@ __all__ = [
     "CompileError",
     "ConfigError",
     "ExecutionError",
+    "ExecutionOptions",
     "FileCheckpointStore",
     "FileProjectStore",
     "ProviderError",
+    "ProviderContext",
     "ProjectDocument",
     "ExecutionPlan",
     "PipelineBuilder",

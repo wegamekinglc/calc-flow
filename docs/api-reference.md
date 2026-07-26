@@ -88,12 +88,46 @@ Import the main surface from `calc_flow`.
 - `compile(runtime=None) -> ExecutionPlan`.
 
 `ExecutionPlan` exposes immutable `name` and `fingerprint`.
-`execute(inputs)` is blocking and rejects a running event loop.
-`execute_async(inputs)` is the asynchronous form. `snapshot[_async]`,
-`restore[_async]`, and `reset[_async]` provide the plan-state lifecycle.
+`execute(inputs, *, options=None)` is blocking and rejects a running event
+loop. `execute_async(inputs, *, options=None)` is the asynchronous form.
+In both signatures, `options` is keyword-only and `None` preserves the
+existing default execution behavior. `snapshot[_async]`, `restore[_async]`,
+and `reset[_async]` provide the plan-state lifecycle.
 
 `RunResult` exposes defensive `outputs`, `metadata`, `node_timings`, and
 `datafusion_metrics` values.
+
+`ExecutionOptions(settings={}, deadline=None)` is frozen and reusable; an
+omitted settings argument creates an empty mapping.
+The root `settings` value may be any `collections.abc.Mapping` and is
+materialized once. Below that sole protocol-based exception, keys must be
+exact built-in `str` values; leaves and containers must be exact built-in
+`None`, `bool`, `int`, finite `float`, `str`, `list`, or `dict` values.
+Subclasses and other nested mappings are rejected. Integers must be in the
+inclusive range `-2**63 .. 2**64 - 1`; cycles are rejected. The root mapping
+is depth 0, and every child value must be at depth 32 or less.
+
+Construction deep-copies the complete accepted graph, including shared nested
+aliases, and neither retains nor mutates caller containers. Every
+`options.settings` read returns another deep `dict`/`list` copy. `deadline`
+accepts `None` or an aware `datetime` whose effective UTC offset is exactly
+zero. Accepted values are normalized to `datetime.UTC` without losing
+microseconds; naive and non-zero-offset datetimes are rejected.
+
+An already expired or crossed deadline raises `calc_flow.CancelledError`
+after transactional rollback. Cancelling a still-pending Python task returned
+by `execute_async` instead raises `asyncio.CancelledError`; if native
+execution completed first, its result or exception wins. Awaited task
+cancellation waits for the native operation and its cleanup, so no run-owned
+work continues detached and the plan recovers before its next public
+operation.
+
+Both deadline and task cancellation are cooperative at safe execution
+boundaries. They do not preempt a Python callback, DataFusion query, or other
+non-cooperative operation already in progress; cleanup continues after that
+operation yields. Every execution receives independent native cancellation
+state, but the public Python API does not expose the native cancellation
+token.
 
 ### Runtime and UDFs
 
@@ -103,6 +137,25 @@ exposes an immutable runtime-session capability snapshot through
 `capabilities()`.
 `register_scalar_udf` requires provider/name/version, exact input type names,
 return type, volatility, and a vectorized callable.
+
+`register_provider` and `_register_mapping_provider` accept keyword-only
+`accepts_context=False`. A single provider registered with `register_provider`
+receives one `Batch` as its first argument: `(batch, options)` by default or
+`(batch, options, context)` when opted in. A mapping provider registered with
+`_register_mapping_provider` receives a named input mapping:
+`(inputs, options)` or `(inputs, options, context)`. The frozen,
+engine-created `ProviderContext` exposes the authoritative run `settings` and
+normalized `deadline`; each settings read is a fresh deep copy. This run
+context is separate from the compile-time provider `options` mapping. Calc
+Flow does not inspect callback signatures or retry a call with another arity.
+The default false flag preserves all existing provider registrations, while
+the true form opts into the additive three-argument ABI.
+
+These execution changes are additive. Existing `execute(inputs)`,
+`execute_async(inputs)`, and two-argument providers retain their behavior.
+Execution settings and deadlines are per-run values; provider-context opt-in
+belongs to the runtime registration. Neither changes project or checkpoint
+formats, fingerprints, Studio REST/OpenAPI, or capability schemas.
 
 Capability schema version 1 contains only frozen data:
 `RuntimeSessionScope`, `OperatorCapability`, `UdfCapability`,

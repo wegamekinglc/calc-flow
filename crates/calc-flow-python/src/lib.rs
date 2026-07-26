@@ -3,6 +3,7 @@
 mod batch;
 mod config;
 mod error;
+mod execution_options;
 mod pipeline;
 mod provider;
 mod runtime;
@@ -22,6 +23,7 @@ fn calc_flow_python(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(version, module)?)?;
     error::register(module)?;
     batch::register(module)?;
+    execution_options::register(module)?;
     config::register(module)?;
     pipeline::register(module)?;
     store::register(module)?;

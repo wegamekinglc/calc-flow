@@ -1,11 +1,32 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use parking_lot::RwLock;
-use pyo3::{PyTraverseError, PyVisit, exceptions::PyRuntimeError, prelude::*, types::PyAny};
+use pyo3::{
+    Borrowed, PyTraverseError, PyVisit,
+    exceptions::{PyRuntimeError, PyTypeError},
+    prelude::*,
+    types::{PyAny, PyBool},
+};
 
 use crate::pipeline::PyExecutionPlan;
 
 const CLEARED_RUNTIME_MESSAGE: &str = "Runtime has been cleared by garbage collection";
+
+#[derive(Clone, Copy)]
+struct ExactBool(bool);
+
+impl<'a, 'py> FromPyObject<'a, 'py> for ExactBool {
+    type Error = PyErr;
+
+    fn extract(value: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        if !value.is_exact_instance_of::<PyBool>() {
+            return Err(PyTypeError::new_err(
+                "accepts_context must be an exact bool",
+            ));
+        }
+        value.extract::<bool>().map(Self)
+    }
+}
 
 /// The single Python reference shared by an opaque Rust implementation and GC.
 ///
@@ -235,6 +256,10 @@ impl PyRuntime {
     }
 
     #[pyo3(name = "register_provider")]
+    #[pyo3(
+        signature = (provider, name, version, callback, *, accepts_context = ExactBool(false)),
+        text_signature = "($self, provider, name, version, callback, *, accepts_context=False)"
+    )]
     fn register_python_provider(
         &self,
         py: Python<'_>,
@@ -242,20 +267,27 @@ impl PyRuntime {
         name: &str,
         version: &str,
         callback: Py<PyAny>,
+        accepts_context: ExactBool,
     ) -> PyResult<()> {
         if !callback.bind(py).is_callable() {
-            return Err(pyo3::exceptions::PyTypeError::new_err(
-                "provider callback must be callable",
-            ));
+            return Err(PyTypeError::new_err("provider callback must be callable"));
         }
         let root = Arc::new(PythonRoot::new(callback));
-        let factory: Arc<dyn calc_flow::ExternalOperatorFactory> = Arc::new(
-            crate::provider::PythonOperatorFactory::new(Arc::clone(&root), provider, name, version),
-        );
+        let factory: Arc<dyn calc_flow::ExternalOperatorFactory> =
+            Arc::new(crate::provider::PythonOperatorFactory::new_with_context(
+                Arc::clone(&root),
+                provider,
+                name,
+                version,
+                accepts_context.0,
+            ));
         self.register_provider_factory(provider, name, version, &factory, root)
     }
 
-    #[pyo3(signature = (provider, name, version, callback, *, input_ports, output_ports))]
+    #[pyo3(
+        signature = (provider, name, version, callback, *, input_ports, output_ports, accepts_context = ExactBool(false)),
+        text_signature = "($self, provider, name, version, callback, *, input_ports, output_ports, accepts_context=False)"
+    )]
     #[allow(
         clippy::too_many_arguments,
         reason = "the private binding preserves the explicit mapping provider contract"
@@ -269,11 +301,10 @@ impl PyRuntime {
         callback: Py<PyAny>,
         input_ports: Vec<(String, String)>,
         output_ports: Vec<(String, String)>,
+        accepts_context: ExactBool,
     ) -> PyResult<()> {
         if !callback.bind(py).is_callable() {
-            return Err(pyo3::exceptions::PyTypeError::new_err(
-                "provider callback must be callable",
-            ));
+            return Err(PyTypeError::new_err("provider callback must be callable"));
         }
         let inputs = input_ports
             .into_iter()
@@ -284,15 +315,17 @@ impl PyRuntime {
             .map(|(port, kind)| mapping_port_contract(&port, &kind))
             .collect::<PyResult<Vec<_>>>()?;
         let root = Arc::new(PythonRoot::new(callback));
-        let factory: Arc<dyn calc_flow::ExternalOperatorFactory> =
-            Arc::new(crate::provider::PythonOperatorFactory::new_mapping(
+        let factory: Arc<dyn calc_flow::ExternalOperatorFactory> = Arc::new(
+            crate::provider::PythonOperatorFactory::new_mapping_with_context(
                 Arc::clone(&root),
                 provider,
                 name,
                 version,
                 inputs,
                 outputs,
-            ));
+                accepts_context.0,
+            ),
+        );
         self.register_provider_factory(provider, name, version, &factory, root)
     }
 

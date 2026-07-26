@@ -106,4 +106,9 @@ impl RunContext {
     pub fn settings(&self) -> &JsonMap {
         &self.settings
     }
+
+    /// Returns the absolute UTC deadline for this run, if configured.
+    pub const fn deadline(&self) -> Option<&DateTime<Utc>> {
+        self.deadline.as_ref()
+    }
 }

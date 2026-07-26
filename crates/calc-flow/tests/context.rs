@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use calc_flow::{CalcFlowError, CancellationToken, MAX_JSON_DEPTH, RunContext, canonical_json};
+use chrono::{TimeZone, Utc};
 use serde_json::{Value, json};
 
 fn nested_arrays(depth: usize) -> Value {
@@ -48,4 +49,13 @@ fn run_context_exposes_settings_and_rejects_empty_node_ids() {
         context.for_node(" \t"),
         Err(CalcFlowError::InvalidArgument { field, .. }) if field == "node_id"
     ));
+}
+
+#[test]
+fn run_context_exposes_the_exact_configured_deadline() {
+    let deadline = Utc.with_ymd_and_hms(2027, 4, 5, 6, 7, 8).single().unwrap();
+    let context =
+        RunContext::new(BTreeMap::new(), Some(deadline), CancellationToken::new()).unwrap();
+
+    assert_eq!(context.deadline(), Some(&deadline));
 }

@@ -166,22 +166,125 @@ normally advances by two and can expose a real partial success if its second
 entry already exists. Previously returned snapshots remain isolated from
 later revisions.
 
+## Execution options and provider context
+
+Use the frozen `ExecutionOptions` value to attach run-scoped settings and an
+absolute UTC deadline:
+
+```python
+from datetime import UTC, datetime, timedelta
+
+from calc_flow import ExecutionOptions
+
+options = ExecutionOptions(
+    settings={"request": {"tenant": "demo", "attempt": 1}},
+    deadline=datetime.now(UTC) + timedelta(seconds=30),
+)
+result = plan.execute({"input": batch}, options=options)
+```
+
+The root `settings` value may be any `collections.abc.Mapping` and is
+materialized once. Nested containers must be exact built-in `dict` or `list`
+values, object keys must be exact built-in strings, and leaves must be exact
+`None`, `bool`, `int`, finite `float`, or `str` values. Subclasses, nested
+custom mappings, coercion-only objects, tuples, sets, bytes, non-finite
+floats, and integers outside the inclusive range `-2**63 .. 2**64 - 1` are
+rejected. The root mapping is depth 0, every child value must be at depth 32 or
+less, and cycles are rejected.
+
+Construction deep-copies the complete accepted graph; mutating the source or
+any nested caller container cannot change the options. Every
+`options.settings` read returns another deep `dict`/`list` copy, so mutating an
+observation cannot change a later read or execution. Omitting `settings`
+creates an empty mapping; passing `None` explicitly is a `TypeError`.
+`deadline` accepts `None` or an aware `datetime` whose effective UTC offset is
+exactly zero. Calc Flow normalizes accepted values to `datetime.UTC` and
+preserves microseconds; it rejects naive and non-zero-offset values.
+
+Both `plan.execute(inputs, *, options=None)` and
+`plan.execute_async(inputs, *, options=None)` make `options` keyword-only.
+Omitting it preserves the existing default behavior.
+
+Provider callbacks remain two-argument callables unless the registration
+explicitly opts into run context:
+
+```python
+def contextual_provider(batch, provider_options, context):
+    tenant = (context.settings or {}).get("request", {}).get("tenant")
+    return batch
+
+
+runtime.register_provider(
+    "acme",
+    "contextual",
+    "1",
+    contextual_provider,
+    accepts_context=True,
+)
+```
+
+A single provider callback receives one `Batch`: `(batch, provider_options)`
+when `accepts_context=False`, the default, or
+`(batch, provider_options, context)` when it is true. A mapping provider
+registered with `_register_mapping_provider` receives its named input mapping
+instead: `(inputs, provider_options)` when false or
+`(inputs, provider_options, context)` when true. Existing two-argument
+providers therefore remain source-compatible.
+
+Each callback is invoked exactly once under the selected ABI. The frozen,
+engine-created `ProviderContext` exposes the authoritative run
+`context.settings` and `context.deadline`, not values merged into the separate
+compile-time `provider_options` mapping. Every settings read returns a fresh
+deep copy, and the deadline is the normalized aware UTC value or `None`. The
+flag must be an exact `bool`; Calc Flow does not infer arity or retry a
+callback after `TypeError`. Native cancellation tokens are intentionally not
+part of the public Python API.
+
+The feature is additive: existing `execute(inputs)`, `execute_async(inputs)`,
+and two-argument providers retain their behavior. Run settings, deadlines,
+and provider-context opt-in are not serialized into projects, checkpoints, or
+Studio API payloads and do not change those formats.
+
 ## Async execution
 
 ```python
+from datetime import UTC, datetime, timedelta
+
+from calc_flow import ExecutionOptions
+
+
 async def calculate() -> list[int]:
     plan = (
         PipelineBuilder("async-example").expression("calc", "total = a + b").compile()
     )
+    options = ExecutionOptions(
+        settings={"request": {"source": "async-example"}},
+        deadline=datetime.now(UTC) + timedelta(seconds=30),
+    )
     result = await plan.execute_async(
-        {"input": Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))}
+        {"input": Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))},
+        options=options,
     )
     return result.outputs["output"].to_pyarrow()["total"].to_pylist()
 ```
 
 Blocking `execute`, store, and runner methods reject a running event loop. Use
-their async forms in servers and asyncio applications. Cancelling an async
-execution or runner call waits for native cleanup before the plan is reusable.
+their async forms in servers and asyncio applications. An already-expired or
+crossed execution deadline raises `calc_flow.CancelledError` after
+transactional rollback. Cancelling a still-pending surrounding asyncio task
+instead raises `asyncio.CancelledError`. If native execution finished first,
+its result or exception remains observable.
+
+Awaiting task cancellation waits until the current native operation and
+run-owned cleanup finish; no work or input payload continues detached. The
+plan recovers its pre-run state before its next public operation. Deadline and
+task cancellation are cooperative at safe boundaries, so neither preempts a
+Python callback, DataFusion query, or other non-cooperative operation already
+in progress; cleanup resumes when that operation yields. The same
+`ExecutionOptions` value can be reused concurrently because each run receives
+independent native cancellation state. No cancellation token is part of the
+public Python API.
+
 The full version is [`examples/05_async_execution.py`](../examples/05_async_execution.py).
 
 ## NumPy and JAX
