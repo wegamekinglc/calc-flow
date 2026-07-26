@@ -178,6 +178,14 @@ def _reshape_shape(node: ast.AST) -> tuple[int, ...]:
     return tuple(dimensions)
 
 
+def _validate_reshape_result(value: object) -> None:
+    dimensions = tuple(int(dimension) for dimension in getattr(value, "shape", ()))
+    if any(dimension > _MAX_RESHAPE_DIMENSION for dimension in dimensions):
+        raise _array_error(f"reshape dimension limit is {_MAX_RESHAPE_DIMENSION}")
+    if math.prod(dimensions) > _MAX_RESHAPE_ELEMENTS:
+        raise _array_error(f"reshape output limit is {_MAX_RESHAPE_ELEMENTS} elements")
+
+
 def _evaluate(
     node: ast.AST,
     value: object,
@@ -204,6 +212,8 @@ def _evaluate(
         if name == "reshape":
             arguments.append(_reshape_shape(node.args[1]))
         result = function(*arguments)
+        if name == "reshape":
+            _validate_reshape_result(result)
     else:
         raise AssertionError("validated array expression contained an unsupported node")
     if validate_result is not None:

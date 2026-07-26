@@ -1553,6 +1553,29 @@ def test_array_expression_validates_function_arguments(
         _external("invalid", "numpy", expression).compile()
 
 
+@pytest.mark.parametrize(
+    ("source_shape", "expression", "message"),
+    [
+        ((1001, 1000), "reshape(x, (-1,))", "reshape dimension limit is 1000000"),
+        (
+            (1001, 10000),
+            "reshape(x, (-1, 11))",
+            "reshape output limit is 10000000 elements",
+        ),
+    ],
+)
+def test_numpy_provider_rejects_inferred_reshape_limits(
+    source_shape: tuple[int, ...], expression: str, message: str
+) -> None:
+    runtime = Runtime()
+    register_numpy(runtime)
+    plan = _external("reshape_limit", "numpy", expression).compile(runtime)
+    source = np.zeros(source_shape, dtype=np.uint8)
+
+    with pytest.raises(ProviderError, match=message):
+        plan.execute({"input": Batch.from_array(source, backend="numpy")})
+
+
 def test_numpy_provider_supports_bounded_array_operations() -> None:
     runtime = Runtime()
     register_numpy(runtime)
