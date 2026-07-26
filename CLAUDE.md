@@ -213,7 +213,10 @@ untouched.
 
 ## Specialist agents
 
-The calc-flow agent team (spec → design → critique → implement → test → review
-→ document) is defined in `.claude/agents/`. `cf-doc-writer` owns the freshness
-of `docs/` and curates `CHANGELOG.md`; invoke it when docs need reconciling
-against current code or a change may warrant a changelog entry.
+The canonical calc-flow agent team (spec → design → critique → implement →
+test → review → document) is defined in `.codex/agents/`.
+`.claude/agents/` mirrors those definitions for Claude compatibility;
+synchronize team changes from `.codex/agents/` to `.claude/agents/`, never in
+the reverse direction. `cf-doc-writer` owns the freshness of `docs/` and
+curates `CHANGELOG.md`; invoke it when docs need reconciling against current
+code or a change may warrant a changelog entry.

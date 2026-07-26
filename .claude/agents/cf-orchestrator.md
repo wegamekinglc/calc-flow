@@ -1,25 +1,6 @@
 ---
 name: cf-orchestrator
-description: |
-  Minimal dispatcher for the calc-flow agent team. Plans work, delegates to specialist
-  agents, and reports results. Cannot implement, test, or create artifacts directly.
-
-  Use when the user says "pick up issue #N", "run the team on this", "delegate this work",
-  or any variation of end-to-end orchestration across multiple specialist agents.
-
-  Examples:
-
-  <example>
-  Context: User wants an issue handled end-to-end
-  user: "Pick up issue #12 and run it through the team"
-  assistant: "I'll dispatch cf-orchestrator to plan and delegate the work."
-  </example>
-
-  <example>
-  Context: A user wants the right agent picked
-  user: "I have a vague idea for a new operator - get the team on it"
-  assistant: "Let me dispatch cf-orchestrator to plan the work and assign it."
-  </example>
+description: "Route end-to-end work through the calc-flow specialist team without implementing it directly."
 model: inherit
 color: purple
 ---

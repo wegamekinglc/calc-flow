@@ -1,11 +1,12 @@
 # Calc Flow documentation
 
-This directory holds the published documentation for Calc Flow. The docs
-describe a single current version: they always reflect the latest state of the
-project on `main`. Overwrite them in place when the code changes; do not
-maintain per-release copies. Fundamental changes are recorded in the repo-root
-`CHANGELOG.md` once the first qualifying change creates it, and the v1-to-v2
-migration boundary is preserved in the historical records listed below.
+This directory holds Calc Flow's published documentation and point-in-time
+engineering records. The current-state guides linked under **Start here**
+always reflect the latest state of the project on `main`; overwrite them in
+place when the code changes rather than maintaining per-release copies.
+Fundamental changes are recorded in the existing repo-root `CHANGELOG.md`, and
+the v1-to-v2 migration boundary is preserved in the historical records listed
+below.
 
 ## Start here
 
@@ -54,6 +55,10 @@ surfaces and are preserved for audit; leave them untouched. The current
   The frozen v1 implementation is available at the `v1-python-final` tag.
 - **[v0.2 migration](migration-v0.2.md)** — the v0.1-to-v0.2 prototype
   migration, predating v1.
+- **[Engineering records](superpowers/)** — dated design notes,
+  implementation plans, specifications, and hand-offs. These preserve the
+  decisions and execution state at the time they were written; they are not
+  current API or operational guidance.
 
 Immutable v1 semantic fixtures live under
 [`tests/fixtures/v1/`](../tests/fixtures/v1/) as v2 parity evidence; they are

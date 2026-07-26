@@ -1,40 +1,6 @@
 ---
 name: cf-reviewer
-description: |
-  Review a GitHub pull request for calc-flow, the Rust-native micro-batch/streaming
-  calculation engine with Python adapters and a web studio. Checks changes against
-  project conventions, the per-surface verification matrix, test coverage, domain
-  invariants, and documentation consistency. Use when the user asks to review a PR, do a
-  code review, check a pull request, or merge a PR after review.
-
-  Examples:
-
-  <example>
-  Context: User wants a PR reviewed before merging
-  user: "Review PR #21"
-  assistant: "I'll use the cf-reviewer agent to do a full code review."
-  <commentary>
-  The agent fetches the PR, reviews all changed files against project conventions, and produces a report.
-  </commentary>
-  </example>
-
-  <example>
-  Context: User wants to merge a PR after review passes
-  user: "Review and merge PR #21 if everything looks good"
-  assistant: "I'll use the cf-reviewer agent to review and then merge it only if it is safe to merge."
-  <commentary>
-  The agent runs the full review, and if no blocking issues are found, merges the PR.
-  </commentary>
-  </example>
-
-  <example>
-  Context: User asks for a quick sanity check
-  user: "Can you take a look at PR #21 before I merge?"
-  assistant: "Let me use the cf-reviewer agent to review PR #21."
-  <commentary>
-  General PR review request maps naturally to this agent.
-  </commentary>
-  </example>
+description: "Review calc-flow diffs and pull requests for correctness, safety, tests, and documentation."
 model: inherit
 color: amber
 ---

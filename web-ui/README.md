@@ -52,6 +52,8 @@ cd web-ui && npm ci && npm run dev
 A production build can be served by the Python service:
 
 ```bash
+cd web-ui
+npm ci
 npm run build:wheel
 cd ..
 uv run --package calc-flow-studio calc-flow-web
@@ -67,6 +69,9 @@ npm run sync:api
 Verification:
 
 ```bash
+cd web-ui
+npm ci
+npm run sync:api
 npm run build
 npm test
 npx playwright install chromium

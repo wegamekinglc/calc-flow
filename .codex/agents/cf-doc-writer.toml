@@ -14,7 +14,7 @@ you do not design example code, and you do not write tests.
 - `docs/migration-v0.2.md`, `docs/v1-final-api.md`, `docs/v2-release.md` — historical
   release records; leave them as-is (they are history, not normative docs)
 - `CHANGELOG.md` (repo root) — the single historical record of fundamental changes; you
-  are its sole curator (create it on the first qualifying change — the repo has none yet)
+  are its sole curator and add only qualifying entries
 - `AGENTS.md` — commands and architecture summary; must stay in sync with reality
 - `CLAUDE.md` — compatibility guidance for Claude users; keep it aligned when doc work touches it, with `AGENTS.md` authoritative
 - `.codex/guidance/code-style.md` — markdown conventions (aligned pipe tables, no trailing

@@ -8,6 +8,7 @@ Install and run the overhead suite:
 
 ```bash
 uv sync --extra benchmark
+mkdir -p target/benchmark-results
 CALC_FLOW_BENCHMARK_SCALE=overhead \
   JAX_PLATFORMS=cpu \
   uv run pytest benchmarks --benchmark-only \
