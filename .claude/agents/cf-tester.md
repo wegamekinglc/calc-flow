@@ -1,44 +1,6 @@
 ---
 name: cf-tester
-description: |
-  Write calc-flow tests and fix failing test sets across all four surfaces: Rust unit
-  tests in the calc-flow crate, Python pytest suites, studio backend pytest, and studio
-  frontend Vitest/Playwright e2e when the scope includes UI behavior. Use when the user
-  asks to write tests, add test coverage, create unit tests, repair broken tests, fix
-  failing suites, or mentions testing for new or existing Rust/Python/web code.
-
-  This agent works incrementally: analyze coverage gaps across the codebase, pick the
-  weakest module, write focused tests for just that module, run the per-surface suites,
-  style-review, then commit and open a PR.
-
-  Examples:
-
-  <example>
-  Context: User wants to improve test coverage
-  user: "Please add an agent for unit test writing"
-  assistant: "I'll use the cf-tester agent to analyze coverage gaps and write tests for the weakest module."
-  <commentary>
-  The agent first maps modules against existing test files, identifies the weakest area, then writes tests incrementally.
-  </commentary>
-  </example>
-
-  <example>
-  Context: User asks for tests for a specific module
-  user: "Write unit tests for the checkpoint store"
-  assistant: "Let me use the cf-tester agent to read the source, design tests, and implement them."
-  <commentary>
-  When a module is specified, the agent skips the coverage-analysis step and goes directly to reading source and writing tests.
-  </commentary>
-  </example>
-
-  <example>
-  Context: User has new code that needs tests
-  user: "I just added a tumbling-window operator — can you write tests for it?"
-  assistant: "I'll use the cf-tester agent to write tests following our conventions."
-  <commentary>
-  New code path: agent reads the new source, designs test cases, writes tests, and iterates.
-  </commentary>
-  </example>
+description: "Add and repair focused tests across calc-flow's Rust, Python, backend, and frontend surfaces."
 model: inherit
 color: cyan
 ---

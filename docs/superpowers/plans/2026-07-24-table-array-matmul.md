@@ -1,5 +1,10 @@
 # Table-Array Matrix Multiplication Implementation Plan
 
+> **Historical status:** Implemented and merged in PR #27. Unchecked boxes and
+> commands below preserve the execution plan as written; for current behavior,
+> use `docs/introduction.md`, `docs/python-api.md`, `docs/api-reference.md`, and
+> `examples/README.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a copy-bounded NumPy/JAX matrix operator that multiplies selected Arrow table columns by a separate backend weight matrix.

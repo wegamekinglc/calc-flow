@@ -80,9 +80,11 @@ The Codex-native calc-flow specialist team is defined in
 critiques belong under `.codex/artifacts/` with one shared kebab-case slug per
 work item.
 
-The `.claude/` tree is preserved compatibility guidance for Claude users.
-Codex agents read and write the Codex paths above and must not rewrite the
-preserved compatibility files during ordinary work.
+The `.codex/agents/` definitions and descriptions are canonical. The
+`.claude/agents/` tree is a preserved compatibility mirror for Claude users;
+when a team definition changes, synchronize its semantics from
+`.codex/agents/` to `.claude/agents/`, never in the reverse direction.
+Ordinary feature work must not rewrite either team definition.
 
 ## Coding style
 

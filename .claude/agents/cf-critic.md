@@ -1,44 +1,6 @@
 ---
 name: cf-critic
-description: |
-  Adversarial reviewer for specs, designs, and proposals in calc-flow, the Rust-native
-  micro-batch/streaming calculation engine. Use when a spec or API note has been written
-  and you want a hostile read before committing to implementation - the goal is to surface
-  hidden assumptions, missing edge cases, unstated constraints, and quietly-bad tradeoffs
-  while they're still cheap to fix.
-
-  Do NOT use this agent on already-implemented code (that's `cf-reviewer`'s job) or on
-  finished diffs looking for simplification (that's `cf-simplifier`). The critic operates
-  on plans, not patches.
-
-  Examples:
-
-  <example>
-  Context: A spec has been written and you want it stress-tested
-  user: "Stress-test the tumbling-window spec at .claude/specs/tumbling-window.md"
-  assistant: "I'll use the cf-critic agent to attack the spec and surface hidden risks."
-  <commentary>
-  Adversarial review on a spec - exactly the right use of this agent.
-  </commentary>
-  </example>
-
-  <example>
-  Context: A proposal feels too clean
-  user: "The spec writer chose event-time windows over processing-time. Push back on that."
-  assistant: "Let me use the cf-critic agent to argue the case against event-time windows."
-  <commentary>
-  Targeted counter-argument on a design choice.
-  </commentary>
-  </example>
-
-  <example>
-  Context: Pre-implementation sanity check
-  user: "Before I delegate to implementer, find the holes in the spec at .claude/specs/multi-source.md"
-  assistant: "I'll use the cf-critic agent to surface missing acceptance criteria and edge cases."
-  <commentary>
-  Late-stage spec review - cheap to fix now, expensive after code is written.
-  </commentary>
-  </example>
+description: "Adversarially review calc-flow specifications and API proposals before implementation."
 model: inherit
 color: red
 ---

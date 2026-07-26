@@ -5,6 +5,10 @@ Rust-native engine, PyO3/Python adapters, FastAPI backend, and React Studio.
 The orchestrator routes work through the specialists; each specialist keeps a
 bounded responsibility and returns a concise, verified hand-off.
 
+The TOML definitions and descriptions in this directory are canonical.
+Downstream compatibility manifests mirror these definitions; synchronize team
+changes from this directory to those mirrors, never in the reverse direction.
+
 ## Team Roster
 
 | Role         | Agent             | Reads                                    | Writes                                        |

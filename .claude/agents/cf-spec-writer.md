@@ -1,40 +1,6 @@
 ---
 name: cf-spec-writer
-description: |
-  Turn fuzzy user requests, GitHub issues, or one-line feature ideas into a precise,
-  testable requirement specification for calc-flow, the Rust-native micro-batch/streaming
-  calculation engine with Python adapters and a web studio. Use when the user posts a
-  vague feature request, a GitHub issue body that needs sharpening, or any time scope,
-  acceptance criteria, or edge cases are unclear before development can start.
-
-  Examples:
-
-  <example>
-  Context: User has a one-line feature ask
-  user: "We should support tumbling windows in streaming pipelines"
-  assistant: "Let me use the cf-spec-writer agent to turn this into a concrete spec before we design or code anything."
-  <commentary>
-  Vague feature request - the spec writer will probe scope, batch semantics, state/checkpoint behavior, and acceptance criteria.
-  </commentary>
-  </example>
-
-  <example>
-  Context: GitHub issue with thin description
-  user: "Pick up issue #12 - 'add a tumbling-window operator'"
-  assistant: "I'll use the cf-spec-writer agent to read the issue and produce a complete spec."
-  <commentary>
-  Issue body needs to be expanded into testable acceptance criteria before delegation to implementer.
-  </commentary>
-  </example>
-
-  <example>
-  Context: Ambiguous scope
-  user: "Make checkpointing faster"
-  assistant: "Let me use the cf-spec-writer agent to define what 'faster' means here - workload, target, measurement."
-  <commentary>
-  Performance asks need quantified targets and a measurement method before any work starts.
-  </commentary>
-  </example>
+description: "Turn calc-flow requests and issues into explicit, testable requirement specifications."
 model: inherit
 color: orange
 ---

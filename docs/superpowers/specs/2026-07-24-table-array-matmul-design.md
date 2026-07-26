@@ -2,7 +2,8 @@
 
 ## Status
 
-Approved in conversation on 2026-07-24.
+Approved on 2026-07-24; implemented and merged in PR #27. This document is a
+point-in-time design record, not current API guidance.
 
 ## Problem
 

@@ -1,43 +1,6 @@
 ---
 name: cf-api-designer
-description: |
-  Critique and design the developer-facing surface of calc-flow: the Rust crate's public
-  API, the Python package (PyO3 bindings plus functional adapters), the studio REST API,
-  error messages, and example code. Use when adding or changing public API, reviewing how
-  a new feature will be called by downstream users, or improving discoverability and
-  ergonomics of an existing surface.
-
-  This is not a graphical-UI agent. "UX" here means *developer experience* - the code a
-  Rust user, a Python user, or a studio API client actually types and reads.
-
-  Examples:
-
-  <example>
-  Context: New public API being added
-  user: "We're exposing tumbling windows in python/calc_flow - check the API shape before we ship it."
-  assistant: "I'll use the cf-api-designer agent to review the call signatures, naming, and error messages."
-  <commentary>
-  Public surface changes deserve a deliberate API design pass before they harden.
-  </commentary>
-  </example>
-
-  <example>
-  Context: Binding ergonomics
-  user: "The pipeline builder takes 9 arguments - is that fine?"
-  assistant: "Let me use the cf-api-designer agent to evaluate the ergonomics and propose alternatives."
-  <commentary>
-  Signatures that humans type need API scrutiny - argument order, defaults, error messages.
-  </commentary>
-  </example>
-
-  <example>
-  Context: Designing examples
-  user: "Write the example that demonstrates the new checkpoint recovery flow."
-  assistant: "I'll use the cf-api-designer agent to design the example so it reads well and teaches the concept."
-  <commentary>
-  Example code is documentation - the API designer ensures it shows the happy path clearly.
-  </commentary>
-  </example>
+description: "Design and critique calc-flow's public Rust, Python, REST, error, and example-code surfaces."
 model: inherit
 color: pink
 ---

@@ -1,42 +1,6 @@
 ---
 name: cf-implementer
-description: |
-  Use this agent when the user wants to implement a feature, develop a new module, or
-  execute a requirement specification in calc-flow, the Rust-native micro-batch/streaming
-  calculation engine with PyO3/Python adapters and a web studio. This agent handles the
-  full development cycle: understanding requirements, technical design, test-driven
-  implementation (red → green → refactor), and iteration until the per-surface
-  verification matrix is green. It always works inside an isolated git worktree.
-
-  Examples:
-
-  <example>
-  Context: User has a feature requirement to implement
-  user: "I need to add a tumbling-window operator to the engine"
-  assistant: "Let me use the cf-implementer agent to handle this end-to-end."
-  <commentary>
-  Feature implementation request. The cf-implementer agent handles everything from design through tested code.
-  </commentary>
-  assistant: "I'll use the cf-implementer agent to implement this feature with full design, implementation, and tests."
-  </example>
-
-  <example>
-  Context: User provides a written specification
-  user: "Here's the spec for the multi-source join we need to build. Can you implement it?"
-  assistant: "I'll use the cf-implementer agent to work through this specification systematically."
-  <commentary>
-  Written specification triggers the full development workflow. Agent will design, implement, test, and iterate.
-  </commentary>
-  </example>
-
-  <example>
-  Context: User asks for a bug fix with clear scope
-  user: "Checkpoint restore drops the source cursor when a sink fails mid-run - fix it"
-  assistant: "Let me use the cf-implementer agent to reproduce, fix, and cover the regression."
-  <commentary>
-  Scoped bug fix: failing regression test first, then the minimal fix.
-  </commentary>
-  </example>
+description: "Implement approved calc-flow changes test-first across Rust, Python, and Studio surfaces."
 model: inherit
 color: green
 ---

@@ -5,6 +5,10 @@ streaming calculation engine with Python adapters and a local web studio. Each a
 one phase of the spec → design → critique → implement → review → document pipeline. The
 orchestrator routes work between them.
 
+This directory is a Claude compatibility mirror. The canonical agent definitions and
+descriptions live in `.codex/agents/`; synchronize team changes from `.codex/agents/` to
+this directory, never in the reverse direction.
+
 ## Team Roster
 
 | Role           | Agent               | Color    | Reads                                        | Writes                                        |
@@ -62,7 +66,7 @@ merge.
 | `.claude/api-notes/`   | cf-api-designer   | public-API surface notes (created on demand)                            |
 | `.claude/critiques/`   | cf-critic         | adversarial reviews of specs and api-notes (created on demand)          |
 | `docs/`                | cf-doc-writer     | normative engine and usage docs (referenced by all agents)              |
-| `CHANGELOG.md`         | cf-doc-writer     | dated log of fundamental changes (created on first qualifying change)   |
+| `CHANGELOG.md`         | cf-doc-writer     | existing dated log of fundamental changes                               |
 | `.claude/rules/`       | (existing)        | normative coding/test conventions                                       |
 
 Filenames share a single kebab-case slug derived from the request, so work traces through
