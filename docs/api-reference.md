@@ -153,9 +153,9 @@ the true form opts into the additive three-argument ABI.
 
 These execution changes are additive. Existing `execute(inputs)`,
 `execute_async(inputs)`, and two-argument providers retain their behavior.
-Execution settings, deadlines, and provider-context opt-in are per-runtime
-values; they do not change project or checkpoint formats, fingerprints,
-Studio REST/OpenAPI, or capability schemas.
+Execution settings and deadlines are per-run values; provider-context opt-in
+belongs to the runtime registration. Neither changes project or checkpoint
+formats, fingerprints, Studio REST/OpenAPI, or capability schemas.
 
 Capability schema version 1 contains only frozen data:
 `RuntimeSessionScope`, `OperatorCapability`, `UdfCapability`,
