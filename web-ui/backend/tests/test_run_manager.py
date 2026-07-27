@@ -868,30 +868,28 @@ def _valid_worker_provider() -> dict[str, object]:
     }
 
 
-def test_worker_preflight_rejects_non_exact_string_kind_without_comparing_it() -> None:
-    class ExplosiveKind(str):
-        def __eq__(self, _: object) -> bool:
-            raise RuntimeError("SECRET-TOKEN")
+class _RecordingRegistrationRuntime:
+    def __init__(self) -> None:
+        self.inner = Runtime()
+        self.calls: list[str] = []
 
-    calls: list[str] = []
+    def register_provider(self, *args: object, **kwargs: object) -> None:
+        self.calls.append("provider")
+        self.inner.register_provider(*args, **kwargs)
 
-    class RecordingRuntime:
-        def __init__(self) -> None:
-            self.inner = Runtime()
+    def _register_mapping_provider(self, *args: object, **kwargs: object) -> None:
+        self.calls.append("mapping")
+        self.inner._register_mapping_provider(*args, **kwargs)
 
-        def register_provider(self, *args: object, **kwargs: object) -> None:
-            calls.append("provider")
-            self.inner.register_provider(*args, **kwargs)
+    def register_scalar_udf(self, **kwargs: object) -> None:
+        self.calls.append("scalar")
+        self.inner.register_scalar_udf(**kwargs)
 
-        def _register_mapping_provider(self, *args: object, **kwargs: object) -> None:
-            calls.append("mapping")
-            self.inner._register_mapping_provider(*args, **kwargs)
 
-        def register_scalar_udf(self, **kwargs: object) -> None:
-            calls.append("scalar")
-            self.inner.register_scalar_udf(**kwargs)
-
-    runtime = RecordingRuntime()
+def _assert_unsupported_registration_tail_is_redacted(
+    tail: object,
+) -> RunManagerError:
+    runtime = _RecordingRegistrationRuntime()
     before = runtime.inner._registration_snapshot()
 
     with pytest.raises(RunManagerError) as caught:
@@ -899,15 +897,62 @@ def test_worker_preflight_rejects_non_exact_string_kind_without_comparing_it() -
             runtime,
             (
                 _valid_worker_provider(),
-                {"kind": ExplosiveKind("provider")},
+                tail,
             ),
         )
 
     assert str(caught.value) == "worker received an unsupported registration kind"
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
-    assert calls == []
+    assert runtime.calls == []
     assert runtime.inner._registration_snapshot() == before
+    return caught.value
+
+
+def test_worker_preflight_rejects_non_exact_string_kind_without_comparing_it() -> None:
+    class ExplosiveKind(str):
+        def __eq__(self, _: object) -> bool:
+            raise RuntimeError("SECRET-TOKEN")
+
+    _assert_unsupported_registration_tail_is_redacted(
+        {"kind": ExplosiveKind("provider")}
+    )
+
+
+def test_worker_preflight_does_not_read_hostile_registration_class() -> None:
+    class HostileRegistration:
+        def __init__(self) -> None:
+            self.class_reads = 0
+
+        @property
+        def __class__(self) -> type[object]:
+            self.class_reads += 1
+            raise RuntimeError("SECRET-CLASS")
+
+    tail = HostileRegistration()
+
+    error = _assert_unsupported_registration_tail_is_redacted(tail)
+
+    assert tail.class_reads == 0
+    assert "SECRET-CLASS" not in str(error)
+
+
+def test_worker_preflight_rejects_registration_spoofing_dict_class() -> None:
+    class SpoofAsDictSecret:
+        def __init__(self) -> None:
+            self.class_reads = 0
+
+        @property
+        def __class__(self) -> type[dict[object, object]]:
+            self.class_reads += 1
+            return dict
+
+    tail = SpoofAsDictSecret()
+
+    error = _assert_unsupported_registration_tail_is_redacted(tail)
+
+    assert tail.class_reads == 0
+    assert "SpoofAsDictSecret" not in str(error)
 
 
 @pytest.mark.parametrize(
