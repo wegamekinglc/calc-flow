@@ -1816,3 +1816,384 @@ fn build_plan(
         operation_state: StdMutex::new(OperationState::default()),
     }
 }
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use std::{
+        future::Future,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        task::Poll,
+    };
+
+    use async_trait::async_trait;
+    use datafusion::arrow::{datatypes::Schema, record_batch::RecordBatch};
+
+    use super::*;
+    use crate::{BatchKind, BatchMetadata, Operator, OperatorContext, UdfRegistry};
+
+    struct LifecycleGate {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        calls: Arc<AtomicUsize>,
+        restores: Arc<AtomicUsize>,
+        fail_snapshot: bool,
+        fail_restore: bool,
+        state: usize,
+        inputs: Vec<Port>,
+        outputs: Vec<Port>,
+    }
+
+    #[async_trait]
+    impl Operator for LifecycleGate {
+        fn name(&self) -> &'static str {
+            "lifecycle_gate"
+        }
+
+        fn input_ports(&self) -> &[Port] {
+            &self.inputs
+        }
+
+        fn output_ports(&self) -> &[Port] {
+            &self.outputs
+        }
+
+        fn configuration(&self) -> JsonMap {
+            BTreeMap::new()
+        }
+
+        async fn process(
+            &mut self,
+            inputs: &BTreeMap<String, Batch>,
+            _context: &OperatorContext<'_>,
+        ) -> Result<BTreeMap<String, Batch>> {
+            self.state += 1;
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.started.notify_one();
+                self.release.notified().await;
+            }
+            Ok(BTreeMap::from([("output".into(), inputs["input"].clone())]))
+        }
+
+        fn snapshot(&self) -> Result<Value> {
+            if self.fail_snapshot {
+                return Err(CalcFlowError::Format {
+                    message: "snapshot failure injected".into(),
+                });
+            }
+            Ok(json!(self.state))
+        }
+
+        fn restore(&mut self, state: &Value) -> Result<()> {
+            self.restores.fetch_add(1, Ordering::SeqCst);
+            if self.fail_restore {
+                return Err(CalcFlowError::Format {
+                    message: "restore failure injected".into(),
+                });
+            }
+            self.state = state
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| CalcFlowError::Format {
+                    message: "lifecycle gate state is invalid".into(),
+                })?;
+            Ok(())
+        }
+    }
+
+    fn lifecycle_plan(
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        calls: Arc<AtomicUsize>,
+        restores: Arc<AtomicUsize>,
+        fail_snapshot: bool,
+        fail_restore: bool,
+    ) -> Arc<ExecutionPlan> {
+        let input = Port::new("input", BatchKind::Table, true, None).unwrap();
+        let output = Port::new("output", BatchKind::Table, true, None).unwrap();
+        Arc::new(
+            PipelineBuilder::new("queued lifecycle")
+                .unwrap()
+                .add_node(
+                    "gate",
+                    Box::new(LifecycleGate {
+                        started,
+                        release,
+                        calls,
+                        restores,
+                        fail_snapshot,
+                        fail_restore,
+                        state: 0,
+                        inputs: vec![input],
+                        outputs: vec![output],
+                    }),
+                )
+                .unwrap()
+                .compile(&UdfRegistry::new().snapshot())
+                .unwrap(),
+        )
+    }
+
+    fn inputs() -> BTreeMap<String, Batch> {
+        let batch = RecordBatch::new_empty(Arc::new(Schema::empty()));
+        BTreeMap::from([(
+            "input".into(),
+            Batch::table(vec![batch], BatchMetadata::default()).unwrap(),
+        )])
+    }
+
+    async fn assert_pending_once(future: &mut (impl Future + Unpin)) {
+        std::future::poll_fn(
+            |context| match Future::poll(std::pin::Pin::new(future), context) {
+                Poll::Pending => Poll::Ready(()),
+                Poll::Ready(_) => panic!("queued execution unexpectedly completed"),
+            },
+        )
+        .await;
+    }
+
+    fn marker(plan: &ExecutionPlan) -> Option<u64> {
+        plan.operation_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .in_flight
+            .as_ref()
+            .map(|operation| operation.token)
+    }
+
+    #[tokio::test]
+    async fn queued_cancellation_is_pending_before_any_second_marker_and_plan_recovers() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let restores = Arc::new(AtomicUsize::new(0));
+        let plan = lifecycle_plan(
+            Arc::clone(&started),
+            Arc::clone(&release),
+            Arc::clone(&calls),
+            Arc::clone(&restores),
+            false,
+            false,
+        );
+
+        let mut first = Box::pin(plan.execute(inputs(), ExecutionOptions::default()));
+        tokio::select! {
+            () = started.notified() => {}
+            result = &mut first => panic!("first execution did not hold the gate: {result:?}"),
+        }
+        let first_marker = marker(&plan).expect("the active run must own a rollback marker");
+
+        let cancellation = CancellationToken::new();
+        let mut second = Box::pin(plan.execute(
+            inputs(),
+            ExecutionOptions {
+                cancellation: cancellation.clone(),
+                ..ExecutionOptions::default()
+            },
+        ));
+        assert_pending_once(&mut second).await;
+        assert_eq!(marker(&plan), Some(first_marker));
+
+        cancellation.cancel();
+        assert_eq!(marker(&plan), Some(first_marker));
+        release.notify_one();
+        first.await.unwrap();
+        assert!(matches!(
+            second.await.unwrap_err(),
+            CalcFlowError::Cancelled { .. }
+        ));
+
+        plan.execute(inputs(), ExecutionOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(restores.load(Ordering::SeqCst), 1);
+        assert_eq!(marker(&plan), None);
+    }
+
+    #[tokio::test]
+    async fn queued_deadline_is_absolute_and_expires_before_second_provider_entry() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let restores = Arc::new(AtomicUsize::new(0));
+        let plan = lifecycle_plan(
+            Arc::clone(&started),
+            Arc::clone(&release),
+            Arc::clone(&calls),
+            Arc::clone(&restores),
+            false,
+            false,
+        );
+
+        let mut first = Box::pin(plan.execute(inputs(), ExecutionOptions::default()));
+        tokio::select! {
+            () = started.notified() => {}
+            result = &mut first => panic!("first execution did not hold the gate: {result:?}"),
+        }
+
+        let deadline = Utc::now() + chrono::Duration::milliseconds(50);
+        let mut second = Box::pin(plan.execute(
+            inputs(),
+            ExecutionOptions {
+                deadline: Some(deadline),
+                ..ExecutionOptions::default()
+            },
+        ));
+        assert_pending_once(&mut second).await;
+        let wait = deadline
+            .signed_duration_since(Utc::now())
+            .to_std()
+            .unwrap_or_default();
+        tokio::time::sleep(wait + Duration::from_millis(10)).await;
+
+        release.notify_one();
+        first.await.unwrap();
+        assert!(matches!(
+            second.await.unwrap_err(),
+            CalcFlowError::Cancelled { .. }
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        plan.execute(inputs(), ExecutionOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(restores.load(Ordering::SeqCst), 1);
+        assert_eq!(marker(&plan), None);
+    }
+
+    #[tokio::test]
+    async fn pre_checkpoint_input_snapshot_and_marker_failures_beat_expired_deadline() {
+        let expired = Utc::now() - chrono::Duration::seconds(1);
+
+        let input_calls = Arc::new(AtomicUsize::new(0));
+        let input_restores = Arc::new(AtomicUsize::new(0));
+        let input_plan = lifecycle_plan(
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::clone(&input_calls),
+            Arc::clone(&input_restores),
+            false,
+            false,
+        );
+        let input_error = input_plan
+            .execute(
+                BTreeMap::from([("wrong".into(), inputs().remove("input").unwrap())]),
+                ExecutionOptions {
+                    deadline: Some(expired),
+                    ..ExecutionOptions::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            input_error,
+            CalcFlowError::InvalidArgument { field, .. } if field == "inputs"
+        ));
+        assert_eq!(input_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(input_restores.load(Ordering::SeqCst), 0);
+
+        let snapshot_calls = Arc::new(AtomicUsize::new(0));
+        let snapshot_restores = Arc::new(AtomicUsize::new(0));
+        let snapshot_plan = lifecycle_plan(
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::clone(&snapshot_calls),
+            Arc::clone(&snapshot_restores),
+            true,
+            false,
+        );
+        let snapshot_error = snapshot_plan
+            .execute(
+                inputs(),
+                ExecutionOptions {
+                    deadline: Some(expired),
+                    ..ExecutionOptions::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            snapshot_error,
+            CalcFlowError::Format { message } if message == "snapshot failure injected"
+        ));
+        assert_eq!(snapshot_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(snapshot_restores.load(Ordering::SeqCst), 0);
+
+        let marker_calls = Arc::new(AtomicUsize::new(0));
+        let marker_restores = Arc::new(AtomicUsize::new(0));
+        let marker_plan = lifecycle_plan(
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::clone(&marker_calls),
+            Arc::clone(&marker_restores),
+            false,
+            false,
+        );
+        marker_plan
+            .operation_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generation = u64::MAX;
+        let marker_error = marker_plan
+            .execute(
+                inputs(),
+                ExecutionOptions {
+                    deadline: Some(expired),
+                    ..ExecutionOptions::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            marker_error,
+            CalcFlowError::Internal { message }
+                if message.contains("exhausted operation generations")
+        ));
+        assert_eq!(marker_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(marker_restores.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn abandoned_recovery_failure_beats_expired_deadline_and_provider_entry() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let restores = Arc::new(AtomicUsize::new(0));
+        let plan = lifecycle_plan(
+            Arc::clone(&started),
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::clone(&calls),
+            Arc::clone(&restores),
+            false,
+            true,
+        );
+        let mut abandoned = Box::pin(plan.execute(inputs(), ExecutionOptions::default()));
+        tokio::select! {
+            () = started.notified() => {}
+            result = &mut abandoned => panic!("execution did not reach the gate: {result:?}"),
+        }
+        drop(abandoned);
+
+        let error = plan
+            .execute(
+                inputs(),
+                ExecutionOptions {
+                    deadline: Some(Utc::now() - chrono::Duration::seconds(1)),
+                    ..ExecutionOptions::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            CalcFlowError::RecoveryRequired { message, .. }
+                if message.contains("plan restoration failed")
+                    && message.contains("restore failure injected")
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(restores.load(Ordering::SeqCst), 1);
+    }
+}

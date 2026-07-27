@@ -52,6 +52,34 @@ type RegistrationRecord = dict[str, Any]
 type LazyBuiltinIdentity = tuple[str, str, str]
 
 
+@dataclass(frozen=True, slots=True)
+class _ProviderRestoration:
+    provider: Any
+    name: Any
+    version: Any
+    callback: Any
+    mode: str
+    accepts_context: bool
+    input_ports: Any = None
+    output_ports: Any = None
+    options_schema: Any = None
+    has_options_schema: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _ScalarRestoration:
+    provider: Any
+    name: Any
+    version: Any
+    input_types: Any
+    return_type: Any
+    volatility: Any
+    function: Any
+
+
+type _RegistrationRestoration = _ProviderRestoration | _ScalarRestoration
+
+
 class RunManagerError(RuntimeError):
     """Raised when a preview run cannot be prepared or managed."""
 
@@ -622,45 +650,138 @@ def _selected_registrations(
 def _restore_registrations(
     runtime: Runtime, registrations: tuple[RegistrationRecord, ...]
 ) -> None:
-    for registration in registrations:
-        if registration["kind"] == "provider":
+    for registration in _preflight_registrations(registrations):
+        if isinstance(registration, _ProviderRestoration):
             options = (
-                {"options_schema": registration["options_schema"]}
-                if "options_schema" in registration
+                {"options_schema": registration.options_schema}
+                if registration.has_options_schema
                 else {}
             )
-            if registration.get("provider_mode") == "mapping":
+            if registration.mode == "mapping":
                 runtime._register_mapping_provider(
-                    registration["provider"],
-                    registration["name"],
-                    registration["version"],
-                    registration["callback"],
-                    input_ports=registration["input_ports"],
-                    output_ports=registration["output_ports"],
-                    accepts_context=registration.get("accepts_context", False),
+                    registration.provider,
+                    registration.name,
+                    registration.version,
+                    registration.callback,
+                    input_ports=registration.input_ports,
+                    output_ports=registration.output_ports,
+                    accepts_context=registration.accepts_context,
                     **options,
                 )
             else:
                 runtime.register_provider(
-                    registration["provider"],
-                    registration["name"],
-                    registration["version"],
-                    registration["callback"],
-                    accepts_context=registration.get("accepts_context", False),
+                    registration.provider,
+                    registration.name,
+                    registration.version,
+                    registration.callback,
+                    accepts_context=registration.accepts_context,
                     **options,
                 )
-        elif registration["kind"] == "scalar_udf":
-            runtime.register_scalar_udf(
-                provider=registration["provider"],
-                name=registration["name"],
-                version=registration["version"],
-                input_types=registration["input_types"],
-                return_type=registration["return_type"],
-                volatility=registration["volatility"],
-                function=registration["function"],
-            )
         else:
-            raise RunManagerError("worker received an unsupported registration kind")
+            runtime.register_scalar_udf(
+                provider=registration.provider,
+                name=registration.name,
+                version=registration.version,
+                input_types=registration.input_types,
+                return_type=registration.return_type,
+                volatility=registration.volatility,
+                function=registration.function,
+            )
+
+
+def _preflight_registrations(
+    registrations: tuple[RegistrationRecord, ...],
+) -> tuple[_RegistrationRestoration, ...]:
+    unsupported = "worker received an unsupported registration kind"
+    invalid = "worker received an invalid registration contract"
+    invalid_context = "worker received an invalid accepts_context registration contract"
+    restorations: list[_RegistrationRestoration] = []
+    missing = object()
+
+    for registration in registrations:
+        if not isinstance(registration, dict):
+            raise RunManagerError(unsupported)
+        kind = dict.get(registration, "kind", missing)
+        if kind not in ("provider", "scalar_udf"):
+            raise RunManagerError(unsupported)
+
+        if kind == "provider":
+            mode_value = dict.get(registration, "provider_mode", missing)
+            if mode_value is missing:
+                mode = "single"
+            elif type(mode_value) is str and mode_value == "mapping":
+                mode = "mapping"
+            else:
+                raise RunManagerError(invalid_context)
+
+            accepts_value = dict.get(registration, "accepts_context", False)
+            if type(accepts_value) is not bool:
+                raise RunManagerError(invalid_context)
+
+            required = ("kind", "provider", "name", "version", "callback")
+            if mode == "mapping":
+                required += ("input_ports", "output_ports")
+            if any(not dict.__contains__(registration, key) for key in required):
+                raise RunManagerError(invalid)
+
+            has_options_schema = dict.__contains__(registration, "options_schema")
+            restorations.append(
+                _ProviderRestoration(
+                    provider=dict.__getitem__(registration, "provider"),
+                    name=dict.__getitem__(registration, "name"),
+                    version=dict.__getitem__(registration, "version"),
+                    callback=dict.__getitem__(registration, "callback"),
+                    mode=mode,
+                    accepts_context=accepts_value,
+                    input_ports=(
+                        dict.__getitem__(registration, "input_ports")
+                        if mode == "mapping"
+                        else None
+                    ),
+                    output_ports=(
+                        dict.__getitem__(registration, "output_ports")
+                        if mode == "mapping"
+                        else None
+                    ),
+                    options_schema=(
+                        dict.__getitem__(registration, "options_schema")
+                        if has_options_schema
+                        else None
+                    ),
+                    has_options_schema=has_options_schema,
+                )
+            )
+            continue
+
+        if dict.__contains__(registration, "provider_mode") or dict.__contains__(
+            registration, "accepts_context"
+        ):
+            raise RunManagerError(invalid_context)
+        required = (
+            "kind",
+            "provider",
+            "name",
+            "version",
+            "input_types",
+            "return_type",
+            "volatility",
+            "function",
+        )
+        if any(not dict.__contains__(registration, key) for key in required):
+            raise RunManagerError(invalid)
+        restorations.append(
+            _ScalarRestoration(
+                provider=dict.__getitem__(registration, "provider"),
+                name=dict.__getitem__(registration, "name"),
+                version=dict.__getitem__(registration, "version"),
+                input_types=dict.__getitem__(registration, "input_types"),
+                return_type=dict.__getitem__(registration, "return_type"),
+                volatility=dict.__getitem__(registration, "volatility"),
+                function=dict.__getitem__(registration, "function"),
+            )
+        )
+
+    return tuple(restorations)
 
 
 def _serialize_worker_payload(

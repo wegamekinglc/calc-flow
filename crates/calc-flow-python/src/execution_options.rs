@@ -2,146 +2,236 @@ use std::collections::{BTreeMap, HashSet};
 
 use chrono::{Datelike, NaiveDate, TimeZone, Timelike, Utc};
 use pyo3::{
-    exceptions::{PyRuntimeError, PyTypeError, PyValueError},
+    exceptions::{PyTypeError, PyValueError},
     prelude::*,
     types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple},
 };
 use serde_json::{Number, Value};
 
-fn settings_type_error(message: impl Into<String>) -> PyErr {
-    PyTypeError::new_err(format!("execution settings {}", message.into()))
+fn settings_type_error() -> PyErr {
+    PyTypeError::new_err("settings must be a mapping or None")
 }
 
-fn settings_value_error(message: impl Into<String>) -> PyErr {
-    PyValueError::new_err(format!("execution settings {}", message.into()))
+fn settings_path_error(path: &str, message: &str) -> PyErr {
+    PyValueError::new_err(format!("settings at {path} {message}"))
 }
 
-fn deadline_type_error(message: impl Into<String>) -> PyErr {
-    PyTypeError::new_err(format!("deadline {}", message.into()))
+fn settings_depth_error(path: &str) -> PyErr {
+    PyValueError::new_err(format!(
+        "settings exceeds the maximum JSON depth of {} at {path}",
+        calc_flow::MAX_JSON_DEPTH
+    ))
 }
 
-fn invalid_deadline() -> PyErr {
-    PyValueError::new_err("deadline must be a timezone-aware UTC datetime")
+fn settings_copy_error() -> PyErr {
+    PyValueError::new_err("settings could not be copied as strict JSON data")
+}
+
+fn settings_encode_error() -> PyErr {
+    PyValueError::new_err("settings could not be encoded as strict JSON data")
+}
+
+fn strict_string(value: &Bound<'_, PyAny>, path: &str) -> PyResult<String> {
+    if !value.is_exact_instance_of::<PyString>() {
+        return Err(settings_path_error(
+            path,
+            "contains a non-string object key",
+        ));
+    }
+    value
+        .cast::<PyString>()
+        .expect("an exact PyString always casts")
+        .to_str()
+        .map(str::to_owned)
+        .map_err(|_| settings_path_error(path, "contains a non-portable Unicode string"))
+}
+
+struct StrictSettingsCopier<'py> {
+    mapping_type: Bound<'py, PyAny>,
+    ancestors: HashSet<usize>,
+}
+
+impl<'py> StrictSettingsCopier<'py> {
+    fn new(py: Python<'py>) -> PyResult<Self> {
+        let mapping_type = py
+            .import(pyo3::intern!(py, "collections.abc"))
+            .and_then(|module| module.getattr(pyo3::intern!(py, "Mapping")))
+            .map_err(|_| settings_copy_error())?;
+        Ok(Self {
+            mapping_type,
+            ancestors: HashSet::new(),
+        })
+    }
+
+    fn is_mapping(&self, value: &Bound<'py, PyAny>) -> PyResult<bool> {
+        value
+            .is_instance(&self.mapping_type)
+            .map_err(|_| settings_copy_error())
+    }
+
+    fn mapping(
+        &mut self,
+        value: &Bound<'py, PyAny>,
+        depth: usize,
+        path: &str,
+    ) -> PyResult<calc_flow::JsonMap> {
+        if depth > calc_flow::MAX_JSON_DEPTH {
+            return Err(settings_depth_error(path));
+        }
+        let identity = value.as_ptr() as usize;
+        if !self.ancestors.insert(identity) {
+            return Err(settings_path_error(path, "contains a cycle"));
+        }
+        let result = self.mapping_inner(value, depth, path);
+        self.ancestors.remove(&identity);
+        result
+    }
+
+    fn mapping_inner(
+        &mut self,
+        value: &Bound<'py, PyAny>,
+        depth: usize,
+        path: &str,
+    ) -> PyResult<calc_flow::JsonMap> {
+        let items = value
+            .call_method0(pyo3::intern!(value.py(), "items"))
+            .map_err(|_| settings_copy_error())?;
+        let items = items.try_iter().map_err(|_| settings_copy_error())?;
+        let mut captured = Vec::new();
+        let mut seen = HashSet::new();
+        for pair in items {
+            let pair = pair.map_err(|_| settings_copy_error())?;
+            if !pair.is_exact_instance_of::<PyTuple>() {
+                return Err(settings_copy_error());
+            }
+            let pair = pair
+                .cast::<PyTuple>()
+                .expect("an exact PyTuple always casts");
+            if pair.len() != 2 {
+                return Err(settings_copy_error());
+            }
+            let key = strict_string(&pair.get_item(0).map_err(|_| settings_copy_error())?, path)?;
+            if !seen.insert(key.clone()) {
+                return Err(settings_path_error(path, "contains duplicate object keys"));
+            }
+            let child = pair.get_item(1).map_err(|_| settings_copy_error())?;
+            captured.push((key, child));
+        }
+        captured.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+        let child_path = format!("{path}.*");
+        let mut converted = BTreeMap::new();
+        for (key, child) in captured {
+            converted.insert(key, self.value(&child, depth + 1, &child_path)?);
+        }
+        Ok(converted)
+    }
+
+    fn list(
+        &mut self,
+        value: &Bound<'py, PyList>,
+        depth: usize,
+        path: &str,
+    ) -> PyResult<Vec<Value>> {
+        if depth > calc_flow::MAX_JSON_DEPTH {
+            return Err(settings_depth_error(path));
+        }
+        let identity = value.as_ptr() as usize;
+        if !self.ancestors.insert(identity) {
+            return Err(settings_path_error(path, "contains a cycle"));
+        }
+        let result = value
+            .iter()
+            .enumerate()
+            .map(|(index, child)| self.value(&child, depth + 1, &format!("{path}[{index}]")))
+            .collect();
+        self.ancestors.remove(&identity);
+        result
+    }
+
+    fn value(&mut self, value: &Bound<'py, PyAny>, depth: usize, path: &str) -> PyResult<Value> {
+        if depth > calc_flow::MAX_JSON_DEPTH {
+            return Err(settings_depth_error(path));
+        }
+        if value.is_none() {
+            return Ok(Value::Null);
+        }
+        if value.is_exact_instance_of::<PyBool>() {
+            return value.extract::<bool>().map(Value::Bool);
+        }
+        if value.is_exact_instance_of::<PyInt>() {
+            if let Ok(integer) = value.extract::<i64>() {
+                return Ok(Value::Number(Number::from(integer)));
+            }
+            if let Ok(integer) = value.extract::<u64>() {
+                return Ok(Value::Number(Number::from(integer)));
+            }
+            return Err(settings_path_error(
+                path,
+                "contains an integer outside the portable JSON range",
+            ));
+        }
+        if value.is_exact_instance_of::<PyFloat>() {
+            let number = value.extract::<f64>()?;
+            if !number.is_finite() {
+                return Err(settings_path_error(
+                    path,
+                    "contains a non-finite JSON number",
+                ));
+            }
+            return Ok(Value::Number(
+                Number::from_f64(number).expect("finite floats are valid JSON numbers"),
+            ));
+        }
+        if value.is_exact_instance_of::<PyString>() {
+            return value
+                .cast::<PyString>()
+                .expect("an exact PyString always casts")
+                .to_str()
+                .map(|text| Value::String(text.to_owned()))
+                .map_err(|_| settings_path_error(path, "contains a non-portable Unicode string"));
+        }
+        if value.is_exact_instance_of::<PyList>() {
+            return self
+                .list(
+                    value
+                        .cast::<PyList>()
+                        .expect("an exact PyList always casts"),
+                    depth,
+                    path,
+                )
+                .map(Value::Array);
+        }
+        if self.is_mapping(value)? {
+            return self.mapping(value, depth, path).map(|mapping| {
+                Value::Object(mapping.into_iter().collect::<serde_json::Map<_, _>>())
+            });
+        }
+        Err(settings_path_error(path, "contains a non-JSON value"))
+    }
 }
 
 fn strict_settings(py: Python<'_>, source: &Bound<'_, PyAny>) -> PyResult<calc_flow::JsonMap> {
-    let mapping = py
-        .import(pyo3::intern!(py, "collections.abc"))?
-        .getattr(pyo3::intern!(py, "Mapping"))?;
-    if !source.is_instance(&mapping)? {
-        return Err(settings_type_error("must be a mapping"));
+    if source.is_none() {
+        return Ok(BTreeMap::new());
     }
-    let copied = py
-        .get_type::<PyDict>()
-        .call1((source,))?
-        .cast_into::<PyDict>()?;
-    let mut ancestors = HashSet::new();
-    strict_dict(&copied, 0, &mut ancestors)
+    let mut copier = StrictSettingsCopier::new(py)?;
+    if !copier.is_mapping(source)? {
+        return Err(settings_type_error());
+    }
+    copier.mapping(source, 0, "$")
 }
 
-fn strict_dict(
-    value: &Bound<'_, PyDict>,
-    depth: usize,
-    ancestors: &mut HashSet<usize>,
-) -> PyResult<calc_flow::JsonMap> {
-    if depth > calc_flow::MAX_JSON_DEPTH {
-        return Err(settings_value_error(format!(
-            "exceed the maximum JSON depth of {}",
-            calc_flow::MAX_JSON_DEPTH
-        )));
-    }
-    let identity = value.as_ptr() as usize;
-    if !ancestors.insert(identity) {
-        return Err(settings_value_error("must not contain cycles"));
-    }
-    let result = (|| {
-        let mut converted = BTreeMap::new();
-        for (key, child) in value {
-            if !key.is_exact_instance_of::<PyString>() {
-                return Err(settings_value_error("keys must be exact strings"));
-            }
-            let key = key.extract::<String>()?;
-            converted.insert(key, strict_value(&child, depth + 1, ancestors)?);
-        }
-        Ok(converted)
-    })();
-    ancestors.remove(&identity);
-    result
+fn deadline_type_error() -> PyErr {
+    PyTypeError::new_err("deadline must be a datetime or None")
 }
 
-fn strict_list(
-    value: &Bound<'_, PyList>,
-    depth: usize,
-    ancestors: &mut HashSet<usize>,
-) -> PyResult<Vec<Value>> {
-    if depth > calc_flow::MAX_JSON_DEPTH {
-        return Err(settings_value_error(format!(
-            "exceed the maximum JSON depth of {}",
-            calc_flow::MAX_JSON_DEPTH
-        )));
-    }
-    let identity = value.as_ptr() as usize;
-    if !ancestors.insert(identity) {
-        return Err(settings_value_error("must not contain cycles"));
-    }
-    let result = value
-        .iter()
-        .map(|child| strict_value(&child, depth + 1, ancestors))
-        .collect();
-    ancestors.remove(&identity);
-    result
+fn naive_deadline() -> PyErr {
+    PyValueError::new_err("deadline must be timezone-aware")
 }
 
-fn strict_value(
-    value: &Bound<'_, PyAny>,
-    depth: usize,
-    ancestors: &mut HashSet<usize>,
-) -> PyResult<Value> {
-    if depth > calc_flow::MAX_JSON_DEPTH {
-        return Err(settings_value_error(format!(
-            "exceed the maximum JSON depth of {}",
-            calc_flow::MAX_JSON_DEPTH
-        )));
-    }
-    if value.is_none() {
-        return Ok(Value::Null);
-    }
-    if value.is_exact_instance_of::<PyBool>() {
-        return value.extract::<bool>().map(Value::Bool);
-    }
-    if value.is_exact_instance_of::<PyInt>() {
-        if let Ok(integer) = value.extract::<i64>() {
-            return Ok(Value::Number(Number::from(integer)));
-        }
-        if let Ok(integer) = value.extract::<u64>() {
-            return Ok(Value::Number(Number::from(integer)));
-        }
-        return Err(settings_value_error(
-            "integers must be in the range -2**63 through 2**64 - 1",
-        ));
-    }
-    if value.is_exact_instance_of::<PyFloat>() {
-        let number = value.extract::<f64>()?;
-        if !number.is_finite() {
-            return Err(settings_value_error("numbers must be finite"));
-        }
-        return Ok(Value::Number(
-            Number::from_f64(number).expect("finite floats are valid JSON numbers"),
-        ));
-    }
-    if value.is_exact_instance_of::<PyString>() {
-        return value.extract::<String>().map(Value::String);
-    }
-    if value.is_exact_instance_of::<PyList>() {
-        return strict_list(value.cast::<PyList>()?, depth, ancestors).map(Value::Array);
-    }
-    if value.is_exact_instance_of::<PyDict>() {
-        let converted = strict_dict(value.cast::<PyDict>()?, depth, ancestors)?;
-        return Ok(Value::Object(converted.into_iter().collect()));
-    }
-    Err(settings_value_error(
-        "values must use exact built-in JSON types",
-    ))
+fn invalid_deadline() -> PyErr {
+    PyValueError::new_err("deadline must be a valid timezone-aware datetime representable in UTC")
 }
 
 fn parse_deadline(
@@ -151,53 +241,86 @@ fn parse_deadline(
     if value.is_none() {
         return Ok(None);
     }
-    let datetime_module = py.import(pyo3::intern!(py, "datetime"))?;
-    let datetime_type = datetime_module.getattr(pyo3::intern!(py, "datetime"))?;
-    if !value.is_instance(&datetime_type)? {
-        return Err(deadline_type_error("must be a datetime or None"));
+    let mapping = py
+        .import(pyo3::intern!(py, "datetime"))
+        .map_err(|_| invalid_deadline())?;
+    let datetime_type = mapping
+        .getattr(pyo3::intern!(py, "datetime"))
+        .map_err(|_| invalid_deadline())?;
+    if !value
+        .is_instance(&datetime_type)
+        .map_err(|_| invalid_deadline())?
+    {
+        return Err(deadline_type_error());
     }
     let offset = value
         .call_method0(pyo3::intern!(py, "utcoffset"))
         .map_err(|_| invalid_deadline())?;
-    let timedelta_type = datetime_module.getattr(pyo3::intern!(py, "timedelta"))?;
-    if offset.is_none() || !offset.is_instance(&timedelta_type)? {
+    if offset.is_none() {
+        return Err(naive_deadline());
+    }
+    let timedelta_type = mapping
+        .getattr(pyo3::intern!(py, "timedelta"))
+        .map_err(|_| invalid_deadline())?;
+    if !offset
+        .is_instance(&timedelta_type)
+        .map_err(|_| invalid_deadline())?
+    {
         return Err(invalid_deadline());
     }
-    let offset_is_zero = offset
-        .getattr(pyo3::intern!(py, "days"))?
-        .extract::<i32>()?
-        == 0
-        && offset
-            .getattr(pyo3::intern!(py, "seconds"))?
-            .extract::<i32>()?
-            == 0
-        && offset
-            .getattr(pyo3::intern!(py, "microseconds"))?
-            .extract::<i32>()?
-            == 0;
-    if !offset_is_zero {
-        return Err(invalid_deadline());
-    }
+    let utc = mapping
+        .getattr(pyo3::intern!(py, "UTC"))
+        .map_err(|_| invalid_deadline())?;
+    let normalized = value
+        .call_method1(pyo3::intern!(py, "astimezone"), (&utc,))
+        .map_err(|_| invalid_deadline())?;
+    let components = (|| {
+        Ok((
+            normalized
+                .getattr(pyo3::intern!(py, "year"))?
+                .extract::<i32>()?,
+            normalized
+                .getattr(pyo3::intern!(py, "month"))?
+                .extract::<u32>()?,
+            normalized
+                .getattr(pyo3::intern!(py, "day"))?
+                .extract::<u32>()?,
+            normalized
+                .getattr(pyo3::intern!(py, "hour"))?
+                .extract::<u32>()?,
+            normalized
+                .getattr(pyo3::intern!(py, "minute"))?
+                .extract::<u32>()?,
+            normalized
+                .getattr(pyo3::intern!(py, "second"))?
+                .extract::<u32>()?,
+            normalized
+                .getattr(pyo3::intern!(py, "microsecond"))?
+                .extract::<u32>()?,
+        ))
+    })()
+    .map_err(|_: PyErr| invalid_deadline())?;
+    let (year, month, day, hour, minute, second, microsecond) = components;
 
-    let year = value.getattr(pyo3::intern!(py, "year"))?.extract::<i32>()?;
-    let month = value
-        .getattr(pyo3::intern!(py, "month"))?
-        .extract::<u32>()?;
-    let day = value.getattr(pyo3::intern!(py, "day"))?.extract::<u32>()?;
-    let hour = value.getattr(pyo3::intern!(py, "hour"))?.extract::<u32>()?;
-    let minute = value
-        .getattr(pyo3::intern!(py, "minute"))?
-        .extract::<u32>()?;
-    let second = value
-        .getattr(pyo3::intern!(py, "second"))?
-        .extract::<u32>()?;
-    let microsecond = value
-        .getattr(pyo3::intern!(py, "microsecond"))?
-        .extract::<u32>()?;
+    let kwargs = PyDict::new(py);
+    kwargs
+        .set_item(pyo3::intern!(py, "tzinfo"), &utc)
+        .map_err(|_| invalid_deadline())?;
+    datetime_type
+        .call(
+            (year, month, day, hour, minute, second, microsecond),
+            Some(&kwargs),
+        )
+        .map_err(|_| invalid_deadline())?;
+
     let naive = NaiveDate::from_ymd_opt(year, month, day)
         .and_then(|date| date.and_hms_micro_opt(hour, minute, second, microsecond))
         .ok_or_else(invalid_deadline)?;
-    Ok(Some(Utc.from_utc_datetime(&naive)))
+    let deadline = Utc.from_utc_datetime(&naive);
+    if deadline.year() != year {
+        return Err(invalid_deadline());
+    }
+    Ok(Some(deadline))
 }
 
 fn deadline_to_python<'py>(
@@ -234,8 +357,7 @@ fn settings_to_python<'py>(
     py: Python<'py>,
     settings: &calc_flow::JsonMap,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let encoded = serde_json::to_string(settings)
-        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    let encoded = serde_json::to_string(settings).map_err(|_| settings_encode_error())?;
     crate::config::json_to_python(py, &encoded)
 }
 
@@ -389,7 +511,9 @@ mod tests {
     static PYTHON_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_python(test: impl FnOnce(Python<'_>)) {
-        let _guard = PYTHON_TEST_LOCK.lock().unwrap();
+        let _guard = PYTHON_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Python::initialize();
         Python::attach(test);
     }
@@ -456,6 +580,76 @@ mod tests {
     }
 
     #[test]
+    fn strict_settings_accepts_none_and_nested_mapping_with_one_items_pass() {
+        with_python(|py| {
+            assert!(strict_settings(py, py.None().bind(py)).unwrap().is_empty());
+
+            let locals = PyDict::new(py);
+            py.run(
+                c_str!(
+                    "from collections.abc import Mapping\nclass OnePass(Mapping):\n    def __init__(self, pairs):\n        self.pairs = pairs\n        self.items_calls = 0\n    def __getitem__(self, key):\n        raise AssertionError('secret getitem')\n    def __iter__(self):\n        raise AssertionError('secret iter')\n    def __len__(self):\n        raise AssertionError('secret len')\n    def items(self):\n        self.items_calls += 1\n        return iter(self.pairs)\nnested = OnePass([('value', 7)])\nsource = OnePass([('nested', nested)])"
+                ),
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+            let source = locals.get_item("source").unwrap().unwrap();
+            let settings = strict_settings(py, &source).unwrap();
+            assert_eq!(
+                settings,
+                BTreeMap::from([("nested".into(), json!({"value": 7}))])
+            );
+            assert_eq!(
+                source
+                    .getattr("items_calls")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                locals
+                    .get_item("nested")
+                    .unwrap()
+                    .unwrap()
+                    .getattr("items_calls")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                1
+            );
+        });
+    }
+
+    #[test]
+    fn strict_settings_duplicate_and_mapping_hook_errors_are_fixed_and_unchained() {
+        with_python(|py| {
+            let locals = PyDict::new(py);
+            py.run(
+                c_str!(
+                    "from collections.abc import Mapping\nclass Duplicate(Mapping):\n    def __getitem__(self, key): raise AssertionError('secret getitem')\n    def __iter__(self): raise AssertionError('secret iter')\n    def __len__(self): raise AssertionError('secret len')\n    def items(self): return iter([('secret', 1), ('secret', 2)])\nclass Broken(Duplicate):\n    def items(self): raise RuntimeError('secret mapping failure')\nduplicate = Duplicate()\nbroken = Broken()"
+                ),
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+
+            for (name, message) in [
+                ("duplicate", "settings at $ contains duplicate object keys"),
+                ("broken", "settings could not be copied as strict JSON data"),
+            ] {
+                let source = locals.get_item(name).unwrap().unwrap();
+                let error = expect_error(strict_settings(py, &source));
+                assert!(error.is_instance_of::<PyValueError>(py));
+                let value = error.value(py);
+                assert_eq!(value.str().unwrap().to_str().unwrap(), message);
+                assert!(value.getattr("__cause__").unwrap().is_none());
+                assert!(value.getattr("__context__").unwrap().is_none());
+            }
+        });
+    }
+
+    #[test]
     fn strict_settings_rejects_invalid_shapes_cycles_values_and_depth() {
         with_python(|py| {
             let not_mapping = PyList::empty(py);
@@ -487,31 +681,23 @@ mod tests {
                 assert!(error.is_instance_of::<PyValueError>(py));
             }
 
-            let mut ancestors = HashSet::new();
-            let error = expect_error(strict_dict(
-                &PyDict::new(py),
-                calc_flow::MAX_JSON_DEPTH + 1,
-                &mut ancestors,
-            ));
-            assert!(error.is_instance_of::<PyValueError>(py));
-            let error = expect_error(strict_list(
-                &PyList::empty(py),
-                calc_flow::MAX_JSON_DEPTH + 1,
-                &mut ancestors,
-            ));
-            assert!(error.is_instance_of::<PyValueError>(py));
-            let none = py.None();
-            let error = expect_error(strict_value(
-                none.bind(py),
-                calc_flow::MAX_JSON_DEPTH + 1,
-                &mut ancestors,
-            ));
+            let locals = PyDict::new(py);
+            py.run(
+                c_str!(
+                    "too_deep = {}\ncurrent = too_deep\nfor _ in range(33):\n    child = {}\n    current['value'] = child\n    current = child"
+                ),
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+            let too_deep = locals.get_item("too_deep").unwrap().unwrap();
+            let error = expect_error(strict_settings(py, &too_deep));
             assert!(error.is_instance_of::<PyValueError>(py));
         });
     }
 
     #[test]
-    fn deadlines_accept_exact_zero_offset_and_reject_invalid_datetime_values() {
+    fn deadlines_normalize_any_aware_offset_and_reject_invalid_datetime_values() {
         with_python(|py| {
             let none = py.None();
             assert_eq!(parse_deadline(py, none.bind(py)).unwrap(), None);
@@ -541,7 +727,13 @@ mod tests {
                     .unwrap()
             );
 
-            for name in ["naive", "nonzero", "broken", "invalid_offset"] {
+            let nonzero = locals.get_item("nonzero").unwrap().unwrap();
+            assert_eq!(
+                parse_deadline(py, &nonzero).unwrap().unwrap(),
+                Utc.with_ymd_and_hms(2027, 4, 4, 23, 0, 0).single().unwrap()
+            );
+
+            for name in ["naive", "broken", "invalid_offset"] {
                 let value = locals.get_item(name).unwrap().unwrap();
                 let error = expect_error(parse_deadline(py, &value));
                 assert!(error.is_instance_of::<PyValueError>(py));

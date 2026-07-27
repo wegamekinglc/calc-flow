@@ -854,6 +854,160 @@ def test_worker_restores_mapping_and_context_provider_modes() -> None:
     ]
 
 
+def _worker_callback(*_: object) -> None:
+    return None
+
+
+def _valid_worker_provider() -> dict[str, object]:
+    return {
+        "kind": "provider",
+        "provider": "test",
+        "name": "identity",
+        "version": "1",
+        "callback": _worker_callback,
+    }
+
+
+@pytest.mark.parametrize(
+    ("invalid_tail", "expected"),
+    [
+        ({}, "worker received an unsupported registration kind"),
+        (
+            {"kind": "unknown"},
+            "worker received an unsupported registration kind",
+        ),
+        (
+            {
+                **_valid_worker_provider(),
+                "provider_mode": "single",
+            },
+            "worker received an invalid accepts_context registration contract",
+        ),
+        (
+            {
+                **_valid_worker_provider(),
+                "accepts_context": 1,
+            },
+            "worker received an invalid accepts_context registration contract",
+        ),
+        (
+            {
+                "kind": "provider",
+                "provider": "test",
+                "name": "missing_callback",
+                "version": "1",
+            },
+            "worker received an invalid registration contract",
+        ),
+        (
+            {
+                **_valid_worker_provider(),
+                "provider_mode": "mapping",
+                "output_ports": (("output", "array"),),
+            },
+            "worker received an invalid registration contract",
+        ),
+        (
+            {
+                **_valid_worker_provider(),
+                "provider_mode": "mapping",
+                "input_ports": (("input", "array"),),
+            },
+            "worker received an invalid registration contract",
+        ),
+        (
+            {
+                "kind": "scalar_udf",
+                "provider": "test",
+                "name": "identity",
+                "version": "1",
+                "input_types": ("int64",),
+                "return_type": "int64",
+                "volatility": "immutable",
+                "function": _worker_callback,
+                "provider_mode": "mapping",
+            },
+            "worker received an invalid accepts_context registration contract",
+        ),
+        (
+            {
+                "kind": "scalar_udf",
+                "provider": "test",
+                "name": "identity",
+                "version": "1",
+                "input_types": ("int64",),
+                "return_type": "int64",
+                "volatility": "immutable",
+                "function": _worker_callback,
+                "accepts_context": False,
+            },
+            "worker received an invalid accepts_context registration contract",
+        ),
+        (
+            {
+                "kind": "scalar_udf",
+                "provider": "test",
+                "name": "missing_function",
+                "version": "1",
+                "input_types": ("int64",),
+                "return_type": "int64",
+                "volatility": "immutable",
+            },
+            "worker received an invalid registration contract",
+        ),
+    ],
+)
+def test_worker_preflights_the_whole_registration_tuple_before_mutation(
+    invalid_tail: dict[str, object],
+    expected: str,
+) -> None:
+    calls: list[str] = []
+
+    class RecordingRuntime:
+        def register_provider(self, *_: object, **__: object) -> None:
+            calls.append("provider")
+
+        def _register_mapping_provider(self, *_: object, **__: object) -> None:
+            calls.append("mapping")
+
+        def register_scalar_udf(self, **_: object) -> None:
+            calls.append("scalar")
+
+    with pytest.raises(RunManagerError) as caught:
+        _restore_registrations(  # type: ignore[arg-type]
+            RecordingRuntime(),
+            (_valid_worker_provider(), invalid_tail),
+        )
+
+    assert str(caught.value) == expected
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert calls == []
+
+
+def test_worker_preflight_failure_does_not_advance_runtime_revision() -> None:
+    runtime = Runtime()
+    before = runtime._registration_snapshot()
+
+    with pytest.raises(
+        RunManagerError,
+        match="^worker received an invalid accepts_context registration contract$",
+    ):
+        _restore_registrations(
+            runtime,
+            (
+                _valid_worker_provider(),
+                {
+                    **_valid_worker_provider(),
+                    "name": "invalid",
+                    "accepts_context": "yes",
+                },
+            ),
+        )
+
+    assert runtime._registration_snapshot() == before
+
+
 def test_worker_registers_only_exact_referenced_builtin_providers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -159,14 +159,21 @@ Python's blocking `execute()` rejects calls from a running event loop.
 `execute_async()` releases Python execution while Rust runs and supports
 cooperative cancellation. Both accept a keyword-only `ExecutionOptions` value.
 Its `settings` are a deep-copied, strict JSON mapping and its optional
-`deadline` is an absolute, aware `datetime` with an exactly zero UTC offset.
-Accepted deadlines are normalized to `datetime.UTC`. A deadline that is
-already expired, or is crossed at an execution boundary, raises
+`deadline` is an absolute, timezone-aware `datetime`. Nested mappings are
+copied in one pass, and `settings=None` means empty settings. Accepted
+deadlines at any valid UTC offset are normalized to `datetime.UTC` with
+microseconds preserved. A deadline that is already expired, or is crossed at
+an execution boundary, raises
 `calc_flow.CancelledError` after rollback; cancelling a still-pending
 surrounding asyncio task instead raises `asyncio.CancelledError` after native
-cleanup completes. These checks do not preempt a non-cooperative callback
-already in progress. One options value can be reused safely because each
-execution receives a fresh native cancellation token.
+cleanup completes. If native execution is already terminal when cancellation
+is handled, its result or exception wins. These checks do not preempt a
+non-cooperative callback already in progress. One options value can be reused
+safely because each execution receives a fresh native cancellation token.
+
+An `ExecutionOptions.deadline` is an absolute cooperative engine deadline.
+Studio preview `max_seconds` is a separate process-level preview limit and
+does not inject execution settings or a deadline into the compiled plan.
 
 Single-input and mapping provider callbacks keep their historical
 `(batch_or_inputs, provider_options)` ABI when `accepts_context=False`, the

@@ -6,11 +6,14 @@ engine or Studio capabilities.
 ## 2026-07
 
 - Add frozen Python `ExecutionOptions(settings, deadline)` as a keyword-only
-  option for blocking and async plan execution, with strict deep-copied JSON
-  settings and cooperative, aware zero-offset UTC deadlines. Deadline expiry
-  raises `calc_flow.CancelledError`; asyncio task cancellation remains
-  `asyncio.CancelledError` and waits for native cleanup. Existing two-argument
-  providers remain compatible, while `accepts_context=True` opts into a frozen
+  option for blocking and async plan execution. Strict settings accept
+  `settings=None` as empty and copy nested mappings in one pass with closed,
+  redacted JSON validation. Any valid timezone-aware deadline is normalized
+  to UTC with microseconds preserved. Deadline expiry raises
+  `calc_flow.CancelledError`; asyncio task cancellation remains
+  `asyncio.CancelledError`, waits for native cleanup, and linearizes against a
+  native result at handler entry. Existing two-argument providers remain
+  compatible, while `accepts_context=True` opts into a frozen
   `ProviderContext`; the public Python API does not expose the native
   cancellation token.
 - Add versioned Studio runtime and preview-worker discovery at

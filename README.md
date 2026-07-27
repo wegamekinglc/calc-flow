@@ -57,8 +57,9 @@ assert result.outputs["output"].to_pyarrow()["total"].to_pylist() == [3, 7]
 its input unchanged. Unconnected input ports become graph inputs; unconnected
 output ports become graph outputs. Use `execute_async()` inside an event loop.
 Both execution forms accept keyword-only, frozen `ExecutionOptions` carrying
-deep-copied strict-JSON settings and an optional aware, exactly zero-offset
-deadline that is normalized to UTC.
+deep-copied strict-JSON settings and an optional timezone-aware deadline that
+is normalized to UTC. Settings may be nested mappings/lists; `settings=None`
+means empty settings.
 
 See [the Python API guide](docs/python-api.md) and the executable
 [examples](examples/README.md) for SQL, Python scalar UDFs, micro-batch
@@ -179,8 +180,8 @@ Python package is not a second engine.
 - Every graph run returns named outputs, per-node row counts/timings, and run
   metadata; table work additionally reports DataFusion plans and timings.
 - Python executions accept reusable frozen `ExecutionOptions` with
-  deep-copied strict-JSON settings and a cooperative, aware zero-offset
-  deadline normalized to UTC.
+  deep-copied strict-JSON settings and a cooperative, timezone-aware deadline
+  normalized to UTC.
 - Micro-batch and streaming runners deliver sinks before committing
   checkpoints. Delivery is at least once, and failed delivery restores owned
   in-memory state.

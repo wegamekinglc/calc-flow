@@ -98,26 +98,31 @@ and `reset[_async]` provide the plan-state lifecycle.
 `datafusion_metrics` values.
 
 `ExecutionOptions(settings={}, deadline=None)` is frozen and reusable; an
-omitted settings argument creates an empty mapping.
-The root `settings` value may be any `collections.abc.Mapping` and is
-materialized once. Below that sole protocol-based exception, keys must be
-exact built-in `str` values; leaves and containers must be exact built-in
-`None`, `bool`, `int`, finite `float`, `str`, `list`, or `dict` values.
-Subclasses and other nested mappings are rejected. Integers must be in the
-inclusive range `-2**63 .. 2**64 - 1`; cycles are rejected. The root mapping
-is depth 0, and every child value must be at depth 32 or less.
+omitted settings argument or explicit `settings=None` creates an empty
+mapping. Every object position may use a `collections.abc.Mapping`; Calc Flow
+calls its `items()` once, consumes that iterator once, and copies it to a
+built-in `dict`. Mapping subclasses are accepted, while sequence containers
+must be exact built-in `list` values. Keys and scalar leaves must be exact
+built-in `str`, `None`, `bool`, `int`, or finite `float` values. Integers must
+be in the inclusive range `-2**63 .. 2**64 - 1`. Duplicate or
+surrogate-containing keys/strings, cycles, unsupported subclasses, and values
+deeper than 32 are rejected with stable redacted paths.
 
 Construction deep-copies the complete accepted graph, including shared nested
 aliases, and neither retains nor mutates caller containers. Every
-`options.settings` read returns another deep `dict`/`list` copy. `deadline`
-accepts `None` or an aware `datetime` whose effective UTC offset is exactly
-zero. Accepted values are normalized to `datetime.UTC` without losing
-microseconds; naive and non-zero-offset datetimes are rejected.
+`options.settings` read returns another deep `dict`/`list` copy. Exceptions
+from caller mappings are replaced without retaining their value, type,
+message, or traceback. `deadline` accepts `None` or any valid timezone-aware
+`datetime`. Accepted offsets are normalized to `datetime.UTC` without losing
+microseconds; naive, invalid, and out-of-range UTC conversions are rejected
+with fixed redacted errors.
 
 An already expired or crossed deadline raises `calc_flow.CancelledError`
 after transactional rollback. Cancelling a still-pending Python task returned
 by `execute_async` instead raises `asyncio.CancelledError`; if native
-execution completed first, its result or exception wins. Awaited task
+execution is terminal when the cancellation handler starts, its result or
+exception wins. Otherwise one native cancellation request wins, even if the
+Python task is cancelled repeatedly while cleanup is held. Awaited task
 cancellation waits for the native operation and its cleanup, so no run-owned
 work continues detached and the plan recovers before its next public
 operation.
