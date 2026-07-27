@@ -702,7 +702,7 @@ def _preflight_registrations(
         if not isinstance(registration, dict):
             raise RunManagerError(unsupported)
         kind = dict.get(registration, "kind", missing)
-        if kind not in ("provider", "scalar_udf"):
+        if type(kind) is not str or kind not in ("provider", "scalar_udf"):
             raise RunManagerError(unsupported)
 
         if kind == "provider":

@@ -868,6 +868,48 @@ def _valid_worker_provider() -> dict[str, object]:
     }
 
 
+def test_worker_preflight_rejects_non_exact_string_kind_without_comparing_it() -> None:
+    class ExplosiveKind(str):
+        def __eq__(self, _: object) -> bool:
+            raise RuntimeError("SECRET-TOKEN")
+
+    calls: list[str] = []
+
+    class RecordingRuntime:
+        def __init__(self) -> None:
+            self.inner = Runtime()
+
+        def register_provider(self, *args: object, **kwargs: object) -> None:
+            calls.append("provider")
+            self.inner.register_provider(*args, **kwargs)
+
+        def _register_mapping_provider(self, *args: object, **kwargs: object) -> None:
+            calls.append("mapping")
+            self.inner._register_mapping_provider(*args, **kwargs)
+
+        def register_scalar_udf(self, **kwargs: object) -> None:
+            calls.append("scalar")
+            self.inner.register_scalar_udf(**kwargs)
+
+    runtime = RecordingRuntime()
+    before = runtime.inner._registration_snapshot()
+
+    with pytest.raises(RunManagerError) as caught:
+        _restore_registrations(  # type: ignore[arg-type]
+            runtime,
+            (
+                _valid_worker_provider(),
+                {"kind": ExplosiveKind("provider")},
+            ),
+        )
+
+    assert str(caught.value) == "worker received an unsupported registration kind"
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert calls == []
+    assert runtime.inner._registration_snapshot() == before
+
+
 @pytest.mark.parametrize(
     ("invalid_tail", "expected"),
     [
