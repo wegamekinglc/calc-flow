@@ -701,6 +701,8 @@ def _preflight_registrations(
     for registration in registrations:
         if type(registration) is not dict:
             raise RunManagerError(unsupported)
+        if any(type(key) is not str for key in dict.__iter__(registration)):
+            raise RunManagerError(unsupported)
         kind = dict.get(registration, "kind", missing)
         if type(kind) is not str or kind not in ("provider", "scalar_udf"):
             raise RunManagerError(unsupported)

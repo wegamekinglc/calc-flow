@@ -955,6 +955,61 @@ def test_worker_preflight_rejects_registration_spoofing_dict_class() -> None:
     assert "SpoofAsDictSecret" not in str(error)
 
 
+def test_worker_preflight_rejects_hostile_non_string_key_without_comparing_it() -> None:
+    class HashCollisionSecret:
+        def __init__(self) -> None:
+            self.eq_calls = 0
+
+        def __hash__(self) -> int:
+            return hash("kind")
+
+        def __eq__(self, _: object) -> bool:
+            self.eq_calls += 1
+            raise RuntimeError("SECRET-HASH-EQ")
+
+    key = HashCollisionSecret()
+    error = _assert_unsupported_registration_tail_is_redacted({key: "provider"})
+
+    assert key.eq_calls == 0
+    assert "SECRET-HASH-EQ" not in str(error)
+    assert "HashCollisionSecret" not in str(error)
+
+    worker_key = HashCollisionSecret()
+    worker_payload = cloudpickle.dumps(
+        (
+            _project().canonical_json(),
+            {},
+            RunOptions().model_dump(mode="json"),
+            (
+                _valid_worker_provider(),
+                {worker_key: "provider"},
+            ),
+        )
+    )
+
+    class RecordingQueue:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, object]] = []
+
+        def put(self, message: dict[str, object]) -> None:
+            self.messages.append(message)
+
+    output_queue = RecordingQueue()
+    run_manager_module._execute_worker(worker_payload, output_queue, False)
+
+    assert output_queue.messages == [
+        {
+            "ok": False,
+            "error": (
+                "RunManagerError: worker received an unsupported registration kind"
+            ),
+        }
+    ]
+    assert worker_key.eq_calls == 0
+    assert "SECRET-HASH-EQ" not in str(output_queue.messages)
+    assert "HashCollisionSecret" not in str(output_queue.messages)
+
+
 @pytest.mark.parametrize(
     ("invalid_tail", "expected"),
     [
