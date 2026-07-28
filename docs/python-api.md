@@ -168,8 +168,8 @@ later revisions.
 
 ## Execution options and provider context
 
-Use the frozen `ExecutionOptions` value to attach run-scoped settings and an
-absolute UTC deadline:
+Use the frozen native `ExecutionOptions` value to attach run-scoped settings
+and an absolute UTC deadline:
 
 ```python
 from datetime import UTC, datetime, timedelta
@@ -183,27 +183,33 @@ options = ExecutionOptions(
 result = plan.execute({"input": batch}, options=options)
 ```
 
-The root `settings` value may be any `collections.abc.Mapping` and is
-materialized once. Nested containers must be exact built-in `dict` or `list`
-values, object keys must be exact built-in strings, and leaves must be exact
-`None`, `bool`, `int`, finite `float`, or `str` values. Subclasses, nested
-custom mappings, coercion-only objects, tuples, sets, bytes, non-finite
-floats, and integers outside the inclusive range `-2**63 .. 2**64 - 1` are
-rejected. The root mapping is depth 0, every child value must be at depth 32 or
-less, and cycles are rejected.
+Every object position in `settings` may use a
+`collections.abc.Mapping`. Calc Flow calls each mapping's `items()` once,
+consumes that iterator once, and copies it to a built-in `dict`; it does not
+consult `len()`, `keys()`, or `__getitem__()`. Mapping subclasses are accepted,
+while sequence containers must be exact built-in `list` values. Object keys
+and leaves must be exact built-in `str`, `None`, `bool`, `int`, or finite
+`float` values. Integers must be in `-2**63 .. 2**64 - 1`. Coercion-only
+objects, unsupported subclasses, tuples, sets, bytes, duplicate keys,
+surrogate code points, excessive depth, and cycles are rejected. Validation
+errors expose only stable settings paths and fixed messages; exceptions from
+caller mappings are not retained or chained.
 
 Construction deep-copies the complete accepted graph; mutating the source or
 any nested caller container cannot change the options. Every
 `options.settings` read returns another deep `dict`/`list` copy, so mutating an
 observation cannot change a later read or execution. Omitting `settings`
-creates an empty mapping; passing `None` explicitly is a `TypeError`.
-`deadline` accepts `None` or an aware `datetime` whose effective UTC offset is
-exactly zero. Calc Flow normalizes accepted values to `datetime.UTC` and
-preserves microseconds; it rejects naive and non-zero-offset values.
+creates an empty mapping, and passing `None` explicitly has the same meaning.
+`deadline` accepts `None` or any valid timezone-aware `datetime`. Calc Flow
+normalizes every accepted offset to `datetime.UTC` and preserves
+microseconds; it rejects naive, invalid, and out-of-range UTC conversions with
+fixed redacted errors.
 
-Both `plan.execute(inputs, *, options=None)` and
-`plan.execute_async(inputs, *, options=None)` make `options` keyword-only.
-Omitting it preserves the existing default behavior.
+The `ExecutionOptions(settings, deadline)` constructor accepts positional or
+keyword arguments. In contrast, `options` is keyword-only in both
+`plan.execute(inputs, *, options=None)` and
+`plan.execute_async(inputs, *, options=None)`. Omitting the plan option
+preserves the existing default behavior.
 
 Provider callbacks remain two-argument callables unless the registration
 explicitly opts into run context:
@@ -245,6 +251,10 @@ and two-argument providers retain their behavior. Run settings, deadlines,
 and provider-context opt-in are not serialized into projects, checkpoints, or
 Studio API payloads and do not change those formats.
 
+`ExecutionOptions.deadline` is an absolute cooperative engine deadline.
+Studio's `RunOptions.max_seconds` is instead a process-level preview limit; it
+does not populate execution settings or a deadline in the worker.
+
 ## Async execution
 
 ```python
@@ -269,11 +279,15 @@ async def calculate() -> list[int]:
 ```
 
 Blocking `execute`, store, and runner methods reject a running event loop. Use
-their async forms in servers and asyncio applications. An already-expired or
-crossed execution deadline raises `calc_flow.CancelledError` after
-transactional rollback. Cancelling a still-pending surrounding asyncio task
-instead raises `asyncio.CancelledError`. If native execution finished first,
-its result or exception remains observable.
+their async forms in servers and asyncio applications. `plan.execute()` checks
+for a running event loop before it validates inputs or options, so that usage
+error has precedence. An already-expired or crossed execution deadline raises
+`calc_flow.CancelledError` after transactional rollback. Cancelling a
+still-pending surrounding asyncio task instead raises
+`asyncio.CancelledError`. The handler makes one terminal-state decision: if
+native execution is already terminal, its result or exception remains
+observable; otherwise it sends exactly one native cancellation request and
+waits through repeated Python task cancellation until cleanup finishes.
 
 Awaiting task cancellation waits until the current native operation and
 run-owned cleanup finish; no work or input payload continues detached. The
@@ -284,6 +298,14 @@ in progress; cleanup resumes when that operation yields. The same
 `ExecutionOptions` value can be reused concurrently because each run receives
 independent native cancellation state. No cancellation token is part of the
 public Python API.
+
+For executions queued behind another invocation of the same plan, the
+absolute deadline keeps elapsing. Cancelling a queued invocation neither
+cancels the active run nor creates partial plan state. Once a deadline or
+accepted task cancellation is observed at a post-provider boundary, it wins
+over that provider's error. Recovery, input, snapshot, and transaction-marker
+failures that occur before the first deadline check retain their existing
+precedence.
 
 The full version is [`examples/05_async_execution.py`](../examples/05_async_execution.py).
 

@@ -8,6 +8,9 @@ import pyarrow as pa
 type JSONValue = (
     None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
 )
+type _JSONInput = (
+    None | bool | int | float | str | list[_JSONInput] | Mapping[str, _JSONInput]
+)
 
 class _ArrowCStream(Protocol):
     def __arrow_c_stream__(
@@ -26,7 +29,7 @@ class CancelledError(ExecutionError): ...
 class ExecutionOptions:
     def __init__(
         self,
-        settings: Mapping[str, JSONValue] = ...,
+        settings: Mapping[str, _JSONInput] | None = ...,
         deadline: datetime | None = None,
     ) -> None: ...
     @property

@@ -854,6 +854,302 @@ def test_worker_restores_mapping_and_context_provider_modes() -> None:
     ]
 
 
+def _worker_callback(*_: object) -> None:
+    return None
+
+
+def _valid_worker_provider() -> dict[str, object]:
+    return {
+        "kind": "provider",
+        "provider": "test",
+        "name": "identity",
+        "version": "1",
+        "callback": _worker_callback,
+    }
+
+
+class _RecordingRegistrationRuntime:
+    def __init__(self) -> None:
+        self.inner = Runtime()
+        self.calls: list[str] = []
+
+    def register_provider(self, *args: object, **kwargs: object) -> None:
+        self.calls.append("provider")
+        self.inner.register_provider(*args, **kwargs)
+
+    def _register_mapping_provider(self, *args: object, **kwargs: object) -> None:
+        self.calls.append("mapping")
+        self.inner._register_mapping_provider(*args, **kwargs)
+
+    def register_scalar_udf(self, **kwargs: object) -> None:
+        self.calls.append("scalar")
+        self.inner.register_scalar_udf(**kwargs)
+
+
+def _assert_unsupported_registration_tail_is_redacted(
+    tail: object,
+) -> RunManagerError:
+    runtime = _RecordingRegistrationRuntime()
+    before = runtime.inner._registration_snapshot()
+
+    with pytest.raises(RunManagerError) as caught:
+        _restore_registrations(  # type: ignore[arg-type]
+            runtime,
+            (
+                _valid_worker_provider(),
+                tail,
+            ),
+        )
+
+    assert str(caught.value) == "worker received an unsupported registration kind"
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert runtime.calls == []
+    assert runtime.inner._registration_snapshot() == before
+    return caught.value
+
+
+def test_worker_preflight_rejects_non_exact_string_kind_without_comparing_it() -> None:
+    class ExplosiveKind(str):
+        def __eq__(self, _: object) -> bool:
+            raise RuntimeError("SECRET-TOKEN")
+
+    _assert_unsupported_registration_tail_is_redacted(
+        {"kind": ExplosiveKind("provider")}
+    )
+
+
+def test_worker_preflight_does_not_read_hostile_registration_class() -> None:
+    class HostileRegistration:
+        def __init__(self) -> None:
+            self.class_reads = 0
+
+        @property
+        def __class__(self) -> type[object]:
+            self.class_reads += 1
+            raise RuntimeError("SECRET-CLASS")
+
+    tail = HostileRegistration()
+
+    error = _assert_unsupported_registration_tail_is_redacted(tail)
+
+    assert tail.class_reads == 0
+    assert "SECRET-CLASS" not in str(error)
+
+
+def test_worker_preflight_rejects_registration_spoofing_dict_class() -> None:
+    class SpoofAsDictSecret:
+        def __init__(self) -> None:
+            self.class_reads = 0
+
+        @property
+        def __class__(self) -> type[dict[object, object]]:
+            self.class_reads += 1
+            return dict
+
+    tail = SpoofAsDictSecret()
+
+    error = _assert_unsupported_registration_tail_is_redacted(tail)
+
+    assert tail.class_reads == 0
+    assert "SpoofAsDictSecret" not in str(error)
+
+
+def test_worker_preflight_rejects_hostile_non_string_key_without_comparing_it() -> None:
+    class HashCollisionSecret:
+        def __init__(self) -> None:
+            self.eq_calls = 0
+
+        def __hash__(self) -> int:
+            return hash("kind")
+
+        def __eq__(self, _: object) -> bool:
+            self.eq_calls += 1
+            raise RuntimeError("SECRET-HASH-EQ")
+
+    key = HashCollisionSecret()
+    error = _assert_unsupported_registration_tail_is_redacted({key: "provider"})
+
+    assert key.eq_calls == 0
+    assert "SECRET-HASH-EQ" not in str(error)
+    assert "HashCollisionSecret" not in str(error)
+
+    worker_key = HashCollisionSecret()
+    worker_payload = cloudpickle.dumps(
+        (
+            _project().canonical_json(),
+            {},
+            RunOptions().model_dump(mode="json"),
+            (
+                _valid_worker_provider(),
+                {worker_key: "provider"},
+            ),
+        )
+    )
+
+    class RecordingQueue:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, object]] = []
+
+        def put(self, message: dict[str, object]) -> None:
+            self.messages.append(message)
+
+    output_queue = RecordingQueue()
+    run_manager_module._execute_worker(worker_payload, output_queue, False)
+
+    assert output_queue.messages == [
+        {
+            "ok": False,
+            "error": (
+                "RunManagerError: worker received an unsupported registration kind"
+            ),
+        }
+    ]
+    assert worker_key.eq_calls == 0
+    assert "SECRET-HASH-EQ" not in str(output_queue.messages)
+    assert "HashCollisionSecret" not in str(output_queue.messages)
+
+
+@pytest.mark.parametrize(
+    ("invalid_tail", "expected"),
+    [
+        ({}, "worker received an unsupported registration kind"),
+        (
+            {"kind": "unknown"},
+            "worker received an unsupported registration kind",
+        ),
+        (
+            {
+                **_valid_worker_provider(),
+                "provider_mode": "single",
+            },
+            "worker received an invalid accepts_context registration contract",
+        ),
+        (
+            {
+                **_valid_worker_provider(),
+                "accepts_context": 1,
+            },
+            "worker received an invalid accepts_context registration contract",
+        ),
+        (
+            {
+                "kind": "provider",
+                "provider": "test",
+                "name": "missing_callback",
+                "version": "1",
+            },
+            "worker received an invalid registration contract",
+        ),
+        (
+            {
+                **_valid_worker_provider(),
+                "provider_mode": "mapping",
+                "output_ports": (("output", "array"),),
+            },
+            "worker received an invalid registration contract",
+        ),
+        (
+            {
+                **_valid_worker_provider(),
+                "provider_mode": "mapping",
+                "input_ports": (("input", "array"),),
+            },
+            "worker received an invalid registration contract",
+        ),
+        (
+            {
+                "kind": "scalar_udf",
+                "provider": "test",
+                "name": "identity",
+                "version": "1",
+                "input_types": ("int64",),
+                "return_type": "int64",
+                "volatility": "immutable",
+                "function": _worker_callback,
+                "provider_mode": "mapping",
+            },
+            "worker received an invalid accepts_context registration contract",
+        ),
+        (
+            {
+                "kind": "scalar_udf",
+                "provider": "test",
+                "name": "identity",
+                "version": "1",
+                "input_types": ("int64",),
+                "return_type": "int64",
+                "volatility": "immutable",
+                "function": _worker_callback,
+                "accepts_context": False,
+            },
+            "worker received an invalid accepts_context registration contract",
+        ),
+        (
+            {
+                "kind": "scalar_udf",
+                "provider": "test",
+                "name": "missing_function",
+                "version": "1",
+                "input_types": ("int64",),
+                "return_type": "int64",
+                "volatility": "immutable",
+            },
+            "worker received an invalid registration contract",
+        ),
+    ],
+)
+def test_worker_preflights_the_whole_registration_tuple_before_mutation(
+    invalid_tail: dict[str, object],
+    expected: str,
+) -> None:
+    calls: list[str] = []
+
+    class RecordingRuntime:
+        def register_provider(self, *_: object, **__: object) -> None:
+            calls.append("provider")
+
+        def _register_mapping_provider(self, *_: object, **__: object) -> None:
+            calls.append("mapping")
+
+        def register_scalar_udf(self, **_: object) -> None:
+            calls.append("scalar")
+
+    with pytest.raises(RunManagerError) as caught:
+        _restore_registrations(  # type: ignore[arg-type]
+            RecordingRuntime(),
+            (_valid_worker_provider(), invalid_tail),
+        )
+
+    assert str(caught.value) == expected
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert calls == []
+
+
+def test_worker_preflight_failure_does_not_advance_runtime_revision() -> None:
+    runtime = Runtime()
+    before = runtime._registration_snapshot()
+
+    with pytest.raises(
+        RunManagerError,
+        match="^worker received an invalid accepts_context registration contract$",
+    ):
+        _restore_registrations(
+            runtime,
+            (
+                _valid_worker_provider(),
+                {
+                    **_valid_worker_provider(),
+                    "name": "invalid",
+                    "accepts_context": "yes",
+                },
+            ),
+        )
+
+    assert runtime._registration_snapshot() == before
+
+
 def test_worker_registers_only_exact_referenced_builtin_providers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

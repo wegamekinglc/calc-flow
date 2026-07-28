@@ -9,6 +9,7 @@ import threading
 import time
 import weakref
 from collections import UserDict
+from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
 
@@ -36,6 +37,45 @@ def _nested_settings(depth: int) -> dict[str, object]:
         current["value"] = child
         current = child
     return root
+
+
+class _OnePassMapping(Mapping[str, object]):
+    def __init__(self, pairs: list[tuple[object, object]]) -> None:
+        self._pairs = pairs
+        self.items_calls = 0
+        self.iterations = 0
+
+    def __getitem__(self, key: str) -> object:
+        raise AssertionError("strict settings must not call __getitem__")
+
+    def __iter__(self) -> Iterator[str]:
+        raise AssertionError("strict settings must not call __iter__")
+
+    def __len__(self) -> int:
+        raise AssertionError("strict settings must not call __len__")
+
+    def items(self) -> Iterator[tuple[object, object]]:  # type: ignore[override]
+        self.items_calls += 1
+
+        def iterate() -> Iterator[tuple[object, object]]:
+            self.iterations += 1
+            yield from self._pairs
+
+        return iterate()
+
+
+class _CallableMapping(_OnePassMapping):
+    def __call__(self) -> None:
+        raise AssertionError("strict settings must retain data, not invoke the mapping")
+
+
+class _SecretMappingError(RuntimeError):
+    pass
+
+
+class _FailingMapping(_OnePassMapping):
+    def items(self) -> Iterator[tuple[object, object]]:  # type: ignore[override]
+        raise _SecretMappingError("secret-key=https://example.invalid/token")
 
 
 def test_execution_options_defaults_identity_and_frozen_fields() -> None:
@@ -95,9 +135,9 @@ def test_execution_options_accepts_one_root_mapping_materialization() -> None:
     class CountingMapping(UserDict[str, object]):
         copies = 0
 
-        def keys(self):
+        def items(self):
             self.copies += 1
-            return super().keys()
+            return super().items()
 
     source = CountingMapping({"nested": [None, False, 1, 2**64 - 1, 1.25, "x"]})
     options = ExecutionOptions(source)
@@ -106,10 +146,60 @@ def test_execution_options_accepts_one_root_mapping_materialization() -> None:
     assert options.settings == {"nested": [None, False, 1, 2**64 - 1, 1.25, "x"]}
 
 
+def test_execution_options_accepts_explicit_none_as_empty_settings() -> None:
+    assert ExecutionOptions(settings=None).settings == {}
+    assert ExecutionOptions(None).settings == {}
+
+
+def test_execution_options_snapshots_nested_mapping_once_without_other_hooks() -> None:
+    nested = _CallableMapping(
+        [
+            ("enabled", True),
+            ("items", [_OnePassMapping([("value", 7)])]),
+        ]
+    )
+    options = ExecutionOptions(_OnePassMapping([("nested", nested)]))
+
+    assert options.settings == {"nested": {"enabled": True, "items": [{"value": 7}]}}
+    assert nested.items_calls == 1
+    assert nested.iterations == 1
+
+
+def test_execution_options_rejects_duplicate_custom_mapping_keys() -> None:
+    source = _OnePassMapping([("secret-key", 1), ("secret-key", 2)])
+
+    with pytest.raises(ValueError) as caught:
+        ExecutionOptions(source)
+
+    assert str(caught.value) == "settings at $ contains duplicate object keys"
+    assert "secret-key" not in str(caught.value)
+    assert source.items_calls == 1
+    assert source.iterations == 1
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        _FailingMapping([]),
+        _OnePassMapping([("valid", 1), ("malformed",)]),  # type: ignore[list-item]
+    ],
+)
+def test_execution_options_redacts_mapping_hook_and_pair_failures(
+    source: Mapping[str, object],
+) -> None:
+    with pytest.raises(ValueError) as caught:
+        ExecutionOptions(source)
+
+    assert str(caught.value) == "settings could not be copied as strict JSON data"
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert "secret" not in str(caught.value)
+    assert "_SecretMappingError" not in str(caught.value)
+
+
 @pytest.mark.parametrize(
     "settings",
     [
-        None,
         [],
         (),
         "value",
@@ -117,7 +207,7 @@ def test_execution_options_accepts_one_root_mapping_materialization() -> None:
     ],
 )
 def test_execution_options_rejects_non_mapping_settings(settings: object) -> None:
-    with pytest.raises(TypeError, match="execution settings"):
+    with pytest.raises(TypeError, match="^settings must be a mapping or None$"):
         ExecutionOptions(settings)  # type: ignore[arg-type]
 
 
@@ -129,7 +219,6 @@ def test_execution_options_rejects_non_mapping_settings(settings: object) -> Non
         b"bytes",
         object(),
         datetime.now(UTC),
-        UserDict({"nested": True}),
         math.nan,
         math.inf,
         -math.inf,
@@ -138,7 +227,7 @@ def test_execution_options_rejects_non_mapping_settings(settings: object) -> Non
     ],
 )
 def test_execution_options_rejects_non_strict_json_values(value: object) -> None:
-    with pytest.raises(ValueError, match="execution settings"):
+    with pytest.raises(ValueError, match="settings"):
         ExecutionOptions({"value": value})  # type: ignore[dict-item]
 
 
@@ -147,7 +236,7 @@ def test_execution_options_rejects_non_string_and_subclassed_keys() -> None:
         pass
 
     for key in (1, StringSubclass("value")):
-        with pytest.raises(ValueError, match="execution settings"):
+        with pytest.raises(ValueError, match="settings"):
             ExecutionOptions({key: True})  # type: ignore[dict-item]
 
 
@@ -158,25 +247,95 @@ def test_execution_options_rejects_non_string_and_subclassed_keys() -> None:
         type("FloatSubclass", (float,), {})(1.0),
         type("StringSubclass", (str,), {})("value"),
         type("ListSubclass", (list,), {})([1]),
-        type("DictSubclass", (dict,), {})({"value": 1}),
     ],
 )
 def test_execution_options_rejects_json_type_subclasses(value: object) -> None:
-    with pytest.raises(ValueError, match="execution settings"):
+    with pytest.raises(ValueError, match="settings"):
         ExecutionOptions({"value": value})  # type: ignore[dict-item]
+
+
+def test_execution_options_accepts_mapping_subclasses_but_not_list_subclasses() -> None:
+    class DictSubclass(dict[str, object]):
+        pass
+
+    class ListSubclass(list[object]):
+        pass
+
+    assert ExecutionOptions({"value": DictSubclass(nested=1)}).settings == {
+        "value": {"nested": 1}
+    }
+    with pytest.raises(
+        ValueError,
+        match=r"^settings at \$\.\* contains a non-JSON value$",
+    ):
+        ExecutionOptions({"value": ListSubclass([1])})
+
+
+@pytest.mark.parametrize(
+    ("settings", "message"),
+    [
+        (
+            {"value": object()},
+            "settings at $.* contains a non-JSON value",
+        ),
+        (
+            {1: True},
+            "settings at $ contains a non-string object key",
+        ),
+        (
+            {"value": -(2**63) - 1},
+            "settings at $.* contains an integer outside the portable JSON range",
+        ),
+        (
+            {"value": 2**64},
+            "settings at $.* contains an integer outside the portable JSON range",
+        ),
+        (
+            {"value": math.inf},
+            "settings at $.* contains a non-finite JSON number",
+        ),
+        (
+            {"value": "\ud800"},
+            "settings at $.* contains a non-portable Unicode string",
+        ),
+        (
+            {"value": "\ud83d\ude00"},
+            "settings at $.* contains a non-portable Unicode string",
+        ),
+        (
+            {"\udfff": True},
+            "settings at $ contains a non-portable Unicode string",
+        ),
+    ],
+)
+def test_execution_options_uses_stable_redacted_settings_errors(
+    settings: dict[object, object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError) as caught:
+        ExecutionOptions(settings)  # type: ignore[arg-type]
+
+    assert str(caught.value) == message
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
 
 
 def test_execution_options_enforces_depth_and_cycles_without_rejecting_aliases() -> (
     None
 ):
     ExecutionOptions(_nested_settings(32))
-    with pytest.raises(ValueError, match="execution settings"):
+    with pytest.raises(ValueError) as too_deep:
         ExecutionOptions(_nested_settings(33))
+    assert str(too_deep.value) == (
+        "settings exceeds the maximum JSON depth of 32 at "
+        "$.*.*.*.*.*.*.*.*.*.*.*.*.*.*.*.*.*.*.*.*.*.*.*.*.*.*.*.*.*.*.*.*.*"
+    )
 
     cycle: list[object] = []
     cycle.append(cycle)
-    with pytest.raises(ValueError, match="execution settings"):
+    with pytest.raises(ValueError) as cyclic:
         ExecutionOptions({"value": cycle})
+    assert str(cyclic.value) == "settings at $.*[0] contains a cycle"
 
     shared = [1, 2]
     options = ExecutionOptions({"left": shared, "right": shared})
@@ -200,7 +359,31 @@ class _RaisingOffset(tzinfo):
         raise RuntimeError("must be translated")
 
 
-def test_execution_options_normalizes_utc_deadline_and_preserves_microseconds() -> None:
+@pytest.mark.parametrize(
+    ("offset", "microsecond", "expected"),
+    [
+        (
+            timedelta(0),
+            0,
+            datetime(2027, 4, 5, 6, 7, 8, 0, tzinfo=UTC),
+        ),
+        (
+            timedelta(hours=8, minutes=30),
+            1,
+            datetime(2027, 4, 4, 21, 37, 8, 1, tzinfo=UTC),
+        ),
+        (
+            -timedelta(hours=7, minutes=45),
+            999_999,
+            datetime(2027, 4, 5, 13, 52, 8, 999_999, tzinfo=UTC),
+        ),
+    ],
+)
+def test_execution_options_normalizes_any_aware_deadline_to_exact_utc(
+    offset: timedelta,
+    microsecond: int,
+    expected: datetime,
+) -> None:
     deadline = datetime(
         2027,
         4,
@@ -208,14 +391,15 @@ def test_execution_options_normalizes_utc_deadline_and_preserves_microseconds() 
         6,
         7,
         8,
-        654321,
-        tzinfo=timezone(timedelta(0), "ZERO"),
+        microsecond,
+        tzinfo=timezone(offset, "SECRET ZONE"),
     )
 
     options = ExecutionOptions(deadline=deadline)
 
-    assert options.deadline == datetime(2027, 4, 5, 6, 7, 8, 654321, tzinfo=UTC)
+    assert options.deadline == expected
     assert options.deadline is not deadline
+    assert type(options.deadline) is datetime
     assert options.deadline is not None
     assert options.deadline.tzinfo is UTC
 
@@ -223,23 +407,52 @@ def test_execution_options_normalizes_utc_deadline_and_preserves_microseconds() 
 @pytest.mark.parametrize(
     "deadline",
     [
-        datetime(2027, 4, 5),
-        datetime(2027, 4, 5, tzinfo=timezone(timedelta(hours=1))),
-        datetime(2027, 4, 5, tzinfo=_NoneOffset()),
         datetime(2027, 4, 5, tzinfo=_BadOffset()),
         datetime(2027, 4, 5, tzinfo=_RaisingOffset()),
+        datetime.min.replace(tzinfo=timezone(timedelta(hours=1))),
+        datetime.max.replace(tzinfo=timezone(-timedelta(hours=1))),
     ],
 )
-def test_execution_options_rejects_invalid_deadline_timezones(
+def test_execution_options_redacts_invalid_deadline_behavior(
     deadline: datetime,
 ) -> None:
-    with pytest.raises(ValueError, match="deadline"):
+    with pytest.raises(ValueError) as caught:
         ExecutionOptions(deadline=deadline)
+
+    assert str(caught.value) == (
+        "deadline must be a valid timezone-aware datetime representable in UTC"
+    )
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert "SECRET" not in str(caught.value)
+    assert "translated" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "deadline",
+    [
+        datetime(2027, 4, 5),
+        datetime(2027, 4, 5, tzinfo=_NoneOffset()),
+    ],
+)
+def test_execution_options_rejects_naive_deadline_with_stable_error(
+    deadline: datetime,
+) -> None:
+    with pytest.raises(ValueError) as caught:
+        ExecutionOptions(deadline=deadline)
+
+    assert str(caught.value) == "deadline must be timezone-aware"
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
 
 
 def test_execution_options_rejects_non_datetime_deadline() -> None:
-    with pytest.raises(TypeError, match="deadline"):
+    with pytest.raises(TypeError) as caught:
         ExecutionOptions(deadline="later")  # type: ignore[arg-type]
+
+    assert str(caught.value) == "deadline must be a datetime or None"
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
 
 
 def test_execution_options_constructor_preserves_normal_argument_errors() -> None:
@@ -267,6 +480,24 @@ def test_execution_options_are_keyword_only_and_type_checked_before_execution() 
         plan.execute_async(inputs, ExecutionOptions())  # type: ignore[call-arg]
     with pytest.raises(TypeError):
         plan.execute_async(inputs, options={})  # type: ignore[arg-type]
+
+
+def test_sync_event_loop_error_precedes_inputs_and_options_validation() -> None:
+    plan = (
+        PipelineBuilder("loop-precedence").expression("calc", "out = value").compile()
+    )
+
+    async def exercise() -> None:
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                r"^execute\(\) cannot run inside an event loop; "
+                r"use execute_async\(\)$"
+            ),
+        ):
+            plan.execute(object(), options=object())  # type: ignore[arg-type]
+
+    asyncio.run(exercise())
 
 
 def test_already_expired_deadline_cancels_sync_before_provider_entry() -> None:
@@ -614,6 +845,136 @@ def test_one_options_value_is_isolated_across_concurrent_independent_plans() -> 
     ]
 
 
+def test_same_plan_queued_runs_keep_context_snapshots_isolated() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    observed: list[tuple[str, datetime | None]] = []
+
+    def callback(
+        batch: Batch,
+        _provider_options: dict[str, object],
+        context: ProviderContext,
+    ) -> Batch:
+        run = context.settings["run"]
+        assert isinstance(run, str)
+        observed.append((run, context.deadline))
+        if run == "A":
+            started.set()
+            assert release.wait(timeout=5)
+        return batch
+
+    runtime = Runtime()
+    runtime.register_provider(
+        "test",
+        "same-plan-context",
+        "1",
+        callback,
+        accepts_context=True,
+    )
+    plan = (
+        PipelineBuilder("same-plan-context")
+        .external("provider", "test", "same-plan-context", "1", {})
+        .compile(runtime)
+    )
+    batch = Batch.from_array(np.array([1]), backend="test")
+    first_deadline = datetime(2030, 1, 1, tzinfo=UTC)
+    second_deadline = datetime(2031, 2, 3, 4, 5, 6, 7, tzinfo=UTC)
+
+    async def exercise() -> None:
+        first = asyncio.create_task(
+            plan.execute_async(
+                {"input": batch},
+                options=ExecutionOptions({"run": "A"}, first_deadline),
+            )
+        )
+        assert await asyncio.to_thread(started.wait, 5)
+
+        second_submitted = asyncio.Event()
+
+        async def run_second():
+            execution = plan.execute_async(
+                {"input": batch},
+                options=ExecutionOptions({"run": "B"}, second_deadline),
+            )
+            second_submitted.set()
+            return await execution
+
+        second = asyncio.create_task(run_second())
+        await second_submitted.wait()
+        assert not second.done()
+        release.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(exercise())
+
+    assert observed == [("A", first_deadline), ("B", second_deadline)]
+
+
+def test_same_plan_deadline_expires_while_waiting_without_second_provider_call() -> (
+    None
+):
+    started = threading.Event()
+    release = threading.Event()
+    observed: list[str] = []
+
+    def callback(
+        batch: Batch,
+        _provider_options: dict[str, object],
+        context: ProviderContext,
+    ) -> Batch:
+        run = context.settings["run"]
+        assert isinstance(run, str)
+        observed.append(run)
+        if run == "A":
+            started.set()
+            assert release.wait(timeout=5)
+        return batch
+
+    runtime = Runtime()
+    runtime.register_provider(
+        "test",
+        "queued-deadline",
+        "1",
+        callback,
+        accepts_context=True,
+    )
+    plan = (
+        PipelineBuilder("queued-deadline")
+        .external("provider", "test", "queued-deadline", "1", {})
+        .compile(runtime)
+    )
+    batch = Batch.from_array(np.array([1]), backend="test")
+
+    async def exercise() -> None:
+        first = asyncio.create_task(
+            plan.execute_async(
+                {"input": batch},
+                options=ExecutionOptions({"run": "A"}),
+            )
+        )
+        assert await asyncio.to_thread(started.wait, 5)
+        deadline = datetime.now(UTC) + timedelta(milliseconds=100)
+        second = asyncio.create_task(
+            plan.execute_async(
+                {"input": batch},
+                options=ExecutionOptions({"run": "B"}, deadline),
+            )
+        )
+        await asyncio.sleep(
+            max(0.0, (deadline - datetime.now(UTC)).total_seconds()) + 0.02
+        )
+        assert not second.done()
+        release.set()
+        await first
+        with pytest.raises(CancelledError):
+            await second
+
+    asyncio.run(exercise())
+
+    assert observed == ["A"]
+    assert plan.snapshot() == {"provider": None}
+
+
 def _deadline_pipeline(
     started: threading.Event,
     release: threading.Event,
@@ -701,6 +1062,50 @@ def test_async_deadline_crossed_in_provider_rolls_back_and_recovers() -> None:
     assert calls == {"gate": 2, "downstream": 1}
 
 
+def test_provider_error_after_deadline_is_reported_as_cancellation() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def callback(batch: Batch, _options: dict[str, object]) -> Batch:
+        del batch
+        nonlocal calls
+        calls += 1
+        started.set()
+        assert release.wait(timeout=5)
+        raise RuntimeError("provider failure must lose to deadline")
+
+    runtime = Runtime()
+    runtime.register_provider("test", "deadline-error", "1", callback)
+    plan = (
+        PipelineBuilder("deadline-error")
+        .external("provider", "test", "deadline-error", "1", {})
+        .compile(runtime)
+    )
+    batch = Batch.from_array(np.array([1]), backend="test")
+
+    async def exercise() -> None:
+        deadline = datetime.now(UTC) + timedelta(milliseconds=100)
+        execution = asyncio.create_task(
+            plan.execute_async(
+                {"input": batch},
+                options=ExecutionOptions(deadline=deadline),
+            )
+        )
+        assert await asyncio.to_thread(started.wait, 5)
+        await asyncio.sleep(
+            max(0.0, (deadline - datetime.now(UTC)).total_seconds()) + 0.02
+        )
+        release.set()
+        with pytest.raises(CancelledError):
+            await execution
+
+    asyncio.run(exercise())
+
+    assert calls == 1
+    assert plan.snapshot() == {"provider": None}
+
+
 def test_async_task_cancellation_waits_for_cleanup_and_reuses_options() -> None:
     started = threading.Event()
     release = threading.Event()
@@ -760,70 +1165,159 @@ def test_async_task_cancellation_waits_for_cleanup_and_reuses_options() -> None:
     assert options.settings == {"request": 7}
 
 
-def test_async_task_cancellation_wins_when_native_completes_after_acceptance() -> None:
-    class Cancellation:
-        cancelled = False
+class _RecordingCancellation:
+    def __init__(
+        self,
+        events: list[str],
+        entered: asyncio.Event | None = None,
+    ) -> None:
+        self.events = events
+        self.entered = entered
+        self.calls = 0
 
-        def cancel(self) -> None:
-            self.cancelled = True
+    def cancel(self) -> None:
+        self.events.append("cancel")
+        self.calls += 1
+        if self.entered is not None:
+            self.entered.set()
 
-    class Inner:
-        def __init__(
-            self, future: asyncio.Future[object], cancellation: Cancellation
-        ) -> None:
-            self.future = future
-            self.cancellation = cancellation
 
-        def _execute_async_cancellable(
-            self, _inputs: dict[str, Batch], *, options: object
-        ) -> tuple[asyncio.Future[object], Cancellation]:
-            return self.future, self.cancellation
+class _SuppressedCallbackFuture(asyncio.Future[object]):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__()
+        self.events = events
 
+    def add_done_callback(  # type: ignore[override]
+        self,
+        fn: object,
+        *,
+        context: object | None = None,
+    ) -> None:
+        del fn, context
+
+    def done(self) -> bool:
+        self.events.append("done")
+        return super().done()
+
+    def result(self) -> object:
+        self.events.append("result")
+        return super().result()
+
+
+class _CleanupFuture(asyncio.Future[object]):
+    def __init__(
+        self,
+        events: list[str],
+        cancellation_entered: asyncio.Event,
+        cleanup_checks: asyncio.Queue[None],
+    ) -> None:
+        super().__init__()
+        self.events = events
+        self.cancellation_entered = cancellation_entered
+        self.cleanup_checks = cleanup_checks
+
+    def done(self) -> bool:
+        self.events.append("done")
+        if self.cancellation_entered.is_set():
+            self.cleanup_checks.put_nowait(None)
+        return super().done()
+
+    def result(self) -> object:
+        self.events.append("result")
+        return super().result()
+
+
+class _FakeExecutionPlanInner:
+    def __init__(
+        self,
+        future: asyncio.Future[object],
+        cancellation: _RecordingCancellation,
+        entered: asyncio.Event,
+    ) -> None:
+        self.future = future
+        self.cancellation = cancellation
+        self.entered = entered
+
+    def _execute_async_cancellable(
+        self,
+        _inputs: dict[str, Batch],
+        *,
+        options: object,
+    ) -> tuple[asyncio.Future[object], _RecordingCancellation]:
+        del options
+        self.entered.set()
+        return self.future, self.cancellation
+
+
+@pytest.mark.parametrize("native_outcome", ["result", "exception"])
+def test_native_terminal_state_wins_at_async_cancellation_handler_entry(
+    native_outcome: str,
+) -> None:
     async def exercise() -> None:
-        future: asyncio.Future[object] = asyncio.get_running_loop().create_future()
-        cancellation = Cancellation()
-        plan = calc_flow.pipeline.ExecutionPlan(Inner(future, cancellation))  # type: ignore[arg-type]
+        events: list[str] = []
+        entered = asyncio.Event()
+        future = _SuppressedCallbackFuture(events)
+        cancellation = _RecordingCancellation(events)
+        inner = _FakeExecutionPlanInner(future, cancellation, entered)
+        plan = calc_flow.pipeline.ExecutionPlan(inner)  # type: ignore[arg-type]
         execution = asyncio.create_task(plan.execute_async({}))
-        await asyncio.sleep(0)
+        await entered.wait()
+        events.clear()
 
-        assert execution.cancel()
-        future.set_result("core-result")
-        with pytest.raises(asyncio.CancelledError):
-            await execution
-        assert cancellation.cancelled
+        def complete_and_cancel() -> None:
+            if native_outcome == "result":
+                future.set_result("core-result")
+            else:
+                future.set_exception(RuntimeError("native failure"))
+            events.clear()
+            assert execution.cancel()
+
+        asyncio.get_running_loop().call_soon(complete_and_cancel)
+        if native_outcome == "result":
+            assert await execution == "core-result"
+        else:
+            with pytest.raises(RuntimeError, match="^native failure$"):
+                await execution
+
+        assert events[-2:] == ["done", "result"]
+        assert events.count("result") == 1
+        assert "cancel" not in events
+        assert cancellation.calls == 0
 
     asyncio.run(exercise())
 
 
-def test_native_completion_wins_when_it_precedes_task_cancellation() -> None:
-    class Cancellation:
-        cancelled = False
-
-        def cancel(self) -> None:
-            self.cancelled = True
-
-    class Inner:
-        def __init__(
-            self, future: asyncio.Future[object], cancellation: Cancellation
-        ) -> None:
-            self.future = future
-            self.cancellation = cancellation
-
-        def _execute_async_cancellable(
-            self, _inputs: dict[str, Batch], *, options: object
-        ) -> tuple[asyncio.Future[object], Cancellation]:
-            return self.future, self.cancellation
-
+def test_async_cancellation_linearizes_once_and_tolerates_repeated_cancellation() -> (
+    None
+):
     async def exercise() -> None:
-        future: asyncio.Future[object] = asyncio.get_running_loop().create_future()
-        cancellation = Cancellation()
-        plan = calc_flow.pipeline.ExecutionPlan(Inner(future, cancellation))  # type: ignore[arg-type]
+        events: list[str] = []
+        entered = asyncio.Event()
+        cancellation_entered = asyncio.Event()
+        cleanup_checks: asyncio.Queue[None] = asyncio.Queue()
+        future = _CleanupFuture(events, cancellation_entered, cleanup_checks)
+        cancellation = _RecordingCancellation(events, cancellation_entered)
+        inner = _FakeExecutionPlanInner(future, cancellation, entered)
+        plan = calc_flow.pipeline.ExecutionPlan(inner)  # type: ignore[arg-type]
         execution = asyncio.create_task(plan.execute_async({}))
-        await asyncio.sleep(0)
+        await entered.wait()
+        events.clear()
 
-        future.set_result("core-result")
         assert execution.cancel()
-        assert await execution == "core-result"
-        assert not cancellation.cancelled
+        await cancellation_entered.wait()
+        await cleanup_checks.get()
+
+        assert execution.cancel()
+        assert execution.cancel()
+        assert cancellation.calls == 1
+
+        future.set_result("late core result")
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+
+        cancel_index = events.index("cancel")
+        assert "done" in events[:cancel_index]
+        assert cancellation.calls == 1
+        assert events.count("cancel") == 1
 
     asyncio.run(exercise())

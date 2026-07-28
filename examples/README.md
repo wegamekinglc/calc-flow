@@ -36,7 +36,8 @@ The files cover:
 - `04_micro_batch_recovery.py` — a replayable source, checkpoint commit, plan
   lease release, and recovery from the stored source cursor.
 - `05_async_execution.py` — non-blocking `execute_async()` use with copied
-  settings and a timezone-aware UTC deadline inside an asyncio application.
+  settings and a timezone-aware deadline normalized to UTC inside an asyncio
+  application.
 - `06_numpy_array.py` — explicit NumPy provider registration and a restricted
   array expression over an immutable array batch.
 - `07_array_and_dataframe.py` — explicit `pyarrow.Table`-to-array matrix

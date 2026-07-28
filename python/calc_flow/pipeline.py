@@ -303,8 +303,6 @@ class ExecutionPlan:
         *,
         options: _native.ExecutionOptions | None = None,
     ) -> _native.RunResult:
-        if options is not None and type(options) is not _native.ExecutionOptions:
-            raise TypeError("options must be a calc_flow.ExecutionOptions or None")
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -313,7 +311,10 @@ class ExecutionPlan:
             raise RuntimeError(
                 "execute() cannot run inside an event loop; use execute_async()"
             )
-        return self._inner.execute(dict(inputs), options=options)
+        if options is not None and type(options) is not _native.ExecutionOptions:
+            raise TypeError("options must be a calc_flow.ExecutionOptions or None")
+        copied = dict(inputs)
+        return self._inner.execute(copied, options=options)
 
     def execute_async(
         self,
@@ -329,18 +330,10 @@ class ExecutionPlan:
             native, cancellation = self._inner._execute_async_cancellable(
                 copied, options=options
             )
-            native_completed = False
-
-            def record_native_completion(
-                _future: asyncio.Future[_native.RunResult],
-            ) -> None:
-                nonlocal native_completed
-                native_completed = True
-
-            native.add_done_callback(record_native_completion)
             try:
                 return await asyncio.shield(native)
             except asyncio.CancelledError as cancelled:
+                native_completed = native.done()
                 if native_completed:
                     return native.result()
                 cancellation.cancel()
