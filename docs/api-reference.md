@@ -89,7 +89,8 @@ Import the main surface from `calc_flow`.
 
 `ExecutionPlan` exposes immutable `name` and `fingerprint`.
 `execute(inputs, *, options=None)` is blocking and rejects a running event
-loop. `execute_async(inputs, *, options=None)` is the asynchronous form.
+loop before validating inputs or options.
+`execute_async(inputs, *, options=None)` is the asynchronous form.
 In both signatures, `options` is keyword-only and `None` preserves the
 existing default execution behavior. `snapshot[_async]`, `restore[_async]`,
 and `reset[_async]` provide the plan-state lifecycle.
@@ -97,16 +98,19 @@ and `reset[_async]` provide the plan-state lifecycle.
 `RunResult` exposes defensive `outputs`, `metadata`, `node_timings`, and
 `datafusion_metrics` values.
 
-`ExecutionOptions(settings={}, deadline=None)` is frozen and reusable; an
-omitted settings argument or explicit `settings=None` creates an empty
-mapping. Every object position may use a `collections.abc.Mapping`; Calc Flow
-calls its `items()` once, consumes that iterator once, and copies it to a
-built-in `dict`. Mapping subclasses are accepted, while sequence containers
-must be exact built-in `list` values. Keys and scalar leaves must be exact
-built-in `str`, `None`, `bool`, `int`, or finite `float` values. Integers must
-be in the inclusive range `-2**63 .. 2**64 - 1`. Duplicate or
-surrogate-containing keys/strings, cycles, unsupported subclasses, and values
-deeper than 32 are rejected with stable redacted paths.
+`ExecutionOptions` and `ProviderContext` are frozen native classes exported
+from the package root. The `ExecutionOptions(settings={}, deadline=None)`
+constructor accepts its two arguments positionally or by keyword; this is
+separate from the keyword-only `options=` plan parameter. An omitted settings
+argument or explicit `settings=None` creates an empty mapping. Every object
+position may use a `collections.abc.Mapping`; Calc Flow calls its `items()`
+once, consumes that iterator once, and copies it to a built-in `dict`. Mapping
+subclasses are accepted, while sequence containers must be exact built-in
+`list` values. Keys and scalar leaves must be exact built-in `str`, `None`,
+`bool`, `int`, or finite `float` values. Integers must be in the inclusive
+range `-2**63 .. 2**64 - 1`. Duplicate or surrogate-containing keys/strings,
+cycles, unsupported subclasses, and values deeper than 32 are rejected with
+stable redacted paths.
 
 Construction deep-copies the complete accepted graph, including shared nested
 aliases, and neither retains nor mutates caller containers. Every
@@ -133,6 +137,14 @@ non-cooperative operation already in progress; cleanup continues after that
 operation yields. Every execution receives independent native cancellation
 state, but the public Python API does not expose the native cancellation
 token.
+
+An absolute deadline continues to elapse while a run waits behind another
+execution of the same plan. Cancelling such a queued run does not cancel the
+active run or create partial plan state. Once a deadline or accepted task
+cancellation is observed at a post-provider boundary, cancellation wins over
+a provider error from that operation; recovery, input, snapshot, and
+transaction-marker failures that occur before the first deadline check retain
+their existing precedence.
 
 ### Runtime and UDFs
 

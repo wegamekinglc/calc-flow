@@ -168,8 +168,8 @@ later revisions.
 
 ## Execution options and provider context
 
-Use the frozen `ExecutionOptions` value to attach run-scoped settings and an
-absolute UTC deadline:
+Use the frozen native `ExecutionOptions` value to attach run-scoped settings
+and an absolute UTC deadline:
 
 ```python
 from datetime import UTC, datetime, timedelta
@@ -205,9 +205,11 @@ normalizes every accepted offset to `datetime.UTC` and preserves
 microseconds; it rejects naive, invalid, and out-of-range UTC conversions with
 fixed redacted errors.
 
-Both `plan.execute(inputs, *, options=None)` and
-`plan.execute_async(inputs, *, options=None)` make `options` keyword-only.
-Omitting it preserves the existing default behavior.
+The `ExecutionOptions(settings, deadline)` constructor accepts positional or
+keyword arguments. In contrast, `options` is keyword-only in both
+`plan.execute(inputs, *, options=None)` and
+`plan.execute_async(inputs, *, options=None)`. Omitting the plan option
+preserves the existing default behavior.
 
 Provider callbacks remain two-argument callables unless the registration
 explicitly opts into run context:
@@ -277,14 +279,15 @@ async def calculate() -> list[int]:
 ```
 
 Blocking `execute`, store, and runner methods reject a running event loop. Use
-their async forms in servers and asyncio applications. An already-expired or
-crossed execution deadline raises `calc_flow.CancelledError` after
-transactional rollback. Cancelling a still-pending surrounding asyncio task
-instead raises `asyncio.CancelledError`. The handler makes one terminal-state
-decision: if native execution is already terminal, its result or exception
-remains observable; otherwise it sends exactly one native cancellation
-request and waits through repeated Python task cancellation until cleanup
-finishes.
+their async forms in servers and asyncio applications. `plan.execute()` checks
+for a running event loop before it validates inputs or options, so that usage
+error has precedence. An already-expired or crossed execution deadline raises
+`calc_flow.CancelledError` after transactional rollback. Cancelling a
+still-pending surrounding asyncio task instead raises
+`asyncio.CancelledError`. The handler makes one terminal-state decision: if
+native execution is already terminal, its result or exception remains
+observable; otherwise it sends exactly one native cancellation request and
+waits through repeated Python task cancellation until cleanup finishes.
 
 Awaiting task cancellation waits until the current native operation and
 run-owned cleanup finish; no work or input payload continues detached. The
@@ -295,6 +298,14 @@ in progress; cleanup resumes when that operation yields. The same
 `ExecutionOptions` value can be reused concurrently because each run receives
 independent native cancellation state. No cancellation token is part of the
 public Python API.
+
+For executions queued behind another invocation of the same plan, the
+absolute deadline keeps elapsing. Cancelling a queued invocation neither
+cancels the active run nor creates partial plan state. Once a deadline or
+accepted task cancellation is observed at a post-provider boundary, it wins
+over that provider's error. Recovery, input, snapshot, and transaction-marker
+failures that occur before the first deadline check retain their existing
+precedence.
 
 The full version is [`examples/05_async_execution.py`](../examples/05_async_execution.py).
 
