@@ -59,3 +59,15 @@ fn run_context_exposes_the_exact_configured_deadline() {
 
     assert_eq!(context.deadline(), Some(&deadline));
 }
+
+#[test]
+fn deadline_equal_to_now_is_treated_as_expired() {
+    let deadline = Utc::now();
+    let context =
+        RunContext::new(BTreeMap::new(), Some(deadline), CancellationToken::new()).unwrap();
+
+    assert!(matches!(
+        context.check_cancelled(),
+        Err(CalcFlowError::Cancelled { .. })
+    ));
+}
