@@ -810,9 +810,9 @@ export default function App() {
             onExport={(format) => void exportProject(format)}
             onDelete={() => void deleteProject()}
           />
-          <button className="ghost-button" type="button" disabled={persistenceBusy} onClick={() => void save()}>Save</button>
-          <button className="ghost-button" type="button" disabled={persistenceBusy} onClick={() => void validate()}>Validate</button>
-          <button className="run-button" type="button" disabled={persistenceBusy} onClick={() => void execute()}><span>▶</span> Run preview</button>
+          <button className="ghost-button topbar-control" type="button" disabled={persistenceBusy} onClick={() => void save()}>Save</button>
+          <button className="ghost-button topbar-control" type="button" disabled={persistenceBusy} onClick={() => void validate()}>Validate</button>
+          <button className="run-button topbar-control" type="button" disabled={persistenceBusy} onClick={() => void execute()}><span>▶</span> Run preview</button>
         </div>
       </header>
 

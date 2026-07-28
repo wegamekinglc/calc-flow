@@ -1,4 +1,10 @@
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type Locator,
+  type Page,
+} from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 
 const projectsUrl = 'http://127.0.0.1:8765/api/v2/projects';
@@ -117,6 +123,240 @@ async function dragSeparator(page: Page, label: string, deltaX: number): Promise
   await page.mouse.move(centerX + deltaX, centerY, { steps: 5 });
   await page.mouse.up();
 }
+
+interface MeasuredControl {
+  readonly label: string;
+  readonly locator: Locator;
+}
+
+interface ElementBox {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+const toolbarControls = (page: Page): MeasuredControl[] => [
+  { label: 'New', locator: page.getByRole('button', { name: 'New', exact: true }) },
+  { label: 'Import', locator: page.getByLabel('Import project').locator('..') },
+  {
+    label: 'Export JSON',
+    locator: page.getByRole('button', { name: 'Export JSON', exact: true }),
+  },
+  {
+    label: 'Export YAML',
+    locator: page.getByRole('button', { name: 'Export YAML', exact: true }),
+  },
+  {
+    label: 'Delete',
+    locator: page.getByRole('button', { name: 'Delete', exact: true }),
+  },
+  { label: 'Save', locator: page.getByRole('button', { name: 'Save', exact: true }) },
+  {
+    label: 'Validate',
+    locator: page.getByRole('button', { name: 'Validate', exact: true }),
+  },
+  {
+    label: 'Run preview',
+    locator: page.getByRole('button', { name: /Run preview/ }),
+  },
+];
+
+async function measuredBox(locator: Locator, label: string): Promise<ElementBox> {
+  await expect(locator, `${label} should be visible`).toBeVisible();
+  const box = await locator.boundingBox();
+  expect(box, `${label} should have a layout box`).not.toBeNull();
+  return box!;
+}
+
+const boxesOverlap = (left: ElementBox, right: ElementBox): boolean => {
+  const epsilon = 0.5;
+  return left.x < right.x + right.width - epsilon
+    && left.x + left.width > right.x + epsilon
+    && left.y < right.y + right.height - epsilon
+    && left.y + left.height > right.y + epsilon;
+};
+
+async function expectToolbarInsideViewport(page: Page): Promise<void> {
+  const viewport = page.viewportSize();
+  expect(viewport).not.toBeNull();
+  const controls = toolbarControls(page);
+  const boxes = await Promise.all(
+    controls.map(async ({ label, locator }) => ({
+      label,
+      box: await measuredBox(locator, label),
+    })),
+  );
+
+  for (const { label, box } of boxes) {
+    expect(box.x, `${label} left edge`).toBeGreaterThanOrEqual(0);
+    expect(box.y, `${label} top edge`).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width, `${label} right edge`)
+      .toBeLessThanOrEqual(viewport!.width);
+    expect(box.y + box.height, `${label} bottom edge`)
+      .toBeLessThanOrEqual(viewport!.height);
+    expect(box.height, `${label} explicit height`).toBeCloseTo(36, 0);
+  }
+
+  for (let leftIndex = 0; leftIndex < boxes.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < boxes.length; rightIndex += 1) {
+      const left = boxes[leftIndex];
+      const right = boxes[rightIndex];
+      expect(
+        boxesOverlap(left.box, right.box),
+        `${left.label} must not overlap ${right.label}`,
+      ).toBe(false);
+      const sameRow = Math.abs(left.box.y - right.box.y) < 1;
+      if (sameRow) {
+        expect(
+          left.box.y + left.box.height,
+          `${left.label} and ${right.label} row bottom`,
+        ).toBeCloseTo(right.box.y + right.box.height, 0);
+      }
+    }
+  }
+}
+
+async function expectDialogInsideViewport(
+  page: Page,
+  includeError: boolean,
+): Promise<void> {
+  const viewport = page.viewportSize();
+  expect(viewport).not.toBeNull();
+  const dialog = page.getByRole('dialog');
+  const measured = [
+    { label: 'dialog', locator: dialog },
+    { label: 'dialog heading', locator: dialog.getByRole('heading') },
+    {
+      label: 'dialog editor',
+      locator: dialog.getByRole('textbox', { name: /Data source data/ }),
+    },
+    { label: 'dialog actions', locator: dialog.locator('.data-source-dialog-actions') },
+    { label: 'Cancel', locator: dialog.getByRole('button', { name: 'Cancel' }) },
+    { label: 'Confirm', locator: dialog.getByRole('button', { name: 'Confirm' }) },
+  ];
+  if (includeError) {
+    measured.push({
+      label: 'validation error',
+      locator: dialog.getByText('Invalid inline JSON'),
+    });
+  }
+  for (const { label, locator } of measured) {
+    const box = await measuredBox(locator, label);
+    expect(box.x, `${label} left edge`).toBeGreaterThanOrEqual(0);
+    expect(box.y, `${label} top edge`).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width, `${label} right edge`)
+      .toBeLessThanOrEqual(viewport!.width);
+    expect(box.y + box.height, `${label} bottom edge`)
+      .toBeLessThanOrEqual(viewport!.height);
+  }
+  const dimensions = await dialog.evaluate((element) => ({
+    scrollWidth: element.scrollWidth,
+    clientWidth: element.clientWidth,
+  }));
+  expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
+  const editorBox = await measuredBox(
+    dialog.getByRole('textbox', { name: /Data source data/ }),
+    'dialog editor',
+  );
+  expect(editorBox.height).toBeGreaterThanOrEqual(180);
+}
+
+async function expectFocusContained(page: Page): Promise<void> {
+  await expect.poll(() => page.evaluate(() => {
+    const dialog = document.querySelector('dialog[open]');
+    return Boolean(dialog?.contains(document.activeElement));
+  })).toBe(true);
+}
+
+test.describe('Data Source dialog and toolbar layout', () => {
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
+    test(`keeps controls, modal drafts, and focus safe at ${viewport.width}x${viewport.height}`, async ({
+      page,
+    }) => {
+      await page.setViewportSize(viewport);
+      await page.goto('/');
+      await expect(page.getByText('Build the flow')).toBeVisible();
+      await expectToolbarInsideViewport(page);
+
+      const opener = page.getByRole('button', { name: 'Edit data source sample' });
+      const preview = page.getByLabel('Data 1 preview');
+      await opener.scrollIntoViewIfNeeded();
+      const committedBefore = await preview.textContent();
+
+      await opener.focus();
+      await opener.click();
+      const dialog = page.getByRole('dialog', { name: 'Edit data source sample' });
+      const editor = dialog.getByRole('textbox', {
+        name: 'Data source data for sample',
+      });
+      await expect(editor).toBeFocused();
+      await expectDialogInsideViewport(page, false);
+
+      for (let cycle = 0; cycle < 10; cycle += 1) {
+        await page.keyboard.press('Tab');
+        await expectFocusContained(page);
+      }
+      for (let cycle = 0; cycle < 10; cycle += 1) {
+        await page.keyboard.press('Shift+Tab');
+        await expectFocusContained(page);
+      }
+
+      const discard = async (
+        text: string,
+        close: () => Promise<void>,
+      ): Promise<void> => {
+        await editor.fill(text);
+        await close();
+        await expect(dialog).toBeHidden();
+        await expect(preview).toHaveText(committedBefore ?? '');
+        await expect(opener).toBeFocused();
+      };
+
+      await discard('escape draft', async () => page.keyboard.press('Escape'));
+
+      await opener.click();
+      await discard('cancel draft', async () => {
+        await dialog.getByRole('button', { name: 'Cancel' }).click();
+      });
+
+      await opener.click();
+      await discard('close draft', async () => {
+        await dialog.getByRole('button', { name: 'Close data source editor' }).click();
+      });
+
+      await opener.click();
+      await editor.fill('backdrop draft');
+      await page.mouse.click(2, 2);
+      await expect(dialog).toBeHidden();
+      await expect(preview).toHaveText(committedBefore ?? '');
+      await expect(opener).toBeFocused();
+
+      const validText = '[{"a":9,"b":1}]';
+      await opener.click();
+      await editor.fill(validText);
+      await dialog.getByRole('button', { name: 'Confirm' }).click();
+      await expect(dialog).toBeHidden();
+      await expect(preview).toContainText(validText);
+      await expect(opener).toBeFocused();
+
+      await opener.click();
+      await editor.fill('[{');
+      await dialog.getByRole('button', { name: 'Confirm' }).click();
+      await expect(dialog).toBeVisible();
+      await expect(editor).toHaveValue('[{');
+      await expect(editor).toHaveAttribute('aria-invalid', 'true');
+      await expect(editor).toHaveAccessibleDescription('Invalid inline JSON');
+      await expect(preview).toContainText(validText);
+      await expectDialogInsideViewport(page, true);
+      await dialog.getByRole('button', { name: 'Cancel' }).click();
+      await expect(opener).toBeFocused();
+    });
+  }
+});
 
 test('builds and runs a persisted DataFusion UDF graph without browser code', async ({ page }) => {
   await page.goto('/');
@@ -254,7 +494,12 @@ test.describe('persisted two-source SQL join', () => {
     await removeSource.click();
     await expect(sources.getByRole('article')).toHaveCount(2);
 
-    await page.getByLabel('Data 1').fill('[{"id":1,"value":4},{"id":2,"value":5}]');
+    await page.getByRole('button', { name: 'Edit data source left' }).click();
+    await page.getByRole('textbox', { name: 'Data source data for left' })
+      .fill('[{"id":1,"value":4},{"id":2,"value":5}]');
+    await page.getByRole('button', { name: 'Confirm' }).click();
+    await expect(page.getByLabel('Data 1 preview'))
+      .toContainText('[{"id":1,"value":4},{"id":2,"value":5}]');
     const save = page.getByRole('button', { name: 'Save' });
     await expect(save).toBeVisible();
     await expect(save).toBeEnabled();
