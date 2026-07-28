@@ -185,12 +185,16 @@ describe('DataSourceEditor', () => {
     },
   );
 
-  it('excludes modal editing from the same source file-read owner', () => {
+  it('excludes only the matching source from a pending file-read owner', () => {
     const props = {
       sources: [
         { id: 'left', input: 'left_source', format: 'inline_json', data: [] },
+        { id: 'right', input: 'right_source', format: 'csv', data: '' },
       ],
-      drafts: [{ key: 'left-key', dataText: '[]', error: null }],
+      drafts: [
+        { key: 'left-key', dataText: '[]', error: null },
+        { key: 'right-key', dataText: 'value\n2\n', error: null },
+      ],
       busy: false,
       pendingSourceKeys: new Set(['left-key']),
       onAdd: vi.fn(),
@@ -200,18 +204,51 @@ describe('DataSourceEditor', () => {
       onLoadFile: vi.fn(),
     } satisfies DataSourceEditorProps;
     const view = render(<DataSourceEditor {...props} />);
-    const opener = screen.getByRole('button', { name: 'Edit data source left' });
+    const leftOpener = screen.getByRole('button', {
+      name: 'Edit data source left',
+    });
+    const rightOpener = screen.getByRole('button', {
+      name: 'Edit data source right',
+    });
 
-    expect(opener).toBeDisabled();
+    expect(leftOpener).toBeDisabled();
+    expect(rightOpener).toBeEnabled();
     expect(screen.getByLabelText('Load file 1')).toBeEnabled();
+    expect(screen.getByLabelText('Load file 2')).toBeEnabled();
 
     view.rerender(
       <DataSourceEditor {...props} pendingSourceKeys={new Set()} />,
     );
-    fireEvent.click(opener);
+    fireEvent.click(rightOpener);
 
-    expect(screen.getByLabelText('Load file 1')).toBeDisabled();
-    expect(screen.getByRole('textbox', { name: 'Data source data for left' }))
+    expect(screen.getByLabelText('Load file 1')).toBeEnabled();
+    expect(screen.getByLabelText('Load file 2')).toBeDisabled();
+    expect(screen.getByRole('textbox', { name: 'Data source data for right' }))
+      .toBeEnabled();
+  });
+
+  it('bounds the committed card preview without hiding its editor opener', () => {
+    const committedText = 'x'.repeat(300);
+    render(
+      <DataSourceEditor
+        sources={[
+          { id: 'left', input: 'left_source', format: 'csv', data: committedText },
+        ]}
+        drafts={[{ key: 'left-key', dataText: committedText, error: null }]}
+        busy={false}
+        pendingSourceKeys={new Set()}
+        onAdd={vi.fn()}
+        onRemove={vi.fn()}
+        onFieldChange={vi.fn()}
+        onDataChange={vi.fn()}
+        onLoadFile={vi.fn()}
+      />,
+    );
+
+    const preview = screen.getByLabelText('Data 1 preview').querySelector('pre');
+    expect(preview).toHaveTextContent(`${'x'.repeat(240)}…`);
+    expect(preview).not.toHaveTextContent('x'.repeat(241));
+    expect(screen.getByRole('button', { name: 'Edit data source left' }))
       .toBeEnabled();
   });
 

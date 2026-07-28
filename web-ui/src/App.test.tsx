@@ -735,6 +735,48 @@ describe('Calc Flow Studio', () => {
       .toEqual([{ value: 2 }]);
   });
 
+  it('rejects a pending file result after its source format changes', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.endsWith('/catalog')) return response(catalog);
+        if (path.endsWith('/projects')) return response([]);
+        throw new Error(`Unexpected request ${path}`);
+      }),
+    );
+    render(<App />);
+
+    const edit = await screen.findByRole('button', {
+      name: 'Edit data source sample',
+    });
+    const preview = screen.getByLabelText('Data 1 preview');
+    const committedBefore = preview.textContent;
+    const delayed = delayedTextFile('older.json');
+
+    fireEvent.change(screen.getByLabelText('Load file 1'), {
+      target: { files: [delayed.file] },
+    });
+    expect(edit).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText('Format 1'), {
+      target: { value: 'csv' },
+    });
+    expect(screen.getByLabelText('Format 1')).toHaveValue('csv');
+    fireEvent.change(screen.getByLabelText('Format 1'), {
+      target: { value: 'inline_json' },
+    });
+    expect(screen.getByLabelText('Format 1')).toHaveValue('inline_json');
+
+    await act(async () => {
+      delayed.resolve('value\n99\n');
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(edit).toBeEnabled());
+    expect(preview.textContent).toBe(committedBefore);
+  });
+
   it('excludes a pending file read before a later confirmed manual edit', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
