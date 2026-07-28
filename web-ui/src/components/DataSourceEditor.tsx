@@ -1,4 +1,7 @@
+import { useEffect, useRef, useState, type MouseEvent } from 'react';
+
 import type { DataSourceSpec } from '../types';
+import { DataSourceDialog } from './DataSourceDialog';
 import {
   DATA_SOURCE_FORMATS,
   type DataSourceDraft,
@@ -9,6 +12,7 @@ export interface DataSourceEditorProps {
   readonly sources: readonly DataSourceSpec[];
   readonly drafts: readonly DataSourceDraft[];
   readonly busy: boolean;
+  readonly pendingSourceKeys: ReadonlySet<string>;
   readonly onAdd: () => void;
   readonly onRemove: (index: number) => void;
   readonly onFieldChange: (
@@ -34,16 +38,79 @@ const SOURCE_FILE_ACCEPT: Record<DataSourceFormat, string> = {
   arrow_ipc: '.arrow,.ipc,application/vnd.apache.arrow.file,application/vnd.apache.arrow.stream',
 };
 
+interface ActiveEditor {
+  readonly key: string;
+  readonly format: DataSourceFormat;
+  readonly initialText: string;
+  readonly sourceLabel: string;
+}
+
+const DATA_PREVIEW_LIMIT = 240;
+
+const dataPreview = (dataText: string): string => {
+  const normalized = dataText.trim();
+  if (!normalized) return 'No data';
+  return normalized.length > DATA_PREVIEW_LIMIT
+    ? `${normalized.slice(0, DATA_PREVIEW_LIMIT)}…`
+    : normalized;
+};
+
 export function DataSourceEditor({
   sources,
   drafts,
   busy,
+  pendingSourceKeys,
   onAdd,
   onRemove,
   onFieldChange,
   onDataChange,
   onLoadFile,
 }: DataSourceEditorProps) {
+  const [activeEditor, setActiveEditor] = useState<ActiveEditor | null>(null);
+  const restoreFocusRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (activeEditor && !drafts.some((draft) => draft.key === activeEditor.key)) {
+      setActiveEditor(null);
+    }
+  }, [activeEditor, drafts]);
+
+  useEffect(() => {
+    if (activeEditor) return;
+    const opener = restoreFocusRef.current;
+    restoreFocusRef.current = null;
+    if (opener?.isConnected) opener.focus();
+  }, [activeEditor]);
+
+  const dismissEditor = () => {
+    setActiveEditor(null);
+  };
+
+  const openEditor = (
+    index: number,
+    event: MouseEvent<HTMLButtonElement>,
+  ) => {
+    const source = sources[index];
+    const draft = drafts[index];
+    if (!source || !draft) return;
+    restoreFocusRef.current = event.currentTarget;
+    setActiveEditor({
+      key: draft.key,
+      format: source.format as DataSourceFormat,
+      initialText: draft.dataText,
+      sourceLabel: source.id || String(index + 1),
+    });
+  };
+
+  const commitEditor = (dataText: string) => {
+    if (!activeEditor) return;
+    const currentIndex = drafts.findIndex(
+      (draft) => draft.key === activeEditor.key,
+    );
+    if (currentIndex >= 0) onDataChange(currentIndex, dataText);
+    setActiveEditor(null);
+  };
+
   return (
     <section className="data-source-editor" aria-labelledby="data-source-heading">
       <div className="data-source-heading">
@@ -63,6 +130,11 @@ export function DataSourceEditor({
           const draft = drafts[index];
           const errorId = `data-source-error-${draft?.key ?? number}`;
           const format = source.format as DataSourceFormat;
+          const editorPending = draft
+            ? pendingSourceKeys.has(draft.key)
+            : false;
+          const dialogOwnsSource = activeEditor?.key === draft?.key;
+          const sourceLabel = source.id || String(number);
           return (
             <article className="data-source-card" key={draft?.key ?? `${source.id}-${number}`}>
               <header>
@@ -107,17 +179,26 @@ export function DataSourceEditor({
                   ))}
                 </select>
               </label>
-              <label>
-                Data {number}
-                <textarea
-                  rows={7}
-                  disabled={busy}
-                  value={draft?.dataText ?? ''}
+              <div className="data-source-data">
+                <div
+                  className="data-source-preview"
+                  aria-label={`Data ${number} preview`}
+                >
+                  <span>Data {number}</span>
+                  <pre>{dataPreview(draft?.dataText ?? '')}</pre>
+                </div>
+                <button
+                  className="ghost-button data-source-edit-button"
+                  type="button"
+                  disabled={busy || editorPending || !draft}
+                  aria-label={`Edit data source ${sourceLabel}`}
                   aria-invalid={Boolean(draft?.error)}
                   aria-describedby={draft?.error ? errorId : undefined}
-                  onChange={(event) => onDataChange(index, event.target.value)}
-                />
-              </label>
+                  onClick={(event) => openEditor(index, event)}
+                >
+                  Edit data
+                </button>
+              </div>
               {draft?.error && (
                 <p className="data-source-error" id={errorId}>{draft.error}</p>
               )}
@@ -125,7 +206,7 @@ export function DataSourceEditor({
                 Load file
                 <input
                   type="file"
-                  disabled={busy}
+                  disabled={busy || dialogOwnsSource}
                   aria-label={`Load file ${number}`}
                   accept={SOURCE_FILE_ACCEPT[format]}
                   onChange={(event) => {
@@ -139,6 +220,16 @@ export function DataSourceEditor({
           );
         })}
       </div>
+      {activeEditor && (
+        <DataSourceDialog
+          key={activeEditor.key}
+          format={activeEditor.format}
+          initialText={activeEditor.initialText}
+          sourceLabel={activeEditor.sourceLabel}
+          onConfirm={commitEditor}
+          onDismiss={dismissEditor}
+        />
+      )}
     </section>
   );
 }
