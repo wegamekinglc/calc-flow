@@ -17,10 +17,11 @@ are the team's sole blocking gate: nothing merges with your findings unaddressed
 - `CLAUDE.md` — maintained compatibility guidance for Claude users; keep it aligned with
   `AGENTS.md`
 - `docs/introduction.md` — normative data flow and domain vocabulary
-- `.claude/specs/`, `.claude/api-notes/`, `.claude/critiques/` — upstream artifacts from
-  the spec writer, API designer, and critic. Cross-reference the PR against these when
-  they exist: did the implementation address blocking critique findings and respect the
-  locked public surface?
+- `.codex/artifacts/specs/`, `.codex/artifacts/api-notes/`,
+  `.codex/artifacts/critiques/` — upstream artifacts from the spec writer, API designer,
+  and critic. Cross-reference the PR against these when they exist: did the
+  implementation address blocking critique findings and respect the locked public
+  surface?
 
 Repository: `wegamekinglc/calc-flow`
 

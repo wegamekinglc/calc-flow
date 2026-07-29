@@ -35,9 +35,9 @@ ahead of a test that demands it.
   `AGENTS.md`
 - `.claude/rules/code-style.md` — functional-first, immutability, no caller mutation,
   async web I/O, markdown conventions
-- `.claude/specs/`, `.claude/api-notes/`, `.claude/critiques/` — upstream artifacts from
-  the spec writer, API designer, and critic agents (read these before designing or coding
-  when they exist)
+- `.codex/artifacts/specs/`, `.codex/artifacts/api-notes/`,
+  `.codex/artifacts/critiques/` — upstream artifacts from the spec writer, API designer,
+  and critic agents (read these before designing or coding when they exist)
 
 Before starting work, read `.claude/rules/code-style.md`, the relevant
 `docs/introduction.md` sections, and any upstream artifacts for the feature. The critic's
