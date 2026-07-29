@@ -1643,24 +1643,17 @@ def test_reshape_to_empty_shape_preserves_single_element(backend: str) -> None:
     assert float(output.array) == 5.0
 
 
-@pytest.mark.parametrize(
-    ("backend", "message"),
-    [
-        ("numpy", "cannot reshape array of size 0"),
-        ("jax", "integer modulo by zero"),
-    ],
-)
-def test_reshape_with_zero_dimension_and_inferred_axis_is_rejected(
-    backend: str, message: str
+@pytest.mark.parametrize("backend", ["numpy", "jax"])
+def test_reshape_with_zero_dimension_and_inferred_axis_is_rejected_during_compile(
+    backend: str,
 ) -> None:
-    namespace: Any = np if backend == "numpy" else pytest.importorskip("jax.numpy")
     runtime = Runtime()
     {"numpy": register_numpy, "jax": register_jax}[backend](runtime)
-    plan = _external("reshape_zero", backend, "reshape(x, (0, -1))").compile(runtime)
-    source = namespace.zeros(0)
 
-    with pytest.raises(ProviderError, match=message):
-        plan.execute({"input": Batch.from_array(source, backend=backend)})
+    with pytest.raises(
+        ValueError, match="reshape cannot combine a zero dimension with -1"
+    ):
+        _external("reshape_zero", backend, "reshape(x, (0, -1))").compile(runtime)
 
 
 def test_numpy_provider_supports_bounded_array_operations() -> None:
