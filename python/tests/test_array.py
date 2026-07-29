@@ -1647,6 +1647,8 @@ def test_reshape_to_empty_shape_preserves_single_element(backend: str) -> None:
 def test_reshape_with_zero_dimension_and_inferred_axis_is_rejected_during_compile(
     backend: str,
 ) -> None:
+    if backend == "jax":
+        pytest.importorskip("jax.numpy")
     runtime = Runtime()
     {"numpy": register_numpy, "jax": register_jax}[backend](runtime)
 
