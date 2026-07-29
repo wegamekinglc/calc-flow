@@ -252,7 +252,7 @@ and provider-context opt-in are not serialized into projects, checkpoints, or
 Studio API payloads and do not change those formats.
 
 `ExecutionOptions.deadline` is an absolute cooperative engine deadline.
-Studio's `RunOptions.max_seconds` is instead a process-level preview limit; it
+Studio's `RunOptions.timeout_seconds` is instead a process-level preview limit; it
 does not populate execution settings or a deadline in the worker.
 
 ## Async execution
