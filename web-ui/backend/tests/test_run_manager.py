@@ -672,6 +672,89 @@ def test_capabilities_separate_parent_compile_and_worker_transport_snapshots(
     manager.shutdown()
 
 
+def test_capability_probe_does_not_block_runs_and_revalidates_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = Runtime()
+    runtime.register_provider("test", "first", "1", lambda batch, _options: batch)
+    manager = RunManager(runtime=runtime, use_processes=False)
+    run_id = "pending-during-capability-probe"
+    manager._runs[run_id] = _RunHandle(
+        id=run_id,
+        project_id="demo",
+        status=RunStatus.PENDING,
+        created_at=datetime.now(UTC),
+    )
+    probe_entered = threading.Event()
+    release_probe = threading.Event()
+    access_done = threading.Event()
+    real_dumps = cloudpickle.dumps
+    blocked_once = False
+
+    def blocking_dumps(value: object, *args: object, **kwargs: object) -> bytes:
+        nonlocal blocked_once
+        if (
+            not blocked_once
+            and isinstance(value, tuple)
+            and len(value) == 1
+            and isinstance(value[0], dict)
+            and value[0].get("name") == "first"
+        ):
+            blocked_once = True
+            probe_entered.set()
+            assert release_probe.wait(timeout=5)
+        return real_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(run_manager_module.cloudpickle, "dumps", blocking_dumps)
+    capability_outcome: list[object] = []
+    access_outcome: list[object] = []
+
+    def load_capabilities() -> None:
+        try:
+            capability_outcome.append(manager.capabilities())
+        except BaseException as error:
+            capability_outcome.append(error)
+
+    def access_run() -> None:
+        try:
+            access_outcome.append(manager.get(run_id))
+        except BaseException as error:
+            access_outcome.append(error)
+        finally:
+            access_done.set()
+
+    capability_thread = threading.Thread(target=load_capabilities)
+    access_thread = threading.Thread(target=access_run)
+    capability_thread.start()
+    try:
+        assert probe_entered.wait(timeout=2)
+        access_thread.start()
+        assert access_done.wait(timeout=1)
+        runtime.register_provider("test", "second", "1", lambda batch, _options: batch)
+    finally:
+        release_probe.set()
+        capability_thread.join(timeout=5)
+        access_thread.join(timeout=5)
+        manager.shutdown()
+
+    assert len(access_outcome) == 1
+    assert not isinstance(access_outcome[0], BaseException)
+    assert access_outcome[0].status is RunStatus.PENDING
+    assert len(capability_outcome) == 1
+    assert not isinstance(capability_outcome[0], BaseException)
+    capabilities = capability_outcome[0]
+    assert capabilities.runtime.scope.revision == 2
+    assert [
+        item.name
+        for item in capabilities.preview.worker_registrations
+        if item.provider == "test"
+    ] == [
+        "first",
+        "second",
+    ]
+    assert manager.capabilities() is capabilities
+
+
 def test_capabilities_deduplicate_lazy_builtins_by_registration_kind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1665,6 +1748,181 @@ def test_submit_caps_concurrent_preparation_without_leaking_capacity(
     assert isinstance(outcomes["second"], RunManagerError)
     assert _wait(manager, outcomes["first"]) is RunStatus.COMPLETED
     manager.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("action", "start_fails"),
+    [
+        pytest.param("cancel", False, id="cancel-after-start"),
+        pytest.param("shutdown", False, id="shutdown-after-start"),
+        pytest.param("cancel", True, id="cancel-after-start-failure"),
+    ],
+)
+def test_worker_start_does_not_block_run_access_or_cancellation(
+    action: str,
+    start_fails: bool,
+) -> None:
+    start_entered = threading.Event()
+    release_start = threading.Event()
+    queue_closed = threading.Event()
+
+    class EmptyQueue:
+        def get(self, *, timeout: float) -> object:
+            assert timeout > 0
+            raise run_manager_module.queue.Empty
+
+        def close(self) -> None:
+            queue_closed.set()
+
+        def join_thread(self) -> None:
+            return None
+
+    class BlockingProcess:
+        pid = None
+
+        def __init__(self) -> None:
+            self.alive = False
+
+        def start(self) -> None:
+            start_entered.set()
+            assert release_start.wait(timeout=5)
+            if start_fails:
+                raise OSError("spawn unavailable")
+            self.alive = True
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def terminate(self) -> None:
+            self.alive = False
+
+        def kill(self) -> None:
+            self.alive = False
+
+        def join(self, *, timeout: float) -> None:
+            assert timeout > 0
+
+    class BlockingContext:
+        def __init__(self) -> None:
+            self.queue = EmptyQueue()
+            self.process = BlockingProcess()
+
+        def Queue(self, *, maxsize: int) -> EmptyQueue:
+            assert maxsize == 1
+            return self.queue
+
+        def Process(self, **kwargs: object) -> BlockingProcess:
+            assert kwargs["target"] is run_manager_module._execute_worker
+            return self.process
+
+    manager = RunManager()
+    context = BlockingContext()
+    manager._process_context = context
+    submit_outcome: list[object] = []
+    get_outcome: list[object] = []
+    action_outcome: list[object] = []
+    wait_outcome: list[object] = []
+    get_done = threading.Event()
+    action_done = threading.Event()
+    wait_started = threading.Event()
+    wait_done = threading.Event()
+
+    def submit() -> None:
+        try:
+            submit_outcome.append(manager.submit(_project(), RunRequest()))
+        except BaseException as error:
+            submit_outcome.append(error)
+
+    submitting = threading.Thread(target=submit)
+    getting: threading.Thread | None = None
+    waiting: threading.Thread | None = None
+    acting: threading.Thread | None = None
+    submitting.start()
+    try:
+        assert start_entered.wait(timeout=2)
+        run_id = next(iter(manager._runs))
+
+        def get_run() -> None:
+            try:
+                get_outcome.append(manager.get(run_id))
+            except BaseException as error:
+                get_outcome.append(error)
+            finally:
+                get_done.set()
+
+        getting = threading.Thread(target=get_run)
+        getting.start()
+        assert get_done.wait(timeout=1)
+        assert len(get_outcome) == 1
+        assert not isinstance(get_outcome[0], BaseException)
+        assert get_outcome[0].status is RunStatus.PENDING
+
+        def wait_for_cancellation() -> None:
+            wait_started.set()
+            try:
+                wait_outcome.append(
+                    manager.wait_for_events(
+                        run_id,
+                        after_sequence=0,
+                        timeout=5,
+                    )
+                )
+            except BaseException as error:
+                wait_outcome.append(error)
+            finally:
+                wait_done.set()
+
+        def act() -> None:
+            try:
+                if action == "cancel":
+                    action_outcome.append(manager.cancel(run_id))
+                else:
+                    manager.shutdown()
+            except BaseException as error:
+                action_outcome.append(error)
+            finally:
+                action_done.set()
+
+        waiting = threading.Thread(target=wait_for_cancellation)
+        waiting.start()
+        assert wait_started.wait(timeout=1)
+        acting = threading.Thread(target=act)
+        acting.start()
+        assert action_done.wait(timeout=1)
+        assert wait_done.wait(timeout=1)
+    finally:
+        release_start.set()
+        submitting.join(timeout=5)
+        if getting is not None:
+            getting.join(timeout=5)
+        if waiting is not None:
+            waiting.join(timeout=5)
+        if acting is not None:
+            acting.join(timeout=5)
+        manager.shutdown()
+
+    assert len(wait_outcome) == 1
+    assert not isinstance(wait_outcome[0], BaseException)
+    events, status = wait_outcome[0]
+    assert status is RunStatus.CANCELLED
+    assert [event.type for event in events] == ["cancelled"]
+    assert not any(isinstance(item, BaseException) for item in action_outcome)
+    if action == "cancel":
+        assert action_outcome[0].status is RunStatus.CANCELLED
+    else:
+        assert action_outcome == []
+    assert len(submit_outcome) == 1
+    if start_fails:
+        assert isinstance(submit_outcome[0], OSError)
+        assert str(submit_outcome[0]) == "spawn unavailable"
+    else:
+        assert isinstance(submit_outcome[0], RunManagerError)
+    assert manager.get(run_id).status is RunStatus.CANCELLED
+    assert manager._runs[run_id].worker is None
+    assert manager._runs[run_id].output_queue is None
+    assert manager._runs[run_id].monitor is None
+    assert context.process.alive is False
+    assert queue_closed.is_set()
 
 
 def test_abnormal_worker_exit_fails_run_and_releases_resources(

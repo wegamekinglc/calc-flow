@@ -24,7 +24,14 @@ import cloudpickle
 import pyarrow as pa
 import pyarrow.csv as pa_csv
 import pyarrow.json as pa_json
-from calc_flow import Batch, ProjectDocument, Runtime, register_jax, register_numpy
+from calc_flow import (
+    Batch,
+    ProjectDocument,
+    Runtime,
+    RuntimeCapabilities,
+    register_jax,
+    register_numpy,
+)
 from pydantic import ValidationError
 
 from calc_flow_studio.models import (
@@ -141,6 +148,101 @@ def _worker_registration(
             **identity,
         )
     return SerializedWorkerRegistration(reconstruction="serialized", **identity)
+
+
+def _capabilities_response(
+    snapshot: RuntimeCapabilities,
+    registrations: tuple[RegistrationRecord, ...],
+    lazy_builtins: tuple[LazyBuiltinIdentity, ...],
+) -> CapabilitiesResponse:
+    runtime_document = asdict(snapshot)
+    runtime_document.pop("schema_version")
+    runtime_document["scope"]["kind"] = "runtimeSession"
+    parent_identities = {
+        (
+            (
+                "dataFusionScalar"
+                if registration["kind"] == "scalar_udf"
+                else "provider"
+            ),
+            registration["provider"],
+            registration["name"],
+            registration["version"],
+        )
+        for registration in registrations
+    }
+    worker_registrations: list[WorkerRegistrationCapability] = [
+        _worker_registration(registration) for registration in registrations
+    ]
+    worker_registrations.extend(
+        LazyBuiltinWorkerRegistration(
+            reconstruction="lazyBuiltin",
+            registration_kind="provider",
+            provider=provider,
+            name=name,
+            version=version,
+        )
+        for provider, name, version in lazy_builtins
+        if ("provider", provider, name, version) not in parent_identities
+    )
+    worker_registrations.sort(
+        key=lambda item: (
+            item.registration_kind,
+            item.provider,
+            item.name,
+            item.version,
+        )
+    )
+    default_options = RunOptions()
+    try:
+        runtime_response = RuntimeCapabilitiesResponse.model_validate(runtime_document)
+    except ValidationError as error:
+        raise _capability_snapshot_error(error, prefix="runtime") from error
+    try:
+        return CapabilitiesResponse(
+            schema_version=snapshot.schema_version,
+            runtime=runtime_response,
+            preview=PreviewCapabilitiesResponse(
+                input_batch_kinds=("table",),
+                request_input_formats=("arrow_ipc", "columns", "records"),
+                project_input_formats=(
+                    "arrow_ipc",
+                    "csv",
+                    "inline_json",
+                    "json",
+                ),
+                worker_registrations=tuple(worker_registrations),
+                limits=PreviewLimitsResponse(
+                    max_input_bytes=PreviewLimit(
+                        default=default_options.max_input_bytes,
+                        minimum=1,
+                        maximum=default_options.max_input_bytes,
+                    ),
+                    max_rows=PreviewLimit(
+                        default=default_options.max_rows,
+                        minimum=1,
+                        maximum=default_options.max_rows,
+                    ),
+                    timeout_seconds=PreviewLimit(
+                        default=default_options.timeout_seconds,
+                        minimum=1,
+                        maximum=300,
+                    ),
+                    memory_limit_mb=PreviewLimit(
+                        default=default_options.memory_limit_mb,
+                        minimum=64,
+                        maximum=4096,
+                    ),
+                    output_rows=PreviewLimit(
+                        default=default_options.output_rows,
+                        minimum=1,
+                        maximum=10_000,
+                    ),
+                ),
+            ),
+        )
+    except ValidationError as error:
+        raise _capability_snapshot_error(error) from error
 
 
 def _run_result_contract_error(
@@ -888,105 +990,30 @@ class RunManager:
             raise RunManagerError(
                 "runtime capability snapshot is unavailable for this session"
             )
-        snapshot, registrations = self._runtime._capability_registration_snapshot()
-        key = (snapshot.scope.session_id, snapshot.scope.revision)
-        with self._lock:
-            cached = self._capability_cache.get(key)
-            if cached is not None:
-                return cached
+        while True:
+            snapshot, registrations = self._runtime._capability_registration_snapshot()
+            key = (snapshot.scope.session_id, snapshot.scope.revision)
+            with self._lock:
+                cached = self._capability_cache.get(key)
+                if cached is not None:
+                    return cached
 
-            runtime_document = asdict(snapshot)
-            runtime_document.pop("schema_version")
-            runtime_document["scope"]["kind"] = "runtimeSession"
-            parent_identities = {
-                (
-                    (
-                        "dataFusionScalar"
-                        if registration["kind"] == "scalar_udf"
-                        else "provider"
-                    ),
-                    registration["provider"],
-                    registration["name"],
-                    registration["version"],
-                )
-                for registration in registrations
-            }
-            worker_registrations: list[WorkerRegistrationCapability] = [
-                _worker_registration(registration) for registration in registrations
-            ]
-            worker_registrations.extend(
-                LazyBuiltinWorkerRegistration(
-                    reconstruction="lazyBuiltin",
-                    registration_kind="provider",
-                    provider=provider,
-                    name=name,
-                    version=version,
-                )
-                for provider, name, version in self._lazy_builtins
-                if ("provider", provider, name, version) not in parent_identities
+            response = _capabilities_response(
+                snapshot,
+                registrations,
+                self._lazy_builtins,
             )
-            worker_registrations.sort(
-                key=lambda item: (
-                    item.registration_kind,
-                    item.provider,
-                    item.name,
-                    item.version,
-                )
-            )
-            default_options = RunOptions()
-            try:
-                runtime_response = RuntimeCapabilitiesResponse.model_validate(
-                    runtime_document
-                )
-            except ValidationError as error:
-                raise _capability_snapshot_error(error, prefix="runtime") from error
-            try:
-                response = CapabilitiesResponse(
-                    schema_version=snapshot.schema_version,
-                    runtime=runtime_response,
-                    preview=PreviewCapabilitiesResponse(
-                        input_batch_kinds=("table",),
-                        request_input_formats=("arrow_ipc", "columns", "records"),
-                        project_input_formats=(
-                            "arrow_ipc",
-                            "csv",
-                            "inline_json",
-                            "json",
-                        ),
-                        worker_registrations=tuple(worker_registrations),
-                        limits=PreviewLimitsResponse(
-                            max_input_bytes=PreviewLimit(
-                                default=default_options.max_input_bytes,
-                                minimum=1,
-                                maximum=default_options.max_input_bytes,
-                            ),
-                            max_rows=PreviewLimit(
-                                default=default_options.max_rows,
-                                minimum=1,
-                                maximum=default_options.max_rows,
-                            ),
-                            timeout_seconds=PreviewLimit(
-                                default=default_options.timeout_seconds,
-                                minimum=1,
-                                maximum=300,
-                            ),
-                            memory_limit_mb=PreviewLimit(
-                                default=default_options.memory_limit_mb,
-                                minimum=64,
-                                maximum=4096,
-                            ),
-                            output_rows=PreviewLimit(
-                                default=default_options.output_rows,
-                                minimum=1,
-                                maximum=10_000,
-                            ),
-                        ),
-                    ),
-                )
-            except ValidationError as error:
-                raise _capability_snapshot_error(error) from error
-            self._capability_cache = {key: response}
-            return response
+
+            with self._lock:
+                current, _ = self._runtime._capability_registration_snapshot()
+                current_key = (current.scope.session_id, current.scope.revision)
+                if current_key != key:
+                    continue
+                cached = self._capability_cache.get(key)
+                if cached is not None:
+                    return cached
+                self._capability_cache = {key: response}
+                return response
 
     def submit(self, project: ProjectDocument, request: RunRequest) -> RunResponse:
         with self._lock:
@@ -1043,44 +1070,64 @@ class RunManager:
                 self._event_condition.notify_all()
             raise
 
-        start_error: BaseException | None = None
         with self._lock:
-            handle = self._require(run_id)
-            if self._shutdown or handle.cancel_requested:
-                self._runs.pop(run_id, None)
+            current = self._runs.get(run_id)
+            may_start = (
+                current is handle
+                and not self._shutdown
+                and not handle.cancel_requested
+                and handle.status is RunStatus.PENDING
+            )
+            if not may_start and current is handle:
+                self._runs.pop(run_id)
+                self._event_condition.notify_all()
+        if not may_start:
+            self._cleanup_resources(worker, output_queue, terminate=True)
+            raise RunManagerError("run manager shut down during submission")
+
+        start_error: BaseException | None = None
+        try:
+            worker.start()
+        except BaseException as error:
+            start_error = error
+
+        with self._lock:
+            current = self._runs.get(run_id)
+            state_changed = (
+                current is not handle
+                or self._shutdown
+                or handle.cancel_requested
+                or handle.status is not RunStatus.PENDING
+            )
+            if start_error is not None or state_changed:
+                if current is handle and handle.status is RunStatus.PENDING:
+                    self._runs.pop(run_id)
+                self._event_condition.notify_all()
                 cleanup_immediately = True
             else:
+                self._prune_history()
+                handle.worker = worker
+                handle.output_queue = output_queue
+                handle.status = RunStatus.RUNNING
+                handle.started_at = datetime.now(UTC)
+                self._event(run_id, "running", "Worker started")
+                monitor = Thread(
+                    target=self._monitor,
+                    args=(run_id, options),
+                    daemon=True,
+                    name=f"calc-flow-monitor-{run_id[:8]}",
+                )
+                handle.monitor = monitor
                 try:
-                    worker.start()
+                    monitor.start()
                 except BaseException as error:
+                    worker, output_queue, _ = self._detach_resources(handle)
                     self._runs.pop(run_id, None)
                     self._event_condition.notify_all()
                     start_error = error
                     cleanup_immediately = True
                 else:
-                    self._prune_history()
-                    handle.worker = worker
-                    handle.output_queue = output_queue
-                    handle.status = RunStatus.RUNNING
-                    handle.started_at = datetime.now(UTC)
-                    self._event(run_id, "running", "Worker started")
-                    monitor = Thread(
-                        target=self._monitor,
-                        args=(run_id, options),
-                        daemon=True,
-                        name=f"calc-flow-monitor-{run_id[:8]}",
-                    )
-                    handle.monitor = monitor
-                    try:
-                        monitor.start()
-                    except BaseException as error:
-                        worker, output_queue, _ = self._detach_resources(handle)
-                        self._runs.pop(run_id, None)
-                        self._event_condition.notify_all()
-                        start_error = error
-                        cleanup_immediately = True
-                    else:
-                        cleanup_immediately = False
+                    cleanup_immediately = False
         if cleanup_immediately:
             self._cleanup_resources(worker, output_queue, terminate=True)
             if start_error is not None:
