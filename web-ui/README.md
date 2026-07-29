@@ -42,6 +42,30 @@ pipeline. They report fingerprint compatibility, cursor, sequence, and stateful
 node names. Bounded preview runs are intentionally stateless and do not create
 runner checkpoints.
 
+## Edit data sources
+
+Each Data Source card shows a bounded preview of its current text. Select
+**Edit data** to open the large, centered editor. The dialog starts with the
+card's latest confirmed text and keeps typing in a temporary draft:
+
+- **Confirm** validates inline JSON and applies valid text to the card. Invalid
+  inline JSON stays in the dialog with an error; JSON/JSONL, CSV, and Arrow IPC
+  text remains opaque at this step.
+- **Cancel**, the close button, Escape, or a backdrop click discards the
+  temporary draft and leaves the card unchanged.
+- Confirming does not save or validate the whole project. Subsequent **Save**,
+  **Validate**, **Run preview**, and checkpoint inspection use the confirmed
+  card text.
+
+Keyboard focus starts in the editor, stays inside the open dialog while
+tabbing, and returns to the exact **Edit data** button after the dialog closes.
+While a file is loading for a source, its editor cannot open; while its dialog
+is open, **Load file** is disabled.
+
+The top action toolbar uses consistently sized controls and wraps as a group
+on narrow screens. The dialog, editor, validation message, and action row stay
+within the viewport.
+
 To run the two development processes manually, use separate terminals:
 
 ```bash

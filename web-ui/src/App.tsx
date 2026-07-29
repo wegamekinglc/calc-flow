@@ -216,7 +216,11 @@ export default function App() {
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const [pendingFileReads, setPendingFileReads] = useState(0);
+  const [pendingFileReadKeys, setPendingFileReadKeys] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
   const pendingFileReadsRef = useRef(0);
+  const pendingFileReadKeyCountsRef = useRef(new Map<string, number>());
   const fileReadTokensRef = useRef(new Map<string, symbol>());
 
   const updateSourceDrafts = useCallback((update: SourceDraftUpdate) => {
@@ -564,6 +568,9 @@ export default function App() {
 
     pendingFileReadsRef.current += 1;
     setPendingFileReads(pendingFileReadsRef.current);
+    const keyCounts = pendingFileReadKeyCountsRef.current;
+    keyCounts.set(draftKey, (keyCounts.get(draftKey) ?? 0) + 1);
+    setPendingFileReadKeys(new Set(keyCounts.keys()));
     try {
       const dataText = format === 'arrow_ipc'
         ? await fileToBase64(file)
@@ -583,6 +590,16 @@ export default function App() {
         pendingFileReadsRef.current - 1,
       );
       setPendingFileReads(pendingFileReadsRef.current);
+      const remainingForKey = Math.max(
+        0,
+        (keyCounts.get(draftKey) ?? 0) - 1,
+      );
+      if (remainingForKey > 0) {
+        keyCounts.set(draftKey, remainingForKey);
+      } else {
+        keyCounts.delete(draftKey);
+      }
+      setPendingFileReadKeys(new Set(keyCounts.keys()));
     }
   };
 
@@ -793,9 +810,9 @@ export default function App() {
             onExport={(format) => void exportProject(format)}
             onDelete={() => void deleteProject()}
           />
-          <button className="ghost-button" type="button" disabled={persistenceBusy} onClick={() => void save()}>Save</button>
-          <button className="ghost-button" type="button" disabled={persistenceBusy} onClick={() => void validate()}>Validate</button>
-          <button className="run-button" type="button" disabled={persistenceBusy} onClick={() => void execute()}><span>▶</span> Run preview</button>
+          <button className="ghost-button topbar-control" type="button" disabled={persistenceBusy} onClick={() => void save()}>Save</button>
+          <button className="ghost-button topbar-control" type="button" disabled={persistenceBusy} onClick={() => void validate()}>Validate</button>
+          <button className="run-button topbar-control" type="button" disabled={persistenceBusy} onClick={() => void execute()}><span>▶</span> Run preview</button>
         </div>
       </header>
 
@@ -813,6 +830,7 @@ export default function App() {
             sources={project.data_sources}
             drafts={sourceDrafts}
             busy={busy}
+            pendingSourceKeys={pendingFileReadKeys}
             onAdd={addDataSource}
             onRemove={removeDataSource}
             onFieldChange={updateDataSourceField}

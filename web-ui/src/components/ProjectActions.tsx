@@ -21,10 +21,15 @@ export function ProjectActions({
 
   return (
     <div className="project-actions">
-      <button className="ghost-button" type="button" disabled={busy} onClick={onNew}>
+      <button
+        className="ghost-button topbar-control"
+        type="button"
+        disabled={busy}
+        onClick={onNew}
+      >
         New
       </button>
-      <label className="ghost-button file-button">
+      <label className="ghost-button file-button topbar-control">
         Import
         <input
           key={importKey}
@@ -41,7 +46,7 @@ export function ProjectActions({
         />
       </label>
       <button
-        className="ghost-button"
+        className="ghost-button topbar-control"
         type="button"
         disabled={busy || !persisted}
         onClick={() => onExport('json')}
@@ -49,7 +54,7 @@ export function ProjectActions({
         Export JSON
       </button>
       <button
-        className="ghost-button"
+        className="ghost-button topbar-control"
         type="button"
         disabled={busy || !persisted}
         onClick={() => onExport('yaml')}
@@ -57,7 +62,7 @@ export function ProjectActions({
         Export YAML
       </button>
       <button
-        className="text-button"
+        className="text-button topbar-control"
         type="button"
         disabled={busy || !persisted}
         onClick={onDelete}

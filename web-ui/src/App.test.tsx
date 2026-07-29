@@ -34,6 +34,19 @@ const delayedTextFile = (name: string) => {
   return { file, resolve: (value: string) => resolve(value) };
 };
 
+const commitDataSourceText = (sourceLabel: string, dataText: string) => {
+  fireEvent.click(
+    screen.getByRole('button', { name: `Edit data source ${sourceLabel}` }),
+  );
+  fireEvent.change(
+    screen.getByRole('textbox', {
+      name: `Data source data for ${sourceLabel}`,
+    }),
+    { target: { value: dataText } },
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+};
+
 afterEach(() => {
   vi.unstubAllGlobals();
   localStorage.clear();
@@ -400,9 +413,7 @@ describe('Calc Flow Studio', () => {
       expect(screen.getByLabelText('Source ID 1')).toHaveValue('left'),
     );
     expect(screen.getByLabelText('Source ID 2')).toHaveValue('right');
-    fireEvent.change(screen.getByLabelText('Data 1'), {
-      target: { value: '[{"id":1,"value":4}]' },
-    });
+    commitDataSourceText('left', '[{"id":1,"value":4}]');
 
     fireEvent.click(screen.getByRole('button', { name: /Run preview/ }));
 
@@ -458,8 +469,19 @@ describe('Calc Flow Studio', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<App />);
 
-    const data = await screen.findByLabelText('Data 1');
-    fireEvent.change(data, { target: { value: '[{' } });
+    const edit = await screen.findByRole('button', {
+      name: 'Edit data source sample',
+    });
+    const invalidFile = {
+      name: 'invalid.json',
+      text: vi.fn().mockResolvedValue('[{'),
+    } as unknown as File;
+    fireEvent.change(screen.getByLabelText('Load file 1'), {
+      target: { files: [invalidFile] },
+    });
+    await waitFor(() =>
+      expect(screen.getByLabelText('Data 1 preview')).toHaveTextContent('[{'),
+    );
 
     const actions = [
       screen.getByRole('button', { name: 'Save' }),
@@ -474,7 +496,7 @@ describe('Calc Flow Studio', () => {
       await waitFor(() => expect(action).toBeEnabled());
     }
 
-    expect(data).toHaveAttribute('aria-invalid', 'true');
+    expect(edit).toHaveAttribute('aria-invalid', 'true');
     expect(
       fetchMock.mock.calls.filter(([path, init]) =>
         Boolean(init?.method)
@@ -485,10 +507,10 @@ describe('Calc Flow Studio', () => {
     fireEvent.change(screen.getByLabelText('Format 1'), {
       target: { value: 'csv' },
     });
-    expect(data).toHaveAttribute('aria-invalid', 'false');
+    expect(edit).toHaveAttribute('aria-invalid', 'false');
   });
 
-  it('replaces source drafts when switching projects', async () => {
+  it('replaces committed source drafts when switching projects', async () => {
     const first = {
       ...blankProject(),
       id: 'first',
@@ -540,9 +562,9 @@ describe('Calc Flow Studio', () => {
     fireEvent.change(screen.getByLabelText('Source ID 1'), {
       target: { value: 'edited-left' },
     });
-    fireEvent.change(screen.getByLabelText('Data 1'), {
-      target: { value: '[{"value":99}]' },
-    });
+    commitDataSourceText('edited-left', '[{"value":99}]');
+    expect(screen.getByLabelText('Data 1 preview'))
+      .toHaveTextContent('[{"value":99}]');
 
     fireEvent.change(screen.getByLabelText('Project'), {
       target: { value: 'second' },
@@ -550,7 +572,7 @@ describe('Calc Flow Studio', () => {
 
     await waitFor(() => {
       expect(screen.getByLabelText('Source ID 1')).toHaveValue('right');
-      expect(screen.getByLabelText('Data 1')).toHaveValue('value\n2\n');
+      expect(screen.getByLabelText('Data 1 preview')).toHaveTextContent('value 2');
     });
   });
 
@@ -616,6 +638,8 @@ describe('Calc Flow Studio', () => {
     });
     fireEvent.change(fileInput);
     expect(save).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Edit data source left' }))
+      .toBeDisabled();
     fireEvent.click(save);
 
     expect(
@@ -627,7 +651,9 @@ describe('Calc Flow Studio', () => {
     });
     await waitFor(() => {
       expect(screen.getByLabelText('Source ID 1')).toHaveValue('right');
-      expect(screen.getByLabelText('Data 1')).toHaveValue('value\n2\n');
+      expect(screen.getByLabelText('Data 1 preview')).toHaveTextContent('value 2');
+      expect(screen.getByRole('button', { name: 'Edit data source right' }))
+        .toBeEnabled();
     });
 
     await act(async () => {
@@ -635,7 +661,7 @@ describe('Calc Flow Studio', () => {
       await Promise.resolve();
     });
     await waitFor(() => expect(save).toBeEnabled());
-    expect(screen.getByLabelText('Data 1')).toHaveValue('value\n2\n');
+    expect(screen.getByLabelText('Data 1 preview')).toHaveTextContent('value 2');
 
     fireEvent.click(save);
     await waitFor(() =>
@@ -665,7 +691,9 @@ describe('Calc Flow Studio', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<App />);
 
-    await screen.findByLabelText('Data 1');
+    const edit = await screen.findByRole('button', {
+      name: 'Edit data source sample',
+    });
     const first = delayedTextFile('first.json');
     const second = delayedTextFile('second.json');
     const fileInput = screen.getByLabelText('Load file 1');
@@ -680,14 +708,18 @@ describe('Calc Flow Studio', () => {
       await Promise.resolve();
     });
     expect(save).toBeDisabled();
-    expect(screen.getByLabelText('Data 1')).toHaveValue('[{"value":2}]');
+    expect(edit).toBeDisabled();
+    expect(screen.getByLabelText('Data 1 preview'))
+      .toHaveTextContent('[{"value":2}]');
 
     await act(async () => {
       first.resolve('[{"value":1}]');
       await Promise.resolve();
     });
     await waitFor(() => expect(save).toBeEnabled());
-    expect(screen.getByLabelText('Data 1')).toHaveValue('[{"value":2}]');
+    expect(edit).toBeEnabled();
+    expect(screen.getByLabelText('Data 1 preview'))
+      .toHaveTextContent('[{"value":2}]');
 
     fireEvent.click(save);
     await waitFor(() =>
@@ -703,7 +735,49 @@ describe('Calc Flow Studio', () => {
       .toEqual([{ value: 2 }]);
   });
 
-  it('keeps a manual data edit made after a file selection', async () => {
+  it('rejects a pending file result after its source format changes', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.endsWith('/catalog')) return response(catalog);
+        if (path.endsWith('/projects')) return response([]);
+        throw new Error(`Unexpected request ${path}`);
+      }),
+    );
+    render(<App />);
+
+    const edit = await screen.findByRole('button', {
+      name: 'Edit data source sample',
+    });
+    const preview = screen.getByLabelText('Data 1 preview');
+    const committedBefore = preview.textContent;
+    const delayed = delayedTextFile('older.json');
+
+    fireEvent.change(screen.getByLabelText('Load file 1'), {
+      target: { files: [delayed.file] },
+    });
+    expect(edit).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText('Format 1'), {
+      target: { value: 'csv' },
+    });
+    expect(screen.getByLabelText('Format 1')).toHaveValue('csv');
+    fireEvent.change(screen.getByLabelText('Format 1'), {
+      target: { value: 'inline_json' },
+    });
+    expect(screen.getByLabelText('Format 1')).toHaveValue('inline_json');
+
+    await act(async () => {
+      delayed.resolve('value\n99\n');
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(edit).toBeEnabled());
+    expect(preview.textContent).toBe(committedBefore);
+  });
+
+  it('excludes a pending file read before a later confirmed manual edit', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path.endsWith('/catalog')) return response(catalog);
@@ -716,21 +790,29 @@ describe('Calc Flow Studio', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<App />);
 
-    const data = await screen.findByLabelText('Data 1');
+    const edit = await screen.findByRole('button', {
+      name: 'Edit data source sample',
+    });
     const delayed = delayedTextFile('older.json');
     const fileInput = screen.getByLabelText('Load file 1');
     const save = screen.getByRole('button', { name: 'Save' });
 
     fireEvent.change(fileInput, { target: { files: [delayed.file] } });
-    fireEvent.change(data, { target: { value: '[{"value":7}]' } });
     expect(save).toBeDisabled();
+    expect(edit).toBeDisabled();
 
     await act(async () => {
       delayed.resolve('[{"value":1}]');
       await Promise.resolve();
     });
     await waitFor(() => expect(save).toBeEnabled());
-    expect(data).toHaveValue('[{"value":7}]');
+    expect(edit).toBeEnabled();
+    expect(screen.getByLabelText('Data 1 preview'))
+      .toHaveTextContent('[{"value":1}]');
+
+    commitDataSourceText('sample', '[{"value":7}]');
+    expect(screen.getByLabelText('Data 1 preview'))
+      .toHaveTextContent('[{"value":7}]');
 
     fireEvent.click(save);
     await waitFor(() =>

@@ -5,6 +5,13 @@ engine or Studio capabilities.
 
 ## 2026-07
 
+- Add a large, responsive Studio Data Source editor dialog with temporary
+  per-source drafts. Inline JSON is validated and applied only on **Confirm**;
+  Cancel, close, Escape, and backdrop dismissal discard edits. Keyboard focus
+  starts in the editor, remains contained, and returns to the opener. The top
+  action toolbar now uses consistently sized controls and intentional
+  narrow-screen wrapping. Project, REST, OpenAPI, and engine contracts remain
+  unchanged.
 - Add frozen native Python `ExecutionOptions(settings, deadline)` for blocking
   and async plan execution. Its constructor remains positional-or-keyword,
   while plans receive it through the keyword-only `options=` parameter.
