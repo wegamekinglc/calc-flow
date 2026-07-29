@@ -179,7 +179,7 @@ active run, and an observed post-provider cancellation or deadline wins over
 that provider's error.
 
 An `ExecutionOptions.deadline` is an absolute cooperative engine deadline.
-Studio preview `max_seconds` is a separate process-level preview limit and
+Studio preview `timeout_seconds` is a separate process-level preview limit and
 does not inject execution settings or a deadline into the compiled plan.
 
 Single-input and mapping provider callbacks keep their historical
