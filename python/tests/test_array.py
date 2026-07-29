@@ -1576,6 +1576,93 @@ def test_numpy_provider_rejects_inferred_reshape_limits(
         plan.execute({"input": Batch.from_array(source, backend="numpy")})
 
 
+@pytest.mark.parametrize(
+    ("source_shape", "expression", "message"),
+    [
+        ((1001, 1000), "reshape(x, (-1,))", "reshape dimension limit is 1000000"),
+        (
+            (1001, 10000),
+            "reshape(x, (-1, 11))",
+            "reshape output limit is 10000000 elements",
+        ),
+    ],
+)
+def test_jax_provider_rejects_inferred_reshape_limits(
+    source_shape: tuple[int, ...], expression: str, message: str
+) -> None:
+    jnp = pytest.importorskip("jax.numpy")
+    runtime = Runtime()
+    register_jax(runtime)
+    plan = _external("reshape_limit", "jax", expression).compile(runtime)
+    source = jnp.zeros(source_shape, dtype=jnp.uint8)
+
+    with pytest.raises(ProviderError, match=message):
+        plan.execute({"input": Batch.from_array(source, backend="jax")})
+
+
+@pytest.mark.parametrize("backend", ["numpy", "jax"])
+@pytest.mark.parametrize(
+    ("source_shape", "expression", "expected_shape"),
+    [
+        ((1000, 1000), "reshape(x, (-1,))", (1_000_000,)),
+        ((10_000_000,), "reshape(x, (-1, 10))", (1_000_000, 10)),
+    ],
+)
+def test_inferred_reshape_accepts_exact_dimension_and_element_limits(
+    backend: str,
+    source_shape: tuple[int, ...],
+    expression: str,
+    expected_shape: tuple[int, ...],
+) -> None:
+    namespace: Any = np if backend == "numpy" else pytest.importorskip("jax.numpy")
+    runtime = Runtime()
+    {"numpy": register_numpy, "jax": register_jax}[backend](runtime)
+    plan = _external("reshape_boundary", backend, expression).compile(runtime)
+    source = namespace.zeros(source_shape, dtype=namespace.uint8)
+
+    output = plan.execute({"input": Batch.from_array(source, backend=backend)}).outputs[
+        "output"
+    ]
+
+    assert output.array.shape == expected_shape
+
+
+@pytest.mark.parametrize("backend", ["numpy", "jax"])
+def test_reshape_to_empty_shape_preserves_single_element(backend: str) -> None:
+    namespace: Any = np if backend == "numpy" else pytest.importorskip("jax.numpy")
+    runtime = Runtime()
+    {"numpy": register_numpy, "jax": register_jax}[backend](runtime)
+    plan = _external("reshape_scalar", backend, "reshape(x, ())").compile(runtime)
+    source = namespace.asarray([5.0])
+
+    output = plan.execute({"input": Batch.from_array(source, backend=backend)}).outputs[
+        "output"
+    ]
+
+    assert output.array.shape == ()
+    assert float(output.array) == 5.0
+
+
+@pytest.mark.parametrize(
+    ("backend", "message"),
+    [
+        ("numpy", "cannot reshape array of size 0"),
+        ("jax", "integer modulo by zero"),
+    ],
+)
+def test_reshape_with_zero_dimension_and_inferred_axis_is_rejected(
+    backend: str, message: str
+) -> None:
+    namespace: Any = np if backend == "numpy" else pytest.importorskip("jax.numpy")
+    runtime = Runtime()
+    {"numpy": register_numpy, "jax": register_jax}[backend](runtime)
+    plan = _external("reshape_zero", backend, "reshape(x, (0, -1))").compile(runtime)
+    source = namespace.zeros(0)
+
+    with pytest.raises(ProviderError, match=message):
+        plan.execute({"input": Batch.from_array(source, backend=backend)})
+
+
 def test_numpy_provider_supports_bounded_array_operations() -> None:
     runtime = Runtime()
     register_numpy(runtime)
