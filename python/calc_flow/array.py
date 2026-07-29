@@ -168,6 +168,8 @@ def _reshape_shape(node: ast.AST) -> tuple[int, ...]:
         dimensions.append(value)
     if dimensions.count(-1) > 1:
         raise _array_error("reshape shape allows at most one -1")
+    if -1 in dimensions and 0 in dimensions:
+        raise _array_error("reshape cannot combine a zero dimension with -1")
     if any(dimension < -1 for dimension in dimensions):
         raise _array_error("reshape dimensions must be non-negative or -1")
     if any(dimension > _MAX_RESHAPE_DIMENSION for dimension in dimensions):
