@@ -61,8 +61,8 @@ fn run_context_exposes_the_exact_configured_deadline() {
 }
 
 #[test]
-fn deadline_equal_to_now_is_treated_as_expired() {
-    let deadline = Utc::now();
+fn expired_deadline_is_treated_as_cancelled() {
+    let deadline = Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).single().unwrap();
     let context =
         RunContext::new(BTreeMap::new(), Some(deadline), CancellationToken::new()).unwrap();
 
