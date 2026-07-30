@@ -39,7 +39,17 @@ export function useRunEvents(
       source.close();
     };
 
+    const stop = () => {
+      active = false;
+      closeSource();
+      if (pollTimer !== undefined) {
+        window.clearTimeout(pollTimer);
+        pollTimer = undefined;
+      }
+    };
+
     const refresh = async (): Promise<boolean> => {
+      if (!active) return true;
       try {
         const current = await api.run(runId);
         if (!active) return true;
@@ -51,7 +61,7 @@ export function useRunEvents(
       } catch (error) {
         if (!active) return true;
         if (error instanceof ApiContractError) {
-          closeSource();
+          stop();
           onError(error);
           return true;
         }
@@ -63,7 +73,11 @@ export function useRunEvents(
     const poll = async () => {
       if (!active) return;
       if (await refresh()) return;
-      pollTimer = window.setTimeout(() => void poll(), 500);
+      if (!active) return;
+      pollTimer = window.setTimeout(() => {
+        pollTimer = undefined;
+        void poll();
+      }, 500);
     };
 
     const refreshFromEvent = () => void refresh();
@@ -81,9 +95,7 @@ export function useRunEvents(
     source.addEventListener('error', handleError);
 
     return () => {
-      active = false;
-      closeSource();
-      if (pollTimer !== undefined) window.clearTimeout(pollTimer);
+      stop();
       eventTypes.forEach((type) => source.removeEventListener(type, refreshFromEvent));
       source.removeEventListener('open', handleOpen);
       source.removeEventListener('error', handleError);

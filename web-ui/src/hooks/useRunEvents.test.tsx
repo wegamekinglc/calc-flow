@@ -107,6 +107,64 @@ describe('useRunEvents', () => {
     expect(source.close).toHaveBeenCalledOnce();
   });
 
+  it('makes contract failures terminal for overlapping refreshes', async () => {
+    vi.useFakeTimers();
+    const onUpdate = vi.fn();
+    const onError = vi.fn();
+    const requests: Array<(response: Response) => void> = [];
+    const holdRequest = () => new Promise<Response>((resolve) => {
+      requests.push(resolve);
+    });
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(holdRequest)
+      .mockImplementationOnce(holdRequest)
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValue(
+        new Response(JSON.stringify(run()), {
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderHook(() => useRunEvents('run-1', onUpdate, onError));
+    const source = FakeEventSource.instances[0];
+    await act(async () => {
+      source.emit('running');
+      source.emit('completed');
+      source.emit('error');
+      source.emit('error');
+      await Promise.resolve();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    await act(async () => {
+      requests[0](
+        new Response(JSON.stringify({ ...run(), status: 'unknown' }), {
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onError).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      requests[1](
+        new Response(JSON.stringify(run()), {
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onUpdate).not.toHaveBeenCalled();
+    expect(source.close).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it('falls back to polling after two consecutive stream errors', async () => {
     const onUpdate = vi.fn();
     const onError = vi.fn();
