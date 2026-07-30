@@ -21,6 +21,18 @@ from calc_flow import (
 )
 
 
+def _secret_rejected_callable() -> None:
+    raise AssertionError("the rejected callable must not be invoked")
+
+
+class _RejectedValueWithHostileFormatting:
+    def __str__(self) -> str:
+        raise AssertionError("the rejected value must not be stringified")
+
+    def __repr__(self) -> str:
+        raise AssertionError("the rejected value must not be represented")
+
+
 def test_empty_runtime_capabilities_are_frozen_and_session_scoped() -> None:
     runtime = Runtime()
 
@@ -103,8 +115,6 @@ def test_provider_options_schema_rejects_non_data_and_unsupported_shapes() -> No
         )
     assert runtime.capabilities().scope.revision == 0
 
-    with pytest.raises(TypeError, match="fields\\[0\\]\\.name.*found function"):
-        ProviderOption(lambda: None, "string")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="must be string, integer, number, or boolean"):
         ProviderOption("nested", "object")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="duplicate field 'expression'"):
@@ -117,33 +127,171 @@ def test_provider_options_schema_rejects_non_data_and_unsupported_shapes() -> No
 
 
 @pytest.mark.parametrize(
-    ("value_type", "type_name", "secret"),
+    ("name", "type_name", "secret"),
     [
-        pytest.param(lambda: None, "function", "<lambda>", id="callable"),
         pytest.param(
-            Path("/secret/provider-option"),
-            "PosixPath",
-            "/secret/provider-option",
+            _secret_rejected_callable,
+            "function",
+            "_secret_rejected_callable",
+            id="callable",
+        ),
+        pytest.param(
+            Path("/secret/provider-option-name"),
+            type(Path()).__name__,
+            "/secret/provider-option-name",
             id="path",
         ),
         pytest.param(
-            ["secret-container-value"], "list", "secret-container-value", id="list"
+            {"outer": ["secret-name-value"]},
+            "dict",
+            "secret-name-value",
+            id="container",
+        ),
+        pytest.param(
+            _RejectedValueWithHostileFormatting(),
+            "_RejectedValueWithHostileFormatting",
+            None,
+            id="hostile-formatting-hooks",
         ),
     ],
 )
-def test_provider_option_rejects_non_string_value_types_without_echoing_them(
+def test_later_provider_option_rejects_non_string_name_without_position_or_value(
+    name: object,
+    type_name: str,
+    secret: str | None,
+) -> None:
+    runtime = Runtime()
+    revision = runtime.capabilities().scope.revision
+
+    with pytest.raises(TypeError) as raised:
+        ProviderOptionsSchema(
+            fields=(
+                ProviderOption("first", "string"),
+                ProviderOption(name, "string"),  # type: ignore[arg-type]
+            )
+        )
+
+    message = str(raised.value)
+    assert message == (
+        "provider options_schema field name must contain strict data; "
+        f"found {type_name}"
+    )
+    assert "fields[" not in message
+    if secret is not None:
+        assert secret not in message
+    assert runtime.capabilities().scope.revision == revision
+
+
+@pytest.mark.parametrize(
+    ("value_type", "type_name", "secret"),
+    [
+        pytest.param(
+            _secret_rejected_callable,
+            "function",
+            "_secret_rejected_callable",
+            id="callable",
+        ),
+        pytest.param(
+            Path("/secret/provider-option-value-type"),
+            type(Path()).__name__,
+            "/secret/provider-option-value-type",
+            id="path",
+        ),
+        pytest.param(
+            {"outer": ["secret-value-type"]},
+            "dict",
+            "secret-value-type",
+            id="container",
+        ),
+        pytest.param(
+            _RejectedValueWithHostileFormatting(),
+            "_RejectedValueWithHostileFormatting",
+            None,
+            id="hostile-formatting-hooks",
+        ),
+    ],
+)
+def test_later_provider_option_rejects_non_string_value_type_without_position_or_value(
     value_type: object,
     type_name: str,
-    secret: str,
+    secret: str | None,
 ) -> None:
-    with pytest.raises(TypeError) as raised:
-        ProviderOption("expression", value_type)  # type: ignore[arg-type]
+    runtime = Runtime()
+    revision = runtime.capabilities().scope.revision
 
-    assert str(raised.value) == (
-        "provider options_schema at 'fields[0].value_type' must contain strict "
+    with pytest.raises(TypeError) as raised:
+        ProviderOptionsSchema(
+            fields=(
+                ProviderOption("first", "string"),
+                ProviderOption("second", value_type),  # type: ignore[arg-type]
+            )
+        )
+
+    message = str(raised.value)
+    assert message == (
+        "provider options_schema field 'second'.value_type must contain strict "
         f"data; found {type_name}"
     )
-    assert secret not in str(raised.value)
+    assert "fields[" not in message
+    if secret is not None:
+        assert secret not in message
+    assert runtime.capabilities().scope.revision == revision
+
+
+def test_provider_option_validates_name_before_value_type() -> None:
+    with pytest.raises(TypeError) as raised:
+        ProviderOption([], {})  # type: ignore[arg-type]
+
+    assert str(raised.value) == (
+        "provider options_schema field name must contain strict data; found list"
+    )
+
+
+def test_provider_option_validates_value_type_before_required() -> None:
+    with pytest.raises(TypeError) as raised:
+        ProviderOption("ordered", [], required="yes")  # type: ignore[arg-type]
+
+    assert str(raised.value) == (
+        "provider options_schema field 'ordered'.value_type must contain strict "
+        "data; found list"
+    )
+
+
+def test_provider_option_preserves_strict_required_validation() -> None:
+    with pytest.raises(
+        TypeError,
+        match="provider options_schema at 'required'\\.required must contain "
+        "strict data; found int",
+    ):
+        ProviderOption("required", "string", required=1)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        pytest.param([ProviderOption("field", "string")], id="list"),
+        pytest.param((object(),), id="non-provider-option"),
+    ],
+)
+def test_provider_options_schema_preserves_strict_field_container_validation(
+    fields: object,
+) -> None:
+    with pytest.raises(
+        TypeError,
+        match="fields must be a tuple of ProviderOption values",
+    ):
+        ProviderOptionsSchema(fields=fields)  # type: ignore[arg-type]
+
+
+def test_provider_options_schema_preserves_sorted_fields() -> None:
+    schema = ProviderOptionsSchema(
+        fields=(
+            ProviderOption("zebra", "boolean"),
+            ProviderOption("alpha", "string"),
+        )
+    )
+
+    assert tuple(field.name for field in schema.fields) == ("alpha", "zebra")
 
 
 @pytest.mark.parametrize(
