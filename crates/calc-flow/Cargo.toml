@@ -29,11 +29,16 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+allocation-counter = "=0.8.1"
 criterion.workspace = true
 proptest.workspace = true
 
 [[bench]]
 name = "core"
+harness = false
+
+[[bench]]
+name = "dal_38_allocation"
 harness = false
 
 [lints]
