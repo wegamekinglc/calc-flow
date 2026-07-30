@@ -744,21 +744,22 @@ The existing `/api/v2` error body keeps `detail` as either the current string
 or FastAPI request-validation array. This design does not replace it with a
 new envelope inside v2.
 
-| Condition                                        | Surface/status                | Required message semantics                                                           |
-| ------------------------------------------------ | ----------------------------- | ------------------------------------------------------------------------------------ |
-| Unsupported capability schema at client          | Python/TypeScript local error | `capabilities schema version <found> is unsupported; expected 1`                     |
-| Capability runtime session is unavailable        | REST `503`                    | `runtime capability snapshot is unavailable for this session`                        |
-| Runtime emits a malformed capability snapshot    | REST `500`                    | `runtime capability snapshot violates schema version 1 at <path>: <constraint>`      |
-| Runtime emits a malformed validation report      | REST `500`                    | `runtime validation report violates the v1 contract at <path>: <constraint>`         |
-| Parent registration cannot cross worker boundary | Capability data               | `reconstruction="unavailable"`, `reasonCode="serializationFailed"`; no raw exception |
-| Stored project is absent                         | REST `404`                    | Existing project-not-found message                                                   |
-| Project is semantically invalid                  | REST `200`                    | `kind="invalid"` plus one or more `{path, code, message}` issues                     |
-| `options_schema` has the wrong object type       | Python `TypeError`            | `options_schema must be a ProviderOptionsSchema or None; found <type>`               |
-| Provider option field has a non-data value       | Python `TypeError`            | `provider options_schema at <path> must contain strict data; found <type>`           |
-| Provider option field uses an unsupported type   | Python `ValueError`           | Name the option field and list `string`, `integer`, `number`, and `boolean`          |
-| Worker returns an unknown output kind            | Run becomes `failed`          | `run result output <name> has unsupported kind <kind>; expected 'table' or 'array'`  |
-| Worker returns another malformed result          | Run becomes `failed`          | `run result violates the v2 preview contract at <path>: <constraint>`                |
-| Browser receives an unknown output kind          | TypeScript local error        | Throw `ApiContractError`; do not render a fallback                                   |
+| Condition                                        | Surface/status                | Required message semantics                                                                 |
+| ------------------------------------------------ | ----------------------------- | ------------------------------------------------------------------------------------------ |
+| Unsupported capability schema at client          | Python/TypeScript local error | `capabilities schema version <found> is unsupported; expected 1`                           |
+| Capability runtime session is unavailable        | REST `503`                    | `runtime capability snapshot is unavailable for this session`                              |
+| Runtime emits a malformed capability snapshot    | REST `500`                    | `runtime capability snapshot violates schema version 1 at <path>: <constraint>`            |
+| Runtime emits a malformed validation report      | REST `500`                    | `runtime validation report violates the v1 contract at <path>: <constraint>`               |
+| Parent registration cannot cross worker boundary | Capability data               | `reconstruction="unavailable"`, `reasonCode="serializationFailed"`; no raw exception       |
+| Stored project is absent                         | REST `404`                    | Existing project-not-found message                                                         |
+| Project is semantically invalid                  | REST `200`                    | `kind="invalid"` plus one or more `{path, code, message}` issues                           |
+| `options_schema` has the wrong object type       | Python `TypeError`            | `options_schema must be a ProviderOptionsSchema or None; found <type>`                     |
+| Provider option name has a non-data value        | Python `TypeError`            | `provider options_schema field name must contain strict data; found <type>`                |
+| Provider option value type has a non-data value  | Python `TypeError`            | `provider options_schema field <name!r>.value_type must contain strict data; found <type>` |
+| Provider option field uses an unsupported type   | Python `ValueError`           | Name the option field and list `string`, `integer`, `number`, and `boolean`                |
+| Worker returns an unknown output kind            | Run becomes `failed`          | `run result output <name> has unsupported kind <kind>; expected 'table' or 'array'`        |
+| Worker returns another malformed result          | Run becomes `failed`          | `run result violates the v2 preview contract at <path>: <constraint>`                      |
+| Browser receives an unknown output kind          | TypeScript local error        | Throw `ApiContractError`; do not render a fallback                                         |
 
 Internal runtime/PyO3 contract violations are `500`, not `422`: the caller did
 not supply an invalid capability or validation document. Request body errors
@@ -885,7 +886,7 @@ runner or checkpoint behavior.
 | Option field named twice               | `provider options_schema contains duplicate field 'expression'`                                                   |
 | Wrong schema object                    | `options_schema must be a ProviderOptionsSchema or None; found dict`                                              |
 | Option type `object` in schema v1      | `provider options_schema field 'expression.value_type' must be string, integer, number, or boolean; found object` |
-| Callable as an option field name       | `provider options_schema at 'fields[0].name' must contain strict data; found function`                            |
+| Callable as an option field name       | `provider options_schema field name must contain strict data; found function`                                     |
 | Runtime reports valid with no hash     | `runtime validation report violates the v1 contract at fingerprint: valid reports require a fingerprint`          |
 | Runtime reports invalid with no issues | `runtime validation report violates the v1 contract at issues: invalid reports require at least one issue`        |
 | Worker output kind `tensor`            | `run result output 'output' has unsupported kind 'tensor'; expected 'table' or 'array'`                           |

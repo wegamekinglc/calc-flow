@@ -18,10 +18,10 @@ inserted into a `ProviderOptionsSchema`.
 Change only the two diagnostics that currently claim the unavailable tuple
 position `fields[0]`:
 
-| Invalid constructor input | Required exception | Required exact message |
-| --- | --- | --- |
-| `ProviderOption(name=<non-str>, value_type="string")` | `TypeError` | `provider options_schema field name must contain strict data; found <type>` |
-| `ProviderOption(name=<valid-str>, value_type=<non-str>)` | `TypeError` | `provider options_schema field <name!r>.value_type must contain strict data; found <type>` |
+| Invalid constructor input                                | Required exception | Required exact message                                                                     |
+| -------------------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------ |
+| `ProviderOption(name=<non-str>, value_type="string")`    | `TypeError`        | `provider options_schema field name must contain strict data; found <type>`                |
+| `ProviderOption(name=<valid-str>, value_type=<non-str>)` | `TypeError`        | `provider options_schema field <name!r>.value_type must contain strict data; found <type>` |
 
 `<type>` is replaced with `type(rejected_value).__name__`. `<name!r>` means the
 normal Python `repr()` rendering of the already validated string field name;
@@ -172,19 +172,19 @@ web-ui/src/api/schema.d.ts
 
 ## Documentation
 
-Required reconciliation:
+Documentation-stage disposition:
 
-- Update the generic provider-option strict-data row and the hard-coded
-  callable example in
-  `.codex/artifacts/api-notes/dal-5-studio-capabilities-contract.md` so they
-  no longer advertise `fields[0]`.
-- Add a concise `CHANGELOG.md` fix entry because the exact human-readable
-  Python diagnostic is observable.
-
-`docs/python-api.md` and `docs/api-reference.md` describe the public values but
-do not publish these error strings, so they require no content change for this
-contract. The documentation pass should record that determination rather than
-adding positional-validation detail to general API guidance.
+- The generic provider-option strict-data rows and the callable example in
+  `.codex/artifacts/api-notes/dal-5-studio-capabilities-contract.md` now use
+  the exact non-positional diagnostics above.
+- `docs/python-api.md` and `docs/api-reference.md` describe the public values
+  but do not publish these error strings, so they require no content change.
+  Positional-validation detail does not belong in general API guidance.
+- `CHANGELOG.md` remains unchanged. The repository charter reserves it for
+  fundamental changes; this fix preserves accepted values, exception classes,
+  constructor boundaries, public declarations, engine behavior, and wire
+  formats. Correcting two human-readable diagnostics for invalid inputs does
+  not cross that bar.
 
 ## Implementation Guardrails
 
