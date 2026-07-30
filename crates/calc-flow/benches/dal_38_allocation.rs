@@ -26,6 +26,10 @@ use sha2::{Digest, Sha256};
 const FIXED_BASELINE_SHA: &str = "2ac7e97c1549baf0e97849d5823f65e7dd298e99";
 const ALLOCATION_COUNTER_CHECKSUM: &str =
     "beb9e990c0a33699f1984d85a6abead615ccc72dd8130bf3e15dcabe2ca149c9";
+const SCHEMA_VERSION: u32 = 1;
+const FIXED_WARMUP_DISPATCHES: u64 = 1_000;
+const FIXED_MEASURED_DISPATCHES: u64 = 10_000;
+const FIXED_REPETITIONS: usize = 10;
 const FROZEN_FILES: [&str; 3] = [
     "Cargo.lock",
     "crates/calc-flow/Cargo.toml",
@@ -74,6 +78,11 @@ enum Invocation {
     Compare {
         baseline: PathBuf,
         candidate: PathBuf,
+    },
+    ValidateNoiseFloor {
+        before_relative_mad_percent: f64,
+        after_relative_mad_percent: f64,
+        declared_noise_floor_percent: f64,
     },
 }
 
@@ -131,7 +140,7 @@ struct MeasurementThreadEvidence {
     unchanged_for_all_measurements: bool,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct RawAllocationInfo {
     count_total: u64,
     count_current: i64,
@@ -467,6 +476,15 @@ fn run() -> HarnessResult<()> {
             baseline,
             candidate,
         } => compare_reports(&baseline, &candidate),
+        Invocation::ValidateNoiseFloor {
+            before_relative_mad_percent,
+            after_relative_mad_percent,
+            declared_noise_floor_percent,
+        } => validate_timing_noise_floor(
+            before_relative_mad_percent,
+            after_relative_mad_percent,
+            declared_noise_floor_percent,
+        ),
     }
 }
 
@@ -485,6 +503,27 @@ fn parse_invocation(arguments: impl Iterator<Item = String>) -> HarnessResult<In
             candidate: arguments[2].clone().into(),
         });
     }
+    if arguments.first().map(String::as_str) == Some("--validate-noise-floor") {
+        if arguments.len() != 4 {
+            return Err(HarnessError(
+                "--validate-noise-floor requires exactly BEFORE_RELATIVE_MAD_PERCENT AFTER_RELATIVE_MAD_PERCENT DECLARED_NOISE_FLOOR_PERCENT".into(),
+            ));
+        }
+        return Ok(Invocation::ValidateNoiseFloor {
+            before_relative_mad_percent: parse_nonnegative_f64(
+                "BEFORE_RELATIVE_MAD_PERCENT",
+                &arguments[1],
+            )?,
+            after_relative_mad_percent: parse_nonnegative_f64(
+                "AFTER_RELATIVE_MAD_PERCENT",
+                &arguments[2],
+            )?,
+            declared_noise_floor_percent: parse_nonnegative_f64(
+                "DECLARED_NOISE_FLOOR_PERCENT",
+                &arguments[3],
+            )?,
+        });
+    }
 
     let mut warmup_dispatches = None;
     let mut measured_dispatches = None;
@@ -499,9 +538,16 @@ fn parse_invocation(arguments: impl Iterator<Item = String>) -> HarnessResult<In
             .get(index + 1)
             .ok_or_else(|| HarnessError(format!("{flag} requires a value")))?;
         match flag {
-            "--warmup-dispatches" => warmup_dispatches = Some(parse_positive_u64(flag, value)?),
-            "--measured-dispatches" => measured_dispatches = Some(parse_positive_u64(flag, value)?),
-            "--repetitions" => repetitions = Some(parse_positive_usize(flag, value)?),
+            "--warmup-dispatches" => {
+                warmup_dispatches = Some(parse_exact_u64(flag, value, FIXED_WARMUP_DISPATCHES)?);
+            }
+            "--measured-dispatches" => {
+                measured_dispatches =
+                    Some(parse_exact_u64(flag, value, FIXED_MEASURED_DISPATCHES)?);
+            }
+            "--repetitions" => {
+                repetitions = Some(parse_exact_usize(flag, value, FIXED_REPETITIONS)?);
+            }
             "--cases" => cases = Some(value.clone()),
             "--role" => role = Some(Role::parse(value)?),
             "--output" => output = Some(PathBuf::from(value)),
@@ -523,24 +569,57 @@ fn parse_invocation(arguments: impl Iterator<Item = String>) -> HarnessResult<In
     }))
 }
 
-fn parse_positive_u64(flag: &str, value: &str) -> HarnessResult<u64> {
+fn parse_exact_u64(flag: &str, value: &str, expected: u64) -> HarnessResult<u64> {
     let parsed = value
         .parse::<u64>()
         .map_err(|error| HarnessError(format!("{flag} must be an integer: {error}")))?;
-    if parsed == 0 {
-        return Err(HarnessError(format!("{flag} must be positive")));
+    if parsed != expected {
+        return Err(HarnessError(format!(
+            "{flag} must be exactly {expected}, got {parsed}"
+        )));
     }
     Ok(parsed)
 }
 
-fn parse_positive_usize(flag: &str, value: &str) -> HarnessResult<usize> {
+fn parse_exact_usize(flag: &str, value: &str, expected: usize) -> HarnessResult<usize> {
     let parsed = value
         .parse::<usize>()
         .map_err(|error| HarnessError(format!("{flag} must be an integer: {error}")))?;
-    if parsed == 0 {
-        return Err(HarnessError(format!("{flag} must be positive")));
+    if parsed != expected {
+        return Err(HarnessError(format!(
+            "{flag} must be exactly {expected}, got {parsed}"
+        )));
     }
     Ok(parsed)
+}
+
+fn parse_nonnegative_f64(name: &str, value: &str) -> HarnessResult<f64> {
+    let parsed = value
+        .parse::<f64>()
+        .map_err(|error| HarnessError(format!("{name} must be a number: {error}")))?;
+    if !parsed.is_finite() || parsed < 0.0 {
+        return Err(HarnessError(format!(
+            "{name} must be finite and non-negative, got {parsed}"
+        )));
+    }
+    Ok(parsed)
+}
+
+fn validate_timing_noise_floor(
+    before_relative_mad_percent: f64,
+    after_relative_mad_percent: f64,
+    declared_noise_floor_percent: f64,
+) -> HarnessResult<()> {
+    let expected = 1.0_f64.max(2.0 * before_relative_mad_percent.max(after_relative_mad_percent));
+    if declared_noise_floor_percent.to_bits() != expected.to_bits() {
+        return Err(HarnessError(format!(
+            "timing noise floor must be max(1%, 2 * max(before relative MAD, after relative MAD)) = {expected}%, got {declared_noise_floor_percent}%"
+        )));
+    }
+    println!(
+        "validated timing noise floor: max(1%, 2 * max({before_relative_mad_percent}%, {after_relative_mad_percent}%)) = {expected}%"
+    );
+    Ok(())
 }
 
 fn require_option<T>(value: Option<T>, name: &str) -> HarnessResult<T> {
@@ -720,6 +799,7 @@ fn workload_fingerprint(
 }
 
 fn run_measurement(options: &MeasureOptions) -> HarnessResult<()> {
+    validate_measurement_scale(options)?;
     let provenance = collect_provenance(options.role)?;
     let cases = build_cases()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -753,7 +833,7 @@ fn run_measurement(options: &MeasureOptions) -> HarnessResult<()> {
         invalid_reason = Some("not all five fixed cases completed".into());
     }
     let report = AllocationReport {
-        schema_version: 1,
+        schema_version: SCHEMA_VERSION,
         role: options.role,
         valid,
         invalid_reason: invalid_reason.clone(),
@@ -797,6 +877,18 @@ fn run_measurement(options: &MeasureOptions) -> HarnessResult<()> {
     }
 }
 
+fn validate_measurement_scale(options: &MeasureOptions) -> HarnessResult<()> {
+    if options.warmup_dispatches != FIXED_WARMUP_DISPATCHES
+        || options.measured_dispatches != FIXED_MEASURED_DISPATCHES
+        || options.repetitions != FIXED_REPETITIONS
+    {
+        return Err(HarnessError(format!(
+            "measurement scale must be exactly warmups={FIXED_WARMUP_DISPATCHES}, dispatches={FIXED_MEASURED_DISPATCHES}, repetitions={FIXED_REPETITIONS}"
+        )));
+    }
+    Ok(())
+}
+
 struct Provenance {
     repo_root: PathBuf,
     product_sha: String,
@@ -834,24 +926,37 @@ fn collect_provenance(role: Role) -> HarnessResult<Provenance> {
             "could not resolve the harness-only commit".into(),
         ));
     }
-    if role == Role::Baseline {
-        let changed = command_output_in(
-            &repo_root,
-            "git",
-            &[
-                "diff",
-                "--name-only",
-                FIXED_BASELINE_SHA,
-                &harness_commit_sha,
-            ],
-        )?;
-        let actual = changed.lines().collect::<BTreeSet<_>>();
-        let expected = FROZEN_FILES.into_iter().collect::<BTreeSet<_>>();
-        if actual != expected || head != harness_commit_sha {
-            return Err(HarnessError(format!(
-                "baseline must be the fixed product SHA plus the three-file harness commit; changed={actual:?}, head={head}, harness={harness_commit_sha}"
-            )));
-        }
+    command_output_in(
+        &repo_root,
+        "git",
+        &[
+            "merge-base",
+            "--is-ancestor",
+            FIXED_BASELINE_SHA,
+            &harness_commit_sha,
+        ],
+    )?;
+    command_output_in(
+        &repo_root,
+        "git",
+        &["merge-base", "--is-ancestor", &harness_commit_sha, &head],
+    )?;
+    let changed = command_output_in(
+        &repo_root,
+        "git",
+        &[
+            "diff",
+            "--name-only",
+            FIXED_BASELINE_SHA,
+            &harness_commit_sha,
+        ],
+    )?;
+    let actual = changed.lines().collect::<BTreeSet<_>>();
+    let expected = FROZEN_FILES.into_iter().collect::<BTreeSet<_>>();
+    if actual != expected || (role == Role::Baseline && head != harness_commit_sha) {
+        return Err(HarnessError(format!(
+            "harness must descend from the fixed product SHA and change exactly the three frozen files; changed={actual:?}, head={head}, harness={harness_commit_sha}, role={role:?}"
+        )));
     }
 
     let rustc_vv = command_output("rustc", &["-Vv"])?;
@@ -1272,7 +1377,22 @@ fn normalize(
 fn compare_reports(baseline_path: &Path, candidate_path: &Path) -> HarnessResult<()> {
     let baseline = read_report(baseline_path)?;
     let candidate = read_report(candidate_path)?;
-    validate_comparison_identity(&baseline, &candidate)?;
+    if let Err(error) = validate_comparison_identity(&baseline, &candidate) {
+        let comparison = ComparisonReport {
+            valid: false,
+            passed: false,
+            invalid_reason: Some(error.to_string()),
+            baseline_product_sha: baseline.product_sha,
+            candidate_product_sha: candidate.product_sha,
+            harness_commit_sha: baseline.harness_commit_sha,
+            cases: Vec::new(),
+        };
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&comparison).map_err(harness_error)?
+        );
+        return Err(error);
+    }
     let mut case_reports = Vec::with_capacity(baseline.cases.len());
     let mut all_passed = true;
     for (baseline_case, candidate_case) in baseline.cases.iter().zip(&candidate.cases) {
@@ -1344,52 +1464,260 @@ fn validate_comparison_identity(
     baseline: &AllocationReport,
     candidate: &AllocationReport,
 ) -> HarnessResult<()> {
-    if !baseline.valid || !candidate.valid {
-        return Err(HarnessError("both allocation reports must be valid".into()));
+    let expected_provenance = collect_provenance(Role::Candidate)?;
+    let expected_cases = build_cases()?;
+    validate_report(
+        baseline,
+        Role::Baseline,
+        FIXED_BASELINE_SHA,
+        &expected_provenance,
+        &expected_cases,
+    )?;
+    validate_report(
+        candidate,
+        Role::Candidate,
+        &expected_provenance.product_sha,
+        &expected_provenance,
+        &expected_cases,
+    )?;
+    Ok(())
+}
+
+fn validate_report(
+    report: &AllocationReport,
+    expected_role: Role,
+    expected_product_sha: &str,
+    expected_provenance: &Provenance,
+    expected_cases: &[PreparedCase],
+) -> HarnessResult<()> {
+    let label = format!("{expected_role:?}").to_ascii_lowercase();
+    if report.schema_version != SCHEMA_VERSION {
+        return Err(HarnessError(format!(
+            "{label} schema_version must be {SCHEMA_VERSION}, got {}",
+            report.schema_version
+        )));
     }
-    if baseline.role != Role::Baseline || candidate.role != Role::Candidate {
-        return Err(HarnessError(
-            "comparison requires baseline and candidate roles".into(),
-        ));
+    if report.role != expected_role {
+        return Err(HarnessError(format!("{label} role is incorrect")));
     }
-    if baseline.fixed_baseline_sha != FIXED_BASELINE_SHA
-        || candidate.fixed_baseline_sha != FIXED_BASELINE_SHA
-        || baseline.harness_commit_sha != candidate.harness_commit_sha
-        || baseline.frozen_files != candidate.frozen_files
-        || baseline.toolchain != candidate.toolchain
+    if !report.valid || report.invalid_reason.is_some() {
+        return Err(HarnessError(format!(
+            "{label} report must be valid with no invalid_reason"
+        )));
+    }
+    if report.product_sha != expected_product_sha {
+        return Err(HarnessError(format!("{label} product SHA is incorrect")));
+    }
+    if report.fixed_baseline_sha != FIXED_BASELINE_SHA {
+        return Err(HarnessError(format!(
+            "{label} fixed baseline SHA is incorrect"
+        )));
+    }
+    if report.harness_commit_sha != expected_provenance.harness_commit_sha {
+        return Err(HarnessError(format!("{label} harness commit is incorrect")));
+    }
+    if report.frozen_files != expected_provenance.frozen_files {
+        return Err(HarnessError(format!(
+            "{label} frozen-file or dependency identity is incorrect"
+        )));
+    }
+    if !report.git_status_short.is_empty() {
+        return Err(HarnessError(format!(
+            "{label} report was produced from a dirty tracked worktree"
+        )));
+    }
+    if report.toolchain != expected_provenance.toolchain {
+        return Err(HarnessError(format!("{label} toolchain is incorrect")));
+    }
+    if report.measurement_thread.id.is_empty()
+        || !report.measurement_thread.current_thread_runtime
+        || !report.measurement_thread.unchanged_for_all_measurements
     {
-        return Err(HarnessError(
-            "fixed baseline, harness, frozen files, or toolchain identity differs".into(),
-        ));
+        return Err(HarnessError(format!(
+            "{label} measurement thread evidence is invalid"
+        )));
     }
-    if baseline.cases.len() != 5 || candidate.cases.len() != 5 {
-        return Err(HarnessError(
-            "both reports must contain all five fixed cases".into(),
-        ));
+    if report.cases.len() != expected_cases.len() {
+        return Err(HarnessError(format!(
+            "{label} must contain exactly {} cases",
+            expected_cases.len()
+        )));
     }
-    for (baseline_case, candidate_case) in baseline.cases.iter().zip(&candidate.cases) {
-        if baseline_case.name != candidate_case.name
-            || baseline_case.payload != candidate_case.payload
-            || baseline_case.workload_fingerprint != candidate_case.workload_fingerprint
-            || baseline_case.compiled_node_count != candidate_case.compiled_node_count
-            || baseline_case.compiled_operator_variants != candidate_case.compiled_operator_variants
-            || baseline_case.configured_datafusion != candidate_case.configured_datafusion
-            || baseline_case.compiled_datafusion != candidate_case.compiled_datafusion
-            || baseline_case.requires_datafusion != candidate_case.requires_datafusion
-            || baseline_case.metric_assertion != candidate_case.metric_assertion
-            || baseline_case.output_assertion != candidate_case.output_assertion
-            || baseline_case.warmup_dispatches != candidate_case.warmup_dispatches
-            || baseline_case.requested_dispatches != candidate_case.requested_dispatches
-            || baseline_case.repetitions_requested != candidate_case.repetitions_requested
-            || baseline_case.repetitions.len() != candidate_case.repetitions.len()
-        {
-            return Err(HarnessError(format!(
-                "workload identity differs for case {}",
-                baseline_case.name
-            )));
-        }
+    let unique_names = report
+        .cases
+        .iter()
+        .map(|case| case.name.as_str())
+        .collect::<BTreeSet<_>>();
+    if unique_names.len() != expected_cases.len() {
+        return Err(HarnessError(format!(
+            "{label} contains duplicate or missing cases"
+        )));
+    }
+    for (case, expected_case) in report.cases.iter().zip(expected_cases) {
+        validate_case_report(&label, case, expected_case, &report.measurement_thread.id)?;
     }
     Ok(())
+}
+
+fn validate_case_report(
+    report_label: &str,
+    case: &CaseReport,
+    expected: &PreparedCase,
+    measurement_thread_id: &str,
+) -> HarnessResult<()> {
+    let expected_variants = expected
+        .logical_variants
+        .iter()
+        .map(|variant| (*variant).to_owned())
+        .collect::<Vec<_>>();
+    let expected_metric_assertion = metric_assertion_description(expected.expected_metric_node);
+    let expected_output_assertion = expected.expectation.description();
+    if case.name != expected.name
+        || case.payload != expected.payload
+        || case.plan_fingerprint != expected.plan.fingerprint()
+        || case.compiled_node_count != expected.expected_node_count
+        || case.compiled_operator_variants != expected_variants
+        || case.configured_datafusion != DATAFUSION_CONFIG
+        || case.compiled_datafusion != expected.plan.datafusion_config()
+        || case.requires_datafusion != expected.plan.requires_datafusion()
+        || case.metric_assertion != expected_metric_assertion
+        || case.output_assertion != expected_output_assertion
+    {
+        return Err(HarnessError(format!(
+            "{report_label} case {} does not match the compiled fixed workload contract",
+            case.name
+        )));
+    }
+    let report_variants = case
+        .compiled_operator_variants
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let recomputed_workload_fingerprint = workload_fingerprint(
+        &case.name,
+        &case.payload,
+        &report_variants,
+        case.compiled_node_count,
+        expected.expected_metric_node,
+        &case.output_assertion,
+        &case.plan_fingerprint,
+    )?;
+    if case.workload_fingerprint != expected.workload_fingerprint
+        || case.workload_fingerprint != recomputed_workload_fingerprint
+    {
+        return Err(HarnessError(format!(
+            "{report_label} case {} workload fingerprint is not reproducible",
+            case.name
+        )));
+    }
+    if case.warmup_dispatches != FIXED_WARMUP_DISPATCHES
+        || case.requested_dispatches != FIXED_MEASURED_DISPATCHES
+        || case.repetitions_requested != FIXED_REPETITIONS
+        || case.repetitions.len() != FIXED_REPETITIONS
+    {
+        return Err(HarnessError(format!(
+            "{report_label} case {} does not use the fixed measurement scale",
+            case.name
+        )));
+    }
+    if !case.valid
+        || case.invalid_reason.is_some()
+        || !case.stable_count_total
+        || !case.stable_bytes_total
+    {
+        return Err(HarnessError(format!(
+            "{report_label} case {} validity or stability evidence failed",
+            case.name
+        )));
+    }
+
+    let mut stable_totals = None;
+    for (expected_index, repetition) in case.repetitions.iter().enumerate() {
+        validate_repetition(
+            report_label,
+            case,
+            repetition,
+            expected_index,
+            measurement_thread_id,
+        )?;
+        let totals = (repetition.raw.count_total, repetition.raw.bytes_total);
+        if stable_totals.is_some_and(|expected_totals| expected_totals != totals) {
+            return Err(HarnessError(format!(
+                "{report_label} case {} raw totals are unstable",
+                case.name
+            )));
+        }
+        stable_totals = Some(totals);
+    }
+    Ok(())
+}
+
+fn validate_repetition(
+    report_label: &str,
+    case: &CaseReport,
+    repetition: &RepetitionReport,
+    expected_index: usize,
+    measurement_thread_id: &str,
+) -> HarnessResult<()> {
+    if repetition.repetition_index != expected_index
+        || repetition.requested_dispatches != FIXED_MEASURED_DISPATCHES
+        || repetition.completed_dispatches != FIXED_MEASURED_DISPATCHES
+    {
+        return Err(HarnessError(format!(
+            "{report_label} case {} repetition {expected_index} index or dispatch count is invalid",
+            case.name
+        )));
+    }
+    if repetition.measurement_thread_id != measurement_thread_id || !repetition.on_expected_thread {
+        return Err(HarnessError(format!(
+            "{report_label} case {} repetition {expected_index} ran off-thread",
+            case.name
+        )));
+    }
+    if !repetition.output_assertion_passed || repetition.invalid_reason.is_some() {
+        return Err(HarnessError(format!(
+            "{report_label} case {} repetition {expected_index} output or validity assertion failed",
+            case.name
+        )));
+    }
+    validate_raw_allocation(report_label, &case.name, expected_index, repetition.raw)?;
+    let recomputed = normalize(
+        repetition.raw,
+        FIXED_MEASURED_DISPATCHES,
+        case.compiled_node_count,
+    );
+    if !normalized_equal(&repetition.normalized, &recomputed) {
+        return Err(HarnessError(format!(
+            "{report_label} case {} repetition {expected_index} normalized allocation identity is incorrect",
+            case.name
+        )));
+    }
+    Ok(())
+}
+
+fn validate_raw_allocation(
+    report_label: &str,
+    case_name: &str,
+    repetition_index: usize,
+    raw: RawAllocationInfo,
+) -> HarnessResult<()> {
+    let current_is_zero = raw.count_current == 0 && raw.bytes_current == 0;
+    let peaks_fit_totals = raw.count_max <= raw.count_total && raw.bytes_max <= raw.bytes_total;
+    let zero_counts_are_consistent =
+        raw.count_total != 0 || (raw.count_max == 0 && raw.bytes_total == 0 && raw.bytes_max == 0);
+    if !current_is_zero || !peaks_fit_totals || !zero_counts_are_consistent {
+        return Err(HarnessError(format!(
+            "{report_label} case {case_name} repetition {repetition_index} has inconsistent raw AllocationInfo fields"
+        )));
+    }
+    Ok(())
+}
+
+fn normalized_equal(left: &NormalizedAllocationInfo, right: &NormalizedAllocationInfo) -> bool {
+    left.calls_per_dispatch.to_bits() == right.calls_per_dispatch.to_bits()
+        && left.bytes_per_dispatch.to_bits() == right.bytes_per_dispatch.to_bits()
+        && left.calls_per_node_dispatch.to_bits() == right.calls_per_node_dispatch.to_bits()
+        && left.bytes_per_node_dispatch.to_bits() == right.bytes_per_node_dispatch.to_bits()
 }
 
 fn signed_delta(candidate: u64, baseline: u64) -> i64 {
@@ -1423,153 +1751,21 @@ fn write_json(path: &Path, report: &AllocationReport) -> HarnessResult<()> {
 }
 
 #[cfg(test)]
+type TestReport = serde_json::Value;
+
+#[cfg(test)]
+type TestMutation = (&'static str, TestReport, TestReport);
+
+#[cfg(test)]
 fn run_regression_tests() -> HarnessResult<()> {
-    use serde_json::Value;
-
-    const WARMUPS: u64 = 1_000;
-    const DISPATCHES: u64 = 10_000;
-    const REPETITIONS: usize = 10;
-
-    fn synthetic_report(role: Role) -> HarnessResult<Value> {
-        let provenance = collect_provenance(role)?;
-        let measurement_thread_id = "ThreadId(1)".to_owned();
-        let cases = build_cases()?
-            .into_iter()
-            .enumerate()
-            .map(|(case_index, case)| {
-                let raw = RawAllocationInfo {
-                    count_total: 100 + case_index as u64,
-                    count_current: 0,
-                    count_max: 1,
-                    bytes_total: 1_000 + case_index as u64,
-                    bytes_current: 0,
-                    bytes_max: 64,
-                };
-                CaseReport {
-                    name: case.name.into(),
-                    payload: case.payload.into(),
-                    workload_fingerprint: case.workload_fingerprint,
-                    plan_fingerprint: case.plan.fingerprint().into(),
-                    compiled_node_count: case.expected_node_count,
-                    compiled_operator_variants: case
-                        .logical_variants
-                        .iter()
-                        .map(|variant| (*variant).to_owned())
-                        .collect(),
-                    configured_datafusion: DATAFUSION_CONFIG,
-                    compiled_datafusion: case.plan.datafusion_config(),
-                    requires_datafusion: case.plan.requires_datafusion(),
-                    metric_assertion: metric_assertion_description(case.expected_metric_node),
-                    output_assertion: case.expectation.description().into(),
-                    warmup_dispatches: WARMUPS,
-                    requested_dispatches: DISPATCHES,
-                    repetitions_requested: REPETITIONS,
-                    repetitions: (0..REPETITIONS)
-                        .map(|repetition_index| RepetitionReport {
-                            repetition_index,
-                            requested_dispatches: DISPATCHES,
-                            completed_dispatches: DISPATCHES,
-                            measurement_thread_id: measurement_thread_id.clone(),
-                            on_expected_thread: true,
-                            raw,
-                            normalized: normalize(raw, DISPATCHES, case.expected_node_count),
-                            output_assertion_passed: true,
-                            invalid_reason: None,
-                        })
-                        .collect(),
-                    stable_count_total: true,
-                    stable_bytes_total: true,
-                    valid: true,
-                    invalid_reason: None,
-                }
-            })
-            .collect();
-        serde_json::to_value(AllocationReport {
-            schema_version: 1,
-            role,
-            valid: true,
-            invalid_reason: None,
-            product_sha: provenance.product_sha,
-            fixed_baseline_sha: FIXED_BASELINE_SHA.into(),
-            harness_commit_sha: provenance.harness_commit_sha,
-            frozen_files: provenance.frozen_files,
-            git_status_short: provenance.git_status_short,
-            toolchain: provenance.toolchain,
-            environment: provenance.environment,
-            measurement_thread: MeasurementThreadEvidence {
-                id: measurement_thread_id,
-                name: Some("main".into()),
-                current_thread_runtime: true,
-                unchanged_for_all_measurements: true,
-            },
-            cases,
-        })
-        .map_err(harness_error)
-    }
-
-    fn set_pair(
-        baseline: &mut Value,
-        candidate: &mut Value,
-        pointer: &str,
-        value: Value,
-    ) -> HarnessResult<()> {
-        *baseline.pointer_mut(pointer).ok_or_else(|| {
-            HarnessError(format!("test fixture lacks baseline pointer {pointer}"))
-        })? = value.clone();
-        *candidate.pointer_mut(pointer).ok_or_else(|| {
-            HarnessError(format!("test fixture lacks candidate pointer {pointer}"))
-        })? = value;
-        Ok(())
-    }
-
-    fn comparison_status(
-        directory: &Path,
-        name: &str,
-        baseline: &Value,
-        candidate: &Value,
-    ) -> HarnessResult<std::process::Output> {
-        let baseline_path = directory.join(format!("{name}-baseline.json"));
-        let candidate_path = directory.join(format!("{name}-candidate.json"));
-        fs::write(
-            &baseline_path,
-            serde_json::to_vec_pretty(baseline).map_err(harness_error)?,
-        )
-        .map_err(harness_error)?;
-        fs::write(
-            &candidate_path,
-            serde_json::to_vec_pretty(candidate).map_err(harness_error)?,
-        )
-        .map_err(harness_error)?;
-        Command::new(env::current_exe().map_err(harness_error)?)
-            .arg("--compare")
-            .arg(baseline_path)
-            .arg(candidate_path)
-            .output()
-            .map_err(harness_error)
-    }
-
-    fn expect_comparison_failure(
-        failures: &mut Vec<String>,
-        directory: &Path,
-        name: &str,
-        baseline: &Value,
-        candidate: &Value,
-    ) -> HarnessResult<()> {
-        let output = comparison_status(directory, name, baseline, candidate)?;
-        if output.status.success() {
-            failures.push(format!("{name}: comparison unexpectedly exited zero"));
-        }
-        Ok(())
-    }
-
     let repo_root = PathBuf::from(command_output("git", &["rev-parse", "--show-toplevel"])?);
     let directory = repo_root
         .join("target/dal-38-allocation")
         .join(format!("regression-tests-{}", std::process::id()));
     fs::create_dir_all(&directory).map_err(harness_error)?;
-    let original_baseline = synthetic_report(Role::Baseline)?;
-    let original_candidate = synthetic_report(Role::Candidate)?;
-    let positive = comparison_status(
+    let original_baseline = synthetic_test_report(Role::Baseline)?;
+    let original_candidate = synthetic_test_report(Role::Candidate)?;
+    let positive = test_comparison_status(
         &directory,
         "fixed-contract-positive",
         &original_baseline,
@@ -1582,8 +1778,153 @@ fn run_regression_tests() -> HarnessResult<()> {
             String::from_utf8_lossy(&positive.stderr)
         ));
     }
+    if test_short_measurement_status(&directory)?.success() {
+        failures.push("short 1/1/1 measurement unexpectedly exited zero".into());
+    }
+    for (name, baseline, candidate) in test_mutations(&original_baseline, &original_candidate)? {
+        expect_test_comparison_failure(&mut failures, &directory, name, &baseline, &candidate)?;
+    }
+    test_noise_floor_statuses(&mut failures)?;
+    if failures.is_empty() {
+        println!("dal_38_allocation regression tests passed");
+        Ok(())
+    } else {
+        Err(HarnessError(failures.join("\n")))
+    }
+}
 
-    let short_measurement = Command::new(env::current_exe().map_err(harness_error)?)
+#[cfg(test)]
+fn synthetic_test_report(role: Role) -> HarnessResult<TestReport> {
+    let provenance = collect_provenance(role)?;
+    let measurement_thread_id = "ThreadId(1)".to_owned();
+    let cases = build_cases()?
+        .into_iter()
+        .enumerate()
+        .map(|(case_index, case)| synthetic_test_case(case_index, case, &measurement_thread_id))
+        .collect();
+    serde_json::to_value(AllocationReport {
+        schema_version: SCHEMA_VERSION,
+        role,
+        valid: true,
+        invalid_reason: None,
+        product_sha: provenance.product_sha,
+        fixed_baseline_sha: FIXED_BASELINE_SHA.into(),
+        harness_commit_sha: provenance.harness_commit_sha,
+        frozen_files: provenance.frozen_files,
+        git_status_short: provenance.git_status_short,
+        toolchain: provenance.toolchain,
+        environment: provenance.environment,
+        measurement_thread: MeasurementThreadEvidence {
+            id: measurement_thread_id,
+            name: Some("main".into()),
+            current_thread_runtime: true,
+            unchanged_for_all_measurements: true,
+        },
+        cases,
+    })
+    .map_err(harness_error)
+}
+
+#[cfg(test)]
+fn synthetic_test_case(
+    case_index: usize,
+    case: PreparedCase,
+    measurement_thread_id: &str,
+) -> CaseReport {
+    let raw = RawAllocationInfo {
+        count_total: 100 + case_index as u64,
+        count_current: 0,
+        count_max: 1,
+        bytes_total: 1_000 + case_index as u64,
+        bytes_current: 0,
+        bytes_max: 64,
+    };
+    CaseReport {
+        name: case.name.into(),
+        payload: case.payload.into(),
+        workload_fingerprint: case.workload_fingerprint,
+        plan_fingerprint: case.plan.fingerprint().into(),
+        compiled_node_count: case.expected_node_count,
+        compiled_operator_variants: case
+            .logical_variants
+            .iter()
+            .map(|variant| (*variant).to_owned())
+            .collect(),
+        configured_datafusion: DATAFUSION_CONFIG,
+        compiled_datafusion: case.plan.datafusion_config(),
+        requires_datafusion: case.plan.requires_datafusion(),
+        metric_assertion: metric_assertion_description(case.expected_metric_node),
+        output_assertion: case.expectation.description().into(),
+        warmup_dispatches: FIXED_WARMUP_DISPATCHES,
+        requested_dispatches: FIXED_MEASURED_DISPATCHES,
+        repetitions_requested: FIXED_REPETITIONS,
+        repetitions: (0..FIXED_REPETITIONS)
+            .map(|repetition_index| RepetitionReport {
+                repetition_index,
+                requested_dispatches: FIXED_MEASURED_DISPATCHES,
+                completed_dispatches: FIXED_MEASURED_DISPATCHES,
+                measurement_thread_id: measurement_thread_id.to_owned(),
+                on_expected_thread: true,
+                raw,
+                normalized: normalize(raw, FIXED_MEASURED_DISPATCHES, case.expected_node_count),
+                output_assertion_passed: true,
+                invalid_reason: None,
+            })
+            .collect(),
+        stable_count_total: true,
+        stable_bytes_total: true,
+        valid: true,
+        invalid_reason: None,
+    }
+}
+
+#[cfg(test)]
+fn test_comparison_status(
+    directory: &Path,
+    name: &str,
+    baseline: &TestReport,
+    candidate: &TestReport,
+) -> HarnessResult<std::process::Output> {
+    let baseline_path = directory.join(format!("{name}-baseline.json"));
+    let candidate_path = directory.join(format!("{name}-candidate.json"));
+    fs::write(
+        &baseline_path,
+        serde_json::to_vec_pretty(baseline).map_err(harness_error)?,
+    )
+    .map_err(harness_error)?;
+    fs::write(
+        &candidate_path,
+        serde_json::to_vec_pretty(candidate).map_err(harness_error)?,
+    )
+    .map_err(harness_error)?;
+    Command::new(env::current_exe().map_err(harness_error)?)
+        .arg("--compare")
+        .arg(baseline_path)
+        .arg(candidate_path)
+        .output()
+        .map_err(harness_error)
+}
+
+#[cfg(test)]
+fn expect_test_comparison_failure(
+    failures: &mut Vec<String>,
+    directory: &Path,
+    name: &str,
+    baseline: &TestReport,
+    candidate: &TestReport,
+) -> HarnessResult<()> {
+    if test_comparison_status(directory, name, baseline, candidate)?
+        .status
+        .success()
+    {
+        failures.push(format!("{name}: comparison unexpectedly exited zero"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn test_short_measurement_status(directory: &Path) -> HarnessResult<std::process::ExitStatus> {
+    Command::new(env::current_exe().map_err(harness_error)?)
         .args([
             "--warmup-dispatches",
             "1",
@@ -1598,177 +1939,227 @@ fn run_regression_tests() -> HarnessResult<()> {
             "--output",
         ])
         .arg(directory.join("short-measurement.json"))
-        .output()
-        .map_err(harness_error)?;
-    if short_measurement.status.success() {
-        failures.push("short 1/1/1 measurement unexpectedly exited zero".into());
-    }
+        .status()
+        .map_err(harness_error)
+}
 
-    let mut mutations: Vec<(&str, Value, Value)> = Vec::new();
+#[cfg(test)]
+fn test_mutations(
+    baseline: &TestReport,
+    candidate: &TestReport,
+) -> HarnessResult<Vec<TestMutation>> {
+    use serde_json::{Value, json};
 
-    let mut baseline = original_baseline.clone();
-    let candidate = original_candidate.clone();
-    baseline["fixed_baseline_sha"] = Value::String("wrong-baseline".into());
-    mutations.push(("wrong-fixed-baseline", baseline, candidate));
+    let mut mutations = vec![
+        test_baseline_mutation(
+            "wrong-fixed-baseline",
+            baseline,
+            candidate,
+            "/fixed_baseline_sha",
+            json!("wrong-baseline"),
+        )?,
+        test_paired_mutation(
+            "paired-forged-schema",
+            baseline,
+            candidate,
+            "/schema_version",
+            json!(99),
+        )?,
+        test_paired_mutation(
+            "paired-forged-harness",
+            baseline,
+            candidate,
+            "/harness_commit_sha",
+            json!("forged-harness"),
+        )?,
+        test_paired_mutation(
+            "paired-forged-file-hash",
+            baseline,
+            candidate,
+            "/frozen_files/benchmark_sha256",
+            json!("forged-file-hash"),
+        )?,
+        test_paired_mutation(
+            "paired-forged-dependency-checksum",
+            baseline,
+            candidate,
+            "/frozen_files/allocation_counter_registry_checksum",
+            json!("forged-dependency-checksum"),
+        )?,
+        test_paired_mutation(
+            "paired-short-report-scale",
+            baseline,
+            candidate,
+            "/cases/0/warmup_dispatches",
+            json!(1),
+        )?,
+        test_candidate_mutation(
+            "wrong-product-sha",
+            baseline,
+            candidate,
+            "/product_sha",
+            json!("forged-product"),
+        )?,
+        test_paired_mutation(
+            "paired-forged-workload-fingerprint",
+            baseline,
+            candidate,
+            "/cases/0/workload_fingerprint",
+            json!("forged-workload"),
+        )?,
+    ];
+    mutations.extend(test_execution_mutations(baseline, candidate)?);
 
-    let baseline = original_baseline.clone();
-    let mut candidate = original_candidate.clone();
-    candidate["cases"][4] = candidate["cases"][0].clone();
-    mutations.push(("duplicate-and-missing-case", baseline, candidate));
-
-    let mut baseline = original_baseline.clone();
-    let mut candidate = original_candidate.clone();
-    set_pair(
-        &mut baseline,
-        &mut candidate,
-        "/schema_version",
-        Value::from(99),
-    )?;
-    mutations.push(("paired-forged-schema", baseline, candidate));
-
-    let mut baseline = original_baseline.clone();
-    let mut candidate = original_candidate.clone();
-    set_pair(
-        &mut baseline,
-        &mut candidate,
-        "/harness_commit_sha",
-        Value::String("forged-harness".into()),
-    )?;
-    mutations.push(("paired-forged-harness", baseline, candidate));
-
-    let mut baseline = original_baseline.clone();
-    let mut candidate = original_candidate.clone();
-    set_pair(
-        &mut baseline,
-        &mut candidate,
-        "/frozen_files/benchmark_sha256",
-        Value::String("forged-file-hash".into()),
-    )?;
-    mutations.push(("paired-forged-file-hash", baseline, candidate));
-
-    let mut baseline = original_baseline.clone();
-    let mut candidate = original_candidate.clone();
-    set_pair(
-        &mut baseline,
-        &mut candidate,
-        "/frozen_files/allocation_counter_registry_checksum",
-        Value::String("forged-dependency-checksum".into()),
-    )?;
-    mutations.push(("paired-forged-dependency-checksum", baseline, candidate));
-
-    let mut baseline = original_baseline.clone();
-    let mut candidate = original_candidate.clone();
-    set_pair(
-        &mut baseline,
-        &mut candidate,
-        "/cases/0/warmup_dispatches",
-        Value::from(1),
-    )?;
-    mutations.push(("paired-short-report-scale", baseline, candidate));
-
-    let baseline = original_baseline.clone();
-    let mut candidate = original_candidate.clone();
-    candidate["product_sha"] = Value::String("forged-product".into());
-    mutations.push(("wrong-product-sha", baseline, candidate));
-
-    let mut baseline = original_baseline.clone();
-    let mut candidate = original_candidate.clone();
-    set_pair(
-        &mut baseline,
-        &mut candidate,
-        "/cases/0/workload_fingerprint",
-        Value::String("forged-workload".into()),
-    )?;
-    mutations.push(("paired-forged-workload-fingerprint", baseline, candidate));
-
-    let baseline = original_baseline.clone();
-    let mut candidate = original_candidate.clone();
-    candidate["cases"][0]["valid"] = Value::Bool(false);
-    candidate["cases"][0]["invalid_reason"] = Value::String("injected failure".into());
-    mutations.push(("invalid-case", baseline, candidate));
-
-    let baseline = original_baseline.clone();
-    let mut candidate = original_candidate.clone();
-    candidate["cases"][0]["repetitions"][0]["completed_dispatches"] = Value::from(0);
-    mutations.push(("zero-completed", baseline, candidate));
-
-    let baseline = original_baseline.clone();
-    let mut candidate = original_candidate.clone();
-    candidate["cases"][0]["repetitions"][0]["completed_dispatches"] = Value::from(DISPATCHES - 1);
-    mutations.push(("short-completed", baseline, candidate));
-
-    let baseline = original_baseline.clone();
-    let mut candidate = original_candidate.clone();
-    candidate["cases"][0]["repetitions"][0]["on_expected_thread"] = Value::Bool(false);
-    mutations.push(("off-thread", baseline, candidate));
-
-    let baseline = original_baseline.clone();
-    let mut candidate = original_candidate.clone();
-    candidate["cases"][0]["repetitions"][0]["output_assertion_passed"] = Value::Bool(false);
-    mutations.push(("failed-output-assertion", baseline, candidate));
-
-    let baseline = original_baseline.clone();
-    let mut candidate = original_candidate.clone();
-    candidate["measurement_thread"]["unchanged_for_all_measurements"] = Value::Bool(false);
-    mutations.push(("unstable-measurement-thread", baseline, candidate));
-
-    let baseline = original_baseline.clone();
-    let mut candidate = original_candidate.clone();
-    candidate["cases"][0]["stable_count_total"] = Value::Bool(false);
-    mutations.push(("unstable-case-totals", baseline, candidate));
-
-    let baseline = original_baseline.clone();
-    let mut candidate = original_candidate.clone();
-    candidate["cases"][0]["repetitions"][0]["raw"]["count_current"] = Value::from(1);
-    mutations.push(("malformed-raw-allocation-info", baseline, candidate));
-
-    let baseline = original_baseline.clone();
-    let mut candidate = original_candidate.clone();
-    candidate["cases"][0]["repetitions"][0]["normalized"]["calls_per_dispatch"] =
-        Value::from(999.0);
-    mutations.push(("forged-normalized-allocation", baseline, candidate));
-
-    let baseline = original_baseline.clone();
-    let mut candidate = original_candidate.clone();
-    candidate["cases"][0]["repetitions"][0]["repetition_index"] = Value::from(9);
-    mutations.push(("malformed-repetition-index", baseline, candidate));
-
-    let baseline = original_baseline.clone();
-    let mut candidate = original_candidate.clone();
-    candidate["cases"][0]["repetitions"]
+    let mut duplicate = candidate.clone();
+    duplicate["cases"][4] = duplicate["cases"][0].clone();
+    mutations.push(("duplicate-and-missing-case", baseline.clone(), duplicate));
+    let mut missing_repetition = candidate.clone();
+    missing_repetition["cases"][0]["repetitions"]
         .as_array_mut()
         .expect("fixture repetitions are an array")
         .pop();
-    mutations.push(("missing-repetition", baseline, candidate));
+    mutations.push(("missing-repetition", baseline.clone(), missing_repetition));
+    let mut invalid_case = candidate.clone();
+    invalid_case["cases"][0]["valid"] = Value::Bool(false);
+    invalid_case["cases"][0]["invalid_reason"] = json!("injected failure");
+    mutations.push(("invalid-case", baseline.clone(), invalid_case));
+    Ok(mutations)
+}
 
-    for (name, baseline, candidate) in mutations {
-        expect_comparison_failure(&mut failures, &directory, name, &baseline, &candidate)?;
-    }
+#[cfg(test)]
+fn test_execution_mutations(
+    baseline: &TestReport,
+    candidate: &TestReport,
+) -> HarnessResult<Vec<TestMutation>> {
+    use serde_json::json;
 
-    let valid_noise_floor = Command::new(env::current_exe().map_err(harness_error)?)
+    [
+        (
+            "zero-completed",
+            "/cases/0/repetitions/0/completed_dispatches",
+            json!(0),
+        ),
+        (
+            "short-completed",
+            "/cases/0/repetitions/0/completed_dispatches",
+            json!(FIXED_MEASURED_DISPATCHES - 1),
+        ),
+        (
+            "off-thread",
+            "/cases/0/repetitions/0/on_expected_thread",
+            json!(false),
+        ),
+        (
+            "failed-output-assertion",
+            "/cases/0/repetitions/0/output_assertion_passed",
+            json!(false),
+        ),
+        (
+            "unstable-measurement-thread",
+            "/measurement_thread/unchanged_for_all_measurements",
+            json!(false),
+        ),
+        (
+            "unstable-case-totals",
+            "/cases/0/stable_count_total",
+            json!(false),
+        ),
+        (
+            "malformed-raw-allocation-info",
+            "/cases/0/repetitions/0/raw/count_current",
+            json!(1),
+        ),
+        (
+            "forged-normalized-allocation",
+            "/cases/0/repetitions/0/normalized/calls_per_dispatch",
+            json!(999.0),
+        ),
+        (
+            "malformed-repetition-index",
+            "/cases/0/repetitions/0/repetition_index",
+            json!(9),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, pointer, value)| {
+        test_candidate_mutation(name, baseline, candidate, pointer, value)
+    })
+    .collect()
+}
+
+#[cfg(test)]
+fn test_baseline_mutation(
+    name: &'static str,
+    baseline: &TestReport,
+    candidate: &TestReport,
+    pointer: &str,
+    value: TestReport,
+) -> HarnessResult<TestMutation> {
+    let mut mutated = baseline.clone();
+    set_test_pointer(&mut mutated, pointer, value)?;
+    Ok((name, mutated, candidate.clone()))
+}
+
+#[cfg(test)]
+fn test_candidate_mutation(
+    name: &'static str,
+    baseline: &TestReport,
+    candidate: &TestReport,
+    pointer: &str,
+    value: TestReport,
+) -> HarnessResult<TestMutation> {
+    let mut mutated = candidate.clone();
+    set_test_pointer(&mut mutated, pointer, value)?;
+    Ok((name, baseline.clone(), mutated))
+}
+
+#[cfg(test)]
+fn test_paired_mutation(
+    name: &'static str,
+    baseline: &TestReport,
+    candidate: &TestReport,
+    pointer: &str,
+    value: TestReport,
+) -> HarnessResult<TestMutation> {
+    let mut baseline = baseline.clone();
+    let mut candidate = candidate.clone();
+    set_test_pointer(&mut baseline, pointer, value.clone())?;
+    set_test_pointer(&mut candidate, pointer, value)?;
+    Ok((name, baseline, candidate))
+}
+
+#[cfg(test)]
+fn set_test_pointer(
+    report: &mut TestReport,
+    pointer: &str,
+    value: TestReport,
+) -> HarnessResult<()> {
+    *report
+        .pointer_mut(pointer)
+        .ok_or_else(|| HarnessError(format!("test fixture lacks pointer {pointer}")))? = value;
+    Ok(())
+}
+
+#[cfg(test)]
+fn test_noise_floor_statuses(failures: &mut Vec<String>) -> HarnessResult<()> {
+    let valid = Command::new(env::current_exe().map_err(harness_error)?)
         .args(["--validate-noise-floor", "0.25", "0.75", "1.5"])
         .output()
         .map_err(harness_error)?;
-    if !valid_noise_floor.status.success() {
+    if !valid.status.success() {
         failures.push(format!(
             "correct timing noise floor rejected: {}",
-            String::from_utf8_lossy(&valid_noise_floor.stderr)
+            String::from_utf8_lossy(&valid.stderr)
         ));
     }
-    let invalid_noise_floor = Command::new(env::current_exe().map_err(harness_error)?)
+    let invalid = Command::new(env::current_exe().map_err(harness_error)?)
         .args(["--validate-noise-floor", "0.25", "0.75", "1.0"])
-        .output()
+        .status()
         .map_err(harness_error)?;
-    if invalid_noise_floor.status.success() {
+    if invalid.success() {
         failures.push("wrong timing noise floor unexpectedly exited zero".into());
     }
-
-    if failures.is_empty() {
-        println!("dal_38_allocation regression tests passed");
-        Ok(())
-    } else {
-        Err(HarnessError(failures.join("\n")))
-    }
+    Ok(())
 }
 
 fn sha256_file(path: impl AsRef<Path>) -> HarnessResult<String> {
