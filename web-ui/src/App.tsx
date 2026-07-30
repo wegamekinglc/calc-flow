@@ -289,7 +289,12 @@ export default function App() {
     setCheckpoint(null);
   }, []);
 
-  useRunEvents(run?.id ?? null, setRun);
+  const handleRunError = useCallback((error: Error) => {
+    setRun(null);
+    setMessage(error.message);
+  }, []);
+
+  useRunEvents(run?.id ?? null, setRun, handleRunError);
 
   const flowNodes = useMemo<FlowNode[]>(
     () =>

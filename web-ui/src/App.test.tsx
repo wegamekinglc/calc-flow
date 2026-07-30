@@ -459,6 +459,86 @@ describe('Calc Flow Studio', () => {
     expect(source.close).toHaveBeenCalledOnce();
   });
 
+  it('shows contract errors instead of retaining stale run state', async () => {
+    class FakeEventSource {
+      static readonly instances: FakeEventSource[] = [];
+
+      readonly close = vi.fn();
+      private readonly listeners = new Map<string, Set<() => void>>();
+
+      constructor(readonly url: string) {
+        FakeEventSource.instances.push(this);
+      }
+
+      addEventListener(type: string, listener: () => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: () => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string) {
+        this.listeners.get(type)?.forEach((listener) => listener());
+      }
+    }
+
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith('/catalog')) return response(catalog);
+      if (path.endsWith('/projects') && !init?.method) return response([]);
+      if (path.endsWith('/projects') && init?.method === 'POST') {
+        return response(JSON.parse(String(init.body)), 201);
+      }
+      if (path.match(/\/projects\/[^/]+\/runs$/)) {
+        return response(
+          {
+            id: 'run_contract_error',
+            project_id: path.split('/').at(-2),
+            status: 'pending',
+            created_at: '2026-01-01T00:00:00Z',
+            started_at: null,
+            finished_at: null,
+            error: null,
+            result: null,
+          },
+          202,
+        );
+      }
+      if (path.endsWith('/runs/run_contract_error')) {
+        return response({
+          id: 'run_contract_error',
+          project_id: 'project_invalid',
+          status: 'unknown',
+          created_at: '2026-01-01T00:00:00Z',
+          started_at: null,
+          finished_at: null,
+          error: null,
+          result: null,
+        });
+      }
+      throw new Error(`Unexpected request ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('EventSource', FakeEventSource);
+    const { container } = render(<App />);
+
+    await screen.findByText('Build the flow');
+    fireEvent.click(screen.getByRole('button', { name: /Run preview/ }));
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    expect(container.querySelector('.status-pill')).toHaveTextContent('pending');
+
+    act(() => FakeEventSource.instances[0].emit('running'));
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      "run.status: expected 'pending' or 'running'",
+    );
+    expect(container.querySelector('.status-pill')).not.toBeInTheDocument();
+    expect(FakeEventSource.instances[0].close).toHaveBeenCalledOnce();
+  });
+
   it('blocks every persistence action when a source draft is invalid', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);

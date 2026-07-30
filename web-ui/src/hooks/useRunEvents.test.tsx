@@ -1,6 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { ApiContractError } from '../api/client';
 import type { RunResponse } from '../types';
 import { useRunEvents } from './useRunEvents';
 
@@ -62,6 +63,7 @@ afterEach(() => {
 describe('useRunEvents', () => {
   it('refreshes authoritative state and closes on a terminal event', async () => {
     const onUpdate = vi.fn();
+    const onError = vi.fn();
     vi.stubGlobal('EventSource', FakeEventSource);
     vi.stubGlobal(
       'fetch',
@@ -72,17 +74,42 @@ describe('useRunEvents', () => {
       ),
     );
 
-    renderHook(() => useRunEvents('run-1', onUpdate));
+    renderHook(() => useRunEvents('run-1', onUpdate, onError));
     const source = FakeEventSource.instances[0];
     act(() => source.emit('completed'));
 
     await waitFor(() => expect(onUpdate).toHaveBeenCalledWith(run()));
+    expect(onError).not.toHaveBeenCalled();
     expect(source.url).toBe('/api/v2/runs/run-1/events');
+    expect(source.close).toHaveBeenCalledOnce();
+  });
+
+  it('surfaces contract failures and stops tracking stale run state', async () => {
+    const onUpdate = vi.fn();
+    const onError = vi.fn();
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ ...run(), status: 'unknown' }), {
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+
+    renderHook(() => useRunEvents('run-1', onUpdate, onError));
+    const source = FakeEventSource.instances[0];
+    act(() => source.emit('running'));
+
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    expect(onError.mock.calls[0][0]).toBeInstanceOf(ApiContractError);
+    expect(onUpdate).not.toHaveBeenCalled();
     expect(source.close).toHaveBeenCalledOnce();
   });
 
   it('falls back to polling after two consecutive stream errors', async () => {
     const onUpdate = vi.fn();
+    const onError = vi.fn();
     vi.stubGlobal('EventSource', FakeEventSource);
     vi.stubGlobal(
       'fetch',
@@ -93,7 +120,7 @@ describe('useRunEvents', () => {
       ),
     );
 
-    renderHook(() => useRunEvents('run-1', onUpdate));
+    renderHook(() => useRunEvents('run-1', onUpdate, onError));
     const source = FakeEventSource.instances[0];
     act(() => {
       source.emit('error');
@@ -101,12 +128,46 @@ describe('useRunEvents', () => {
     });
 
     await waitFor(() => expect(onUpdate).toHaveBeenCalledWith(run()));
+    expect(onError).not.toHaveBeenCalled();
     expect(source.close).toHaveBeenCalledOnce();
+  });
+
+  it('silently retries a transient network failure while polling', async () => {
+    vi.useFakeTimers();
+    const onUpdate = vi.fn();
+    const onError = vi.fn();
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValue(
+        new Response(JSON.stringify(run()), {
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderHook(() => useRunEvents('run-1', onUpdate, onError));
+    const source = FakeEventSource.instances[0];
+    await act(async () => {
+      source.emit('error');
+      source.emit('error');
+      await Promise.resolve();
+    });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(onError).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+
+    expect(onUpdate).toHaveBeenCalledWith(run());
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it('removes every stream listener when the owner unmounts', () => {
     vi.stubGlobal('EventSource', FakeEventSource);
-    const { unmount } = renderHook(() => useRunEvents('run-1', vi.fn()));
+    const { unmount } = renderHook(() => useRunEvents('run-1', vi.fn(), vi.fn()));
     const source = FakeEventSource.instances[0];
 
     unmount();

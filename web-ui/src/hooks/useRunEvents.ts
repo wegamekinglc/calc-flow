@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 
-import { api } from '../api/client';
+import { api, ApiContractError } from '../api/client';
 import type { RunResponse } from '../types';
 
 const terminalStatuses = new Set<RunResponse['status']>([
@@ -22,6 +22,7 @@ const eventTypes = [
 export function useRunEvents(
   runId: string | null,
   onUpdate: (run: RunResponse) => void,
+  onError: (error: ApiContractError) => void,
 ): void {
   useEffect(() => {
     if (!runId) return;
@@ -47,7 +48,13 @@ export function useRunEvents(
           closeSource();
           return true;
         }
-      } catch {
+      } catch (error) {
+        if (!active) return true;
+        if (error instanceof ApiContractError) {
+          closeSource();
+          onError(error);
+          return true;
+        }
         // A later event or polling attempt can recover a transient request failure.
       }
       return false;
@@ -81,5 +88,5 @@ export function useRunEvents(
       source.removeEventListener('open', handleOpen);
       source.removeEventListener('error', handleError);
     };
-  }, [onUpdate, runId]);
+  }, [onError, onUpdate, runId]);
 }
