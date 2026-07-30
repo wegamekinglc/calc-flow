@@ -951,6 +951,28 @@ def _valid_worker_provider() -> dict[str, object]:
     }
 
 
+def _valid_worker_mapping_provider() -> dict[str, object]:
+    return {
+        **_valid_worker_provider(),
+        "provider_mode": "mapping",
+        "input_ports": (("input", "array"),),
+        "output_ports": (("output", "array"),),
+    }
+
+
+def _valid_worker_scalar_udf() -> dict[str, object]:
+    return {
+        "kind": "scalar_udf",
+        "provider": "test",
+        "name": "identity",
+        "version": "1",
+        "input_types": ("int64",),
+        "return_type": "int64",
+        "volatility": "immutable",
+        "function": _worker_callback,
+    }
+
+
 class _RecordingRegistrationRuntime:
     def __init__(self) -> None:
         self.inner = Runtime()
@@ -1094,6 +1116,95 @@ def test_worker_preflight_rejects_hostile_non_string_key_without_comparing_it() 
 
 
 @pytest.mark.parametrize(
+    "registration",
+    [
+        _valid_worker_provider(),
+        {
+            **_valid_worker_provider(),
+            "options_schema": None,
+        },
+        {
+            **_valid_worker_provider(),
+            "accepts_context": False,
+        },
+        {
+            **_valid_worker_provider(),
+            "options_schema": None,
+            "accepts_context": True,
+        },
+        _valid_worker_mapping_provider(),
+        {
+            **_valid_worker_mapping_provider(),
+            "options_schema": None,
+        },
+        {
+            **_valid_worker_mapping_provider(),
+            "accepts_context": False,
+        },
+        {
+            **_valid_worker_mapping_provider(),
+            "options_schema": None,
+            "accepts_context": True,
+        },
+        _valid_worker_scalar_udf(),
+    ],
+)
+def test_worker_preflight_accepts_each_exact_registration_key_shape(
+    registration: dict[str, object],
+) -> None:
+    restorations = run_manager_module._preflight_registrations((registration,))
+
+    assert len(restorations) == 1
+
+
+@pytest.mark.parametrize(
+    ("registration", "expected"),
+    [
+        (
+            {
+                **_valid_worker_provider(),
+                "provider_mode": "single",
+                "accepts_context": "yes",
+                "unexpected": object(),
+            },
+            "worker received an invalid provider_mode registration contract",
+        ),
+        (
+            {
+                **_valid_worker_mapping_provider(),
+                "accepts_context": "yes",
+                "unexpected": object(),
+            },
+            "worker received an invalid accepts_context registration contract",
+        ),
+        (
+            {
+                **_valid_worker_scalar_udf(),
+                "provider_mode": "mapping",
+                "accepts_context": False,
+                "unexpected": object(),
+            },
+            "worker received an invalid provider_mode registration contract",
+        ),
+        (
+            {
+                **_valid_worker_scalar_udf(),
+                "accepts_context": False,
+                "unexpected": object(),
+            },
+            "worker received an invalid accepts_context registration contract",
+        ),
+    ],
+)
+def test_worker_preflight_reports_field_errors_before_unknown_keys(
+    registration: dict[str, object],
+    expected: str,
+) -> None:
+    with pytest.raises(RunManagerError, match=f"^{expected}$"):
+        run_manager_module._preflight_registrations((registration,))
+
+
+@pytest.mark.parametrize(
     ("invalid_tail", "expected"),
     [
         ({}, "worker received an unsupported registration kind"),
@@ -1106,7 +1217,7 @@ def test_worker_preflight_rejects_hostile_non_string_key_without_comparing_it() 
                 **_valid_worker_provider(),
                 "provider_mode": "single",
             },
-            "worker received an invalid accepts_context registration contract",
+            "worker received an invalid provider_mode registration contract",
         ),
         (
             {
@@ -1114,6 +1225,48 @@ def test_worker_preflight_rejects_hostile_non_string_key_without_comparing_it() 
                 "accepts_context": 1,
             },
             "worker received an invalid accepts_context registration contract",
+        ),
+        (
+            {
+                **_valid_worker_provider(),
+                "unexpected": object(),
+            },
+            "worker received an invalid registration contract",
+        ),
+        (
+            {
+                **_valid_worker_provider(),
+                "input_ports": (("input", "array"),),
+            },
+            "worker received an invalid registration contract",
+        ),
+        (
+            {
+                **_valid_worker_provider(),
+                "output_ports": (("output", "array"),),
+            },
+            "worker received an invalid registration contract",
+        ),
+        (
+            {
+                **_valid_worker_mapping_provider(),
+                "unexpected": object(),
+            },
+            "worker received an invalid registration contract",
+        ),
+        (
+            {
+                **_valid_worker_scalar_udf(),
+                "unexpected": object(),
+            },
+            "worker received an invalid registration contract",
+        ),
+        (
+            {
+                **_valid_worker_scalar_udf(),
+                "options_schema": None,
+            },
+            "worker received an invalid registration contract",
         ),
         (
             {
@@ -1152,7 +1305,7 @@ def test_worker_preflight_rejects_hostile_non_string_key_without_comparing_it() 
                 "function": _worker_callback,
                 "provider_mode": "mapping",
             },
-            "worker received an invalid accepts_context registration contract",
+            "worker received an invalid provider_mode registration contract",
         ),
         (
             {

@@ -796,6 +796,7 @@ def _preflight_registrations(
 ) -> tuple[_RegistrationRestoration, ...]:
     unsupported = "worker received an unsupported registration kind"
     invalid = "worker received an invalid registration contract"
+    invalid_mode = "worker received an invalid provider_mode registration contract"
     invalid_context = "worker received an invalid accepts_context registration contract"
     restorations: list[_RegistrationRestoration] = []
     missing = object()
@@ -805,6 +806,7 @@ def _preflight_registrations(
             raise RunManagerError(unsupported)
         if any(type(key) is not str for key in dict.__iter__(registration)):
             raise RunManagerError(unsupported)
+        keys = frozenset(dict.__iter__(registration))
         kind = dict.get(registration, "kind", missing)
         if type(kind) is not str or kind not in ("provider", "scalar_udf"):
             raise RunManagerError(unsupported)
@@ -816,16 +818,17 @@ def _preflight_registrations(
             elif type(mode_value) is str and mode_value == "mapping":
                 mode = "mapping"
             else:
-                raise RunManagerError(invalid_context)
+                raise RunManagerError(invalid_mode)
 
             accepts_value = dict.get(registration, "accepts_context", False)
             if type(accepts_value) is not bool:
                 raise RunManagerError(invalid_context)
 
-            required = ("kind", "provider", "name", "version", "callback")
+            required = frozenset(("kind", "provider", "name", "version", "callback"))
             if mode == "mapping":
-                required += ("input_ports", "output_ports")
-            if any(not dict.__contains__(registration, key) for key in required):
+                required |= {"provider_mode", "input_ports", "output_ports"}
+            allowed = required | {"accepts_context", "options_schema"}
+            if not required <= keys or not keys <= allowed:
                 raise RunManagerError(invalid)
 
             has_options_schema = dict.__contains__(registration, "options_schema")
@@ -857,21 +860,23 @@ def _preflight_registrations(
             )
             continue
 
-        if dict.__contains__(registration, "provider_mode") or dict.__contains__(
-            registration, "accepts_context"
-        ):
+        if dict.__contains__(registration, "provider_mode"):
+            raise RunManagerError(invalid_mode)
+        if dict.__contains__(registration, "accepts_context"):
             raise RunManagerError(invalid_context)
-        required = (
-            "kind",
-            "provider",
-            "name",
-            "version",
-            "input_types",
-            "return_type",
-            "volatility",
-            "function",
+        required = frozenset(
+            (
+                "kind",
+                "provider",
+                "name",
+                "version",
+                "input_types",
+                "return_type",
+                "volatility",
+                "function",
+            )
         )
-        if any(not dict.__contains__(registration, key) for key in required):
+        if keys != required:
             raise RunManagerError(invalid)
         restorations.append(
             _ScalarRestoration(
