@@ -447,6 +447,10 @@ impl FailureCode {
 fn main() {
     #[cfg(test)]
     if env::args_os().len() == 1 {
+        if let Err(error) = run_regression_tests() {
+            eprintln!("dal_38_allocation regression tests: {error}");
+            std::process::exit(1);
+        }
         return;
     }
 
@@ -1416,6 +1420,355 @@ fn write_json(path: &Path, report: &AllocationReport) -> HarnessResult<()> {
     let bytes = serde_json::to_vec_pretty(report).map_err(harness_error)?;
     fs::write(path, bytes)
         .map_err(|error| HarnessError(format!("failed to write {}: {error}", path.display())))
+}
+
+#[cfg(test)]
+fn run_regression_tests() -> HarnessResult<()> {
+    use serde_json::Value;
+
+    const WARMUPS: u64 = 1_000;
+    const DISPATCHES: u64 = 10_000;
+    const REPETITIONS: usize = 10;
+
+    fn synthetic_report(role: Role) -> HarnessResult<Value> {
+        let provenance = collect_provenance(role)?;
+        let measurement_thread_id = "ThreadId(1)".to_owned();
+        let cases = build_cases()?
+            .into_iter()
+            .enumerate()
+            .map(|(case_index, case)| {
+                let raw = RawAllocationInfo {
+                    count_total: 100 + case_index as u64,
+                    count_current: 0,
+                    count_max: 1,
+                    bytes_total: 1_000 + case_index as u64,
+                    bytes_current: 0,
+                    bytes_max: 64,
+                };
+                CaseReport {
+                    name: case.name.into(),
+                    payload: case.payload.into(),
+                    workload_fingerprint: case.workload_fingerprint,
+                    plan_fingerprint: case.plan.fingerprint().into(),
+                    compiled_node_count: case.expected_node_count,
+                    compiled_operator_variants: case
+                        .logical_variants
+                        .iter()
+                        .map(|variant| (*variant).to_owned())
+                        .collect(),
+                    configured_datafusion: DATAFUSION_CONFIG,
+                    compiled_datafusion: case.plan.datafusion_config(),
+                    requires_datafusion: case.plan.requires_datafusion(),
+                    metric_assertion: metric_assertion_description(case.expected_metric_node),
+                    output_assertion: case.expectation.description().into(),
+                    warmup_dispatches: WARMUPS,
+                    requested_dispatches: DISPATCHES,
+                    repetitions_requested: REPETITIONS,
+                    repetitions: (0..REPETITIONS)
+                        .map(|repetition_index| RepetitionReport {
+                            repetition_index,
+                            requested_dispatches: DISPATCHES,
+                            completed_dispatches: DISPATCHES,
+                            measurement_thread_id: measurement_thread_id.clone(),
+                            on_expected_thread: true,
+                            raw,
+                            normalized: normalize(raw, DISPATCHES, case.expected_node_count),
+                            output_assertion_passed: true,
+                            invalid_reason: None,
+                        })
+                        .collect(),
+                    stable_count_total: true,
+                    stable_bytes_total: true,
+                    valid: true,
+                    invalid_reason: None,
+                }
+            })
+            .collect();
+        serde_json::to_value(AllocationReport {
+            schema_version: 1,
+            role,
+            valid: true,
+            invalid_reason: None,
+            product_sha: provenance.product_sha,
+            fixed_baseline_sha: FIXED_BASELINE_SHA.into(),
+            harness_commit_sha: provenance.harness_commit_sha,
+            frozen_files: provenance.frozen_files,
+            git_status_short: provenance.git_status_short,
+            toolchain: provenance.toolchain,
+            environment: provenance.environment,
+            measurement_thread: MeasurementThreadEvidence {
+                id: measurement_thread_id,
+                name: Some("main".into()),
+                current_thread_runtime: true,
+                unchanged_for_all_measurements: true,
+            },
+            cases,
+        })
+        .map_err(harness_error)
+    }
+
+    fn set_pair(
+        baseline: &mut Value,
+        candidate: &mut Value,
+        pointer: &str,
+        value: Value,
+    ) -> HarnessResult<()> {
+        *baseline.pointer_mut(pointer).ok_or_else(|| {
+            HarnessError(format!("test fixture lacks baseline pointer {pointer}"))
+        })? = value.clone();
+        *candidate.pointer_mut(pointer).ok_or_else(|| {
+            HarnessError(format!("test fixture lacks candidate pointer {pointer}"))
+        })? = value;
+        Ok(())
+    }
+
+    fn comparison_status(
+        directory: &Path,
+        name: &str,
+        baseline: &Value,
+        candidate: &Value,
+    ) -> HarnessResult<std::process::Output> {
+        let baseline_path = directory.join(format!("{name}-baseline.json"));
+        let candidate_path = directory.join(format!("{name}-candidate.json"));
+        fs::write(
+            &baseline_path,
+            serde_json::to_vec_pretty(baseline).map_err(harness_error)?,
+        )
+        .map_err(harness_error)?;
+        fs::write(
+            &candidate_path,
+            serde_json::to_vec_pretty(candidate).map_err(harness_error)?,
+        )
+        .map_err(harness_error)?;
+        Command::new(env::current_exe().map_err(harness_error)?)
+            .arg("--compare")
+            .arg(baseline_path)
+            .arg(candidate_path)
+            .output()
+            .map_err(harness_error)
+    }
+
+    fn expect_comparison_failure(
+        failures: &mut Vec<String>,
+        directory: &Path,
+        name: &str,
+        baseline: &Value,
+        candidate: &Value,
+    ) -> HarnessResult<()> {
+        let output = comparison_status(directory, name, baseline, candidate)?;
+        if output.status.success() {
+            failures.push(format!("{name}: comparison unexpectedly exited zero"));
+        }
+        Ok(())
+    }
+
+    let repo_root = PathBuf::from(command_output("git", &["rev-parse", "--show-toplevel"])?);
+    let directory = repo_root
+        .join("target/dal-38-allocation")
+        .join(format!("regression-tests-{}", std::process::id()));
+    fs::create_dir_all(&directory).map_err(harness_error)?;
+    let original_baseline = synthetic_report(Role::Baseline)?;
+    let original_candidate = synthetic_report(Role::Candidate)?;
+    let positive = comparison_status(
+        &directory,
+        "fixed-contract-positive",
+        &original_baseline,
+        &original_candidate,
+    )?;
+    let mut failures = Vec::new();
+    if !positive.status.success() {
+        failures.push(format!(
+            "fixed-contract-positive: comparison failed: {}",
+            String::from_utf8_lossy(&positive.stderr)
+        ));
+    }
+
+    let short_measurement = Command::new(env::current_exe().map_err(harness_error)?)
+        .args([
+            "--warmup-dispatches",
+            "1",
+            "--measured-dispatches",
+            "1",
+            "--repetitions",
+            "1",
+            "--cases",
+            "all-existing-data",
+            "--role",
+            "candidate",
+            "--output",
+        ])
+        .arg(directory.join("short-measurement.json"))
+        .output()
+        .map_err(harness_error)?;
+    if short_measurement.status.success() {
+        failures.push("short 1/1/1 measurement unexpectedly exited zero".into());
+    }
+
+    let mut mutations: Vec<(&str, Value, Value)> = Vec::new();
+
+    let mut baseline = original_baseline.clone();
+    let candidate = original_candidate.clone();
+    baseline["fixed_baseline_sha"] = Value::String("wrong-baseline".into());
+    mutations.push(("wrong-fixed-baseline", baseline, candidate));
+
+    let baseline = original_baseline.clone();
+    let mut candidate = original_candidate.clone();
+    candidate["cases"][4] = candidate["cases"][0].clone();
+    mutations.push(("duplicate-and-missing-case", baseline, candidate));
+
+    let mut baseline = original_baseline.clone();
+    let mut candidate = original_candidate.clone();
+    set_pair(
+        &mut baseline,
+        &mut candidate,
+        "/schema_version",
+        Value::from(99),
+    )?;
+    mutations.push(("paired-forged-schema", baseline, candidate));
+
+    let mut baseline = original_baseline.clone();
+    let mut candidate = original_candidate.clone();
+    set_pair(
+        &mut baseline,
+        &mut candidate,
+        "/harness_commit_sha",
+        Value::String("forged-harness".into()),
+    )?;
+    mutations.push(("paired-forged-harness", baseline, candidate));
+
+    let mut baseline = original_baseline.clone();
+    let mut candidate = original_candidate.clone();
+    set_pair(
+        &mut baseline,
+        &mut candidate,
+        "/frozen_files/benchmark_sha256",
+        Value::String("forged-file-hash".into()),
+    )?;
+    mutations.push(("paired-forged-file-hash", baseline, candidate));
+
+    let mut baseline = original_baseline.clone();
+    let mut candidate = original_candidate.clone();
+    set_pair(
+        &mut baseline,
+        &mut candidate,
+        "/frozen_files/allocation_counter_registry_checksum",
+        Value::String("forged-dependency-checksum".into()),
+    )?;
+    mutations.push(("paired-forged-dependency-checksum", baseline, candidate));
+
+    let mut baseline = original_baseline.clone();
+    let mut candidate = original_candidate.clone();
+    set_pair(
+        &mut baseline,
+        &mut candidate,
+        "/cases/0/warmup_dispatches",
+        Value::from(1),
+    )?;
+    mutations.push(("paired-short-report-scale", baseline, candidate));
+
+    let baseline = original_baseline.clone();
+    let mut candidate = original_candidate.clone();
+    candidate["product_sha"] = Value::String("forged-product".into());
+    mutations.push(("wrong-product-sha", baseline, candidate));
+
+    let mut baseline = original_baseline.clone();
+    let mut candidate = original_candidate.clone();
+    set_pair(
+        &mut baseline,
+        &mut candidate,
+        "/cases/0/workload_fingerprint",
+        Value::String("forged-workload".into()),
+    )?;
+    mutations.push(("paired-forged-workload-fingerprint", baseline, candidate));
+
+    let baseline = original_baseline.clone();
+    let mut candidate = original_candidate.clone();
+    candidate["cases"][0]["valid"] = Value::Bool(false);
+    candidate["cases"][0]["invalid_reason"] = Value::String("injected failure".into());
+    mutations.push(("invalid-case", baseline, candidate));
+
+    let baseline = original_baseline.clone();
+    let mut candidate = original_candidate.clone();
+    candidate["cases"][0]["repetitions"][0]["completed_dispatches"] = Value::from(0);
+    mutations.push(("zero-completed", baseline, candidate));
+
+    let baseline = original_baseline.clone();
+    let mut candidate = original_candidate.clone();
+    candidate["cases"][0]["repetitions"][0]["completed_dispatches"] = Value::from(DISPATCHES - 1);
+    mutations.push(("short-completed", baseline, candidate));
+
+    let baseline = original_baseline.clone();
+    let mut candidate = original_candidate.clone();
+    candidate["cases"][0]["repetitions"][0]["on_expected_thread"] = Value::Bool(false);
+    mutations.push(("off-thread", baseline, candidate));
+
+    let baseline = original_baseline.clone();
+    let mut candidate = original_candidate.clone();
+    candidate["cases"][0]["repetitions"][0]["output_assertion_passed"] = Value::Bool(false);
+    mutations.push(("failed-output-assertion", baseline, candidate));
+
+    let baseline = original_baseline.clone();
+    let mut candidate = original_candidate.clone();
+    candidate["measurement_thread"]["unchanged_for_all_measurements"] = Value::Bool(false);
+    mutations.push(("unstable-measurement-thread", baseline, candidate));
+
+    let baseline = original_baseline.clone();
+    let mut candidate = original_candidate.clone();
+    candidate["cases"][0]["stable_count_total"] = Value::Bool(false);
+    mutations.push(("unstable-case-totals", baseline, candidate));
+
+    let baseline = original_baseline.clone();
+    let mut candidate = original_candidate.clone();
+    candidate["cases"][0]["repetitions"][0]["raw"]["count_current"] = Value::from(1);
+    mutations.push(("malformed-raw-allocation-info", baseline, candidate));
+
+    let baseline = original_baseline.clone();
+    let mut candidate = original_candidate.clone();
+    candidate["cases"][0]["repetitions"][0]["normalized"]["calls_per_dispatch"] =
+        Value::from(999.0);
+    mutations.push(("forged-normalized-allocation", baseline, candidate));
+
+    let baseline = original_baseline.clone();
+    let mut candidate = original_candidate.clone();
+    candidate["cases"][0]["repetitions"][0]["repetition_index"] = Value::from(9);
+    mutations.push(("malformed-repetition-index", baseline, candidate));
+
+    let baseline = original_baseline.clone();
+    let mut candidate = original_candidate.clone();
+    candidate["cases"][0]["repetitions"]
+        .as_array_mut()
+        .expect("fixture repetitions are an array")
+        .pop();
+    mutations.push(("missing-repetition", baseline, candidate));
+
+    for (name, baseline, candidate) in mutations {
+        expect_comparison_failure(&mut failures, &directory, name, &baseline, &candidate)?;
+    }
+
+    let valid_noise_floor = Command::new(env::current_exe().map_err(harness_error)?)
+        .args(["--validate-noise-floor", "0.25", "0.75", "1.5"])
+        .output()
+        .map_err(harness_error)?;
+    if !valid_noise_floor.status.success() {
+        failures.push(format!(
+            "correct timing noise floor rejected: {}",
+            String::from_utf8_lossy(&valid_noise_floor.stderr)
+        ));
+    }
+    let invalid_noise_floor = Command::new(env::current_exe().map_err(harness_error)?)
+        .args(["--validate-noise-floor", "0.25", "0.75", "1.0"])
+        .output()
+        .map_err(harness_error)?;
+    if invalid_noise_floor.status.success() {
+        failures.push("wrong timing noise floor unexpectedly exited zero".into());
+    }
+
+    if failures.is_empty() {
+        println!("dal_38_allocation regression tests passed");
+        Ok(())
+    } else {
+        Err(HarnessError(failures.join("\n")))
+    }
 }
 
 fn sha256_file(path: impl AsRef<Path>) -> HarnessResult<String> {
