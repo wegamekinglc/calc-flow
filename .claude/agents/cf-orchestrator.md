@@ -106,8 +106,8 @@ For each agent in your plan, spawn it with a **self-contained prompt** that incl
 Example delegation prompt:
 
 > Implement issue #12 ("Add a tumbling-window count operator"). Read the spec at
-> `.claude/specs/tumbling-window.md` and the critique at
-> `.claude/critiques/tumbling-window.md`. Address all blocking findings. Write tests
+> `.codex/artifacts/specs/tumbling-window.md` and the critique at
+> `.codex/artifacts/critiques/tumbling-window.md`. Address all blocking findings. Write tests
 > first, run the per-surface verification matrix, and commit.
 > Branch: `feature/tumbling-window`.
 
@@ -183,8 +183,9 @@ Spawning cf-critic after spec is ready...
 
 Report:
 - Delegated 6 tasks to specialist agents
-- Expected artifacts: .claude/specs/tumbling-window.md, .claude/critiques/tumbling-window.md,
-  implementation on branch feature/tumbling-window
+- Expected artifacts: .codex/artifacts/specs/tumbling-window.md,
+  .codex/artifacts/critiques/tumbling-window.md, implementation on branch
+  feature/tumbling-window
 - Agents are working sequentially; cf-critic waits for cf-spec-writer, etc.
 - No blockers. Will report again when implementation is ready for review.
 

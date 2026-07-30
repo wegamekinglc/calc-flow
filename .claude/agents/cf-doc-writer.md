@@ -49,8 +49,9 @@ Before writing a word, establish ground truth from the code, not from the existi
 2. Read `AGENTS.md` so the doc's commands and architecture description stay consistent.
 3. Read the doc(s) you are about to edit in full and diff them mentally against the
    source: which signatures, names, paths, or behavioral claims are stale?
-4. Read any upstream artifact (`.claude/specs/`, `.claude/api-notes/`,
-   `.claude/critiques/`) so the rewrite uses the team's agreed vocabulary and does not
+4. Read any upstream artifact (`.codex/artifacts/specs/`,
+   `.codex/artifacts/api-notes/`, `.codex/artifacts/critiques/`) so the rewrite uses the
+   team's agreed vocabulary and does not
    reopen settled decisions.
 
 Report a short list of discrepancies to the user before rewriting, so the scope of the
@@ -65,8 +66,8 @@ Update the doc(s) in place to match the current source:
 - Aligned pipe tables per `.claude/rules/code-style.md`: columns aligned with pipes,
   separator-row dashes spanning each column's full width. No trailing whitespace. Every
   file ends with a newline.
-- Reuse example code from `examples/` or `.claude/api-notes/` verbatim. If an example is
-  wrong or missing, route that to `cf-api-designer` — do not fix it here.
+- Reuse example code from `examples/` or `.codex/artifacts/api-notes/` verbatim. If an
+  example is wrong or missing, route that to `cf-api-designer` — do not fix it here.
 - Update `AGENTS.md` when commands or architecture change. Reconcile duplicated
   `CLAUDE.md` guidance against authoritative `AGENTS.md`.
 - Cross-link new pages from `docs/introduction.md` or the nearest existing page.
@@ -159,17 +160,17 @@ When in doubt, ask the user. A cluttered changelog is worse than a sparse one.
 
 ## Key Conventions at a Glance
 
-| Element             | Convention                                                                |
-| ------------------- | ------------------------------------------------------------------------- |
-| Docs root           | `docs/` (cross-link from `docs/introduction.md`)                          |
-| Normative docs      | introduction, getting-started, python-api, rust-api, api-reference        |
-| Historical docs     | v1-final-api, v2-release, migration-v0.2 (leave as-is)                    |
-| Changelog           | `CHANGELOG.md` at repo root, fundamental changes only                     |
-| Versioning model    | Single current version; overwrite in place; no per-version doc trees      |
-| Tables              | aligned pipes; separator dashes span full column width                    |
-| Example code        | reuse `examples/` / `.claude/api-notes/` verbatim; do not redesign        |
-| Commit prefix       | `docs:`                                                                   |
-| PR                  | left for the user to merge; never self-merge                              |
+| Element             | Convention                                                                       |
+| ------------------- | -------------------------------------------------------------------------------- |
+| Docs root           | `docs/` (cross-link from `docs/introduction.md`)                                 |
+| Normative docs      | introduction, getting-started, python-api, rust-api, api-reference               |
+| Historical docs     | v1-final-api, v2-release, migration-v0.2 (leave as-is)                           |
+| Changelog           | `CHANGELOG.md` at repo root, fundamental changes only                            |
+| Versioning model    | Single current version; overwrite in place; no per-version doc trees             |
+| Tables              | aligned pipes; separator dashes span full column width                           |
+| Example code        | reuse `examples/` / `.codex/artifacts/api-notes/` verbatim; do not redesign      |
+| Commit prefix       | `docs:`                                                                          |
+| PR                  | left for the user to merge; never self-merge                                     |
 
 ## What Not to Do
 

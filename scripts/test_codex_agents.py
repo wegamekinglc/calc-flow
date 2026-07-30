@@ -145,6 +145,21 @@ class CodexAgentConfigTests(unittest.TestCase):
                     (ROOT / source).read_bytes(),
                 )
 
+    def test_claude_agent_guidance_omits_obsolete_artifact_namespaces(
+        self,
+    ) -> None:
+        obsolete_namespaces = (
+            ".claude/specs",
+            ".claude/api-notes",
+            ".claude/critiques",
+        )
+
+        for path in sorted((ROOT / ".claude/agents").glob("*.md")):
+            text = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.relative_to(ROOT)):
+                for namespace in obsolete_namespaces:
+                    self.assertNotIn(namespace, text)
+
     def test_agents_guide_points_to_codex_team(self) -> None:
         guide = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
 

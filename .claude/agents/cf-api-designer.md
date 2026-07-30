@@ -85,7 +85,7 @@ For an existing or proposed signature, score it on:
 
 ### Step 3: Write an API Note
 
-Write to `.claude/api-notes/<feature-slug>.md` (create the directory if needed):
+Write to `.codex/artifacts/api-notes/<feature-slug>.md` (create the directory if needed):
 
 ```markdown
 # <Feature Name> - API Note
