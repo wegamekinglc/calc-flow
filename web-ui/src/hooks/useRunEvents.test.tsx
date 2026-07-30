@@ -165,6 +165,57 @@ describe('useRunEvents', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
+  it('does not regress terminal state when an earlier refresh finishes later', async () => {
+    const onUpdate = vi.fn();
+    const onError = vi.fn();
+    const requests: Array<(response: Response) => void> = [];
+    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => {
+      requests.push(resolve);
+    }));
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderHook(() => useRunEvents('run-1', onUpdate, onError));
+    const source = FakeEventSource.instances[0];
+    act(() => {
+      source.emit('running');
+      source.emit('completed');
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      requests[1](
+        new Response(JSON.stringify(run()), {
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(onUpdate).toHaveBeenLastCalledWith(run());
+
+    await act(async () => {
+      requests[0](
+        new Response(
+          JSON.stringify({
+            ...run(),
+            status: 'running',
+            finished_at: null,
+            result: null,
+          }),
+          { headers: { 'Content-Type': 'application/json' } },
+        ),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+    expect(source.close).toHaveBeenCalledOnce();
+  });
+
   it('falls back to polling after two consecutive stream errors', async () => {
     const onUpdate = vi.fn();
     const onError = vi.fn();
