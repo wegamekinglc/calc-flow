@@ -94,14 +94,14 @@ Replace stale artifact path references in these files:
 | `.claude/agents/cf-api-designer.md`    | `.codex/artifacts/api-notes/<feature-slug>.md`                |
 | `.claude/agents/cf-critic.md`          | canonical inputs and `.codex/artifacts/critiques/` output     |
 | `.claude/agents/cf-orchestrator.md`    | canonical spec and critique paths in examples and reports     |
-| `.claude/agents/cf-implementer.md`     | canonical upstream artifact directories                      |
-| `.claude/agents/cf-reviewer.md`        | canonical upstream artifact directories                      |
-| `.claude/agents/cf-doc-writer.md`      | canonical upstream directories and API-note example source   |
+| `.claude/agents/cf-implementer.md`     | canonical upstream artifact directories                       |
+| `.claude/agents/cf-reviewer.md`        | canonical upstream artifact directories                       |
+| `.claude/agents/cf-doc-writer.md`      | canonical upstream directories and API-note example source    |
 
 The canonical path mapping is exact:
 
-| Legacy active guidance  | Canonical active guidance          |
-| ----------------------- | ---------------------------------- |
+| Legacy active guidance  | Canonical active guidance           |
+| ----------------------- | ----------------------------------- |
 | `.claude/specs/`        | `.codex/artifacts/specs/`           |
 | `.claude/api-notes/`    | `.codex/artifacts/api-notes/`       |
 | `.claude/critiques/`    | `.codex/artifacts/critiques/`       |
