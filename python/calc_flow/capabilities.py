@@ -41,13 +41,14 @@ class ProviderOption:
     def __post_init__(self) -> None:
         if type(self.name) is not str:
             raise TypeError(
-                "provider options_schema at 'fields[0].name' must contain strict "
-                f"data; found {type(self.name).__name__}"
+                "provider options_schema field name must contain strict data; "
+                f"found {type(self.name).__name__}"
             )
         if type(self.value_type) is not str:
             raise TypeError(
-                "provider options_schema at 'fields[0].value_type' must contain "
-                f"strict data; found {type(self.value_type).__name__}"
+                f"provider options_schema field {self.name!r}.value_type must "
+                "contain strict data; "
+                f"found {type(self.value_type).__name__}"
             )
         if self.value_type not in {"string", "integer", "number", "boolean"}:
             raise ValueError(
