@@ -96,6 +96,7 @@ struct MeasureOptions {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct FrozenFileEvidence {
     cargo_lock_sha256: String,
     crate_manifest_sha256: String,
@@ -105,6 +106,7 @@ struct FrozenFileEvidence {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct ToolchainEvidence {
     rustc_vv: String,
     cargo_version: String,
@@ -113,6 +115,7 @@ struct ToolchainEvidence {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct PowerSupplyEvidence {
     name: String,
     kind: String,
@@ -120,6 +123,7 @@ struct PowerSupplyEvidence {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct EnvironmentEvidence {
     uname_a: String,
     lscpu: String,
@@ -133,14 +137,17 @@ struct EnvironmentEvidence {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct MeasurementThreadEvidence {
     id: String,
+    #[serde(deserialize_with = "deserialize_required_option")]
     name: Option<String>,
     current_thread_runtime: bool,
     unchanged_for_all_measurements: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct RawAllocationInfo {
     count_total: u64,
     count_current: i64,
@@ -164,6 +171,7 @@ impl From<AllocationInfo> for RawAllocationInfo {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 #[expect(
     clippy::struct_field_names,
     reason = "the JSON contract names all four normalized fields by their denominator"
@@ -176,6 +184,7 @@ struct NormalizedAllocationInfo {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct RepetitionReport {
     repetition_index: usize,
     requested_dispatches: u64,
@@ -185,10 +194,12 @@ struct RepetitionReport {
     raw: RawAllocationInfo,
     normalized: NormalizedAllocationInfo,
     output_assertion_passed: bool,
+    #[serde(deserialize_with = "deserialize_required_option")]
     invalid_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "the evidence schema records independent assertion and stability results"
@@ -201,6 +212,7 @@ struct CaseReport {
     compiled_node_count: usize,
     compiled_operator_variants: Vec<String>,
     configured_datafusion: DataFusionConfig,
+    #[serde(deserialize_with = "deserialize_required_option")]
     compiled_datafusion: Option<DataFusionConfig>,
     requires_datafusion: bool,
     metric_assertion: String,
@@ -212,14 +224,17 @@ struct CaseReport {
     stable_count_total: bool,
     stable_bytes_total: bool,
     valid: bool,
+    #[serde(deserialize_with = "deserialize_required_option")]
     invalid_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct AllocationReport {
     schema_version: u32,
     role: Role,
     valid: bool,
+    #[serde(deserialize_with = "deserialize_required_option")]
     invalid_reason: Option<String>,
     product_sha: String,
     fixed_baseline_sha: String,
@@ -1738,6 +1753,14 @@ fn read_report(path: &Path) -> HarnessResult<AllocationReport> {
         .map_err(|error| HarnessError(format!("invalid report {}: {error}", path.display())))
 }
 
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 fn write_json(path: &Path, report: &AllocationReport) -> HarnessResult<()> {
     if let Some(parent) = path
         .parent()
@@ -2023,6 +2046,19 @@ fn test_mutations(
     invalid_case["cases"][0]["valid"] = Value::Bool(false);
     invalid_case["cases"][0]["invalid_reason"] = json!("injected failure");
     mutations.push(("invalid-case", baseline.clone(), invalid_case));
+    let mut missing_field = candidate.clone();
+    missing_field
+        .as_object_mut()
+        .expect("fixture report is an object")
+        .remove("invalid_reason");
+    mutations.push((
+        "missing-required-schema-field",
+        baseline.clone(),
+        missing_field,
+    ));
+    let mut unknown_field = candidate.clone();
+    unknown_field["attacker_controlled"] = json!("ignored");
+    mutations.push(("unknown-schema-field", baseline.clone(), unknown_field));
     Ok(mutations)
 }
 
