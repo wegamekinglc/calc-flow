@@ -1,3 +1,4 @@
+mod envelope;
 mod micro_batch;
 mod streaming;
 
