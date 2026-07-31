@@ -29,7 +29,7 @@ mod tests {
     use crate::{Batch, BatchMetadata};
 
     #[test]
-    fn runtime_envelope_data_preserves_batch_sharing() {
+    fn data_envelope_preserves_batch_sharing() {
         let record_batch = RecordBatch::try_from_iter(vec![(
             "value",
             Arc::new(Int64Array::from(vec![1, 2, 3])) as _,

@@ -19,6 +19,7 @@ use crate::{
     RunContext, UdfCatalogEntry, UdfReference, UdfRegistrySnapshot, canonical_json,
     validate_selected_udfs,
 };
+use crate::{operator::CompiledOperator, runtime::RuntimeEnvelope};
 
 #[derive(Clone, Debug, Default)]
 pub struct ExecutionOptions {
@@ -115,7 +116,7 @@ pub struct PipelineBuilder {
 #[allow(dead_code)]
 pub(crate) struct CompiledNode {
     pub(crate) node_id: String,
-    pub(crate) operator: Arc<tokio::sync::Mutex<OperatorDefinition>>,
+    pub(crate) operator: Arc<tokio::sync::Mutex<CompiledOperator>>,
     pub(crate) input_ports: Vec<Port>,
     pub(crate) output_ports: Vec<Port>,
     pub(crate) inbound: BTreeMap<String, PortEndpoint>,
@@ -623,7 +624,7 @@ impl ExecutionPlan {
                 inputs
                     .get(name)
                     .cloned()
-                    .map(|batch| (endpoint.clone(), batch))
+                    .map(|batch| (endpoint.clone(), RuntimeEnvelope::Data(batch)))
             })
             .collect::<BTreeMap<_, _>>();
         let mut produced_values = BTreeMap::new();
@@ -639,7 +640,7 @@ impl ExecutionPlan {
             node_context.check_cancelled()?;
             let started = Instant::now();
             let process_result = operator
-                .process(&operator_inputs, &node_context, runtime)
+                .process_data(&operator_inputs, &node_context, runtime)
                 .await;
             let duration_ns = nanos(started.elapsed());
             node_context.check_cancelled()?;
@@ -662,7 +663,7 @@ impl ExecutionPlan {
                 produced_values
                     .get(endpoint)
                     .cloned()
-                    .map(|batch| (name.clone(), batch))
+                    .map(|envelope| (name.clone(), envelope.into_data()))
             })
             .collect();
         Ok((outputs, timings))
@@ -1127,8 +1128,8 @@ fn row_counts(batches: &BTreeMap<String, Batch>) -> BTreeMap<String, usize> {
 
 fn gather_node_inputs(
     node: &CompiledNode,
-    produced_values: &BTreeMap<PortEndpoint, Batch>,
-    external_values: &BTreeMap<PortEndpoint, Batch>,
+    produced_values: &BTreeMap<PortEndpoint, RuntimeEnvelope>,
+    external_values: &BTreeMap<PortEndpoint, RuntimeEnvelope>,
     external_names: &BTreeMap<PortEndpoint, String>,
 ) -> Result<BTreeMap<String, Batch>> {
     let mut inputs = BTreeMap::new();
@@ -1138,7 +1139,7 @@ fn gather_node_inputs(
             port: port.name().into(),
         };
         let source = node.inbound.get(port.name());
-        let batch = source
+        let envelope = source
             .and_then(|endpoint| produced_values.get(endpoint))
             .or_else(|| {
                 source
@@ -1146,8 +1147,9 @@ fn gather_node_inputs(
                     .then(|| external_values.get(&target))
                     .flatten()
             });
-        match batch {
-            Some(batch) => {
+        match envelope {
+            Some(envelope) => {
+                let batch = envelope.data();
                 port.validate(batch, &format!("input {}.{}", node.node_id, port.name()))?;
                 inputs.insert(port.name().into(), batch.clone());
             }
@@ -1199,7 +1201,7 @@ fn missing_node_input(
 fn validate_and_store_outputs(
     node: &CompiledNode,
     outputs: &BTreeMap<String, Batch>,
-    values: &mut BTreeMap<PortEndpoint, Batch>,
+    values: &mut BTreeMap<PortEndpoint, RuntimeEnvelope>,
 ) -> Result<()> {
     let output_ports = node
         .output_ports
@@ -1235,7 +1237,7 @@ fn validate_and_store_outputs(
                 node_id: node.node_id.clone(),
                 port: name.clone(),
             },
-            batch.clone(),
+            RuntimeEnvelope::Data(batch.clone()),
         );
     }
     Ok(())
@@ -1797,7 +1799,9 @@ fn build_plan(
                 .collect();
             CompiledNode {
                 node_id: definition.node_id,
-                operator: Arc::new(tokio::sync::Mutex::new(definition.operator)),
+                operator: Arc::new(tokio::sync::Mutex::new(CompiledOperator::ExistingData(
+                    definition.operator,
+                ))),
                 input_ports,
                 output_ports,
                 inbound: node_inbound,
@@ -2195,5 +2199,82 @@ mod lifecycle_tests {
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(restores.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod data_envelope_tests {
+    use std::{collections::BTreeMap, sync::Arc};
+
+    use datafusion::arrow::{
+        array::{Array, Int64Array},
+        record_batch::RecordBatch,
+    };
+
+    use super::{PipelineBuilder, PortEndpoint, gather_node_inputs, validate_and_store_outputs};
+    use crate::runtime::RuntimeEnvelope;
+    use crate::{Batch, BatchMetadata, ExpressionOperator, UdfRegistry};
+
+    #[test]
+    fn data_endpoint_slots_preserve_envelope_payload_identity() {
+        let plan = PipelineBuilder::new("data envelope slots")
+            .unwrap()
+            .add_node(
+                "expression",
+                Box::new(
+                    ExpressionOperator::new(
+                        "expression",
+                        "plus_one = value + 1",
+                        Vec::new(),
+                        None,
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap()
+            .compile(&UdfRegistry::new().snapshot())
+            .unwrap();
+        let node = &plan.nodes[0];
+        let input_endpoint = plan.external_inputs["input"].clone();
+        let record_batch = RecordBatch::try_from_iter(vec![(
+            "value",
+            Arc::new(Int64Array::from(vec![1, 2, 3])) as Arc<dyn Array>,
+        )])
+        .unwrap();
+        let batch = Batch::table(vec![record_batch], BatchMetadata::default()).unwrap();
+        let schema = Arc::clone(batch.table_payload().unwrap().schema());
+        let external_names = BTreeMap::from([(input_endpoint.clone(), "input".to_owned())]);
+        let external_values =
+            BTreeMap::from([(input_endpoint, RuntimeEnvelope::Data(batch.clone()))]);
+
+        let inputs =
+            gather_node_inputs(node, &BTreeMap::new(), &external_values, &external_names).unwrap();
+
+        assert!(Arc::ptr_eq(
+            inputs["input"].table_payload().unwrap().schema(),
+            &schema
+        ));
+
+        let mut produced_values = BTreeMap::new();
+        validate_and_store_outputs(
+            node,
+            &BTreeMap::from([("output".to_owned(), batch)]),
+            &mut produced_values,
+        )
+        .unwrap();
+        let output_endpoint = PortEndpoint {
+            node_id: "expression".to_owned(),
+            port: "output".to_owned(),
+        };
+
+        assert!(Arc::ptr_eq(
+            produced_values[&output_endpoint]
+                .data()
+                .table_payload()
+                .unwrap()
+                .schema(),
+            &schema
+        ));
     }
 }

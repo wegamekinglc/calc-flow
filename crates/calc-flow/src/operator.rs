@@ -558,6 +558,17 @@ pub(crate) enum CompiledOperator {
 }
 
 impl CompiledOperator {
+    pub(crate) async fn process_data(
+        &mut self,
+        inputs: &BTreeMap<String, Batch>,
+        run: &RunContext,
+        datafusion: Option<&DataFusionRuntime>,
+    ) -> Result<BTreeMap<String, Batch>> {
+        match self {
+            Self::ExistingData(operator) => operator.process(inputs, run, datafusion).await,
+        }
+    }
+
     pub(crate) fn snapshot(&self) -> Result<Value> {
         match self {
             Self::ExistingData(operator) => operator.snapshot(),

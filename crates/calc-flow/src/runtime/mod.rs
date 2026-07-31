@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 use crate::{CalcFlowError, Result, RunResult, Sink};
 
+pub(crate) use envelope::RuntimeEnvelope;
 pub use micro_batch::MicroBatchRunner;
 pub use streaming::StreamingRunner;
 
