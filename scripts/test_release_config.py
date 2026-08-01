@@ -121,7 +121,7 @@ class ReleaseConfigTests(unittest.TestCase):
             rust_core.index(rustdoc),
         )
 
-    def test_rust_core_ci_isolates_frozen_dal_38_harness(self) -> None:
+    def test_rust_core_ci_isolates_frozen_allocation_harness(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         rust_core = workflow.split("  rust-core:\n", 1)[1].split(
             "  rust-supply-chain:\n", 1
@@ -137,35 +137,40 @@ class ReleaseConfigTests(unittest.TestCase):
         )
 
         self.assertIn("fetch-depth: 0", rust_core)
-        self.assertIn(f'DAL38_HARNESS_SHA: "{harness_sha}"', rust_core)
-        self.assertIn("id: dal38_harness", rust_core)
+        self.assertNotIn("DAL38_", rust_core)
+        self.assertNotIn("id: dal38_harness", rust_core)
+        self.assertIn(f'FROZEN_ALLOCATION_HARNESS_SHA: "{harness_sha}"', rust_core)
+        self.assertIn("id: frozen_allocation_harness", rust_core)
         self.assertIn(
-            'git merge-base --is-ancestor "$DAL38_HARNESS_SHA" HEAD',
+            'git merge-base --is-ancestor "$FROZEN_ALLOCATION_HARNESS_SHA" HEAD',
             rust_core,
         )
         self.assertIn(
-            "if: steps.dal38_harness.outputs.enabled == 'true'",
+            "if: steps.frozen_allocation_harness.outputs.enabled == 'true'",
             rust_core,
         )
         self.assertIn(product_tests, rust_core)
         self.assertIn(ordinary_bench, rust_core)
         self.assertIn(
-            'git worktree add --detach "$DAL38_HARNESS_WORKTREE" "$DAL38_HARNESS_SHA"',
+            'git worktree add --detach "$FROZEN_ALLOCATION_HARNESS_WORKTREE" '
+            '"$FROZEN_ALLOCATION_HARNESS_SHA"',
             rust_core,
         )
         self.assertIn(harness_self_test, rust_core)
         self.assertIn(
-            "github.event.pull_request.base.sha == env.DAL38_HARNESS_SHA",
+            "github.event.pull_request.base.sha == env.FROZEN_ALLOCATION_HARNESS_SHA",
             rust_core,
         )
         self.assertIn(
-            "DAL38_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}",
+            "FROZEN_ALLOCATION_CANDIDATE_SHA: "
+            "${{ github.event.pull_request.head.sha }}",
             rust_core,
         )
         self.assertIn("--role baseline", rust_core)
         self.assertIn("--role candidate", rust_core)
         self.assertIn(
-            '--compare "$DAL38_BASELINE_REPORT" "$DAL38_CANDIDATE_REPORT"',
+            '--compare "$FROZEN_ALLOCATION_BASELINE_REPORT" '
+            '"$FROZEN_ALLOCATION_CANDIDATE_REPORT"',
             rust_core,
         )
         self.assertLess(rust_core.index(product_tests), rust_core.index(ordinary_bench))
