@@ -145,6 +145,26 @@ fn single_node_plan(name: &str) -> ExecutionPlan {
         .unwrap()
 }
 
+fn resolve_signal_allocation_output(output: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    let output = output.as_ref();
+    if output.is_absolute() {
+        return output.to_path_buf();
+    }
+    assert!(
+        !output
+            .components()
+            .any(|component| component == std::path::Component::ParentDir),
+        "relative signal allocation output cannot contain parent components"
+    );
+
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    if output.starts_with("target") {
+        workspace.join(output)
+    } else {
+        workspace.join("target").join(output)
+    }
+}
+
 fn write_signal_allocation_reference(kind: SignalAllocationKind) {
     let output = std::env::var_os("SIGNAL_ALLOCATION_OUTPUT");
     let (warmup_dispatches, measured_dispatches) =
@@ -191,14 +211,7 @@ fn write_signal_allocation_reference(kind: SignalAllocationKind) {
                 "bytes_max": allocation.bytes_max,
             },
         });
-        let output = std::path::PathBuf::from(output);
-        let output = if output.is_absolute() {
-            output
-        } else {
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../..")
-                .join(output)
-        };
+        let output = resolve_signal_allocation_output(output);
         std::fs::create_dir_all(output.parent().unwrap()).unwrap();
         std::fs::write(output, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     }
@@ -312,4 +325,25 @@ fn dal_38_signal_aware_data_allocation_reference() {
 #[test]
 fn dal_38_signal_aware_control_allocation_reference() {
     write_signal_allocation_reference(SignalAllocationKind::Control);
+}
+
+#[test]
+fn signal_allocation_relative_output_stays_under_workspace_target() {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let expected = workspace.join("target/signal-allocation/reference.json");
+
+    assert_eq!(
+        resolve_signal_allocation_output("signal-allocation/reference.json"),
+        expected
+    );
+    assert_eq!(
+        resolve_signal_allocation_output("target/signal-allocation/reference.json"),
+        expected
+    );
+}
+
+#[test]
+#[should_panic(expected = "relative signal allocation output cannot contain parent components")]
+fn signal_allocation_relative_output_rejects_parent_components() {
+    resolve_signal_allocation_output("../reference.json");
 }
