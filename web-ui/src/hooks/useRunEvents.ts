@@ -55,7 +55,7 @@ export function useRunEvents(
         if (!active) return true;
         onUpdate(current);
         if (terminalStatuses.has(current.status)) {
-          closeSource();
+          stop();
           return true;
         }
       } catch (error) {
