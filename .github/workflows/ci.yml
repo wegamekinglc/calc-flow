@@ -42,6 +42,26 @@ jobs:
           path: coverage.xml
           if-no-files-found: error
           retention-days: 14
+  windows-process-tree:
+    name: Windows process-tree cleanup
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - name: Report Windows runner
+        shell: pwsh
+        run: |
+          Write-Output "WINDOWS_RUNNER_EVIDENCE runner_os=$env:RUNNER_OS image_os=$env:ImageOS image_version=$env:ImageVersion"
+      - name: Run Windows process-tree cleanup test
+        run: >-
+          python -W error::ResourceWarning -m unittest -v
+          scripts.test_run_rust_tests.RustTestHarnessTests.test_timeout_cleans_up_the_test_binary_process_tree_on_windows
   frontend:
     name: Studio build + tests
     runs-on: ubuntu-latest
@@ -155,7 +175,7 @@ jobs:
           enable-cache: true
       - name: Build wheel and source distribution
         run: |
-          python -m unittest scripts.test_inspect_wheel scripts.test_release_config
+          python -m unittest scripts.test_run_rust_tests scripts.test_inspect_wheel scripts.test_release_config
           uv build
           python scripts/inspect_wheel.py core-wheel dist/calc_flow-*.whl
           python scripts/inspect_wheel.py sdist dist/calc_flow-*.tar.gz
@@ -296,7 +316,8 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Run Rust tests
-        run: cargo test --workspace --all-targets --all-features
+        timeout-minutes: 30
+        run: python3.13 scripts/run_rust_tests.py --python-stress-runs 3
       - name: Install Rust coverage tool
         run: cargo install cargo-llvm-cov --version 0.8.7 --locked
       - name: Reclaim Rust build disk before coverage

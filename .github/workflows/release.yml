@@ -72,7 +72,7 @@ jobs:
       - name: Inspect wheel contents
         shell: bash
         run: |
-          python -m unittest scripts.test_inspect_wheel scripts.test_release_config
+          python -m unittest scripts.test_run_rust_tests scripts.test_inspect_wheel scripts.test_release_config
           python scripts/inspect_wheel.py core-wheel dist/*.whl
       - name: Smoke native wheel
         if: matrix.smoke

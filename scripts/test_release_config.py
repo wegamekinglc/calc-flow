@@ -75,6 +75,9 @@ class ReleaseConfigTests(unittest.TestCase):
         rust_core = workflow.split("  rust-core:\n", 1)[1].split(
             "  rust-supply-chain:\n", 1
         )[0]
+        rust_test_command = (
+            "python3.13 scripts/run_rust_tests.py --python-stress-runs 3"
+        )
 
         setup_python = (
             "uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"
@@ -96,8 +99,13 @@ class ReleaseConfigTests(unittest.TestCase):
         )
         self.assertLess(
             rust_core.index(install_test_dependencies),
-            rust_core.index("cargo test --workspace --all-targets --all-features"),
+            rust_core.index(rust_test_command),
         )
+        rust_test_step = rust_core.split("      - name: Run Rust tests\n", 1)[1].split(
+            "      - name:", 1
+        )[0]
+        self.assertIn("timeout-minutes: 30", rust_test_step)
+        self.assertIn(f"run: {rust_test_command}", rust_test_step)
 
     def test_rust_core_ci_reclaims_disk_around_coverage(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
@@ -105,7 +113,7 @@ class ReleaseConfigTests(unittest.TestCase):
             "  rust-supply-chain:\n", 1
         )[0]
 
-        rust_tests = "cargo test --workspace --all-targets --all-features"
+        rust_tests = "python3.13 scripts/run_rust_tests.py --python-stress-runs 3"
         clean_tests = "cargo clean"
         coverage = "cargo llvm-cov --workspace --all-features --fail-under-lines 90"
         clean_coverage = "cargo llvm-cov clean --workspace"
@@ -123,6 +131,42 @@ class ReleaseConfigTests(unittest.TestCase):
             rust_core.index(clean_coverage),
             rust_core.index(rustdoc),
         )
+
+    def test_ci_and_release_execute_rust_test_harness_unit_tests(self) -> None:
+        command = (
+            "python -m unittest scripts.test_run_rust_tests "
+            "scripts.test_inspect_wheel scripts.test_release_config"
+        )
+        windows_test = (
+            "scripts.test_run_rust_tests.RustTestHarnessTests."
+            "test_timeout_cleans_up_the_test_binary_process_tree_on_windows"
+        )
+
+        for path in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+            with self.subTest(path=path):
+                workflow = (ROOT / path).read_text()
+                self.assertIn(command, workflow)
+
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        runner_tests = (ROOT / "scripts/test_run_rust_tests.py").read_text()
+        self.assertIn("WINDOWS_PROCESS_TREE_EVIDENCE", runner_tests)
+        windows_job = ci.split("  windows-process-tree:\n", 1)[1].split(
+            "  frontend:\n", 1
+        )[0]
+        self.assertIn("if: github.event_name == 'pull_request'", windows_job)
+        self.assertIn("runs-on: windows-latest", windows_job)
+        self.assertIn("timeout-minutes: 10", windows_job)
+        self.assertIn("WINDOWS_RUNNER_EVIDENCE", windows_job)
+        self.assertIn(windows_test, windows_job)
+
+    def test_agents_rust_runner_uses_synced_python_dependencies(self) -> None:
+        agents = (ROOT / "AGENTS.md").read_text()
+        sync = "uv sync --extra dev"
+        runner = "uv run python scripts/run_rust_tests.py"
+
+        self.assertIn("NumPy and PyArrow", agents)
+        self.assertIn(runner, agents)
+        self.assertLess(agents.index(sync), agents.index(runner))
 
     def test_benchmark_smoke_runs_every_supported_scale(self) -> None:
         support_tree = ast.parse((ROOT / "benchmarks/support.py").read_text())
