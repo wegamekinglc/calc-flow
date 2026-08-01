@@ -27,7 +27,8 @@ use crate::{
 mod control;
 
 use control::{
-    ControlIngress, ControlRoute, ControlRouteStatus, PendingControlStep, derive_control_routes,
+    ControlIngress, ControlRoute, ControlRouteStatus, ControlRouteStep, PendingControlStep,
+    derive_control_routes,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -843,91 +844,144 @@ impl PlanTransaction<'_> {
         let context = RunContext::new(options.settings, options.deadline, options.cancellation)?;
         let mut pending = BTreeMap::from([(origin.step_index, origin)]);
         while let Some((step_index, pending_step)) = pending.pop_first() {
-            if step_index != pending_step.step_index {
-                return Err(CalcFlowError::Internal {
-                    message: "control scheduler key does not match its pending step".into(),
-                });
-            }
-            let shared = match pending_step.envelope {
-                RuntimeEnvelope::Control(shared) => shared,
-                RuntimeEnvelope::Data(_) => {
-                    return Err(CalcFlowError::Internal {
-                        message: "data envelope reached the control scheduler".into(),
-                    });
-                }
-            };
-            let step = route
-                .steps
-                .get(step_index)
+            let shared = Self::pending_control_marker(step_index, pending_step)?;
+            let (step, node) = self.control_target(route, step_index)?;
+            Self::invoke_control_handler(step, node, &shared, &context, observe).await?;
+            Self::queue_control_successors(route, step_index, step, &shared, &mut pending)?;
+        }
+        Ok(())
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the M2 control entry is intentionally crate-private until a later caller"
+    )]
+    fn pending_control_marker(
+        scheduler_step_index: usize,
+        pending: PendingControlStep,
+    ) -> Result<SharedControlMarker> {
+        if scheduler_step_index != pending.step_index {
+            return Err(CalcFlowError::Internal {
+                message: "control scheduler key does not match its pending step".into(),
+            });
+        }
+        match pending.envelope {
+            RuntimeEnvelope::Control(shared) => Ok(shared),
+            RuntimeEnvelope::Data(_) => Err(CalcFlowError::Internal {
+                message: "data envelope reached the control scheduler".into(),
+            }),
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the M2 control entry is intentionally crate-private until a later caller"
+    )]
+    fn control_target<'route>(
+        &self,
+        route: &'route ControlRoute,
+        step_index: usize,
+    ) -> Result<(&'route ControlRouteStep, &CompiledNode)> {
+        let step = route
+            .steps
+            .get(step_index)
+            .ok_or_else(|| CalcFlowError::Internal {
+                message: format!("control route has no step {step_index}"),
+            })?;
+        let node =
+            self.plan
+                .nodes
+                .get(step.target_node_index)
                 .ok_or_else(|| CalcFlowError::Internal {
-                    message: format!("control route has no step {step_index}"),
-                })?;
-            let node = self.plan.nodes.get(step.target_node_index).ok_or_else(|| {
-                CalcFlowError::Internal {
                     message: format!(
                         "control step {step_index} targets missing node index {}",
                         step.target_node_index
                     ),
-                }
-            })?;
-            if node.node_id != step.target.node_id {
+                })?;
+        if node.node_id != step.target.node_id {
+            return Err(CalcFlowError::Internal {
+                message: format!(
+                    "control step {step_index} target {:?} does not match node {:?}",
+                    step.target, node.node_id
+                ),
+            });
+        }
+        Ok((step, node))
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the M2 control entry is intentionally crate-private until a later caller"
+    )]
+    async fn invoke_control_handler<F>(
+        step: &ControlRouteStep,
+        node: &CompiledNode,
+        shared: &SharedControlMarker,
+        context: &RunContext,
+        observe: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(&PortEndpoint, &ControlIngress, &SharedControlMarker),
+    {
+        let node_context = context.for_node(&node.node_id)?;
+        node_context.check_cancelled()?;
+        observe(&step.target, &step.ingress, shared);
+        let mut operator = node.operator.lock().await;
+        let handler_result = match operator.control_handling() {
+            ControlHandling::Transparent => Ok(()),
+            ControlHandling::Aware(handler) => {
+                handler.handle_control(shared.marker(), &node_context).await
+            }
+        };
+        let post_handler = node_context.check_cancelled();
+        drop(operator);
+        post_handler?;
+        match handler_result {
+            Ok(()) => Ok(()),
+            Err(error @ CalcFlowError::Cancelled { .. }) => Err(error),
+            Err(error) => Err(CalcFlowError::Operator {
+                node_id: node.node_id.clone(),
+                message: format!(
+                    "control {:?} occurrence {:?} handler failed: {error}; ingress {:?}",
+                    shared.marker().kind(),
+                    shared.marker().occurrence(),
+                    step.ingress
+                ),
+            }),
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the M2 control entry is intentionally crate-private until a later caller"
+    )]
+    fn queue_control_successors(
+        route: &ControlRoute,
+        step_index: usize,
+        step: &ControlRouteStep,
+        shared: &SharedControlMarker,
+        pending: &mut BTreeMap<usize, PendingControlStep>,
+    ) -> Result<()> {
+        for successor in &step.successor_step_indices {
+            if route.steps.get(*successor).is_none() {
                 return Err(CalcFlowError::Internal {
                     message: format!(
-                        "control step {step_index} target {:?} does not match node {:?}",
-                        step.target, node.node_id
-                    ),
-                });
-            }
-
-            let node_context = context.for_node(&node.node_id)?;
-            node_context.check_cancelled()?;
-            observe(&step.target, &step.ingress, &shared);
-            let mut operator = node.operator.lock().await;
-            let handler_result = match operator.control_handling() {
-                ControlHandling::Transparent => Ok(()),
-                ControlHandling::Aware(handler) => {
-                    handler.handle_control(shared.marker(), &node_context).await
-                }
-            };
-            let post_handler = node_context.check_cancelled();
-            drop(operator);
-            post_handler?;
-            if let Err(error) = handler_result {
-                if matches!(error, CalcFlowError::Cancelled { .. }) {
-                    return Err(error);
-                }
-                return Err(CalcFlowError::Operator {
-                    node_id: node.node_id.clone(),
-                    message: format!(
-                        "control {:?} occurrence {:?} handler failed: {error}; ingress {:?}",
-                        shared.marker().kind(),
-                        shared.marker().occurrence(),
+                        "control step {step_index} has missing successor {successor} from ingress {:?}",
                         step.ingress
                     ),
                 });
             }
-
-            for successor in &step.successor_step_indices {
-                if route.steps.get(*successor).is_none() {
-                    return Err(CalcFlowError::Internal {
-                        message: format!(
-                            "control step {step_index} has missing successor {successor} from ingress {:?}",
-                            step.ingress
-                        ),
-                    });
-                }
-                let successor_step = PendingControlStep {
-                    step_index: *successor,
-                    envelope: RuntimeEnvelope::Control(SharedControlMarker::clone(&shared)),
-                };
-                if pending.insert(*successor, successor_step).is_some() {
-                    return Err(CalcFlowError::Internal {
-                        message: format!(
-                            "control step {successor} became pending more than once from ingress {:?}",
-                            step.ingress
-                        ),
-                    });
-                }
+            let successor_step = PendingControlStep {
+                step_index: *successor,
+                envelope: RuntimeEnvelope::Control(SharedControlMarker::clone(shared)),
+            };
+            if pending.insert(*successor, successor_step).is_some() {
+                return Err(CalcFlowError::Internal {
+                    message: format!(
+                        "control step {successor} became pending more than once from ingress {:?}",
+                        step.ingress
+                    ),
+                });
             }
         }
         Ok(())
