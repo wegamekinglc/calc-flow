@@ -137,11 +137,27 @@ class ReleaseConfigTests(unittest.TestCase):
             "python -m unittest scripts.test_run_rust_tests "
             "scripts.test_inspect_wheel scripts.test_release_config"
         )
+        windows_test = (
+            "scripts.test_run_rust_tests.RustTestHarnessTests."
+            "test_timeout_cleans_up_the_test_binary_process_tree_on_windows"
+        )
 
         for path in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
             with self.subTest(path=path):
                 workflow = (ROOT / path).read_text()
                 self.assertIn(command, workflow)
+
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        runner_tests = (ROOT / "scripts/test_run_rust_tests.py").read_text()
+        self.assertIn("WINDOWS_PROCESS_TREE_EVIDENCE", runner_tests)
+        windows_job = ci.split("  windows-process-tree:\n", 1)[1].split(
+            "  frontend:\n", 1
+        )[0]
+        self.assertIn("if: github.event_name == 'pull_request'", windows_job)
+        self.assertIn("runs-on: windows-latest", windows_job)
+        self.assertIn("timeout-minutes: 10", windows_job)
+        self.assertIn("WINDOWS_RUNNER_EVIDENCE", windows_job)
+        self.assertIn(windows_test, windows_job)
 
     def test_agents_rust_runner_uses_synced_python_dependencies(self) -> None:
         agents = (ROOT / "AGENTS.md").read_text()

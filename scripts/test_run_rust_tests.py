@@ -365,8 +365,17 @@ if arguments[:3] == ["test", "-p", "calc-flow-python"]:
             self.assertEqual(result.returncode, 124, result.stderr)
             self.assertTrue(parent_pid_file.exists())
             self.assertTrue(child_pid_file.exists())
-            self.assertTrue(_wait_until_stopped(int(parent_pid_file.read_text())))
-            self.assertTrue(_wait_until_stopped(int(child_pid_file.read_text())))
+            parent_stopped = _wait_until_stopped(int(parent_pid_file.read_text()))
+            child_stopped = _wait_until_stopped(int(child_pid_file.read_text()))
+            print(
+                "WINDOWS_PROCESS_TREE_EVIDENCE "
+                f"exit_code={result.returncode} "
+                f"parent_stopped={str(parent_stopped).lower()} "
+                f"child_stopped={str(child_stopped).lower()}",
+                flush=True,
+            )
+            self.assertTrue(parent_stopped)
+            self.assertTrue(child_stopped)
 
     @unittest.skipUnless(os.name == "posix", "requires POSIX process groups")
     def test_terminating_harness_cleans_up_the_active_test_process_tree(self) -> None:
