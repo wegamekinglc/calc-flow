@@ -335,7 +335,9 @@ centered = plan.execute({"input": batch}).outputs["output"].array
 
 Owned arrays are read-only. The bounded expression evaluator allows arithmetic,
 reductions, transpose, and reshape; it rejects Python execution features and
-backend changes. `register_jax` provides the same explicit provider boundary.
+backend changes. Every node result, including broadcast binary operations, is
+capped at 10,000,000 elements so a single expression cannot allocate an
+unbounded output. `register_jax` provides the same explicit provider boundary.
 The full version is [`examples/06_numpy_array.py`](../examples/06_numpy_array.py).
 
 ### Table-array matrix multiplication

@@ -22,6 +22,7 @@ _MAX_POWER_EXPONENT_MAGNITUDE = 64
 _MAX_RESHAPE_RANK = 16
 _MAX_RESHAPE_DIMENSION = 1_000_000
 _MAX_RESHAPE_ELEMENTS = 10_000_000
+_MAX_OPERATION_ELEMENTS = 10_000_000
 _TABLE_MATMUL_INPUT_PORTS = (("table", "table"), ("weights", "array"))
 _TABLE_MATMUL_OUTPUT_PORTS = (("output", "array"),)
 _EXPRESSION_OPTIONS_SCHEMA = ProviderOptionsSchema(
@@ -195,8 +196,10 @@ def _evaluate(
     validate_result: Callable[[object], None] | None = None,
 ) -> object:
     if isinstance(node, ast.Name):
-        result = value
-    elif isinstance(node, ast.Constant):
+        # The input batch is validated at construction; only operation
+        # results pass through validate_result.
+        return value
+    if isinstance(node, ast.Constant):
         result = node.value
     elif isinstance(node, ast.BinOp):
         function = _ALLOWED_BINARY[type(node.op)]
@@ -499,6 +502,14 @@ def _validate_python_operation_scalar(value: object) -> bool:
     return type(value) in (float, complex)
 
 
+def _validate_operation_output_size(value: object) -> None:
+    shape = tuple(int(dimension) for dimension in getattr(value, "shape", ()))
+    if math.prod(shape) > _MAX_OPERATION_ELEMENTS:
+        raise _array_error(
+            f"operation output limit is {_MAX_OPERATION_ELEMENTS} elements"
+        )
+
+
 def _validate_numpy_operation_result(value: object) -> None:
     import numpy as np
 
@@ -506,6 +517,7 @@ def _validate_numpy_operation_result(value: object) -> None:
         return
     if type(value) is np.ndarray or isinstance(value, np.generic):
         _validate_numpy_dtype(value.dtype)
+        _validate_operation_output_size(value)
         return
     raise TypeError("NumPy provider operations must produce arrays or numeric scalars")
 
@@ -513,7 +525,10 @@ def _validate_numpy_operation_result(value: object) -> None:
 def _validate_jax_operation_result(value: object) -> None:
     import jax
 
-    if _validate_python_operation_scalar(value) or isinstance(value, jax.Array):
+    if _validate_python_operation_scalar(value):
+        return
+    if isinstance(value, jax.Array):
+        _validate_operation_output_size(value)
         return
     raise TypeError("JAX provider operations must produce arrays or numeric scalars")
 
