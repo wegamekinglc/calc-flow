@@ -1,0 +1,32 @@
+---
+# Codacy configuration: https://docs.codacy.com/repositories-configure/codacy-configuration-file/
+# Tools are enabled/disabled on the Codacy "Code patterns" page; this file
+# only keeps generated, vendored, and non-source content out of the analysis.
+# When this file exists, the "Ignored files" settings on the Codacy UI do not
+# apply and every exclusion must live here.
+exclude_paths:
+  # Build artifacts and local environments
+  - ".venv/**"
+  - ".worktrees/**"
+  - "target/**"
+  - "dist/**"
+  - "web-ui/node_modules/**"
+  - "web-ui/dist/**"
+  - "web-ui/test-results/**"
+  # Test caches and coverage output
+  - ".benchmarks/**"
+  - ".hypothesis/**"
+  - ".pytest_cache/**"
+  - ".ruff_cache/**"
+  - "**/__pycache__/**"
+  # Local runtime state directories
+  - ".calc-flow-checkpoints/**"
+  - ".calc-flow-projects/**"
+  - ".calc-flow-web/**"
+  # Historical parity evidence, kept verbatim on purpose
+  - "tests/fixtures/**"
+  # Agent tooling and internal planning notes
+  - ".claude/**"
+  - ".codex/**"
+  - ".superpowers/**"
+  - "docs/superpowers/**"
