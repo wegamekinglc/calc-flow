@@ -13,7 +13,7 @@ React application. See `docs/introduction.md`.
 # Rust core
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --all-features
+python3.13 scripts/run_rust_tests.py
 cargo llvm-cov --workspace --all-features --fail-under-lines 90
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 
@@ -47,6 +47,13 @@ python -m unittest scripts.test_inspect_wheel scripts.test_release_config
 Keep Cargo, Maturin, uv, coverage, and release outputs under the repository
 `target/` tree when working from a constrained mirror. Never leave a generated
 `python/calc_flow/_native*.so` in source.
+
+`scripts/run_rust_tests.py` runs the core targets normally, then compiles the
+`calc_flow_python` lib test before starting its runtime-only timeout. The
+compiled PyO3 test runs serially with a five-minute limit. Pass
+`--python-stress-runs N` to repeat that isolated PyO3 test process. If the
+test binary reports that `libpython3.13.so.1.0` is missing, add the directory
+containing that shared library to `LD_LIBRARY_PATH` before running the script.
 
 Run informational benchmarks with:
 

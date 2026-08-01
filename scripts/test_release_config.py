@@ -75,6 +75,9 @@ class ReleaseConfigTests(unittest.TestCase):
         rust_core = workflow.split("  rust-core:\n", 1)[1].split(
             "  rust-supply-chain:\n", 1
         )[0]
+        rust_test_command = (
+            "python3.13 scripts/run_rust_tests.py --python-stress-runs 3"
+        )
 
         setup_python = (
             "uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"
@@ -96,8 +99,13 @@ class ReleaseConfigTests(unittest.TestCase):
         )
         self.assertLess(
             rust_core.index(install_test_dependencies),
-            rust_core.index("cargo test --workspace --all-targets --all-features"),
+            rust_core.index(rust_test_command),
         )
+        rust_test_step = rust_core.split("      - name: Run Rust tests\n", 1)[1].split(
+            "      - name:", 1
+        )[0]
+        self.assertIn("timeout-minutes: 30", rust_test_step)
+        self.assertIn(f"run: {rust_test_command}", rust_test_step)
 
     def test_rust_core_ci_reclaims_disk_around_coverage(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
@@ -105,7 +113,7 @@ class ReleaseConfigTests(unittest.TestCase):
             "  rust-supply-chain:\n", 1
         )[0]
 
-        rust_tests = "cargo test --workspace --all-targets --all-features"
+        rust_tests = "python3.13 scripts/run_rust_tests.py --python-stress-runs 3"
         clean_tests = "cargo clean"
         coverage = "cargo llvm-cov --workspace --all-features --fail-under-lines 90"
         clean_coverage = "cargo llvm-cov clean --workspace"
