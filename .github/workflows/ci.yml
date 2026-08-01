@@ -9,7 +9,9 @@ permissions:
   contents: read
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel default-branch runs: a cancelled latest run renders the
+  # README CI badge as failing even when every job was healthy.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
 jobs:
   lint-and-test:
     name: Ruff + unit tests
