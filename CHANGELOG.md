@@ -26,8 +26,8 @@ engine or Studio capabilities.
   native result at handler entry. Existing two-argument providers remain
   compatible, while `accepts_context=True` opts into a frozen native
   `ProviderContext`; the public Python API does not expose the native
-  cancellation token. Project, checkpoint, capability, and Studio REST
-  schemas remain unchanged.
+  cancellation token. These execution-options changes leave project and
+  checkpoint formats unchanged.
 - Add versioned Studio runtime and preview-worker discovery at
   `GET /api/v2/capabilities`, and model validation, run-state, and table/array
   result responses as closed unions. This is an intentional generated
