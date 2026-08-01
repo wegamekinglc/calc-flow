@@ -1628,18 +1628,21 @@ def test_inferred_reshape_accepts_exact_dimension_and_element_limits(
 
 
 @pytest.mark.parametrize("backend", ["numpy", "jax"])
+@pytest.mark.parametrize(
+    ("elements", "expression"),
+    [
+        (3163, "reshape(x, (3163, 1)) * reshape(x, (1, 3163))"),
+        (1_000_000, "reshape(x, (1000000, 1)) * reshape(x, (1, 1000000))"),
+    ],
+)
 def test_expression_rejects_broadcast_output_above_operation_limit(
-    backend: str,
+    backend: str, elements: int, expression: str
 ) -> None:
     namespace: Any = np if backend == "numpy" else pytest.importorskip("jax.numpy")
     runtime = Runtime()
     {"numpy": register_numpy, "jax": register_jax}[backend](runtime)
-    plan = _external(
-        "broadcast_limit",
-        backend,
-        "reshape(x, (3163, 1)) * reshape(x, (1, 3163))",
-    ).compile(runtime)
-    source = namespace.zeros(3163, dtype=namespace.uint8)
+    plan = _external("broadcast_limit", backend, expression).compile(runtime)
+    source = namespace.zeros(elements, dtype=namespace.uint8)
 
     with pytest.raises(
         ProviderError, match="operation output limit is 10000000 elements"
@@ -1681,6 +1684,23 @@ def test_expression_accepts_broadcast_output_below_operation_limit(
     ]
 
     assert output.array.shape == (3162, 3162)
+
+
+@pytest.mark.parametrize("backend", ["numpy", "jax"])
+def test_expression_reduction_accepts_input_above_operation_limit(
+    backend: str,
+) -> None:
+    namespace: Any = np if backend == "numpy" else pytest.importorskip("jax.numpy")
+    runtime = Runtime()
+    {"numpy": register_numpy, "jax": register_jax}[backend](runtime)
+    plan = _external("large_input_reduction", backend, "sum(x)").compile(runtime)
+    source = namespace.ones(10_000_001, dtype=namespace.uint8)
+
+    output = plan.execute({"input": Batch.from_array(source, backend=backend)}).outputs[
+        "output"
+    ]
+
+    assert int(output.array) == 10_000_001
 
 
 @pytest.mark.parametrize("backend", ["numpy", "jax"])

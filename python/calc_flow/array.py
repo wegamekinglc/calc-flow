@@ -203,10 +203,11 @@ def _evaluate(
         result = node.value
     elif isinstance(node, ast.BinOp):
         function = _ALLOWED_BINARY[type(node.op)]
-        result = function(
-            _evaluate(node.left, value, namespace, validate_result),
-            _evaluate(node.right, value, namespace, validate_result),
-        )
+        left = _evaluate(node.left, value, namespace, validate_result)
+        right = _evaluate(node.right, value, namespace, validate_result)
+        if not isinstance(node.op, ast.MatMult):
+            _validate_broadcast_output_size(left, right)
+        result = function(left, right)
     elif isinstance(node, ast.UnaryOp):
         function = _ALLOWED_UNARY[type(node.op)]
         result = function(_evaluate(node.operand, value, namespace, validate_result))
@@ -502,9 +503,36 @@ def _validate_python_operation_scalar(value: object) -> bool:
     return type(value) in (float, complex)
 
 
+def _result_shape(value: object) -> tuple[int, ...]:
+    return tuple(int(dimension) for dimension in getattr(value, "shape", ()))
+
+
 def _validate_operation_output_size(value: object) -> None:
-    shape = tuple(int(dimension) for dimension in getattr(value, "shape", ()))
-    if math.prod(shape) > _MAX_OPERATION_ELEMENTS:
+    if math.prod(_result_shape(value)) > _MAX_OPERATION_ELEMENTS:
+        raise _array_error(
+            f"operation output limit is {_MAX_OPERATION_ELEMENTS} elements"
+        )
+
+
+def _broadcast_shape(
+    left: tuple[int, ...], right: tuple[int, ...]
+) -> tuple[int, ...] | None:
+    dimensions: list[int] = []
+    for offset in range(1, max(len(left), len(right)) + 1):
+        left_dim = left[-offset] if offset <= len(left) else 1
+        right_dim = right[-offset] if offset <= len(right) else 1
+        if left_dim == 1:
+            dimensions.append(right_dim)
+        elif right_dim == 1 or left_dim == right_dim:
+            dimensions.append(left_dim)
+        else:
+            return None
+    return tuple(reversed(dimensions))
+
+
+def _validate_broadcast_output_size(left: object, right: object) -> None:
+    shape = _broadcast_shape(_result_shape(left), _result_shape(right))
+    if shape is not None and math.prod(shape) > _MAX_OPERATION_ELEMENTS:
         raise _array_error(
             f"operation output limit is {_MAX_OPERATION_ELEMENTS} elements"
         )
