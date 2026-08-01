@@ -287,7 +287,10 @@ still-pending surrounding asyncio task instead raises
 `asyncio.CancelledError`. The handler makes one terminal-state decision: if
 native execution is already terminal, its result or exception remains
 observable; otherwise it sends exactly one native cancellation request and
-waits through repeated Python task cancellation until cleanup finishes.
+waits through repeated Python task cancellation until cleanup finishes. Once
+the cancellation request is sent, the caller's `asyncio.CancelledError` wins
+over any native outcome observed during that drain: a native failure landing
+mid-drain is retrieved and discarded, never re-raised to the caller.
 
 Awaiting task cancellation waits until the current native operation and
 run-owned cleanup finish; no work or input payload continues detached. The

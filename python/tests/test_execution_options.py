@@ -1287,6 +1287,38 @@ def test_native_terminal_state_wins_at_async_cancellation_handler_entry(
     asyncio.run(exercise())
 
 
+def test_native_failure_landing_mid_drain_yields_to_cancellation() -> None:
+    async def exercise() -> None:
+        events: list[str] = []
+        entered = asyncio.Event()
+        cancellation_entered = asyncio.Event()
+        cleanup_checks: asyncio.Queue[None] = asyncio.Queue()
+        future = _CleanupFuture(events, cancellation_entered, cleanup_checks)
+        cancellation = _RecordingCancellation(events, cancellation_entered)
+        inner = _FakeExecutionPlanInner(future, cancellation, entered)
+        plan = calc_flow.pipeline.ExecutionPlan(inner)  # type: ignore[arg-type]
+        execution = asyncio.create_task(plan.execute_async({}))
+        await entered.wait()
+        events.clear()
+
+        assert execution.cancel()
+        await cancellation_entered.wait()
+        # Let the drain loop reach its shielded await, then fail the native
+        # future mid-drain. Cancellation precedence wins: the failure is
+        # discarded in favor of the caller's CancelledError.
+        await asyncio.sleep(0)
+        future.set_exception(RuntimeError("native failure"))
+
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+
+        assert cancellation.calls == 1
+        assert events.count("cancel") == 1
+        assert "result" not in events
+
+    asyncio.run(exercise())
+
+
 def test_async_cancellation_linearizes_once_and_tolerates_repeated_cancellation() -> (
     None
 ):
