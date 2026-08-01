@@ -54,6 +54,17 @@ const run = (): RunResponse => ({
   },
 });
 
+const runningRun = (): RunResponse => ({
+  id: 'run-1',
+  project_id: 'project-1',
+  status: 'running',
+  created_at: '2026-01-01T00:00:00Z',
+  started_at: '2026-01-01T00:00:00Z',
+  finished_at: null,
+  error: null,
+  result: null,
+});
+
 afterEach(() => {
   FakeEventSource.instances = [];
   vi.unstubAllGlobals();
@@ -163,6 +174,56 @@ describe('useRunEvents', () => {
     expect(source.close).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(1_000);
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not let an older refresh overwrite a newer terminal response', async () => {
+    const onUpdate = vi.fn();
+    const onError = vi.fn();
+    const requests: Array<(response: Response) => void> = [];
+    const holdRequest = () => new Promise<Response>((resolve) => {
+      requests.push(resolve);
+    });
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(holdRequest)
+      .mockImplementationOnce(holdRequest);
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderHook(() => useRunEvents('run-1', onUpdate, onError));
+    const source = FakeEventSource.instances[0];
+    await act(async () => {
+      source.emit('running');
+      source.emit('completed');
+      await Promise.resolve();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      requests[1](
+        new Response(JSON.stringify(run()), {
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onUpdate).toHaveBeenCalledWith(run());
+
+    await act(async () => {
+      requests[0](
+        new Response(JSON.stringify(runningRun()), {
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onUpdate.mock.calls.map(([current]) => current.status)).toEqual([
+      'completed',
+    ]);
+    expect(onError).not.toHaveBeenCalled();
+    expect(source.close).toHaveBeenCalledOnce();
   });
 
   it('falls back to polling after two consecutive stream errors', async () => {
