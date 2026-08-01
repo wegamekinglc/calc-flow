@@ -337,6 +337,11 @@ class ExecutionPlan:
                 if native_completed:
                     return native.result()
                 cancellation.cancel()
+                # Cancellation precedence: once the handler passes the
+                # terminal-at-entry check, the caller's CancelledError wins
+                # over any native outcome observed during the drain. A native
+                # failure landing mid-drain is retrieved below (so asyncio
+                # never reports it as unretrieved) and then discarded.
                 while not native.done():
                     try:
                         await asyncio.shield(native)
@@ -344,6 +349,8 @@ class ExecutionPlan:
                         continue
                     except Exception:
                         break
+                if native.done() and not native.cancelled():
+                    native.exception()
                 raise cancelled
 
         return execute()

@@ -126,7 +126,10 @@ after transactional rollback. Cancelling a still-pending Python task returned
 by `execute_async` instead raises `asyncio.CancelledError`; if native
 execution is terminal when the cancellation handler starts, its result or
 exception wins. Otherwise one native cancellation request wins, even if the
-Python task is cancelled repeatedly while cleanup is held. Awaited task
+Python task is cancelled repeatedly while cleanup is held. After that
+request, cancellation keeps precedence: a native failure observed during the
+drain is retrieved and discarded, never re-raised over the caller's
+`asyncio.CancelledError`. Awaited task
 cancellation waits for the native operation and its cleanup, so no run-owned
 work continues detached and the plan recovers before its next public
 operation.
