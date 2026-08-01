@@ -86,10 +86,7 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("python-version-file: .python-version", rust_core)
         self.assertIn(install_test_dependencies, rust_core)
         rust_core_header = rust_core.split("    steps:\n", 1)[0]
-        self.assertIn(
-            "    env:\n      RUST_TEST_THREADS: 1\n",
-            rust_core_header,
-        )
+        self.assertIn("      RUST_TEST_THREADS: 1\n", rust_core_header)
         self.assertLess(
             rust_core.index(setup_python),
             rust_core.index("cargo clippy --workspace --all-targets --all-features"),
@@ -122,6 +119,61 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertLess(
             rust_core.index(clean_coverage),
             rust_core.index(rustdoc),
+        )
+
+    def test_rust_core_ci_isolates_frozen_dal_38_harness(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        rust_core = workflow.split("  rust-core:\n", 1)[1].split(
+            "  rust-supply-chain:\n", 1
+        )[0]
+
+        harness_sha = "bc78beb07a296b8c6f60d733cebf4376f8db5403"
+        product_tests = (
+            "cargo test --workspace --lib --bins --tests --examples --all-features"
+        )
+        ordinary_bench = "cargo test --locked -p calc-flow --bench core --all-features"
+        harness_self_test = (
+            "cargo test --locked -p calc-flow --bench dal_38_allocation --all-features"
+        )
+
+        self.assertIn("fetch-depth: 0", rust_core)
+        self.assertIn(f'DAL38_HARNESS_SHA: "{harness_sha}"', rust_core)
+        self.assertIn("id: dal38_harness", rust_core)
+        self.assertIn(
+            'git merge-base --is-ancestor "$DAL38_HARNESS_SHA" HEAD',
+            rust_core,
+        )
+        self.assertIn(
+            "if: steps.dal38_harness.outputs.enabled == 'true'",
+            rust_core,
+        )
+        self.assertIn(product_tests, rust_core)
+        self.assertIn(ordinary_bench, rust_core)
+        self.assertIn(
+            'git worktree add --detach "$DAL38_HARNESS_WORKTREE" "$DAL38_HARNESS_SHA"',
+            rust_core,
+        )
+        self.assertIn(harness_self_test, rust_core)
+        self.assertIn(
+            "github.event.pull_request.base.sha == env.DAL38_HARNESS_SHA",
+            rust_core,
+        )
+        self.assertIn(
+            "DAL38_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}",
+            rust_core,
+        )
+        self.assertIn("--role baseline", rust_core)
+        self.assertIn("--role candidate", rust_core)
+        self.assertIn(
+            '--compare "$DAL38_BASELINE_REPORT" "$DAL38_CANDIDATE_REPORT"',
+            rust_core,
+        )
+        self.assertLess(rust_core.index(product_tests), rust_core.index(ordinary_bench))
+        self.assertLess(
+            rust_core.index(ordinary_bench), rust_core.index(harness_self_test)
+        )
+        self.assertLess(
+            rust_core.index(harness_self_test), rust_core.index("--role baseline")
         )
 
     def test_benchmark_smoke_runs_every_supported_scale(self) -> None:
