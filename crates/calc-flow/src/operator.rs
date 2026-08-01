@@ -13,6 +13,7 @@ use crate::{
     Batch, BatchKind, CalcFlowError, DataFusionRuntime, JsonMap, Result, RunContext, UdfReference,
     expression::{sql_projection, validate_select_query},
     json::validate_portable_identifier,
+    runtime::ControlMarker,
 };
 
 #[derive(Clone, Debug)]
@@ -553,8 +554,46 @@ impl OperatorDefinition {
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "the first signal-aware implementations remain crate-private test fixtures"
+)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing existing data operators would add a data-hot-path allocation"
+)]
 pub(crate) enum CompiledOperator {
     ExistingData(OperatorDefinition),
+    SignalAware(Box<dyn SignalAwareOperator>),
+}
+
+#[async_trait]
+#[allow(
+    dead_code,
+    reason = "the first signal-aware implementations remain crate-private test fixtures"
+)]
+pub(crate) trait SignalAwareOperator: Send + Sync {
+    async fn process_data(
+        &mut self,
+        inputs: &BTreeMap<String, Batch>,
+        run: &RunContext,
+        datafusion: Option<&DataFusionRuntime>,
+    ) -> Result<BTreeMap<String, Batch>>;
+
+    async fn handle_control(&mut self, marker: &ControlMarker, context: &RunContext) -> Result<()>;
+
+    fn snapshot(&self) -> Result<Value>;
+    fn restore(&mut self, state: &Value) -> Result<()>;
+    fn reset(&mut self) -> Result<()>;
+}
+
+#[allow(
+    dead_code,
+    reason = "the first signal-aware implementations remain crate-private test fixtures"
+)]
+pub(crate) enum ControlHandling<'a> {
+    Transparent,
+    Aware(&'a mut dyn SignalAwareOperator),
 }
 
 impl CompiledOperator {
@@ -566,24 +605,39 @@ impl CompiledOperator {
     ) -> Result<BTreeMap<String, Batch>> {
         match self {
             Self::ExistingData(operator) => operator.process(inputs, run, datafusion).await,
+            Self::SignalAware(operator) => operator.process_data(inputs, run, datafusion).await,
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the first signal-aware implementations remain crate-private test fixtures"
+    )]
+    pub(crate) fn control_handling(&mut self) -> ControlHandling<'_> {
+        match self {
+            Self::ExistingData(_) => ControlHandling::Transparent,
+            Self::SignalAware(operator) => ControlHandling::Aware(operator.as_mut()),
         }
     }
 
     pub(crate) fn snapshot(&self) -> Result<Value> {
         match self {
             Self::ExistingData(operator) => operator.snapshot(),
+            Self::SignalAware(operator) => operator.snapshot(),
         }
     }
 
     pub(crate) fn restore(&mut self, state: &Value) -> Result<()> {
         match self {
             Self::ExistingData(operator) => operator.restore(state),
+            Self::SignalAware(operator) => operator.restore(state),
         }
     }
 
     pub(crate) fn reset(&mut self) -> Result<()> {
         match self {
             Self::ExistingData(operator) => operator.reset(),
+            Self::SignalAware(operator) => operator.reset(),
         }
     }
 }
@@ -822,9 +876,50 @@ fn validate_provider_identity(provider: &str, name: &str, version: &str) -> Resu
 
 #[cfg(test)]
 mod compiled_operator_tests {
+    use std::collections::BTreeMap;
+
+    use async_trait::async_trait;
     use serde_json::Value;
 
-    use super::{CompiledOperator, ExpressionOperator, OperatorDefinition};
+    use super::{
+        CompiledOperator, ControlHandling, ExpressionOperator, OperatorDefinition,
+        SignalAwareOperator,
+    };
+    use crate::{Batch, DataFusionRuntime, Result, RunContext, runtime::ControlMarker};
+
+    struct SignalAwareProbe;
+
+    #[async_trait]
+    impl SignalAwareOperator for SignalAwareProbe {
+        async fn process_data(
+            &mut self,
+            inputs: &BTreeMap<String, Batch>,
+            _run: &RunContext,
+            _datafusion: Option<&DataFusionRuntime>,
+        ) -> Result<BTreeMap<String, Batch>> {
+            Ok(inputs.clone())
+        }
+
+        async fn handle_control(
+            &mut self,
+            _marker: &ControlMarker,
+            _context: &RunContext,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn snapshot(&self) -> Result<Value> {
+            Ok(Value::Null)
+        }
+
+        fn restore(&mut self, _state: &Value) -> Result<()> {
+            Ok(())
+        }
+
+        fn reset(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn compiled_operator_existing_data_delegates_lifecycle() {
@@ -840,6 +935,19 @@ mod compiled_operator_tests {
         );
         let mut operator = CompiledOperator::ExistingData(definition);
 
+        assert_eq!(operator.snapshot().unwrap(), Value::Null);
+        operator.restore(&Value::Null).unwrap();
+        operator.reset().unwrap();
+    }
+
+    #[test]
+    fn compiled_signal_aware_operator_owns_control_and_lifecycle() {
+        let mut operator = CompiledOperator::SignalAware(Box::new(SignalAwareProbe));
+
+        assert!(matches!(
+            operator.control_handling(),
+            ControlHandling::Aware(_)
+        ));
         assert_eq!(operator.snapshot().unwrap(), Value::Null);
         operator.restore(&Value::Null).unwrap();
         operator.reset().unwrap();

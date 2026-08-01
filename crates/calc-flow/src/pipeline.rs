@@ -19,7 +19,17 @@ use crate::{
     RunContext, UdfCatalogEntry, UdfReference, UdfRegistrySnapshot, canonical_json,
     validate_selected_udfs,
 };
-use crate::{operator::CompiledOperator, runtime::RuntimeEnvelope};
+use crate::{
+    operator::{CompiledOperator, ControlHandling},
+    runtime::{RuntimeEnvelope, SharedControlMarker},
+};
+
+mod control;
+
+use control::{
+    ControlIngress, ControlRoute, ControlRouteStatus, ControlRouteStep, PendingControlStep,
+    derive_control_routes,
+};
 
 #[derive(Clone, Debug, Default)]
 pub struct ExecutionOptions {
@@ -113,13 +123,13 @@ pub struct PipelineBuilder {
     edges: Vec<Edge>,
 }
 
-#[allow(dead_code)]
 pub(crate) struct CompiledNode {
     pub(crate) node_id: String,
     pub(crate) operator: Arc<tokio::sync::Mutex<CompiledOperator>>,
     pub(crate) input_ports: Vec<Port>,
     pub(crate) output_ports: Vec<Port>,
     pub(crate) inbound: BTreeMap<String, PortEndpoint>,
+    pub(crate) outbound: BTreeMap<String, Vec<PortEndpoint>>,
 }
 
 struct TablePlanResources {
@@ -133,6 +143,11 @@ pub struct ExecutionPlan {
     pub(crate) nodes: Vec<CompiledNode>,
     pub(crate) external_inputs: BTreeMap<String, PortEndpoint>,
     pub(crate) external_outputs: BTreeMap<String, PortEndpoint>,
+    #[allow(
+        dead_code,
+        reason = "the M2 control route remains reachable only from the crate-private entry"
+    )]
+    control_routes: BTreeMap<String, ControlRouteStatus>,
     pub(crate) fingerprint: String,
     table: Option<TablePlanResources>,
     pub(crate) run_lock: tokio::sync::Mutex<()>,
@@ -256,6 +271,84 @@ impl ExecutionPlan {
 
     pub const fn external_outputs(&self) -> &BTreeMap<String, PortEndpoint> {
         &self.external_outputs
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the M2 control entry is intentionally crate-private until a later caller"
+    )]
+    pub(crate) async fn dispatch_control(
+        &self,
+        input: &str,
+        marker: crate::runtime::ControlMarker,
+        options: ExecutionOptions,
+    ) -> Result<()> {
+        self.dispatch_control_with_observer(input, marker, options, &mut |_, _, _| {})
+            .await
+    }
+
+    #[cfg(test)]
+    async fn dispatch_control_observed<F>(
+        &self,
+        input: &str,
+        marker: crate::runtime::ControlMarker,
+        options: ExecutionOptions,
+        mut observe: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&PortEndpoint, &ControlIngress, &SharedControlMarker),
+    {
+        self.dispatch_control_with_observer(input, marker, options, &mut observe)
+            .await
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the M2 control entry is intentionally crate-private until a later caller"
+    )]
+    async fn dispatch_control_with_observer<F>(
+        &self,
+        input: &str,
+        marker: crate::runtime::ControlMarker,
+        options: ExecutionOptions,
+        observe: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(&PortEndpoint, &ControlIngress, &SharedControlMarker),
+    {
+        let route = self.preflight_control(input)?;
+        let transaction = self.public_transaction().await?;
+        let origin = PendingControlStep {
+            step_index: route.origin_step,
+            envelope: RuntimeEnvelope::Control(marker.into_shared()),
+        };
+        let before = transaction.snapshot().await?;
+        let operation = transaction.begin_rollback(before)?;
+        let result = transaction
+            .dispatch_control_validated(route, origin, options, observe)
+            .await;
+        match result {
+            Ok(()) => transaction.commit_operation(operation),
+            Err(original) => Err(transaction
+                .rollback_error(operation, original, None)
+                .await
+                .error),
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the M2 control entry is intentionally crate-private until a later caller"
+    )]
+    fn preflight_control(&self, input: &str) -> Result<&ControlRoute> {
+        match self.control_routes.get(input) {
+            Some(ControlRouteStatus::Supported(route)) => Ok(route),
+            Some(ControlRouteStatus::Unsupported(topology)) => Err(topology.error(input)),
+            None => Err(CalcFlowError::InvalidArgument {
+                field: "control_input".into(),
+                message: format!("unknown graph input {input:?} for control dispatch"),
+            }),
+        }
     }
 
     /// Returns the only external input name accepted by a runner.
@@ -663,9 +756,9 @@ impl ExecutionPlan {
                 produced_values
                     .get(endpoint)
                     .cloned()
-                    .map(|envelope| (name.clone(), envelope.into_data()))
+                    .map(|envelope| envelope.into_data().map(|batch| (name.clone(), batch)))
             })
-            .collect();
+            .collect::<Result<BTreeMap<_, _>>>()?;
         Ok((outputs, timings))
     }
 
@@ -732,6 +825,166 @@ impl PlanTransaction<'_> {
         options: ExecutionOptions,
     ) -> Result<RunResult> {
         self.plan.execute_unlocked(inputs, options).await
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the M2 control entry is intentionally crate-private until a later caller"
+    )]
+    async fn dispatch_control_validated<F>(
+        &self,
+        route: &ControlRoute,
+        origin: PendingControlStep,
+        options: ExecutionOptions,
+        observe: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(&PortEndpoint, &ControlIngress, &SharedControlMarker),
+    {
+        let context = RunContext::new(options.settings, options.deadline, options.cancellation)?;
+        let mut pending = BTreeMap::from([(origin.step_index, origin)]);
+        while let Some((step_index, pending_step)) = pending.pop_first() {
+            let shared = Self::pending_control_marker(step_index, pending_step)?;
+            let (step, node) = self.control_target(route, step_index)?;
+            Self::invoke_control_handler(step, node, &shared, &context, observe).await?;
+            Self::queue_control_successors(route, step_index, step, &shared, &mut pending)?;
+        }
+        Ok(())
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the M2 control entry is intentionally crate-private until a later caller"
+    )]
+    fn pending_control_marker(
+        scheduler_step_index: usize,
+        pending: PendingControlStep,
+    ) -> Result<SharedControlMarker> {
+        if scheduler_step_index != pending.step_index {
+            return Err(CalcFlowError::Internal {
+                message: "control scheduler key does not match its pending step".into(),
+            });
+        }
+        match pending.envelope {
+            RuntimeEnvelope::Control(shared) => Ok(shared),
+            RuntimeEnvelope::Data(_) => Err(CalcFlowError::Internal {
+                message: "data envelope reached the control scheduler".into(),
+            }),
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the M2 control entry is intentionally crate-private until a later caller"
+    )]
+    fn control_target<'route>(
+        &self,
+        route: &'route ControlRoute,
+        step_index: usize,
+    ) -> Result<(&'route ControlRouteStep, &CompiledNode)> {
+        let step = route
+            .steps
+            .get(step_index)
+            .ok_or_else(|| CalcFlowError::Internal {
+                message: format!("control route has no step {step_index}"),
+            })?;
+        let node =
+            self.plan
+                .nodes
+                .get(step.target_node_index)
+                .ok_or_else(|| CalcFlowError::Internal {
+                    message: format!(
+                        "control step {step_index} targets missing node index {}",
+                        step.target_node_index
+                    ),
+                })?;
+        if node.node_id != step.target.node_id {
+            return Err(CalcFlowError::Internal {
+                message: format!(
+                    "control step {step_index} target {:?} does not match node {:?}",
+                    step.target, node.node_id
+                ),
+            });
+        }
+        Ok((step, node))
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the M2 control entry is intentionally crate-private until a later caller"
+    )]
+    async fn invoke_control_handler<F>(
+        step: &ControlRouteStep,
+        node: &CompiledNode,
+        shared: &SharedControlMarker,
+        context: &RunContext,
+        observe: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(&PortEndpoint, &ControlIngress, &SharedControlMarker),
+    {
+        let node_context = context.for_node(&node.node_id)?;
+        node_context.check_cancelled()?;
+        observe(&step.target, &step.ingress, shared);
+        let mut operator = node.operator.lock().await;
+        let handler_result = match operator.control_handling() {
+            ControlHandling::Transparent => Ok(()),
+            ControlHandling::Aware(handler) => {
+                handler.handle_control(shared.marker(), &node_context).await
+            }
+        };
+        let post_handler = node_context.check_cancelled();
+        drop(operator);
+        post_handler?;
+        match handler_result {
+            Ok(()) => Ok(()),
+            Err(error @ CalcFlowError::Cancelled { .. }) => Err(error),
+            Err(error) => Err(CalcFlowError::Operator {
+                node_id: node.node_id.clone(),
+                message: format!(
+                    "control {:?} occurrence {:?} handler failed: {error}; ingress {:?}",
+                    shared.marker().kind(),
+                    shared.marker().occurrence(),
+                    step.ingress
+                ),
+            }),
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the M2 control entry is intentionally crate-private until a later caller"
+    )]
+    fn queue_control_successors(
+        route: &ControlRoute,
+        step_index: usize,
+        step: &ControlRouteStep,
+        shared: &SharedControlMarker,
+        pending: &mut BTreeMap<usize, PendingControlStep>,
+    ) -> Result<()> {
+        for successor in &step.successor_step_indices {
+            if route.steps.get(*successor).is_none() {
+                return Err(CalcFlowError::Internal {
+                    message: format!(
+                        "control step {step_index} has missing successor {successor} from ingress {:?}",
+                        step.ingress
+                    ),
+                });
+            }
+            let successor_step = PendingControlStep {
+                step_index: *successor,
+                envelope: RuntimeEnvelope::Control(SharedControlMarker::clone(shared)),
+            };
+            if pending.insert(*successor, successor_step).is_some() {
+                return Err(CalcFlowError::Internal {
+                    message: format!(
+                        "control step {successor} became pending more than once from ingress {:?}",
+                        step.ingress
+                    ),
+                });
+            }
+        }
+        Ok(())
     }
 
     pub(crate) async fn snapshot(&self) -> Result<BTreeMap<String, Value>> {
@@ -1149,7 +1402,7 @@ fn gather_node_inputs(
             });
         match envelope {
             Some(envelope) => {
-                let batch = envelope.data();
+                let batch = envelope.data()?;
                 port.validate(batch, &format!("input {}.{}", node.node_id, port.name()))?;
                 inputs.insert(port.name().into(), batch.clone());
             }
@@ -1779,6 +2032,17 @@ fn build_plan(
             )
         })
         .collect::<BTreeMap<_, _>>();
+    let mut outbound = BTreeMap::<(String, String), Vec<PortEndpoint>>::new();
+    for edge in &builder.edges {
+        outbound
+            .entry((edge.source.node_id.clone(), edge.source.port.clone()))
+            .or_default()
+            .push(edge.target.clone());
+    }
+    for targets in outbound.values_mut() {
+        targets.sort();
+        targets.dedup();
+    }
     let nodes = order
         .into_iter()
         .map(|node_id| {
@@ -1797,6 +2061,15 @@ fn build_plan(
                         .map(|source| (port.name().into(), source))
                 })
                 .collect();
+            let node_outbound = output_ports
+                .iter()
+                .filter_map(|port| {
+                    outbound
+                        .get(&(node_id.clone(), port.name().into()))
+                        .cloned()
+                        .map(|targets| (port.name().into(), targets))
+                })
+                .collect();
             CompiledNode {
                 node_id: definition.node_id,
                 operator: Arc::new(tokio::sync::Mutex::new(CompiledOperator::ExistingData(
@@ -1805,15 +2078,18 @@ fn build_plan(
                 input_ports,
                 output_ports,
                 inbound: node_inbound,
+                outbound: node_outbound,
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let control_routes = derive_control_routes(&nodes, &external_inputs);
     ExecutionPlan {
         name: builder.name,
         table,
         nodes,
         external_inputs,
         external_outputs,
+        control_routes,
         fingerprint,
         run_lock: tokio::sync::Mutex::new(()),
         lease_state: StdMutex::new(LeaseState::default()),
@@ -2271,6 +2547,7 @@ mod data_envelope_tests {
         assert!(Arc::ptr_eq(
             produced_values[&output_endpoint]
                 .data()
+                .unwrap()
                 .table_payload()
                 .unwrap()
                 .schema(),
@@ -2278,3 +2555,9 @@ mod data_envelope_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod runtime_envelope_tests;
+
+#[cfg(test)]
+mod signal_allocation_tests;
