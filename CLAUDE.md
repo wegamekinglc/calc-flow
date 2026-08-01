@@ -30,15 +30,15 @@ The canonical command groups live in [AGENTS.md](AGENTS.md#commands) and are
 reproduced here for convenience; repeat them exactly.
 
 ```bash
-# Rust core
+# Rust core and PyO3 Rust unit tests
+uv sync --extra dev
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --all-features
+uv run python scripts/run_rust_tests.py
 cargo llvm-cov --workspace --all-features --fail-under-lines 90
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 
 # PyO3 package and Python adapters
-uv sync --extra dev
 uv run maturin develop
 JAX_PLATFORMS=cpu uv run pytest python/tests -q
 uv run ruff check .
@@ -61,7 +61,7 @@ npm audit --omit=dev
 # Supply chain and release helpers
 cargo audit --ignore RUSTSEC-2026-0176 --ignore RUSTSEC-2026-0177
 cargo deny --locked check
-python -m unittest scripts.test_inspect_wheel scripts.test_release_config
+python -m unittest scripts.test_run_rust_tests scripts.test_inspect_wheel scripts.test_release_config
 ```
 
 Run informational benchmarks with:
@@ -88,9 +88,11 @@ surface has its own runner.
   `crates/calc-flow/src/`; integration tests live under
   `crates/calc-flow/tests/`. The `calc-flow-python` PyO3 binding has no
   separate Rust integration-test directory — its behavior is covered by inline
-  unit tests and the Python suite under `python/tests/`. Run with
-  `cargo test --workspace --all-targets --all-features`, and enforce the 90%
-  line floor with `cargo llvm-cov --workspace --all-features --fail-under-lines 90`.
+  unit tests and the Python suite under `python/tests/`. Run `uv sync --extra
+  dev`, then use `uv run python scripts/run_rust_tests.py` to test the core
+  targets normally and the compiled PyO3 test executable serially with its
+  runtime-only timeout. Enforce the 90% line floor with `cargo llvm-cov
+  --workspace --all-features --fail-under-lines 90`.
 - **Python binding and adapters** — `python/tests/`, run with
   `JAX_PLATFORMS=cpu uv run pytest python/tests -q` after
   `uv run maturin develop`. Define fixtures in focused test modules; there is no
