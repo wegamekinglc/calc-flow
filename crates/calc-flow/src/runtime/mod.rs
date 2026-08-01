@@ -1,7 +1,3 @@
-#[allow(
-    dead_code,
-    reason = "the M2 control envelope remains reachable only from the crate-private entry"
-)]
 mod envelope;
 mod micro_batch;
 mod streaming;

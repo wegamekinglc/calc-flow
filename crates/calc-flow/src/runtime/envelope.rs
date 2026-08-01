@@ -18,7 +18,15 @@ pub(crate) struct SharedControlMarker(Arc<ControlMarker>);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MarkerKind {
+    #[allow(
+        dead_code,
+        reason = "the M2 crate-private watermark constructor is exercised by the frozen harness"
+    )]
     Watermark,
+    #[allow(
+        dead_code,
+        reason = "the M2 crate-private epoch constructor is exercised by the frozen harness"
+    )]
     Epoch,
 }
 
@@ -29,10 +37,18 @@ pub(crate) enum ControlKind {
 }
 
 impl ControlMarker {
+    #[allow(
+        dead_code,
+        reason = "the M2 crate-private watermark entry is exercised by the frozen harness"
+    )]
     pub(crate) fn watermark() -> Self {
         Self::new(MarkerKind::Watermark)
     }
 
+    #[allow(
+        dead_code,
+        reason = "the M2 crate-private epoch entry is exercised by the frozen harness"
+    )]
     pub(crate) fn epoch() -> Self {
         Self::new(MarkerKind::Epoch)
     }

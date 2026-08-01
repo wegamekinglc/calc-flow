@@ -24,10 +24,6 @@ use crate::{
     runtime::{RuntimeEnvelope, SharedControlMarker},
 };
 
-#[allow(
-    dead_code,
-    reason = "the M2 control route remains reachable only from the crate-private entry"
-)]
 mod control;
 
 use control::{
@@ -126,7 +122,6 @@ pub struct PipelineBuilder {
     edges: Vec<Edge>,
 }
 
-#[allow(dead_code)]
 pub(crate) struct CompiledNode {
     pub(crate) node_id: String,
     pub(crate) operator: Arc<tokio::sync::Mutex<CompiledOperator>>,

@@ -100,6 +100,13 @@ struct SignalAwareProbe {
     handled_kinds: Arc<StdMutex<Vec<String>>>,
 }
 
+struct PreflightSignalAwareProbe {
+    snapshots: Arc<AtomicUsize>,
+    handler_calls: Arc<AtomicUsize>,
+    restore_calls: Arc<AtomicUsize>,
+    reset_calls: Arc<AtomicUsize>,
+}
+
 struct OrderedSignalAwareProbe {
     events: Arc<StdMutex<Vec<String>>>,
 }
@@ -119,6 +126,47 @@ enum CancellationBehavior {
 
 struct CancellationSignalAwareProbe {
     behavior: CancellationBehavior,
+}
+
+#[async_trait]
+impl SignalAwareOperator for PreflightSignalAwareProbe {
+    async fn process_data(
+        &mut self,
+        inputs: &BTreeMap<String, Batch>,
+        _run: &RunContext,
+        _datafusion: Option<&DataFusionRuntime>,
+    ) -> Result<BTreeMap<String, Batch>> {
+        Ok(inputs
+            .values()
+            .next()
+            .cloned()
+            .map(|batch| BTreeMap::from([("output".into(), batch)]))
+            .unwrap_or_default())
+    }
+
+    async fn handle_control(
+        &mut self,
+        _marker: &ControlMarker,
+        _context: &RunContext,
+    ) -> Result<()> {
+        self.handler_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn snapshot(&self) -> Result<Value> {
+        self.snapshots.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::Null)
+    }
+
+    fn restore(&mut self, _state: &Value) -> Result<()> {
+        self.restore_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        self.reset_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -394,9 +442,19 @@ fn control_label(marker: &ControlMarker) -> String {
 async fn assert_control_rejected_before_snapshot(
     plan: &ExecutionPlan,
     input: &str,
-    snapshots: &AtomicUsize,
+    snapshots: &Arc<AtomicUsize>,
     expected_node: &str,
 ) -> String {
+    let handler_calls = Arc::new(AtomicUsize::new(0));
+    let restore_calls = Arc::new(AtomicUsize::new(0));
+    let reset_calls = Arc::new(AtomicUsize::new(0));
+    *plan.nodes[0].operator.lock().await =
+        CompiledOperator::SignalAware(Box::new(PreflightSignalAwareProbe {
+            snapshots: Arc::clone(snapshots),
+            handler_calls: Arc::clone(&handler_calls),
+            restore_calls: Arc::clone(&restore_calls),
+            reset_calls: Arc::clone(&reset_calls),
+        }));
     let mut observed = Vec::new();
     let error = plan
         .dispatch_control_observed(
@@ -413,6 +471,9 @@ async fn assert_control_rejected_before_snapshot(
     ));
     assert!(error.to_string().contains(expected_node));
     assert_eq!(snapshots.load(Ordering::SeqCst), 0);
+    assert_eq!(handler_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(restore_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(reset_calls.load(Ordering::SeqCst), 0);
     assert!(observed.is_empty());
     error.to_string()
 }
@@ -914,6 +975,12 @@ async fn runtime_envelope_single_chain_preserves_occurrence_order() {
     let watermark_label = control_label(&watermark);
     let epoch = ControlMarker::epoch();
     let epoch_label = control_label(&epoch);
+    let consecutive_watermark_1 = ControlMarker::watermark();
+    let consecutive_watermark_1_label = control_label(&consecutive_watermark_1);
+    let consecutive_watermark_2 = ControlMarker::watermark();
+    let consecutive_watermark_2_label = control_label(&consecutive_watermark_2);
+    let consecutive_epoch = ControlMarker::epoch();
+    let consecutive_epoch_label = control_label(&consecutive_epoch);
 
     plan.execute(
         BTreeMap::from([("input".into(), table_batch(1))]),
@@ -939,6 +1006,23 @@ async fn runtime_envelope_single_chain_preserves_occurrence_order() {
     )
     .await
     .unwrap();
+    plan.dispatch_control(
+        "input",
+        consecutive_watermark_1,
+        ExecutionOptions::default(),
+    )
+    .await
+    .unwrap();
+    plan.dispatch_control(
+        "input",
+        consecutive_watermark_2,
+        ExecutionOptions::default(),
+    )
+    .await
+    .unwrap();
+    plan.dispatch_control("input", consecutive_epoch, ExecutionOptions::default())
+        .await
+        .unwrap();
 
     assert_eq!(
         *events
@@ -950,6 +1034,9 @@ async fn runtime_envelope_single_chain_preserves_occurrence_order() {
             "Data(2)".to_string(),
             epoch_label,
             "Data(3)".to_string(),
+            consecutive_watermark_1_label,
+            consecutive_watermark_2_label,
+            consecutive_epoch_label,
         ]
     );
 }
