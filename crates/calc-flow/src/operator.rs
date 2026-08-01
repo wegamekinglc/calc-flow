@@ -553,6 +553,41 @@ impl OperatorDefinition {
     }
 }
 
+pub(crate) enum CompiledOperator {
+    ExistingData(OperatorDefinition),
+}
+
+impl CompiledOperator {
+    pub(crate) async fn process_data(
+        &mut self,
+        inputs: &BTreeMap<String, Batch>,
+        run: &RunContext,
+        datafusion: Option<&DataFusionRuntime>,
+    ) -> Result<BTreeMap<String, Batch>> {
+        match self {
+            Self::ExistingData(operator) => operator.process(inputs, run, datafusion).await,
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> Result<Value> {
+        match self {
+            Self::ExistingData(operator) => operator.snapshot(),
+        }
+    }
+
+    pub(crate) fn restore(&mut self, state: &Value) -> Result<()> {
+        match self {
+            Self::ExistingData(operator) => operator.restore(state),
+        }
+    }
+
+    pub(crate) fn reset(&mut self) -> Result<()> {
+        match self {
+            Self::ExistingData(operator) => operator.reset(),
+        }
+    }
+}
+
 fn required_datafusion<'a>(
     datafusion: Option<&'a DataFusionRuntime>,
     operator: &str,
@@ -783,4 +818,30 @@ fn validate_provider_identity(provider: &str, name: &str, version: &str) -> Resu
         validate_portable_identifier(field, value)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod compiled_operator_tests {
+    use serde_json::Value;
+
+    use super::{CompiledOperator, ExpressionOperator, OperatorDefinition};
+
+    #[test]
+    fn compiled_operator_existing_data_delegates_lifecycle() {
+        let definition = OperatorDefinition::Expression(
+            ExpressionOperator::new(
+                "expression",
+                "plus_one = value + 1",
+                Vec::new(),
+                None,
+                Vec::new(),
+            )
+            .unwrap(),
+        );
+        let mut operator = CompiledOperator::ExistingData(definition);
+
+        assert_eq!(operator.snapshot().unwrap(), Value::Null);
+        operator.restore(&Value::Null).unwrap();
+        operator.reset().unwrap();
+    }
 }
