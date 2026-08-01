@@ -132,6 +132,26 @@ class ReleaseConfigTests(unittest.TestCase):
             rust_core.index(rustdoc),
         )
 
+    def test_ci_and_release_execute_rust_test_harness_unit_tests(self) -> None:
+        command = (
+            "python -m unittest scripts.test_run_rust_tests "
+            "scripts.test_inspect_wheel scripts.test_release_config"
+        )
+
+        for path in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+            with self.subTest(path=path):
+                workflow = (ROOT / path).read_text()
+                self.assertIn(command, workflow)
+
+    def test_agents_rust_runner_uses_synced_python_dependencies(self) -> None:
+        agents = (ROOT / "AGENTS.md").read_text()
+        sync = "uv sync --extra dev"
+        runner = "uv run python scripts/run_rust_tests.py"
+
+        self.assertIn("NumPy and PyArrow", agents)
+        self.assertIn(runner, agents)
+        self.assertLess(agents.index(sync), agents.index(runner))
+
     def test_benchmark_smoke_runs_every_supported_scale(self) -> None:
         support_tree = ast.parse((ROOT / "benchmarks/support.py").read_text())
         scales_assignment = next(

@@ -10,15 +10,15 @@ React application. See `docs/introduction.md`.
 ## Commands
 
 ```bash
-# Rust core
+# Rust core and PyO3 Rust unit tests
+uv sync --extra dev
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-python3.13 scripts/run_rust_tests.py
+uv run python scripts/run_rust_tests.py
 cargo llvm-cov --workspace --all-features --fail-under-lines 90
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 
 # PyO3 package and Python adapters
-uv sync --extra dev
 uv run maturin develop
 JAX_PLATFORMS=cpu uv run pytest python/tests -q
 uv run ruff check .
@@ -41,19 +41,23 @@ npm audit --omit=dev
 # Supply chain and release helpers
 cargo audit --ignore RUSTSEC-2026-0176 --ignore RUSTSEC-2026-0177
 cargo deny --locked check
-python -m unittest scripts.test_inspect_wheel scripts.test_release_config
+python -m unittest scripts.test_run_rust_tests scripts.test_inspect_wheel scripts.test_release_config
 ```
 
 Keep Cargo, Maturin, uv, coverage, and release outputs under the repository
 `target/` tree when working from a constrained mirror. Never leave a generated
 `python/calc_flow/_native*.so` in source.
 
-`scripts/run_rust_tests.py` runs the core targets normally, then compiles the
-`calc_flow_python` lib test before starting its runtime-only timeout. The
-compiled PyO3 test runs serially with a five-minute limit. Pass
+`uv sync --extra dev` installs the NumPy and PyArrow dependencies imported by
+the PyO3 Rust tests. Run the harness through `uv run python` so Cargo and the
+test binary inherit that managed Python environment. The harness runs the core
+targets normally, then compiles the `calc_flow_python` lib test and discovers
+its executable before starting the runtime-only timeout. The compiled PyO3
+test runs serially with a five-minute limit; the harness adds the managed
+interpreter's library directory to the test process's loader path. Pass
 `--python-stress-runs N` to repeat that isolated PyO3 test process. If the
-test binary reports that `libpython3.13.so.1.0` is missing, add the directory
-containing that shared library to `LD_LIBRARY_PATH` before running the script.
+PyO3 build is configured with `PYO3_PYTHON`, invoke the harness through that
+same interpreter so its NumPy, PyArrow, and shared-library paths stay aligned.
 
 Run informational benchmarks with:
 
