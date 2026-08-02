@@ -304,9 +304,14 @@ jobs:
     name: Rust core parity
     runs-on: ubuntu-latest
     env:
+      FROZEN_ALLOCATION_CANDIDATE_TARGET_DIR: ${{ github.workspace }}/target/frozen-allocation-candidate
+      FROZEN_ALLOCATION_HARNESS_SHA: "fe34d7dcd5bfd66c9e97c79d540380f58ee1a04d"
+      FROZEN_ALLOCATION_HARNESS_TARGET_DIR: ${{ github.workspace }}/target/frozen-allocation-harness
       RUST_TEST_THREADS: 1
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version-file: .python-version
@@ -317,13 +322,87 @@ jobs:
           components: clippy,llvm-tools-preview,rustfmt
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Detect frozen allocation harness
+        id: frozen_allocation_harness
+        run: |
+          if git merge-base --is-ancestor "$FROZEN_ALLOCATION_HARNESS_SHA" HEAD; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Run Rust tests
         timeout-minutes: 30
         run: python3.13 scripts/run_rust_tests.py --python-stress-runs 3
+      - name: Verify frozen allocation harness
+        if: steps.frozen_allocation_harness.outputs.enabled == 'true'
+        env:
+          FROZEN_ALLOCATION_HARNESS_WORKTREE: ${{ runner.temp }}/frozen-allocation-harness
+        run: |
+          git worktree add --detach "$FROZEN_ALLOCATION_HARNESS_WORKTREE" "$FROZEN_ALLOCATION_HARNESS_SHA"
+          cd "$FROZEN_ALLOCATION_HARNESS_WORKTREE"
+          CARGO_TARGET_DIR="$FROZEN_ALLOCATION_HARNESS_TARGET_DIR" \
+            cargo test --locked -p calc-flow --bench allocation_regression --all-features
+      - name: Reclaim Rust test build disk before allocation comparison
+        if: >-
+          steps.frozen_allocation_harness.outputs.enabled == 'true' &&
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.base.sha == env.FROZEN_ALLOCATION_HARNESS_SHA
+        run: cargo clean
+      - name: Compare candidate allocations
+        if: >-
+          steps.frozen_allocation_harness.outputs.enabled == 'true' &&
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.base.sha == env.FROZEN_ALLOCATION_HARNESS_SHA
+        timeout-minutes: 120
+        env:
+          FROZEN_ALLOCATION_BASELINE_REPORT: ${{ runner.temp }}/frozen-allocation-harness/target/allocation-regression/baseline-2ac7e97.json
+          FROZEN_ALLOCATION_CANDIDATE_REPORT: ${{ runner.temp }}/frozen-allocation-candidate/target/allocation-regression/candidate.json
+          FROZEN_ALLOCATION_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+          FROZEN_ALLOCATION_CANDIDATE_WORKTREE: ${{ runner.temp }}/frozen-allocation-candidate
+          FROZEN_ALLOCATION_HARNESS_WORKTREE: ${{ runner.temp }}/frozen-allocation-harness
+        run: |
+          git worktree add --detach "$FROZEN_ALLOCATION_CANDIDATE_WORKTREE" "$FROZEN_ALLOCATION_CANDIDATE_SHA"
+          cd "$FROZEN_ALLOCATION_HARNESS_WORKTREE"
+          CARGO_TARGET_DIR="$FROZEN_ALLOCATION_HARNESS_TARGET_DIR" CARGO_BUILD_JOBS=1 \
+            cargo bench --locked -p calc-flow --bench allocation_regression -- \
+            --warmup-dispatches 1000 \
+            --measured-dispatches 10000 \
+            --repetitions 10 \
+            --cases all-existing-data \
+            --role baseline \
+            --output "$FROZEN_ALLOCATION_BASELINE_REPORT"
+          cd "$FROZEN_ALLOCATION_CANDIDATE_WORKTREE"
+          CARGO_TARGET_DIR="$FROZEN_ALLOCATION_CANDIDATE_TARGET_DIR" CARGO_BUILD_JOBS=1 \
+            cargo bench --locked -p calc-flow --bench allocation_regression -- \
+            --warmup-dispatches 1000 \
+            --measured-dispatches 10000 \
+            --repetitions 10 \
+            --cases all-existing-data \
+            --role candidate \
+            --output "$FROZEN_ALLOCATION_CANDIDATE_REPORT"
+          CARGO_TARGET_DIR="$FROZEN_ALLOCATION_CANDIDATE_TARGET_DIR" CARGO_BUILD_JOBS=1 \
+            cargo bench --locked -p calc-flow --bench allocation_regression -- \
+            --compare "$FROZEN_ALLOCATION_BASELINE_REPORT" "$FROZEN_ALLOCATION_CANDIDATE_REPORT"
+      - name: Remove frozen allocation worktrees
+        if: always() && steps.frozen_allocation_harness.outputs.enabled == 'true'
+        env:
+          FROZEN_ALLOCATION_CANDIDATE_WORKTREE: ${{ runner.temp }}/frozen-allocation-candidate
+          FROZEN_ALLOCATION_HARNESS_WORKTREE: ${{ runner.temp }}/frozen-allocation-harness
+        run: |
+          if [ -e "$FROZEN_ALLOCATION_CANDIDATE_WORKTREE/.git" ]; then
+            git worktree remove --force "$FROZEN_ALLOCATION_CANDIDATE_WORKTREE"
+          fi
+          if [ -e "$FROZEN_ALLOCATION_HARNESS_WORKTREE/.git" ]; then
+            git worktree remove --force "$FROZEN_ALLOCATION_HARNESS_WORKTREE"
+          fi
+          git worktree prune
       - name: Install Rust coverage tool
         run: cargo install cargo-llvm-cov --version 0.8.7 --locked
       - name: Reclaim Rust build disk before coverage
-        run: cargo clean
+        run: |
+          cargo clean
+          cargo clean --target-dir "$FROZEN_ALLOCATION_HARNESS_TARGET_DIR"
+          cargo clean --target-dir "$FROZEN_ALLOCATION_CANDIDATE_TARGET_DIR"
       - name: Enforce Rust core line coverage
         run: >-
           cargo llvm-cov --workspace --all-features --fail-under-lines 90

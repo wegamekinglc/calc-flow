@@ -25,6 +25,8 @@ exclude_paths:
   - ".calc-flow-web/**"
   # Historical parity evidence, kept verbatim on purpose
   - "tests/fixtures/**"
+  # Frozen executable allocation evidence, kept byte-identical to its baseline
+  - "crates/calc-flow/benches/allocation_regression.rs"
   # Agent tooling and internal planning notes
   - ".claude/**"
   - ".codex/**"

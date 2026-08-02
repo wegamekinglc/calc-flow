@@ -194,12 +194,30 @@ def main(arguments: Sequence[str] | None = None) -> int:
             "test",
             "-p",
             "calc-flow",
-            "--all-targets",
+            "--lib",
+            "--bins",
+            "--tests",
+            "--examples",
             "--all-features",
         ]
     )
     if core_status != 0:
         return core_status
+
+    benchmark_status = _run(
+        [
+            options.cargo,
+            "test",
+            "--locked",
+            "-p",
+            "calc-flow",
+            "--bench",
+            "core",
+            "--all-features",
+        ]
+    )
+    if benchmark_status != 0:
+        return benchmark_status
 
     compile_status, python_executable = _compile_python_test(options.cargo)
     if compile_status != 0:

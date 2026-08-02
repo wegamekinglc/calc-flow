@@ -145,9 +145,17 @@ dashes span the full column width, including cell spaces.
 
 ### Rust core
 
-- `Batch` is the only graph/runner data envelope. Table batches contain Arrow
-  record batches; external batches contain an explicitly registered provider
-  payload.
+- `Batch` is the public graph/runner data envelope. Table batches contain
+  Arrow record batches; external batches contain an explicitly registered
+  provider payload.
+- Compiled endpoint storage wraps batches as crate-private
+  `RuntimeEnvelope::Data`. The private control scheduler carries opaque
+  watermark/epoch markers only as `RuntimeEnvelope::Control` pending work
+  items. The control path keeps runtime as the sole forwarding owner,
+  preserves serial first-in, first-out (FIFO) order on supported
+  single-ingress routes, and fails closed before side effects at a reachable
+  multi-input node. It is not a public or runner control API. See
+  `docs/runtime-envelope.md`.
 - `Port` declares name, `BatchKind`, required flag, and optional exact Arrow
   schema.
 - `Operator` owns async processing and checkpoint lifecycle. Built-ins are

@@ -63,6 +63,38 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("Apache License", license_text)
         self.assertIn("Version 2.0, January 2004", license_text)
 
+    def test_codacy_excludes_only_the_frozen_allocation_harness(self) -> None:
+        config = (ROOT / ".codacy.yml").read_text()
+        harness_path = "crates/calc-flow/benches/allocation_regression.rs"
+        frozen_harness = f'  - "{harness_path}"'
+
+        self.assertEqual(config.count(frozen_harness), 1)
+        self.assertNotIn('  - "crates/calc-flow/benches/**"', config)
+        self.assertTrue((ROOT / harness_path).is_file())
+        legacy_issue_slug = "_".join(("dal", "38"))
+        self.assertFalse(
+            (
+                ROOT / f"crates/calc-flow/benches/{legacy_issue_slug}_allocation.rs"
+            ).exists()
+        )
+        for path in (
+            ".github/workflows/ci.yml",
+            "crates/calc-flow/Cargo.toml",
+            harness_path,
+            "crates/calc-flow/src/pipeline/signal_allocation_tests.rs",
+        ):
+            with self.subTest(path=path):
+                self.assertNotRegex(
+                    (ROOT / path).read_text(),
+                    r"(?i)dal(?:[_-]?38)",
+                )
+
+        harness = (ROOT / harness_path).read_text()
+        self.assertIn(
+            'env::var("ALLOCATION_REGRESSION_BACKGROUND_LOAD_POLICY")',
+            harness,
+        )
+
     def test_release_maturin_actions_pin_tool_and_rust_versions(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         action_count = workflow.count("uses: PyO3/maturin-action@")
@@ -89,10 +121,7 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("python-version-file: .python-version", rust_core)
         self.assertIn(install_test_dependencies, rust_core)
         rust_core_header = rust_core.split("    steps:\n", 1)[0]
-        self.assertIn(
-            "    env:\n      RUST_TEST_THREADS: 1\n",
-            rust_core_header,
-        )
+        self.assertIn("      RUST_TEST_THREADS: 1\n", rust_core_header)
         self.assertLess(
             rust_core.index(setup_python),
             rust_core.index("cargo clippy --workspace --all-targets --all-features"),
@@ -130,6 +159,75 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertLess(
             rust_core.index(clean_coverage),
             rust_core.index(rustdoc),
+        )
+
+    def test_rust_core_ci_isolates_frozen_allocation_harness(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        rust_core = workflow.split("  rust-core:\n", 1)[1].split(
+            "  rust-supply-chain:\n", 1
+        )[0]
+
+        harness_sha = "fe34d7dcd5bfd66c9e97c79d540380f58ee1a04d"
+        rust_test_harness = (
+            "python3.13 scripts/run_rust_tests.py --python-stress-runs 3"
+        )
+        harness_self_test = (
+            "cargo test --locked -p calc-flow --bench "
+            "allocation_regression --all-features"
+        )
+
+        self.assertIn("fetch-depth: 0", rust_core)
+        self.assertIn(f'FROZEN_ALLOCATION_HARNESS_SHA: "{harness_sha}"', rust_core)
+        self.assertIn("id: frozen_allocation_harness", rust_core)
+        self.assertIn(
+            'git merge-base --is-ancestor "$FROZEN_ALLOCATION_HARNESS_SHA" HEAD',
+            rust_core,
+        )
+        self.assertIn(
+            "if: steps.frozen_allocation_harness.outputs.enabled == 'true'",
+            rust_core,
+        )
+        self.assertIn(rust_test_harness, rust_core)
+        self.assertIn(
+            'git worktree add --detach "$FROZEN_ALLOCATION_HARNESS_WORKTREE" '
+            '"$FROZEN_ALLOCATION_HARNESS_SHA"',
+            rust_core,
+        )
+        self.assertIn(harness_self_test, rust_core)
+        self.assertIn(
+            "if: always() && steps.frozen_allocation_harness.outputs.enabled == 'true'",
+            rust_core,
+        )
+        self.assertIn(
+            'git worktree remove --force "$FROZEN_ALLOCATION_CANDIDATE_WORKTREE"',
+            rust_core,
+        )
+        self.assertIn(
+            'git worktree remove --force "$FROZEN_ALLOCATION_HARNESS_WORKTREE"',
+            rust_core,
+        )
+        self.assertIn("git worktree prune", rust_core)
+        self.assertIn(
+            "github.event.pull_request.base.sha == env.FROZEN_ALLOCATION_HARNESS_SHA",
+            rust_core,
+        )
+        self.assertIn(
+            "FROZEN_ALLOCATION_CANDIDATE_SHA: "
+            "${{ github.event.pull_request.head.sha }}",
+            rust_core,
+        )
+        self.assertIn("--role baseline", rust_core)
+        self.assertIn("--role candidate", rust_core)
+        self.assertIn(
+            '--compare "$FROZEN_ALLOCATION_BASELINE_REPORT" '
+            '"$FROZEN_ALLOCATION_CANDIDATE_REPORT"',
+            rust_core,
+        )
+        self.assertLess(
+            rust_core.index(rust_test_harness), rust_core.index(harness_self_test)
+        )
+        self.assertLess(
+            rust_core.index(harness_self_test), rust_core.index("--role baseline")
         )
 
     def test_ci_and_release_execute_rust_test_harness_unit_tests(self) -> None:
