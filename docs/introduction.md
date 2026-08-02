@@ -90,7 +90,7 @@ engine.
 
 ## Batch contract
 
-Every graph item is an immutable `Batch` envelope:
+Every public graph data item is an immutable `Batch` envelope:
 
 - table batches contain Arrow record batches and are calculated exclusively by
   Apache DataFusion;
@@ -108,6 +108,13 @@ Raw tables and arrays never cross graph, plan, or runner boundaries. Batch
 accessors reject the wrong payload kind. Metadata and Python-facing payloads
 are defensively copied or made read-only so callers cannot mutate graph-owned
 state.
+
+Inside the Rust core, compiled endpoint storage wraps `Batch` values as
+crate-private `RuntimeEnvelope::Data`. The private control scheduler separately
+carries opaque watermark and epoch markers as `RuntimeEnvelope::Control`
+pending work items. The public data contract remains `Batch`; see the [internal
+ordered runtime envelope](runtime-envelope.md) for its ordering, forwarding,
+failure, and compatibility boundaries.
 
 ## Graph compilation
 
@@ -274,6 +281,12 @@ see the same batch again: delivery is at least once.
 `FileCheckpointStore` writes versioned JSON atomically. A checkpoint identifies
 the pipeline name/fingerprint, source cursor/sequence, node-keyed state, and
 creation time. One runner has an exclusive lease on a stateful plan.
+
+The crate-private control path is not a continuous runner or a public
+watermark/checkpoint interface. `MicroBatchRunner` and `StreamingRunner` still
+submit formed `Batch` values only. The [internal runtime-envelope
+contract](runtime-envelope.md) documents the reusable groundwork and the
+semantics that remain outside the current engine surface.
 
 ## Python binding boundary
 
