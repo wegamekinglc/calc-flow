@@ -348,7 +348,7 @@ event-time temporal table 语义。
 
 ## 8. Calc-Flow 最终架构建议
 
-### 8.1 保留 batch executor，新增 continuous executor
+### 8.1 保留 `BatchExecutionPlan`，新增 `StreamExecutionPlan`
 
 不建议直接把 `ExecutionPlan::execute_nodes()` 改造成一组永久 task。这会同时改变现有
 batch API 的延迟、错误、取消、rollback、指标和确定性契约，并把流式生命周期硬塞入
@@ -357,7 +357,7 @@ batch API 的延迟、错误、取消、rollback、指标和确定性契约，�
 建议保留：
 
 ```text
-ExecutionPlan
+BatchExecutionPlan
   └── execute(inputs) -> RunResult
       现有有界、确定性、一次性 batch 执行路径
 ```
@@ -365,7 +365,7 @@ ExecutionPlan
 新增：
 
 ```text
-ContinuousExecutionPlan
+StreamExecutionPlan
   ├── source tasks
   ├── per-edge bounded channels
   ├── long-lived stream operator tasks
@@ -374,7 +374,7 @@ ContinuousExecutionPlan
   └── sink tasks
 ```
 
-两种 executor 共享图定义、端口、schema、UDF/provider snapshot 和可复用的纯计算
+两种执行计划共享图定义、端口、schema、UDF/provider snapshot 和可复用的纯计算
 内核，但不共享互相冲突的生命周期。
 
 ### 8.2 引入专用 `StreamOperator` 生命周期
@@ -490,8 +490,8 @@ format 应与 transport 正交，例如 Kafka + JSON、Kafka + Avro、file + Par
 
 当前 project v2 是严格、data-only 的稳定契约。connector、watermark、window 和
 runtime mode 会引入新的持久语义，不应在 v2 schema 中静默扩展或复用含义模糊的
-现有字段。建议设计 project v3，并提供显式 v2 -> v3 迁移函数；v2 文档继续保持
-可读取、语义不变。
+现有字段。建议设计 project v3；v2 文档返回 `UnsupportedVersion`，与计划文档
+决策一致。
 
 ## 9. 推荐开发路线
 
