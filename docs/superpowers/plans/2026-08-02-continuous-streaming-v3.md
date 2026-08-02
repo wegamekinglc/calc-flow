@@ -61,7 +61,10 @@
 - 用 `BatchExecutionPlan` 与 `StreamExecutionPlan` 替换现有
   `ExecutionPlan`。
 - 用 `compile_batch()` 与 `compile_stream()` 替换 `compile()`。
-- 删除 `MicroBatchRunner`。
+- 删除 `MicroBatchRunner`。它当前提供的“可重放 source + 逐 batch checkpoint +
+  at-least-once”能力由新的 `StreamExecutionPlan` 承接：使用有界 source，配合
+  `EndOfInput` 与 epoch checkpoint 即可覆盖同一场景。这是公共能力的替换而不是
+  净删除，`CHANGELOG.md` 与迁移指南必须显式写出这条替换路径。
 - 重新定义 `StreamingRunner`：它成为 source-driven continuous runner；删除
   当前调用者逐批 `step(batch)` 的模型。
 - 用流原生 source/sink trait 和 binding 替换 `Source`、`SourceItem`、`Sink`、
@@ -133,6 +136,11 @@ enum StreamMessage {
   每个 output 只转发一个结束标记。
 - runtime 是 control 转发的唯一所有者。operator 可以在 watermark 到来时输出已关闭
   窗口，但不能自行伪造、压制或重排 barrier/epoch。
+- source task 必须能在等待外部数据的同时响应 barrier 请求。这条不变量决定了
+  source trait 的形状，必须在 M0 二选一并写进规范：要么显式声明“取下一项”的
+  future 是取消安全的（丢弃 future 不丢数据、不前进 cursor），要么由 runtime 用
+  预取槽位把外部 I/O 与控制响应拆到两个协作单元。若两者都不做，一个长期无数据的
+  source 会让每次 checkpoint 都走到超时失败。
 
 ### 2.2 批算子与流算子分离
 
@@ -179,6 +187,13 @@ pub trait StreamOperator: Send + Sync {
     async fn restore(&mut self, checkpoint: &OperatorCheckpoint) -> Result<()>;
 }
 ```
+
+上面的草图只画出两者的差异部分，省略了编译器今天就依赖的成员。M0 冻结签名时，
+`name()`、`input_ports()`、`output_ports()`、`configuration()` 和
+`udf_references()` 必须在两个 trait 上都保留或提升到共享的 `OperatorMetadata`
+supertrait，否则 `compile_batch()` 与 `compile_stream()` 无法完成端口、schema 和
+UDF 校验。`reset()` 目前只出现在 batch 侧，流算子在重启、`reset()` 与从
+checkpoint 恢复三种入口下的状态语义也必须一并冻结。
 
 首版支持矩阵：
 
@@ -313,6 +328,25 @@ crates/calc-flow-connectors/
 `calc-flow`。`rdkafka`、PostgreSQL、ClickHouse、HTTP、WebSocket 等较重客户端依赖
 进入独立 `calc-flow-connectors` crate，避免污染核心 crate。
 
+新增第三个 workspace crate 会牵动打包、CI 与覆盖率，必须在 M0 一次性决定，不能留到
+M6 才发现：
+
+- **依赖边**：`calc-flow-python` 是否依赖 `calc-flow-connectors`。若依赖，rdkafka、
+  TLS 与压缩库会进入 wheel 的原生模块，需要确认 manylinux/macOS/Windows 的构建与
+  SBOM；若不依赖，则 M6.7 中“Python/Studio 运行 PostgreSQL CDC 到 ClickHouse”的
+  验收门不可达，必须改写。二者只能择一。
+- **feature gate**：每个 connector 一个 cargo feature，默认全部关闭。否则任何一次
+  普通构建都会拉起 rdkafka 与数据库客户端。
+- **`--all-features` 影响**：`AGENTS.md` 的 clippy、`cargo llvm-cov` 和 `cargo doc`
+  都使用 `--all-features`，启用全部 connector feature 后 CI 需要系统级依赖，必须
+  同步更新命令与开发环境说明。
+- **覆盖率底线**：workspace 有 90% 行覆盖门，而 connector 的主要路径靠容器测试，
+  且计划明确要求容器测试不混入普通单测。必须在 M0 决定是把
+  `calc-flow-connectors` 排除在 workspace 覆盖门之外并给它单独的门槛，还是把容器
+  测试纳入覆盖率采集。不做决定就会在 M6 撞上无法通过的门。
+- **版本与发布**：release invariant 要求各包版本同步。`calc-flow-connectors` 的
+  版本策略、是否随核心 crate 发布、以及 crate 打包内容都要一并写入 M7.4。
+
 ## 4. 里程碑、依赖与排期
 
 ```text
@@ -351,9 +385,11 @@ M7 hardening / 3.0 release
 | M6     | connector、project v3、Python、Studio         | 16 至 24 周  | M5       |
 | M7     | soak、性能、安全、打包与发布                  | 3 至 5 周    | M6       |
 
-顺序总量约 47 至 70 engineer-weeks。两名熟练工程师可并行数据库 connector、
-其他 connector、Python、Studio、测试和文档，但 state/checkpoint 位于强依赖关键
-路径，更可信的日历时间约 34 至 46 周。
+顺序总量约 47 至 70 engineer-weeks，与调研报告 §9.1 给出的“单工程师 11 至 16 个月”
+量级一致。两名熟练工程师可并行数据库 connector、其他 connector、Python、Studio、
+测试和文档，但 state/checkpoint 位于强依赖关键路径，更可信的日历时间约 34 至 46 周。
+调研报告 §9 的里程碑划分与本表的 M0 至 M7 并非一一对应，引用排期时必须注明依据的是
+哪一份分解。
 
 ### 4.1 可合并性策略
 
@@ -392,9 +428,16 @@ M7 hardening / 3.0 release
 - secret value 不得进入 project、fingerprint、日志、指标、state segment 或
   checkpoint manifest。
 - 正确性测试不得使用时间性能断言。
-- 不允许 detached Tokio task；success、failure、cancel、drop 都必须 join。
+- 不允许 detached Tokio task。success、failure 和显式 cancel 三条路径都必须 join。
+  `Drop` 里无法 await，也不允许为了 join 而阻塞 Tokio worker thread，因此 drop 的
+  契约是“取消并释放所有权”，join 由 `wait()` 承担；M0 必须明确 drop 之后未 join 的
+  task 何时被回收，以及测试如何在不依赖 `Drop` 内 join 的前提下断言无泄漏。
 - 所有 edge queue 在入队前同时验证 rows 与 estimated bytes。
-- 单 batch 超过 edge byte limit 时直接报错，不允许“一条超限消息”例外。
+- 单 batch 超过 edge byte limit 时直接报错，不允许“一条超限消息”例外。为此
+  `compile_stream()` 必须校验 source 侧配置的最大 batch bytes/rows 不超过其下游
+  edge 容量，把这类错误提前到 source 打开之前；同时注意现有
+  `io.rs` 的 `BatchingSource` 对首个超限 item 是照常发出而不是报错，M1.3 重构时
+  必须显式统一这两处策略，并在 `CHANGELOG.md` 记录行为变化。
 - `tests/fixtures/v1/` 保持不变。
 
 ## 6. M0：实现前冻结语义
@@ -415,8 +458,19 @@ M7 hardening / 3.0 release
 - [ ] 定义 union 跨 ingress 的选择顺序：每 ingress FIFO，但 ready ingress 间不承诺
   业务顺序。
 - [ ] 定义 watermark 单调性、idle、reactivate、end 和最终 flush。
-- [ ] 明确 late boundary 是 `event_time <= output_watermark`，或评审后记录另一条唯一
-  规则。
+- [ ] 冻结 `EventTime` 内部精度，规定 Arrow second/millisecond/microsecond/
+  nanosecond 的 checked conversion，并统一截断方向为向下取整：事件时间向下取整
+  保证行不会被推进到更晚的窗口，watermark 向下取整保证进度估计保持保守。
+- [ ] late boundary 按窗口而不是按行定义：一行迟到当且仅当它所属窗口的
+  `window_end <= 当前输入 watermark`，即该窗口已经关闭。**不得**采用
+  `event_time <= output_watermark`：只要 watermark delay 小于 window size，该判据
+  就会丢弃大量本应进入尚未关闭窗口的正常数据（1 小时 tumbling、watermark 10:30、
+  事件时间 10:15 的行属于尚未关闭的 `[10:00, 11:00)`，必须接受）。非窗口算子若
+  需要独立的 late 判据，必须单独记录并说明与窗口判据的关系。
+- [ ] 定义 source 在等待外部数据时如何响应 barrier 请求：明确“取下一项”是否取消
+  安全，或改由 runtime 预取槽位解耦；这条决定直接决定 `StreamSource` 的签名。
+- [ ] 定义 state segment 发布与 checkpoint manifest 发布的先后顺序，并指定
+  checkpoint manifest 为“最近完成 epoch”的唯一真相。
 - [ ] 定义 final-only tumbling/hopping 的触发与输出顺序。
 - [ ] 定义 barrier alignment、timeout、cancel 和 source cursor 边界。
 - [ ] 定义 job terminal state 和并发多错误的确定性选择规则。
@@ -446,6 +500,10 @@ checkpoint 顺序仍有歧义时禁止进入 M1。
 - [ ] 冻结 Studio `/api/v3` job route 与 SSE event model。
 - [ ] 对 cancellation safety、reentrancy、task ownership、checkpoint recovery、
   capability spoofing、secret persistence 做对抗性评审。
+- [ ] 明确 `StreamSource` 取下一项的取消安全契约，以及 `Drop` 只取消不 join 的
+  所有权模型；这两点必须由 critique 判定为无 `Block` 才能进入 M1。
+- [ ] 决定 barrier 转发时机：operator 完成同步快照后立即转发，还是等待 coordinator
+  ack。若选择后者，必须记录 checkpoint 延迟为 O(图深度 × 往返) 的代价与上限。
 - [ ] 所有 `Block` 结论清零后才进入 M1。
 
 **验收门：** spec、API note、critique 使用同一个
@@ -456,6 +514,7 @@ checkpoint 顺序仍有歧义时禁止进入 M1。
 **文件：**
 
 - 读取：`crates/calc-flow/benches/core.rs`
+- 读取：`crates/calc-flow/benches/allocation_regression.rs`
 - 新建：`docs/superpowers/handoffs/2026-08-02-continuous-streaming-v3-baseline.md`
 - 仅生成：`target/cargo/criterion/`
 
@@ -465,6 +524,8 @@ checkpoint 顺序仍有歧义时禁止进入 M1。
   检查。
 - [ ] 保存 expression、SQL、external passthrough、DataFusion runtime creation、
   checkpoint persistence 的 Criterion baseline。
+- [ ] 记录 `allocation_regression` 当前的冻结分配基线，并明确 M1 的破坏性重构将
+  改写该 harness；重写后必须重新建立基线，而不是静默放宽阈值。
 - [ ] 记录编译器、CPU、内存、target 路径、point estimate、confidence interval 和
   失败项。
 - [ ] 性能回归门设为 5%，但必须由同机配对数据和置信区间共同支持，不能只比较
@@ -485,7 +546,14 @@ checkpoint 顺序仍有歧义时禁止进入 M1。
 - 新建：`crates/calc-flow/src/pipeline/{mod,compile,batch,stream}.rs`
 - 修改：`crates/calc-flow/src/lib.rs`
 - 修改：`crates/calc-flow/tests/{operator,pipeline_compile,pipeline_execute}.rs`
+- 修改：`crates/calc-flow/tests/{properties,workspace,v1_fixtures}.rs`
+- 修改：`crates/calc-flow/benches/{core,allocation_regression}.rs`
 - 新建：`crates/calc-flow/tests/{stream_operator,stream_compile}.rs`
+
+以上后两组是本次破坏性重构必然波及、但容易被漏掉的既有产物：它们直接依赖
+`Operator`、`ExecutionPlan`、`ExecutionOptions` 和 `PipelineBuilder::compile()`。
+`tests/fixtures/v1/` 的数据文件保持不变，但读取它的 `tests/v1_fixtures.rs`
+harness 必须迁移到 `compile_batch()` 路径。
 
 **先写 RED：**
 
@@ -498,6 +566,8 @@ checkpoint 顺序仍有歧义时禁止进入 M1。
 - [ ] `compile_stream()` 拒绝 multi-input SQL 和不支持 stream 的 provider。
 - [ ] graph 插入顺序不同但语义相同，fingerprint 保持确定。
 - [ ] batch/stream 语义不同时 fingerprint 必须不同。
+- [ ] 只改 channel 容量或 checkpoint interval 时语义 fingerprint 不变，runtime
+  config hash 改变。
 
 **实现：**
 
@@ -510,9 +580,14 @@ checkpoint 顺序仍有歧义时禁止进入 M1。
 - [ ] 为 stream plan 编译稳定 edge ID、source binding slot、sink binding slot。
 - [ ] 新增至少两个输入的 `UnionOperator`。
 - [ ] stream 模式只允许 unary expression、single-alias SQL 和显式 stream provider。
-- [ ] fingerprint 包含 execution mode、stream operator config、UDF catalog、关键
-  runtime/state 配置。
-- [ ] 删除旧 `SignalAwareOperator` 测试桥和 batch plan control-route。
+- [ ] 拆成两个独立摘要：语义 fingerprint 只包含 execution mode、图结构、operator
+  配置、UDF catalog 和影响状态布局的 window/state 语义，决定 checkpoint 兼容性；
+  runtime config hash 单独记录 channel 容量、checkpoint interval 等可调项，只用于
+  可观测性与诊断。调大队列容量不得作废既有 checkpoint。
+- [ ] 删除旧 `SignalAwareOperator` 测试桥和 batch plan control-route，同时删除
+  `crates/calc-flow/src/pipeline/{signal_allocation_tests,runtime_envelope_tests}.rs`，
+  并把其中仍然有效的顺序、分配和 fail-closed 断言迁移到新的 stream 测试中，不得
+  静默丢失覆盖。
 
 **聚焦验证：**
 
@@ -547,7 +622,9 @@ CARGO_TARGET_DIR="$PWD/target/cargo" cargo test -p calc-flow --test operator \
 **实现：**
 
 - [ ] 引入 `EventTime`、`Epoch` newtype，禁止 public API 使用裸 `i64`。
-- [ ] 固定内部时间精度和 checkpoint 序列化精度。
+- [ ] 固定内部时间精度和 checkpoint 序列化精度，并统一向下取整的截断方向；
+  超出内部精度的 Arrow 输入要么按该方向截断，要么在入队前带列路径报错，不允许
+  按实现方便逐处选择。
 - [ ] 引入 `StreamMessage` 和只用于诊断的 private metadata。
 - [ ] 删除 UUID occurrence。
 - [ ] control 构造保持 crate-private；source 只能通过验证后的 `SourceEvent` 构造器
@@ -576,7 +653,9 @@ CARGO_TARGET_DIR="$PWD/target/cargo" cargo test -p calc-flow --test operator \
 
 - [ ] 新增 `Batch::estimated_bytes()`。
 - [ ] v3 的 `ExternalPayload` 强制实现 `estimated_bytes()`，不提供 `Option` 绕过。
-- [ ] 将 `io.rs` 现有 Arrow memory measurement 移到可复用位置。
+- [ ] 将 `io.rs` 现有 Arrow memory measurement 移到可复用位置，并统一超限策略：
+  现有 `BatchingSource` 对首个超限 item 是照常发出，v3 的 edge 入队则要求报错，
+  两者必须显式收敛到一条规则。
 - [ ] 明确共享 payload 的 queue charge 是逻辑占用，不声称等于进程 RSS。
 
 **验收门：** 任意能进入 stream queue 的 `Batch` 都能在入队前给出保守 byte cost。
@@ -601,6 +680,9 @@ CARGO_TARGET_DIR="$PWD/target/cargo" cargo test -p calc-flow --test operator \
 **实现：**
 
 - [ ] 定义 `EnvelopeCost { messages, rows, bytes }` 并使用 checked arithmetic。
+- [ ] 明确并在编译期依赖“每条 edge 恰有一个生产者”这一不变量（沿用现有单写入者
+  校验，fan-out 的每条出边是独立 channel）。它是下面单一预算设计成立的前提，
+  避免多生产者场景下 `Notify` 唤醒到无法推进的等待者而丢失唤醒。
 - [ ] 用单一 mutex-protected budget + `Notify` 做原子双维度 reservation，避免两个
   semaphore 分别申请造成死锁或饥饿。
 - [ ] 入队前 reserve，receiver 取出或 drop 时 release。
@@ -625,7 +707,8 @@ CARGO_TARGET_DIR="$PWD/target/cargo" cargo test -p calc-flow --test operator \
 - [ ] 第一个 task failure 会 cancel 并 join 所有 sibling。
 - [ ] 已经同时观测到的多个错误按稳定 task ID 排序返回。
 - [ ] panic 转成带 task identity 的 typed internal error。
-- [ ] drop owning handle 会 cancel 并回收 task，不产生 detached task。
+- [ ] drop owning handle 会 cancel 并回收 task，不产生 detached task；断言方式不得
+  依赖在 `Drop` 内 join，而应通过 supervisor 侧的注册表在 runtime 关闭时校验。
 - [ ] deadline 和显式 cancel 收敛到唯一 terminal state。
 
 **实现：**
@@ -657,12 +740,17 @@ CARGO_TARGET_DIR="$PWD/target/cargo" cargo test -p calc-flow --test operator \
 - [ ] 每个 source 的 sequence 严格递增。
 - [ ] `None` 只产生一个有序 `EndOfInput`。
 - [ ] 下游 edge 满时暂停后续 `next()`。
+- [ ] source 在 `next()` 长时间未返回时仍能观察到 barrier/cancel 请求，且丢弃或
+  中断该等待不会丢数据、不会前进 cursor。
 - [ ] source error 通过 supervisor cancel sibling。
 - [ ] native/Python I/O 中取消后能够 join。
 
 **实现：**
 
 - [ ] 用 `StreamSource -> SourceEvent` 替换旧 `Source`。
+- [ ] 按 M0 结论实现 source task 的控制响应形状：或者要求 `next()` 取消安全并在
+  `select!` 中与 barrier 请求复用，或者用预取槽位把外部 I/O 拆到独立协作单元。
+  该选择必须体现在 trait 的 rustdoc 契约中，而不只是实现细节。
 - [ ] `SourceEvent` 支持 data、source watermark、idle 和 end。
 - [ ] binding ID 是 `BatchMetadata.source` 的权威来源；用 `with_metadata()` 不可变地
   写入 source/sequence 并保留 attributes。
@@ -839,13 +927,16 @@ enum WatermarkPolicy {
 **步骤：**
 
 - [ ] 3.0 只实现 `LateDataPolicy::Drop`。
-- [ ] 严格使用 M0 批准的 late boundary。
+- [ ] 严格使用 M0 批准的 late boundary：一行迟到当且仅当其所属窗口
+  `window_end <= 当前输入 watermark`。hopping 场景下同一行可能同时命中已关闭和
+  未关闭的窗口，此时只丢弃已关闭窗口的那一份，其余窗口正常累加。
 - [ ] 记录 late rows、affected batches、maximum lateness。
 - [ ] 不记录行 payload。
 - [ ] project 中出现 allow/side_output 时编译失败。
 - [ ] 恢复后 watermark 和 late metrics 不回退、不重复累计已提交值。
 
-**验收门：** late row 不会重开 final window，且用户能观察丢弃数量。
+**验收门：** late row 不会重开 final window，且用户能观察丢弃数量。watermark 尚未
+越过 `window_end` 的乱序行必须被正常累加，不得计入 late 指标。
 
 ## 10. M4：增量状态与 final-only window
 
@@ -854,8 +945,14 @@ enum WatermarkPolicy {
 **文件：**
 
 - 新建：`crates/calc-flow/src/state/{mod,backend,manifest,segment}.rs`
+- 新建：`crates/calc-flow/src/checkpoint/model.rs`
 - 修改：`crates/calc-flow/src/error.rs`
 - 新建：`crates/calc-flow/tests/state_backend.rs`
+
+**前移说明：** epoch 与 checkpoint manifest 的数据模型必须在本任务一次定型，而不是
+先在 M4 自造一套临时 state manifest、再在 M5.1 推倒重来。M5.1 只负责替换
+`CheckpointStore` 的读写路径与旧 runner 的 sequence-only checkpoint，不再重新定义
+manifest 结构。
 
 **目标概念：**
 
@@ -882,6 +979,10 @@ struct StateHandle {
 **实现：**
 
 - [ ] M0 在 Arrow IPC 与 Parquet 间确定首版 segment format。
+- [ ] 固定 state segment 与 checkpoint manifest 的提交顺序：先落盘并校验 segment，
+  再原子发布 checkpoint manifest。checkpoint manifest 是“最近完成 epoch”的唯一
+  真相，恢复只读取它；任何未被保留 manifest 引用的 segment 一律按垃圾处理，不参与
+  恢复判定，也不得让恢复失败。
 - [ ] checkpoint JSON 只保存 handle，不保存 keyed row。
 - [ ] pipeline/operator 名称先 hash 再用于路径。
 - [ ] staging 与 committed state 位于同一受管 filesystem root。
@@ -906,6 +1007,8 @@ struct StateHandle {
 - [ ] 写 epoch staging directory，再原子发布 manifest。
 - [ ] 保留可配置数量的 completed epoch。
 - [ ] 不删除任何 retained manifest 可达的 state。
+- [ ] 已提交但没有任何 retained checkpoint manifest 引用的 segment 视为孤儿，可以
+  安全回收，且其存在不得让恢复失败。
 - [ ] 只 compact immutable committed segment。
 - [ ] locked/delete failure 立即停止，不扩大 cleanup target。
 - [ ] 模拟 segment/manifest rename 前后 crash。
@@ -980,6 +1083,9 @@ struct StateHandle {
 - [ ] hopping update 避免不必要克隆 Arrow payload。
 
 **验收门：** batch partition、checkpoint recovery、compaction 都不改变 final result。
+注意“同一窗口只关闭一次”只能在事务/幂等 sink 边界成立：at-least-once 下故障重放
+必然可能让算子重新发出已关闭窗口，因此该断言写在 sink 层，算子层只断言重放后最终
+结果不变。
 
 ## 11. M5：Epoch checkpoint 与 exactly-once
 
@@ -1014,7 +1120,8 @@ struct StateHandle {
 
 **实现：**
 
-- [ ] 用 `CheckpointManifest` 替换 `Checkpoint`。
+- [ ] 用 `CheckpointManifest` 替换 `Checkpoint`，沿用 M4.1 已定型的 manifest 模型，
+  不重新定义结构。
 - [ ] 重写 `CheckpointStore` 为 manifest operation。
 - [ ] 保留 bounded atomic JSON store，但只存 metadata/handle。
 - [ ] 删除旧 runner 的 sequence-only checkpoint 和 compensation path。
@@ -1063,7 +1170,9 @@ struct StateHandle {
 - [ ] 同 epoch 所有 required ingress 到齐后才 snapshot。
 - [ ] future/regressed epoch fail closed。
 - [ ] barrier 前 data 在 state，barrier 后 data 不在该 snapshot。
-- [ ] snapshot ack 成功后才 forward barrier。
+- [ ] snapshot 成功后才 forward barrier；转发时机按 M0 的结论执行，并在实现注释中
+  写明选的是“同步快照完成即转发”还是“等待 coordinator ack 再转发”，以及对应的
+  checkpoint 延迟量级。
 - [ ] snapshot failure 不 forward barrier 并 cancel job。
 - [ ] idle 不免除 alignment。
 
@@ -1074,7 +1183,7 @@ struct StateHandle {
 - [ ] 未 blocked ingress 继续消费。
 - [ ] full alignment 后调用 `checkpoint(epoch)`。
 - [ ] stage dirty state 并向 coordinator 发送 `OperatorCheckpoint`。
-- [ ] 成功后 forward barrier，并同时恢复全部 ingress。
+- [ ] 按 M0 选定的时机 forward barrier，并同时恢复全部 ingress。
 
 **验收门：** union/window 在所有双输入 barrier 到达排列下都通过 before/after state
 断言。
@@ -1186,7 +1295,11 @@ trait TransactionalSink: StreamSink {
 - [ ] transport factory 与 `FormatDecoder`/`FormatEncoder` 分离。
 - [ ] compile 时捕获 plan-scoped immutable registry snapshot。
 - [ ] `SecretResolver` 只接受 secret reference。
-- [ ] 网络客户端依赖不进入 core crate。
+- [ ] 网络客户端依赖不进入 core crate；`calc-flow-connectors` 内每个 connector 由
+  独立 cargo feature 控制，默认关闭，并同步更新 `--all-features` 相关的 CI 命令、
+  覆盖率范围和开发环境前置依赖。
+- [ ] 按 M0 结论落实 `calc-flow-python` 与 `calc-flow-connectors` 的依赖边，并让
+  Python 侧能够注册可用 connector；若决定不依赖，则同步收窄 M6.7、M6.8 的验收门。
 - [ ] capability 包含 delivery、replay、watermark、transaction、lookup、snapshot、
   polling 和 CDC。
 - [ ] 公共 `database_types.rs` 只保存经过验证的 Arrow/database 类型映射，不包含
@@ -1525,6 +1638,9 @@ PostgreSQL CDC -> window -> ClickHouse/Parquet stream。
 - [ ] 保持明确 GIL boundary，不阻塞 Tokio thread。
 - [ ] NumPy/JAX payload 保持 immutable 并能 byte-account。
 - [ ] capability schema version 与 project format list 改为 v3 only。
+- [ ] 按 M6.1 的依赖边决定，实现 Python 侧可用 connector 的注册与能力枚举；若
+  wheel 不携带原生 connector，`capabilities.py` 必须如实反映这一点，而不是宣告
+  project v3 中不可达的 connector。
 
 **验收门：** Python 与 Rust 能运行相同 start/status/checkpoint/stop/recover 场景，
 重复 cancellation stress 通过。
@@ -1553,7 +1669,11 @@ PostgreSQL CDC -> window -> ClickHouse/Parquet stream。
 **步骤：**
 
 - [ ] 删除 `/api/v2`。
-- [ ] 保持 spawned-worker 的 CPU、memory、timeout、output、cancel 限制。
+- [ ] 保持 spawned-worker 的 CPU、memory、output、cancel 限制。
+- [ ] 持续作业天然没有运行时长上限，因此原有的 worker timeout 不再是有效边界。
+  删除它之前必须给出等价的替代上限：最大并发 job 数、单 job 与全局的常驻内存
+  上限、最大 checkpoint/state 磁盘占用，以及必须由用户显式 stop 的生命周期。
+  不允许只是把 timeout 置空。
 - [ ] 增加适合 long-running job 的 persistent worker ownership。
 - [ ] worker death 与 checkpoint recovery/terminal status 一致。
 - [ ] `serve()` 保持 loopback-only。
@@ -1584,9 +1704,13 @@ PostgreSQL CDC -> window -> ClickHouse/Parquet stream。
   malicious schema、deep connector option、SQL identifier/query、replication slot、
   WAL retention、database ledger 和 ClickHouse dedup token。
 - [ ] 验证 TLS default 和 credential redaction。
-- [ ] 运行 `cargo audit`、`cargo deny`、`npm audit --omit=dev` 和 artifact inspector。
+- [ ] 运行 `cargo audit`、`cargo deny`、`npm audit --omit=dev` 和 artifact inspector，
+  覆盖启用全部 connector feature 的配置。
 - [ ] 审查 `rdkafka`、PostgreSQL、ClickHouse、HTTP、WebSocket、Avro、compression 的
   license/platform build。
+- [ ] 按 M6.1 的决定核对 workspace 覆盖率门：确认 `calc-flow-connectors` 是被排除
+  并单独设门，还是已把容器测试纳入采集，且 `--fail-under-lines 90` 在最终配置下
+  真实通过。
 - [ ] checkpoint/state cleanup 不遍历 symlink 或宽泛路径。
 - [ ] fuzz/property test project、checkpoint、format、state metadata decoder。
 
@@ -1604,7 +1728,8 @@ PostgreSQL CDC -> window -> ClickHouse/Parquet stream。
 
 ### Task M7.4：版本与 release 验证
 
-- [ ] workspace crate、Python core、Studio、frontend 同步升级到 `3.0.0`。
+- [ ] workspace crate、Python core、Studio、frontend 同步升级到 `3.0.0`，并明确
+  `calc-flow-connectors` 的版本策略与是否随核心 crate 一起发布。
 - [ ] PyO3 crate 对 core Rust dependency 保持 exact version。
 - [ ] 从最终源码生成 project v3 schema、OpenAPI、TypeScript type。
 - [ ] 构建 core wheel、sdist、crate、Studio wheel。

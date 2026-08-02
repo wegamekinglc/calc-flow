@@ -111,12 +111,15 @@ keyed window state 的长期承载形式。若先实现窗口、再继续把全�
 Arroyo 是 Rust 实现的分布式流处理引擎，以 SQL 编译持续 dataflow 为主要产品
 形态。调研源码快照为
 [`f6afb832`](https://github.com/ArroyoSystems/arroyo/tree/f6afb832c00d25a349522ba2678d55a6866a9fab)，
-crate 版本为 `0.16.0-dev`；调研时最新稳定版为 `v0.15.0`。仓库同时提供
-Apache-2.0 与 MIT 许可证文件。
+crate 版本为 `0.16.0-dev`；调研时最新稳定版为 `v0.15.0`。该快照就是调研当日
+默认分支的 HEAD（提交时间 2026-08-01），因此下文源码结论描述的是当时的最新
+开发状态，而不是某个已发布版本。仓库同时提供 Apache-2.0 与 MIT 许可证文件。
 
 Cloudflare 于 2025-04-10 宣布收购 Arroyo 团队，并将其技术用于 Cloudflare
 Pipelines。开源仓库此后仍有提交，但产品与社区演进需要同时观察开源项目和
-Cloudflare 平台方向，不能仅凭“仍有提交”推导长期治理承诺。
+Cloudflare 平台方向，不能仅凭“仍有提交”推导长期治理承诺。这一判断有具体
+证据：`v0.15.0` 发布于 2025-12-01，到调研日已约八个月没有新的稳定版，而默认
+分支仍在持续提交。开发活跃度与发布节奏在该项目上并不同步。
 
 ### 4.2 控制面与数据面
 
@@ -177,8 +180,10 @@ Arroyo 的 watermark 是 `EventTime(SystemTime)` 或 `Idle`。watermark 可由 s
 
 窗口覆盖 tumbling、sliding、session 等形态，聚合计算复用 DataFusion 物理表达式
 和聚合能力。调研快照中的 late-data 处理相对保守：窗口路径会过滤已经落后于
-watermark 的记录，没有形成类似 Flink allowed lateness + side output 的完整产品
-契约。
+watermark 的记录。需要注明证据强度：该快照与官方文档中都没有出现 Flink 式
+allowed lateness + side output 的产品契约，但本次核验未能从一手源逐条确认其
+全部 late-data 分支行为，因此这里只作“未见等价产品契约”的弱结论，不作“确定
+不存在”的强结论。
 
 ### 4.5 状态、checkpoint 与 exactly-once
 
@@ -279,10 +284,13 @@ cache miss 和远端读取成本。
 ### 5.5 Exactly-once 是逐 sink 能力
 
 RisingWave 内部状态一致性由 barrier、epoch 和 Hummock version 协调。对外 sink
-是否 exactly-once 则取决于 connector：Iceberg 等 sink 可使用协调的两阶段提交和
-持久化 pre-commit 元数据；Kafka、NATS、Kinesis 以及不少普通 sink 的官方交付
-契约仍是 at-least-once。不能把“RisingWave 内部 epoch 一致性”直接推广为“所有
-外部 sink 都端到端 exactly-once”。
+是否 exactly-once 则取决于 connector。官方 delivery 文档给出的分档很明确：
+Iceberg sink 在 `is_exactly_once = true`（默认值）且启用 sink decoupling 时提供
+exactly-once，一旦关闭 sink decoupling，exactly-once 会被自动禁用；Kafka sink
+的官方表述是“非事务写入，通过重试提供 at-least-once”；其余 sink 除非另有说明
+一律为 at-least-once。因此不能把“RisingWave 内部 epoch 一致性”直接推广为“所有
+外部 sink 都端到端 exactly-once”，也不能把 Iceberg 的 exactly-once 当成无条件
+能力——它依赖一个可以被用户关掉的配置组合。
 
 ### 5.6 SQL、窗口、CDC 与 serving
 
@@ -314,17 +322,17 @@ event-time temporal table 语义。
 
 ## 6. 对原始参考报告的关键修正
 
-| 原始表述或倾向                              | 独立核验后的结论                                                                 |
-| ------------------------------------------- | -------------------------------------------------------------------------------- |
-| Arroyo 队列按消息数和字节数双配额阻塞      | 行数/消息计数实际执行阻塞；bytes 在该实现中主要用于指标，不是第二个硬配额。       |
-| RisingWave 内部使用行式 chunk               | `StreamChunk` 基于列式 `DataChunk`，另带操作数组和 visibility。                  |
-| RisingWave checkpoint 只是提交 epoch        | dirty state 仍需 flush、生成 SST 并上传；版本提交避免的是重复的全量独立快照。     |
-| RisingWave 端到端一律 exactly-once          | 内部状态一致，不代表所有 sink 一致；外部 delivery guarantee 是 connector-specific。 |
-| RisingWave 恢复时间与状态大小无关           | 不必预下载全部状态，但元数据、工作集、cache 和对象存储仍会影响恢复与预热。        |
-| Arroyo 有 21 个等价 connector               | 这是源码 registry entry 数；source/sink 方向、用途和成熟度并不相同。              |
-| Calc-Flow 已有 watermark/epoch 语义骨架      | 只有 opaque marker 与私有控制路由骨架，没有事件时间、barrier 或 runner 契约。     |
-| 直接把 `execute_nodes` task 化即可持续执行   | 现有 `Operator::process` 是整组输入语义；需要独立 stream operator 生命周期和执行器。 |
-| M1 到 M5 可在约 16 至 22 周完整生产化        | 可做原型；跨 Rust、Python、project schema、Studio、故障测试的生产化更可能需 7 至 11 个月。 |
+| 原始表述或倾向                             | 独立核验后的结论                                                                               |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------- |
+| Arroyo 队列按消息数和字节数双配额阻塞      | 行数/消息计数实际执行阻塞；bytes 在该实现中主要用于指标，不是第二个硬配额。                    |
+| RisingWave 内部使用行式 chunk              | `StreamChunk` 基于列式 `DataChunk`，另带操作数组和 visibility。                                |
+| RisingWave checkpoint 只是提交 epoch       | dirty state 仍需 flush、生成 SST 并上传；版本提交避免的是重复的全量独立快照。                  |
+| RisingWave 端到端一律 exactly-once         | 内部状态一致，不代表所有 sink 一致；外部 delivery guarantee 是 connector-specific。            |
+| RisingWave 恢复时间与状态大小无关          | 不必预下载全部状态，但元数据、工作集、cache 和对象存储仍会影响恢复与预热。                     |
+| Arroyo 有 21 个等价 connector              | 这是源码 registry entry 数；source/sink 方向、用途和成熟度并不相同。                           |
+| Calc-Flow 已有 watermark/epoch 语义骨架    | 只有 opaque marker 与私有控制路由骨架，没有事件时间、barrier 或 runner 契约。                  |
+| 直接把 `execute_nodes` task 化即可持续执行 | 现有 `Operator::process` 是整组输入语义；需要独立 stream operator 生命周期和执行器。           |
+| M1 到 M5 可在约 16 至 22 周完整生产化      | 可做原型；按本报告 §9 分解，覆盖 Rust、Python、schema、Studio 与故障测试更可能需 38 至 59 周。 |
 
 ## 7. 三者架构对比
 
@@ -410,6 +418,18 @@ enum StreamMessage {
 序列化和越界规则。每条 ingress 上 watermark 必须单调不降，多输入输出 watermark
 通常取所有非 idle 输入的最小值。
 
+精度转换必须一并固定：内部单位确定后，Arrow 的 second/millisecond/microsecond/
+nanosecond 输入都要做 checked conversion，且截断方向统一向下取整。事件时间向下
+取整保证行不会被推进到更晚的窗口，watermark 向下取整保证进度估计保持保守；两者
+方向不一致会同时产生错分窗口和过早关闭窗口两类错误。
+
+迟到判定的边界必须按窗口而不是按行定义。窗口算子中，一行迟到当且仅当它所属
+窗口的 `window_end <= 当前输入 watermark`，即该窗口已经关闭。若错误地采用
+`event_time <= watermark` 作为判据，则只要 watermark delay 小于 window size，
+大量本应进入尚未关闭窗口的正常数据都会被丢弃：例如 1 小时 tumbling 窗口、
+watermark 为 10:30 时，事件时间 10:15 的行属于 `[10:00, 11:00)`，该窗口尚未关闭，
+必须接受而不是丢弃。
+
 第一阶段迟到数据只支持：
 
 - `Drop`，并暴露按 operator/window/source 统计的指标；
@@ -455,6 +475,14 @@ state backend
 首版只需本地文件后端即可，不需要对象存储和 Hummock。关键是让大量 keyed state
 不再膨胀 bounded JSON checkpoint，同时维持原子 manifest 提交。
 
+这里有一个容易被忽略的一致性要求：state segment 的发布和 checkpoint manifest 的
+发布是两个不同的原子提交点，二者必须只有一个是“最近完成 epoch”的唯一真相。
+建议规定 checkpoint manifest 是唯一真相，并固定提交顺序为：先落盘并校验 state
+segment，再原子发布 checkpoint manifest。恢复只读取 checkpoint manifest，任何未被
+保留 manifest 引用的 segment 一律按垃圾回收，不参与恢复判定。若不固定这条顺序和
+唯一真相，崩溃窗口会同时产生两类不可判定状态：manifest 引用了不存在的 segment，
+以及 segment 已提交但没有任何 manifest 指向它。
+
 ### 8.6 Exactly-once 必须显式组合能力
 
 只有满足以下条件的 pipeline 才能声明端到端 exactly-once：
@@ -468,6 +496,11 @@ state backend
 
 建议保留现有 `Sink` 作为 at-least-once 简单接口，另增事务 sink 能力，而不是让每个
 sink 被迫伪装成支持 2PC。
+
+barrier 注入还有一条容易被忽略的 source 契约：source task 必须能在等待外部数据的
+同时响应 barrier 请求，否则一个长期无数据的 source 会让每次 checkpoint 都超时。
+这要求 source 的“取下一项”操作要么明确声明可取消安全，要么由 runtime 用预取槽位
+把外部 I/O 与控制响应解耦。二者必须择一写进规范，不能留给实现临时决定。
 
 默认背压策略应是 `Block`。`DropOldest` 只能用于用户显式选择的 lossy source，且
 编译时必须判定它与 exactly-once 不兼容。
@@ -495,7 +528,7 @@ runtime mode 会引入新的持久语义，不应在 v2 schema 中静默扩展�
 
 ## 9. 推荐开发路线
 
-### M0：语义规格与故障模型，1 至 2 周
+### M0：语义规格与故障模型，2 至 3 周
 
 交付物：
 
@@ -544,8 +577,10 @@ EOF 排空、取消无 task 泄漏、现有 batch executor 行为不变。
 - tumbling/hopping aggregate；
 - watermark close 后一次性输出。
 
-验收重点：与离线 group-by 结果一致；大量窗口状态不进入 JSON；checkpoint/恢复后
-不重复关闭窗口；compaction 前后结果一致。
+验收重点：与离线 group-by 结果一致；大量窗口状态不进入 JSON；恢复后不会因为
+重放而改变最终窗口结果；compaction 前后结果一致。需要注意，“同一窗口只对外
+关闭一次”在 at-least-once 下只能在事务/幂等 sink 边界成立；算子边界在故障重放
+时必然可能重新发出已关闭窗口，因此这条断言应该写在 sink 层，而不是算子层。
 
 ### M4：Epoch checkpoint 与事务 sink，8 至 12 周
 
@@ -589,6 +624,11 @@ TypeScript 类型。
 source/sink 后，按一名熟悉 Rust async、Arrow/DataFusion、数据库协议、PyO3 和
 Studio 的工程师估算，完整生产化更合理的总量级约为 11 至 16 个月；并行投入可
 缩短日历时间，但状态、checkpoint 和故障测试仍存在强顺序依赖。
+
+上述量级与实现计划的分解一致：计划把同一范围拆成 M0 至 M7，合计约 47 至 70
+engineer-weeks，正好落在 11 至 16 个月区间内。两份文档的排期口径应始终保持
+一致；本报告 §9 的里程碑划分与计划的里程碑编号并不一一对应，引用时需注明依据
+的是哪一份分解。
 
 ## 10. 自研还是采用现成系统
 
