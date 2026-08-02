@@ -305,7 +305,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       FROZEN_ALLOCATION_CANDIDATE_TARGET_DIR: ${{ github.workspace }}/target/frozen-allocation-candidate
-      FROZEN_ALLOCATION_HARNESS_SHA: "bc78beb07a296b8c6f60d733cebf4376f8db5403"
+      FROZEN_ALLOCATION_HARNESS_SHA: "eaac319d70aacee1e5bc09c53ca6fee36415607e"
       FROZEN_ALLOCATION_HARNESS_TARGET_DIR: ${{ github.workspace }}/target/frozen-allocation-harness
       RUST_TEST_THREADS: 1
     steps:
@@ -341,7 +341,7 @@ jobs:
           git worktree add --detach "$FROZEN_ALLOCATION_HARNESS_WORKTREE" "$FROZEN_ALLOCATION_HARNESS_SHA"
           cd "$FROZEN_ALLOCATION_HARNESS_WORKTREE"
           CARGO_TARGET_DIR="$FROZEN_ALLOCATION_HARNESS_TARGET_DIR" \
-            cargo test --locked -p calc-flow --bench dal_38_allocation --all-features
+            cargo test --locked -p calc-flow --bench allocation_regression --all-features
       - name: Reclaim Rust test build disk before allocation comparison
         if: >-
           steps.frozen_allocation_harness.outputs.enabled == 'true' &&
@@ -355,8 +355,8 @@ jobs:
           github.event.pull_request.base.sha == env.FROZEN_ALLOCATION_HARNESS_SHA
         timeout-minutes: 120
         env:
-          FROZEN_ALLOCATION_BASELINE_REPORT: ${{ runner.temp }}/frozen-allocation-harness/target/dal-38-allocation/baseline-2ac7e97.json
-          FROZEN_ALLOCATION_CANDIDATE_REPORT: ${{ runner.temp }}/frozen-allocation-candidate/target/dal-38-allocation/candidate.json
+          FROZEN_ALLOCATION_BASELINE_REPORT: ${{ runner.temp }}/frozen-allocation-harness/target/allocation-regression/baseline-2ac7e97.json
+          FROZEN_ALLOCATION_CANDIDATE_REPORT: ${{ runner.temp }}/frozen-allocation-candidate/target/allocation-regression/candidate.json
           FROZEN_ALLOCATION_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
           FROZEN_ALLOCATION_CANDIDATE_WORKTREE: ${{ runner.temp }}/frozen-allocation-candidate
           FROZEN_ALLOCATION_HARNESS_WORKTREE: ${{ runner.temp }}/frozen-allocation-harness
@@ -364,7 +364,7 @@ jobs:
           git worktree add --detach "$FROZEN_ALLOCATION_CANDIDATE_WORKTREE" "$FROZEN_ALLOCATION_CANDIDATE_SHA"
           cd "$FROZEN_ALLOCATION_HARNESS_WORKTREE"
           CARGO_TARGET_DIR="$FROZEN_ALLOCATION_HARNESS_TARGET_DIR" CARGO_BUILD_JOBS=1 \
-            cargo bench --locked -p calc-flow --bench dal_38_allocation -- \
+            cargo bench --locked -p calc-flow --bench allocation_regression -- \
             --warmup-dispatches 1000 \
             --measured-dispatches 10000 \
             --repetitions 10 \
@@ -373,7 +373,7 @@ jobs:
             --output "$FROZEN_ALLOCATION_BASELINE_REPORT"
           cd "$FROZEN_ALLOCATION_CANDIDATE_WORKTREE"
           CARGO_TARGET_DIR="$FROZEN_ALLOCATION_CANDIDATE_TARGET_DIR" CARGO_BUILD_JOBS=1 \
-            cargo bench --locked -p calc-flow --bench dal_38_allocation -- \
+            cargo bench --locked -p calc-flow --bench allocation_regression -- \
             --warmup-dispatches 1000 \
             --measured-dispatches 10000 \
             --repetitions 10 \
@@ -381,7 +381,7 @@ jobs:
             --role candidate \
             --output "$FROZEN_ALLOCATION_CANDIDATE_REPORT"
           CARGO_TARGET_DIR="$FROZEN_ALLOCATION_CANDIDATE_TARGET_DIR" CARGO_BUILD_JOBS=1 \
-            cargo bench --locked -p calc-flow --bench dal_38_allocation -- \
+            cargo bench --locked -p calc-flow --bench allocation_regression -- \
             --compare "$FROZEN_ALLOCATION_BASELINE_REPORT" "$FROZEN_ALLOCATION_CANDIDATE_REPORT"
       - name: Install Rust coverage tool
         run: cargo install cargo-llvm-cov --version 0.8.7 --locked

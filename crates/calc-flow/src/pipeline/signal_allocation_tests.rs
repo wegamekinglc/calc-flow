@@ -318,12 +318,12 @@ fn measure_signal_aware_control(
 }
 
 #[test]
-fn dal_38_signal_aware_data_allocation_reference() {
+fn signal_aware_data_allocation_reference() {
     write_signal_allocation_reference(SignalAllocationKind::Data);
 }
 
 #[test]
-fn dal_38_signal_aware_control_allocation_reference() {
+fn signal_aware_control_allocation_reference() {
     write_signal_allocation_reference(SignalAllocationKind::Control);
 }
 

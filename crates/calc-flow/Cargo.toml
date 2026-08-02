@@ -38,7 +38,7 @@ name = "core"
 harness = false
 
 [[bench]]
-name = "dal_38_allocation"
+name = "allocation_regression"
 harness = false
 
 [lints]

@@ -33,7 +33,7 @@ const FIXED_REPETITIONS: usize = 10;
 const FROZEN_FILES: [&str; 3] = [
     "Cargo.lock",
     "crates/calc-flow/Cargo.toml",
-    "crates/calc-flow/benches/dal_38_allocation.rs",
+    "crates/calc-flow/benches/allocation_regression.rs",
 ];
 const DATAFUSION_CONFIG: DataFusionConfig = DataFusionConfig {
     batch_size: 1_024,
@@ -288,7 +288,7 @@ struct BenchmarkExternalPayload {
 
 impl ExternalPayload for BenchmarkExternalPayload {
     fn backend(&self) -> &'static str {
-        "dal-38-benchmark"
+        "allocation-regression-benchmark"
     }
 
     fn len(&self) -> usize {
@@ -317,7 +317,7 @@ impl PassthroughOperator {
 #[async_trait]
 impl Operator for PassthroughOperator {
     fn name(&self) -> &'static str {
-        "dal-38-passthrough"
+        "allocation-regression-passthrough"
     }
 
     fn input_ports(&self) -> &[Port] {
@@ -341,7 +341,7 @@ impl Operator for PassthroughOperator {
             .get("input")
             .cloned()
             .ok_or_else(|| CalcFlowError::Internal {
-                message: "dal-38 passthrough input is missing".into(),
+                message: "allocation-regression passthrough input is missing".into(),
             })?;
         Ok(BTreeMap::from([("output".into(), output)]))
     }
@@ -472,14 +472,14 @@ fn main() {
     #[cfg(test)]
     if env::args_os().len() == 1 {
         if let Err(error) = run_regression_tests() {
-            eprintln!("dal_38_allocation regression tests: {error}");
+            eprintln!("allocation_regression regression tests: {error}");
             std::process::exit(1);
         }
         return;
     }
 
     if let Err(error) = run() {
-        eprintln!("dal_38_allocation: {error}");
+        eprintln!("allocation_regression: {error}");
         std::process::exit(1);
     }
 }
@@ -652,7 +652,7 @@ fn build_cases() -> HarnessResult<Vec<PreparedCase>> {
 }
 
 fn external_payload_one_node() -> HarnessResult<PreparedCase> {
-    let plan = PipelineBuilder::new("dal-38-external-payload")
+    let plan = PipelineBuilder::new("allocation-regression-external-payload")
         .map_err(harness_error)?
         .with_datafusion_config(DATAFUSION_CONFIG)
         .add_node(
@@ -679,7 +679,7 @@ fn external_payload_one_node() -> HarnessResult<PreparedCase> {
 }
 
 fn external_table_one_node() -> HarnessResult<PreparedCase> {
-    let plan = PipelineBuilder::new("dal-38-external-table")
+    let plan = PipelineBuilder::new("allocation-regression-external-table")
         .map_err(harness_error)?
         .with_datafusion_config(DATAFUSION_CONFIG)
         .add_node(
@@ -701,7 +701,7 @@ fn external_table_one_node() -> HarnessResult<PreparedCase> {
 }
 
 fn external_table_three_way_fan_out() -> HarnessResult<PreparedCase> {
-    let mut builder = PipelineBuilder::new("dal-38-external-table-fan-out")
+    let mut builder = PipelineBuilder::new("allocation-regression-external-table-fan-out")
         .map_err(harness_error)?
         .with_datafusion_config(DATAFUSION_CONFIG)
         .add_node(
@@ -737,7 +737,7 @@ fn builtin_expression_one_node() -> HarnessResult<PreparedCase> {
     let operator =
         ExpressionOperator::new("expression", "plus_one = value + 1", vec![], None, vec![])
             .map_err(harness_error)?;
-    let plan = PipelineBuilder::new("dal-38-expression")
+    let plan = PipelineBuilder::new("allocation-regression-expression")
         .map_err(harness_error)?
         .with_datafusion_config(DATAFUSION_CONFIG)
         .add_node("expression", Box::new(operator))
@@ -763,7 +763,7 @@ fn builtin_sql_one_node() -> HarnessResult<PreparedCase> {
         vec![],
     )
     .map_err(harness_error)?;
-    let plan = PipelineBuilder::new("dal-38-sql")
+    let plan = PipelineBuilder::new("allocation-regression-sql")
         .map_err(harness_error)?
         .with_datafusion_config(DATAFUSION_CONFIG)
         .add_node("sql", Box::new(operator))
@@ -1783,7 +1783,7 @@ type TestMutation = (&'static str, TestReport, TestReport);
 fn run_regression_tests() -> HarnessResult<()> {
     let repo_root = PathBuf::from(command_output("git", &["rev-parse", "--show-toplevel"])?);
     let directory = repo_root
-        .join("target/dal-38-allocation")
+        .join("target/allocation-regression")
         .join(format!("regression-tests-{}", std::process::id()));
     fs::create_dir_all(&directory).map_err(harness_error)?;
     let original_baseline = synthetic_test_report(Role::Baseline)?;
@@ -1809,7 +1809,7 @@ fn run_regression_tests() -> HarnessResult<()> {
     }
     test_noise_floor_statuses(&mut failures)?;
     if failures.is_empty() {
-        println!("dal_38_allocation regression tests passed");
+        println!("allocation_regression regression tests passed");
         Ok(())
     } else {
         Err(HarnessError(failures.join("\n")))

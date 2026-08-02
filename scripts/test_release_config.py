@@ -63,6 +63,29 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("Apache License", license_text)
         self.assertIn("Version 2.0, January 2004", license_text)
 
+    def test_codacy_excludes_only_the_frozen_allocation_harness(self) -> None:
+        config = (ROOT / ".codacy.yml").read_text()
+        harness_path = "crates/calc-flow/benches/allocation_regression.rs"
+        frozen_harness = f'  - "{harness_path}"'
+
+        self.assertEqual(config.count(frozen_harness), 1)
+        self.assertNotIn('  - "crates/calc-flow/benches/**"', config)
+        self.assertTrue((ROOT / harness_path).is_file())
+        legacy_issue_slug = "_".join(("dal", "38"))
+        self.assertFalse(
+            (
+                ROOT / f"crates/calc-flow/benches/{legacy_issue_slug}_allocation.rs"
+            ).exists()
+        )
+        for path in (
+            ".github/workflows/ci.yml",
+            "crates/calc-flow/Cargo.toml",
+            harness_path,
+            "crates/calc-flow/src/pipeline/signal_allocation_tests.rs",
+        ):
+            with self.subTest(path=path):
+                self.assertNotRegex((ROOT / path).read_text(), r"(?i)dal[_-]38")
+
     def test_release_maturin_actions_pin_tool_and_rust_versions(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         action_count = workflow.count("uses: PyO3/maturin-action@")
@@ -135,12 +158,13 @@ class ReleaseConfigTests(unittest.TestCase):
             "  rust-supply-chain:\n", 1
         )[0]
 
-        harness_sha = "bc78beb07a296b8c6f60d733cebf4376f8db5403"
+        harness_sha = "eaac319d70aacee1e5bc09c53ca6fee36415607e"
         rust_test_harness = (
             "python3.13 scripts/run_rust_tests.py --python-stress-runs 3"
         )
         harness_self_test = (
-            "cargo test --locked -p calc-flow --bench dal_38_allocation --all-features"
+            "cargo test --locked -p calc-flow --bench "
+            "allocation_regression --all-features"
         )
 
         self.assertIn("fetch-depth: 0", rust_core)
