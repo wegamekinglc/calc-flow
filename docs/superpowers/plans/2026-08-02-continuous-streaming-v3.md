@@ -468,7 +468,7 @@ M7 hardening / 3.0 release
   事件时间 10:15 的行属于尚未关闭的 `[10:00, 11:00)`，必须接受）。非窗口算子若
   需要独立的 late 判据，必须单独记录并说明与窗口判据的关系。
 - [ ] 定义 source 在等待外部数据时如何响应 barrier 请求：明确“取下一项”是否取消
-  安全，或改由 runtime 预取槽位解耦；这条决定直接决定 `StreamSource` 的签名。
+  安全，或改由 runtime 预取槽位解耦；这项选择将直接决定 `StreamSource` 的签名。
 - [ ] 定义 state segment 发布与 checkpoint manifest 发布的先后顺序，并指定
   checkpoint manifest 为“最近完成 epoch”的唯一真相。
 - [ ] 定义 final-only tumbling/hopping 的触发与输出顺序。
