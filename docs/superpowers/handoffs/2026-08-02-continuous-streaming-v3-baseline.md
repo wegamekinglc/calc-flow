@@ -23,16 +23,16 @@ Measurement and documentation only; no production code was changed.
 
 ## 1. Baseline identity
 
-| Item                                  | Value                                                                |
-| ------------------------------------- | -------------------------------------------------------------------- |
-| Baseline commit (HEAD of `main`)      | `e9c4127d2023a4640e4f65085ef2a1b715cbf3f6`                           |
-| Commit subject                        | `Merge pull request #75 from wegamekinglc/fix/streaming-research-plan-review` |
-| Capture date                          | 2026-08-03 (local, CST)                                              |
-| Criterion baseline name               | `continuous-streaming-v3-m0`                                         |
-| Allocation frozen product SHA         | `2ac7e97c1549baf0e97849d5823f65e7dd298e99`                           |
-| Allocation harness commit             | `fe34d7dcd5bfd66c9e97c79d540380f58ee1a04d`                           |
-| Working-tree state during capture     | Tracked files clean at `e9c4127`; only untracked M0 spec/API artifacts under `.codex/artifacts/` (not compiled or measured) |
-| CI fleet reference run                | Scheduled `benchmarks.yml` run `30732416522` (2026-08-02, `schedule` trigger, success) at commit `3bae1a6d109f4c21df8f2251b47669a6e4d34666` — <https://github.com/wegamekinglc/calc-flow/actions/runs/30732416522> |
+| Item                              | Value                                                                                                                                                                                                              |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Baseline commit (HEAD of `main`)  | `e9c4127d2023a4640e4f65085ef2a1b715cbf3f6`                                                                                                                                                                         |
+| Commit subject                    | `Merge pull request #75 from wegamekinglc/fix/streaming-research-plan-review`                                                                                                                                      |
+| Capture date                      | 2026-08-03 (local, CST)                                                                                                                                                                                            |
+| Criterion baseline name           | `continuous-streaming-v3-m0`                                                                                                                                                                                       |
+| Allocation frozen product SHA     | `2ac7e97c1549baf0e97849d5823f65e7dd298e99`                                                                                                                                                                         |
+| Allocation harness commit         | `fe34d7dcd5bfd66c9e97c79d540380f58ee1a04d`                                                                                                                                                                         |
+| Working-tree state during capture | Tracked files clean at `e9c4127`; only untracked M0 spec/API artifacts under `.codex/artifacts/` (not compiled or measured)                                                                                        |
+| CI fleet reference run            | Scheduled `benchmarks.yml` run `30732416522` (2026-08-02, `schedule` trigger, success) at commit `3bae1a6d109f4c21df8f2251b47669a6e4d34666` — <https://github.com/wegamekinglc/calc-flow/actions/runs/30732416522> |
 
 Every baseline number below is tied to commit `e9c4127`. The allocation
 measurement additionally records its own provenance evidence (frozen-file
@@ -49,11 +49,11 @@ The delta is **not** "docs changes plus the allocation-harness merge" as
 initially expected — it also contains the DAL-38 runtime-envelope refactor
 series, which touches runtime source. This is flagged prominently here:
 
-| Group                                                        | Commits                                                                                                                            | Runtime-affecting? |
-| ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
-| Runtime-envelope refactor series (DAL-38)                    | `5cace7a`, `b902658`, `4222777`, `c6d9b93`, `f777fa0` (+ merges `2ae6b65` #57, `5b31005` #66)                                       | **YES** — touches `crates/calc-flow/src/runtime/envelope.rs`, `runtime/mod.rs`, `pipeline.rs`, `pipeline/control.rs`, `operator.rs` |
-| Allocation harness, CI wiring, and harness tests             | `2174698`, `bb08d0e`, `f3af9f9`, `bc78beb`, `89f1a2d`, `b2f0316`, `4f64103`, `18ba3e7`, `0835864`, `eaac319`, `6ddbb9e`, `fe34d7d`, `0c8ae5b`, `f880fb8` (#72), `8922c5d` | No — `benches/`, `.github/workflows/`, `scripts/`, harness-only |
-| Docs and streaming plan                                      | `ba08b2d` (#70), `0905b22` (#71), `cb2321e`, `1dceb9e` (#73), `1417c37`, `1d8bc75`, `8360529` (#74), `959cbe0`, `eeac0a4`, `e9c4127` (#75) | No — `docs/`, `AGENTS.md`, `CLAUDE.md`, `.claude/agents/` |
+| Group                                            | Commits                                                                                                                                                                   | Runtime-affecting?                                                                                                                  |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime-envelope refactor series (DAL-38)        | `5cace7a`, `b902658`, `4222777`, `c6d9b93`, `f777fa0` (+ merges `2ae6b65` #57, `5b31005` #66)                                                                             | **YES** — touches `crates/calc-flow/src/runtime/envelope.rs`, `runtime/mod.rs`, `pipeline.rs`, `pipeline/control.rs`, `operator.rs` |
+| Allocation harness, CI wiring, and harness tests | `2174698`, `bb08d0e`, `f3af9f9`, `bc78beb`, `89f1a2d`, `b2f0316`, `4f64103`, `18ba3e7`, `0835864`, `eaac319`, `6ddbb9e`, `fe34d7d`, `0c8ae5b`, `f880fb8` (#72), `8922c5d` | No — `benches/`, `.github/workflows/`, `scripts/`, harness-only                                                                     |
+| Docs and streaming plan                          | `ba08b2d` (#70), `0905b22` (#71), `cb2321e`, `1dceb9e` (#73), `1417c37`, `1d8bc75`, `8360529` (#74), `959cbe0`, `eeac0a4`, `e9c4127` (#75)                                | No — `docs/`, `AGENTS.md`, `CLAUDE.md`, `.claude/agents/`                                                                           |
 
 Files changed across the whole delta (`git diff --name-only 3bae1a6..e9c4127`):
 `.claude/agents/cf-critic.md`, `.codacy.yml`, `.github/workflows/ci.yml`,
@@ -95,28 +95,28 @@ paired same-machine rerun, not by cross-referencing §5 against §5.2.
 This is a **virtualized, shared development workstation (WSL2)**, not a
 dedicated benchmark runner. See §9 for the noise policy this implies.
 
-| Item                  | Value                                                                 |
-| --------------------- | --------------------------------------------------------------------- |
-| CPU model             | 13th Gen Intel(R) Core(TM) i9-13900HX                                 |
-| Topology              | 1 socket, 16 physical cores, 2 threads/core, 32 logical CPUs          |
-| Total memory          | 32,669,504 kB (≈ 31.2 GiB) visible to the WSL2 guest                  |
-| Swap                  | 64 GiB (≈ 53 GiB free during capture)                                 |
+| Item                  | Value                                                                                     |
+| --------------------- | ----------------------------------------------------------------------------------------- |
+| CPU model             | 13th Gen Intel(R) Core(TM) i9-13900HX                                                     |
+| Topology              | 1 socket, 16 physical cores, 2 threads/core, 32 logical CPUs                              |
+| Total memory          | 32,669,504 kB (≈ 31.2 GiB) visible to the WSL2 guest                                      |
+| Swap                  | 64 GiB (≈ 53 GiB free during capture)                                                     |
 | OS / kernel           | Linux `5.15.167.4-microsoft-standard-WSL2` (`#1 SMP Tue Nov 5 00:21:55 UTC 2024`), x86_64 |
-| Virtualization        | `wsl` (systemd-detect-virt)                                           |
-| CPU governor          | Unavailable in the WSL2 guest                                         |
-| Power supplies        | `AC1`, `BAT1` present; no frequency control exposed                   |
-| rustc                 | `rustc 1.88.0 (6b00bc388 2025-06-23)`, host `x86_64-unknown-linux-gnu`, LLVM 20.1.5 |
-| cargo                 | `cargo 1.88.0 (873a06493 2025-05-10)`                                 |
-| cargo-llvm-cov        | `0.8.7`                                                               |
-| uv                    | `0.11.19 (x86_64-unknown-linux-gnu)`                                  |
-| Python (project venv) | `3.13.9` (interpreter at `/home/wegamekinglc/anaconda3/bin/python3`)  |
-| maturin               | `1.14.1`                                                              |
-| ruff                  | `0.16.0`                                                              |
-| node                  | `v20.20.2`                                                            |
-| npm                   | `10.8.2`                                                              |
-| criterion (dev-dep)   | `0.8.0` with `async_tokio`                                            |
-| allocation-counter    | `0.8.1` (pinned `=0.8.1`)                                             |
-| DataFusion            | `=54.0.0`                                                             |
+| Virtualization        | `wsl` (systemd-detect-virt)                                                               |
+| CPU governor          | Unavailable in the WSL2 guest                                                             |
+| Power supplies        | `AC1`, `BAT1` present; no frequency control exposed                                       |
+| rustc                 | `rustc 1.88.0 (6b00bc388 2025-06-23)`, host `x86_64-unknown-linux-gnu`, LLVM 20.1.5       |
+| cargo                 | `cargo 1.88.0 (873a06493 2025-05-10)`                                                     |
+| cargo-llvm-cov        | `0.8.7`                                                                                   |
+| uv                    | `0.11.19 (x86_64-unknown-linux-gnu)`                                                      |
+| Python (project venv) | `3.13.9` (interpreter at `/home/wegamekinglc/anaconda3/bin/python3`)                      |
+| maturin               | `1.14.1`                                                                                  |
+| ruff                  | `0.16.0`                                                                                  |
+| node                  | `v20.20.2`                                                                                |
+| npm                   | `10.8.2`                                                                                  |
+| criterion (dev-dep)   | `0.8.0` with `async_tokio`                                                                |
+| allocation-counter    | `0.8.1` (pinned `=0.8.1`)                                                                 |
+| DataFusion            | `=54.0.0`                                                                                 |
 
 ## 3. Target directory layout
 
@@ -124,17 +124,17 @@ All build and measurement artifacts stayed under the repository `target/`
 tree; scratch git worktrees lived under `/tmp` and were removed after the
 runs.
 
-| Path                                             | Contents                                                            |
-| ------------------------------------------------ | ------------------------------------------------------------------- |
-| `target/` (default)                              | fmt/clippy/test/doc builds (`target/debug`, `target/doc`)           |
-| `target/llvm-cov-target/`                        | cargo-llvm-cov instrumented build and coverage data                 |
-| `target/cargo/`                                  | `CARGO_TARGET_DIR` for all bench builds; Criterion output at `target/cargo/criterion/<case>/continuous-streaming-v3-m0/` |
-| `target/cargo/release/deps/`                     | Prebuilt bench binaries (`core-*`, `allocation_regression-*`)       |
-| `target/allocation-regression/`                  | `baseline-2ac7e97.json`, `candidate-e9c4127.json`, `compare-m0.json` |
-| `target/m0-baseline-logs/`                       | Per-surface logs and `criterion-estimates.json`                     |
-| `/tmp/cf-alloc-harness` (removed)                | Detached worktree at `fe34d7d` for the `--role baseline` run        |
-| `/tmp/cf-alloc-candidate` (removed)              | Detached worktree at `e9c4127` for the `--role candidate` run       |
-| `target/benchmark-results/ci-30732416522/`       | Mined CI artifacts: four pytest-benchmark JSONs, extracted Criterion estimates (`criterion-estimates.json`), and the full Criterion report tree (`criterion-report/`) — local copies of the 90-day-retention CI artifacts |
+| Path                                       | Contents                                                                                                                                                                                                                  |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `target/` (default)                        | fmt/clippy/test/doc builds (`target/debug`, `target/doc`)                                                                                                                                                                 |
+| `target/llvm-cov-target/`                  | cargo-llvm-cov instrumented build and coverage data                                                                                                                                                                       |
+| `target/cargo/`                            | `CARGO_TARGET_DIR` for all bench builds; Criterion output at `target/cargo/criterion/<case>/continuous-streaming-v3-m0/`                                                                                                  |
+| `target/cargo/release/deps/`               | Prebuilt bench binaries (`core-*`, `allocation_regression-*`)                                                                                                                                                             |
+| `target/allocation-regression/`            | `baseline-2ac7e97.json`, `candidate-e9c4127.json`, `compare-m0.json`                                                                                                                                                      |
+| `target/m0-baseline-logs/`                 | Per-surface logs and `criterion-estimates.json`                                                                                                                                                                           |
+| `/tmp/cf-alloc-harness` (removed)          | Detached worktree at `fe34d7d` for the `--role baseline` run                                                                                                                                                              |
+| `/tmp/cf-alloc-candidate` (removed)        | Detached worktree at `e9c4127` for the `--role candidate` run                                                                                                                                                             |
+| `target/benchmark-results/ci-30732416522/` | Mined CI artifacts: four pytest-benchmark JSONs, extracted Criterion estimates (`criterion-estimates.json`), and the full Criterion report tree (`criterion-report/`) — local copies of the 90-day-retention CI artifacts |
 
 ## 4. Verification surface results
 
@@ -144,38 +144,38 @@ listed explicitly in §7; none indicate a repository defect.
 
 ### 4.1 Rust core
 
-| Check                  | Command                                                              | Result | Key numbers                                                     |
-| ---------------------- | -------------------------------------------------------------------- | ------ | --------------------------------------------------------------- |
-| Dependency sync        | `uv sync --extra dev`                                                | PASS   | 43 packages resolved, environment already current               |
-| Format                 | `cargo fmt --all --check`                                            | PASS   | No diffs                                                        |
-| Lints                  | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | PASS | Zero warnings                                                   |
-| Rust tests             | `uv run python scripts/run_rust_tests.py`                            | PASS   | 335 tests, 0 failed: 266 `calc-flow` (41 lib + 225 integration) + 69 `calc-flow-python` lib tests (serial, 1.79 s); core test-profile compile 20 m 06 s under parallel build load |
-| Coverage               | `cargo llvm-cov --workspace --all-features --fail-under-lines 90`    | PASS   | **Lines 90.77 %** (10,723/11,813) ≥ 90 % floor; regions 88.63 %; functions 81.55 % |
-| Rustdoc                | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps` | PASS | Generated without warnings                              |
+| Check           | Command                                                                     | Result | Key numbers                                                                                                                                                                       |
+| --------------- | --------------------------------------------------------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Dependency sync | `uv sync --extra dev`                                                       | PASS   | 43 packages resolved, environment already current                                                                                                                                 |
+| Format          | `cargo fmt --all --check`                                                   | PASS   | No diffs                                                                                                                                                                          |
+| Lints           | `cargo clippy --workspace --all-targets --all-features -- -D warnings`      | PASS   | Zero warnings                                                                                                                                                                     |
+| Rust tests      | `uv run python scripts/run_rust_tests.py`                                   | PASS   | 335 tests, 0 failed: 266 `calc-flow` (41 lib + 225 integration) + 69 `calc-flow-python` lib tests (serial, 1.79 s); core test-profile compile 20 m 06 s under parallel build load |
+| Coverage        | `cargo llvm-cov --workspace --all-features --fail-under-lines 90`           | PASS   | **Lines 90.77 %** (10,723/11,813) ≥ 90 % floor; regions 88.63 %; functions 81.55 %                                                                                                |
+| Rustdoc         | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps` | PASS   | Generated without warnings                                                                                                                                                        |
 
 ### 4.2 Python binding and adapters
 
-| Check                  | Command                                            | Result | Key numbers                                  |
-| ---------------------- | -------------------------------------------------- | ------ | -------------------------------------------- |
-| Native module build    | `uv run maturin develop`                           | PASS   | `calc_flow-2.0.0` editable install rebuilt at `e9c4127` (abi3 wheel, cp313) |
-| Python tests           | `JAX_PLATFORMS=cpu uv run pytest python/tests -q`  | PASS   | **426 passed, 0 failed** in 11.61 s (re-run against the fresh native module) |
-| Lint                   | `uv run ruff check .`                              | PASS   | No findings                                  |
-| Format                 | `uv run ruff format --check .`                     | PASS   | No diffs                                     |
+| Check               | Command                                           | Result | Key numbers                                                                  |
+| ------------------- | ------------------------------------------------- | ------ | ---------------------------------------------------------------------------- |
+| Native module build | `uv run maturin develop`                          | PASS   | `calc_flow-2.0.0` editable install rebuilt at `e9c4127` (abi3 wheel, cp313)  |
+| Python tests        | `JAX_PLATFORMS=cpu uv run pytest python/tests -q` | PASS   | **426 passed, 0 failed** in 11.61 s (re-run against the fresh native module) |
+| Lint                | `uv run ruff check .`                             | PASS   | No findings                                                                  |
+| Format              | `uv run ruff format --check .`                    | PASS   | No diffs                                                                     |
 
 ### 4.3 Studio backend
 
-| Check                  | Command                                                            | Result | Key numbers                                        |
-| ---------------------- | ------------------------------------------------------------------ | ------ | -------------------------------------------------- |
-| Backend tests + coverage | `cd web-ui/backend && uv run --project . --extra dev pytest --cov=calc_flow_studio` | PASS | **150 passed, 4 skipped** in 11.87 s; coverage **93.88 %** ≥ 85 % floor |
+| Check                    | Command                                                                             | Result | Key numbers                                                             |
+| ------------------------ | ----------------------------------------------------------------------------------- | ------ | ----------------------------------------------------------------------- |
+| Backend tests + coverage | `cd web-ui/backend && uv run --project . --extra dev pytest --cov=calc_flow_studio` | PASS   | **150 passed, 4 skipped** in 11.87 s; coverage **93.88 %** ≥ 85 % floor |
 
 ### 4.4 Studio frontend and generated contract
 
-| Check                  | Command                          | Result | Key numbers                                            |
-| ---------------------- | -------------------------------- | ------ | ------------------------------------------------------ |
-| Dependency install     | `npm ci`                         | PASS   | 165 packages, audited 166                              |
-| Build                  | `npm run build`                  | PASS   | `tsc -b && vite build`, built in 230 ms                |
-| Unit tests             | `npm test` (`vitest run`)        | PASS   | **18 files / 182 tests passed**, duration 3.58 s       |
-| Generated-file drift   | `npm run sync:api` + SHA-256 comparison of `web-ui/openapi.json`, `web-ui/src/api/schema.d.ts`, `schemas/project-v2.schema.json` | PASS | All three files byte-identical after regeneration; working tree left unmodified |
+| Check                | Command                                                                                                                          | Result | Key numbers                                                                     |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------ | ------------------------------------------------------------------------------- |
+| Dependency install   | `npm ci`                                                                                                                         | PASS   | 165 packages, audited 166                                                       |
+| Build                | `npm run build`                                                                                                                  | PASS   | `tsc -b && vite build`, built in 230 ms                                         |
+| Unit tests           | `npm test` (`vitest run`)                                                                                                        | PASS   | **18 files / 182 tests passed**, duration 3.58 s                                |
+| Generated-file drift | `npm run sync:api` + SHA-256 comparison of `web-ui/openapi.json`, `web-ui/src/api/schema.d.ts`, `schemas/project-v2.schema.json` | PASS   | All three files byte-identical after regeneration; working tree left unmodified |
 
 `npm run test:e2e` (Playwright) was not part of the M0.3 command list and
 was not run.
@@ -206,15 +206,15 @@ All intervals are Criterion-reported 95 % confidence intervals. Note that
 the Criterion console headline for `b.iter()` cases prints the **slope**
 statistic; all three location statistics are recorded below.
 
-| Case                                   | Mean (point) [95 % CI]                  | Median (point) [95 % CI]                | Slope (point) [95 % CI]                 | Std dev   | Outliers |
-| -------------------------------------- | --------------------------------------- | --------------------------------------- | --------------------------------------- | --------- | -------- |
-| `compile/expression`                   | 11.374 µs [11.258, 11.510]              | 11.222 µs [11.159, 11.318]              | 11.232 µs [11.165, 11.305]              | 0.655 µs  | 6 %      |
-| `execute/expression_1024_rows`         | 374.70 µs [371.17, 378.58]              | 371.00 µs [367.35, 373.43]              | 376.10 µs [370.50, 382.52]              | 19.13 µs  | 7 %      |
-| `execute/datafusion_runtime_new`       | 18.696 ns [18.584, 18.812]              | 18.601 ns [18.456, 18.701]              | 18.611 ns [18.508, 18.720]              | 0.591 ns  | 2 %      |
-| `execute/datafusion_runtime_new_register_udfs` | 54.826 ns [54.494, 55.174]      | 54.575 ns [54.081, 54.973]              | 54.817 ns [54.423, 55.231]              | 1.757 ns  | 3 %      |
-| `execute/external_passthrough_1000_rows` | 2.0229 µs [2.0105, 2.0362]            | 2.0131 µs [2.0017, 2.0342]              | 1.9920 µs [1.9808, 2.0051]              | 0.066 µs  | 4 %      |
-| `execute/external_plan_table_requirement` | 236.57 ps [233.11, 240.27]           | 230.27 ps [228.73, 232.21]              | 238.08 ps [234.55, 242.04]              | 0.018 ns  | 22 %     |
-| `json/canonical_nested`                | 3.5184 µs [3.5022, 3.5354]              | 3.5056 µs [3.4879, 3.5228]              | 3.5193 µs [3.4963, 3.5449]              | 0.085 µs  | 4 %      |
+| Case                                           | Mean (point) [95 % CI]     | Median (point) [95 % CI]   | Slope (point) [95 % CI]    | Std dev  | Outliers |
+| ---------------------------------------------- | -------------------------- | -------------------------- | -------------------------- | -------- | -------- |
+| `compile/expression`                           | 11.374 µs [11.258, 11.510] | 11.222 µs [11.159, 11.318] | 11.232 µs [11.165, 11.305] | 0.655 µs | 6 %      |
+| `execute/expression_1024_rows`                 | 374.70 µs [371.17, 378.58] | 371.00 µs [367.35, 373.43] | 376.10 µs [370.50, 382.52] | 19.13 µs | 7 %      |
+| `execute/datafusion_runtime_new`               | 18.696 ns [18.584, 18.812] | 18.601 ns [18.456, 18.701] | 18.611 ns [18.508, 18.720] | 0.591 ns | 2 %      |
+| `execute/datafusion_runtime_new_register_udfs` | 54.826 ns [54.494, 55.174] | 54.575 ns [54.081, 54.973] | 54.817 ns [54.423, 55.231] | 1.757 ns | 3 %      |
+| `execute/external_passthrough_1000_rows`       | 2.0229 µs [2.0105, 2.0362] | 2.0131 µs [2.0017, 2.0342] | 1.9920 µs [1.9808, 2.0051] | 0.066 µs | 4 %      |
+| `execute/external_plan_table_requirement`      | 236.57 ps [233.11, 240.27] | 230.27 ps [228.73, 232.21] | 238.08 ps [234.55, 242.04] | 0.018 ns | 22 %     |
+| `json/canonical_nested`                        | 3.5184 µs [3.5022, 3.5354] | 3.5056 µs [3.4879, 3.5228] | 3.5193 µs [3.4963, 3.5449] | 0.085 µs | 4 %      |
 
 Reading notes:
 
@@ -266,28 +266,28 @@ orders of magnitude only; they must never be compared directly against §5
 
 CI runner identity (from the workflow and the artifacts' `machine_info`):
 
-| Item             | Value                                                                      |
-| ---------------- | -------------------------------------------------------------------------- |
-| Workflow         | `.github/workflows/benchmarks.yml`, `schedule` trigger (cron `17 3 * * *`) |
-| Runner label     | `ubuntu-latest` (GitHub-hosted)                                            |
-| VM / kernel      | Azure VM, Linux `6.17.0-1020-azure`                                        |
-| CPU              | AMD EPYC 9V74 80-Core Processor, 4 vCPUs visible, 2.87 GHz                 |
-| Memory           | 16 GB (GitHub-hosted standard runner specification)                        |
-| Python           | 3.13.14 (local baseline used 3.13.9 — dependency fingerprints differ)      |
-| Artifact retention | 90 days (`benchmark-rust-*`, `benchmark-<scale>-*`)                      |
+| Item               | Value                                                                      |
+| ------------------ | -------------------------------------------------------------------------- |
+| Workflow           | `.github/workflows/benchmarks.yml`, `schedule` trigger (cron `17 3 * * *`) |
+| Runner label       | `ubuntu-latest` (GitHub-hosted)                                            |
+| VM / kernel        | Azure VM, Linux `6.17.0-1020-azure`                                        |
+| CPU                | AMD EPYC 9V74 80-Core Processor, 4 vCPUs visible, 2.87 GHz                 |
+| Memory             | 16 GB (GitHub-hosted standard runner specification)                        |
+| Python             | 3.13.14 (local baseline used 3.13.9 — dependency fingerprints differ)      |
+| Artifact retention | 90 days (`benchmark-rust-*`, `benchmark-<scale>-*`)                        |
 
 Side-by-side presentation of the seven shared Criterion cases, labeled by
 commit and machine class (mean point estimate [95 % CI]):
 
-| Case                                   | Local `e9c4127` — WSL2, i9-13900HX (§5) | CI `3bae1a6` — ubuntu-latest, EPYC 4 vCPU |
-| -------------------------------------- | ------------------------------------- | ----------------------------------------- |
-| `compile/expression`                   | 11.374 µs [11.258, 11.510]            | 17.455 µs [17.420, 17.499]                |
-| `execute/expression_1024_rows`         | 374.70 µs [371.17, 378.58]            | 522.76 µs [521.71, 524.59]                |
-| `execute/datafusion_runtime_new`       | 18.696 ns [18.584, 18.812]            | 31.158 ns [30.796, 31.534]                |
-| `execute/datafusion_runtime_new_register_udfs` | 54.826 ns [54.494, 55.174]    | 84.733 ns [84.564, 84.922]                |
-| `execute/external_passthrough_1000_rows` | 2.0229 µs [2.0105, 2.0362]          | 3.3677 µs [3.3590, 3.3780]                |
-| `execute/external_plan_table_requirement` | 236.57 ps [233.11, 240.27]         | 503.30 ps [500.19, 507.08]                |
-| `json/canonical_nested`                | 3.5184 µs [3.5022, 3.5354]            | 4.4530 µs [4.4458, 4.4631]                |
+| Case                                           | Local `e9c4127` — WSL2, i9-13900HX (§5) | CI `3bae1a6` — ubuntu-latest, EPYC 4 vCPU |
+| ---------------------------------------------- | --------------------------------------- | ----------------------------------------- |
+| `compile/expression`                           | 11.374 µs [11.258, 11.510]              | 17.455 µs [17.420, 17.499]                |
+| `execute/expression_1024_rows`                 | 374.70 µs [371.17, 378.58]              | 522.76 µs [521.71, 524.59]                |
+| `execute/datafusion_runtime_new`               | 18.696 ns [18.584, 18.812]              | 31.158 ns [30.796, 31.534]                |
+| `execute/datafusion_runtime_new_register_udfs` | 54.826 ns [54.494, 55.174]              | 84.733 ns [84.564, 84.922]                |
+| `execute/external_passthrough_1000_rows`       | 2.0229 µs [2.0105, 2.0362]              | 3.3677 µs [3.3590, 3.3780]                |
+| `execute/external_plan_table_requirement`      | 236.57 ps [233.11, 240.27]              | 503.30 ps [500.19, 507.08]                |
+| `json/canonical_nested`                        | 3.5184 µs [3.5022, 3.5354]              | 4.4530 µs [4.4458, 4.4631]                |
 
 The CI runner is consistently slower per case (≈ 1.3–1.7×), consistent with
 a 4-vCPU shared Azure VM versus a 32-thread desktop-class CPU; the ratio is
@@ -301,12 +301,12 @@ scale, `commit_info.id = 3bae1a6d109f4c21…`, `dirty = false`). Preserved
 under `target/benchmark-results/ci-30732416522/<scale>.json`. Full
 per-case tables are in Appendix A.
 
-| Scale      | Rows / elements / matrix | Cases | Artifact preserved at                                                  |
-| ---------- | ------------------------ | ----- | ---------------------------------------------------------------------- |
-| `overhead` | 1,000 / 1,000 / 16       | 40    | `target/benchmark-results/ci-30732416522/overhead.json`                |
-| `small`    | 10,000 / 10,000 / 64     | 40    | `target/benchmark-results/ci-30732416522/small.json`                   |
-| `standard` | 100,000 / 100,000 / 256  | 40    | `target/benchmark-results/ci-30732416522/standard.json`                |
-| `nightly`  | 1,000,000 / 1,000,000 / 512 | 40 | `target/benchmark-results/ci-30732416522/nightly.json`                 |
+| Scale      | Rows / elements / matrix    | Cases | Artifact preserved at                                   |
+| ---------- | --------------------------- | ----- | ------------------------------------------------------- |
+| `overhead` | 1,000 / 1,000 / 16          | 40    | `target/benchmark-results/ci-30732416522/overhead.json` |
+| `small`    | 10,000 / 10,000 / 64        | 40    | `target/benchmark-results/ci-30732416522/small.json`    |
+| `standard` | 100,000 / 100,000 / 256     | 40    | `target/benchmark-results/ci-30732416522/standard.json` |
+| `nightly`  | 1,000,000 / 1,000,000 / 512 | 40    | `target/benchmark-results/ci-30732416522/nightly.json`  |
 
 pytest-benchmark reports min/mean/median/std-dev/rounds rather than
 Criterion-style confidence intervals; a 95 % interval can be reconstructed
@@ -328,27 +328,27 @@ repetitions; counts asserted stable across repetitions).
 
 Provenance of this capture:
 
-| Item                                | Value                                                                |
-| ----------------------------------- | -------------------------------------------------------------------- |
-| Baseline report                     | `target/allocation-regression/baseline-2ac7e97.json` (role `baseline`, product SHA `2ac7e97`, measured in `/tmp/cf-alloc-harness` at `fe34d7d`) |
-| Candidate report                    | `target/allocation-regression/candidate-e9c4127.json` (role `candidate`, product SHA `e9c4127`, measured in `/tmp/cf-alloc-candidate`) |
-| Comparison                          | `target/allocation-regression/compare-m0.json` — **valid, passed** (candidate ≤ baseline on every case and repetition: zero allocation drift between the frozen product and `e9c4127`) |
-| Frozen `Cargo.lock` SHA-256         | `4e7069ec6f20f828a59bf39a7c1f2e0fcaff74cb61095133ff63c4abb227458f`   |
-| Frozen `crates/calc-flow/Cargo.toml` SHA-256 | `1d9a6c60cbc25d16d9cee09bde7a7756f4f08f3c85aeb3fd8e305419ad4c8eee` |
-| Frozen `benches/allocation_regression.rs` SHA-256 | `63f334634c0b16a5ce34c0b7b8ef0c8654da0263a084ad5fd68bebc845e68cea` |
-| allocation-counter                  | `0.8.1`, registry checksum `beb9e990c0a33699f1984d85a6abead615ccc72dd8130bf3e15dcabe2ca149c9` (matches the harness `ALLOCATION_COUNTER_CHECKSUM` constant) |
-| Report schema version               | `1`                                                                  |
+| Item                                              | Value                                                                                                                                                                                  |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Baseline report                                   | `target/allocation-regression/baseline-2ac7e97.json` (role `baseline`, product SHA `2ac7e97`, measured in `/tmp/cf-alloc-harness` at `fe34d7d`)                                        |
+| Candidate report                                  | `target/allocation-regression/candidate-e9c4127.json` (role `candidate`, product SHA `e9c4127`, measured in `/tmp/cf-alloc-candidate`)                                                 |
+| Comparison                                        | `target/allocation-regression/compare-m0.json` — **valid, passed** (candidate ≤ baseline on every case and repetition: zero allocation drift between the frozen product and `e9c4127`) |
+| Frozen `Cargo.lock` SHA-256                       | `4e7069ec6f20f828a59bf39a7c1f2e0fcaff74cb61095133ff63c4abb227458f`                                                                                                                     |
+| Frozen `crates/calc-flow/Cargo.toml` SHA-256      | `1d9a6c60cbc25d16d9cee09bde7a7756f4f08f3c85aeb3fd8e305419ad4c8eee`                                                                                                                     |
+| Frozen `benches/allocation_regression.rs` SHA-256 | `63f334634c0b16a5ce34c0b7b8ef0c8654da0263a084ad5fd68bebc845e68cea`                                                                                                                     |
+| allocation-counter                                | `0.8.1`, registry checksum `beb9e990c0a33699f1984d85a6abead615ccc72dd8130bf3e15dcabe2ca149c9` (matches the harness `ALLOCATION_COUNTER_CHECKSUM` constant)                             |
+| Report schema version                             | `1`                                                                                                                                                                                    |
 
 Frozen baseline values (identical in the candidate report; per-case totals
 over 10,000 measured dispatches, stable across all 10 repetitions):
 
-| Case                              | `count_total` | `bytes_total`  | calls / dispatch | bytes / dispatch | calls / node-dispatch | bytes / node-dispatch |
-| --------------------------------- | ------------- | -------------- | ---------------- | ---------------- | --------------------- | --------------------- |
-| `external_payload_one_node`       | 500,001       | 136,770,064    | 50.0001          | 13,677.0064      | 50.0001               | 13,677.0064           |
-| `external_table_one_node`         | 500,001       | 136,750,064    | 50.0001          | 13,675.0064      | 50.0001               | 13,675.0064           |
-| `external_table_three_way_fan_out` | 1,230,001    | 255,630,064    | 123.0001         | 25,563.0064      | 30.7500               | 6,390.7516            |
-| `builtin_expression_one_node`     | 34,090,001    | 3,726,780,064  | 3,409.0001       | 372,678.0064     | 3,409.0001            | 372,678.0064          |
-| `builtin_sql_one_node`            | 31,040,001    | 3,456,420,064  | 3,104.0001       | 345,642.0064     | 3,104.0001            | 345,642.0064          |
+| Case                               | `count_total` | `bytes_total` | calls / dispatch | bytes / dispatch | calls / node-dispatch | bytes / node-dispatch |
+| ---------------------------------- | ------------- | ------------- | ---------------- | ---------------- | --------------------- | --------------------- |
+| `external_payload_one_node`        | 500,001       | 136,770,064   | 50.0001          | 13,677.0064      | 50.0001               | 13,677.0064           |
+| `external_table_one_node`          | 500,001       | 136,750,064   | 50.0001          | 13,675.0064      | 50.0001               | 13,675.0064           |
+| `external_table_three_way_fan_out` | 1,230,001     | 255,630,064   | 123.0001         | 25,563.0064      | 30.7500               | 6,390.7516            |
+| `builtin_expression_one_node`      | 34,090,001    | 3,726,780,064 | 3,409.0001       | 372,678.0064     | 3,409.0001            | 372,678.0064          |
+| `builtin_sql_one_node`             | 31,040,001    | 3,456,420,064 | 3,104.0001       | 345,642.0064     | 3,104.0001            | 345,642.0064          |
 
 Allocation counts are deterministic integers (the harness asserts equality
 across repetitions), so machine timing noise does not affect them; the
