@@ -3,6 +3,16 @@
 This file records fundamental changes to Calc Flow's public surfaces and
 engine or Studio capabilities.
 
+## 2026-08
+
+- Add a crate-private ordered runtime envelope for existing `Batch` data and
+  opaque watermark/epoch markers. Internal control dispatch preserves serial
+  per-edge FIFO on supported single-ingress routes, keeps the runtime as the
+  sole forwarding owner, fails closed before side effects at reachable
+  multi-input nodes, and reuses plan snapshot and in-flight rollback
+  machinery. This is internal groundwork only: public Rust, Python, Studio,
+  runner, project, checkpoint, and graph-fingerprint contracts are unchanged.
+
 ## 2026-07
 
 - Add a large, responsive Studio Data Source editor dialog with temporary
