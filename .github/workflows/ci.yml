@@ -305,7 +305,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       FROZEN_ALLOCATION_CANDIDATE_TARGET_DIR: ${{ github.workspace }}/target/frozen-allocation-candidate
-      FROZEN_ALLOCATION_HARNESS_SHA: "eaac319d70aacee1e5bc09c53ca6fee36415607e"
+      FROZEN_ALLOCATION_HARNESS_SHA: "fe34d7dcd5bfd66c9e97c79d540380f58ee1a04d"
       FROZEN_ALLOCATION_HARNESS_TARGET_DIR: ${{ github.workspace }}/target/frozen-allocation-harness
       RUST_TEST_THREADS: 1
     steps:
@@ -383,6 +383,19 @@ jobs:
           CARGO_TARGET_DIR="$FROZEN_ALLOCATION_CANDIDATE_TARGET_DIR" CARGO_BUILD_JOBS=1 \
             cargo bench --locked -p calc-flow --bench allocation_regression -- \
             --compare "$FROZEN_ALLOCATION_BASELINE_REPORT" "$FROZEN_ALLOCATION_CANDIDATE_REPORT"
+      - name: Remove frozen allocation worktrees
+        if: always() && steps.frozen_allocation_harness.outputs.enabled == 'true'
+        env:
+          FROZEN_ALLOCATION_CANDIDATE_WORKTREE: ${{ runner.temp }}/frozen-allocation-candidate
+          FROZEN_ALLOCATION_HARNESS_WORKTREE: ${{ runner.temp }}/frozen-allocation-harness
+        run: |
+          if [ -e "$FROZEN_ALLOCATION_CANDIDATE_WORKTREE/.git" ]; then
+            git worktree remove --force "$FROZEN_ALLOCATION_CANDIDATE_WORKTREE"
+          fi
+          if [ -e "$FROZEN_ALLOCATION_HARNESS_WORKTREE/.git" ]; then
+            git worktree remove --force "$FROZEN_ALLOCATION_HARNESS_WORKTREE"
+          fi
+          git worktree prune
       - name: Install Rust coverage tool
         run: cargo install cargo-llvm-cov --version 0.8.7 --locked
       - name: Reclaim Rust build disk before coverage

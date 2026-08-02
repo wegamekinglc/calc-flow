@@ -84,7 +84,16 @@ class ReleaseConfigTests(unittest.TestCase):
             "crates/calc-flow/src/pipeline/signal_allocation_tests.rs",
         ):
             with self.subTest(path=path):
-                self.assertNotRegex((ROOT / path).read_text(), r"(?i)dal[_-]38")
+                self.assertNotRegex(
+                    (ROOT / path).read_text(),
+                    r"(?i)dal(?:[_-]?38)",
+                )
+
+        harness = (ROOT / harness_path).read_text()
+        self.assertIn(
+            'env::var("ALLOCATION_REGRESSION_BACKGROUND_LOAD_POLICY")',
+            harness,
+        )
 
     def test_release_maturin_actions_pin_tool_and_rust_versions(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
@@ -158,7 +167,7 @@ class ReleaseConfigTests(unittest.TestCase):
             "  rust-supply-chain:\n", 1
         )[0]
 
-        harness_sha = "eaac319d70aacee1e5bc09c53ca6fee36415607e"
+        harness_sha = "fe34d7dcd5bfd66c9e97c79d540380f58ee1a04d"
         rust_test_harness = (
             "python3.13 scripts/run_rust_tests.py --python-stress-runs 3"
         )
@@ -168,8 +177,6 @@ class ReleaseConfigTests(unittest.TestCase):
         )
 
         self.assertIn("fetch-depth: 0", rust_core)
-        self.assertNotIn("DAL38_", rust_core)
-        self.assertNotIn("id: dal38_harness", rust_core)
         self.assertIn(f'FROZEN_ALLOCATION_HARNESS_SHA: "{harness_sha}"', rust_core)
         self.assertIn("id: frozen_allocation_harness", rust_core)
         self.assertIn(
@@ -187,6 +194,19 @@ class ReleaseConfigTests(unittest.TestCase):
             rust_core,
         )
         self.assertIn(harness_self_test, rust_core)
+        self.assertIn(
+            "if: always() && steps.frozen_allocation_harness.outputs.enabled == 'true'",
+            rust_core,
+        )
+        self.assertIn(
+            'git worktree remove --force "$FROZEN_ALLOCATION_CANDIDATE_WORKTREE"',
+            rust_core,
+        )
+        self.assertIn(
+            'git worktree remove --force "$FROZEN_ALLOCATION_HARNESS_WORKTREE"',
+            rust_core,
+        )
+        self.assertIn("git worktree prune", rust_core)
         self.assertIn(
             "github.event.pull_request.base.sha == env.FROZEN_ALLOCATION_HARNESS_SHA",
             rust_core,

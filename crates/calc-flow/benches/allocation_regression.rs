@@ -1047,9 +1047,10 @@ fn collect_environment() -> EnvironmentEvidence {
                 .unwrap_or_else(|error| format!("unavailable: {error}"))
                 .trim()
         ),
-        background_load_policy: env::var("DAL38_BACKGROUND_LOAD_POLICY").unwrap_or_else(|_| {
-            "shared runner; no benchmark-related work intentionally run concurrently".into()
-        }),
+        background_load_policy: env::var("ALLOCATION_REGRESSION_BACKGROUND_LOAD_POLICY")
+            .unwrap_or_else(|_| {
+                "shared runner; no benchmark-related work intentionally run concurrently".into()
+            }),
         cargo_build_jobs: env::var("CARGO_BUILD_JOBS").unwrap_or_else(|_| "unset".into()),
         calc_flow_benchmark_scale: env::var("CALC_FLOW_BENCHMARK_SCALE")
             .unwrap_or_else(|_| "unset".into()),
