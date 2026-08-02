@@ -22,7 +22,7 @@ quotable across all three).
   only. Rust/Python type names, trait signatures, error variant names, and JSON
   field layouts are owned by the M0.2 API note under the same slug. The key
   words MUST, MUST NOT, SHOULD, and MAY are normative. Revision 2 applies M0
-  critique round 1 (`../../critiques/continuous-streaming-runtime.md`):
+  critique round 1 (`../critiques/continuous-streaming-runtime.md`):
   D4.1/D4.3/D4.5, D5.1/D5.3/D5.4, D9.4/D9.6, section 1 cursor definition,
   S2.2, S7.3, S7.5, S9.2/S9.4, S10.3, I4/I5/I6, NFR-5, FR17/FR23, and
   AC-D4/AC-D5/AC-S10/AC-I. Revision 3 applies M0 critique round 2 (finding

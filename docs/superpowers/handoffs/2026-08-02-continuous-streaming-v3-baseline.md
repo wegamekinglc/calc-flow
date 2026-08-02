@@ -403,7 +403,11 @@ environment exactly; they are recorded faithfully for future operators:
    job-wide in `.github/workflows/ci.yml`; `AGENTS.md` does not mention
    this requirement for local coverage runs.
    **Recovery:** re-ran with `RUST_TEST_THREADS=1` (CI-equivalent); full
-   suite then passed. Documentation gap worth fixing in M0 wrap-up.
+   suite then passed. **Follow-up (not delivered by this PR):** the
+   `RUST_TEST_THREADS=1` requirement for local `cargo llvm-cov` runs should
+   be documented in `AGENTS.md`; this wrap-up PR intentionally leaves
+   `AGENTS.md` unchanged, so the fix is owned by a separate docs follow-up
+   PR or by milestone M1.
 3. **`uv run maturin develop` attempt 1 — FAILED (exit 1).** Maturin
    refuses to run when both `VIRTUAL_ENV` (set by `uv run`) and
    `CONDA_PREFIX` (set by this shell's active conda base) are present.
