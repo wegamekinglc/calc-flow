@@ -35,9 +35,9 @@ ahead of a test that demands it.
   `AGENTS.md`
 - `.claude/rules/code-style.md` — functional-first, immutability, no caller mutation,
   async web I/O, markdown conventions
-- `.claude/specs/`, `.claude/api-notes/`, `.claude/critiques/` — upstream artifacts from
-  the spec writer, API designer, and critic agents (read these before designing or coding
-  when they exist)
+- `.codex/artifacts/specs/`, `.codex/artifacts/api-notes/`,
+  `.codex/artifacts/critiques/` — upstream artifacts from the spec writer, API designer,
+  and critic agents (read these before designing or coding when they exist)
 
 Before starting work, read `.claude/rules/code-style.md`, the relevant
 `docs/introduction.md` sections, and any upstream artifacts for the feature. The critic's
@@ -108,8 +108,9 @@ each surface you touch.
 
 **Rust core** (tests live in each module's `#[cfg(test)]` mod or the crate's `tests/`):
 ```bash
+uv sync --extra dev
 cargo test -p calc-flow <test_name>          # targeted red/green loop
-cargo test --workspace --all-targets --all-features   # full suite
+uv run python scripts/run_rust_tests.py       # full suite
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
@@ -190,7 +191,7 @@ PR title with a category prefix (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`
 
 | Element          | Convention                                                                             |
 | ---------------- | -------------------------------------------------------------------------------------- |
-| Rust             | rustfmt clean; clippy `-D warnings`; workspace tests green; llvm-cov ≥90 lines         |
+| Rust             | rustfmt clean; clippy `-D warnings`; harness green; llvm-cov ≥90 lines                 |
 | Python           | 3.13+; `from __future__ import annotations`; `list[str]`, `dict[str, Any]`, `A \| B`   |
 | Functions        | pure transforms; never mutate inputs or caller-owned objects                           |
 | State            | confined to owned boundaries (stateful operators, runners, stores)                     |

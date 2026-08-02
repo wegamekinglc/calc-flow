@@ -14,9 +14,9 @@ this directory, never in the reverse direction.
 | Role           | Agent               | Color    | Reads                                        | Writes                                        |
 | -------------- | ------------------- | -------- | -------------------------------------------- | --------------------------------------------- |
 | Orchestrator   | `cf-orchestrator`   | purple   | GitHub issues, all artifacts                 | task list                                     |
-| Spec writer    | `cf-spec-writer`    | orange   | issues, introduction.md, AGENTS.md, rules    | `.claude/specs/<slug>.md`                     |
-| API designer   | `cf-api-designer`   | pink     | spec, crate exports, stubs, openapi.json     | `.claude/api-notes/<slug>.md`                 |
-| Critic         | `cf-critic`         | red      | spec, api-note                               | `.claude/critiques/<slug>.md`                 |
+| Spec writer    | `cf-spec-writer`    | orange   | issues, introduction.md, AGENTS.md, rules    | `.codex/artifacts/specs/<slug>.md`            |
+| API designer   | `cf-api-designer`   | pink     | spec, crate exports, stubs, openapi.json     | `.codex/artifacts/api-notes/<slug>.md`        |
+| Critic         | `cf-critic`         | red      | spec, api-note                               | `.codex/artifacts/critiques/<slug>.md`        |
 | Implementer    | `cf-implementer`    | green    | spec, api-note, critique                     | source code, tests, TDD in worktree           |
 | Tester         | `cf-tester`         | cyan     | source under-test, conventions               | tests for the touched surfaces, in worktree   |
 | Reviewer       | `cf-reviewer`       | amber    | PR diff, all upstream artifacts              | review report; merge on explicit request      |
@@ -60,18 +60,19 @@ merge.
 
 ## Artifact Layout
 
-| Path                   | Owner             | Purpose                                                                 |
-| ---------------------- | ----------------- | ----------------------------------------------------------------------- |
-| `.claude/specs/`       | cf-spec-writer    | testable requirement specifications (created on demand)                 |
-| `.claude/api-notes/`   | cf-api-designer   | public-API surface notes (created on demand)                            |
-| `.claude/critiques/`   | cf-critic         | adversarial reviews of specs and api-notes (created on demand)          |
-| `docs/`                | cf-doc-writer     | normative engine and usage docs (referenced by all agents)              |
-| `CHANGELOG.md`         | cf-doc-writer     | existing dated log of fundamental changes                               |
-| `.claude/rules/`       | (existing)        | normative coding/test conventions                                       |
+| Path                           | Owner             | Purpose                                                                 |
+| ------------------------------ | ----------------- | ----------------------------------------------------------------------- |
+| `.codex/artifacts/specs/`      | cf-spec-writer    | testable requirement specifications (created on demand)                 |
+| `.codex/artifacts/api-notes/`  | cf-api-designer   | public-API surface notes (created on demand)                            |
+| `.codex/artifacts/critiques/`  | cf-critic         | adversarial reviews of specs and api-notes (created on demand)          |
+| `docs/`                        | cf-doc-writer     | normative engine and usage docs (referenced by all agents)              |
+| `CHANGELOG.md`                 | cf-doc-writer     | existing dated log of fundamental changes                               |
+| `.claude/rules/`               | (existing)        | normative coding/test conventions                                       |
 
 Filenames share a single kebab-case slug derived from the request, so work traces through
-`specs/tumbling-window.md → api-notes/tumbling-window.md → critiques/tumbling-window.md`
-end-to-end.
+`.codex/artifacts/specs/tumbling-window.md` →
+`.codex/artifacts/api-notes/tumbling-window.md` →
+`.codex/artifacts/critiques/tumbling-window.md` end-to-end.
 
 ## How to Invoke the Team
 
@@ -80,7 +81,7 @@ end-to-end.
 - **A single specialist.** Address the role directly: "Use `cf-spec-writer` to spec the
   tumbling-window operator described in issue #12."
 - **Adversarial review of an existing plan.** "Use `cf-critic` on the spec at
-  `.claude/specs/tumbling-window.md`."
+  `.codex/artifacts/specs/tumbling-window.md`."
 - **Out-of-band sweep.** "Use `cf-performancer` to check the branch for benchmark
   regressions" or "Use `cf-simplifier` on the diff before I merge."
 
@@ -107,7 +108,7 @@ inside a worktree):
 - **Worktree isolation.** Enter an isolated git worktree (`EnterWorktree`) before creating
   or editing any file. All edits, builds, iteration, and any explicitly requested
   commit/PR happen inside it, keeping the main working tree clean. The planning agents
-  (spec writer, API designer, critic) write only into the shared `.claude/` artifact
+  (spec writer, API designer, critic) write only into the shared `.codex/artifacts/`
   directories (created on demand) and do not need a worktree.
 - **Test-driven development (TDD).** The implementer works strictly red → green → refactor:
   write a failing test for the next behavior, confirm it fails for the right reason, write

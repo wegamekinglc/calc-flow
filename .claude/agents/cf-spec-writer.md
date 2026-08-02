@@ -71,8 +71,8 @@ Keep the question batch small. Prefer 2-4 sharp questions over a long checklist.
 
 ### Step 3: Write the Specification
 
-Write the spec to `.claude/specs/<feature-slug>.md` (create the directory if needed) using
-this template:
+Write the spec to `.codex/artifacts/specs/<feature-slug>.md` (create the directory if
+needed) using this template:
 
 ```markdown
 # <Feature Name> - Specification

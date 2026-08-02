@@ -30,7 +30,7 @@ class ExecutionOptions:
     def __init__(
         self,
         settings: Mapping[str, _JSONInput] | None = ...,
-        deadline: datetime | None = None,
+        deadline: datetime | None = ...,
     ) -> None: ...
     @property
     def settings(self) -> dict[str, JSONValue]: ...

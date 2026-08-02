@@ -151,8 +151,9 @@ If the user has explicitly asked you to apply the fixes ("apply the duplication 
 2. Apply the agreed findings one at a time, re-running the affected surface's suite
    after each change to prove behavior is unchanged:
    ```bash
-   cargo test --workspace --all-targets --all-features        # Rust
-   uv sync --extra dev && uv run maturin develop              # Python bindings current
+   uv sync --extra dev
+   uv run python scripts/run_rust_tests.py                     # Rust
+   uv run maturin develop                                     # Python bindings current
    JAX_PLATFORMS=cpu uv run pytest python/tests -q            # Python
    cd web-ui/backend && uv run --project . --extra dev pytest --cov=calc_flow_studio
    cd web-ui && npm ci && npm run build && npm test           # frontend

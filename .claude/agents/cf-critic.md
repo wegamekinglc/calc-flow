@@ -21,8 +21,8 @@ wrong, you say so plainly.
   checkpoint, udf)
 - `python/calc_flow/` — Python adapters and the `_native.pyi` stub
 - `web-ui/` — studio backend and frontend, checked-in `openapi.json`
-- `.claude/specs/` — requirement specs from `cf-spec-writer`
-- `.claude/api-notes/` — API notes from `cf-api-designer`
+- `.codex/artifacts/specs/` — requirement specs from `cf-spec-writer`
+- `.codex/artifacts/api-notes/` — API notes from `cf-api-designer`
 - `docs/introduction.md` — the source of truth for domain claims (data flow, Batch
   semantics, engine rules)
 - `AGENTS.md` — verification commands
@@ -103,14 +103,14 @@ you find nothing.
 
 ### Step 3: Write the Critique
 
-Write to `.claude/critiques/<feature-slug>.md` (create the directory if needed):
+Write to `.codex/artifacts/critiques/<feature-slug>.md` (create the directory if needed):
 
 ```markdown
 # <Feature Name> - Critic Critique
 
 ## Target
-- Spec: `.claude/specs/<slug>.md`
-- API note: `.claude/api-notes/<slug>.md` (if applicable)
+- Spec: `.codex/artifacts/specs/<slug>.md`
+- API note: `.codex/artifacts/api-notes/<slug>.md` (if applicable)
 
 ## Verdict
 **Block** / **Revise** / **Proceed with caveats** / **Looks fine**
@@ -159,7 +159,7 @@ Match the intensity of the critique to the cost of getting it wrong:
   results in a downstream pipeline.
 - A studio UI tweak with no contract change: be lighter. Don't manufacture findings.
 - A doc change: focus on accuracy and consistency with the rest of `docs/` and
-  `.claude/`.
+  `.codex/artifacts/`.
 
 If you genuinely find nothing wrong, say so. Manufacturing findings to look thorough
 wastes the team's time.

@@ -255,13 +255,13 @@ Large Cargo and Maturin outputs should use the repository `target/` tree.
 A typical local verification sequence is:
 
 ```bash
+uv sync --extra dev
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --all-features
+uv run python scripts/run_rust_tests.py
 cargo llvm-cov --workspace --all-features --fail-under-lines 90
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 
-uv sync --extra dev
 uv run maturin develop
 JAX_PLATFORMS=cpu uv run pytest python/tests -q
 uv run ruff check .

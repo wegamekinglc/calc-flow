@@ -36,7 +36,7 @@ dev = [
     "pytest>=8",
     "pytest-cov>=7.1",
     "pytest-xdist>=3.6",
-    "ruff>=0.14",
+    "ruff==0.16.0",
 ]
 
 [build-system]
@@ -63,6 +63,14 @@ source = ["calc_flow"]
 fail_under = 90
 
 [tool.ruff]
+extend-exclude = [
+    ".claude/api-notes/**/*.md",
+    ".claude/specs/**/*.md",
+    ".claude/critiques/**/*.md",
+    ".codex/artifacts/**/*.md",
+    "design/**/*.md",
+    "docs/superpowers/**/*.md",
+]
 target-version = "py313"
 
 [tool.ruff.lint]

@@ -91,7 +91,8 @@ flows (Phase 4B).
 Run the suites for every surface you touched:
 
 ```bash
-cargo test --workspace --all-targets --all-features
+uv sync --extra dev
+uv run python scripts/run_rust_tests.py
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo llvm-cov --workspace --all-features --fail-under-lines 90

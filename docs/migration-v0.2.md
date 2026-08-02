@@ -72,11 +72,7 @@ def process(self, inputs, context):
 Build and compile a graph before execution:
 
 ```python
-plan = (
-    Pipeline("example")
-    .then(ExpressionOperator("calculate", "c = a + b"))
-    .compile()
-)
+plan = Pipeline("example").then(ExpressionOperator("calculate", "c = a + b")).compile()
 run = plan.execute({"input": batch})
 batch = run.output
 ```

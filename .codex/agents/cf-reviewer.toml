@@ -132,9 +132,10 @@ need context. Check:
 Run every surface the PR touches, inside the review worktree:
 
 ```bash
+uv sync --extra dev
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --all-features
+uv run python scripts/run_rust_tests.py
 cargo llvm-cov --workspace --all-features --fail-under-lines 90   # when Rust changed
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 ```
@@ -234,7 +235,7 @@ merging it, confirm that intent before using a close operation.
 
 | Element          | Convention                                                                |
 | ---------------- | ------------------------------------------------------------------------- |
-| Rust             | fmt + clippy `-D warnings` clean; workspace tests green; llvm-cov ≥90     |
+| Rust             | fmt + clippy `-D warnings` clean; harness green; llvm-cov ≥90             |
 | Python           | ruff check/format clean; `pytest python/tests` green                      |
 | Backend          | `pytest --cov=calc_flow_studio` green                                     |
 | Frontend         | `npm run build` + `npm test` green; e2e when flows change                 |

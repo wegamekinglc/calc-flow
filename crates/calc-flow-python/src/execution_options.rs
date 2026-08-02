@@ -1,3 +1,5 @@
+#![deny(clippy::expect_used)]
+
 use std::collections::{BTreeMap, HashSet};
 
 use chrono::{Datelike, NaiveDate, TimeZone, Timelike, Utc};
@@ -40,7 +42,7 @@ fn strict_string(value: &Bound<'_, PyAny>, path: &str) -> PyResult<String> {
     }
     value
         .cast::<PyString>()
-        .expect("an exact PyString always casts")
+        .map_err(|_| settings_copy_error())?
         .to_str()
         .map(str::to_owned)
         .map_err(|_| settings_path_error(path, "contains a non-portable Unicode string"))
@@ -104,9 +106,7 @@ impl<'py> StrictSettingsCopier<'py> {
             if !pair.is_exact_instance_of::<PyTuple>() {
                 return Err(settings_copy_error());
             }
-            let pair = pair
-                .cast::<PyTuple>()
-                .expect("an exact PyTuple always casts");
+            let pair = pair.cast::<PyTuple>().map_err(|_| settings_copy_error())?;
             if pair.len() != 2 {
                 return Err(settings_copy_error());
             }
@@ -179,14 +179,14 @@ impl<'py> StrictSettingsCopier<'py> {
                     "contains a non-finite JSON number",
                 ));
             }
-            return Ok(Value::Number(
-                Number::from_f64(number).expect("finite floats are valid JSON numbers"),
-            ));
+            return Ok(Value::Number(Number::from_f64(number).ok_or_else(
+                || settings_path_error(path, "contains a non-finite JSON number"),
+            )?));
         }
         if value.is_exact_instance_of::<PyString>() {
             return value
                 .cast::<PyString>()
-                .expect("an exact PyString always casts")
+                .map_err(|_| settings_copy_error())?
                 .to_str()
                 .map(|text| Value::String(text.to_owned()))
                 .map_err(|_| settings_path_error(path, "contains a non-portable Unicode string"));
@@ -194,9 +194,7 @@ impl<'py> StrictSettingsCopier<'py> {
         if value.is_exact_instance_of::<PyList>() {
             return self
                 .list(
-                    value
-                        .cast::<PyList>()
-                        .expect("an exact PyList always casts"),
+                    value.cast::<PyList>().map_err(|_| settings_copy_error())?,
                     depth,
                     path,
                 )

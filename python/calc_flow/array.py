@@ -22,6 +22,7 @@ _MAX_POWER_EXPONENT_MAGNITUDE = 64
 _MAX_RESHAPE_RANK = 16
 _MAX_RESHAPE_DIMENSION = 1_000_000
 _MAX_RESHAPE_ELEMENTS = 10_000_000
+_MAX_OPERATION_ELEMENTS = 10_000_000
 _TABLE_MATMUL_INPUT_PORTS = (("table", "table"), ("weights", "array"))
 _TABLE_MATMUL_OUTPUT_PORTS = (("output", "array"),)
 _EXPRESSION_OPTIONS_SCHEMA = ProviderOptionsSchema(
@@ -195,15 +196,18 @@ def _evaluate(
     validate_result: Callable[[object], None] | None = None,
 ) -> object:
     if isinstance(node, ast.Name):
-        result = value
-    elif isinstance(node, ast.Constant):
+        # The input batch is validated at construction; only operation
+        # results pass through validate_result.
+        return value
+    if isinstance(node, ast.Constant):
         result = node.value
     elif isinstance(node, ast.BinOp):
         function = _ALLOWED_BINARY[type(node.op)]
-        result = function(
-            _evaluate(node.left, value, namespace, validate_result),
-            _evaluate(node.right, value, namespace, validate_result),
-        )
+        left = _evaluate(node.left, value, namespace, validate_result)
+        right = _evaluate(node.right, value, namespace, validate_result)
+        if not isinstance(node.op, ast.MatMult):
+            _validate_broadcast_output_size(left, right)
+        result = function(left, right)
     elif isinstance(node, ast.UnaryOp):
         function = _ALLOWED_UNARY[type(node.op)]
         result = function(_evaluate(node.operand, value, namespace, validate_result))
@@ -499,6 +503,41 @@ def _validate_python_operation_scalar(value: object) -> bool:
     return type(value) in (float, complex)
 
 
+def _result_shape(value: object) -> tuple[int, ...]:
+    return tuple(int(dimension) for dimension in getattr(value, "shape", ()))
+
+
+def _validate_operation_output_size(value: object) -> None:
+    if math.prod(_result_shape(value)) > _MAX_OPERATION_ELEMENTS:
+        raise _array_error(
+            f"operation output limit is {_MAX_OPERATION_ELEMENTS} elements"
+        )
+
+
+def _broadcast_shape(
+    left: tuple[int, ...], right: tuple[int, ...]
+) -> tuple[int, ...] | None:
+    dimensions: list[int] = []
+    for offset in range(1, max(len(left), len(right)) + 1):
+        left_dim = left[-offset] if offset <= len(left) else 1
+        right_dim = right[-offset] if offset <= len(right) else 1
+        if left_dim == 1:
+            dimensions.append(right_dim)
+        elif right_dim == 1 or left_dim == right_dim:
+            dimensions.append(left_dim)
+        else:
+            return None
+    return tuple(reversed(dimensions))
+
+
+def _validate_broadcast_output_size(left: object, right: object) -> None:
+    shape = _broadcast_shape(_result_shape(left), _result_shape(right))
+    if shape is not None and math.prod(shape) > _MAX_OPERATION_ELEMENTS:
+        raise _array_error(
+            f"operation output limit is {_MAX_OPERATION_ELEMENTS} elements"
+        )
+
+
 def _validate_numpy_operation_result(value: object) -> None:
     import numpy as np
 
@@ -506,6 +545,7 @@ def _validate_numpy_operation_result(value: object) -> None:
         return
     if type(value) is np.ndarray or isinstance(value, np.generic):
         _validate_numpy_dtype(value.dtype)
+        _validate_operation_output_size(value)
         return
     raise TypeError("NumPy provider operations must produce arrays or numeric scalars")
 
@@ -513,7 +553,10 @@ def _validate_numpy_operation_result(value: object) -> None:
 def _validate_jax_operation_result(value: object) -> None:
     import jax
 
-    if _validate_python_operation_scalar(value) or isinstance(value, jax.Array):
+    if _validate_python_operation_scalar(value):
+        return
+    if isinstance(value, jax.Array):
+        _validate_operation_output_size(value)
         return
     raise TypeError("JAX provider operations must produce arrays or numeric scalars")
 

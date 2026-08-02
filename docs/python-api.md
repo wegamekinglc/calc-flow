@@ -287,7 +287,10 @@ still-pending surrounding asyncio task instead raises
 `asyncio.CancelledError`. The handler makes one terminal-state decision: if
 native execution is already terminal, its result or exception remains
 observable; otherwise it sends exactly one native cancellation request and
-waits through repeated Python task cancellation until cleanup finishes.
+waits through repeated Python task cancellation until cleanup finishes. Once
+the cancellation request is sent, the caller's `asyncio.CancelledError` wins
+over any native outcome observed during that drain: a native failure landing
+mid-drain is retrieved and discarded, never re-raised to the caller.
 
 Awaiting task cancellation waits until the current native operation and
 run-owned cleanup finish; no work or input payload continues detached. The
@@ -335,7 +338,11 @@ centered = plan.execute({"input": batch}).outputs["output"].array
 
 Owned arrays are read-only. The bounded expression evaluator allows arithmetic,
 reductions, transpose, and reshape; it rejects Python execution features and
-backend changes. `register_jax` provides the same explicit provider boundary.
+backend changes. Operation results, including broadcast binary operations, are
+capped at 10,000,000 elements so a single expression cannot allocate an
+unbounded output. The input batch itself is exempt, so reductions over larger
+inputs remain valid. `register_jax` provides the same explicit provider
+boundary.
 The full version is [`examples/06_numpy_array.py`](../examples/06_numpy_array.py).
 
 ### Table-array matrix multiplication
