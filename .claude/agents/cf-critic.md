@@ -159,7 +159,7 @@ Match the intensity of the critique to the cost of getting it wrong:
   results in a downstream pipeline.
 - A studio UI tweak with no contract change: be lighter. Don't manufacture findings.
 - A doc change: focus on accuracy and consistency with the rest of `docs/` and
-  `.claude/`.
+  `.codex/artifacts/`.
 
 If you genuinely find nothing wrong, say so. Manufacturing findings to look thorough
 wastes the team's time.
