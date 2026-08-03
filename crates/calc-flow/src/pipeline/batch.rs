@@ -1,153 +1,120 @@
+//! The finite one-shot execution plan and its state-lifecycle machinery.
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex as StdMutex},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
-use chrono::{DateTime, Utc};
-use datafusion::arrow::{
-    datatypes::SchemaRef,
-    ipc::{convert::IpcSchemaEncoder, writer::DictionaryTracker},
-};
-use serde::Serialize;
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
+use serde_json::Value;
 
 use crate::{
-    Batch, CalcFlowError, CancellationToken, Checkpoint, CheckpointStore, DataFusionConfig,
-    DataFusionQueryMetric, DataFusionRuntime, JsonMap, OperatorDefinition, Port, Result,
-    RunContext, UdfCatalogEntry, UdfReference, UdfRegistrySnapshot, canonical_json,
-    validate_selected_udfs,
-};
-use crate::{
-    operator::{CompiledOperator, ControlHandling},
-    runtime::{RuntimeEnvelope, SharedControlMarker},
+    Batch, BatchOperator, BatchOperatorContext, CalcFlowError, Checkpoint, CheckpointStore,
+    DataFusionConfig, DataFusionRuntime, ExecutionOptions, ExpressionOperator, NodeOperator,
+    OperatorMetadata, PipelineBuilder, Port, PortEndpoint, Result, RunContext, RunMetadata,
+    RunResult, SqlOperator, UdfRegistrySnapshot,
 };
 
-mod control;
-
-use control::{
-    ControlIngress, ControlRoute, ControlRouteStatus, ControlRouteStep, PendingControlStep,
-    derive_control_routes,
+use super::{
+    CompiledNode, NodeDefinition, NodeTiming, TablePlanResources, build_nodes, compile_graph,
+    lifecycle_result, nanos, row_counts,
 };
 
-#[derive(Clone, Debug, Default)]
-pub struct ExecutionOptions {
-    pub settings: JsonMap,
-    pub deadline: Option<DateTime<Utc>>,
-    pub cancellation: CancellationToken,
+pub(crate) enum CompiledBatchOperator {
+    External(Box<dyn BatchOperator>),
+    Expression(ExpressionOperator),
+    Sql(SqlOperator),
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct NodeTiming {
-    pub duration_ns: u64,
-    pub input_rows: BTreeMap<String, usize>,
-    pub output_rows: BTreeMap<String, usize>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct RunMetadata {
-    pub run_id: String,
-    pub pipeline_name: String,
-    pub pipeline_fingerprint: String,
-}
-
-#[derive(Clone, Debug)]
-#[non_exhaustive]
-pub struct RunResult {
-    pub outputs: BTreeMap<String, Batch>,
-    pub node_timings: BTreeMap<String, NodeTiming>,
-    pub datafusion_metrics: Vec<DataFusionQueryMetric>,
-    pub metadata: RunMetadata,
-    context: RunContext,
-}
-
-impl RunResult {
-    /// Returns the exact context used to execute this run.
-    ///
-    /// Sinks use this accessor so delivery observes the same run identity,
-    /// settings, deadline, and cancellation token as operators.
-    pub const fn context(&self) -> &RunContext {
-        &self.context
-    }
-}
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct PortEndpoint {
-    pub node_id: String,
-    pub port: String,
-}
-
-impl PortEndpoint {
-    /// Creates an endpoint naming one port on one pipeline node.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CalcFlowError::InvalidArgument`] when either component is
-    /// empty.
-    pub fn new(node_id: &str, port: &str) -> Result<Self> {
-        if node_id.is_empty() || port.is_empty() {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "endpoint".into(),
-                message: "node and port must not be empty".into(),
-            });
+impl CompiledBatchOperator {
+    fn try_convert(definition: NodeDefinition) -> Result<Self> {
+        match definition.operator {
+            NodeOperator::Expression(operator) => Ok(Self::Expression(operator)),
+            NodeOperator::Sql(operator) => Ok(Self::Sql(operator)),
+            NodeOperator::Batch(operator) => Ok(Self::External(operator)),
+            NodeOperator::Union(_) | NodeOperator::Stream(_) => Err(CalcFlowError::Compile {
+                message: format!(
+                    "node {:?} is stream-only; batch graphs compose multi-input logic through SQL aliases",
+                    definition.node_id
+                ),
+            }),
         }
-        Ok(Self {
-            node_id: node_id.into(),
-            port: port.into(),
-        })
+    }
+
+    pub(crate) fn snapshot(&self) -> Result<Value> {
+        match self {
+            Self::External(operator) => operator.snapshot(),
+            Self::Expression(_) | Self::Sql(_) => Ok(Value::Null),
+        }
+    }
+
+    pub(crate) fn restore(&mut self, state: &Value) -> Result<()> {
+        match self {
+            Self::External(operator) => operator.restore(state),
+            Self::Expression(_) | Self::Sql(_) if state.is_null() => Ok(()),
+            Self::Expression(_) | Self::Sql(_) => Err(CalcFlowError::Format {
+                message: "stateless operator state must be null".into(),
+            }),
+        }
+    }
+
+    pub(crate) fn reset(&mut self) -> Result<()> {
+        match self {
+            Self::External(operator) => operator.reset(),
+            Self::Expression(_) | Self::Sql(_) => Ok(()),
+        }
+    }
+
+    async fn process(
+        &mut self,
+        inputs: &BTreeMap<String, Batch>,
+        run: &RunContext,
+        datafusion: Option<&DataFusionRuntime>,
+    ) -> Result<BTreeMap<String, Batch>> {
+        match self {
+            Self::External(operator) => {
+                operator
+                    .process(inputs, &BatchOperatorContext { run })
+                    .await
+            }
+            Self::Expression(operator) => {
+                let datafusion = required_datafusion(datafusion, operator.name())?;
+                operator.process_table(inputs, run, datafusion).await
+            }
+            Self::Sql(operator) => {
+                let datafusion = required_datafusion(datafusion, operator.name())?;
+                operator.process_table(inputs, run, datafusion).await
+            }
+        }
     }
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct Edge {
-    pub source: PortEndpoint,
-    pub target: PortEndpoint,
+fn required_datafusion<'a>(
+    datafusion: Option<&'a DataFusionRuntime>,
+    operator: &str,
+) -> Result<&'a DataFusionRuntime> {
+    datafusion.ok_or_else(|| CalcFlowError::Internal {
+        message: format!("table operator {operator:?} has no run-scoped DataFusion runtime"),
+    })
 }
 
-impl Edge {
-    pub const fn new(source: PortEndpoint, target: PortEndpoint) -> Self {
-        Self { source, target }
+impl std::fmt::Debug for BatchExecutionPlan {
+    /// Diagnostics show the pipeline identity only; operator state never
+    /// appears (invariant I4).
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BatchExecutionPlan")
+            .field("name", &self.name)
+            .field("fingerprint", &self.fingerprint)
+            .finish_non_exhaustive()
     }
 }
 
-struct NodeDefinition {
-    node_id: String,
-    operator: OperatorDefinition,
-}
-
-pub struct PipelineBuilder {
-    name: String,
-    datafusion_config: DataFusionConfig,
-    nodes: BTreeMap<String, NodeDefinition>,
-    edges: Vec<Edge>,
-}
-
-pub(crate) struct CompiledNode {
-    pub(crate) node_id: String,
-    pub(crate) operator: Arc<tokio::sync::Mutex<CompiledOperator>>,
-    pub(crate) input_ports: Vec<Port>,
-    pub(crate) output_ports: Vec<Port>,
-    pub(crate) inbound: BTreeMap<String, PortEndpoint>,
-    pub(crate) outbound: BTreeMap<String, Vec<PortEndpoint>>,
-}
-
-struct TablePlanResources {
-    config: DataFusionConfig,
-    udfs: UdfRegistrySnapshot,
-    selected_udfs: Vec<UdfReference>,
-}
-
-pub struct ExecutionPlan {
+pub struct BatchExecutionPlan {
     pub(crate) name: String,
-    pub(crate) nodes: Vec<CompiledNode>,
+    pub(crate) nodes: Vec<CompiledNode<CompiledBatchOperator>>,
     pub(crate) external_inputs: BTreeMap<String, PortEndpoint>,
     pub(crate) external_outputs: BTreeMap<String, PortEndpoint>,
-    #[allow(
-        dead_code,
-        reason = "the M2 control route remains reachable only from the crate-private entry"
-    )]
-    control_routes: BTreeMap<String, ControlRouteStatus>,
     pub(crate) fingerprint: String,
     table: Option<TablePlanResources>,
     pub(crate) run_lock: tokio::sync::Mutex<()>,
@@ -223,22 +190,69 @@ impl RecoveryOutcome {
 /// acquisition so calls queued before this lease was created cannot slip
 /// through the ownership transition.
 pub(crate) struct PlanLease {
-    plan: Arc<ExecutionPlan>,
+    plan: Arc<BatchExecutionPlan>,
     token: u64,
 }
 
 /// Crate-internal state transaction that owns a plan's lifecycle lock.
 ///
 /// Runners keep this guard alive while awaiting sinks and checkpoint stores so
-/// another owner of the same [`ExecutionPlan`] cannot observe or mutate an
+/// another owner of the same [`BatchExecutionPlan`] cannot observe or mutate an
 /// intermediate state.
 pub(crate) struct PlanTransaction<'a> {
-    plan: &'a ExecutionPlan,
+    plan: &'a BatchExecutionPlan,
     lease_token: Option<u64>,
     _guard: tokio::sync::MutexGuard<'a, ()>,
 }
 
-impl ExecutionPlan {
+impl PipelineBuilder {
+    /// Validates and consumes this graph into an immutable batch execution
+    /// topology (the v2 finite one-shot contract).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::Compile`] for an invalid graph, a stream-only
+    /// node, or a selected UDF catalog problem.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a node that passed the stream-only rejection above still
+    /// fails conversion; validation runs before conversion, so this is
+    /// unreachable and guards the internal invariant only.
+    pub fn compile_batch(self, udfs: &UdfRegistrySnapshot) -> Result<BatchExecutionPlan> {
+        for (node_id, node) in &self.nodes {
+            if matches!(
+                node.operator,
+                NodeOperator::Union(_) | NodeOperator::Stream(_)
+            ) {
+                return Err(CalcFlowError::Compile {
+                    message: format!(
+                        "node {node_id:?} is stream-only; batch graphs compose multi-input logic through SQL aliases"
+                    ),
+                });
+            }
+        }
+        let graph = compile_graph(&self, "batch", udfs)?;
+        let name = self.name.clone();
+        let nodes = build_nodes(self, graph.order, |definition| {
+            CompiledBatchOperator::try_convert(definition)
+                .expect("batch-only nodes were validated before conversion")
+        });
+        Ok(BatchExecutionPlan {
+            name,
+            nodes,
+            external_inputs: graph.external_inputs,
+            external_outputs: graph.external_outputs,
+            fingerprint: graph.fingerprint,
+            table: graph.table,
+            run_lock: tokio::sync::Mutex::new(()),
+            lease_state: StdMutex::new(LeaseState::default()),
+            operation_state: StdMutex::new(OperationState::default()),
+        })
+    }
+}
+
+impl BatchExecutionPlan {
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -271,84 +285,6 @@ impl ExecutionPlan {
 
     pub const fn external_outputs(&self) -> &BTreeMap<String, PortEndpoint> {
         &self.external_outputs
-    }
-
-    #[allow(
-        dead_code,
-        reason = "the M2 control entry is intentionally crate-private until a later caller"
-    )]
-    pub(crate) async fn dispatch_control(
-        &self,
-        input: &str,
-        marker: crate::runtime::ControlMarker,
-        options: ExecutionOptions,
-    ) -> Result<()> {
-        self.dispatch_control_with_observer(input, marker, options, &mut |_, _, _| {})
-            .await
-    }
-
-    #[cfg(test)]
-    async fn dispatch_control_observed<F>(
-        &self,
-        input: &str,
-        marker: crate::runtime::ControlMarker,
-        options: ExecutionOptions,
-        mut observe: F,
-    ) -> Result<()>
-    where
-        F: FnMut(&PortEndpoint, &ControlIngress, &SharedControlMarker),
-    {
-        self.dispatch_control_with_observer(input, marker, options, &mut observe)
-            .await
-    }
-
-    #[allow(
-        dead_code,
-        reason = "the M2 control entry is intentionally crate-private until a later caller"
-    )]
-    async fn dispatch_control_with_observer<F>(
-        &self,
-        input: &str,
-        marker: crate::runtime::ControlMarker,
-        options: ExecutionOptions,
-        observe: &mut F,
-    ) -> Result<()>
-    where
-        F: FnMut(&PortEndpoint, &ControlIngress, &SharedControlMarker),
-    {
-        let route = self.preflight_control(input)?;
-        let transaction = self.public_transaction().await?;
-        let origin = PendingControlStep {
-            step_index: route.origin_step,
-            envelope: RuntimeEnvelope::Control(marker.into_shared()),
-        };
-        let before = transaction.snapshot().await?;
-        let operation = transaction.begin_rollback(before)?;
-        let result = transaction
-            .dispatch_control_validated(route, origin, options, observe)
-            .await;
-        match result {
-            Ok(()) => transaction.commit_operation(operation),
-            Err(original) => Err(transaction
-                .rollback_error(operation, original, None)
-                .await
-                .error),
-        }
-    }
-
-    #[allow(
-        dead_code,
-        reason = "the M2 control entry is intentionally crate-private until a later caller"
-    )]
-    fn preflight_control(&self, input: &str) -> Result<&ControlRoute> {
-        match self.control_routes.get(input) {
-            Some(ControlRouteStatus::Supported(route)) => Ok(route),
-            Some(ControlRouteStatus::Unsupported(topology)) => Err(topology.error(input)),
-            None => Err(CalcFlowError::InvalidArgument {
-                field: "control_input".into(),
-                message: format!("unknown graph input {input:?} for control dispatch"),
-            }),
-        }
     }
 
     /// Returns the only external input name accepted by a runner.
@@ -717,7 +653,7 @@ impl ExecutionPlan {
                 inputs
                     .get(name)
                     .cloned()
-                    .map(|batch| (endpoint.clone(), RuntimeEnvelope::Data(batch)))
+                    .map(|batch| (endpoint.clone(), batch))
             })
             .collect::<BTreeMap<_, _>>();
         let mut produced_values = BTreeMap::new();
@@ -733,7 +669,7 @@ impl ExecutionPlan {
             node_context.check_cancelled()?;
             let started = Instant::now();
             let process_result = operator
-                .process_data(&operator_inputs, &node_context, runtime)
+                .process(&operator_inputs, &node_context, runtime)
                 .await;
             let duration_ns = nanos(started.elapsed());
             node_context.check_cancelled()?;
@@ -756,9 +692,9 @@ impl ExecutionPlan {
                 produced_values
                     .get(endpoint)
                     .cloned()
-                    .map(|envelope| envelope.into_data().map(|batch| (name.clone(), batch)))
+                    .map(|batch| (name.clone(), batch))
             })
-            .collect::<Result<BTreeMap<_, _>>>()?;
+            .collect::<BTreeMap<_, _>>();
         Ok((outputs, timings))
     }
 
@@ -800,7 +736,7 @@ impl ExecutionPlan {
         Ok(())
     }
 
-    fn node(&self, node_id: &str) -> Result<&CompiledNode> {
+    fn node(&self, node_id: &str) -> Result<&CompiledNode<CompiledBatchOperator>> {
         self.nodes
             .iter()
             .find(|node| node.node_id == node_id)
@@ -825,166 +761,6 @@ impl PlanTransaction<'_> {
         options: ExecutionOptions,
     ) -> Result<RunResult> {
         self.plan.execute_unlocked(inputs, options).await
-    }
-
-    #[allow(
-        dead_code,
-        reason = "the M2 control entry is intentionally crate-private until a later caller"
-    )]
-    async fn dispatch_control_validated<F>(
-        &self,
-        route: &ControlRoute,
-        origin: PendingControlStep,
-        options: ExecutionOptions,
-        observe: &mut F,
-    ) -> Result<()>
-    where
-        F: FnMut(&PortEndpoint, &ControlIngress, &SharedControlMarker),
-    {
-        let context = RunContext::new(options.settings, options.deadline, options.cancellation)?;
-        let mut pending = BTreeMap::from([(origin.step_index, origin)]);
-        while let Some((step_index, pending_step)) = pending.pop_first() {
-            let shared = Self::pending_control_marker(step_index, pending_step)?;
-            let (step, node) = self.control_target(route, step_index)?;
-            Self::invoke_control_handler(step, node, &shared, &context, observe).await?;
-            Self::queue_control_successors(route, step_index, step, &shared, &mut pending)?;
-        }
-        Ok(())
-    }
-
-    #[allow(
-        dead_code,
-        reason = "the M2 control entry is intentionally crate-private until a later caller"
-    )]
-    fn pending_control_marker(
-        scheduler_step_index: usize,
-        pending: PendingControlStep,
-    ) -> Result<SharedControlMarker> {
-        if scheduler_step_index != pending.step_index {
-            return Err(CalcFlowError::Internal {
-                message: "control scheduler key does not match its pending step".into(),
-            });
-        }
-        match pending.envelope {
-            RuntimeEnvelope::Control(shared) => Ok(shared),
-            RuntimeEnvelope::Data(_) => Err(CalcFlowError::Internal {
-                message: "data envelope reached the control scheduler".into(),
-            }),
-        }
-    }
-
-    #[allow(
-        dead_code,
-        reason = "the M2 control entry is intentionally crate-private until a later caller"
-    )]
-    fn control_target<'route>(
-        &self,
-        route: &'route ControlRoute,
-        step_index: usize,
-    ) -> Result<(&'route ControlRouteStep, &CompiledNode)> {
-        let step = route
-            .steps
-            .get(step_index)
-            .ok_or_else(|| CalcFlowError::Internal {
-                message: format!("control route has no step {step_index}"),
-            })?;
-        let node =
-            self.plan
-                .nodes
-                .get(step.target_node_index)
-                .ok_or_else(|| CalcFlowError::Internal {
-                    message: format!(
-                        "control step {step_index} targets missing node index {}",
-                        step.target_node_index
-                    ),
-                })?;
-        if node.node_id != step.target.node_id {
-            return Err(CalcFlowError::Internal {
-                message: format!(
-                    "control step {step_index} target {:?} does not match node {:?}",
-                    step.target, node.node_id
-                ),
-            });
-        }
-        Ok((step, node))
-    }
-
-    #[allow(
-        dead_code,
-        reason = "the M2 control entry is intentionally crate-private until a later caller"
-    )]
-    async fn invoke_control_handler<F>(
-        step: &ControlRouteStep,
-        node: &CompiledNode,
-        shared: &SharedControlMarker,
-        context: &RunContext,
-        observe: &mut F,
-    ) -> Result<()>
-    where
-        F: FnMut(&PortEndpoint, &ControlIngress, &SharedControlMarker),
-    {
-        let node_context = context.for_node(&node.node_id)?;
-        node_context.check_cancelled()?;
-        observe(&step.target, &step.ingress, shared);
-        let mut operator = node.operator.lock().await;
-        let handler_result = match operator.control_handling() {
-            ControlHandling::Transparent => Ok(()),
-            ControlHandling::Aware(handler) => {
-                handler.handle_control(shared.marker(), &node_context).await
-            }
-        };
-        let post_handler = node_context.check_cancelled();
-        drop(operator);
-        post_handler?;
-        match handler_result {
-            Ok(()) => Ok(()),
-            Err(error @ CalcFlowError::Cancelled { .. }) => Err(error),
-            Err(error) => Err(CalcFlowError::Operator {
-                node_id: node.node_id.clone(),
-                message: format!(
-                    "control {:?} occurrence {:?} handler failed: {error}; ingress {:?}",
-                    shared.marker().kind(),
-                    shared.marker().occurrence(),
-                    step.ingress
-                ),
-            }),
-        }
-    }
-
-    #[allow(
-        dead_code,
-        reason = "the M2 control entry is intentionally crate-private until a later caller"
-    )]
-    fn queue_control_successors(
-        route: &ControlRoute,
-        step_index: usize,
-        step: &ControlRouteStep,
-        shared: &SharedControlMarker,
-        pending: &mut BTreeMap<usize, PendingControlStep>,
-    ) -> Result<()> {
-        for successor in &step.successor_step_indices {
-            if route.steps.get(*successor).is_none() {
-                return Err(CalcFlowError::Internal {
-                    message: format!(
-                        "control step {step_index} has missing successor {successor} from ingress {:?}",
-                        step.ingress
-                    ),
-                });
-            }
-            let successor_step = PendingControlStep {
-                step_index: *successor,
-                envelope: RuntimeEnvelope::Control(SharedControlMarker::clone(shared)),
-            };
-            if pending.insert(*successor, successor_step).is_some() {
-                return Err(CalcFlowError::Internal {
-                    message: format!(
-                        "control step {successor} became pending more than once from ingress {:?}",
-                        step.ingress
-                    ),
-                });
-            }
-        }
-        Ok(())
     }
 
     pub(crate) async fn snapshot(&self) -> Result<BTreeMap<String, Value>> {
@@ -1372,17 +1148,10 @@ impl Drop for PlanLease {
     }
 }
 
-fn row_counts(batches: &BTreeMap<String, Batch>) -> BTreeMap<String, usize> {
-    batches
-        .iter()
-        .map(|(name, batch)| (name.clone(), batch.num_rows()))
-        .collect()
-}
-
 fn gather_node_inputs(
-    node: &CompiledNode,
-    produced_values: &BTreeMap<PortEndpoint, RuntimeEnvelope>,
-    external_values: &BTreeMap<PortEndpoint, RuntimeEnvelope>,
+    node: &CompiledNode<CompiledBatchOperator>,
+    produced_values: &BTreeMap<PortEndpoint, Batch>,
+    external_values: &BTreeMap<PortEndpoint, Batch>,
     external_names: &BTreeMap<PortEndpoint, String>,
 ) -> Result<BTreeMap<String, Batch>> {
     let mut inputs = BTreeMap::new();
@@ -1392,7 +1161,7 @@ fn gather_node_inputs(
             port: port.name().into(),
         };
         let source = node.inbound.get(port.name());
-        let envelope = source
+        let batch = source
             .and_then(|endpoint| produced_values.get(endpoint))
             .or_else(|| {
                 source
@@ -1400,9 +1169,8 @@ fn gather_node_inputs(
                     .then(|| external_values.get(&target))
                     .flatten()
             });
-        match envelope {
-            Some(envelope) => {
-                let batch = envelope.data()?;
+        match batch {
+            Some(batch) => {
                 port.validate(batch, &format!("input {}.{}", node.node_id, port.name()))?;
                 inputs.insert(port.name().into(), batch.clone());
             }
@@ -1422,7 +1190,7 @@ fn gather_node_inputs(
 }
 
 fn missing_node_input(
-    node: &CompiledNode,
+    node: &CompiledNode<CompiledBatchOperator>,
     port: &Port,
     source: Option<&PortEndpoint>,
     external_names: &BTreeMap<PortEndpoint, String>,
@@ -1452,9 +1220,9 @@ fn missing_node_input(
 }
 
 fn validate_and_store_outputs(
-    node: &CompiledNode,
+    node: &CompiledNode<CompiledBatchOperator>,
     outputs: &BTreeMap<String, Batch>,
-    values: &mut BTreeMap<PortEndpoint, RuntimeEnvelope>,
+    values: &mut BTreeMap<PortEndpoint, Batch>,
 ) -> Result<()> {
     let output_ports = node
         .output_ports
@@ -1490,611 +1258,10 @@ fn validate_and_store_outputs(
                 node_id: node.node_id.clone(),
                 port: name.clone(),
             },
-            RuntimeEnvelope::Data(batch.clone()),
+            batch.clone(),
         );
     }
     Ok(())
-}
-
-fn nanos(duration: Duration) -> u64 {
-    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
-}
-
-fn lifecycle_result(action: &str, failures: &[String]) -> Result<()> {
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(CalcFlowError::Internal {
-            message: format!("operator {action} failed: {}", failures.join("; ")),
-        })
-    }
-}
-
-impl PipelineBuilder {
-    /// Creates an empty owned graph builder.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CalcFlowError::InvalidArgument`] when `name` is empty.
-    pub fn new(name: &str) -> Result<Self> {
-        if name.is_empty() {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "pipeline.name".into(),
-                message: "must not be empty".into(),
-            });
-        }
-        Ok(Self {
-            name: name.into(),
-            datafusion_config: DataFusionConfig::default(),
-            nodes: BTreeMap::new(),
-            edges: Vec::new(),
-        })
-    }
-
-    /// Returns this builder with the run-scoped `DataFusion` configuration.
-    #[must_use]
-    pub const fn with_datafusion_config(mut self, config: DataFusionConfig) -> Self {
-        self.datafusion_config = config;
-        self
-    }
-
-    /// Returns a new builder that owns the added operator.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CalcFlowError::Compile`] when `node_id` is empty or already
-    /// exists.
-    pub fn add_node<O>(mut self, node_id: &str, operator: O) -> Result<Self>
-    where
-        O: Into<OperatorDefinition>,
-    {
-        if node_id.is_empty() {
-            return Err(CalcFlowError::Compile {
-                message: "node ID must not be empty".into(),
-            });
-        }
-        if self.nodes.contains_key(node_id) {
-            return Err(CalcFlowError::Compile {
-                message: format!("duplicate node {node_id}"),
-            });
-        }
-        self.nodes.insert(
-            node_id.into(),
-            NodeDefinition {
-                node_id: node_id.into(),
-                operator: operator.into(),
-            },
-        );
-        Ok(self)
-    }
-
-    /// Returns a new builder containing the directed edge.
-    ///
-    /// Port validation is deferred until [`Self::compile`] so every operator
-    /// remains owned by the builder while the complete graph is checked.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CalcFlowError::Compile`] when either endpoint names an unknown
-    /// node.
-    pub fn connect(mut self, edge: Edge) -> Result<Self> {
-        if !self.nodes.contains_key(&edge.source.node_id)
-            || !self.nodes.contains_key(&edge.target.node_id)
-        {
-            return Err(CalcFlowError::Compile {
-                message: "edge references an unknown node".into(),
-            });
-        }
-        self.edges.push(edge);
-        Ok(self)
-    }
-
-    /// Validates and consumes this graph into an immutable execution topology.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CalcFlowError::Compile`] for an invalid graph or selected UDF
-    /// catalog.
-    pub fn compile(self, udfs: &UdfRegistrySnapshot) -> Result<ExecutionPlan> {
-        let requires_datafusion = self
-            .nodes
-            .values()
-            .any(|node| node.operator.requires_datafusion());
-        if requires_datafusion {
-            self.datafusion_config.validate()?;
-        }
-        validate_nodes(&self.nodes)?;
-        validate_edges(&self.nodes, &self.edges)?;
-        let order = topological_order(&self.nodes, &self.edges)?;
-        let selected_catalog = selected_udf_catalog(&self.nodes, udfs)?;
-        let selected_udfs = selected_catalog
-            .iter()
-            .map(|(reference, _)| reference.clone())
-            .collect();
-        let (external_inputs, external_outputs) = external_ports(&self.nodes, &self.edges)?;
-        let fingerprint = graph_fingerprint(
-            &self.name,
-            requires_datafusion.then_some(self.datafusion_config),
-            &self.nodes,
-            &self.edges,
-            &selected_catalog,
-        )?;
-        let table = requires_datafusion.then(|| TablePlanResources {
-            config: self.datafusion_config,
-            udfs: udfs.clone(),
-            selected_udfs,
-        });
-        Ok(build_plan(
-            self,
-            order,
-            external_inputs,
-            external_outputs,
-            fingerprint,
-            table,
-        ))
-    }
-}
-
-fn validate_nodes(nodes: &BTreeMap<String, NodeDefinition>) -> Result<()> {
-    for (node_id, node) in nodes {
-        validate_unique_ports(node_id, "input", node.operator.input_ports())?;
-        validate_unique_ports(node_id, "output", node.operator.output_ports())?;
-    }
-    Ok(())
-}
-
-fn validate_unique_ports(node_id: &str, direction: &str, ports: &[Port]) -> Result<()> {
-    let mut names = BTreeSet::new();
-    for port in ports {
-        if !names.insert(port.name()) {
-            return Err(CalcFlowError::Compile {
-                message: format!(
-                    "node {node_id} has duplicate {direction} port {}",
-                    port.name()
-                ),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn validate_edges(nodes: &BTreeMap<String, NodeDefinition>, edges: &[Edge]) -> Result<()> {
-    let mut unique_edges = BTreeSet::new();
-    let mut writers = BTreeMap::new();
-    for edge in edges {
-        if !unique_edges.insert(edge) {
-            return Err(CalcFlowError::Compile {
-                message: format!(
-                    "duplicate edge {}.{} -> {}.{}",
-                    edge.source.node_id, edge.source.port, edge.target.node_id, edge.target.port
-                ),
-            });
-        }
-        let source = endpoint_port(nodes, &edge.source, EndpointDirection::Source)?;
-        let target = endpoint_port(nodes, &edge.target, EndpointDirection::Target)?;
-        if source.kind() != target.kind() {
-            return Err(CalcFlowError::Compile {
-                message: format!(
-                    "edge {}.{} -> {}.{} has incompatible batch kinds",
-                    edge.source.node_id, edge.source.port, edge.target.node_id, edge.target.port
-                ),
-            });
-        }
-        if source.schema() != target.schema() {
-            return Err(CalcFlowError::Compile {
-                message: format!(
-                    "edge {}.{} -> {}.{} has incompatible Arrow schemas",
-                    edge.source.node_id, edge.source.port, edge.target.node_id, edge.target.port
-                ),
-            });
-        }
-        if let Some(previous) = writers.insert(&edge.target, &edge.source) {
-            return Err(CalcFlowError::Compile {
-                message: format!(
-                    "input {}.{} has multiple writers: {}.{} and {}.{}",
-                    edge.target.node_id,
-                    edge.target.port,
-                    previous.node_id,
-                    previous.port,
-                    edge.source.node_id,
-                    edge.source.port
-                ),
-            });
-        }
-    }
-    Ok(())
-}
-
-#[derive(Clone, Copy)]
-enum EndpointDirection {
-    Source,
-    Target,
-}
-
-fn endpoint_port<'a>(
-    nodes: &'a BTreeMap<String, NodeDefinition>,
-    endpoint: &PortEndpoint,
-    direction: EndpointDirection,
-) -> Result<&'a Port> {
-    let node = nodes
-        .get(&endpoint.node_id)
-        .ok_or_else(|| CalcFlowError::Compile {
-            message: format!("edge references unknown node {}", endpoint.node_id),
-        })?;
-    let (expected, opposite, label) = match direction {
-        EndpointDirection::Source => (
-            node.operator.output_ports(),
-            node.operator.input_ports(),
-            "source",
-        ),
-        EndpointDirection::Target => (
-            node.operator.input_ports(),
-            node.operator.output_ports(),
-            "target",
-        ),
-    };
-    if let Some(port) = expected.iter().find(|port| port.name() == endpoint.port) {
-        return Ok(port);
-    }
-    let message = if opposite.iter().any(|port| port.name() == endpoint.port) {
-        format!(
-            "{label} endpoint {}.{} has the wrong port direction",
-            endpoint.node_id, endpoint.port
-        )
-    } else {
-        format!(
-            "{label} endpoint {}.{} names a missing port",
-            endpoint.node_id, endpoint.port
-        )
-    };
-    Err(CalcFlowError::Compile { message })
-}
-
-fn topological_order(
-    nodes: &BTreeMap<String, NodeDefinition>,
-    edges: &[Edge],
-) -> Result<Vec<String>> {
-    let mut indegree = nodes
-        .keys()
-        .map(|node_id| (node_id.clone(), 0_usize))
-        .collect::<BTreeMap<_, _>>();
-    let mut outgoing = nodes
-        .keys()
-        .map(|node_id| (node_id.clone(), BTreeMap::new()))
-        .collect::<BTreeMap<_, _>>();
-    for edge in edges {
-        *indegree
-            .get_mut(&edge.target.node_id)
-            .expect("edges were validated before sorting") += 1;
-        outgoing
-            .get_mut(&edge.source.node_id)
-            .expect("edges were validated before sorting")
-            .entry(edge.target.node_id.clone())
-            .and_modify(|count| *count += 1)
-            .or_insert(1_usize);
-    }
-
-    let mut ready = indegree
-        .iter()
-        .filter_map(|(node_id, degree)| (*degree == 0).then_some(node_id.clone()))
-        .collect::<BTreeSet<_>>();
-    let mut order = Vec::with_capacity(nodes.len());
-    while let Some(node_id) = ready.pop_first() {
-        for (target, edge_count) in &outgoing[&node_id] {
-            let degree = indegree
-                .get_mut(target)
-                .expect("edges were validated before sorting");
-            *degree -= edge_count;
-            if *degree == 0 {
-                ready.insert(target.clone());
-            }
-        }
-        order.push(node_id);
-    }
-    if order.len() != nodes.len() {
-        return Err(CalcFlowError::Compile {
-            message: "pipeline graph contains a cycle".into(),
-        });
-    }
-    Ok(order)
-}
-
-fn external_ports(
-    nodes: &BTreeMap<String, NodeDefinition>,
-    edges: &[Edge],
-) -> Result<(
-    BTreeMap<String, PortEndpoint>,
-    BTreeMap<String, PortEndpoint>,
-)> {
-    let connected_inputs = edges
-        .iter()
-        .map(|edge| edge.target.clone())
-        .collect::<BTreeSet<_>>();
-    let connected_outputs = edges
-        .iter()
-        .map(|edge| edge.source.clone())
-        .collect::<BTreeSet<_>>();
-    let inputs = nodes
-        .iter()
-        .flat_map(|(node_id, node)| {
-            node.operator.input_ports().iter().map(|port| PortEndpoint {
-                node_id: node_id.clone(),
-                port: port.name().into(),
-            })
-        })
-        .filter(|endpoint| !connected_inputs.contains(endpoint))
-        .collect::<BTreeSet<_>>();
-    let outputs = nodes
-        .iter()
-        .flat_map(|(node_id, node)| {
-            node.operator
-                .output_ports()
-                .iter()
-                .map(|port| PortEndpoint {
-                    node_id: node_id.clone(),
-                    port: port.name().into(),
-                })
-        })
-        .filter(|endpoint| !connected_outputs.contains(endpoint))
-        .collect::<BTreeSet<_>>();
-    if outputs.is_empty() {
-        return Err(CalcFlowError::Compile {
-            message: "pipeline requires at least one external output".into(),
-        });
-    }
-    Ok((external_names(inputs), external_names(outputs)))
-}
-
-/// Assigns a bare port name when it is unique in one external direction.
-/// Every endpoint sharing a port name is instead qualified as `node_id.port`.
-/// Port names cannot contain `.`, so qualification is unambiguous and cannot
-/// collide with a bare name. Sorted endpoints make the assignment independent
-/// of graph insertion order.
-fn external_names(endpoints: BTreeSet<PortEndpoint>) -> BTreeMap<String, PortEndpoint> {
-    let counts = endpoints
-        .iter()
-        .fold(BTreeMap::new(), |mut counts, endpoint| {
-            *counts.entry(endpoint.port.clone()).or_insert(0_usize) += 1;
-            counts
-        });
-    endpoints
-        .into_iter()
-        .map(|endpoint| {
-            let name = if counts[&endpoint.port] == 1 {
-                endpoint.port.clone()
-            } else {
-                format!("{}.{}", endpoint.node_id, endpoint.port)
-            };
-            (name, endpoint)
-        })
-        .collect()
-}
-
-fn selected_udf_catalog(
-    nodes: &BTreeMap<String, NodeDefinition>,
-    udfs: &UdfRegistrySnapshot,
-) -> Result<Vec<(UdfReference, UdfCatalogEntry)>> {
-    let references = nodes
-        .values()
-        .flat_map(|node| node.operator.udf_references())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    validate_selected_udfs(&references)?;
-
-    references
-        .into_iter()
-        .map(|reference| {
-            let entry = udfs
-                .catalog()
-                .iter()
-                .find(|entry| catalog_matches(entry, &reference))
-                .cloned()
-                .ok_or_else(|| CalcFlowError::Compile {
-                    message: format!(
-                        "unknown UDF {}:{}@{}",
-                        reference.provider(),
-                        reference.name(),
-                        reference.version()
-                    ),
-                })?;
-            if reference.kind() == crate::UdfKind::DataFusionScalar {
-                udfs.resolve_native(&reference)?;
-            }
-            Ok((reference, entry))
-        })
-        .collect()
-}
-
-fn catalog_matches(entry: &UdfCatalogEntry, reference: &UdfReference) -> bool {
-    entry.provider == reference.provider()
-        && entry.name == reference.name()
-        && entry.version == reference.version()
-        && entry.kind == reference.kind()
-}
-
-fn graph_fingerprint(
-    name: &str,
-    datafusion_config: Option<DataFusionConfig>,
-    nodes: &BTreeMap<String, NodeDefinition>,
-    edges: &[Edge],
-    selected_catalog: &[(UdfReference, UdfCatalogEntry)],
-) -> Result<String> {
-    let node_values = nodes
-        .iter()
-        .map(|(node_id, node)| {
-            let declared_udfs = node.operator.udf_references();
-            let canonical_udfs = canonical_udf_references(&declared_udfs);
-            let configuration = fingerprint_configuration(
-                node.operator.configuration(),
-                &declared_udfs,
-                &canonical_udfs,
-            );
-            Ok(json!({
-                "configuration": configuration,
-                "input_ports": port_values(node.operator.input_ports()),
-                "node_id": node_id,
-                "output_ports": port_values(node.operator.output_ports()),
-                "udf_references": canonical_udfs,
-            }))
-        })
-        .collect::<Result<Vec<Value>>>()?;
-    let mut sorted_edges = edges.to_vec();
-    sorted_edges.sort();
-    let catalog_values = selected_catalog
-        .iter()
-        .map(|(reference, entry)| json!({"reference": reference, "catalog": entry}))
-        .collect::<Vec<_>>();
-    let mut value = json!({
-        "edges": sorted_edges,
-        "name": name,
-        "nodes": node_values,
-        "selected_udfs": catalog_values,
-    });
-    if let Some(datafusion_config) = datafusion_config {
-        value
-            .as_object_mut()
-            .expect("fingerprint root is an object")
-            .insert("datafusion".into(), json!(datafusion_config));
-    }
-    let canonical = canonical_json(&value)?;
-    Ok(hex::encode(Sha256::digest(canonical.as_bytes())))
-}
-
-fn canonical_udf_references(references: &[UdfReference]) -> Vec<UdfReference> {
-    references
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
-/// Canonicalizes only the conventional projection of declared UDF references.
-/// An arbitrary configuration array retains its order unless `configuration.udfs`
-/// exactly mirrors the operator's declared references in their original order.
-fn fingerprint_configuration(
-    mut configuration: BTreeMap<String, Value>,
-    declared_udfs: &[UdfReference],
-    canonical_udfs: &[UdfReference],
-) -> BTreeMap<String, Value> {
-    let declared_projection = Value::Array(declared_udfs.iter().map(|udf| json!(udf)).collect());
-    if configuration.get("udfs") == Some(&declared_projection) {
-        configuration.insert(
-            "udfs".into(),
-            Value::Array(canonical_udfs.iter().map(|udf| json!(udf)).collect()),
-        );
-    }
-    configuration
-}
-
-fn port_values(ports: &[Port]) -> Vec<Value> {
-    let mut ports = ports.iter().collect::<Vec<_>>();
-    ports.sort_by_key(|port| port.name());
-    ports
-        .into_iter()
-        .map(|port| {
-            json!({
-                "kind": port.kind(),
-                "name": port.name(),
-                "required": port.required(),
-                "schema": port.schema().map(schema_value),
-            })
-        })
-        .collect()
-}
-
-fn schema_value(schema: &SchemaRef) -> Value {
-    let mut dictionary_tracker = DictionaryTracker::new(true);
-    let bytes = IpcSchemaEncoder::new()
-        .with_dictionary_tracker(&mut dictionary_tracker)
-        .schema_to_fb(schema)
-        .finished_data()
-        .to_vec();
-    Value::String(hex::encode(bytes))
-}
-
-fn build_plan(
-    mut builder: PipelineBuilder,
-    order: Vec<String>,
-    external_inputs: BTreeMap<String, PortEndpoint>,
-    external_outputs: BTreeMap<String, PortEndpoint>,
-    fingerprint: String,
-    table: Option<TablePlanResources>,
-) -> ExecutionPlan {
-    let inbound = builder
-        .edges
-        .iter()
-        .map(|edge| {
-            (
-                (edge.target.node_id.clone(), edge.target.port.clone()),
-                edge.source.clone(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut outbound = BTreeMap::<(String, String), Vec<PortEndpoint>>::new();
-    for edge in &builder.edges {
-        outbound
-            .entry((edge.source.node_id.clone(), edge.source.port.clone()))
-            .or_default()
-            .push(edge.target.clone());
-    }
-    for targets in outbound.values_mut() {
-        targets.sort();
-        targets.dedup();
-    }
-    let nodes = order
-        .into_iter()
-        .map(|node_id| {
-            let definition = builder
-                .nodes
-                .remove(&node_id)
-                .expect("topology contains every validated node exactly once");
-            let input_ports = definition.operator.input_ports().to_vec();
-            let output_ports = definition.operator.output_ports().to_vec();
-            let node_inbound = input_ports
-                .iter()
-                .filter_map(|port| {
-                    inbound
-                        .get(&(node_id.clone(), port.name().into()))
-                        .cloned()
-                        .map(|source| (port.name().into(), source))
-                })
-                .collect();
-            let node_outbound = output_ports
-                .iter()
-                .filter_map(|port| {
-                    outbound
-                        .get(&(node_id.clone(), port.name().into()))
-                        .cloned()
-                        .map(|targets| (port.name().into(), targets))
-                })
-                .collect();
-            CompiledNode {
-                node_id: definition.node_id,
-                operator: Arc::new(tokio::sync::Mutex::new(CompiledOperator::ExistingData(
-                    definition.operator,
-                ))),
-                input_ports,
-                output_ports,
-                inbound: node_inbound,
-                outbound: node_outbound,
-            }
-        })
-        .collect::<Vec<_>>();
-    let control_routes = derive_control_routes(&nodes, &external_inputs);
-    ExecutionPlan {
-        name: builder.name,
-        table,
-        nodes,
-        external_inputs,
-        external_outputs,
-        control_routes,
-        fingerprint,
-        run_lock: tokio::sync::Mutex::new(()),
-        lease_state: StdMutex::new(LeaseState::default()),
-        operation_state: StdMutex::new(OperationState::default()),
-    }
 }
 
 #[cfg(test)]
@@ -2109,10 +1276,15 @@ mod lifecycle_tests {
     };
 
     use async_trait::async_trait;
+    use chrono::Utc;
     use datafusion::arrow::{datatypes::Schema, record_batch::RecordBatch};
+    use serde_json::json;
 
     use super::*;
-    use crate::{BatchKind, BatchMetadata, Operator, OperatorContext, UdfRegistry};
+    use crate::{
+        BatchKind, BatchMetadata, BatchOperator, CancellationToken, JsonMap, OperatorMetadata,
+        UdfRegistry,
+    };
 
     struct LifecycleGate {
         started: Arc<tokio::sync::Notify>,
@@ -2126,8 +1298,7 @@ mod lifecycle_tests {
         outputs: Vec<Port>,
     }
 
-    #[async_trait]
-    impl Operator for LifecycleGate {
+    impl OperatorMetadata for LifecycleGate {
         fn name(&self) -> &'static str {
             "lifecycle_gate"
         }
@@ -2143,11 +1314,14 @@ mod lifecycle_tests {
         fn configuration(&self) -> JsonMap {
             BTreeMap::new()
         }
+    }
 
+    #[async_trait]
+    impl BatchOperator for LifecycleGate {
         async fn process(
             &mut self,
             inputs: &BTreeMap<String, Batch>,
-            _context: &OperatorContext<'_>,
+            _context: &BatchOperatorContext<'_>,
         ) -> Result<BTreeMap<String, Batch>> {
             self.state += 1;
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -2190,7 +1364,7 @@ mod lifecycle_tests {
         restores: Arc<AtomicUsize>,
         fail_snapshot: bool,
         fail_restore: bool,
-    ) -> Arc<ExecutionPlan> {
+    ) -> Arc<BatchExecutionPlan> {
         let input = Port::new("input", BatchKind::Table, true, None).unwrap();
         let output = Port::new("output", BatchKind::Table, true, None).unwrap();
         Arc::new(
@@ -2208,10 +1382,10 @@ mod lifecycle_tests {
                         state: 0,
                         inputs: vec![input],
                         outputs: vec![output],
-                    }),
+                    }) as Box<dyn BatchOperator>,
                 )
                 .unwrap()
-                .compile(&UdfRegistry::new().snapshot())
+                .compile_batch(&UdfRegistry::new().snapshot())
                 .unwrap(),
         )
     }
@@ -2234,7 +1408,7 @@ mod lifecycle_tests {
         .await;
     }
 
-    fn marker(plan: &ExecutionPlan) -> Option<u64> {
+    fn marker(plan: &BatchExecutionPlan) -> Option<u64> {
         plan.operation_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2327,7 +1501,7 @@ mod lifecycle_tests {
             .signed_duration_since(Utc::now())
             .to_std()
             .unwrap_or_default();
-        tokio::time::sleep(wait + Duration::from_millis(10)).await;
+        tokio::time::sleep(wait + std::time::Duration::from_millis(10)).await;
 
         release.notify_one();
         first.await.unwrap();
@@ -2479,7 +1653,7 @@ mod lifecycle_tests {
 }
 
 #[cfg(test)]
-mod data_envelope_tests {
+mod data_tests {
     use std::{collections::BTreeMap, sync::Arc};
 
     use datafusion::arrow::{
@@ -2487,13 +1661,14 @@ mod data_envelope_tests {
         record_batch::RecordBatch,
     };
 
-    use super::{PipelineBuilder, PortEndpoint, gather_node_inputs, validate_and_store_outputs};
-    use crate::runtime::RuntimeEnvelope;
-    use crate::{Batch, BatchMetadata, ExpressionOperator, UdfRegistry};
+    use super::{gather_node_inputs, validate_and_store_outputs};
+    use crate::{
+        Batch, BatchMetadata, ExpressionOperator, PipelineBuilder, PortEndpoint, UdfRegistry,
+    };
 
     #[test]
-    fn data_endpoint_slots_preserve_envelope_payload_identity() {
-        let plan = PipelineBuilder::new("data envelope slots")
+    fn endpoint_slots_preserve_batch_payload_identity() {
+        let plan = PipelineBuilder::new("data slots")
             .unwrap()
             .add_node(
                 "expression",
@@ -2509,7 +1684,7 @@ mod data_envelope_tests {
                 ),
             )
             .unwrap()
-            .compile(&UdfRegistry::new().snapshot())
+            .compile_batch(&UdfRegistry::new().snapshot())
             .unwrap();
         let node = &plan.nodes[0];
         let input_endpoint = plan.external_inputs["input"].clone();
@@ -2521,8 +1696,7 @@ mod data_envelope_tests {
         let batch = Batch::table(vec![record_batch], BatchMetadata::default()).unwrap();
         let schema = Arc::clone(batch.table_payload().unwrap().schema());
         let external_names = BTreeMap::from([(input_endpoint.clone(), "input".to_owned())]);
-        let external_values =
-            BTreeMap::from([(input_endpoint, RuntimeEnvelope::Data(batch.clone()))]);
+        let external_values = BTreeMap::from([(input_endpoint, batch.clone())]);
 
         let inputs =
             gather_node_inputs(node, &BTreeMap::new(), &external_values, &external_names).unwrap();
@@ -2546,8 +1720,6 @@ mod data_envelope_tests {
 
         assert!(Arc::ptr_eq(
             produced_values[&output_endpoint]
-                .data()
-                .unwrap()
                 .table_payload()
                 .unwrap()
                 .schema(),
@@ -2555,9 +1727,3 @@ mod data_envelope_tests {
         ));
     }
 }
-
-#[cfg(test)]
-mod runtime_envelope_tests;
-
-#[cfg(test)]
-mod signal_allocation_tests;

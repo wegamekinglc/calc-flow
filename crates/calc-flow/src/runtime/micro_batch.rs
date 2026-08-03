@@ -3,8 +3,8 @@ use std::{collections::BTreeMap, sync::Arc};
 use chrono::Utc;
 
 use crate::{
-    CalcFlowError, Checkpoint, CheckpointStore, ExecutionOptions, ExecutionPlan, Result, RunResult,
-    Source, SourceItem,
+    BatchExecutionPlan, CalcFlowError, Checkpoint, CheckpointStore, ExecutionOptions, Result,
+    RunResult, Source, SourceItem,
     pipeline::{PlanLease, PlanTransaction},
 };
 
@@ -16,7 +16,7 @@ use super::SinkRouter;
 /// drop. Direct plan lifecycle calls and other runners are rejected while the
 /// lease is active.
 pub struct MicroBatchRunner {
-    plan: Arc<ExecutionPlan>,
+    plan: Arc<BatchExecutionPlan>,
     lease: PlanLease,
     source: Box<dyn Source>,
     sinks: SinkRouter,
@@ -46,7 +46,7 @@ impl MicroBatchRunner {
     /// logical [`CheckpointStore`] so it can authenticate the durable cursor
     /// and compensate any interrupted store mutation.
     pub fn new(
-        plan: Arc<ExecutionPlan>,
+        plan: Arc<BatchExecutionPlan>,
         source: Box<dyn Source>,
         sinks: SinkRouter,
         checkpoints: Arc<dyn CheckpointStore>,
@@ -388,7 +388,10 @@ impl Drop for MicroBatchRunner {
     }
 }
 
-pub(super) fn validate_checkpoint(checkpoint: &Checkpoint, plan: &ExecutionPlan) -> Result<()> {
+pub(super) fn validate_checkpoint(
+    checkpoint: &Checkpoint,
+    plan: &BatchExecutionPlan,
+) -> Result<()> {
     if checkpoint.pipeline_name != plan.name() {
         return Err(CalcFlowError::CheckpointMismatch {
             message: format!(

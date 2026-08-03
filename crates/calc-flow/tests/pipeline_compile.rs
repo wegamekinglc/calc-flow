@@ -2,8 +2,9 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use calc_flow::{
-    Batch, BatchKind, CalcFlowError, Edge, ExpressionOperator, JsonMap, Operator, OperatorContext,
-    PipelineBuilder, Port, PortEndpoint, Result, UdfKind, UdfReference, UdfRegistry,
+    Batch, BatchKind, BatchOperator, BatchOperatorContext, CalcFlowError, Edge, ExpressionOperator,
+    JsonMap, OperatorMetadata, PipelineBuilder, Port, PortEndpoint, Result, UdfKind, UdfReference,
+    UdfRegistry,
 };
 use datafusion::{
     arrow::datatypes::{DataType, Field},
@@ -42,8 +43,7 @@ impl TestOperator {
     }
 }
 
-#[async_trait]
-impl Operator for TestOperator {
+impl OperatorMetadata for TestOperator {
     fn name(&self) -> &str {
         &self.name
     }
@@ -63,11 +63,14 @@ impl Operator for TestOperator {
     fn udf_references(&self) -> Vec<UdfReference> {
         self.udfs.clone()
     }
+}
 
+#[async_trait]
+impl BatchOperator for TestOperator {
     async fn process(
         &mut self,
         _inputs: &BTreeMap<String, Batch>,
-        _context: &OperatorContext<'_>,
+        _context: &BatchOperatorContext<'_>,
     ) -> Result<BTreeMap<String, Batch>> {
         Ok(BTreeMap::new())
     }
@@ -91,20 +94,20 @@ fn array_port(name: &str) -> Port {
     Port::new(name, BatchKind::Array, true, None).unwrap()
 }
 
-fn source(name: &str) -> Box<dyn Operator> {
+fn source(name: &str) -> Box<dyn BatchOperator> {
     Box::new(TestOperator::new(
         name,
         vec![],
         vec![table_port("output", true)],
-    ))
+    )) as Box<dyn BatchOperator>
 }
 
-fn transform(name: &str) -> Box<dyn Operator> {
+fn transform(name: &str) -> Box<dyn BatchOperator> {
     Box::new(TestOperator::new(
         name,
         vec![table_port("input", true)],
         vec![table_port("output", true)],
-    ))
+    )) as Box<dyn BatchOperator>
 }
 
 fn endpoint(node_id: &str, port: &str) -> PortEndpoint {
@@ -198,7 +201,7 @@ fn compilation_rejects_missing_source_and_target_ports() {
             .unwrap()
             .connect(invalid_edge)
             .unwrap()
-            .compile(&registry);
+            .compile_batch(&registry);
         assert!(matches!(result, Err(CalcFlowError::Compile { .. })));
     }
 }
@@ -218,7 +221,7 @@ fn compilation_enforces_port_direction() {
             .unwrap()
             .connect(invalid_edge)
             .unwrap()
-            .compile(&registry);
+            .compile_batch(&registry);
         assert!(matches!(result, Err(CalcFlowError::Compile { .. })));
     }
 }
@@ -234,14 +237,14 @@ fn compilation_enforces_kind_and_exact_arrow_schema_compatibility() {
                 "source",
                 vec![],
                 vec![array_port("output")],
-            )),
+            )) as Box<dyn BatchOperator>,
         )
         .unwrap()
         .add_node("target", transform("target"))
         .unwrap()
         .connect(edge("source", "output", "target", "input"))
         .unwrap()
-        .compile(&registry);
+        .compile_batch(&registry);
     assert!(matches!(kind_result, Err(CalcFlowError::Compile { .. })));
 
     let schema_result = PipelineBuilder::new("schema")
@@ -252,7 +255,7 @@ fn compilation_enforces_kind_and_exact_arrow_schema_compatibility() {
                 "source",
                 vec![],
                 vec![typed_table_port("output", "value", DataType::Int64)],
-            )),
+            )) as Box<dyn BatchOperator>,
         )
         .unwrap()
         .add_node(
@@ -261,12 +264,12 @@ fn compilation_enforces_kind_and_exact_arrow_schema_compatibility() {
                 "target",
                 vec![typed_table_port("input", "value", DataType::Utf8)],
                 vec![table_port("output", true)],
-            )),
+            )) as Box<dyn BatchOperator>,
         )
         .unwrap()
         .connect(edge("source", "output", "target", "input"))
         .unwrap()
-        .compile(&registry);
+        .compile_batch(&registry);
     assert!(matches!(schema_result, Err(CalcFlowError::Compile { .. })));
 }
 
@@ -284,7 +287,7 @@ fn compilation_rejects_duplicate_edges_and_multiple_input_writers() {
         .unwrap()
         .connect(duplicate)
         .unwrap()
-        .compile(&registry);
+        .compile_batch(&registry);
     assert!(matches!(
         duplicate_result,
         Err(CalcFlowError::Compile { .. })
@@ -302,7 +305,7 @@ fn compilation_rejects_duplicate_edges_and_multiple_input_writers() {
         .unwrap()
         .connect(edge("second", "output", "target", "input"))
         .unwrap()
-        .compile(&registry);
+        .compile_batch(&registry);
     assert!(matches!(writer_result, Err(CalcFlowError::Compile { .. })));
 }
 
@@ -315,7 +318,7 @@ fn compilation_rejects_self_and_multi_node_cycles() {
         .unwrap()
         .connect(edge("node", "output", "node", "input"))
         .unwrap()
-        .compile(&registry);
+        .compile_batch(&registry);
     assert!(matches!(self_cycle, Err(CalcFlowError::Compile { .. })));
 
     let multi_cycle = PipelineBuilder::new("multi cycle")
@@ -328,7 +331,7 @@ fn compilation_rejects_self_and_multi_node_cycles() {
         .unwrap()
         .connect(edge("second", "output", "first", "input"))
         .unwrap()
-        .compile(&registry);
+        .compile_batch(&registry);
     assert!(matches!(multi_cycle, Err(CalcFlowError::Compile { .. })));
 }
 
@@ -347,7 +350,7 @@ fn kahn_topology_is_deterministic_regardless_of_insertion_order() {
         .unwrap()
         .connect(edge("right", "output", "left", "input"))
         .unwrap()
-        .compile(&registry)
+        .compile_batch(&registry)
         .unwrap();
     let second = PipelineBuilder::new("topology")
         .unwrap()
@@ -361,7 +364,7 @@ fn kahn_topology_is_deterministic_regardless_of_insertion_order() {
         .unwrap()
         .connect(edge("root", "output", "right", "input"))
         .unwrap()
-        .compile(&registry)
+        .compile_batch(&registry)
         .unwrap();
 
     assert_eq!(first.topological_order(), ["root", "right", "left"]);
@@ -379,7 +382,7 @@ fn kahn_topology_counts_distinct_edges_between_the_same_nodes() {
                 "source",
                 vec![],
                 vec![table_port("first", true), table_port("second", true)],
-            )),
+            )) as Box<dyn BatchOperator>,
         )
         .unwrap()
         .add_node(
@@ -388,14 +391,14 @@ fn kahn_topology_counts_distinct_edges_between_the_same_nodes() {
                 "target",
                 vec![table_port("first", true), table_port("second", true)],
                 vec![table_port("output", true)],
-            )),
+            )) as Box<dyn BatchOperator>,
         )
         .unwrap()
         .connect(edge("source", "first", "target", "first"))
         .unwrap()
         .connect(edge("source", "second", "target", "second"))
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
 
     assert_eq!(plan.topological_order(), ["source", "target"]);
@@ -417,18 +420,20 @@ fn external_names_are_stable_unique_and_include_required_and_optional_inputs() {
         let builder = PipelineBuilder::new("externals").unwrap();
         let builder = if reverse {
             builder
-                .add_node("right", Box::new(right))
+                .add_node("right", Box::new(right) as Box<dyn BatchOperator>)
                 .unwrap()
-                .add_node("left", Box::new(left))
+                .add_node("left", Box::new(left) as Box<dyn BatchOperator>)
                 .unwrap()
         } else {
             builder
-                .add_node("left", Box::new(left))
+                .add_node("left", Box::new(left) as Box<dyn BatchOperator>)
                 .unwrap()
-                .add_node("right", Box::new(right))
+                .add_node("right", Box::new(right) as Box<dyn BatchOperator>)
                 .unwrap()
         };
-        builder.compile(&UdfRegistry::new().snapshot()).unwrap()
+        builder
+            .compile_batch(&UdfRegistry::new().snapshot())
+            .unwrap()
     };
     let first = build(false);
     let second = build(true);
@@ -464,7 +469,7 @@ fn unique_external_port_names_stay_bare() {
         .unwrap()
         .add_node("calc", transform("calc"))
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
 
     assert_eq!(
@@ -493,10 +498,10 @@ fn compilation_requires_at_least_one_external_output() {
                 "sink",
                 vec![table_port("input", true)],
                 vec![],
-            )),
+            )) as Box<dyn BatchOperator>,
         )
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot());
+        .compile_batch(&UdfRegistry::new().snapshot());
     assert!(matches!(result, Err(CalcFlowError::Compile { .. })));
 }
 
@@ -517,10 +522,10 @@ fn configurable_graph(
                     vec![typed_table_port("output", field_name, DataType::Int64)],
                 )
                 .with_configuration(BTreeMap::from([("setting".into(), configuration)])),
-            ),
+            ) as Box<dyn BatchOperator>,
         )
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap()
         .fingerprint()
         .into()
@@ -572,10 +577,10 @@ fn dictionary_schemas_compile_with_deterministic_fingerprints() {
                         "category",
                         DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
                     )],
-                )),
+                )) as Box<dyn BatchOperator>,
             )
             .unwrap()
-            .compile(&UdfRegistry::new().snapshot())
+            .compile_batch(&UdfRegistry::new().snapshot())
             .unwrap()
             .fingerprint()
             .to_owned()
@@ -601,7 +606,7 @@ fn fingerprint_treats_built_in_udf_references_as_a_set() {
                 ),
             )
             .unwrap()
-            .compile(&registry.snapshot())
+            .compile_batch(&registry.snapshot())
             .unwrap()
             .fingerprint()
             .to_owned()
@@ -623,10 +628,10 @@ fn fingerprint_preserves_arbitrary_external_configuration_array_order() {
                 Box::new(
                     TestOperator::new("external", vec![], vec![table_port("output", true)])
                         .with_configuration(BTreeMap::from([("udfs".into(), json!(steps))])),
-                ),
+                ) as Box<dyn BatchOperator>,
             )
             .unwrap()
-            .compile(&UdfRegistry::new().snapshot())
+            .compile_batch(&UdfRegistry::new().snapshot())
             .unwrap()
             .fingerprint()
             .to_owned()
@@ -644,7 +649,7 @@ fn fingerprints_change_with_edges() {
         .unwrap()
         .add_node("target", transform("target"))
         .unwrap()
-        .compile(&registry)
+        .compile_batch(&registry)
         .unwrap();
     let connected = PipelineBuilder::new("edges")
         .unwrap()
@@ -654,7 +659,7 @@ fn fingerprints_change_with_edges() {
         .unwrap()
         .connect(edge("source", "output", "target", "input"))
         .unwrap()
-        .compile(&registry)
+        .compile_batch(&registry)
         .unwrap();
 
     assert_ne!(disconnected.fingerprint(), connected.fingerprint());
@@ -672,10 +677,10 @@ fn fingerprint_uses_only_selected_udf_catalog_entries() {
                 Box::new(
                     TestOperator::new("node", vec![], vec![table_port("output", true)])
                         .with_udfs(vec![selected.clone()]),
-                ),
+                ) as Box<dyn BatchOperator>,
             )
             .unwrap()
-            .compile(&registry.snapshot())
+            .compile_batch(&registry.snapshot())
             .unwrap()
             .fingerprint()
             .to_owned()
@@ -716,10 +721,10 @@ fn fingerprint_changes_with_selected_udf_references() {
                 Box::new(
                     TestOperator::new("node", vec![], vec![table_port("output", true)])
                         .with_udfs(vec![reference]),
-                ),
+                ) as Box<dyn BatchOperator>,
             )
             .unwrap()
-            .compile(&registry.snapshot())
+            .compile_batch(&registry.snapshot())
             .unwrap()
             .fingerprint()
             .to_owned()
@@ -738,10 +743,10 @@ fn unknown_referenced_udfs_are_rejected_before_plan_creation() {
             Box::new(
                 TestOperator::new("node", vec![], vec![table_port("output", true)])
                     .with_udfs(vec![unknown]),
-            ),
+            ) as Box<dyn BatchOperator>,
         )
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot());
+        .compile_batch(&UdfRegistry::new().snapshot());
     assert!(matches!(
         result,
         Err(CalcFlowError::Compile { message }) if message.contains("unknown UDF")
@@ -767,10 +772,10 @@ fn conflicting_selected_datafusion_references_are_rejected_before_plan_creation(
             Box::new(
                 TestOperator::new("node", vec![], vec![table_port("output", true)])
                     .with_udfs(vec![first, second]),
-            ),
+            ) as Box<dyn BatchOperator>,
         )
         .unwrap()
-        .compile(&registry.snapshot());
+        .compile_batch(&registry.snapshot());
     assert!(matches!(
         result,
         Err(CalcFlowError::Compile { message }) if message.contains("collides")

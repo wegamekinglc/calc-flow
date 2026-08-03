@@ -8,9 +8,9 @@ use std::{
 
 use async_trait::async_trait;
 use calc_flow::{
-    Batch, BatchKind, CalcFlowError, CancellationToken, DataFusionConfig, Edge, ExecutionOptions,
-    ExpressionOperator, JsonMap, Operator, OperatorContext, PipelineBuilder, Port, PortEndpoint,
-    UdfKind, UdfReference, UdfRegistry,
+    Batch, BatchKind, BatchOperator, BatchOperatorContext, CalcFlowError, CancellationToken,
+    DataFusionConfig, Edge, ExecutionOptions, ExpressionOperator, JsonMap, OperatorMetadata,
+    PipelineBuilder, Port, PortEndpoint, UdfKind, UdfReference, UdfRegistry,
 };
 use datafusion::{
     arrow::datatypes::{DataType, Field},
@@ -28,15 +28,15 @@ fn edge(source: &str, target: &str) -> Edge {
     Edge::new(endpoint(source, "output"), endpoint(target, "input"))
 }
 
-fn one_node(action: Action, probe: Arc<Probe>) -> calc_flow::ExecutionPlan {
+fn one_node(action: Action, probe: Arc<Probe>) -> calc_flow::BatchExecutionPlan {
     PipelineBuilder::new("execute")
         .unwrap()
         .add_node(
             "node",
-            Box::new(TestOperator::transform("node", action, probe)),
+            Box::new(TestOperator::transform("node", action, probe)) as Box<dyn BatchOperator>,
         )
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap()
 }
 
@@ -64,10 +64,10 @@ async fn dropped_execute_restores_mutated_state_before_the_next_public_call() {
                     Arc::clone(&probe),
                 )
                 .stateful(),
-            ),
+            ) as Box<dyn BatchOperator>,
         )
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
 
     let mut cancelled = Box::pin(plan.execute(inputs(), ExecutionOptions::default()));
@@ -107,17 +107,17 @@ async fn reset_recovers_an_unrestorable_dropped_direct_multi_input_operation() {
                 )
                 .stateful()
                 .failing_restore(),
-            ),
+            ) as Box<dyn BatchOperator>,
         )
         .unwrap()
         .add_node(
             "second",
             Box::new(
                 TestOperator::transform("second", Action::Pass, Arc::clone(&second)).stateful(),
-            ),
+            ) as Box<dyn BatchOperator>,
         )
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
     let inputs = plan
         .external_inputs()
@@ -154,8 +154,7 @@ impl DriftingOutputOperator {
     }
 }
 
-#[async_trait]
-impl Operator for DriftingOutputOperator {
+impl OperatorMetadata for DriftingOutputOperator {
     fn name(&self) -> &'static str {
         "drifting-output"
     }
@@ -171,11 +170,14 @@ impl Operator for DriftingOutputOperator {
     fn configuration(&self) -> JsonMap {
         BTreeMap::new()
     }
+}
 
+#[async_trait]
+impl BatchOperator for DriftingOutputOperator {
     async fn process(
         &mut self,
         _inputs: &BTreeMap<String, Batch>,
-        _context: &OperatorContext<'_>,
+        _context: &BatchOperatorContext<'_>,
     ) -> calc_flow::Result<BTreeMap<String, Batch>> {
         self.output_ports = vec![Port::new(
             "output",
@@ -202,7 +204,7 @@ async fn run_result_contains_named_outputs_timings_metrics_and_metadata() {
             ),
         )
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
 
     let result = plan
@@ -275,7 +277,7 @@ async fn connected_mixed_plan_shares_one_table_runtime() {
                 vec![untyped_table_port("output", true)],
                 Action::Pass,
                 Arc::clone(&probe),
-            )),
+            )) as Box<dyn BatchOperator>,
         )
         .unwrap()
         .add_node(
@@ -310,7 +312,7 @@ async fn connected_mixed_plan_shares_one_table_runtime() {
         .unwrap()
         .connect(edge("first_table", "second_table"))
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
 
     assert!(plan.requires_datafusion());
@@ -354,7 +356,7 @@ async fn connected_mixed_plan_rolls_back_external_state_after_table_failure() {
                     Arc::clone(&failing_probe),
                 )
                 .stateful(),
-            ),
+            ) as Box<dyn BatchOperator>,
         )
         .unwrap()
         .add_node(
@@ -367,7 +369,7 @@ async fn connected_mixed_plan_rolls_back_external_state_after_table_failure() {
         .unwrap()
         .connect(edge("external", "bad_table"))
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
     let before = failing.snapshot().await.unwrap();
     assert!(
@@ -419,9 +421,9 @@ async fn optional_external_input_may_be_absent_but_unknown_names_are_rejected() 
     );
     let plan = PipelineBuilder::new("optional")
         .unwrap()
-        .add_node("optional", Box::new(operator))
+        .add_node("optional", Box::new(operator) as Box<dyn BatchOperator>)
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
     let result = plan
         .execute(BTreeMap::new(), ExecutionOptions::default())
@@ -451,9 +453,9 @@ async fn omitted_same_name_output_does_not_echo_the_external_input() {
     );
     let plan = PipelineBuilder::new("same-name omitted output")
         .unwrap()
-        .add_node("same-name", Box::new(operator))
+        .add_node("same-name", Box::new(operator) as Box<dyn BatchOperator>)
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
 
     let result = plan
@@ -481,16 +483,16 @@ async fn connected_same_name_output_must_be_produced_before_routing_downstream()
     let consumer = TestOperator::transform("consumer", Action::Pass, Arc::clone(&probe));
     let plan = PipelineBuilder::new("connected same-name output")
         .unwrap()
-        .add_node("producer", Box::new(producer))
+        .add_node("producer", Box::new(producer) as Box<dyn BatchOperator>)
         .unwrap()
-        .add_node("consumer", Box::new(consumer))
+        .add_node("consumer", Box::new(consumer) as Box<dyn BatchOperator>)
         .unwrap()
         .connect(Edge::new(
             endpoint("producer", "shared"),
             endpoint("consumer", "input"),
         ))
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
 
     let error = plan
@@ -517,9 +519,9 @@ async fn produced_same_name_output_replaces_neither_input_nor_route_identity() {
     );
     let plan = PipelineBuilder::new("same-name produced output")
         .unwrap()
-        .add_node("same-name", Box::new(operator))
+        .add_node("same-name", Box::new(operator) as Box<dyn BatchOperator>)
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
 
     let result = plan
@@ -538,9 +540,12 @@ async fn produced_same_name_output_replaces_neither_input_nor_route_identity() {
 async fn execution_validates_outputs_against_compile_time_port_snapshot() {
     let plan = PipelineBuilder::new("compile-time ports")
         .unwrap()
-        .add_node("drift", Box::new(DriftingOutputOperator::new()))
+        .add_node(
+            "drift",
+            Box::new(DriftingOutputOperator::new()) as Box<dyn BatchOperator>,
+        )
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
 
     let error = plan
@@ -568,13 +573,13 @@ async fn execution_is_topological_and_validates_required_downstream_inputs() {
     let consumer = TestOperator::transform("consumer", Action::Pass, Arc::clone(&probe));
     let plan = PipelineBuilder::new("topological")
         .unwrap()
-        .add_node("consumer", Box::new(consumer))
+        .add_node("consumer", Box::new(consumer) as Box<dyn BatchOperator>)
         .unwrap()
-        .add_node("producer", Box::new(producer))
+        .add_node("producer", Box::new(producer) as Box<dyn BatchOperator>)
         .unwrap()
         .connect(edge("producer", "consumer"))
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
     let error = plan
         .execute(inputs(), ExecutionOptions::default())
@@ -595,9 +600,9 @@ async fn missing_unknown_and_schema_invalid_outputs_are_rejected_and_rolled_back
         let operator = TestOperator::transform("node", action, Arc::clone(&probe)).stateful();
         let plan = PipelineBuilder::new("invalid output")
             .unwrap()
-            .add_node("node", Box::new(operator))
+            .add_node("node", Box::new(operator) as Box<dyn BatchOperator>)
             .unwrap()
-            .compile(&UdfRegistry::new().snapshot())
+            .compile_batch(&UdfRegistry::new().snapshot())
             .unwrap();
         let before = plan.snapshot().await.unwrap();
         assert!(
@@ -620,7 +625,7 @@ async fn operator_and_datafusion_failures_restore_every_node() {
             "first",
             Box::new(
                 TestOperator::transform("first", Action::Pass, Arc::clone(&first_probe)).stateful(),
-            ),
+            ) as Box<dyn BatchOperator>,
         )
         .unwrap()
         .add_node(
@@ -628,12 +633,12 @@ async fn operator_and_datafusion_failures_restore_every_node() {
             Box::new(
                 TestOperator::transform("second", Action::Fail("boom"), Arc::clone(&second_probe))
                     .stateful(),
-            ),
+            ) as Box<dyn BatchOperator>,
         )
         .unwrap()
         .connect(edge("first", "second"))
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
     let before = plan.snapshot().await.unwrap();
     assert!(
@@ -655,7 +660,7 @@ async fn operator_and_datafusion_failures_restore_every_node() {
             ),
         )
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
     let before = datafusion.snapshot().await.unwrap();
     assert!(
@@ -700,7 +705,7 @@ async fn cancellation_is_checked_immediately_before_and_after_each_operator_call
                     Arc::clone(&first_probe),
                 )
                 .stateful(),
-            ),
+            ) as Box<dyn BatchOperator>,
         )
         .unwrap()
         .add_node(
@@ -709,12 +714,12 @@ async fn cancellation_is_checked_immediately_before_and_after_each_operator_call
                 "second",
                 Action::Pass,
                 Arc::clone(&second_probe),
-            )),
+            )) as Box<dyn BatchOperator>,
         )
         .unwrap()
         .connect(edge("first", "second"))
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
     let before = plan.snapshot().await.unwrap();
     let error = plan
@@ -762,7 +767,7 @@ async fn restore_rejects_missing_and_extra_node_ids_before_mutating_any_node() {
                 "first",
                 Action::Pass,
                 Arc::clone(&first),
-            )),
+            )) as Box<dyn BatchOperator>,
         )
         .unwrap()
         .add_node(
@@ -771,10 +776,10 @@ async fn restore_rejects_missing_and_extra_node_ids_before_mutating_any_node() {
                 "second",
                 Action::Pass,
                 Arc::clone(&second),
-            )),
+            )) as Box<dyn BatchOperator>,
         )
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
     for invalid in [
         BTreeMap::from([("first".into(), json!({"state": 0}))]),
@@ -805,7 +810,7 @@ async fn snapshot_restore_and_reset_cover_every_node() {
                 "first",
                 Action::Pass,
                 Arc::clone(&first),
-            )),
+            )) as Box<dyn BatchOperator>,
         )
         .unwrap()
         .add_node(
@@ -814,10 +819,10 @@ async fn snapshot_restore_and_reset_cover_every_node() {
                 "second",
                 Action::Pass,
                 Arc::clone(&second),
-            )),
+            )) as Box<dyn BatchOperator>,
         )
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
     let state = plan.snapshot().await.unwrap();
     assert_eq!(
@@ -842,7 +847,7 @@ async fn rollback_failure_preserves_original_failure_and_attempts_every_restore(
                 TestOperator::transform("bad_restore", Action::Pass, Arc::clone(&bad))
                     .stateful()
                     .failing_restore(),
-            ),
+            ) as Box<dyn BatchOperator>,
         )
         .unwrap()
         .add_node(
@@ -854,12 +859,12 @@ async fn rollback_failure_preserves_original_failure_and_attempts_every_restore(
                     Arc::clone(&good),
                 )
                 .stateful(),
-            ),
+            ) as Box<dyn BatchOperator>,
         )
         .unwrap()
         .connect(edge("bad_restore", "failure"))
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
     let error = plan
         .execute(inputs(), ExecutionOptions::default())
@@ -884,7 +889,7 @@ async fn concurrent_runs_are_serialized_across_the_whole_plan() {
                     "first",
                     Action::DelayPass(Duration::from_millis(20)),
                     Arc::clone(&probe),
-                )),
+                )) as Box<dyn BatchOperator>,
             )
             .unwrap()
             .add_node(
@@ -893,12 +898,12 @@ async fn concurrent_runs_are_serialized_across_the_whole_plan() {
                     "second",
                     Action::DelayPass(Duration::from_millis(20)),
                     Arc::clone(&probe),
-                )),
+                )) as Box<dyn BatchOperator>,
             )
             .unwrap()
             .connect(edge("first", "second"))
             .unwrap()
-            .compile(&UdfRegistry::new().snapshot())
+            .compile_batch(&UdfRegistry::new().snapshot())
             .unwrap(),
     );
     let first = tokio::spawn({
@@ -930,7 +935,7 @@ async fn lifecycle_operations_wait_for_the_whole_run_lock() {
                     "first",
                     Action::Pass,
                     Arc::clone(&first_probe),
-                )),
+                )) as Box<dyn BatchOperator>,
             )
             .unwrap()
             .add_node(
@@ -942,12 +947,12 @@ async fn lifecycle_operations_wait_for_the_whole_run_lock() {
                         release: Arc::clone(&release),
                     },
                     Arc::clone(&second_probe),
-                )),
+                )) as Box<dyn BatchOperator>,
             )
             .unwrap()
             .connect(edge("first", "second"))
             .unwrap()
-            .compile(&UdfRegistry::new().snapshot())
+            .compile_batch(&UdfRegistry::new().snapshot())
             .unwrap(),
     );
     let run = tokio::spawn({
@@ -997,10 +1002,10 @@ async fn invalid_external_input_does_not_touch_operator_lifecycle() {
                 TestOperator::transform("node", Action::Pass, Arc::clone(&probe))
                     .stateful()
                     .failing_restore(),
-            ),
+            ) as Box<dyn BatchOperator>,
         )
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
 
     let error = plan
@@ -1056,7 +1061,7 @@ async fn each_run_registers_only_compile_time_selected_native_udfs() {
             ),
         )
         .unwrap()
-        .compile(&registry.snapshot())
+        .compile_batch(&registry.snapshot())
         .unwrap();
 
     for _ in 0..2 {

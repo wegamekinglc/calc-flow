@@ -3,10 +3,10 @@ mod support;
 use std::collections::{BTreeMap, HashMap};
 
 use calc_flow::{
-    BatchMetadata, CalcFlowError, Checkpoint, DataFusionConfig, DataSourceSpec, Edge, NodeSpec,
-    OperatorSpec, PROJECT_FORMAT_VERSION, PipelineBuilder, PipelineSpec, PortEndpoint, ProjectSpec,
-    RunOptions, UdfRegistry, canonical_json, export_project_json, export_project_yaml,
-    import_project_json, import_project_yaml,
+    BatchMetadata, BatchOperator, CalcFlowError, Checkpoint, DataFusionConfig, DataSourceSpec,
+    Edge, NodeSpec, OperatorSpec, PROJECT_FORMAT_VERSION, PipelineBuilder, PipelineSpec,
+    PortEndpoint, ProjectSpec, RunOptions, UdfRegistry, canonical_json, export_project_json,
+    export_project_yaml, import_project_json, import_project_yaml,
 };
 use chrono::{TimeZone, Utc};
 use proptest::{
@@ -70,7 +70,7 @@ fn graph_builder(name: &str, nodes: usize) -> PipelineBuilder {
                     &node,
                     support::Action::Pass,
                     std::sync::Arc::default(),
-                )),
+                )) as Box<dyn BatchOperator>,
             )
             .unwrap()
     })
@@ -159,7 +159,7 @@ proptest! {
                 expected_edges.push((source, target));
             }
         }
-        let plan = builder.compile(&UdfRegistry::new().snapshot()).unwrap();
+        let plan = builder.compile_batch(&UdfRegistry::new().snapshot()).unwrap();
         let order = plan.topological_order();
         let positions: HashMap<_, _> = order
             .iter()
@@ -185,7 +185,7 @@ proptest! {
             .connect(edge(&format!("node_{}", node_count - 1), "node_0"))
             .unwrap();
 
-        let error = match builder.compile(&UdfRegistry::new().snapshot()) {
+        let error = match builder.compile_batch(&UdfRegistry::new().snapshot()) {
             Ok(_) => return Err(TestCaseError::fail("generated cycle compiled")),
             Err(error) => error,
         };

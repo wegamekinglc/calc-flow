@@ -106,7 +106,7 @@ async fn main() -> Result<()> {
                     Vec::new(),
                 )?),
             )?
-            .compile(&UdfRegistry::new().snapshot())?,
+            .compile_batch(&UdfRegistry::new().snapshot())?,
     );
     let directory = tempfile::tempdir().map_err(|source| calc_flow::CalcFlowError::Io {
         path: "temporary checkpoint directory".into(),

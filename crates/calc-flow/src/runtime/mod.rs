@@ -1,4 +1,3 @@
-mod envelope;
 mod micro_batch;
 mod streaming;
 
@@ -6,9 +5,8 @@ use std::collections::BTreeMap;
 
 use crate::{CalcFlowError, Result, RunResult, Sink};
 
-pub(crate) use envelope::{ControlMarker, RuntimeEnvelope, SharedControlMarker};
 pub use micro_batch::MicroBatchRunner;
-pub use streaming::StreamingRunner;
+pub use streaming::{StreamJobContext, StreamMessage, StreamMessageKind, StreamingRunner};
 
 /// Ordered sink lists keyed by external graph output name.
 #[derive(Default)]

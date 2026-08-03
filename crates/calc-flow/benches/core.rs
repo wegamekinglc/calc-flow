@@ -2,9 +2,10 @@ use std::{any::Any, collections::BTreeMap, hint::black_box, sync::Arc};
 
 use async_trait::async_trait;
 use calc_flow::{
-    Batch, BatchKind, BatchMetadata, CalcFlowError, DataFusionConfig, DataFusionRuntime,
-    ExecutionOptions, ExpressionOperator, ExternalPayload, JsonMap, Operator, OperatorContext,
-    PipelineBuilder, Port, Result, UdfReference, UdfRegistry, canonical_json,
+    Batch, BatchKind, BatchMetadata, BatchOperator, BatchOperatorContext, CalcFlowError,
+    DataFusionConfig, DataFusionRuntime, ExecutionOptions, ExpressionOperator, ExternalPayload,
+    JsonMap, OperatorMetadata, PipelineBuilder, Port, Result, UdfReference, UdfRegistry,
+    canonical_json,
 };
 use criterion::{Criterion, criterion_group, criterion_main};
 use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
@@ -14,12 +15,12 @@ fn expression_operator() -> ExpressionOperator {
     ExpressionOperator::new("calculate", "total = a + b", Vec::new(), None, Vec::new()).unwrap()
 }
 
-fn expression_plan() -> calc_flow::ExecutionPlan {
+fn expression_plan() -> calc_flow::BatchExecutionPlan {
     PipelineBuilder::new("benchmark")
         .unwrap()
         .add_node("calculate", Box::new(expression_operator()))
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap()
 }
 
@@ -44,7 +45,7 @@ fn compile_expression(c: &mut Criterion) {
                     .unwrap()
                     .add_node("calculate", Box::new(expression_operator()))
                     .unwrap()
-                    .compile(&UdfRegistry::new().snapshot())
+                    .compile_batch(&UdfRegistry::new().snapshot())
                     .unwrap(),
             )
         });
@@ -121,8 +122,7 @@ impl PassthroughOperator {
     }
 }
 
-#[async_trait]
-impl Operator for PassthroughOperator {
+impl OperatorMetadata for PassthroughOperator {
     fn name(&self) -> &'static str {
         "passthrough"
     }
@@ -138,11 +138,14 @@ impl Operator for PassthroughOperator {
     fn configuration(&self) -> JsonMap {
         BTreeMap::new()
     }
+}
 
+#[async_trait]
+impl BatchOperator for PassthroughOperator {
     async fn process(
         &mut self,
         inputs: &BTreeMap<String, Batch>,
-        _context: &OperatorContext<'_>,
+        _context: &BatchOperatorContext<'_>,
     ) -> Result<BTreeMap<String, Batch>> {
         let output = inputs
             .get("input")
@@ -154,12 +157,15 @@ impl Operator for PassthroughOperator {
     }
 }
 
-fn external_passthrough_plan() -> calc_flow::ExecutionPlan {
+fn external_passthrough_plan() -> calc_flow::BatchExecutionPlan {
     PipelineBuilder::new("external passthrough benchmark")
         .unwrap()
-        .add_node("passthrough", Box::new(PassthroughOperator::new()))
+        .add_node(
+            "passthrough",
+            Box::new(PassthroughOperator::new()) as Box<dyn BatchOperator>,
+        )
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap()
 }
 

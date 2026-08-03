@@ -111,13 +111,13 @@ impl PythonOperatorFactory {
     }
 }
 
-impl calc_flow::ExternalOperatorFactory for PythonOperatorFactory {
+impl calc_flow::BatchOperatorFactory for PythonOperatorFactory {
     fn create(
         &self,
         spec: &calc_flow::ExternalOperatorSpec,
         inputs: Vec<calc_flow::Port>,
         outputs: Vec<calc_flow::Port>,
-    ) -> calc_flow::Result<Box<dyn calc_flow::Operator>> {
+    ) -> calc_flow::Result<Box<dyn calc_flow::BatchOperator>> {
         validate_ports(&self.mode, &inputs, &outputs)?;
         let options_json = encode_provider_options(spec.options())?;
         validate_callback(&self.callback, &options_json).map_err(|message| {
@@ -224,8 +224,7 @@ impl PythonOperator {
     }
 }
 
-#[async_trait]
-impl calc_flow::Operator for PythonOperator {
+impl calc_flow::OperatorMetadata for PythonOperator {
     fn name(&self) -> &str {
         &self.name
     }
@@ -246,11 +245,14 @@ impl calc_flow::Operator for PythonOperator {
             ("version".into(), json!(self.version)),
         ])
     }
+}
 
+#[async_trait]
+impl calc_flow::BatchOperator for PythonOperator {
     async fn process(
         &mut self,
         inputs: &BTreeMap<String, calc_flow::Batch>,
-        context: &calc_flow::OperatorContext<'_>,
+        context: &calc_flow::BatchOperatorContext<'_>,
     ) -> calc_flow::Result<BTreeMap<String, calc_flow::Batch>> {
         if let PythonProviderMode::Mapping {
             inputs: input_contracts,
@@ -440,7 +442,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use calc_flow::ExternalOperatorFactory as _;
+    use calc_flow::BatchOperatorFactory as _;
     use pyo3::types::PyDict;
 
     #[derive(Debug)]
@@ -573,7 +575,7 @@ mod tests {
         .unwrap();
         let cancellation = calc_flow::CancellationToken::new();
         let run = calc_flow::RunContext::new(BTreeMap::new(), None, cancellation).unwrap();
-        let context = calc_flow::OperatorContext { run: &run };
+        let context = calc_flow::BatchOperatorContext { run: &run };
         let error = operator
             .process(&BTreeMap::from([("input".into(), input)]), &context)
             .await
@@ -668,7 +670,7 @@ mod tests {
         let outputs = operator
             .process(
                 &BTreeMap::from([("table".into(), table), ("weights".into(), weights.clone())]),
-                &calc_flow::OperatorContext { run: &run },
+                &calc_flow::BatchOperatorContext { run: &run },
             )
             .await
             .unwrap();
@@ -710,7 +712,7 @@ mod tests {
         let error = operator
             .process(
                 &BTreeMap::from([("input".into(), input)]),
-                &calc_flow::OperatorContext { run: &run },
+                &calc_flow::BatchOperatorContext { run: &run },
             )
             .await
             .unwrap_err();
@@ -749,7 +751,7 @@ mod tests {
         let error = operator
             .process(
                 &BTreeMap::from([("input".into(), input)]),
-                &calc_flow::OperatorContext { run: &run },
+                &calc_flow::BatchOperatorContext { run: &run },
             )
             .await
             .unwrap_err();
@@ -847,7 +849,7 @@ mod tests {
         let error = operator
             .process(
                 &BTreeMap::from([("input".into(), input)]),
-                &calc_flow::OperatorContext { run: &run },
+                &calc_flow::BatchOperatorContext { run: &run },
             )
             .await
             .unwrap_err();

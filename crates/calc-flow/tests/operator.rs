@@ -2,10 +2,10 @@ use std::{any::Any, collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use calc_flow::{
-    Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken, ExecutionOptions,
-    ExpressionOperator, ExternalOperatorFactory, ExternalOperatorSpec, ExternalPayload, JsonMap,
-    Operator, OperatorContext, PipelineBuilder, Port, ProviderRegistry, Result, RunContext,
-    SqlOperator, UdfKind, UdfReference, UdfRegistry,
+    Batch, BatchKind, BatchMetadata, BatchOperator, BatchOperatorContext, BatchOperatorFactory,
+    CalcFlowError, CancellationToken, ExecutionOptions, ExpressionOperator, ExternalOperatorSpec,
+    ExternalPayload, JsonMap, OperatorMetadata, PipelineBuilder, Port, ProviderRegistry, Result,
+    RunContext, SqlOperator, UdfKind, UdfReference, UdfRegistry,
 };
 use datafusion::arrow::{
     array::{Array, Int64Array},
@@ -292,7 +292,7 @@ async fn expression_operator_processes_assignment_with_real_datafusion() {
             ),
         )
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
 
     let result = plan
@@ -346,7 +346,7 @@ async fn expression_operator_processes_projection_and_filter() {
             ),
         )
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
 
     let output = plan
@@ -388,7 +388,7 @@ async fn sql_operator_processes_join_with_real_datafusion() {
             ),
         )
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
 
     let result = plan
@@ -441,12 +441,12 @@ fn built_in_configuration_and_udf_references_are_data_only() {
 
 #[test]
 fn stateless_operator_lifecycle_is_object_safe_and_rejects_state() {
-    let mut operator: Box<dyn Operator> = Box::new(PassthroughOperator {
+    let mut operator: Box<dyn BatchOperator> = Box::new(PassthroughOperator {
         name: "stateless".into(),
         marker: "lifecycle",
         inputs: Vec::new(),
         outputs: Vec::new(),
-    });
+    }) as Box<dyn BatchOperator>;
 
     assert_eq!(operator.snapshot().unwrap(), Value::Null);
     assert!(matches!(
@@ -462,19 +462,19 @@ struct PassthroughFactory {
     marker: &'static str,
 }
 
-impl ExternalOperatorFactory for PassthroughFactory {
+impl BatchOperatorFactory for PassthroughFactory {
     fn create(
         &self,
         spec: &ExternalOperatorSpec,
         inputs: Vec<Port>,
         outputs: Vec<Port>,
-    ) -> Result<Box<dyn Operator>> {
+    ) -> Result<Box<dyn BatchOperator>> {
         Ok(Box::new(PassthroughOperator {
             name: spec.name().into(),
             marker: self.marker,
             inputs,
             outputs,
-        }))
+        }) as Box<dyn BatchOperator>)
     }
 }
 
@@ -486,8 +486,7 @@ struct PassthroughOperator {
     outputs: Vec<Port>,
 }
 
-#[async_trait]
-impl Operator for PassthroughOperator {
+impl OperatorMetadata for PassthroughOperator {
     fn name(&self) -> &str {
         &self.name
     }
@@ -503,11 +502,14 @@ impl Operator for PassthroughOperator {
     fn configuration(&self) -> JsonMap {
         BTreeMap::from([("marker".into(), json!(self.marker))])
     }
+}
 
+#[async_trait]
+impl BatchOperator for PassthroughOperator {
     async fn process(
         &mut self,
         inputs: &BTreeMap<String, Batch>,
-        _context: &OperatorContext<'_>,
+        _context: &BatchOperatorContext<'_>,
     ) -> Result<BTreeMap<String, Batch>> {
         let output =
             inputs
@@ -600,10 +602,10 @@ fn external_operator_spec_and_registry_round_trip_portable_identities() {
     assert_eq!(serde_json::to_value(&spec).unwrap(), value);
 
     let registry = ProviderRegistry::default();
-    let factory: Arc<dyn ExternalOperatorFactory> =
+    let factory: Arc<dyn BatchOperatorFactory> =
         Arc::new(PassthroughFactory { marker: "portable" });
     registry
-        .register(
+        .register_batch(
             "python-3",
             "_array.expression",
             "1.2_rc-1",
@@ -611,7 +613,7 @@ fn external_operator_spec_and_registry_round_trip_portable_identities() {
         )
         .unwrap();
     let resolved = registry
-        .resolve("python-3", "_array.expression", "1.2_rc-1")
+        .resolve_batch("python-3", "_array.expression", "1.2_rc-1")
         .unwrap();
     assert!(Arc::ptr_eq(&resolved, &factory));
 }
@@ -619,24 +621,26 @@ fn external_operator_spec_and_registry_round_trip_portable_identities() {
 #[test]
 fn provider_registry_rejects_invalid_registration_without_replacement() {
     let registry = ProviderRegistry::default();
-    let original: Arc<dyn ExternalOperatorFactory> =
+    let original: Arc<dyn BatchOperatorFactory> =
         Arc::new(PassthroughFactory { marker: "original" });
     registry
-        .register("python", "passthrough", "1", Arc::clone(&original))
+        .register_batch("python", "passthrough", "1", Arc::clone(&original))
         .unwrap();
 
     for (field, index) in [("provider", 0), ("name", 1), ("version", 2)] {
         for invalid in INVALID_PORTABLE_IDENTIFIERS {
             let mut identity = ["python", "passthrough", "1"];
             identity[index] = invalid;
-            let rejected: Arc<dyn ExternalOperatorFactory> =
+            let rejected: Arc<dyn BatchOperatorFactory> =
                 Arc::new(PassthroughFactory { marker: "rejected" });
 
             assert!(matches!(
-                registry.register(identity[0], identity[1], identity[2], rejected),
+                registry.register_batch(identity[0], identity[1], identity[2], rejected),
                 Err(CalcFlowError::InvalidArgument { field: actual, .. }) if actual == field
             ));
-            let resolved = registry.resolve("python", "passthrough", "1").unwrap();
+            let resolved = registry
+                .resolve_batch("python", "passthrough", "1")
+                .unwrap();
             assert!(Arc::ptr_eq(&resolved, &original));
         }
     }
@@ -652,14 +656,14 @@ fn provider_registry_validates_resolution_before_lookup() {
             identity[index] = invalid;
 
             assert!(matches!(
-                registry.resolve(identity[0], identity[1], identity[2]),
+                registry.resolve_batch(identity[0], identity[1], identity[2]),
                 Err(CalcFlowError::InvalidArgument { field: actual, .. }) if actual == field
             ));
         }
     }
 
     assert!(matches!(
-        registry.resolve("python", "unavailable", "1"),
+        registry.resolve_batch("python", "unavailable", "1"),
         Err(CalcFlowError::Compile { message })
             if message.contains("python:unavailable@1")
     ));
@@ -668,22 +672,24 @@ fn provider_registry_validates_resolution_before_lookup() {
 #[tokio::test]
 async fn provider_registry_resolves_factory_without_replacing_duplicates() {
     let registry = ProviderRegistry::default();
-    let first: Arc<dyn ExternalOperatorFactory> = Arc::new(PassthroughFactory { marker: "first" });
-    let duplicate: Arc<dyn ExternalOperatorFactory> = Arc::new(PassthroughFactory {
+    let first: Arc<dyn BatchOperatorFactory> = Arc::new(PassthroughFactory { marker: "first" });
+    let duplicate: Arc<dyn BatchOperatorFactory> = Arc::new(PassthroughFactory {
         marker: "duplicate",
     });
     registry
-        .register("python", "passthrough", "1", Arc::clone(&first))
+        .register_batch("python", "passthrough", "1", Arc::clone(&first))
         .unwrap();
 
     assert!(matches!(
-        registry.register("python", "passthrough", "1", duplicate),
+        registry.register_batch("python", "passthrough", "1", duplicate),
         Err(CalcFlowError::InvalidArgument { field, .. }) if field == "provider"
     ));
-    let resolved = registry.resolve("python", "passthrough", "1").unwrap();
+    let resolved = registry
+        .resolve_batch("python", "passthrough", "1")
+        .unwrap();
     assert!(Arc::ptr_eq(&resolved, &first));
     assert!(matches!(
-        registry.resolve("numpy", "expression", "1"),
+        registry.resolve_batch("numpy", "expression", "1"),
         Err(CalcFlowError::Compile { message })
             if message.contains("numpy:expression@1")
     ));
@@ -702,7 +708,7 @@ async fn provider_registry_resolves_factory_without_replacing_duplicates() {
     let input = table(vec![("a", vec![1, 2])]);
     let inputs = BTreeMap::from([("input".into(), input)]);
     let run = RunContext::new(BTreeMap::new(), None, CancellationToken::new()).unwrap();
-    let context = OperatorContext { run: &run };
+    let context = BatchOperatorContext { run: &run };
     let outputs = operator.process(&inputs, &context).await.unwrap();
     assert_eq!(values(&outputs["output"], "a"), [1, 2]);
 }
@@ -710,10 +716,9 @@ async fn provider_registry_resolves_factory_without_replacing_duplicates() {
 #[test]
 fn provider_registry_is_shareable_across_threads() {
     let registry = Arc::new(ProviderRegistry::default());
-    let factory: Arc<dyn ExternalOperatorFactory> =
-        Arc::new(PassthroughFactory { marker: "shared" });
+    let factory: Arc<dyn BatchOperatorFactory> = Arc::new(PassthroughFactory { marker: "shared" });
     registry
-        .register("python", "passthrough", "1", Arc::clone(&factory))
+        .register_batch("python", "passthrough", "1", Arc::clone(&factory))
         .unwrap();
 
     let mut threads = Vec::new();
@@ -721,7 +726,9 @@ fn provider_registry_is_shareable_across_threads() {
         let registry = Arc::clone(&registry);
         let expected = Arc::clone(&factory);
         threads.push(std::thread::spawn(move || {
-            let resolved = registry.resolve("python", "passthrough", "1").unwrap();
+            let resolved = registry
+                .resolve_batch("python", "passthrough", "1")
+                .unwrap();
             assert!(Arc::ptr_eq(&resolved, &expected));
         }));
     }

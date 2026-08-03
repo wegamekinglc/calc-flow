@@ -14,9 +14,10 @@ use std::{
 
 use async_trait::async_trait;
 use calc_flow::{
-    Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken, Checkpoint, CheckpointStore,
-    Edge, ExecutionPlan, ExpressionOperator, JsonMap, Operator, OperatorContext, PipelineBuilder,
-    Port, PortEndpoint, Result, RunContext, Sink, Source, SourceItem, SqlOperator, UdfRegistry,
+    Batch, BatchExecutionPlan, BatchKind, BatchMetadata, BatchOperator, BatchOperatorContext,
+    CalcFlowError, CancellationToken, Checkpoint, CheckpointStore, Edge, ExpressionOperator,
+    JsonMap, OperatorMetadata, PipelineBuilder, Port, PortEndpoint, Result, RunContext, Sink,
+    Source, SourceItem, SqlOperator, UdfRegistry,
 };
 use datafusion::arrow::{
     array::{Int64Array, StringArray},
@@ -163,8 +164,7 @@ impl TestOperator {
     }
 }
 
-#[async_trait]
-impl Operator for TestOperator {
+impl OperatorMetadata for TestOperator {
     fn name(&self) -> &str {
         &self.name
     }
@@ -180,11 +180,14 @@ impl Operator for TestOperator {
     fn configuration(&self) -> JsonMap {
         BTreeMap::new()
     }
+}
 
+#[async_trait]
+impl BatchOperator for TestOperator {
     async fn process(
         &mut self,
         inputs: &BTreeMap<String, Batch>,
-        _context: &OperatorContext<'_>,
+        _context: &BatchOperatorContext<'_>,
     ) -> Result<BTreeMap<String, Batch>> {
         let _guard = self.probe.enter(&self.name);
         if self.mutate_state {
@@ -331,7 +334,7 @@ pub fn read_v1_fixture(name: &str) -> Vec<RecordBatch> {
     }
 }
 
-pub fn v1_expression_plan(expression: &str) -> ExecutionPlan {
+pub fn v1_expression_plan(expression: &str) -> BatchExecutionPlan {
     PipelineBuilder::new("v1-expression")
         .unwrap()
         .add_node(
@@ -342,11 +345,11 @@ pub fn v1_expression_plan(expression: &str) -> ExecutionPlan {
             ),
         )
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap()
 }
 
-pub fn v1_sql_plan() -> ExecutionPlan {
+pub fn v1_sql_plan() -> BatchExecutionPlan {
     PipelineBuilder::new("v1-sql")
         .unwrap()
         .add_node(
@@ -362,11 +365,11 @@ pub fn v1_sql_plan() -> ExecutionPlan {
             ),
         )
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap()
 }
 
-pub fn v1_identity_plan(name: &str) -> ExecutionPlan {
+pub fn v1_identity_plan(name: &str) -> BatchExecutionPlan {
     PipelineBuilder::new(name)
         .unwrap()
         .add_node(
@@ -377,19 +380,22 @@ pub fn v1_identity_plan(name: &str) -> ExecutionPlan {
                 vec![untyped_table_port("output", true)],
                 Action::Pass,
                 Arc::new(Probe::default()),
-            )),
+            )) as Box<dyn BatchOperator>,
         )
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap()
 }
 
-pub fn v1_rollback_plan() -> ExecutionPlan {
+pub fn v1_rollback_plan() -> BatchExecutionPlan {
     PipelineBuilder::new("v1-state-rollback")
         .unwrap()
-        .add_node("state", Box::new(EmptyStateFailingOperator::default()))
+        .add_node(
+            "state",
+            Box::new(EmptyStateFailingOperator::default()) as Box<dyn BatchOperator>,
+        )
         .unwrap()
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap()
 }
 
@@ -409,8 +415,7 @@ impl Default for EmptyStateFailingOperator {
     }
 }
 
-#[async_trait]
-impl Operator for EmptyStateFailingOperator {
+impl OperatorMetadata for EmptyStateFailingOperator {
     fn name(&self) -> &'static str {
         "fail_after_state"
     }
@@ -426,11 +431,14 @@ impl Operator for EmptyStateFailingOperator {
     fn configuration(&self) -> JsonMap {
         JsonMap::new()
     }
+}
 
+#[async_trait]
+impl BatchOperator for EmptyStateFailingOperator {
     async fn process(
         &mut self,
         _inputs: &BTreeMap<String, Batch>,
-        _context: &OperatorContext<'_>,
+        _context: &BatchOperatorContext<'_>,
     ) -> Result<BTreeMap<String, Batch>> {
         self.state.insert("mutated".into(), json!(true));
         Err(CalcFlowError::Operator {
@@ -461,16 +469,17 @@ impl Operator for EmptyStateFailingOperator {
     }
 }
 
-pub fn stateful_plan(name: &str, probe: Arc<Probe>) -> Arc<ExecutionPlan> {
+pub fn stateful_plan(name: &str, probe: Arc<Probe>) -> Arc<BatchExecutionPlan> {
     Arc::new(
         PipelineBuilder::new(name)
             .unwrap()
             .add_node(
                 "node",
-                Box::new(TestOperator::transform("node", Action::Pass, probe).stateful()),
+                Box::new(TestOperator::transform("node", Action::Pass, probe).stateful())
+                    as Box<dyn BatchOperator>,
             )
             .unwrap()
-            .compile(&UdfRegistry::new().snapshot())
+            .compile_batch(&UdfRegistry::new().snapshot())
             .unwrap(),
     )
 }
@@ -479,13 +488,14 @@ pub fn partially_failing_reset_plan(
     name: &str,
     first_probe: Arc<Probe>,
     second_probe: Arc<Probe>,
-) -> Arc<ExecutionPlan> {
+) -> Arc<BatchExecutionPlan> {
     Arc::new(
         PipelineBuilder::new(name)
             .unwrap()
             .add_node(
                 "first",
-                Box::new(TestOperator::transform("first", Action::Pass, first_probe).stateful()),
+                Box::new(TestOperator::transform("first", Action::Pass, first_probe).stateful())
+                    as Box<dyn BatchOperator>,
             )
             .unwrap()
             .add_node(
@@ -494,7 +504,7 @@ pub fn partially_failing_reset_plan(
                     TestOperator::transform("second", Action::Pass, second_probe)
                         .stateful()
                         .failing_reset(),
-                ),
+                ) as Box<dyn BatchOperator>,
             )
             .unwrap()
             .connect(Edge::new(
@@ -502,7 +512,7 @@ pub fn partially_failing_reset_plan(
                 PortEndpoint::new("second", "input").unwrap(),
             ))
             .unwrap()
-            .compile(&UdfRegistry::new().snapshot())
+            .compile_batch(&UdfRegistry::new().snapshot())
             .unwrap(),
     )
 }
