@@ -3,9 +3,11 @@ use std::{any::Any, collections::BTreeMap, sync::Arc};
 use async_trait::async_trait;
 use calc_flow::{
     Batch, BatchKind, BatchMetadata, BatchOperator, BatchOperatorContext, BatchOperatorFactory,
-    CalcFlowError, CancellationToken, ExecutionOptions, ExpressionOperator, ExternalOperatorSpec,
-    ExternalPayload, JsonMap, OperatorMetadata, PipelineBuilder, Port, ProviderRegistry, Result,
-    RunContext, SqlOperator, UdfKind, UdfReference, UdfRegistry,
+    CalcFlowError, CancellationToken, EdgeCollector, EventTime, ExecutionOptions,
+    ExpressionOperator, ExternalOperatorSpec, ExternalPayload, JsonMap, OperatorMetadata,
+    PipelineBuilder, Port, ProviderRegistry, Result, RunContext, SqlOperator, StreamCollector,
+    StreamJobContext, StreamOperator, StreamOperatorContext, StreamOperatorFactory, UdfKind,
+    UdfReference, UdfRegistry,
 };
 use datafusion::arrow::{
     array::{Array, Int64Array},
@@ -735,4 +737,267 @@ fn provider_registry_is_shareable_across_threads() {
     for thread in threads {
         thread.join().unwrap();
     }
+}
+
+struct StreamPassthroughFactory {
+    marker: &'static str,
+}
+
+impl StreamOperatorFactory for StreamPassthroughFactory {
+    fn create(
+        &self,
+        spec: &ExternalOperatorSpec,
+        inputs: Vec<Port>,
+        outputs: Vec<Port>,
+    ) -> Result<Box<dyn StreamOperator>> {
+        Ok(Box::new(StreamPassthroughOperator {
+            name: spec.name().into(),
+            marker: self.marker,
+            inputs,
+            outputs,
+        }) as Box<dyn StreamOperator>)
+    }
+}
+
+struct StreamPassthroughOperator {
+    name: String,
+    marker: &'static str,
+    inputs: Vec<Port>,
+    outputs: Vec<Port>,
+}
+
+impl OperatorMetadata for StreamPassthroughOperator {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn input_ports(&self) -> &[Port] {
+        &self.inputs
+    }
+
+    fn output_ports(&self) -> &[Port] {
+        &self.outputs
+    }
+
+    fn configuration(&self) -> JsonMap {
+        BTreeMap::from([("marker".into(), json!(self.marker))])
+    }
+}
+
+#[async_trait]
+impl StreamOperator for StreamPassthroughOperator {
+    async fn process_data(
+        &mut self,
+        ingress: &str,
+        batch: Batch,
+        _context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        assert_eq!(ingress, "input");
+        output.emit("output", batch).await
+    }
+
+    async fn on_watermark(
+        &mut self,
+        _watermark: EventTime,
+        _context: &StreamOperatorContext<'_>,
+        _output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn on_end(
+        &mut self,
+        _context: &StreamOperatorContext<'_>,
+        _output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn provider_registry_round_trips_stream_factories() {
+    let registry = ProviderRegistry::default();
+    let factory: Arc<dyn StreamOperatorFactory> =
+        Arc::new(StreamPassthroughFactory { marker: "portable" });
+    registry
+        .register_stream(
+            "python-3",
+            "_array.expression",
+            "1.2_rc-1",
+            Arc::clone(&factory),
+        )
+        .unwrap();
+    let resolved = registry
+        .resolve_stream("python-3", "_array.expression", "1.2_rc-1")
+        .unwrap();
+    assert!(Arc::ptr_eq(&resolved, &factory));
+}
+
+#[test]
+fn provider_registry_rejects_invalid_stream_registration_without_replacement() {
+    let registry = ProviderRegistry::default();
+    let original: Arc<dyn StreamOperatorFactory> =
+        Arc::new(StreamPassthroughFactory { marker: "original" });
+    registry
+        .register_stream("python", "passthrough", "1", Arc::clone(&original))
+        .unwrap();
+
+    for (field, index) in [("provider", 0), ("name", 1), ("version", 2)] {
+        for invalid in INVALID_PORTABLE_IDENTIFIERS {
+            let mut identity = ["python", "passthrough", "1"];
+            identity[index] = invalid;
+            let rejected: Arc<dyn StreamOperatorFactory> =
+                Arc::new(StreamPassthroughFactory { marker: "rejected" });
+
+            assert!(matches!(
+                registry.register_stream(identity[0], identity[1], identity[2], rejected),
+                Err(CalcFlowError::InvalidArgument { field: actual, .. }) if actual == field
+            ));
+            let resolved = registry
+                .resolve_stream("python", "passthrough", "1")
+                .unwrap();
+            assert!(Arc::ptr_eq(&resolved, &original));
+        }
+    }
+}
+
+#[test]
+fn provider_registry_validates_stream_resolution_before_lookup() {
+    let registry = ProviderRegistry::default();
+
+    for (field, index) in [("provider", 0), ("name", 1), ("version", 2)] {
+        for invalid in INVALID_PORTABLE_IDENTIFIERS {
+            let mut identity = ["python", "passthrough", "1"];
+            identity[index] = invalid;
+
+            assert!(matches!(
+                registry.resolve_stream(identity[0], identity[1], identity[2]),
+                Err(CalcFlowError::InvalidArgument { field: actual, .. }) if actual == field
+            ));
+        }
+    }
+
+    assert!(matches!(
+        registry.resolve_stream("python", "unavailable", "1"),
+        Err(CalcFlowError::Compile { message })
+            if message.contains("python:unavailable@1")
+    ));
+}
+
+#[test]
+fn provider_registry_resolves_stream_factory_without_replacing_duplicates() {
+    let registry = ProviderRegistry::default();
+    let first: Arc<dyn StreamOperatorFactory> =
+        Arc::new(StreamPassthroughFactory { marker: "first" });
+    registry
+        .register_stream("python", "passthrough", "1", Arc::clone(&first))
+        .unwrap();
+    let duplicate: Arc<dyn StreamOperatorFactory> = Arc::new(StreamPassthroughFactory {
+        marker: "duplicate",
+    });
+
+    assert!(matches!(
+        registry.register_stream("python", "passthrough", "1", duplicate),
+        Err(CalcFlowError::InvalidArgument { field, .. }) if field == "provider"
+    ));
+    let resolved = registry
+        .resolve_stream("python", "passthrough", "1")
+        .unwrap();
+    assert!(Arc::ptr_eq(&resolved, &first));
+
+    let spec = ExternalOperatorSpec::new("python", "passthrough", "1", BTreeMap::new()).unwrap();
+    let operator = resolved
+        .create(
+            &spec,
+            vec![Port::new("input", BatchKind::Table, true, None).unwrap()],
+            vec![Port::new("output", BatchKind::Table, true, None).unwrap()],
+        )
+        .unwrap();
+    assert_eq!(operator.configuration()["marker"], "first");
+}
+
+#[tokio::test]
+async fn expression_operator_direct_paths_cover_process_clone_debug_and_stream_noops() {
+    let operator =
+        ExpressionOperator::new("calc", "total = a + b", Vec::new(), None, Vec::new()).unwrap();
+    let mut standalone = operator.clone();
+    let run = RunContext::new(BTreeMap::new(), None, CancellationToken::new()).unwrap();
+    let context = BatchOperatorContext { run: &run };
+    let inputs = BTreeMap::from([(
+        "input".into(),
+        table(vec![("a", vec![1, 2]), ("b", vec![10, 20])]),
+    )]);
+    let outputs = standalone.process(&inputs, &context).await.unwrap();
+    assert_eq!(values(&outputs["output"], "total"), [11, 22]);
+
+    let debug = format!("{operator:?}");
+    assert!(debug.contains("calc"));
+    assert!(debug.contains("total = a + b"));
+
+    let job = StreamJobContext::new(
+        1,
+        "fingerprint",
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    )
+    .unwrap();
+    let stream_context = StreamOperatorContext::new(&job, "calc", None);
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    let mut stream_operator = operator;
+    stream_operator
+        .on_watermark(EventTime::from_micros(7), &stream_context, &mut collector)
+        .await
+        .unwrap();
+    stream_operator
+        .on_end(&stream_context, &mut collector)
+        .await
+        .unwrap();
+    assert!(collector.drain("output").is_empty());
+}
+
+#[tokio::test]
+async fn sql_operator_direct_paths_cover_process_clone_debug_and_stream_noops() {
+    let operator = SqlOperator::new(
+        "sql",
+        "SELECT a + b AS total FROM input",
+        vec!["input".into()],
+        Vec::new(),
+    )
+    .unwrap();
+    let mut standalone = operator.clone();
+    let run = RunContext::new(BTreeMap::new(), None, CancellationToken::new()).unwrap();
+    let context = BatchOperatorContext { run: &run };
+    let inputs = BTreeMap::from([(
+        "input".into(),
+        table(vec![("a", vec![1, 2]), ("b", vec![10, 20])]),
+    )]);
+    let outputs = standalone.process(&inputs, &context).await.unwrap();
+    assert_eq!(values(&outputs["output"], "total"), [11, 22]);
+
+    let debug = format!("{operator:?}");
+    assert!(debug.contains("sql"));
+    assert!(debug.contains("SELECT a + b AS total FROM input"));
+
+    let job = StreamJobContext::new(
+        1,
+        "fingerprint",
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    )
+    .unwrap();
+    let stream_context = StreamOperatorContext::new(&job, "sql", None);
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    let mut stream_operator = operator;
+    stream_operator
+        .on_watermark(EventTime::from_micros(7), &stream_context, &mut collector)
+        .await
+        .unwrap();
+    stream_operator
+        .on_end(&stream_context, &mut collector)
+        .await
+        .unwrap();
+    assert!(collector.drain("output").is_empty());
 }

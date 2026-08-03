@@ -17,11 +17,13 @@ use calc_flow::{
     StreamJobContext, StreamMessage, StreamMessageKind, StreamOperator, StreamOperatorContext,
     UnionOperator,
 };
+use chrono::DateTime;
 use datafusion::arrow::{
     array::{Array, Int64Array},
     datatypes::{DataType, Field},
     record_batch::RecordBatch,
 };
+use serde_json::json;
 
 fn table_batch(values: &[i64]) -> Batch {
     table_batch_named("value", values)
@@ -290,6 +292,85 @@ async fn collector_rejects_an_unknown_output_port_before_enqueue() {
     assert!(error.to_string().contains("missing"));
     assert!(collector.drain("output").is_empty());
     assert!(collector.drain("missing").is_empty());
+}
+
+#[tokio::test]
+async fn union_rejects_an_unknown_ingress_and_ignores_control_callbacks() {
+    let mut operator = UnionOperator::new(
+        "merge",
+        vec![
+            Port::new("left", BatchKind::Table, true, None).unwrap(),
+            Port::new("right", BatchKind::Table, true, None).unwrap(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(operator.name(), "merge");
+    let debug = format!("{operator:?}");
+    assert!(debug.contains("merge"));
+
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "merge", None);
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+
+    let error = operator
+        .process_data("middle", table_batch(&[1]), &context, &mut collector)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, CalcFlowError::Operator { .. }));
+    assert!(error.to_string().contains("middle"));
+    assert!(collector.drain("output").is_empty());
+
+    operator
+        .on_watermark(EventTime::from_micros(3), &context, &mut collector)
+        .await
+        .unwrap();
+    operator.on_end(&context, &mut collector).await.unwrap();
+    assert!(collector.drain("output").is_empty());
+}
+
+#[test]
+fn stream_job_context_exposes_accessors_and_reports_token_cancellation() {
+    let cancellation = CancellationToken::new();
+    // 2100-01-01T00:00:00Z: a fixed future deadline, no wall-clock dependence.
+    let deadline = DateTime::from_timestamp_micros(4_102_444_800_000_000).unwrap();
+    let job = StreamJobContext::new(
+        42,
+        "fingerprint",
+        JsonMap::from([("key".into(), json!("value"))]),
+        Some(deadline),
+        cancellation.clone(),
+    )
+    .unwrap();
+
+    assert_eq!(job.job_id(), 42);
+    assert_eq!(job.fingerprint(), "fingerprint");
+    assert_eq!(job.settings()["key"], json!("value"));
+    assert_eq!(job.deadline(), Some(&deadline));
+    assert!(!job.cancellation().is_cancelled());
+    assert!(job.check_cancelled().is_ok());
+
+    cancellation.cancel();
+    assert!(matches!(
+        job.check_cancelled(),
+        Err(CalcFlowError::Cancelled { .. })
+    ));
+}
+
+#[test]
+fn stream_job_context_reports_an_elapsed_deadline_as_cancelled() {
+    let job = StreamJobContext::new(
+        1,
+        "fingerprint",
+        JsonMap::new(),
+        Some(DateTime::from_timestamp_micros(0).unwrap()),
+        CancellationToken::new(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        job.check_cancelled(),
+        Err(CalcFlowError::Cancelled { .. })
+    ));
 }
 
 #[tokio::test]

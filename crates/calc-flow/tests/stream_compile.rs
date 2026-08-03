@@ -646,3 +646,55 @@ fn stream_plan_compiles_stable_edge_ids_and_binding_slots() {
     assert_eq!(plan.name(), "slots");
     assert!(plan.requires_datafusion());
 }
+
+#[test]
+fn compile_stream_accepts_a_custom_stream_operator_and_exposes_plan_accessors() {
+    let plan = PipelineBuilder::new("custom")
+        .unwrap()
+        .add_node("custom", StreamOnlyOperator::boxed())
+        .unwrap()
+        .compile_stream(&udfs(), &StreamRequirements::default())
+        .unwrap();
+
+    assert_eq!(plan.topological_order(), ["custom"]);
+    assert_eq!(plan.source_binding_ids(), ["input"]);
+    assert_eq!(plan.sink_binding_ids(), ["output"]);
+    assert!(plan.external_inputs().contains_key("input"));
+    assert!(plan.external_outputs().contains_key("output"));
+    assert!(!plan.requires_datafusion());
+    assert!(plan.datafusion_config().is_none());
+
+    let debug = format!("{plan:?}");
+    assert!(debug.contains("custom"));
+    assert!(debug.contains(plan.fingerprint()));
+}
+
+#[test]
+fn stream_plan_accessors_report_table_resources_when_datafusion_is_required() {
+    let plan = unary_chain()
+        .compile_stream(&udfs(), &StreamRequirements::default())
+        .unwrap();
+
+    assert!(plan.requires_datafusion());
+    assert!(plan.datafusion_config().is_some());
+    assert!(plan.external_inputs().contains_key("input"));
+    assert!(plan.external_outputs().contains_key("output"));
+}
+
+#[test]
+fn runtime_config_rejects_durations_exceeding_the_microsecond_range() {
+    let config = StreamRuntimeConfig {
+        checkpoint_interval: Duration::from_secs(u64::MAX),
+        ..Default::default()
+    };
+
+    let error = config.validate().unwrap_err();
+    assert!(error.to_string().contains("checkpoint_interval"));
+    assert!(error.to_string().contains("microsecond range"));
+
+    let plan = unary_chain()
+        .compile_stream(&udfs(), &StreamRequirements::default())
+        .unwrap();
+    let error = plan.runtime_config_hash(&config).unwrap_err();
+    assert!(error.to_string().contains("checkpoint_interval"));
+}
