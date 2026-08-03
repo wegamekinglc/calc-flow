@@ -106,7 +106,7 @@ Ordinary feature work must not rewrite either team definition.
 - Prefer a functional style: immutable values, pure transformations, explicit
   error variants, and deterministic `BTreeMap` ordering where output is
   serialized or observed. Confine necessary mutation to owned stateful
-  boundaries and never mutate caller-owned inputs; defensively copy when an
+  boundaries. Treat caller-owned inputs as read-only; defensively copy when an
   underlying library requires mutation.
 - Return `calc_flow::Result<T>` from fallible public core operations. Preserve
   the failing field/path and source error where applicable.
