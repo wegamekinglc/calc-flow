@@ -300,8 +300,7 @@ mod tests {
             JsonMap::new(),
             None,
             CancellationToken::new(),
-        )
-        .unwrap();
+        );
         let context = StreamOperatorContext::new(&job, "window", None);
         context
             .record_late_rows(4, Some(Duration::from_micros(11)))

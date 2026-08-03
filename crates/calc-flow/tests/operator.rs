@@ -941,8 +941,7 @@ async fn expression_operator_direct_paths_cover_process_clone_debug_and_stream_n
         JsonMap::new(),
         None,
         CancellationToken::new(),
-    )
-    .unwrap();
+    );
     let stream_context = StreamOperatorContext::new(&job, "calc", None);
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
     let mut stream_operator = operator;
@@ -986,8 +985,7 @@ async fn sql_operator_direct_paths_cover_process_clone_debug_and_stream_noops() 
         JsonMap::new(),
         None,
         CancellationToken::new(),
-    )
-    .unwrap();
+    );
     let stream_context = StreamOperatorContext::new(&job, "sql", None);
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
     let mut stream_operator = operator;

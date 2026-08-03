@@ -75,7 +75,7 @@ impl StreamMessage {
 
     /// Returns the message kind for inspection and routing.
     pub const fn kind(&self) -> StreamMessageKind {
-        match self.0 {
+        match &self.0 {
             MessageKind::Data(_) => StreamMessageKind::Data,
             MessageKind::Watermark(_) => StreamMessageKind::Watermark,
             MessageKind::Barrier(_) => StreamMessageKind::Barrier,
@@ -94,28 +94,28 @@ impl StreamMessage {
 
     /// Returns the watermark value, when this is a watermark message.
     pub const fn as_watermark(&self) -> Option<EventTime> {
-        match self.0 {
-            MessageKind::Watermark(at) => Some(at),
+        match &self.0 {
+            MessageKind::Watermark(at) => Some(*at),
             _ => None,
         }
     }
 
     /// Returns the barrier epoch, when this is a barrier message.
     pub const fn as_barrier(&self) -> Option<Epoch> {
-        match self.0 {
-            MessageKind::Barrier(epoch) => Some(epoch),
+        match &self.0 {
+            MessageKind::Barrier(epoch) => Some(*epoch),
             _ => None,
         }
     }
 
     /// Returns whether this message marks its ingress idle (S1.4).
     pub const fn is_idle(&self) -> bool {
-        matches!(self.0, MessageKind::Idle)
+        matches!(&self.0, MessageKind::Idle)
     }
 
     /// Returns whether this message terminates its ingress (S1.6).
     pub const fn is_end_of_input(&self) -> bool {
-        matches!(self.0, MessageKind::EndOfInput)
+        matches!(&self.0, MessageKind::EndOfInput)
     }
 }
 

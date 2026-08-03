@@ -57,7 +57,6 @@ fn job() -> StreamJobContext {
         None,
         CancellationToken::new(),
     )
-    .unwrap()
 }
 
 /// Records the ingress names and payload identity of every data batch.
@@ -339,8 +338,7 @@ fn stream_job_context_exposes_accessors_and_reports_token_cancellation() {
         JsonMap::from([("key".into(), json!("value"))]),
         Some(deadline),
         cancellation.clone(),
-    )
-    .unwrap();
+    );
 
     assert_eq!(job.job_id(), 42);
     assert_eq!(job.fingerprint(), "fingerprint");
@@ -364,8 +362,7 @@ fn stream_job_context_reports_an_elapsed_deadline_as_cancelled() {
         JsonMap::new(),
         Some(DateTime::from_timestamp_micros(0).unwrap()),
         CancellationToken::new(),
-    )
-    .unwrap();
+    );
 
     assert!(matches!(
         job.check_cancelled(),

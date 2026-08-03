@@ -18,32 +18,22 @@ pub struct StreamJobContext {
 }
 
 impl StreamJobContext {
-    /// Creates a job context.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CalcFlowError::InvalidArgument`] when the deadline does not
-    /// use UTC.
+    /// Creates a job context. `deadline` is `DateTime<Utc>`, so UTC is
+    /// guaranteed by the type and needs no runtime validation.
     pub fn new(
         job_id: u64,
         fingerprint: impl Into<String>,
         settings: JsonMap,
         deadline: Option<DateTime<Utc>>,
         cancellation: CancellationToken,
-    ) -> Result<Self> {
-        if deadline.is_some_and(|value| value.timezone() != Utc) {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "deadline".into(),
-                message: "must use UTC".into(),
-            });
-        }
-        Ok(Self {
+    ) -> Self {
+        Self {
             job_id,
             fingerprint: fingerprint.into(),
             settings,
             deadline,
             cancellation,
-        })
+        }
     }
 
     pub const fn job_id(&self) -> u64 {
