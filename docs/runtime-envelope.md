@@ -198,7 +198,8 @@ compile time, before any source opens:
 
 Stream graphs compose unary expression nodes, single-input SQL nodes,
 explicit stream providers, and `UnionOperator`, whose two or more input
-ports share one kind and one exact schema, or are all schema-less.
+ports share one kind, one required flag, and one exact schema, or are all
+schema-less.
 
 The compiled plan records the deterministic topology, stable edge IDs, the
 source and sink binding slots (external input and output names in

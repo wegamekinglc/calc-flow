@@ -218,6 +218,20 @@ fn epoch_serializes_the_exact_value() {
 }
 
 #[test]
+fn epoch_deserialization_rejects_the_zero_sentinel() {
+    let error = serde_json::from_str::<Epoch>("0").unwrap_err();
+    assert!(error.to_string().contains("epoch"));
+}
+
+#[test]
+fn epoch_deserialization_accepts_one_and_the_maximum() {
+    let initial: Epoch = serde_json::from_str("1").unwrap();
+    assert_eq!(initial, Epoch::INITIAL);
+    let maximum: Epoch = serde_json::from_str(&u64::MAX.to_string()).unwrap();
+    assert_eq!(maximum, Epoch::new(u64::MAX).unwrap());
+}
+
+#[test]
 fn stream_message_data_clone_shares_the_immutable_payload() {
     let batch = table_batch(&[1, 2, 3]);
     let column = Arc::clone(batch.table_payload().unwrap().batches()[0].column(0));

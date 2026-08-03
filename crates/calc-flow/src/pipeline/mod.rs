@@ -112,6 +112,10 @@ impl Edge {
 
     /// Returns the stable edge identifier assigned at compile time (plan
     /// M1.1): `source.node.port->target.node.port`.
+    ///
+    /// Node IDs may contain `.` or `->`, so the formatted ID is not
+    /// self-delimiting; graph compilation rejects any pair of edges whose
+    /// formatted IDs collide (see `compile::validate_edges`).
     pub(crate) fn stable_id(&self) -> String {
         format!(
             "{}.{}->{}.{}",

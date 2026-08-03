@@ -191,6 +191,7 @@ pub(crate) fn validate_edges(
     edges: &[Edge],
 ) -> Result<()> {
     let mut unique_edges = BTreeSet::new();
+    let mut stable_ids = BTreeMap::new();
     let mut writers = BTreeMap::new();
     for edge in edges {
         if !unique_edges.insert(edge) {
@@ -198,6 +199,25 @@ pub(crate) fn validate_edges(
                 message: format!(
                     "duplicate edge {}.{} -> {}.{}",
                     edge.source.node_id, edge.source.port, edge.target.node_id, edge.target.port
+                ),
+            });
+        }
+        // Node IDs are only validated non-empty, so `.` or `->` inside them can
+        // make two distinct edges format to the same stable ID; collecting
+        // those edges into an ID-keyed map would silently drop one.
+        let stable_id = edge.stable_id();
+        if let Some(previous) = stable_ids.insert(stable_id.clone(), edge) {
+            return Err(CalcFlowError::Compile {
+                message: format!(
+                    "edges {}.{} -> {}.{} and {}.{} -> {}.{} collide on stable edge ID {stable_id:?}",
+                    previous.source.node_id,
+                    previous.source.port,
+                    previous.target.node_id,
+                    previous.target.port,
+                    edge.source.node_id,
+                    edge.source.port,
+                    edge.target.node_id,
+                    edge.target.port,
                 ),
             });
         }

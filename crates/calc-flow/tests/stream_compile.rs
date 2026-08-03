@@ -482,6 +482,155 @@ fn compile_stream_rejects_delivery_requests_for_unknown_outputs() {
     assert!(error.to_string().contains("missing"));
 }
 
+/// A configurable-port operator for crafting node IDs whose formatted stable
+/// edge IDs collide. It implements both execution traits so the batch and
+/// stream compilers validate the same graph shape.
+struct RenamableOperator {
+    name: String,
+    input_ports: Vec<Port>,
+    output_ports: Vec<Port>,
+}
+
+impl RenamableOperator {
+    fn stream(name: &str, inputs: &[&str], outputs: &[&str]) -> Box<dyn StreamOperator> {
+        Box::new(Self::new(name, inputs, outputs))
+    }
+
+    fn batch(name: &str, inputs: &[&str], outputs: &[&str]) -> Box<dyn BatchOperator> {
+        Box::new(Self::new(name, inputs, outputs))
+    }
+
+    fn new(name: &str, inputs: &[&str], outputs: &[&str]) -> Self {
+        let ports = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| Port::new(name, BatchKind::Table, true, None).unwrap())
+                .collect()
+        };
+        Self {
+            name: name.into(),
+            input_ports: ports(inputs),
+            output_ports: ports(outputs),
+        }
+    }
+}
+
+impl OperatorMetadata for RenamableOperator {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn input_ports(&self) -> &[Port] {
+        &self.input_ports
+    }
+
+    fn output_ports(&self) -> &[Port] {
+        &self.output_ports
+    }
+
+    fn configuration(&self) -> JsonMap {
+        BTreeMap::new()
+    }
+}
+
+#[async_trait]
+impl BatchOperator for RenamableOperator {
+    async fn process(
+        &mut self,
+        _inputs: &BTreeMap<String, Batch>,
+        _context: &BatchOperatorContext<'_>,
+    ) -> Result<BTreeMap<String, Batch>> {
+        Ok(BTreeMap::new())
+    }
+}
+
+#[async_trait]
+impl StreamOperator for RenamableOperator {
+    async fn process_data(
+        &mut self,
+        _ingress: &str,
+        batch: Batch,
+        _context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        let port = self.output_ports[0].name().to_owned();
+        output.emit(&port, batch).await
+    }
+
+    async fn on_watermark(
+        &mut self,
+        _watermark: EventTime,
+        _context: &StreamOperatorContext<'_>,
+        _output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn on_end(
+        &mut self,
+        _context: &StreamOperatorContext<'_>,
+        _output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// The crafted graph: `a.b -> c.out->d.in` and `a.b->c.out -> d.in` both
+/// format to the stable edge ID `a.b->c.out->d.in`.
+fn colliding_stable_id_graph<O>(node: impl Fn(&str, &[&str], &[&str]) -> O) -> PipelineBuilder
+where
+    O: Into<calc_flow::NodeOperator>,
+{
+    PipelineBuilder::new("colliding")
+        .unwrap()
+        .add_node("a", node("a", &["in"], &["b"]))
+        .unwrap()
+        .add_node("c.out->d", node("c.out->d", &["in"], &["out"]))
+        .unwrap()
+        .add_node("a.b->c", node("a.b->c", &["in"], &["out"]))
+        .unwrap()
+        .add_node("d", node("d", &["in"], &["out"]))
+        .unwrap()
+        .connect(edge(("a", "b"), ("c.out->d", "in")))
+        .unwrap()
+        .connect(edge(("a.b->c", "out"), ("d", "in")))
+        .unwrap()
+}
+
+#[test]
+fn compile_rejects_colliding_stable_edge_ids_naming_both_edges() {
+    let stream_error = colliding_stable_id_graph(RenamableOperator::stream)
+        .compile_stream(&udfs(), &StreamRequirements::default())
+        .unwrap_err();
+    assert!(matches!(stream_error, CalcFlowError::Compile { .. }));
+    let message = stream_error.to_string();
+    assert!(message.contains("a.b->c.out->d.in"));
+    assert!(message.contains("c.out->d"));
+    assert!(message.contains("a.b->c"));
+
+    let batch_error = colliding_stable_id_graph(RenamableOperator::batch)
+        .compile_batch(&udfs())
+        .unwrap_err();
+    assert!(matches!(batch_error, CalcFlowError::Compile { .. }));
+    assert!(batch_error.to_string().contains("a.b->c.out->d.in"));
+}
+
+#[test]
+fn compile_accepts_separator_node_ids_while_stable_ids_stay_unique() {
+    let plan = PipelineBuilder::new("separators")
+        .unwrap()
+        .add_node("a.b", RenamableOperator::stream("a.b", &["in"], &["out"]))
+        .unwrap()
+        .add_node("c->d", RenamableOperator::stream("c->d", &["in"], &["out"]))
+        .unwrap()
+        .connect(edge(("a.b", "out"), ("c->d", "in")))
+        .unwrap()
+        .compile_stream(&udfs(), &StreamRequirements::default())
+        .unwrap();
+
+    assert_eq!(plan.edge_ids(), ["a.b.out->c->d.in"]);
+}
+
 #[test]
 fn compile_stream_records_the_delivery_requirements() {
     let mut requirements = StreamRequirements::default();
@@ -572,6 +721,30 @@ fn union_operator_requires_at_least_two_inputs() {
     .unwrap_err();
 
     assert!(matches!(error, CalcFlowError::InvalidArgument { .. }));
+}
+
+#[test]
+fn union_operator_rejects_duplicate_input_port_names() {
+    let error = UnionOperator::new(
+        "merge",
+        vec![
+            Port::new("left", BatchKind::Table, true, None).unwrap(),
+            Port::new("left", BatchKind::Table, true, None).unwrap(),
+        ],
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, CalcFlowError::InvalidArgument { .. }));
+    assert!(error.to_string().contains("unique"));
+
+    UnionOperator::new(
+        "merge",
+        vec![
+            Port::new("left", BatchKind::Table, true, None).unwrap(),
+            Port::new("right", BatchKind::Table, true, None).unwrap(),
+        ],
+    )
+    .unwrap();
 }
 
 #[test]

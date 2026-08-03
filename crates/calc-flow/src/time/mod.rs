@@ -16,8 +16,11 @@ use crate::{CalcFlowError, Result};
 ///
 /// Epochs start at `1` for a fresh job lineage and increase by exactly one
 /// per injected checkpoint barrier; `0` is reserved as the "no checkpoint"
-/// sentinel and is unconstructable through [`Epoch::new`].
+/// sentinel and is unconstructable through [`Epoch::new`]. Deserialization
+/// routes through the same guard, so a persisted `0` is rejected rather than
+/// resurrecting the sentinel.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "u64")]
 pub struct Epoch(u64);
 
 impl Epoch {
@@ -46,5 +49,16 @@ impl Epoch {
             .ok_or_else(|| CalcFlowError::Internal {
                 message: "epoch counter exhausted".into(),
             })
+    }
+}
+
+impl TryFrom<u64> for Epoch {
+    type Error = CalcFlowError;
+
+    fn try_from(value: u64) -> Result<Self> {
+        Self::new(value).ok_or_else(|| CalcFlowError::InvalidArgument {
+            field: "epoch".into(),
+            message: "0 is the reserved no-checkpoint sentinel".into(),
+        })
     }
 }

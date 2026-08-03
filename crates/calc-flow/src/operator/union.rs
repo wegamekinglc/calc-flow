@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use async_trait::async_trait;
 
@@ -38,14 +41,21 @@ impl UnionOperator {
     /// # Errors
     ///
     /// Returns [`CalcFlowError::InvalidArgument`] when the name is empty,
-    /// fewer than two input ports are given, or the ports differ in kind,
-    /// schema, schema presence, or the required flag.
+    /// fewer than two input ports are given, two ports share a name, or the
+    /// ports differ in kind, schema, schema presence, or the required flag.
     pub fn new(name: &str, input_ports: Vec<Port>) -> Result<Self> {
         validate_operator_name(name)?;
         if input_ports.len() < 2 {
             return Err(CalcFlowError::InvalidArgument {
                 field: "operator.input_ports".into(),
                 message: "union operators require at least two input ports".into(),
+            });
+        }
+        let mut unique = BTreeSet::new();
+        if input_ports.iter().any(|port| !unique.insert(port.name())) {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "operator.input_ports".into(),
+                message: "union input port names must be unique".into(),
             });
         }
         let first = &input_ports[0];
