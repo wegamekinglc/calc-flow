@@ -5,13 +5,19 @@ engine or Studio capabilities.
 
 ## 2026-08
 
-- Add a crate-private ordered runtime envelope for existing `Batch` data and
-  opaque watermark/epoch markers. Internal control dispatch preserves serial
-  per-edge FIFO on supported single-ingress routes, keeps the runtime as the
-  sole forwarding owner, fails closed before side effects at reachable
-  multi-input nodes, and reuses plan snapshot and in-flight rollback
-  machinery. This is internal groundwork only: public Rust, Python, Studio,
-  runner, project, checkpoint, and graph-fingerprint contracts are unchanged.
+- Split the operator and plan surface by lifecycle — `BatchOperator` /
+  `BatchExecutionPlan` for finite one-shot graphs, `StreamOperator` /
+  `StreamExecutionPlan` for continuously running graphs — and replace the
+  crate-internal opaque runtime markers with the typed v3 stream contract:
+  `StreamMessage` (public data plus crate-private watermark, barrier, idle,
+  and end-of-input control), strongly typed `EventTime` (signed UTC
+  microseconds with checked, uniformly floor-rounded Arrow conversions), and
+  `Epoch` (starts at 1, strictly increasing). Stream-rule violations fail at
+  compile time before any source opens. This is a breaking Rust API change
+  with no v2 compatibility layer; the PyO3 `ExecutionPlan` keeps its name
+  over the batch plan, so Python and Studio surfaces are unchanged in this
+  step. `docs/runtime-envelope.md` is rewritten as the normative v3
+  contract.
 
 ## 2026-07
 
