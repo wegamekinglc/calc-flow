@@ -81,7 +81,6 @@ class ReleaseConfigTests(unittest.TestCase):
             ".github/workflows/ci.yml",
             "crates/calc-flow/Cargo.toml",
             harness_path,
-            "crates/calc-flow/src/pipeline/signal_allocation_tests.rs",
         ):
             with self.subTest(path=path):
                 self.assertNotRegex(

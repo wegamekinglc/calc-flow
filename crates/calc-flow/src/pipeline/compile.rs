@@ -62,12 +62,7 @@ pub(crate) fn compile_graph(
         .nodes
         .values()
         .any(|node| node.operator.requires_datafusion());
-    if requires_datafusion {
-        builder.datafusion_config.validate()?;
-    }
-    validate_nodes(&builder.nodes)?;
-    validate_edges(&builder.nodes, &builder.edges)?;
-    let order = topological_order(&builder.nodes, &builder.edges)?;
+    let order = validate_and_order(builder, requires_datafusion)?;
     let selected_catalog = selected_udf_catalog(&builder.nodes, udfs)?;
     let selected_udfs = selected_catalog
         .iter()
@@ -94,6 +89,17 @@ pub(crate) fn compile_graph(
         fingerprint,
         table,
     })
+}
+
+/// Runs the validation passes that precede compilation and returns the
+/// deterministic topological order of the graph.
+fn validate_and_order(builder: &PipelineBuilder, requires_datafusion: bool) -> Result<Vec<String>> {
+    if requires_datafusion {
+        builder.datafusion_config.validate()?;
+    }
+    validate_nodes(&builder.nodes)?;
+    validate_edges(&builder.nodes, &builder.edges)?;
+    topological_order(&builder.nodes, &builder.edges)
 }
 
 /// Moves builder nodes into compiled nodes in topological order, converting
@@ -190,37 +196,9 @@ pub(crate) fn validate_edges(
     nodes: &BTreeMap<String, NodeDefinition>,
     edges: &[Edge],
 ) -> Result<()> {
-    let mut unique_edges = BTreeSet::new();
-    let mut stable_ids = BTreeMap::new();
+    validate_edge_uniqueness(edges)?;
     let mut writers = BTreeMap::new();
     for edge in edges {
-        if !unique_edges.insert(edge) {
-            return Err(CalcFlowError::Compile {
-                message: format!(
-                    "duplicate edge {}.{} -> {}.{}",
-                    edge.source.node_id, edge.source.port, edge.target.node_id, edge.target.port
-                ),
-            });
-        }
-        // Node IDs are only validated non-empty, so `.` or `->` inside them can
-        // make two distinct edges format to the same stable ID; collecting
-        // those edges into an ID-keyed map would silently drop one.
-        let stable_id = edge.stable_id();
-        if let Some(previous) = stable_ids.insert(stable_id.clone(), edge) {
-            return Err(CalcFlowError::Compile {
-                message: format!(
-                    "edges {}.{} -> {}.{} and {}.{} -> {}.{} collide on stable edge ID {stable_id:?}",
-                    previous.source.node_id,
-                    previous.source.port,
-                    previous.target.node_id,
-                    previous.target.port,
-                    edge.source.node_id,
-                    edge.source.port,
-                    edge.target.node_id,
-                    edge.target.port,
-                ),
-            });
-        }
         let source = endpoint_port(nodes, &edge.source, EndpointDirection::Source)?;
         let target = endpoint_port(nodes, &edge.target, EndpointDirection::Target)?;
         if source.kind() != target.kind() {
@@ -249,6 +227,42 @@ pub(crate) fn validate_edges(
                     previous.port,
                     edge.source.node_id,
                     edge.source.port
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Rejects duplicate edges and stable edge ID collisions before endpoint
+/// checks run. Node IDs are only validated non-empty, so `.` or `->` inside
+/// them can make two distinct edges format to the same stable ID; collecting
+/// those edges into an ID-keyed map would silently drop one.
+fn validate_edge_uniqueness(edges: &[Edge]) -> Result<()> {
+    let mut unique_edges = BTreeSet::new();
+    let mut stable_ids = BTreeMap::new();
+    for edge in edges {
+        if !unique_edges.insert(edge) {
+            return Err(CalcFlowError::Compile {
+                message: format!(
+                    "duplicate edge {}.{} -> {}.{}",
+                    edge.source.node_id, edge.source.port, edge.target.node_id, edge.target.port
+                ),
+            });
+        }
+        let stable_id = edge.stable_id();
+        if let Some(previous) = stable_ids.insert(stable_id.clone(), edge) {
+            return Err(CalcFlowError::Compile {
+                message: format!(
+                    "edges {}.{} -> {}.{} and {}.{} -> {}.{} collide on stable edge ID {stable_id:?}",
+                    previous.source.node_id,
+                    previous.source.port,
+                    previous.target.node_id,
+                    previous.target.port,
+                    edge.source.node_id,
+                    edge.source.port,
+                    edge.target.node_id,
+                    edge.target.port,
                 ),
             });
         }
