@@ -114,12 +114,16 @@ pub(crate) struct PythonPayload {
 /// the documented convention for opaque hosts without an `nbytes` report: it
 /// prices queue occupancy, is not a memory bound, and can sit below a large
 /// non-array host's true footprint. Charges are logical queue occupancy, not
-/// RSS (spec S10.2).
+/// RSS (spec S10.2). A host that exposes `nbytes` whose value does not fit a
+/// `usize` (for example a Python arbitrary-precision integer) is charged
+/// `usize::MAX`: the contract never under-reports, so an unmeasurable
+/// payload receives the most conservative charge rather than the small
+/// per-element fallback.
 fn estimate_payload_bytes(object: &Bound<'_, PyAny>, len: usize) -> usize {
-    object
-        .getattr("nbytes")
-        .and_then(|nbytes| nbytes.extract::<usize>())
-        .unwrap_or_else(|_| len.saturating_mul(size_of::<u64>()))
+    let Ok(nbytes) = object.getattr("nbytes") else {
+        return len.saturating_mul(size_of::<u64>());
+    };
+    nbytes.extract::<usize>().unwrap_or(usize::MAX)
 }
 
 impl PythonPayload {
@@ -946,6 +950,32 @@ mod tests {
             assert_eq!(
                 batch.clone_inner().unwrap().estimated_bytes().unwrap(),
                 2 * size_of::<u64>()
+            );
+        });
+    }
+
+    #[test]
+    fn unconvertible_nbytes_reports_a_conservative_charge() {
+        Python::initialize();
+        Python::attach(|py| {
+            // `nbytes` exists but exceeds `usize`: the per-element fallback
+            // would severely under-report, so the estimate must saturate
+            // instead (the ExternalPayload contract never under-reports).
+            let class = py
+                .eval(
+                    c"type('HugeHost', (), {'nbytes': property(lambda self: 2**100)})",
+                    None,
+                    None,
+                )
+                .unwrap();
+            let object = class.call0().unwrap().unbind().into_any();
+            let metadata = PyDict::new(py);
+            let batch =
+                PyBatch::_from_external(object, "test".into(), 2, metadata.as_any()).unwrap();
+
+            assert_eq!(
+                batch.clone_inner().unwrap().estimated_bytes().unwrap(),
+                usize::MAX
             );
         });
     }
