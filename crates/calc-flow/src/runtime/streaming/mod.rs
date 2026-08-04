@@ -5,9 +5,11 @@
 //! source-driven continuous runner. `StreamJobContext` and `StreamMessage`
 //! are the first v3 stream types.
 
+mod channel;
 mod context;
 mod message;
 
+pub use channel::{ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, edge_channel};
 pub use context::StreamJobContext;
 pub use message::{StreamMessage, StreamMessageKind};
 
