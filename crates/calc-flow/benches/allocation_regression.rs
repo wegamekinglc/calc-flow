@@ -15,9 +15,9 @@ use std::{
 use allocation_counter::{AllocationInfo, measure};
 use async_trait::async_trait;
 use calc_flow::{
-    Batch, BatchKind, BatchMetadata, CalcFlowError, DataFusionConfig, Edge, ExecutionOptions,
-    ExpressionOperator, ExternalPayload, JsonMap, Operator, OperatorContext, PipelineBuilder, Port,
-    PortEndpoint, RunResult, SqlOperator, UdfRegistry,
+    Batch, BatchKind, BatchMetadata, BatchOperator, BatchOperatorContext, CalcFlowError,
+    DataFusionConfig, Edge, ExecutionOptions, ExpressionOperator, ExternalPayload, JsonMap,
+    OperatorMetadata, PipelineBuilder, Port, PortEndpoint, RunResult, SqlOperator, UdfRegistry,
 };
 use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
 use serde::{Deserialize, Serialize};
@@ -314,8 +314,7 @@ impl PassthroughOperator {
     }
 }
 
-#[async_trait]
-impl Operator for PassthroughOperator {
+impl OperatorMetadata for PassthroughOperator {
     fn name(&self) -> &'static str {
         "allocation-regression-passthrough"
     }
@@ -331,11 +330,14 @@ impl Operator for PassthroughOperator {
     fn configuration(&self) -> JsonMap {
         BTreeMap::new()
     }
+}
 
+#[async_trait]
+impl BatchOperator for PassthroughOperator {
     async fn process(
         &mut self,
         inputs: &BTreeMap<String, Batch>,
-        _context: &OperatorContext<'_>,
+        _context: &BatchOperatorContext<'_>,
     ) -> calc_flow::Result<BTreeMap<String, Batch>> {
         let output = inputs
             .get("input")
@@ -373,7 +375,7 @@ struct PreparedCase {
     expected_node_count: usize,
     expected_metric_node: Option<&'static str>,
     expectation: OutputExpectation,
-    plan: calc_flow::ExecutionPlan,
+    plan: calc_flow::BatchExecutionPlan,
     input_name: String,
     terminal_outputs: Vec<String>,
     input: Batch,
@@ -387,7 +389,7 @@ impl PreparedCase {
         logical_variants: &'static [&'static str],
         expected_metric_node: Option<&'static str>,
         expectation: OutputExpectation,
-        plan: calc_flow::ExecutionPlan,
+        plan: calc_flow::BatchExecutionPlan,
         input: Batch,
     ) -> HarnessResult<Self> {
         let expected_node_count = logical_variants.len();
@@ -461,7 +463,7 @@ impl FailureCode {
     const fn description(self) -> &'static str {
         match self {
             Self::WrongThread => "measurement future moved off the calling thread",
-            Self::DispatchError => "ExecutionPlan::execute returned an error",
+            Self::DispatchError => "BatchExecutionPlan::execute returned an error",
             Self::MetricAssertion => "DataFusion metric assertion failed",
             Self::OutputAssertion => "output value or identity assertion failed",
         }
@@ -657,10 +659,10 @@ fn external_payload_one_node() -> HarnessResult<PreparedCase> {
         .with_datafusion_config(DATAFUSION_CONFIG)
         .add_node(
             "passthrough",
-            Box::new(PassthroughOperator::new(BatchKind::Array)?),
+            Box::new(PassthroughOperator::new(BatchKind::Array)?) as Box<dyn BatchOperator>,
         )
         .map_err(harness_error)?
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .map_err(harness_error)?;
     let input = Batch::external(
         Arc::new(BenchmarkExternalPayload { rows: 1_000 }),
@@ -684,10 +686,10 @@ fn external_table_one_node() -> HarnessResult<PreparedCase> {
         .with_datafusion_config(DATAFUSION_CONFIG)
         .add_node(
             "passthrough",
-            Box::new(PassthroughOperator::new(BatchKind::Table)?),
+            Box::new(PassthroughOperator::new(BatchKind::Table)?) as Box<dyn BatchOperator>,
         )
         .map_err(harness_error)?
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .map_err(harness_error)?;
     PreparedCase::finish(
         "external_table_one_node",
@@ -706,12 +708,15 @@ fn external_table_three_way_fan_out() -> HarnessResult<PreparedCase> {
         .with_datafusion_config(DATAFUSION_CONFIG)
         .add_node(
             "root",
-            Box::new(PassthroughOperator::new(BatchKind::Table)?),
+            Box::new(PassthroughOperator::new(BatchKind::Table)?) as Box<dyn BatchOperator>,
         )
         .map_err(harness_error)?;
     for leaf in ["leaf_a", "leaf_b", "leaf_c"] {
         builder = builder
-            .add_node(leaf, Box::new(PassthroughOperator::new(BatchKind::Table)?))
+            .add_node(
+                leaf,
+                Box::new(PassthroughOperator::new(BatchKind::Table)?) as Box<dyn BatchOperator>,
+            )
             .map_err(harness_error)?
             .connect(Edge::new(
                 PortEndpoint::new("root", "output").map_err(harness_error)?,
@@ -720,7 +725,7 @@ fn external_table_three_way_fan_out() -> HarnessResult<PreparedCase> {
             .map_err(harness_error)?;
     }
     let plan = builder
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .map_err(harness_error)?;
     PreparedCase::finish(
         "external_table_three_way_fan_out",
@@ -742,7 +747,7 @@ fn builtin_expression_one_node() -> HarnessResult<PreparedCase> {
         .with_datafusion_config(DATAFUSION_CONFIG)
         .add_node("expression", Box::new(operator))
         .map_err(harness_error)?
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .map_err(harness_error)?;
     PreparedCase::finish(
         "builtin_expression_one_node",
@@ -768,7 +773,7 @@ fn builtin_sql_one_node() -> HarnessResult<PreparedCase> {
         .with_datafusion_config(DATAFUSION_CONFIG)
         .add_node("sql", Box::new(operator))
         .map_err(harness_error)?
-        .compile(&UdfRegistry::new().snapshot())
+        .compile_batch(&UdfRegistry::new().snapshot())
         .map_err(harness_error)?;
     PreparedCase::finish(
         "builtin_sql_one_node",

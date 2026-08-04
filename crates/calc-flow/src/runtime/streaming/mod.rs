@@ -1,10 +1,23 @@
+//! The v2 push runner plus the v3 stream building blocks.
+//!
+//! `StreamingRunner` below is the v2 push-based runner over
+//! [`crate::BatchExecutionPlan`]; plan task M2.4 replaces it with the
+//! source-driven continuous runner. `StreamJobContext` and `StreamMessage`
+//! are the first v3 stream types.
+
+mod context;
+mod message;
+
+pub use context::StreamJobContext;
+pub use message::{StreamMessage, StreamMessageKind};
+
 use std::{collections::BTreeMap, sync::Arc};
 
 use chrono::Utc;
 
 use crate::{
-    Batch, CalcFlowError, Checkpoint, CheckpointStore, ExecutionOptions, ExecutionPlan, Result,
-    RunResult,
+    Batch, BatchExecutionPlan, CalcFlowError, Checkpoint, CheckpointStore, ExecutionOptions,
+    Result, RunResult,
     pipeline::{PlanLease, PlanTransaction},
 };
 
@@ -12,7 +25,7 @@ use super::{SinkRouter, micro_batch::validate_checkpoint};
 
 /// Push-based at-least-once runner for already formed batches.
 pub struct StreamingRunner {
-    plan: Arc<ExecutionPlan>,
+    plan: Arc<BatchExecutionPlan>,
     lease: PlanLease,
     checkpoints: Arc<dyn CheckpointStore>,
     recovered: bool,
@@ -32,7 +45,10 @@ impl StreamingRunner {
     /// A replacement runner used after abandonment must receive the same
     /// logical [`CheckpointStore`] so interrupted durable mutations are
     /// recovered against the store that observed them.
-    pub fn new(plan: Arc<ExecutionPlan>, checkpoints: Arc<dyn CheckpointStore>) -> Result<Self> {
+    pub fn new(
+        plan: Arc<BatchExecutionPlan>,
+        checkpoints: Arc<dyn CheckpointStore>,
+    ) -> Result<Self> {
         plan.single_external_input()?;
         let lease = plan.acquire_lease()?;
         Ok(Self {

@@ -1094,7 +1094,7 @@ mod tests {
                 ),
             )
             .unwrap()
-            .compile(&calc_flow::UdfRegistry::new().snapshot())
+            .compile_batch(&calc_flow::UdfRegistry::new().snapshot())
             .unwrap();
         PyExecutionPlan::new(
             Arc::new(core),

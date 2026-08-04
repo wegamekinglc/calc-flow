@@ -7,9 +7,9 @@ use std::{
 
 use async_trait::async_trait;
 use calc_flow::{
-    Batch, BatchingSource, CalcFlowError, Checkpoint, CheckpointStore, ExecutionOptions,
-    MicroBatchRunner, PipelineBuilder, Result, RunContext, Sink, SinkRouter, Source, SourceItem,
-    StreamingRunner, UdfRegistry,
+    Batch, BatchOperator, BatchingSource, CalcFlowError, Checkpoint, CheckpointStore,
+    ExecutionOptions, MicroBatchRunner, PipelineBuilder, Result, RunContext, Sink, SinkRouter,
+    Source, SourceItem, StreamingRunner, UdfRegistry,
 };
 use chrono::Utc;
 use serde_json::json;
@@ -683,10 +683,10 @@ async fn runner_lease_closes_the_queued_direct_call_race() {
                         release: Arc::clone(&release),
                     },
                     Arc::new(Probe::default()),
-                )),
+                )) as Box<dyn BatchOperator>,
             )
             .unwrap()
-            .compile(&UdfRegistry::new().snapshot())
+            .compile_batch(&UdfRegistry::new().snapshot())
             .unwrap(),
     );
     let first = tokio::spawn({
@@ -810,10 +810,10 @@ async fn runner_invalid_input_does_not_snapshot_restore_or_poison() {
                     TestOperator::transform("node", Action::Pass, Arc::clone(&probe))
                         .stateful()
                         .failing_restore(),
-                ),
+                ) as Box<dyn BatchOperator>,
             )
             .unwrap()
-            .compile(&UdfRegistry::new().snapshot())
+            .compile_batch(&UdfRegistry::new().snapshot())
             .unwrap(),
     );
     let (source, _) = QueueSource::new(vec![SourceItem {
@@ -1000,10 +1000,10 @@ async fn execution_failure_is_rolled_back_and_the_item_remains_retryable() {
                 Box::new(
                     TestOperator::transform("node", Action::Fail("boom"), Arc::clone(&probe))
                         .stateful(),
-                ),
+                ) as Box<dyn BatchOperator>,
             )
             .unwrap()
-            .compile(&UdfRegistry::new().snapshot())
+            .compile_batch(&UdfRegistry::new().snapshot())
             .unwrap(),
     );
     let initial = plan.snapshot().await.unwrap();
@@ -1121,10 +1121,10 @@ async fn delivery_and_rollback_failures_keep_both_diagnostics() {
                     TestOperator::transform("node", Action::Pass, Arc::clone(&probe))
                         .stateful()
                         .failing_restore(),
-                ),
+                ) as Box<dyn BatchOperator>,
             )
             .unwrap()
-            .compile(&UdfRegistry::new().snapshot())
+            .compile_batch(&UdfRegistry::new().snapshot())
             .unwrap(),
     );
     let (source, _) = QueueSource::new(vec![
@@ -1261,7 +1261,7 @@ fn constructor_requires_positive_cadence_and_exactly_one_external_input() {
                     "one",
                     Action::Pass,
                     Arc::new(Probe::default()),
-                )),
+                )) as Box<dyn BatchOperator>,
             )
             .unwrap()
             .add_node(
@@ -1270,10 +1270,10 @@ fn constructor_requires_positive_cadence_and_exactly_one_external_input() {
                     "two",
                     Action::Pass,
                     Arc::new(Probe::default()),
-                )),
+                )) as Box<dyn BatchOperator>,
             )
             .unwrap()
-            .compile(&UdfRegistry::new().snapshot())
+            .compile_batch(&UdfRegistry::new().snapshot())
             .unwrap(),
     );
     let (source, _) = QueueSource::new(Vec::new());
@@ -1319,12 +1319,12 @@ impl Source for TransientCandidateSource {
 }
 
 struct ReentrantSink {
-    plan: Arc<calc_flow::ExecutionPlan>,
+    plan: Arc<calc_flow::BatchExecutionPlan>,
     observation: Arc<Mutex<Option<String>>>,
 }
 
 struct ReentrantSource {
-    plan: Arc<calc_flow::ExecutionPlan>,
+    plan: Arc<calc_flow::BatchExecutionPlan>,
     source: QueueSource,
     observation: Arc<Mutex<Option<String>>>,
 }
@@ -1366,7 +1366,7 @@ impl Sink for ReentrantSink {
 }
 
 struct ReentrantCheckpointStore {
-    plan: Arc<calc_flow::ExecutionPlan>,
+    plan: Arc<calc_flow::BatchExecutionPlan>,
     checkpoint: Mutex<Option<Checkpoint>>,
     observation: Arc<Mutex<Option<String>>>,
 }

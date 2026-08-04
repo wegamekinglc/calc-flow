@@ -1,4 +1,9 @@
-//! Calc Flow's Rust-native v2 calculation engine.
+//! Calc Flow's Rust-native calculation engine.
+//!
+//! The public surface splits operators and plans by lifecycle (v3, plan
+//! section 1.3): [`BatchOperator`] and [`BatchExecutionPlan`] run finite
+//! one-shot graphs; [`StreamOperator`] and [`StreamExecutionPlan`] compile
+//! continuously running graphs executed by the streaming runtime.
 
 mod batch;
 mod checkpoint;
@@ -13,6 +18,7 @@ mod operator;
 mod pipeline;
 mod project_store;
 mod runtime;
+mod time;
 mod udf;
 
 pub use batch::{Batch, BatchKind, BatchMetadata, ExternalPayload, TableBatch};
@@ -31,19 +37,26 @@ pub use error::{CalcFlowError, Result};
 pub use io::{BatchingSource, Sink, Source, SourceItem};
 pub use json::{JsonMap, MAX_JSON_DEPTH, canonical_json};
 pub use operator::{
-    ExpressionOperator, ExternalOperatorFactory, ExternalOperatorSpec, Operator, OperatorContext,
-    OperatorDefinition, Port, ProviderRegistry, SqlOperator,
+    BatchOperator, BatchOperatorContext, BatchOperatorFactory, EdgeCollector, ExpressionOperator,
+    ExternalOperatorSpec, NodeOperator, OperatorMetadata, OperatorStateSnapshot, Port,
+    ProviderRegistry, SqlOperator, StreamCollector, StreamOperator, StreamOperatorContext,
+    StreamOperatorFactory, UnionOperator,
 };
 pub use pipeline::{
-    Edge, ExecutionOptions, ExecutionPlan, NodeTiming, PipelineBuilder, PortEndpoint, RunMetadata,
-    RunResult,
+    BatchExecutionPlan, DeliveryGuarantee, Edge, EdgeBudget, ExecutionOptions, NodeTiming,
+    PipelineBuilder, PortEndpoint, RunMetadata, RunResult, StreamExecutionPlan, StreamRequirements,
+    StreamRuntimeConfig,
 };
 pub use project_store::{
     FileProjectStore, MAX_PROJECT_DOCUMENT_BYTES, ProjectStore, export_project_json,
     export_project_yaml, import_project_json, import_project_json_with_limit, import_project_yaml,
     import_project_yaml_with_limit,
 };
-pub use runtime::{MicroBatchRunner, SinkRouter, StreamingRunner};
+pub use runtime::{
+    MicroBatchRunner, SinkRouter, StreamJobContext, StreamMessage, StreamMessageKind,
+    StreamingRunner,
+};
+pub use time::{Epoch, EventTime};
 pub use udf::{
     UdfCatalogEntry, UdfKind, UdfReference, UdfRegistry, UdfRegistrySnapshot,
     validate_selected_udfs,

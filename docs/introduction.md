@@ -109,12 +109,15 @@ accessors reject the wrong payload kind. Metadata and Python-facing payloads
 are defensively copied or made read-only so callers cannot mutate graph-owned
 state.
 
-Inside the Rust core, compiled endpoint storage wraps `Batch` values as
-crate-private `RuntimeEnvelope::Data`. The private control scheduler separately
-carries opaque watermark and epoch markers as `RuntimeEnvelope::Control`
-pending work items. The public data contract remains `Batch`; see the [internal
-ordered runtime envelope](runtime-envelope.md) for its ordering, forwarding,
-failure, and compatibility boundaries.
+Inside the Rust core, the streaming surface moves stream traffic on one typed
+`StreamMessage` per edge: a public data variant wrapping an immutable `Batch`,
+plus watermark, barrier, idle, and end-of-input control variants created only
+through crate-private constructors. Typed `EventTime` and `Epoch` values carry
+event-time progress and checkpoint identity. The message and job context live
+in `crates/calc-flow/src/runtime/streaming/`; event time and epoch live in
+`crates/calc-flow/src/time/`. The public data contract remains `Batch`; see
+the [stream message envelope](runtime-envelope.md) for the full message, time,
+and delivery contract.
 
 ## Graph compilation
 
@@ -282,11 +285,11 @@ see the same batch again: delivery is at least once.
 the pipeline name/fingerprint, source cursor/sequence, node-keyed state, and
 creation time. One runner has an exclusive lease on a stateful plan.
 
-The crate-private control path is not a continuous runner or a public
+The stream message surface is not a continuous runner or a public
 watermark/checkpoint interface. `MicroBatchRunner` and `StreamingRunner` still
-submit formed `Batch` values only. The [internal runtime-envelope
-contract](runtime-envelope.md) documents the reusable groundwork and the
-semantics that remain outside the current engine surface.
+submit formed `Batch` values only. The [stream message
+envelope](runtime-envelope.md) documents the message, time, and context types
+and the delivery guarantees the current runtime provides.
 
 ## Python binding boundary
 

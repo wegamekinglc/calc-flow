@@ -1,222 +1,310 @@
-# Internal ordered runtime envelope
+# Stream message envelope
 
-The Rust core uses a crate-private `RuntimeEnvelope` in two separate internal
-paths: compiled endpoint storage wraps data, while the private control
-scheduler owns pending control work. This is an internal execution contract,
-not a public Rust, Python, or Studio API. Public graph inputs, operator inputs
-and outputs, runner steps, and terminal results continue to use immutable
-`Batch` values.
+The v3 Rust core moves stream traffic on one typed message: `StreamMessage`.
+Each stream edge carries a single ordered sequence of data and control
+messages from one producer to one consumer. This document is the normative
+contract for that envelope: the message type, its typed `EventTime` and
+`Epoch` values, the job and operator contexts, the emission boundary stream
+operators see, the compiled stream plan, and the delivery invariants the
+runtime guarantees today.
 
-The implementation lives in `crates/calc-flow/src/runtime/envelope.rs`,
-`crates/calc-flow/src/operator.rs`, `crates/calc-flow/src/pipeline.rs`, and
-`crates/calc-flow/src/pipeline/control.rs`.
+The implementation lives in `crates/calc-flow/src/runtime/streaming/` (the
+message and the job context), `crates/calc-flow/src/time/` (event time and
+epoch), `crates/calc-flow/src/operator/stream.rs` (the operator traits and
+the validating collector), and `crates/calc-flow/src/pipeline/stream.rs`
+(the compiled stream plan). The frozen semantics behind the contract are
+recorded in the [continuous streaming runtime
+specification](../.codex/artifacts/specs/continuous-streaming-runtime.md),
+cited below as S and D items.
 
-## Carrier and visibility
+The public surface splits operators and plans by lifecycle. `BatchOperator`
+and `BatchExecutionPlan` run finite one-shot graphs; `StreamOperator` and
+`StreamExecutionPlan` compile continuously running graphs. On both sides,
+`Batch` remains the public data envelope: raw tables and arrays never cross
+a graph, plan, or runner boundary.
 
-`RuntimeEnvelope` has two crate-private variants:
+## `StreamMessage`: one message per edge
 
-- `Data(Batch)` wraps the existing public data envelope. Endpoint storage uses
-  this variant without changing the table or external-payload sharing rules.
-- `Control(SharedControlMarker)` carries either a watermark marker or an epoch
-  marker. The shared handle is an immutable `Arc` so fan-out clones the handle,
-  not a data payload.
+`StreamMessage` is the single ordered message carried by one stream edge
+(S1.1). Its representation is private; the variants are:
 
-Each `ControlMarker` owns a kind and an opaque, UUID-backed
-`ControlOccurrence`. The crate-private `watermark()` and `epoch()` mint
-operations create a fresh occurrence. The marker itself is move-only; after a
-dispatch consumes it, the runtime creates one `SharedControlMarker` and clones
-only that shared handle for successor steps.
+| Variant       | Payload     | Contract meaning                                                      |
+| ------------- | ----------- | --------------------------------------------------------------------- |
+| `Data`        | `Batch`     | One immutable data batch; the only variant public callers construct.  |
+| `Watermark`   | `EventTime` | An event-time progress estimate (S5).                                 |
+| `Barrier`     | `Epoch`     | A checkpoint barrier carrying its epoch (S7).                         |
+| `Idle`        | —           | Marks its ingress idle; excluded from watermark progress only (S1.4). |
+| `EndOfInput`  | —           | Terminates its ingress permanently (S1.6).                            |
 
-An occurrence distinguishes submissions for tests and diagnostics. It is not:
+The data variant wraps one immutable `Batch`. Fan-out clones share the
+payload: cloning a message clones the handle, not the Arrow buffers (S3).
 
-- an event-time value or watermark timestamp;
-- a monotonic sequence;
-- a checkpoint epoch ID;
-- a persistent or replayable identity;
-- a cross-input ordering key.
+Control messages are created only through crate-private constructors.
+`StreamMessage::data` is the only public constructor, so operators, sources,
+and other public consumers cannot forge, suppress, or reorder control
+(S1.3); the type system, not a runtime check, enforces this. Validation of
+control values — watermark monotonicity and epoch consistency — belongs to
+the runtime paths that construct and enqueue them and runs before enqueue,
+before any downstream side effect (S1.3, S5.4). Those paths arrive with the
+milestones listed under "Specified but not yet implemented".
 
-The marker, occurrence, shared handle, route, and envelope are not re-exported
-from `calc_flow`. They are absent from project documents, checkpoints, graph
-fingerprints, Python bindings, Studio routes, OpenAPI, and generated clients.
+Inspection goes through the message kind and typed accessors:
 
-## Data dispatch
+| Accessor            | Returns             | Meaning                                                  |
+| ------------------- | ------------------- | -------------------------------------------------------- |
+| `kind()`            | `StreamMessageKind` | The message kind, for inspection and routing.            |
+| `as_data()`         | `Option<&Batch>`    | The data payload, when this is a data message.           |
+| `as_watermark()`    | `Option<EventTime>` | The watermark value, when this is a watermark message.   |
+| `as_barrier()`      | `Option<Epoch>`     | The barrier epoch, when this is a barrier message.       |
+| `is_idle()`         | `bool`              | Whether this message marks its ingress idle.             |
+| `is_end_of_input()` | `bool`              | Whether this message terminates its ingress.             |
 
-`ExecutionPlan::execute` still accepts `BTreeMap<String, Batch>` and returns a
-`RunResult`. Internally, the plan stores external and produced endpoint values
-as `RuntimeEnvelope::Data`. Input gathering accepts only the data variant and
-passes the same `BTreeMap<String, Batch>` contract to operators. Terminal
-output collection converts only data envelopes back to `Batch`.
+The `Debug` implementation shows kinds and typed business values only. Row
+payloads, batch metadata, and attributes — which may carry secrets — never
+appear in diagnostics (invariant I4).
 
-A control envelope reaching the data gather or terminal-output path is an
-internal routing error. It is never silently dropped or exposed as a new
-`BatchKind` or port kind.
+## `EventTime`
 
-## Control route and forwarding ownership
+`EventTime` is a newtype over a signed 64-bit integer counting microseconds
+since the Unix epoch (1970-01-01T00:00:00Z), always UTC (D1.1). Ordering is
+total across pre- and post-epoch values. Public APIs never expose a bare
+`i64` timestamp; they expose `EventTime` or its exact serialized
+microsecond value. Serialization stores the exact microsecond count, so
+durable representations round-trip losslessly (D1.2).
 
-Compilation derives a control-route status for every external graph input
-after the normal topology has been validated. This derivation does not reject
-a data graph and does not participate in its fingerprint. A supported route
-contains stable target steps with:
+Arrow timestamp columns import through `EventTime::import_timestamp`, which
+selects the conversion by the column's time unit; `EventTime::export_timestamp`
+produces one Arrow timestamp unit back (D1.3, D1.4):
 
-- the target node and input port;
-- the unique external-input or graph-edge ingress;
-- successor step indices in compiled order.
+| Arrow unit      | Import to `EventTime`                    | Export from `EventTime`    |
+| --------------- | ---------------------------------------- | -------------------------- |
+| `timestamp(s)`  | multiply by 1,000,000, checked           | divide by 1,000,000, floor |
+| `timestamp(ms)` | multiply by 1,000, checked               | divide by 1,000, floor     |
+| `timestamp(us)` | exact identity                           | exact identity             |
+| `timestamp(ns)` | divide by 1,000, floor (cannot overflow) | multiply by 1,000, checked |
 
-The runtime is the only forwarding owner. Existing built-in and external
-operators are `Transparent`: the runtime admits the target and forwards the
-marker without calling a handler. A crate-private `SignalAwareOperator` can
-instead receive `handle_control(&ControlMarker, &RunContext) -> Result<()>`.
-The handler can observe the marker and mutate state covered by its normal
-snapshot/restore lifecycle, but it cannot return, replace, suppress, or route a
-control message.
+Checked conversions fail with `CalcFlowError::InvalidArgument`; import
+errors name the offending column, and silent wrap is forbidden.
 
-The `SignalAwareOperator` capability and its construction path remain private.
-The current signal-aware implementations are library-test probes; public
-`PipelineBuilder` and project compilation create only existing data operators.
+Every conversion that produces a coarser representation from a finer value
+floors toward negative infinity — one uniform direction with no per-call-site
+choice (D1.5). For example, `-1,500 ns` imports to `-2 µs`, `1,999 ns`
+imports to `1 µs`, and exporting `-1 µs` to seconds yields `-1 s`, not
+`0 s`. Flooring never moves a row into a later window and keeps watermark
+progress estimates conservative.
 
-The crate-private direct control entry follows this sequence:
+An Arrow timestamp column declared as an event-time column must be
+timezone-naive (interpreted as UTC) or carry the explicit timezone `"UTC"`;
+any other timezone is rejected with the column path in the error (D1.6).
 
-1. Look up the selected external input and preflight its complete reachable
-   route.
-2. Acquire the existing unleased plan transaction, recovering any abandoned
-   direct operation first.
-3. Convert the owned marker into one shared handle and create the origin
-   pending step.
-4. Snapshot operator lifecycle state and create the existing in-flight
-   rollback marker.
-5. Admit route steps in stable compiled order. For each target, check
-   cancellation, cross the target-consumption observation boundary, then run
-   transparent or aware handling.
-6. After the handler and post-handler cancellation check both succeed, create
-   successor pending steps by cloning the shared marker handle.
-7. Commit the in-flight operation after the whole route succeeds, or use the
-   existing rollback path after an error.
+## `Epoch`
 
-There is no public control-dispatch method, Python or Studio projection, or
-runner-owned control entry. `MicroBatchRunner` and `StreamingRunner` continue
-to submit formed `Batch` values only.
+`Epoch` is a newtype over `u64` identifying one checkpoint within a job
+lineage (D9). Value `0` is reserved as the "no checkpoint" sentinel and is
+unconstructable: `Epoch::new` returns `None` for it, and it is never
+injected (D9.1). `Epoch::INITIAL` is `1`, the first checkpoint of a fresh
+lineage, and `Epoch::next` increments by exactly one with a checked overflow
+(D9.2). Epochs are strictly increasing within a job lineage. Serialization
+stores the exact value.
 
-## Ordering and target consumption
+The recovery and reuse rules that continue a lineage across jobs (D9.3–D9.6)
+belong to the checkpoint protocol and arrive with it; see "Specified but not
+yet implemented".
 
-For messages submitted serially to one supported external input, every
-admitted target ingress observes the same submission order. This is the
-implemented per-edge FIFO guarantee. It covers interleaved data, watermark,
-and epoch submissions as well as consecutive control markers.
+## Job and operator context
 
-The control scheduler uses pending target steps; it does not create persistent
-per-edge queues. Creating a pending step is not an observation. A target
-consumes its ingress only after its pre-handler cancellation check succeeds and
-before transparent handling or the aware handler is invoked.
+`StreamJobContext` is the immutable, job-scoped context shared by every task
+of one streaming job. It carries the job ID, the plan fingerprint, run
+settings as a `JsonMap`, an optional deadline, and the cancellation token.
+The constructor requires a UTC deadline. `check_cancelled` fails with
+`CalcFlowError::Cancelled` when cancellation was requested or the deadline
+has passed.
 
-At fan-out, each admitted target consumes the same occurrence once. Stable
-compiled step order makes fault behavior deterministic, but it is not a
-business guarantee of global order between branches. If an earlier branch
-fails, its ingress has already been observed, its successors are not created,
-and all unvisited sibling steps are discarded without observation.
+`StreamOperatorContext` is the execution context an operator task hands to
+one stream operator. It borrows the job context and exposes:
 
-These guarantees do not define an order between different external inputs and
-do not provide a global order at a merge.
+- `job()` — the owning job's immutable context;
+- `operator_id()` — the operator's node identity;
+- `input_watermark()` — the current input watermark `WM_in`, or `None`
+  while undefined (S5.2);
+- `check_cancelled()` — the job liveness check;
+- `record_late_rows(dropped, max_lateness)` — cumulative late-data counters:
+  dropped row-window assignments, the count of batches that contained at
+  least one dropped assignment, and the maximum observed lateness. Row
+  payloads are never accepted, and only window operators call this. The
+  current version never fails; the `Result` keeps the frozen signature
+  stable for the validation rules later milestones add. Reporting these
+  counters as metrics arrives with the late-data policy work (D2.5).
 
-## Multi-input fail-closed boundary
+## The operator emission boundary
 
-Every declared input port on a control-reachable node counts as a potential
-control ingress. Connected inputs, external inputs, and unconnected optional
-ports all count; two target ports connected to the same source still count as
-two ingresses.
+`StreamOperator` is the continuously running operator trait: it receives one
+named-ingress batch per call and emits only through a `StreamCollector`. The
+port, schema, and UDF metadata accessors live on the shared `OperatorMetadata`
+supertrait so the batch and stream compilers validate them once. The
+handlers are:
 
-A route is supported only when every reachable node has exactly one potential
-ingress. Otherwise control preflight returns
-`CalcFlowError::InvalidArgument` with `field = "control_input"` and identifies
-the first conflicting node and its ingresses. The failure happens before the
-plan transaction, snapshot, handler calls, target observations, or partial
-forwarding.
+- `process_data(ingress, batch, context, output)` — processes one batch
+  from the named ingress. A failed handler never forwards a partial control
+  event (S1.3).
+- `on_watermark(watermark, context, output)` — reacts to an input-watermark
+  advance; a window operator emits newly closed windows before the runtime
+  forwards the watermark (S5.2).
+- `on_end(context, output)` — flushes once after every ingress has ended
+  (S1.6, S5.5).
 
-This control-only restriction does not change normal graph validation. The
-same multi-input graph can still compile and execute data through the public
-API.
+Handlers never see barriers, and watermarks arrive as typed `EventTime`
+values.
 
-## Error and rollback boundary
+The state lifecycle is synchronous and executor-safe. `checkpoint(epoch)`
+captures dirty state as an `OperatorStateSnapshot` in O(dirty-key
+metadata) — never a bulk encode on the executor thread; durable staging is
+runtime-owned (D4.1). `restore(snapshot)` applies a captured snapshot, and
+`reset()` returns the operator to its freshly constructed state. The
+defaults are stateless: capture returns an empty snapshot, restore rejects a
+non-empty one, and reset succeeds.
 
-Control dispatch uses the same plan run lock, lease exclusion, lifecycle
-snapshot, in-flight operation marker, and `rollback_error` machinery as direct
-data execution. A runner lease prevents the private direct entry from bypassing
-runner ownership.
+`OperatorStateSnapshot` carries small bounded JSON `inline_metadata` plus
+named byte `segments`. Keyed row state never appears inline (D4.4), and no
+segment may carry secrets (I4); the runtime assigns segment paths, lengths,
+and checksums during staging (D4.1).
 
-An aware handler's non-cancellation error becomes a node-scoped
-`CalcFlowError::Operator` diagnostic containing the marker kind, occurrence,
-and ingress. A cancellation returned by the handler keeps its cancellation
-classification. Cancellation observed after the handler wins over a different
-handler error.
+`StreamCollector` is the only way a stream operator emits. `emit(port,
+batch)` validates the port name, the `BatchKind`, and the optional exact
+Arrow schema against the compiled output ports, then enqueues the batch; a
+validation failure returns `CalcFlowError::Compile` before the batch reaches
+an edge, so an invalid batch never produces a downstream side effect (S5.4,
+S10.1). Control messages can never be emitted through this trait (S1.3):
+watermark, barrier, idle, and end-of-input forwarding is runtime-owned.
 
-When rollback succeeds, operator state returns to the pre-dispatch snapshot and
-the in-flight marker is cleared, so a later data or freshly minted control
-submission can run cleanly. Rollback does not erase diagnostic observations,
-undo arbitrary external side effects, compensate an already visited sibling,
-or provide cross-branch atomicity. The boundary is no stronger than the
-existing data-handler failure boundary.
+`EdgeCollector` is the runtime-owned validating `StreamCollector`. One
+collector is constructed per operator from the compiled output ports; each
+port owns an outbox, and `drain(port)` returns that port's pending messages
+in FIFO order, with an unknown port draining to empty. The in-memory outbox
+is the current backing; bounded edge channels replace the storage without
+changing this validation contract, as listed below.
 
-The private direct control entry does not read or write a checkpoint store.
-Control markers are not checkpoint data, and retry mints a new occurrence
-rather than replaying the failed occurrence.
+## Stream plan compilation
 
-## Compatibility and non-goals
+`PipelineBuilder::compile_stream` validates and consumes a graph into an
+immutable `StreamExecutionPlan`. Every stream-rule violation is reported at
+compile time, before any source opens:
 
-The internal carrier does not change:
+- multi-input (multi-alias) SQL nodes are rejected;
+- nodes offering only a batch operator are rejected;
+- delivery requirements naming an unknown graph output are rejected;
+- volatile DataFusion scalar UDFs are rejected when any output requests
+  exactly-once delivery.
 
-- the public Rust crate exports or `Operator` trait;
-- Rust or Python execution and runner signatures;
-- `Batch`, `BatchKind`, `Port`, `RunResult`, or `NodeTiming`;
-- project or checkpoint formats;
-- graph fingerprint inputs or values;
-- Python exceptions, Studio REST, OpenAPI, or generated TypeScript.
+Stream graphs compose unary expression nodes, single-input SQL nodes,
+explicit stream providers, and `UnionOperator`, whose two or more input
+ports share one kind, one required flag, and one exact schema, or are all
+schema-less.
 
-No migration is required. This capability does not claim complete continuous
-execution, watermark semantics, epoch/checkpoint semantics, cross-input global
-ordering, barrier alignment, terminal control delivery, or exactly-once
-processing.
+The compiled plan records the deterministic topology, stable edge IDs, the
+source and sink binding slots (external input and output names in
+deterministic order), the semantic fingerprint, and the per-output delivery
+requirements. It never executes directly; the continuous runner that
+executes it arrives with the runtime milestones below. Pure array graphs
+need no table engine: `requires_datafusion` reports whether any node needs
+a DataFusion session.
 
-## Downstream handoff
+`StreamRequirements` records the requested `DeliveryGuarantee` per graph
+output — `AtLeastOnce` or `ExactlyOnce`; outputs absent from the map default
+to `AtLeastOnce`. The guarantee is a per-sink contract, not a global
+property of the plan. Exactly-once delivery itself is checkpoint-protocol
+work; today the requirement is recorded in the plan and drives the
+compile-time determinism check above.
 
-### D2: continuous execution
+Two hashes describe the plan (NFR-5):
 
-Reusable internal mechanisms:
+- the semantic fingerprint covers execution mode, graph structure, operator
+  configurations, and the UDF catalog; it decides checkpoint compatibility;
+- the runtime-config hash covers `StreamRuntimeConfig` — checkpoint interval
+  and timeout, the per-edge row/byte budget, and retained epochs — and feeds
+  observability and diagnostics only, so retuning it never invalidates
+  checkpoints. Durations must be exact multiples of one microsecond, and
+  both budget limits must be positive. The defaults are a 60-second
+  checkpoint interval, a 600-second checkpoint timeout, 10,000 rows and
+  64 MiB per edge, and two retained epochs.
 
-- `RuntimeEnvelope` as a data/control carrier;
-- compiled route lookup, deterministic dispatch, fan-out, and per-edge FIFO;
-- runtime-only forwarding and the transparent/aware distinction;
-- the plan run lock, lease exclusion, lifecycle transaction, and rollback
-  boundary.
+## Delivery guarantees in the current runtime
 
-D2 still has to define source polling, bounded queues and backpressure,
-multi-source scheduling, job-level cancellation and shutdown, terminal sink
-control delivery, and the continuous lifecycle. The current
-`StreamingRunner` is a push-based sequence of already formed batch steps, not
-a continuous source-driving loop.
+The executing runners remain `MicroBatchRunner` and the push-based
+`StreamingRunner` over `BatchExecutionPlan`. Both deliver sinks before
+committing checkpoints, giving at-least-once delivery: after a failure a
+sink may observe the same batch again. The streaming runner:
 
-### D3: watermark semantics
+- requires a plan with exactly one external input and holds an exclusive
+  lease on it;
+- executes one pushed batch per `step`, writing all sinks before saving the
+  checkpoint that commits the step;
+- owns no replay cursor in push mode, so the caller retains or reconstructs
+  the batch and resubmits it after a failed step;
+- recovers once from the durable checkpoint and continues its sequence from
+  there;
+- rolls operator state back on failure, and refuses further work until
+  `reset` if a rollback itself fails to complete.
 
-Reusable internal mechanisms:
+For the stream surface, the guarantees that hold today are compile-time and
+type-level: invalid stream graphs fail before any source opens, emission
+validation fails closed before enqueue, and control construction is
+impossible outside the crate. The runtime ordering, forwarding, and
+checkpoint semantics of the specification are enforced by machinery later
+milestones add; they are listed below, not claimed here.
 
-- the private watermark marker kind and shared occurrence carrier;
-- handler-before-forward ordering;
-- target-consumption observation and deterministic fan-out failure behavior;
-- conservative multi-input fail-closed handling.
+## Ownership, visibility, and non-goals
 
-D3 still has to define the event-time value and type, monotonicity, idle-input
-handling, late data, multi-input minimum/merge rules, window interaction, and
-any public Rust, Python, or Studio surface. `ControlOccurrence` cannot be used
-as event time.
+Public: the `StreamMessage` handle and `StreamMessageKind`, the typed
+`EventTime` and `Epoch` values, `StreamJobContext` and
+`StreamOperatorContext`, the `StreamOperator` and `StreamCollector` traits,
+`OperatorStateSnapshot`, `EdgeCollector`, and the compiled plan types
+(`StreamExecutionPlan`, `StreamRequirements`, `DeliveryGuarantee`,
+`StreamRuntimeConfig`, `EdgeBudget`).
 
-### D6: epoch and checkpoint semantics
+Crate-private: the message representation and the four control constructors,
+the compiled-operator representation, and the late-row recorder.
 
-Reusable internal mechanisms:
+The envelope and its typed values do not appear in the current project or
+checkpoint document formats, the Python binding, or Studio routes. The
+durable manifest and the cross-language projections arrive with the
+milestones below.
 
-- the private epoch marker kind and shared occurrence carrier;
-- signal-aware state under the existing snapshot/restore lifecycle owner;
-- handler-before-forward ordering;
-- transaction, lease exclusion, in-flight operation, and rollback machinery.
+Non-goals:
 
-D6 still has to define epoch identity, barrier alignment, the snapshot
-boundary, marker persistence and restore, sink commit coordination, and
-exactly-once semantics. `ControlOccurrence` cannot be persisted or interpreted
-as a checkpoint epoch ID.
+- **No public runner control API.** Runners accept formed `Batch` values
+  only; no public surface injects watermarks, barriers, idle, or
+  end-of-input messages.
+- **No executable-object serialization.** Operator configurations carry
+  only `UdfReference` values — never source text, callables, or import
+  paths — and checkpoint state carries JSON metadata and byte segments,
+  never operator instances.
+- **No v2 compatibility surface.** The batch/stream split is an intentional
+  breaking change; v2 runner APIs, documents, and shims are rejected rather
+  than adapted (NG9).
+- **No payload leakage in diagnostics.** Debug output and metrics show
+  kinds and typed business values only; row payloads, metadata, and
+  attributes never appear (I4).
+
+## Specified but not yet implemented
+
+The [specification](../.codex/artifacts/specs/continuous-streaming-runtime.md)
+and the [v3 implementation plan](superpowers/plans/2026-08-02-continuous-streaming-v3.md)
+assign the following behaviors to later milestones. They are not implemented
+in the current tree, and this document does not describe them as present:
+
+- **M1.3–M1.4** — bounded edge channels with row and byte hard limits and
+  backpressure (S10), including uniform batch byte metering.
+- **M2** — production construction and runtime-owned forwarding of control
+  messages, per-edge FIFO channels, source and sink tasks, the task
+  supervisor, and the continuous runner that executes `StreamExecutionPlan`
+  (S1–S3).
+- **M3** — source watermark policies, watermark monotonicity enforcement,
+  idle declaration and reactivation, and the multi-ingress watermark minimum
+  (S5); late-data drop behavior and its metrics (D2.5).
+- **M4** — window assignment and final-only triggers (S6, D8); state
+  backends and durable segment staging (D4).
+- **M5** — barrier injection and alignment, epoch checkpoint manifests,
+  lineage recovery numbering (D9.3–D9.6), and the exactly-once sink commit
+  protocol (S7, S9).
+- **M6** — Python and Studio projections of the stream surface.

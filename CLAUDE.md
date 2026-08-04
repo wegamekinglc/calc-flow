@@ -168,10 +168,11 @@ The frontend talks to the backend over the `/api/v2` REST contract only.
 - `Batch` is the public graph/runner data envelope. Table batches contain Arrow
   record batches; external batches contain an explicitly registered provider
   payload. Raw tables and arrays never cross a graph, plan, or runner boundary.
-- The crate-private runtime-envelope implementation does not expand those
-  public boundaries or expose a runner control API. Its detailed guarantees
-  and non-goals are documented in the [internal runtime-envelope
-  contract](docs/runtime-envelope.md).
+- The stream message and context types (`StreamMessage`, `EventTime`, `Epoch`,
+  `StreamJobContext`) do not expand those public boundaries or expose a runner
+  control API; control messages are constructed only through crate-private
+  constructors. The full contract is documented in the [stream message
+  envelope](docs/runtime-envelope.md).
 - Apache DataFusion 54 is the sole table engine. Table operations accept one
   expression/projection/filter node or one read-only `SELECT`/CTE SQL node.
   DDL, DML, utility statements, multiple statements, and table backend

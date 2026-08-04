@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Vec::new(),
             )?),
         )?
-        .compile(&UdfRegistry::new().snapshot())?;
+        .compile_batch(&UdfRegistry::new().snapshot())?;
     let input = RecordBatch::try_from_iter(vec![
         (
             "a",

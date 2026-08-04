@@ -2,7 +2,9 @@ mod support;
 
 use std::sync::{Arc, Mutex, atomic::AtomicUsize};
 
-use calc_flow::{CalcFlowError, Checkpoint, CheckpointStore, SinkRouter, StreamingRunner};
+use calc_flow::{
+    BatchOperator, CalcFlowError, Checkpoint, CheckpointStore, SinkRouter, StreamingRunner,
+};
 use chrono::Utc;
 use serde_json::json;
 use support::{
@@ -176,10 +178,10 @@ async fn rollback_failure_poisons_streaming_until_successful_reset() {
                     TestOperator::transform("node", Action::Pass, Arc::clone(&probe))
                         .stateful()
                         .failing_restore(),
-                ),
+                ) as Box<dyn BatchOperator>,
             )
             .unwrap()
-            .compile(&calc_flow::UdfRegistry::new().snapshot())
+            .compile_batch(&calc_flow::UdfRegistry::new().snapshot())
             .unwrap(),
     );
     let store = Arc::new(MemoryCheckpointStore::default());

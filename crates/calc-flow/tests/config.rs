@@ -8,12 +8,12 @@ use std::{
 
 use async_trait::async_trait;
 use calc_flow::{
-    ArrowFieldSpec, Batch, BatchKind, DataFusionConfig, DataSourceSpec, Edge, EdgeSpec,
-    ExpressionOperator, ExternalOperatorFactory, ExternalOperatorSpec, JsonMap, NodeSpec, Operator,
-    OperatorContext, OperatorSpec, PROJECT_FORMAT_VERSION, PipelineBuilder, PipelineSpec, Port,
-    PortEndpoint, PortSpec, PositionSpec, ProjectSpec, ProviderRegistry, Result, RunOptions,
-    UdfKind, UdfReference, UdfRegistry, ValidationReport, compile_project, project_json_schema,
-    validate_project,
+    ArrowFieldSpec, Batch, BatchKind, BatchOperator, BatchOperatorContext, BatchOperatorFactory,
+    DataFusionConfig, DataSourceSpec, Edge, EdgeSpec, ExpressionOperator, ExternalOperatorSpec,
+    JsonMap, NodeSpec, OperatorMetadata, OperatorSpec, PROJECT_FORMAT_VERSION, PipelineBuilder,
+    PipelineSpec, Port, PortEndpoint, PortSpec, PositionSpec, ProjectSpec, ProviderRegistry,
+    Result, RunOptions, UdfKind, UdfReference, UdfRegistry, ValidationReport, compile_project,
+    project_json_schema, validate_project,
 };
 use datafusion::arrow::datatypes::DataType;
 use parking_lot::Mutex;
@@ -398,7 +398,7 @@ fn compile_expression_uses_exact_configured_ports_and_schemas() {
             ),
         )
         .unwrap()
-        .compile(&udfs)
+        .compile_batch(&udfs)
         .unwrap();
     assert_eq!(plan.fingerprint(), direct.fingerprint());
 }
@@ -430,7 +430,7 @@ fn datafusion_config_is_preserved_and_changes_the_fingerprint() {
             ),
         )
         .unwrap()
-        .compile(&udfs)
+        .compile_batch(&udfs)
         .unwrap();
     assert_eq!(changed_plan.fingerprint(), direct.fingerprint());
 }
@@ -466,7 +466,7 @@ fn direct_pipeline_compile_validates_core_datafusion_config() {
                     ),
                 )
                 .unwrap()
-                .compile(&udfs),
+                .compile_batch(&udfs),
             Err(calc_flow::CalcFlowError::InvalidArgument { field, .. })
                 if field.starts_with("datafusion.")
         ));
@@ -523,8 +523,7 @@ struct PassthroughOperator {
     outputs: Vec<Port>,
 }
 
-#[async_trait]
-impl Operator for PassthroughOperator {
+impl OperatorMetadata for PassthroughOperator {
     fn name(&self) -> &'static str {
         "external"
     }
@@ -537,10 +536,14 @@ impl Operator for PassthroughOperator {
     fn configuration(&self) -> JsonMap {
         BTreeMap::new()
     }
+}
+
+#[async_trait]
+impl BatchOperator for PassthroughOperator {
     async fn process(
         &mut self,
         inputs: &BTreeMap<String, Batch>,
-        _context: &OperatorContext<'_>,
+        _context: &BatchOperatorContext<'_>,
     ) -> Result<BTreeMap<String, Batch>> {
         Ok(inputs
             .get("input")
@@ -556,13 +559,13 @@ struct PassthroughFactory {
     seen_input: Arc<Mutex<Option<SeenPort>>>,
 }
 
-impl ExternalOperatorFactory for PassthroughFactory {
+impl BatchOperatorFactory for PassthroughFactory {
     fn create(
         &self,
         _spec: &ExternalOperatorSpec,
         inputs: Vec<Port>,
         outputs: Vec<Port>,
-    ) -> Result<Box<dyn Operator>> {
+    ) -> Result<Box<dyn BatchOperator>> {
         let input = &inputs[0];
         let field = input.schema().unwrap().field(0);
         *self.seen_input.lock() = Some((
@@ -572,7 +575,7 @@ impl ExternalOperatorFactory for PassthroughFactory {
             field.data_type().clone(),
             field.is_nullable(),
         ));
-        Ok(Box::new(PassthroughOperator { inputs, outputs }))
+        Ok(Box::new(PassthroughOperator { inputs, outputs }) as Box<dyn BatchOperator>)
     }
 }
 
@@ -580,15 +583,15 @@ struct CountingFactory {
     creations: Arc<AtomicUsize>,
 }
 
-impl ExternalOperatorFactory for CountingFactory {
+impl BatchOperatorFactory for CountingFactory {
     fn create(
         &self,
         _spec: &ExternalOperatorSpec,
         inputs: Vec<Port>,
         outputs: Vec<Port>,
-    ) -> Result<Box<dyn Operator>> {
+    ) -> Result<Box<dyn BatchOperator>> {
         self.creations.fetch_add(1, Ordering::SeqCst);
-        Ok(Box::new(PassthroughOperator { inputs, outputs }))
+        Ok(Box::new(PassthroughOperator { inputs, outputs }) as Box<dyn BatchOperator>)
     }
 }
 
@@ -596,7 +599,7 @@ impl ExternalOperatorFactory for CountingFactory {
 fn external_only_projects_ignore_unused_datafusion_configuration() {
     let (providers, udfs) = empty_registries();
     providers
-        .register(
+        .register_batch(
             "acme",
             "passthrough",
             "1",
@@ -638,7 +641,7 @@ fn semantic_validation_does_not_create_external_operators() {
     let (providers, udfs) = empty_registries();
     let creations = Arc::new(AtomicUsize::new(0));
     providers
-        .register(
+        .register_batch(
             "acme",
             "passthrough",
             "1",
@@ -710,7 +713,7 @@ fn external_nodes_require_exact_provider_and_receive_configured_ports() {
     );
     let seen_input = Arc::new(Mutex::new(None));
     providers
-        .register(
+        .register_batch(
             "acme",
             "passthrough",
             "1",

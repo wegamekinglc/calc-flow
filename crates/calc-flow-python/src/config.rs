@@ -140,7 +140,7 @@ impl PyRuntime {
         provider: &str,
         name: &str,
         version: &str,
-        factory: &Arc<dyn calc_flow::ExternalOperatorFactory>,
+        factory: &Arc<dyn calc_flow::BatchOperatorFactory>,
         root: Arc<PythonRoot>,
     ) -> PyResult<()> {
         let providers = {
@@ -151,7 +151,7 @@ impl PyRuntime {
             Arc::clone(&state.providers)
         };
         providers
-            .register(provider, name, version, Arc::clone(factory))
+            .register_batch(provider, name, version, Arc::clone(factory))
             .map_err(crate::error::to_py_err)?;
         let mut state = self.state.write();
         let state = state
@@ -273,7 +273,7 @@ impl PyRuntime {
             return Err(PyTypeError::new_err("provider callback must be callable"));
         }
         let root = Arc::new(PythonRoot::new(callback));
-        let factory: Arc<dyn calc_flow::ExternalOperatorFactory> =
+        let factory: Arc<dyn calc_flow::BatchOperatorFactory> =
             Arc::new(crate::provider::PythonOperatorFactory::new_with_context(
                 Arc::clone(&root),
                 provider,
@@ -315,7 +315,7 @@ impl PyRuntime {
             .map(|(port, kind)| mapping_port_contract(&port, &kind))
             .collect::<PyResult<Vec<_>>>()?;
         let root = Arc::new(PythonRoot::new(callback));
-        let factory: Arc<dyn calc_flow::ExternalOperatorFactory> = Arc::new(
+        let factory: Arc<dyn calc_flow::BatchOperatorFactory> = Arc::new(
             crate::provider::PythonOperatorFactory::new_mapping_with_context(
                 Arc::clone(&root),
                 provider,
@@ -498,13 +498,13 @@ mod tests {
         _callback: Arc<PythonRoot>,
     }
 
-    impl calc_flow::ExternalOperatorFactory for RootedFactory {
+    impl calc_flow::BatchOperatorFactory for RootedFactory {
         fn create(
             &self,
             _spec: &calc_flow::ExternalOperatorSpec,
             _inputs: Vec<calc_flow::Port>,
             _outputs: Vec<calc_flow::Port>,
-        ) -> calc_flow::Result<Box<dyn calc_flow::Operator>> {
+        ) -> calc_flow::Result<Box<dyn calc_flow::BatchOperator>> {
             unreachable!("the GC ownership test never compiles this provider")
         }
     }
@@ -658,10 +658,9 @@ mod tests {
                     .unwrap();
 
                 let provider_root = Arc::new(PythonRoot::new(provider.clone().unbind()));
-                let factory: Arc<dyn calc_flow::ExternalOperatorFactory> =
-                    Arc::new(RootedFactory {
-                        _callback: Arc::clone(&provider_root),
-                    });
+                let factory: Arc<dyn calc_flow::BatchOperatorFactory> = Arc::new(RootedFactory {
+                    _callback: Arc::clone(&provider_root),
+                });
                 runtime
                     .borrow(py)
                     .register_provider_factory("python", "array", "1", &factory, provider_root)
@@ -711,7 +710,7 @@ mod tests {
         Python::attach(|py| {
             let runtime = PyRuntime::new().unwrap();
             let root = Arc::new(PythonRoot::new(py.None()));
-            let factory: Arc<dyn calc_flow::ExternalOperatorFactory> = Arc::new(RootedFactory {
+            let factory: Arc<dyn calc_flow::BatchOperatorFactory> = Arc::new(RootedFactory {
                 _callback: Arc::clone(&root),
             });
             runtime
@@ -744,10 +743,9 @@ mod tests {
         Python::attach(|py| {
             let runtime = Py::new(py, PyRuntime::new().unwrap()).unwrap();
             let inert_provider = Arc::new(PythonRoot::new(py.None()));
-            let inert_factory: Arc<dyn calc_flow::ExternalOperatorFactory> =
-                Arc::new(RootedFactory {
-                    _callback: Arc::clone(&inert_provider),
-                });
+            let inert_factory: Arc<dyn calc_flow::BatchOperatorFactory> = Arc::new(RootedFactory {
+                _callback: Arc::clone(&inert_provider),
+            });
             runtime
                 .borrow(py)
                 .register_provider_factory("python", "array", "1", &inert_factory, inert_provider)
@@ -784,7 +782,7 @@ mod tests {
 
             let provider_callback = callback_type.call1((runtime.bind(py),)).unwrap();
             let provider_root = Arc::new(PythonRoot::new(provider_callback.unbind()));
-            let rejected_factory: Arc<dyn calc_flow::ExternalOperatorFactory> =
+            let rejected_factory: Arc<dyn calc_flow::BatchOperatorFactory> =
                 Arc::new(RootedFactory {
                     _callback: Arc::clone(&provider_root),
                 });

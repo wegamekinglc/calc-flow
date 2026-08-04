@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 
 use crate::operator::expression_query;
 use crate::{
-    BatchKind, CalcFlowError, DataFusionConfig, Edge, ExecutionPlan, ExpressionOperator,
-    ExternalOperatorSpec, JsonMap, OperatorDefinition, PipelineBuilder, Port, PortEndpoint,
+    BatchExecutionPlan, BatchKind, CalcFlowError, DataFusionConfig, Edge, ExpressionOperator,
+    ExternalOperatorSpec, JsonMap, NodeOperator, PipelineBuilder, Port, PortEndpoint,
     ProviderRegistry, Result, SqlOperator, UdfKind, UdfReference, UdfRegistrySnapshot,
     validate_selected_udfs,
 };
@@ -241,7 +241,7 @@ pub fn compile_project(
     project: &ProjectSpec,
     providers: &ProviderRegistry,
     udfs: &UdfRegistrySnapshot,
-) -> Result<ExecutionPlan> {
+) -> Result<BatchExecutionPlan> {
     let issues = semantic_issues(project, providers, udfs);
     if let Some(first) = issues.first() {
         return Err(validation_error(first));
@@ -259,7 +259,7 @@ fn build_project(
     project: &ProjectSpec,
     providers: &ProviderRegistry,
     udfs: &UdfRegistrySnapshot,
-) -> Result<ExecutionPlan> {
+) -> Result<BatchExecutionPlan> {
     let mut builder = PipelineBuilder::new(&project.pipeline.name)?
         .with_datafusion_config(project.pipeline.datafusion);
     for node in &project.pipeline.nodes {
@@ -274,7 +274,7 @@ fn build_project(
             } => {
                 let (inputs, outputs) =
                     builtin_ports(inputs, outputs, &["input"], &["output"], BatchKind::Table)?;
-                OperatorDefinition::Expression(
+                NodeOperator::Expression(
                     ExpressionOperator::new(
                         &node.id,
                         expression,
@@ -296,7 +296,7 @@ fn build_project(
                 let expected = aliases.iter().map(String::as_str).collect::<Vec<_>>();
                 let (inputs, outputs) =
                     builtin_ports(inputs, outputs, &expected, &["output"], BatchKind::Table)?;
-                OperatorDefinition::Sql(
+                NodeOperator::Sql(
                     SqlOperator::new(&node.id, query, aliases.clone(), references.clone())?
                         .with_ports(inputs, outputs.into_iter().next().unwrap())?,
                 )
@@ -308,9 +308,9 @@ fn build_project(
                 options,
             } => {
                 let spec = ExternalOperatorSpec::new(provider, name, version, options.clone())?;
-                OperatorDefinition::External(
+                NodeOperator::Batch(
                     providers
-                        .resolve(provider, name, version)?
+                        .resolve_batch(provider, name, version)?
                         .create(&spec, inputs, outputs)?,
                 )
             }
@@ -323,7 +323,7 @@ fn build_project(
             PortEndpoint::new(&edge.target_node, &edge.target_port)?,
         ))?;
     }
-    builder.compile(udfs)
+    builder.compile_batch(udfs)
 }
 
 fn configured_ports(node: &NodeSpec, inputs: bool) -> Result<Vec<Port>> {
@@ -572,7 +572,7 @@ fn validate_operator(
         } => {
             match ExternalOperatorSpec::new(provider, name, version, BTreeMap::new()) {
                 Ok(_) => {
-                    if providers.resolve(provider, name, version).is_err() {
+                    if providers.resolve_batch(provider, name, version).is_err() {
                         issues.push(issue(
                             &base,
                             "missing_provider",
@@ -800,7 +800,7 @@ fn validate_sources(project: &ProjectSpec, issues: &mut Vec<ValidationIssue>) {
 
 fn validate_source_coverage(
     project: &ProjectSpec,
-    plan: &ExecutionPlan,
+    plan: &BatchExecutionPlan,
     issues: &mut Vec<ValidationIssue>,
 ) {
     let expected = plan.external_inputs().keys().collect::<BTreeSet<_>>();

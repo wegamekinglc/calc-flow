@@ -15,7 +15,7 @@ const CLEARED_PLAN_MESSAGE: &str = "ExecutionPlan has been cleared by garbage co
 const CLEARED_RESULT_MESSAGE: &str = "RunResult has been cleared by garbage collection";
 
 struct PlanState {
-    inner: Arc<calc_flow::ExecutionPlan>,
+    inner: Arc<calc_flow::BatchExecutionPlan>,
     tokio: Arc<tokio::runtime::Runtime>,
     owners: Vec<Py<PyAny>>,
     roots: Vec<Arc<crate::config::PythonRoot>>,
@@ -26,7 +26,7 @@ struct PlanState {
 /// Tasks that retain or execute the core plan must retain this whole value. A
 /// Python class storing it must report [`Self::owner`] from `__traverse__`.
 pub(crate) struct ExecutionPlanOwner {
-    inner: Arc<calc_flow::ExecutionPlan>,
+    inner: Arc<calc_flow::BatchExecutionPlan>,
     tokio: Arc<tokio::runtime::Runtime>,
     owner: Py<PyAny>,
 }
@@ -36,7 +36,7 @@ impl ExecutionPlanOwner {
         dead_code,
         reason = "Task 20 passes the owned core plan to native runner construction"
     )]
-    pub(crate) const fn inner(&self) -> &Arc<calc_flow::ExecutionPlan> {
+    pub(crate) const fn inner(&self) -> &Arc<calc_flow::BatchExecutionPlan> {
         &self.inner
     }
 
@@ -68,7 +68,7 @@ impl PyExecutionPlan {
         reason = "Task 20 can wrap a core plan while preserving explicit Python GC roots"
     )]
     pub(crate) fn new(
-        inner: Arc<calc_flow::ExecutionPlan>,
+        inner: Arc<calc_flow::BatchExecutionPlan>,
         tokio: Arc<tokio::runtime::Runtime>,
         roots: Vec<Arc<crate::config::PythonRoot>>,
     ) -> Self {
@@ -83,7 +83,7 @@ impl PyExecutionPlan {
     }
 
     pub(crate) fn new_with_owner(
-        inner: Arc<calc_flow::ExecutionPlan>,
+        inner: Arc<calc_flow::BatchExecutionPlan>,
         tokio: Arc<tokio::runtime::Runtime>,
         owner: Py<PyAny>,
     ) -> Self {
@@ -99,7 +99,10 @@ impl PyExecutionPlan {
 
     fn execution_handles(
         &self,
-    ) -> PyResult<(Arc<calc_flow::ExecutionPlan>, Arc<tokio::runtime::Runtime>)> {
+    ) -> PyResult<(
+        Arc<calc_flow::BatchExecutionPlan>,
+        Arc<tokio::runtime::Runtime>,
+    )> {
         let state = self.state.read();
         let state = state
             .as_ref()
@@ -448,8 +451,7 @@ mod tests {
         outputs: Vec<calc_flow::Port>,
     }
 
-    #[async_trait]
-    impl calc_flow::Operator for RootedPassthrough {
+    impl calc_flow::OperatorMetadata for RootedPassthrough {
         fn name(&self) -> &'static str {
             "passthrough"
         }
@@ -465,11 +467,14 @@ mod tests {
         fn configuration(&self) -> calc_flow::JsonMap {
             BTreeMap::new()
         }
+    }
 
+    #[async_trait]
+    impl calc_flow::BatchOperator for RootedPassthrough {
         async fn process(
             &mut self,
             inputs: &BTreeMap<String, calc_flow::Batch>,
-            _context: &calc_flow::OperatorContext<'_>,
+            _context: &calc_flow::BatchOperatorContext<'_>,
         ) -> calc_flow::Result<BTreeMap<String, calc_flow::Batch>> {
             Ok(BTreeMap::from([("output".into(), inputs["input"].clone())]))
         }
@@ -508,8 +513,7 @@ mod tests {
         output: Vec<calc_flow::Port>,
     }
 
-    #[async_trait]
-    impl calc_flow::Operator for GatedPythonPassthrough {
+    impl calc_flow::OperatorMetadata for GatedPythonPassthrough {
         fn name(&self) -> &'static str {
             "python_gate"
         }
@@ -525,11 +529,14 @@ mod tests {
         fn configuration(&self) -> calc_flow::JsonMap {
             BTreeMap::new()
         }
+    }
 
+    #[async_trait]
+    impl calc_flow::BatchOperator for GatedPythonPassthrough {
         async fn process(
             &mut self,
             inputs: &BTreeMap<String, calc_flow::Batch>,
-            _context: &calc_flow::OperatorContext<'_>,
+            _context: &calc_flow::BatchOperatorContext<'_>,
         ) -> calc_flow::Result<BTreeMap<String, calc_flow::Batch>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.started.notify_one();
@@ -556,8 +563,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
-    impl calc_flow::Operator for GatedPassthrough {
+    impl calc_flow::OperatorMetadata for GatedPassthrough {
         fn name(&self) -> &'static str {
             "gate"
         }
@@ -573,11 +579,14 @@ mod tests {
         fn configuration(&self) -> calc_flow::JsonMap {
             BTreeMap::new()
         }
+    }
 
+    #[async_trait]
+    impl calc_flow::BatchOperator for GatedPassthrough {
         async fn process(
             &mut self,
             inputs: &BTreeMap<String, calc_flow::Batch>,
-            _context: &calc_flow::OperatorContext<'_>,
+            _context: &calc_flow::BatchOperatorContext<'_>,
         ) -> calc_flow::Result<BTreeMap<String, calc_flow::Batch>> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 self.started.notify_one();
@@ -587,8 +596,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
-    impl calc_flow::Operator for StatefulGatedPassthrough {
+    impl calc_flow::OperatorMetadata for StatefulGatedPassthrough {
         fn name(&self) -> &'static str {
             "stateful_gate"
         }
@@ -604,11 +612,14 @@ mod tests {
         fn configuration(&self) -> calc_flow::JsonMap {
             BTreeMap::new()
         }
+    }
 
+    #[async_trait]
+    impl calc_flow::BatchOperator for StatefulGatedPassthrough {
         async fn process(
             &mut self,
             inputs: &BTreeMap<String, calc_flow::Batch>,
-            _context: &calc_flow::OperatorContext<'_>,
+            _context: &calc_flow::BatchOperatorContext<'_>,
         ) -> calc_flow::Result<BTreeMap<String, calc_flow::Batch>> {
             self.baselines.lock().push(self.state);
             self.state += 1;
@@ -635,8 +646,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
-    impl calc_flow::Operator for CountingPassthrough {
+    impl calc_flow::OperatorMetadata for CountingPassthrough {
         fn name(&self) -> &'static str {
             "downstream"
         }
@@ -652,11 +662,14 @@ mod tests {
         fn configuration(&self) -> calc_flow::JsonMap {
             BTreeMap::new()
         }
+    }
 
+    #[async_trait]
+    impl calc_flow::BatchOperator for CountingPassthrough {
         async fn process(
             &mut self,
             inputs: &BTreeMap<String, calc_flow::Batch>,
-            _context: &calc_flow::OperatorContext<'_>,
+            _context: &calc_flow::BatchOperatorContext<'_>,
         ) -> calc_flow::Result<BTreeMap<String, calc_flow::Batch>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(BTreeMap::from([("output".into(), inputs["input"].clone())]))
@@ -729,7 +742,7 @@ mod tests {
                 ),
             )
             .unwrap()
-            .compile(&udfs)
+            .compile_batch(&udfs)
             .unwrap();
         PyExecutionPlan::new(
             Arc::new(plan),
@@ -741,7 +754,7 @@ mod tests {
     fn rooted_plan(
         root: Arc<crate::config::PythonRoot>,
         kind: calc_flow::BatchKind,
-    ) -> Arc<calc_flow::ExecutionPlan> {
+    ) -> Arc<calc_flow::BatchExecutionPlan> {
         let input = calc_flow::Port::new("input", kind, true, None).unwrap();
         let output = calc_flow::Port::new("output", kind, true, None).unwrap();
         Arc::new(
@@ -753,10 +766,10 @@ mod tests {
                         _callback: root,
                         inputs: vec![input],
                         outputs: vec![output],
-                    }),
+                    }) as Box<dyn calc_flow::BatchOperator>,
                 )
                 .unwrap()
-                .compile(&calc_flow::UdfRegistry::new().snapshot())
+                .compile_batch(&calc_flow::UdfRegistry::new().snapshot())
                 .unwrap(),
         )
     }
@@ -767,7 +780,7 @@ mod tests {
         release: Arc<tokio::sync::Notify>,
         calls: Arc<AtomicUsize>,
         validations: Arc<AtomicUsize>,
-    ) -> Arc<calc_flow::ExecutionPlan> {
+    ) -> Arc<calc_flow::BatchExecutionPlan> {
         let input = calc_flow::Port::new("input", calc_flow::BatchKind::Array, true, None).unwrap();
         let output =
             calc_flow::Port::new("output", calc_flow::BatchKind::Array, true, None).unwrap();
@@ -784,10 +797,10 @@ mod tests {
                         validations,
                         input: vec![input],
                         output: vec![output],
-                    }),
+                    }) as Box<dyn calc_flow::BatchOperator>,
                 )
                 .unwrap()
-                .compile(&calc_flow::UdfRegistry::new().snapshot())
+                .compile_batch(&calc_flow::UdfRegistry::new().snapshot())
                 .unwrap(),
         )
     }
@@ -798,7 +811,7 @@ mod tests {
         calls: Arc<AtomicUsize>,
         baselines: Arc<Mutex<Vec<usize>>>,
         downstream_calls: Arc<AtomicUsize>,
-    ) -> Arc<calc_flow::ExecutionPlan> {
+    ) -> Arc<calc_flow::BatchExecutionPlan> {
         let gate_input =
             calc_flow::Port::new("input", calc_flow::BatchKind::Table, true, None).unwrap();
         let gate_output =
@@ -820,7 +833,7 @@ mod tests {
                         state: 0,
                         input: vec![gate_input],
                         output: vec![gate_output],
-                    }),
+                    }) as Box<dyn calc_flow::BatchOperator>,
                 )
                 .unwrap()
                 .add_node(
@@ -829,7 +842,7 @@ mod tests {
                         calls: downstream_calls,
                         input: vec![downstream_input],
                         output: vec![downstream_output],
-                    }),
+                    }) as Box<dyn calc_flow::BatchOperator>,
                 )
                 .unwrap()
                 .connect(calc_flow::Edge::new(
@@ -837,7 +850,7 @@ mod tests {
                     calc_flow::PortEndpoint::new("downstream", "input").unwrap(),
                 ))
                 .unwrap()
-                .compile(&calc_flow::UdfRegistry::new().snapshot())
+                .compile_batch(&calc_flow::UdfRegistry::new().snapshot())
                 .unwrap(),
         )
     }
@@ -1443,10 +1456,10 @@ mod tests {
                         calls: Arc::clone(&calls),
                         input: vec![input],
                         output: vec![output],
-                    }),
+                    }) as Box<dyn calc_flow::BatchOperator>,
                 )
                 .unwrap()
-                .compile(&calc_flow::UdfRegistry::new().snapshot())
+                .compile_batch(&calc_flow::UdfRegistry::new().snapshot())
                 .unwrap();
             let locals = PyDict::new(py);
             locals
