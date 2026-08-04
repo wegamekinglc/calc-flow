@@ -169,8 +169,9 @@ struct Shared {
 /// reservations; the `high_water_*` fields are their monotone maxima and
 /// never regress. `blocked_sends` counts sends that had to await capacity at
 /// least once, and `blocked_duration` accumulates the time those sends spent
-/// waiting. A send cancelled while it waits still increments `blocked_sends`
-/// but contributes nothing to `blocked_duration`, which only accumulates
+/// waiting. A send that is cancelled, or that is woken by receiver
+/// close/drop, while it waits still increments `blocked_sends` but
+/// contributes nothing to `blocked_duration`, which only accumulates
 /// when a blocked send eventually enqueues. Snapshots are consistent: every
 /// field is read under one lock.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -348,7 +349,10 @@ impl EdgeSender {
                 }
                 if fits(&state.charged, &cost, &self.shared.budget) {
                     state.charged = state.charged.checked_add(&cost).map_err(|error| {
-                        // Unreachable: `fits` proved the sum cannot overflow.
+                        // `fits` rejected every rows/bytes sum that could
+                        // overflow, so only the `messages` component could
+                        // fail here; that needs `usize::MAX` enqueues, which
+                        // is structurally unreachable but still checked.
                         CalcFlowError::Internal {
                             message: format!(
                                 "edge {:?} charge overflowed after a successful capacity check: {error}",
