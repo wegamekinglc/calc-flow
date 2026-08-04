@@ -1,3 +1,18 @@
+//! Semantic allocation-regression harness for the calc-flow hot paths.
+//!
+//! Provenance model: a comparable report requires a clean worktree,
+//! byte-identical frozen files (`Cargo.lock`, the crate manifest, this
+//! harness), an identical toolchain, and the pinned `allocation-counter`.
+//! The pre-M1 anchor (product `2ac7e97`, harness `fe34d7d`) is a reference
+//! point only: per the M0.3 handoff
+//! (docs/superpowers/handoffs/2026-08-02-continuous-streaming-v3-baseline.md,
+//! section 6), milestone M1 rewrote this harness and the v3 allocation
+//! baseline MUST be re-established from the rewritten harness, never
+//! grandfathered. Comparability between two reports therefore rests on
+//! identical frozen-file hashes, toolchain evidence, workload fingerprints,
+//! and the fixed measurement scale - not on ancestry to the retired pre-M1
+//! anchor. Schema v1 reports (which name the retired anchor) are rejected.
+
 use std::{
     any::Any,
     collections::{BTreeMap, BTreeSet},
@@ -16,17 +31,17 @@ use allocation_counter::{AllocationInfo, measure};
 use async_trait::async_trait;
 use calc_flow::{
     Batch, BatchKind, BatchMetadata, BatchOperator, BatchOperatorContext, CalcFlowError,
-    DataFusionConfig, Edge, ExecutionOptions, ExpressionOperator, ExternalPayload, JsonMap,
-    OperatorMetadata, PipelineBuilder, Port, PortEndpoint, RunResult, SqlOperator, UdfRegistry,
+    DataFusionConfig, Edge, EdgeBudget, EdgeReceiver, EdgeSender, ExecutionOptions,
+    ExpressionOperator, ExternalPayload, JsonMap, OperatorMetadata, PipelineBuilder, Port,
+    PortEndpoint, RunResult, SqlOperator, StreamMessage, UdfRegistry, edge_channel,
 };
 use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const FIXED_BASELINE_SHA: &str = "2ac7e97c1549baf0e97849d5823f65e7dd298e99";
 const ALLOCATION_COUNTER_CHECKSUM: &str =
     "beb9e990c0a33699f1984d85a6abead615ccc72dd8130bf3e15dcabe2ca149c9";
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const FIXED_WARMUP_DISPATCHES: u64 = 1_000;
 const FIXED_MEASURED_DISPATCHES: u64 = 10_000;
 const FIXED_REPETITIONS: usize = 10;
@@ -70,6 +85,16 @@ impl Role {
             ))),
         }
     }
+}
+
+/// The workload shape of one fixed case.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CaseKind {
+    /// One `BatchExecutionPlan::execute` dispatch over the fixed input.
+    PlanDispatch,
+    /// One send + receive round trip per edge of an M1.4 edge channel.
+    ChannelRoundTrip,
 }
 
 #[derive(Debug)]
@@ -183,6 +208,19 @@ struct NormalizedAllocationInfo {
     bytes_per_node_dispatch: f64,
 }
 
+/// The workload identity of a channel round-trip case: the edge
+/// identities, the dual-limit budget, and the fixed input's M1.3 cost.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ChannelWorkload {
+    edge_ids: Vec<String>,
+    max_rows: usize,
+    max_bytes: usize,
+    input_kind: String,
+    input_rows: usize,
+    input_estimated_bytes: usize,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RepetitionReport {
@@ -207,8 +245,12 @@ struct RepetitionReport {
 struct CaseReport {
     name: String,
     payload: String,
+    kind: CaseKind,
     workload_fingerprint: String,
-    plan_fingerprint: String,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    plan_fingerprint: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    channel_workload: Option<ChannelWorkload>,
     compiled_node_count: usize,
     compiled_operator_variants: Vec<String>,
     configured_datafusion: DataFusionConfig,
@@ -237,7 +279,6 @@ struct AllocationReport {
     #[serde(deserialize_with = "deserialize_required_option")]
     invalid_reason: Option<String>,
     product_sha: String,
-    fixed_baseline_sha: String,
     harness_commit_sha: String,
     frozen_files: FrozenFileEvidence,
     git_status_short: String,
@@ -293,6 +334,10 @@ impl ExternalPayload for BenchmarkExternalPayload {
 
     fn len(&self) -> usize {
         self.rows
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        self.rows.saturating_mul(8)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -368,14 +413,25 @@ impl OutputExpectation {
     }
 }
 
+/// The live handles of one channel round-trip case: one M1.4 edge channel
+/// per edge, reused across warm-up and measured dispatches so the measured
+/// allocation profile is the steady-state send/receive path.
+struct ChannelFixture {
+    senders: Vec<EdgeSender>,
+    receivers: Vec<EdgeReceiver>,
+}
+
 struct PreparedCase {
+    kind: CaseKind,
     name: &'static str,
     payload: &'static str,
     logical_variants: &'static [&'static str],
     expected_node_count: usize,
     expected_metric_node: Option<&'static str>,
     expectation: OutputExpectation,
-    plan: calc_flow::BatchExecutionPlan,
+    plan: Option<calc_flow::BatchExecutionPlan>,
+    channel: Option<ChannelFixture>,
+    channel_workload: Option<ChannelWorkload>,
     input_name: String,
     terminal_outputs: Vec<String>,
     input: Batch,
@@ -436,18 +492,103 @@ impl PreparedCase {
             plan.fingerprint(),
         )?;
         Ok(Self {
+            kind: CaseKind::PlanDispatch,
             name,
             payload,
             logical_variants,
             expected_node_count,
             expected_metric_node,
             expectation,
-            plan,
+            plan: Some(plan),
+            channel: None,
+            channel_workload: None,
             input_name: input_names.into_iter().next().expect("length checked"),
             terminal_outputs,
             input,
             workload_fingerprint,
         })
+    }
+
+    /// Builds a channel round-trip case: one edge channel per edge ID with
+    /// the dual-limit budget, charged by the M1.4 `EnvelopeCost` path on
+    /// every send.
+    fn channel(
+        name: &'static str,
+        payload: &'static str,
+        logical_variants: &'static [&'static str],
+        expectation: OutputExpectation,
+        edge_ids: &[&str],
+        budget: EdgeBudget,
+        input: Batch,
+    ) -> HarnessResult<Self> {
+        let expected_node_count = logical_variants.len();
+        if edge_ids.len() != expected_node_count {
+            return Err(HarnessError(format!(
+                "{name}: expected {expected_node_count} edges, got {}",
+                edge_ids.len()
+            )));
+        }
+        let cost_bytes = input.estimated_bytes().map_err(harness_error)?;
+        if input.num_rows() > budget.max_rows || cost_bytes > budget.max_bytes {
+            return Err(HarnessError(format!(
+                "{name}: the fixed input must fit the edge budget"
+            )));
+        }
+        let mut senders = Vec::with_capacity(edge_ids.len());
+        let mut receivers = Vec::with_capacity(edge_ids.len());
+        for edge_id in edge_ids {
+            let (sender, receiver) = edge_channel(*edge_id, budget).map_err(harness_error)?;
+            senders.push(sender);
+            receivers.push(receiver);
+        }
+        let edge_ids = edge_ids
+            .iter()
+            .map(|id| (*id).to_owned())
+            .collect::<Vec<_>>();
+        let workload = ChannelWorkload {
+            edge_ids: edge_ids.clone(),
+            max_rows: budget.max_rows,
+            max_bytes: budget.max_bytes,
+            input_kind: format!("{:?}", input.kind()),
+            input_rows: input.num_rows(),
+            input_estimated_bytes: cost_bytes,
+        };
+        let workload_fingerprint =
+            channel_workload_fingerprint(name, payload, expectation.description(), &workload)?;
+        Ok(Self {
+            kind: CaseKind::ChannelRoundTrip,
+            name,
+            payload,
+            logical_variants,
+            expected_node_count,
+            expected_metric_node: None,
+            expectation,
+            plan: None,
+            channel: Some(ChannelFixture { senders, receivers }),
+            channel_workload: Some(workload),
+            input_name: String::new(),
+            terminal_outputs: Vec::new(),
+            input,
+            workload_fingerprint,
+        })
+    }
+
+    fn plan_fingerprint(&self) -> Option<&str> {
+        self.plan
+            .as_ref()
+            .map(calc_flow::BatchExecutionPlan::fingerprint)
+    }
+
+    fn requires_datafusion(&self) -> bool {
+        self.plan
+            .as_ref()
+            .is_some_and(calc_flow::BatchExecutionPlan::requires_datafusion)
+    }
+
+    fn compiled_datafusion(&self) -> Option<DataFusionConfig> {
+        self.plan
+            .as_ref()
+            .and_then(calc_flow::BatchExecutionPlan::datafusion_config)
     }
 }
 
@@ -650,7 +791,63 @@ fn build_cases() -> HarnessResult<Vec<PreparedCase>> {
         external_table_three_way_fan_out()?,
         builtin_expression_one_node()?,
         builtin_sql_one_node()?,
+        edge_channel_table_round_trip()?,
+        edge_channel_external_round_trip()?,
+        edge_channel_fan_out_round_trip()?,
     ])
+}
+
+/// The fixed channel budget: generous enough that one in-flight message per
+/// edge never blocks, so the measured path is reserve -> enqueue -> dequeue
+/// -> release, not the backpressure wait path.
+const CHANNEL_BENCH_BUDGET: EdgeBudget = EdgeBudget {
+    max_rows: 1_024,
+    max_bytes: 1 << 20,
+};
+
+fn edge_channel_table_round_trip() -> HarnessResult<PreparedCase> {
+    PreparedCase::channel(
+        "edge_channel_table_round_trip",
+        "Arrow table value=0..63, one edge",
+        &["EdgeChannel"],
+        OutputExpectation::TableIdentity,
+        &["bench_source.output->bench_sink.input"],
+        CHANNEL_BENCH_BUDGET,
+        table_input()?,
+    )
+}
+
+fn edge_channel_external_round_trip() -> HarnessResult<PreparedCase> {
+    let input = Batch::external(
+        Arc::new(BenchmarkExternalPayload { rows: 1_000 }),
+        BatchMetadata::default(),
+    )
+    .map_err(harness_error)?;
+    PreparedCase::channel(
+        "edge_channel_external_round_trip",
+        "external payload, 1000 rows, one edge",
+        &["EdgeChannel"],
+        OutputExpectation::ExternalPayloadIdentity,
+        &["bench_source.output->bench_sink.input"],
+        CHANNEL_BENCH_BUDGET,
+        input,
+    )
+}
+
+fn edge_channel_fan_out_round_trip() -> HarnessResult<PreparedCase> {
+    PreparedCase::channel(
+        "edge_channel_fan_out_round_trip",
+        "Arrow table value=0..63, three fan-out edges",
+        &["EdgeChannel", "EdgeChannel", "EdgeChannel"],
+        OutputExpectation::TableIdentity,
+        &[
+            "bench_root.output->bench_leaf_a.input",
+            "bench_root.output->bench_leaf_b.input",
+            "bench_root.output->bench_leaf_c.input",
+        ],
+        CHANNEL_BENCH_BUDGET,
+        table_input()?,
+    )
 }
 
 fn external_payload_one_node() -> HarnessResult<PreparedCase> {
@@ -818,10 +1015,39 @@ fn workload_fingerprint(
     Ok(hex::encode(Sha256::digest(descriptor)))
 }
 
+/// Hashes the channel round-trip workload identity: the edges, the
+/// dual-limit budget, and the fixed input's kind/rows/estimated bytes (a
+/// metering change shifts the fingerprint).
+fn channel_workload_fingerprint(
+    name: &str,
+    payload: &str,
+    output_assertion: &str,
+    workload: &ChannelWorkload,
+) -> HarnessResult<String> {
+    let descriptor = serde_json::to_vec(&serde_json::json!({
+        "name": name,
+        "payload": payload,
+        "kind": "channel_round_trip",
+        "edge_ids": workload.edge_ids,
+        "edge_budget": {
+            "max_rows": workload.max_rows,
+            "max_bytes": workload.max_bytes,
+        },
+        "input": {
+            "kind": workload.input_kind,
+            "rows": workload.input_rows,
+            "estimated_bytes": workload.input_estimated_bytes,
+        },
+        "output_assertion": output_assertion,
+    }))
+    .map_err(harness_error)?;
+    Ok(hex::encode(Sha256::digest(descriptor)))
+}
+
 fn run_measurement(options: &MeasureOptions) -> HarnessResult<()> {
     validate_measurement_scale(options)?;
-    let provenance = collect_provenance(options.role)?;
-    let cases = build_cases()?;
+    let provenance = collect_provenance()?;
+    let mut cases = build_cases()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -832,7 +1058,7 @@ fn run_measurement(options: &MeasureOptions) -> HarnessResult<()> {
     let mut case_reports = Vec::with_capacity(cases.len());
     let mut invalid_reason = None;
 
-    for case in &cases {
+    for case in &mut cases {
         let report = measure_case(
             case,
             &runtime,
@@ -850,7 +1076,7 @@ fn run_measurement(options: &MeasureOptions) -> HarnessResult<()> {
 
     let valid = invalid_reason.is_none() && case_reports.len() == cases.len();
     if !valid && invalid_reason.is_none() {
-        invalid_reason = Some("not all five fixed cases completed".into());
+        invalid_reason = Some("not all fixed cases completed".into());
     }
     let report = AllocationReport {
         schema_version: SCHEMA_VERSION,
@@ -858,7 +1084,6 @@ fn run_measurement(options: &MeasureOptions) -> HarnessResult<()> {
         valid,
         invalid_reason: invalid_reason.clone(),
         product_sha: provenance.product_sha,
-        fixed_baseline_sha: FIXED_BASELINE_SHA.into(),
         harness_commit_sha: provenance.harness_commit_sha,
         frozen_files: provenance.frozen_files,
         git_status_short: provenance.git_status_short,
@@ -919,7 +1144,7 @@ struct Provenance {
     environment: EnvironmentEvidence,
 }
 
-fn collect_provenance(role: Role) -> HarnessResult<Provenance> {
+fn collect_provenance() -> HarnessResult<Provenance> {
     let repo_root = PathBuf::from(command_output("git", &["rev-parse", "--show-toplevel"])?);
     let head = command_output_in(&repo_root, "git", &["rev-parse", "HEAD"])?;
     let git_status_short = command_output_in(&repo_root, "git", &["status", "--short"])?;
@@ -928,6 +1153,9 @@ fn collect_provenance(role: Role) -> HarnessResult<Provenance> {
             "tracked worktree must be clean before measurement, status: {git_status_short:?}"
         )));
     }
+    // Evidence only: the last commit that touched the frozen files. The
+    // comparability lock is the byte-identical frozen-file hashes below,
+    // never ancestry to the retired pre-M1 anchor.
     let harness_commit_sha = command_output_in(
         &repo_root,
         "git",
@@ -945,38 +1173,6 @@ fn collect_provenance(role: Role) -> HarnessResult<Provenance> {
         return Err(HarnessError(
             "could not resolve the harness-only commit".into(),
         ));
-    }
-    command_output_in(
-        &repo_root,
-        "git",
-        &[
-            "merge-base",
-            "--is-ancestor",
-            FIXED_BASELINE_SHA,
-            &harness_commit_sha,
-        ],
-    )?;
-    command_output_in(
-        &repo_root,
-        "git",
-        &["merge-base", "--is-ancestor", &harness_commit_sha, &head],
-    )?;
-    let changed = command_output_in(
-        &repo_root,
-        "git",
-        &[
-            "diff",
-            "--name-only",
-            FIXED_BASELINE_SHA,
-            &harness_commit_sha,
-        ],
-    )?;
-    let actual = changed.lines().collect::<BTreeSet<_>>();
-    let expected = FROZEN_FILES.into_iter().collect::<BTreeSet<_>>();
-    if actual != expected || (role == Role::Baseline && head != harness_commit_sha) {
-        return Err(HarnessError(format!(
-            "harness must descend from the fixed product SHA and change exactly the three frozen files; changed={actual:?}, head={head}, harness={harness_commit_sha}, role={role:?}"
-        )));
     }
 
     let rustc_vv = command_output("rustc", &["-Vv"])?;
@@ -1003,10 +1199,7 @@ fn collect_provenance(role: Role) -> HarnessResult<Provenance> {
     };
     Ok(Provenance {
         repo_root,
-        product_sha: match role {
-            Role::Baseline => FIXED_BASELINE_SHA.into(),
-            Role::Candidate => head,
-        },
+        product_sha: head,
         harness_commit_sha,
         frozen_files,
         git_status_short,
@@ -1109,7 +1302,7 @@ fn power_supplies() -> Vec<PowerSupplyEvidence> {
 }
 
 fn measure_case(
-    case: &PreparedCase,
+    case: &mut PreparedCase,
     runtime: &tokio::runtime::Runtime,
     expected_thread: thread::ThreadId,
     measurement_thread_label: &str,
@@ -1191,8 +1384,10 @@ fn measure_case(
     CaseReport {
         name: case.name.into(),
         payload: case.payload.into(),
+        kind: case.kind,
         workload_fingerprint: case.workload_fingerprint.clone(),
-        plan_fingerprint: case.plan.fingerprint().into(),
+        plan_fingerprint: case.plan_fingerprint().map(str::to_owned),
+        channel_workload: case.channel_workload.clone(),
         compiled_node_count: case.expected_node_count,
         compiled_operator_variants: case
             .logical_variants
@@ -1200,8 +1395,8 @@ fn measure_case(
             .map(|variant| (*variant).to_owned())
             .collect(),
         configured_datafusion: DATAFUSION_CONFIG,
-        compiled_datafusion: case.plan.datafusion_config(),
-        requires_datafusion: case.plan.requires_datafusion(),
+        compiled_datafusion: case.compiled_datafusion(),
+        requires_datafusion: case.requires_datafusion(),
         metric_assertion: metric_assertion_description(case.expected_metric_node),
         output_assertion: case.expectation.description().into(),
         warmup_dispatches: options.warmup_dispatches,
@@ -1223,8 +1418,10 @@ fn invalid_case_report(
     CaseReport {
         name: case.name.into(),
         payload: case.payload.into(),
+        kind: case.kind,
         workload_fingerprint: case.workload_fingerprint.clone(),
-        plan_fingerprint: case.plan.fingerprint().into(),
+        plan_fingerprint: case.plan_fingerprint().map(str::to_owned),
+        channel_workload: case.channel_workload.clone(),
         compiled_node_count: case.expected_node_count,
         compiled_operator_variants: case
             .logical_variants
@@ -1232,8 +1429,8 @@ fn invalid_case_report(
             .map(|variant| (*variant).to_owned())
             .collect(),
         configured_datafusion: DATAFUSION_CONFIG,
-        compiled_datafusion: case.plan.datafusion_config(),
-        requires_datafusion: case.plan.requires_datafusion(),
+        compiled_datafusion: case.compiled_datafusion(),
+        requires_datafusion: case.requires_datafusion(),
         metric_assertion: metric_assertion_description(case.expected_metric_node),
         output_assertion: case.expectation.description().into(),
         warmup_dispatches: options.warmup_dispatches,
@@ -1255,15 +1452,21 @@ fn metric_assertion_description(expected_metric_node: Option<&str>) -> String {
 }
 
 async fn dispatch_once(
-    case: &PreparedCase,
+    case: &mut PreparedCase,
     expected_thread: thread::ThreadId,
 ) -> Result<(), FailureCode> {
+    if let Some(channel) = case.channel.as_mut() {
+        return dispatch_channel_once(channel, &case.input, case.expectation, expected_thread)
+            .await;
+    }
     if thread::current().id() != expected_thread {
         return Err(FailureCode::WrongThread);
     }
     let inputs = BTreeMap::from([(case.input_name.clone(), case.input.clone())]);
     let result = case
         .plan
+        .as_ref()
+        .expect("plan dispatch cases carry a plan")
         .execute(inputs, ExecutionOptions::default())
         .await
         .map_err(|_| FailureCode::DispatchError)?;
@@ -1272,6 +1475,52 @@ async fn dispatch_once(
     }
     if !outputs_match(case, &result) {
         return Err(FailureCode::OutputAssertion);
+    }
+    if thread::current().id() != expected_thread {
+        return Err(FailureCode::WrongThread);
+    }
+    Ok(())
+}
+
+/// One channel dispatch: the fixed input is cloned onto every edge (fan-out
+/// shares the payload, S3) and then received back from every edge. With one
+/// in-flight message per edge and the generous fixed budget, this measures
+/// the steady-state reserve -> enqueue -> dequeue -> release path.
+async fn dispatch_channel_once(
+    channel: &mut ChannelFixture,
+    input: &Batch,
+    expectation: OutputExpectation,
+    expected_thread: thread::ThreadId,
+) -> Result<(), FailureCode> {
+    if thread::current().id() != expected_thread {
+        return Err(FailureCode::WrongThread);
+    }
+    for sender in &mut channel.senders {
+        sender
+            .send(StreamMessage::data(input.clone()))
+            .await
+            .map_err(|_| FailureCode::DispatchError)?;
+    }
+    for receiver in &mut channel.receivers {
+        let message = receiver
+            .recv()
+            .await
+            .map_err(|_| FailureCode::DispatchError)?
+            .ok_or(FailureCode::OutputAssertion)?;
+        let output = message.as_data().ok_or(FailureCode::OutputAssertion)?;
+        let matches = match expectation {
+            OutputExpectation::ExternalPayloadIdentity => {
+                match (input.external_payload(), output.external_payload()) {
+                    (Ok(input), Ok(output)) => Arc::ptr_eq(input, output),
+                    _ => false,
+                }
+            }
+            OutputExpectation::TableIdentity => table_identity_matches(input, output),
+            _ => false,
+        };
+        if !matches {
+            return Err(FailureCode::OutputAssertion);
+        }
     }
     if thread::current().id() != expected_thread {
         return Err(FailureCode::WrongThread);
@@ -1485,19 +1734,17 @@ fn validate_comparison_identity(
     baseline: &AllocationReport,
     candidate: &AllocationReport,
 ) -> HarnessResult<()> {
-    let expected_provenance = collect_provenance(Role::Candidate)?;
+    let expected_provenance = collect_provenance()?;
     let expected_cases = build_cases()?;
     validate_report(
         baseline,
         Role::Baseline,
-        FIXED_BASELINE_SHA,
         &expected_provenance,
         &expected_cases,
     )?;
     validate_report(
         candidate,
         Role::Candidate,
-        &expected_provenance.product_sha,
         &expected_provenance,
         &expected_cases,
     )?;
@@ -1507,7 +1754,6 @@ fn validate_comparison_identity(
 fn validate_report(
     report: &AllocationReport,
     expected_role: Role,
-    expected_product_sha: &str,
     expected_provenance: &Provenance,
     expected_cases: &[PreparedCase],
 ) -> HarnessResult<()> {
@@ -1526,13 +1772,11 @@ fn validate_report(
             "{label} report must be valid with no invalid_reason"
         )));
     }
-    if report.product_sha != expected_product_sha {
-        return Err(HarnessError(format!("{label} product SHA is incorrect")));
-    }
-    if report.fixed_baseline_sha != FIXED_BASELINE_SHA {
-        return Err(HarnessError(format!(
-            "{label} fixed baseline SHA is incorrect"
-        )));
+    // The product SHA is attribution, not identity: the measured delta is
+    // precisely the product difference between the two reports. The
+    // comparability lock is the harness/dependency/toolchain identity below.
+    if report.product_sha.is_empty() {
+        return Err(HarnessError(format!("{label} product SHA is missing")));
     }
     if report.harness_commit_sha != expected_provenance.harness_commit_sha {
         return Err(HarnessError(format!("{label} harness commit is incorrect")));
@@ -1595,12 +1839,14 @@ fn validate_case_report(
     let expected_output_assertion = expected.expectation.description();
     if case.name != expected.name
         || case.payload != expected.payload
-        || case.plan_fingerprint != expected.plan.fingerprint()
+        || case.kind != expected.kind
+        || case.plan_fingerprint.as_deref() != expected.plan_fingerprint()
+        || case.channel_workload != expected.channel_workload
         || case.compiled_node_count != expected.expected_node_count
         || case.compiled_operator_variants != expected_variants
         || case.configured_datafusion != DATAFUSION_CONFIG
-        || case.compiled_datafusion != expected.plan.datafusion_config()
-        || case.requires_datafusion != expected.plan.requires_datafusion()
+        || case.compiled_datafusion != expected.compiled_datafusion()
+        || case.requires_datafusion != expected.requires_datafusion()
         || case.metric_assertion != expected_metric_assertion
         || case.output_assertion != expected_output_assertion
     {
@@ -1609,20 +1855,34 @@ fn validate_case_report(
             case.name
         )));
     }
-    let report_variants = case
-        .compiled_operator_variants
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let recomputed_workload_fingerprint = workload_fingerprint(
-        &case.name,
-        &case.payload,
-        &report_variants,
-        case.compiled_node_count,
-        expected.expected_metric_node,
-        &case.output_assertion,
-        &case.plan_fingerprint,
-    )?;
+    let recomputed_workload_fingerprint =
+        match (&case.channel_workload, case.plan_fingerprint.as_deref()) {
+            (Some(workload), None) => channel_workload_fingerprint(
+                &case.name,
+                &case.payload,
+                &case.output_assertion,
+                workload,
+            )?,
+            (None, Some(plan_fingerprint)) => workload_fingerprint(
+                &case.name,
+                &case.payload,
+                &case
+                    .compiled_operator_variants
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                case.compiled_node_count,
+                expected.expected_metric_node,
+                &case.output_assertion,
+                plan_fingerprint,
+            )?,
+            _ => {
+                return Err(HarnessError(format!(
+                    "{report_label} case {} must carry exactly one workload identity",
+                    case.name
+                )));
+            }
+        };
     if case.workload_fingerprint != expected.workload_fingerprint
         || case.workload_fingerprint != recomputed_workload_fingerprint
     {
@@ -1824,12 +2084,12 @@ fn run_regression_tests() -> HarnessResult<()> {
 
 #[cfg(test)]
 fn synthetic_test_report(role: Role) -> HarnessResult<TestReport> {
-    let provenance = collect_provenance(role)?;
+    let provenance = collect_provenance()?;
     let measurement_thread_id = "ThreadId(1)".to_owned();
     let cases = build_cases()?
         .into_iter()
         .enumerate()
-        .map(|(case_index, case)| synthetic_test_case(case_index, case, &measurement_thread_id))
+        .map(|(case_index, case)| synthetic_test_case(case_index, &case, &measurement_thread_id))
         .collect();
     serde_json::to_value(AllocationReport {
         schema_version: SCHEMA_VERSION,
@@ -1837,7 +2097,6 @@ fn synthetic_test_report(role: Role) -> HarnessResult<TestReport> {
         valid: true,
         invalid_reason: None,
         product_sha: provenance.product_sha,
-        fixed_baseline_sha: FIXED_BASELINE_SHA.into(),
         harness_commit_sha: provenance.harness_commit_sha,
         frozen_files: provenance.frozen_files,
         git_status_short: provenance.git_status_short,
@@ -1857,7 +2116,7 @@ fn synthetic_test_report(role: Role) -> HarnessResult<TestReport> {
 #[cfg(test)]
 fn synthetic_test_case(
     case_index: usize,
-    case: PreparedCase,
+    case: &PreparedCase,
     measurement_thread_id: &str,
 ) -> CaseReport {
     let raw = RawAllocationInfo {
@@ -1871,8 +2130,10 @@ fn synthetic_test_case(
     CaseReport {
         name: case.name.into(),
         payload: case.payload.into(),
-        workload_fingerprint: case.workload_fingerprint,
-        plan_fingerprint: case.plan.fingerprint().into(),
+        kind: case.kind,
+        workload_fingerprint: case.workload_fingerprint.clone(),
+        plan_fingerprint: case.plan_fingerprint().map(str::to_owned),
+        channel_workload: case.channel_workload.clone(),
         compiled_node_count: case.expected_node_count,
         compiled_operator_variants: case
             .logical_variants
@@ -1880,8 +2141,8 @@ fn synthetic_test_case(
             .map(|variant| (*variant).to_owned())
             .collect(),
         configured_datafusion: DATAFUSION_CONFIG,
-        compiled_datafusion: case.plan.datafusion_config(),
-        requires_datafusion: case.plan.requires_datafusion(),
+        compiled_datafusion: case.compiled_datafusion(),
+        requires_datafusion: case.requires_datafusion(),
         metric_assertion: metric_assertion_description(case.expected_metric_node),
         output_assertion: case.expectation.description().into(),
         warmup_dispatches: FIXED_WARMUP_DISPATCHES,
@@ -1981,11 +2242,11 @@ fn test_mutations(
 
     let mut mutations = vec![
         test_baseline_mutation(
-            "wrong-fixed-baseline",
+            "invalid-baseline-report",
             baseline,
             candidate,
-            "/fixed_baseline_sha",
-            json!("wrong-baseline"),
+            "/valid",
+            json!(false),
         )?,
         test_paired_mutation(
             "paired-forged-schema",
@@ -2023,11 +2284,11 @@ fn test_mutations(
             json!(1),
         )?,
         test_candidate_mutation(
-            "wrong-product-sha",
+            "missing-product-sha",
             baseline,
             candidate,
             "/product_sha",
-            json!("forged-product"),
+            json!(""),
         )?,
         test_paired_mutation(
             "paired-forged-workload-fingerprint",
@@ -2038,6 +2299,7 @@ fn test_mutations(
         )?,
     ];
     mutations.extend(test_execution_mutations(baseline, candidate)?);
+    mutations.extend(test_channel_mutations(baseline, candidate)?);
 
     let mut duplicate = candidate.clone();
     duplicate["cases"][4] = duplicate["cases"][0].clone();
@@ -2065,6 +2327,47 @@ fn test_mutations(
     let mut unknown_field = candidate.clone();
     unknown_field["attacker_controlled"] = json!("ignored");
     mutations.push(("unknown-schema-field", baseline.clone(), unknown_field));
+    Ok(mutations)
+}
+
+#[cfg(test)]
+fn test_channel_mutations(
+    baseline: &TestReport,
+    candidate: &TestReport,
+) -> HarnessResult<Vec<TestMutation>> {
+    use serde_json::json;
+
+    let mut mutations = vec![
+        test_candidate_mutation(
+            "channel-case-kind-mismatch",
+            baseline,
+            candidate,
+            "/cases/5/kind",
+            json!("plan_dispatch"),
+        )?,
+        test_candidate_mutation(
+            "forged-channel-workload",
+            baseline,
+            candidate,
+            "/cases/5/channel_workload/max_bytes",
+            json!(1),
+        )?,
+        test_candidate_mutation(
+            "channel-case-with-plan-fingerprint",
+            baseline,
+            candidate,
+            "/cases/5/plan_fingerprint",
+            json!("forged-plan"),
+        )?,
+    ];
+    let mut dual_identity = candidate.clone();
+    dual_identity["cases"][0]["channel_workload"] =
+        dual_identity["cases"][5]["channel_workload"].clone();
+    mutations.push((
+        "plan-case-with-channel-workload",
+        baseline.clone(),
+        dual_identity,
+    ));
     Ok(mutations)
 }
 

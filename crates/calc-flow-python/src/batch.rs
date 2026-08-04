@@ -104,6 +104,26 @@ pub(crate) struct PythonPayload {
     pub(crate) object: Py<PyAny>,
     backend: String,
     len: usize,
+    estimated_bytes: usize,
+}
+
+/// Charges a payload's visible byte cost: the host object's own `nbytes`
+/// report when it exposes one (`NumPy` and JAX arrays report their exact
+/// visible bytes, including views and empty arrays), otherwise a logical
+/// per-element charge of one `u64` per element. The per-element fallback is
+/// the documented convention for opaque hosts without an `nbytes` report: it
+/// prices queue occupancy, is not a memory bound, and can sit below a large
+/// non-array host's true footprint. Charges are logical queue occupancy, not
+/// RSS (spec S10.2). A host that exposes `nbytes` whose value does not fit a
+/// `usize` (for example a Python arbitrary-precision integer) is charged
+/// `usize::MAX`: the contract never under-reports, so an unmeasurable
+/// payload receives the most conservative charge rather than the small
+/// per-element fallback.
+fn estimate_payload_bytes(object: &Bound<'_, PyAny>, len: usize) -> usize {
+    let Ok(nbytes) = object.getattr("nbytes") else {
+        return len.saturating_mul(size_of::<u64>());
+    };
+    nbytes.extract::<usize>().unwrap_or(usize::MAX)
 }
 
 impl PythonPayload {
@@ -129,6 +149,10 @@ impl calc_flow::ExternalPayload for PythonPayload {
 
     fn len(&self) -> usize {
         self.len
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        self.estimated_bytes
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -196,6 +220,7 @@ pub(crate) fn rehome_python_payload(
         object: payload.object.clone_ref(py),
         backend: payload.backend.clone(),
         len: payload.len,
+        estimated_bytes: payload.estimated_bytes,
     };
     calc_flow::Batch::external(Arc::new(payload), batch.metadata().clone())
         .map_err(crate::error::to_py_err)
@@ -277,10 +302,12 @@ impl PyBatch {
             }
         };
         let metadata = metadata_from_python(py, Some(metadata))?;
+        let estimated_bytes = estimate_payload_bytes(array.bind(py), len);
         let payload = PythonPayload {
             object: array,
             backend,
             len,
+            estimated_bytes,
         };
         let inner = calc_flow::Batch::external(Arc::new(payload), metadata)
             .map_err(crate::error::to_py_err)?;
@@ -323,10 +350,12 @@ impl PyBatch {
             .call1((array, &backend))?;
         let (object, len): (Py<PyAny>, usize) = prepared.extract()?;
         let metadata = metadata_from_python(py, metadata)?;
+        let estimated_bytes = estimate_payload_bytes(object.bind(py), len);
         let payload = PythonPayload {
             object,
             backend,
             len,
+            estimated_bytes,
         };
         let inner = calc_flow::Batch::external(Arc::new(payload), metadata)
             .map_err(crate::error::to_py_err)?;
@@ -340,11 +369,14 @@ impl PyBatch {
         len: usize,
         metadata: &Bound<'_, PyAny>,
     ) -> PyResult<Self> {
-        let metadata = metadata_from_python(metadata.py(), Some(metadata))?;
+        let py = metadata.py();
+        let metadata = metadata_from_python(py, Some(metadata))?;
+        let estimated_bytes = estimate_payload_bytes(object.bind(py), len);
         let payload = PythonPayload {
             object,
             backend,
             len,
+            estimated_bytes,
         };
         let inner = calc_flow::Batch::external(Arc::new(payload), metadata)
             .map_err(crate::error::to_py_err)?;
@@ -554,7 +586,7 @@ mod tests {
     };
     use pyo3::{
         exceptions::{PyTypeError, PyValueError},
-        types::{PyDict, PyList, PyTuple},
+        types::{PyDict, PyList, PySlice, PyTuple},
     };
 
     use super::*;
@@ -840,6 +872,133 @@ mod tests {
                 error.value(py).to_string(),
                 "owned array token was already consumed"
             );
+        });
+    }
+
+    #[test]
+    fn owned_numpy_payload_estimates_its_exact_visible_bytes() {
+        Python::initialize();
+        Python::attach(|py| {
+            let shape = PyTuple::new(py, [3_usize, 4_usize]).unwrap();
+            let (object, token) = PyBatch::_new_owned_numpy(py, shape.as_any(), "float64").unwrap();
+            let metadata = PyDict::new(py);
+            let batch = PyBatch::_from_owned_array(
+                py,
+                object,
+                "numpy".into(),
+                Some(token.bind(py).borrow()),
+                metadata.as_any(),
+            )
+            .unwrap();
+
+            assert_eq!(batch.clone_inner().unwrap().estimated_bytes().unwrap(), 96);
+        });
+    }
+
+    #[test]
+    fn numpy_view_payload_estimates_the_visible_window_not_the_base() {
+        Python::initialize();
+        Python::attach(|py| {
+            let numpy = py.import("numpy").unwrap();
+            let base = numpy.call_method1("zeros", ((4_usize, 8_usize),)).unwrap();
+            let view = base
+                .call_method1("__getitem__", (PySlice::new(py, 0, 4, 2),))
+                .unwrap();
+            assert_eq!(
+                view.getattr("nbytes").unwrap().extract::<usize>().unwrap(),
+                128
+            );
+            assert_eq!(
+                base.getattr("nbytes").unwrap().extract::<usize>().unwrap(),
+                256
+            );
+            let metadata = PyDict::new(py);
+            let batch =
+                PyBatch::_from_external(view.unbind(), "numpy".into(), 2, metadata.as_any())
+                    .unwrap();
+
+            // The charge is the visible 2x8 float64 window, not the 4x8 base
+            // buffer the view keeps alive.
+            assert_eq!(batch.clone_inner().unwrap().estimated_bytes().unwrap(), 128);
+        });
+    }
+
+    #[test]
+    fn empty_numpy_payload_estimates_zero_bytes() {
+        Python::initialize();
+        Python::attach(|py| {
+            let numpy = py.import("numpy").unwrap();
+            let empty = numpy.call_method1("zeros", ((0_usize, 4_usize),)).unwrap();
+            let metadata = PyDict::new(py);
+            let batch =
+                PyBatch::_from_external(empty.unbind(), "numpy".into(), 0, metadata.as_any())
+                    .unwrap();
+
+            assert_eq!(batch.clone_inner().unwrap().estimated_bytes().unwrap(), 0);
+        });
+    }
+
+    #[test]
+    fn payload_without_nbytes_falls_back_to_a_per_element_charge() {
+        Python::initialize();
+        Python::attach(|py| {
+            let object = PyList::new(py, [1, 2]).unwrap().unbind().into_any();
+            let metadata = PyDict::new(py);
+            let batch =
+                PyBatch::_from_external(object, "test".into(), 2, metadata.as_any()).unwrap();
+
+            assert_eq!(
+                batch.clone_inner().unwrap().estimated_bytes().unwrap(),
+                2 * size_of::<u64>()
+            );
+        });
+    }
+
+    #[test]
+    fn unconvertible_nbytes_reports_a_conservative_charge() {
+        Python::initialize();
+        Python::attach(|py| {
+            // `nbytes` exists but exceeds `usize`: the per-element fallback
+            // would severely under-report, so the estimate must saturate
+            // instead (the ExternalPayload contract never under-reports).
+            let class = py
+                .eval(
+                    c"type('HugeHost', (), {'nbytes': property(lambda self: 2**100)})",
+                    None,
+                    None,
+                )
+                .unwrap();
+            let object = class.call0().unwrap().unbind().into_any();
+            let metadata = PyDict::new(py);
+            let batch =
+                PyBatch::_from_external(object, "test".into(), 2, metadata.as_any()).unwrap();
+
+            assert_eq!(
+                batch.clone_inner().unwrap().estimated_bytes().unwrap(),
+                usize::MAX
+            );
+        });
+    }
+
+    #[test]
+    fn rehomed_payload_preserves_the_cached_byte_estimate() {
+        Python::initialize();
+        Python::attach(|py| {
+            let numpy = py.import("numpy").unwrap();
+            let base = numpy.call_method1("zeros", ((4_usize, 8_usize),)).unwrap();
+            let view = base
+                .call_method1("__getitem__", (PySlice::new(py, 0, 4, 2),))
+                .unwrap();
+            let metadata = PyDict::new(py);
+            let inner =
+                PyBatch::_from_external(view.unbind(), "numpy".into(), 2, metadata.as_any())
+                    .unwrap()
+                    .clone_inner()
+                    .unwrap();
+
+            let rehomed = rehome_python_payload(py, inner).unwrap();
+
+            assert_eq!(rehomed.estimated_bytes().unwrap(), 128);
         });
     }
 }

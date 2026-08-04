@@ -457,6 +457,10 @@ mod tests {
             1
         }
 
+        fn estimated_bytes(&self) -> usize {
+            8
+        }
+
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }

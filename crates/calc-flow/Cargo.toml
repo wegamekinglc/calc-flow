@@ -32,6 +32,7 @@ uuid.workspace = true
 allocation-counter = "=0.8.1"
 criterion.workspace = true
 proptest.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [[bench]]
 name = "core"

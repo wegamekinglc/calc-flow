@@ -20,6 +20,10 @@ impl ExternalPayload for TestArray {
         2
     }
 
+    fn estimated_bytes(&self) -> usize {
+        16
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -34,6 +38,10 @@ impl ExternalPayload for EmptyBackendArray {
     }
 
     fn len(&self) -> usize {
+        0
+    }
+
+    fn estimated_bytes(&self) -> usize {
         0
     }
 

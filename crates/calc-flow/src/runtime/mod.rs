@@ -6,7 +6,10 @@ use std::collections::BTreeMap;
 use crate::{CalcFlowError, Result, RunResult, Sink};
 
 pub use micro_batch::MicroBatchRunner;
-pub use streaming::{StreamJobContext, StreamMessage, StreamMessageKind, StreamingRunner};
+pub use streaming::{
+    ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, StreamJobContext, StreamMessage,
+    StreamMessageKind, StreamingRunner, edge_channel,
+};
 
 /// Ordered sink lists keyed by external graph output name.
 #[derive(Default)]

@@ -8,7 +8,6 @@ use std::{
 };
 
 use datafusion::{
-    arrow::record_batch::RecordBatch,
     datasource::MemTable,
     execution::context::{SessionConfig, SessionContext},
     logical_expr::ScalarUDF,
@@ -221,8 +220,8 @@ impl DataFusionRuntime {
             .await
             .map_err(|error| datafusion_error(node_id, error))?;
         let execution_ns = nanos(execution_start.elapsed());
-        let output_rows = batches.iter().map(RecordBatch::num_rows).sum();
         let output = Batch::table(batches, merged_metadata(tables))?;
+        let output_rows = output.num_rows();
         self.metrics.lock().push(DataFusionQueryMetric {
             query_id: self.next_query.fetch_add(1, Ordering::Relaxed),
             node_id: node_id.map(str::to_owned),

@@ -29,6 +29,10 @@ impl ExternalPayload for TestArray {
         1
     }
 
+    fn estimated_bytes(&self) -> usize {
+        8
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
