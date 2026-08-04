@@ -19,6 +19,8 @@ EXPECTED_AGENTS = {
     "cf-tester",
 }
 
+CODE_STYLE_SKILL = ".agents/skills/code-style/SKILL.md"
+
 MIRRORS = (
     (
         ".claude/api-notes/docs-examples.md",
@@ -27,10 +29,6 @@ MIRRORS = (
     (
         ".claude/specs/head-operator.md",
         ".codex/artifacts/specs/head-operator.md",
-    ),
-    (
-        ".claude/rules/code-style.md",
-        ".codex/guidance/code-style.md",
     ),
 )
 
@@ -101,6 +99,35 @@ class CodexAgentConfigTests(unittest.TestCase):
                 for marker in LEGACY_AGENT_MARKERS:
                     self.assertNotIn(marker, text)
 
+    def test_every_custom_agent_enables_code_style_skill(self) -> None:
+        expected_skill_config = {
+            "config": [
+                {
+                    "name": "code-style",
+                    "enabled": True,
+                }
+            ]
+        }
+
+        for filename, config in self._agent_configs().items():
+            with self.subTest(agent=filename):
+                self.assertEqual(config.get("skills"), expected_skill_config)
+
+    def test_code_style_guidance_is_a_valid_skill(self) -> None:
+        skill = (ROOT / CODE_STYLE_SKILL).read_text(encoding="utf-8")
+
+        self.assertFalse((ROOT / ".codex/guidance/code-style.md").exists())
+        self.assertTrue(skill.startswith("---\nname: code-style\n"))
+        self.assertIn("\ndescription: ", skill.split("---", 2)[1])
+        for heading in (
+            "## Python",
+            "## Web UI and backend",
+            "## Tests",
+            "## Markdown",
+            "## Verification",
+        ):
+            self.assertIn(heading, skill)
+
     def test_custom_agent_instruction_tables_are_aligned(self) -> None:
         for filename, config in self._agent_configs().items():
             blocks: list[list[str]] = []
@@ -131,7 +158,7 @@ class CodexAgentConfigTests(unittest.TestCase):
             ".codex/artifacts/specs/",
             ".codex/artifacts/api-notes/",
             ".codex/artifacts/critiques/",
-            ".codex/guidance/code-style.md",
+            CODE_STYLE_SKILL,
         ):
             self.assertIn(path, readme)
         self.assertNotIn("EnterWorktree", readme)

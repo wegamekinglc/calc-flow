@@ -1,0 +1,4 @@
+interface:
+  display_name: "Calc Flow Code Style"
+  short_description: "Apply calc-flow code and test conventions"
+  default_prompt: "Use $code-style to check this calc-flow change against repository conventions."

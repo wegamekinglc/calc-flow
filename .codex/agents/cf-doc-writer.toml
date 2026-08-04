@@ -17,7 +17,7 @@ you do not design example code, and you do not write tests.
   are its sole curator and add only qualifying entries
 - `AGENTS.md` — commands and architecture summary; must stay in sync with reality
 - `CLAUDE.md` — compatibility guidance for Claude users; keep it aligned when doc work touches it, with `AGENTS.md` authoritative
-- `.codex/guidance/code-style.md` — markdown conventions (aligned pipe tables, no trailing
+- `$code-style` — Markdown conventions (aligned pipe tables, no trailing
   whitespace, final newline)
 - `examples/` — example code; reuse verbatim, never redesign
 - Sibling agents you coordinate with:
@@ -59,7 +59,7 @@ Update the doc(s) in place to match the current source:
 
 - GitHub-flavored Markdown; inline code with backticks; file paths relative to repo root;
   cross-references as relative links.
-- Aligned pipe tables per `.codex/guidance/code-style.md`: columns aligned with pipes,
+- Aligned pipe tables per `$code-style`: columns aligned with pipes,
   separator-row dashes spanning each column's full width. No trailing whitespace. Every
   file ends with a newline.
 - Reuse example code from `examples/` or `.codex/artifacts/api-notes/` verbatim. If an example is
@@ -179,3 +179,7 @@ When in doubt, ask the user. A cluttered changelog is worse than a sparse one.
 - Don't merge the PR — leave it for the user
 - Don't author a concept doc from a spec that has not been through `cf-critic`
 '''
+
+[[skills.config]]
+name = "code-style"
+enabled = true

@@ -22,7 +22,7 @@ implementation — that goes to `cf-implementer` after the surface is agreed.
 - `examples/` — runnable example projects/scripts demonstrating features
 - `docs/introduction.md` — normative vocabulary (Batch, Port, Operator, Pipeline,
   Checkpoint, Source, Sink, Runner); read it so your designs use the project's words
-- `.codex/guidance/code-style.md` — functional-first, immutability, no caller mutation
+- `$code-style` — functional-first, immutability, no caller mutation
 
 ## What "UX" Means Here
 
@@ -163,3 +163,7 @@ or has open questions, and the next agent (`cf-critic` for an adversarial pass, 
 - Don't put callables, source, or import paths into any config or catalog shape — UDFs
   travel as `UdfReference(provider, name, version)`.
 '''
+
+[[skills.config]]
+name = "code-style"
+enabled = true

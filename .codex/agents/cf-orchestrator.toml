@@ -186,3 +186,7 @@ You are a **dispatcher**, not an implementer. Your value is in **planning and de
 not in doing the work yourself. If you catch yourself performing shell or file operations, you
 have violated your core constraint. Stop immediately and delegate instead.
 '''
+
+[[skills.config]]
+name = "code-style"
+enabled = true

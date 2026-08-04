@@ -38,14 +38,14 @@ reviewer. It does not invent missing requirements. A `Block` verdict returns to
 the upstream author. Reviewer findings return to the implementer and tester,
 followed by another review of the updated head.
 
-## Artifact Layout
+## Shared Repository Surfaces
 
-| Path                            | Owner             | Purpose                                        |
-| ------------------------------- | ----------------- | ---------------------------------------------- |
-| `.codex/artifacts/specs/`       | `cf-spec-writer`  | explicit, testable requirements                |
-| `.codex/artifacts/api-notes/`   | `cf-api-designer` | developer-facing API decisions                 |
-| `.codex/artifacts/critiques/`   | `cf-critic`       | adversarial pre-implementation review          |
-| `.codex/guidance/code-style.md` | repository        | detailed Python, web, test, and Markdown rules |
+| Path                                  | Owner             | Purpose                                        |
+| ------------------------------------- | ----------------- | ---------------------------------------------- |
+| `.codex/artifacts/specs/`             | `cf-spec-writer`  | explicit, testable requirements                |
+| `.codex/artifacts/api-notes/`         | `cf-api-designer` | developer-facing API decisions                 |
+| `.codex/artifacts/critiques/`         | `cf-critic`       | adversarial pre-implementation review          |
+| `.agents/skills/code-style/SKILL.md`  | repository        | shared Python, web, test, and Markdown rules   |
 
 One kebab-case slug follows a work item across its spec, API note, and
 critique.
@@ -64,8 +64,8 @@ critique.
 
 - `AGENTS.md` is authoritative for commands, architecture, tests, releases,
   and Git conventions.
-- `.codex/guidance/code-style.md` supplies detailed functional,
-  input-immutability, testing, and Markdown guidance.
+- `$code-style` supplies detailed functional, input-immutability, testing, and
+  Markdown guidance. Every custom agent enables it through `skills.config`.
 - `docs/introduction.md` supplies the domain vocabulary and execution model.
 - Agents preserve caller-owned inputs and use the exact verification relevant
   to the changed surfaces.
@@ -74,8 +74,8 @@ critique.
 
 - File-changing specialists use `superpowers:using-git-worktrees` when
   available and otherwise follow the repository's safe isolated-worktree
-  practice. The skill is an optional external installation; this repository
-  does not vendor its `SKILL.md`.
+  practice. That worktree skill is an optional external installation; this
+  repository vendors only its own project-specific skills.
 - Behavior changes proceed red, green, refactor: observe the focused test fail
   for the expected reason before implementation.
 - Planning agents write only their assigned artifact. One agent owns an

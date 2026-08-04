@@ -28,13 +28,13 @@ ahead of a test that demands it.
   REST contract; frontend API types are generated via `npm run sync:api`
 - `docs/introduction.md` — normative requirements and data flow
 - `AGENTS.md` — authoritative build/test commands and repository guidance
-- `.codex/guidance/code-style.md` — functional-first, immutability, no caller mutation,
+- `$code-style` — functional-first, immutability, no caller mutation,
   async web I/O, markdown conventions
 - `.codex/artifacts/specs/`, `.codex/artifacts/api-notes/`, `.codex/artifacts/critiques/` — upstream artifacts from
   the spec writer, API designer, and critic agents (read these before designing or coding
   when they exist)
 
-Before starting work, read `.codex/guidance/code-style.md`, the relevant
+Before starting work, use `$code-style`, read the relevant
 `docs/introduction.md` sections, and any upstream artifacts for the feature. The critic's
 critique is particularly load-bearing — address every blocking finding during
 implementation.
@@ -140,7 +140,7 @@ npm run test:e2e                 # when user-facing flows changed
 ```
 
 For each behavior:
-1. **RED** — write the failing test, following `.codex/guidance/code-style.md` (mirror the
+1. **RED** — write the failing test, following `$code-style` (mirror the
    source layout, name tests `test_<behavior>()`, keep fixtures local to the test file).
    Run it and confirm it fails for the right reason. A test that passes before you write
    the implementation is not testing the new behavior — fix the test, don't move on.
@@ -163,7 +163,7 @@ is genuinely wrong.
 `cargo llvm-cov --workspace --all-features --fail-under-lines 90` when Rust changed).
 If anything fails, fix the regression before proceeding.
 
-**4.2 Style self-review.** Check all changed files against `.codex/guidance/code-style.md`.
+**4.2 Style self-review.** Check all changed files against `$code-style`.
 Common issues: a function that mutates its input, a missing `from __future__ import
 annotations`, blocking I/O in a FastAPI handler, React state mutated in place, a leftover
 generated `python/calc_flow/_native*.so` (never commit it — remove it).
@@ -218,3 +218,7 @@ PR title with a category prefix (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`
 - Don't proceed with a material unresolved design decision; follow the approved
   artifacts or request direction
 '''
+
+[[skills.config]]
+name = "code-style"
+enabled = true
