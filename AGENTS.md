@@ -103,8 +103,11 @@ Ordinary feature work must not rewrite either team definition.
 
 - Use Rust 2024 and the workspace MSRV in `Cargo.toml`.
 - Keep `unsafe_code = "forbid"`; do not weaken workspace lints.
-- Prefer immutable values, pure transformations, explicit error variants, and
-  deterministic `BTreeMap` ordering where output is serialized or observed.
+- Prefer a functional style: immutable values, pure transformations, explicit
+  error variants, and deterministic `BTreeMap` ordering where output is
+  serialized or observed. Confine necessary mutation to owned stateful
+  boundaries. Treat caller-owned inputs as read-only; defensively copy when an
+  underlying library requires mutation.
 - Return `calc_flow::Result<T>` from fallible public core operations. Preserve
   the failing field/path and source error where applicable.
 - Async traits and functions own I/O, cancellation, stores, sources, sinks, and
