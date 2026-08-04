@@ -1,0 +1,2166 @@
+{
+  "schema_version": 2,
+  "role": "baseline",
+  "valid": true,
+  "invalid_reason": null,
+  "product_sha": "0969f8d77f80adce5e61ff1cb986a504c8c2dd26",
+  "harness_commit_sha": "9a6a8c6bcf8bc3cf6af39d410af204c7f10249b1",
+  "frozen_files": {
+    "cargo_lock_sha256": "4e7069ec6f20f828a59bf39a7c1f2e0fcaff74cb61095133ff63c4abb227458f",
+    "crate_manifest_sha256": "6de42e956f7b0ad240e81f0eb1f16c23eb95b8c12cb1ea86ee5c74318cb5c427",
+    "benchmark_sha256": "69ea1718dbc6d5d5c15376cc9d00dba037d8ef356c7ccdcff082b4f60d601add",
+    "allocation_counter_version": "0.8.1",
+    "allocation_counter_registry_checksum": "beb9e990c0a33699f1984d85a6abead615ccc72dd8130bf3e15dcabe2ca149c9"
+  },
+  "git_status_short": "",
+  "toolchain": {
+    "rustc_vv": "rustc 1.88.0 (6b00bc388 2025-06-23)\nbinary: rustc\ncommit-hash: 6b00bc3880198600130e1cf62b8f8a93494488cc\ncommit-date: 2025-06-23\nhost: x86_64-unknown-linux-gnu\nrelease: 1.88.0\nLLVM version: 20.1.5",
+    "cargo_version": "cargo 1.88.0 (873a06493 2025-05-10)",
+    "host": "x86_64-unknown-linux-gnu",
+    "target": "x86_64-unknown-linux-gnu"
+  },
+  "environment": {
+    "uname_a": "Linux chengli-i9 5.15.167.4-microsoft-standard-WSL2 #1 SMP Tue Nov 5 00:21:55 UTC 2024 x86_64 GNU/Linux",
+    "lscpu": "Architecture:                         x86_64\nCPU op-mode(s):                       32-bit, 64-bit\nAddress sizes:                        39 bits physical, 48 bits virtual\nByte Order:                           Little Endian\nCPU(s):                               32\nOn-line CPU(s) list:                  0-31\nVendor ID:                            GenuineIntel\nModel name:                           13th Gen Intel(R) Core(TM) i9-13900HX\nCPU family:                           6\nModel:                                183\nThread(s) per core:                   2\nCore(s) per socket:                   16\nSocket(s):                            1\nStepping:                             1\nBogoMIPS:                             4838.39\nFlags:                                fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch invpcid_single ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow vnmi ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize flush_l1d arch_capabilities\nVirtualization:                       VT-x\nHypervisor vendor:                    Microsoft\nVirtualization type:                  full\nL1d cache:                            768 KiB (16 instances)\nL1i cache:                            512 KiB (16 instances)\nL2 cache:                             32 MiB (16 instances)\nL3 cache:                             36 MiB (1 instance)\nVulnerability Gather data sampling:   Not affected\nVulnerability Itlb multihit:          Not affected\nVulnerability L1tf:                   Not affected\nVulnerability Mds:                    Not affected\nVulnerability Meltdown:               Not affected\nVulnerability Mmio stale data:        Not affected\nVulnerability Reg file data sampling: Vulnerable: No microcode\nVulnerability Retbleed:               Mitigation; Enhanced IBRS\nVulnerability Spec rstack overflow:   Not affected\nVulnerability Spec store bypass:      Mitigation; Speculative Store Bypass disabled via prctl and seccomp\nVulnerability Spectre v1:             Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:             Mitigation; Enhanced / Automatic IBRS; IBPB conditional; RSB filling; PBRSB-eIBRS SW sequence; BHI BHI_DIS_S\nVulnerability Srbds:                  Not affected\nVulnerability Tsx async abort:        Not affected",
+    "cpu_governors": [
+      "unavailable"
+    ],
+    "power_supplies": [
+      {
+        "name": "AC1",
+        "kind": "Mains",
+        "online": "1"
+      },
+      {
+        "name": "BAT1",
+        "kind": "Battery",
+        "online": "unavailable: No such file or directory (os error 2)"
+      }
+    ],
+    "virtualization": "wsl",
+    "container_markers": "/.dockerenv=false, /run/.containerenv=false, /proc/1/cgroup=0::/init.scope",
+    "background_load_policy": "shared runner; no benchmark-related work intentionally run concurrently",
+    "cargo_build_jobs": "unset",
+    "calc_flow_benchmark_scale": "unset"
+  },
+  "measurement_thread": {
+    "id": "ThreadId(1)",
+    "name": "main",
+    "current_thread_runtime": true,
+    "unchanged_for_all_measurements": true
+  },
+  "cases": [
+    {
+      "name": "external_payload_one_node",
+      "payload": "external payload, 1000 rows",
+      "kind": "plan_dispatch",
+      "workload_fingerprint": "64ee96dcc59509a98b8802570b21a4515e61309bce9032a66d53eced7a25bbeb",
+      "plan_fingerprint": "938e9b83ccbeb5e1a8d814f4292bf3efb7cedaab782c8ef4fd009f8651fda621",
+      "channel_workload": null,
+      "compiled_node_count": 1,
+      "compiled_operator_variants": [
+        "External"
+      ],
+      "configured_datafusion": {
+        "batch_size": 1024,
+        "target_partitions": 1
+      },
+      "compiled_datafusion": null,
+      "requires_datafusion": false,
+      "metric_assertion": "no DataFusion metrics",
+      "output_assertion": "single terminal external payload Arc::ptr_eq",
+      "warmup_dispatches": 1000,
+      "requested_dispatches": 10000,
+      "repetitions_requested": 10,
+      "repetitions": [
+        {
+          "repetition_index": 0,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 500001,
+            "count_current": 0,
+            "count_max": 29,
+            "bytes_total": 136770064,
+            "bytes_current": 0,
+            "bytes_max": 10247
+          },
+          "normalized": {
+            "calls_per_dispatch": 50.0001,
+            "bytes_per_dispatch": 13677.0064,
+            "calls_per_node_dispatch": 50.0001,
+            "bytes_per_node_dispatch": 13677.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 1,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 500001,
+            "count_current": 0,
+            "count_max": 29,
+            "bytes_total": 136770064,
+            "bytes_current": 0,
+            "bytes_max": 10247
+          },
+          "normalized": {
+            "calls_per_dispatch": 50.0001,
+            "bytes_per_dispatch": 13677.0064,
+            "calls_per_node_dispatch": 50.0001,
+            "bytes_per_node_dispatch": 13677.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 2,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 500001,
+            "count_current": 0,
+            "count_max": 29,
+            "bytes_total": 136770064,
+            "bytes_current": 0,
+            "bytes_max": 10247
+          },
+          "normalized": {
+            "calls_per_dispatch": 50.0001,
+            "bytes_per_dispatch": 13677.0064,
+            "calls_per_node_dispatch": 50.0001,
+            "bytes_per_node_dispatch": 13677.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 3,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 500001,
+            "count_current": 0,
+            "count_max": 29,
+            "bytes_total": 136770064,
+            "bytes_current": 0,
+            "bytes_max": 10247
+          },
+          "normalized": {
+            "calls_per_dispatch": 50.0001,
+            "bytes_per_dispatch": 13677.0064,
+            "calls_per_node_dispatch": 50.0001,
+            "bytes_per_node_dispatch": 13677.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 4,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 500001,
+            "count_current": 0,
+            "count_max": 29,
+            "bytes_total": 136770064,
+            "bytes_current": 0,
+            "bytes_max": 10247
+          },
+          "normalized": {
+            "calls_per_dispatch": 50.0001,
+            "bytes_per_dispatch": 13677.0064,
+            "calls_per_node_dispatch": 50.0001,
+            "bytes_per_node_dispatch": 13677.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 5,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 500001,
+            "count_current": 0,
+            "count_max": 29,
+            "bytes_total": 136770064,
+            "bytes_current": 0,
+            "bytes_max": 10247
+          },
+          "normalized": {
+            "calls_per_dispatch": 50.0001,
+            "bytes_per_dispatch": 13677.0064,
+            "calls_per_node_dispatch": 50.0001,
+            "bytes_per_node_dispatch": 13677.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 6,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 500001,
+            "count_current": 0,
+            "count_max": 29,
+            "bytes_total": 136770064,
+            "bytes_current": 0,
+            "bytes_max": 10247
+          },
+          "normalized": {
+            "calls_per_dispatch": 50.0001,
+            "bytes_per_dispatch": 13677.0064,
+            "calls_per_node_dispatch": 50.0001,
+            "bytes_per_node_dispatch": 13677.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 7,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 500001,
+            "count_current": 0,
+            "count_max": 29,
+            "bytes_total": 136770064,
+            "bytes_current": 0,
+            "bytes_max": 10247
+          },
+          "normalized": {
+            "calls_per_dispatch": 50.0001,
+            "bytes_per_dispatch": 13677.0064,
+            "calls_per_node_dispatch": 50.0001,
+            "bytes_per_node_dispatch": 13677.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 8,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 500001,
+            "count_current": 0,
+            "count_max": 29,
+            "bytes_total": 136770064,
+            "bytes_current": 0,
+            "bytes_max": 10247
+          },
+          "normalized": {
+            "calls_per_dispatch": 50.0001,
+            "bytes_per_dispatch": 13677.0064,
+            "calls_per_node_dispatch": 50.0001,
+            "bytes_per_node_dispatch": 13677.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 9,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 500001,
+            "count_current": 0,
+            "count_max": 29,
+            "bytes_total": 136770064,
+            "bytes_current": 0,
+            "bytes_max": 10247
+          },
+          "normalized": {
+            "calls_per_dispatch": 50.0001,
+            "bytes_per_dispatch": 13677.0064,
+            "calls_per_node_dispatch": 50.0001,
+            "bytes_per_node_dispatch": 13677.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        }
+      ],
+      "stable_count_total": true,
+      "stable_bytes_total": true,
+      "valid": true,
+      "invalid_reason": null
+    },
+    {
+      "name": "external_table_one_node",
+      "payload": "Arrow table value=0..63",
+      "kind": "plan_dispatch",
+      "workload_fingerprint": "51602962e13ac7d54ad62ab3a036232353014cf0a0c2fc13a3cdb9f17f4bab5e",
+      "plan_fingerprint": "e442c372a440c6518981fcbddb4372859b0496058da3d1a027117706af748233",
+      "channel_workload": null,
+      "compiled_node_count": 1,
+      "compiled_operator_variants": [
+        "External"
+      ],
+      "configured_datafusion": {
+        "batch_size": 1024,
+        "target_partitions": 1
+      },
+      "compiled_datafusion": null,
+      "requires_datafusion": false,
+      "metric_assertion": "no DataFusion metrics",
+      "output_assertion": "terminal schema, array, and value-buffer pointer identity",
+      "warmup_dispatches": 1000,
+      "requested_dispatches": 10000,
+      "repetitions_requested": 10,
+      "repetitions": [
+        {
+          "repetition_index": 0,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 500001,
+            "count_current": 0,
+            "count_max": 29,
+            "bytes_total": 136750064,
+            "bytes_current": 0,
+            "bytes_max": 10247
+          },
+          "normalized": {
+            "calls_per_dispatch": 50.0001,
+            "bytes_per_dispatch": 13675.0064,
+            "calls_per_node_dispatch": 50.0001,
+            "bytes_per_node_dispatch": 13675.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 1,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 500001,
+            "count_current": 0,
+            "count_max": 29,
+            "bytes_total": 136750064,
+            "bytes_current": 0,
+            "bytes_max": 10247
+          },
+          "normalized": {
+            "calls_per_dispatch": 50.0001,
+            "bytes_per_dispatch": 13675.0064,
+            "calls_per_node_dispatch": 50.0001,
+            "bytes_per_node_dispatch": 13675.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 2,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 500001,
+            "count_current": 0,
+            "count_max": 29,
+            "bytes_total": 136750064,
+            "bytes_current": 0,
+            "bytes_max": 10247
+          },
+          "normalized": {
+            "calls_per_dispatch": 50.0001,
+            "bytes_per_dispatch": 13675.0064,
+            "calls_per_node_dispatch": 50.0001,
+            "bytes_per_node_dispatch": 13675.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 3,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 500001,
+            "count_current": 0,
+            "count_max": 29,
+            "bytes_total": 136750064,
+            "bytes_current": 0,
+            "bytes_max": 10247
+          },
+          "normalized": {
+            "calls_per_dispatch": 50.0001,
+            "bytes_per_dispatch": 13675.0064,
+            "calls_per_node_dispatch": 50.0001,
+            "bytes_per_node_dispatch": 13675.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 4,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 500001,
+            "count_current": 0,
+            "count_max": 29,
+            "bytes_total": 136750064,
+            "bytes_current": 0,
+            "bytes_max": 10247
+          },
+          "normalized": {
+            "calls_per_dispatch": 50.0001,
+            "bytes_per_dispatch": 13675.0064,
+            "calls_per_node_dispatch": 50.0001,
+            "bytes_per_node_dispatch": 13675.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 5,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 500001,
+            "count_current": 0,
+            "count_max": 29,
+            "bytes_total": 136750064,
+            "bytes_current": 0,
+            "bytes_max": 10247
+          },
+          "normalized": {
+            "calls_per_dispatch": 50.0001,
+            "bytes_per_dispatch": 13675.0064,
+            "calls_per_node_dispatch": 50.0001,
+            "bytes_per_node_dispatch": 13675.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 6,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 500001,
+            "count_current": 0,
+            "count_max": 29,
+            "bytes_total": 136750064,
+            "bytes_current": 0,
+            "bytes_max": 10247
+          },
+          "normalized": {
+            "calls_per_dispatch": 50.0001,
+            "bytes_per_dispatch": 13675.0064,
+            "calls_per_node_dispatch": 50.0001,
+            "bytes_per_node_dispatch": 13675.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 7,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 500001,
+            "count_current": 0,
+            "count_max": 29,
+            "bytes_total": 136750064,
+            "bytes_current": 0,
+            "bytes_max": 10247
+          },
+          "normalized": {
+            "calls_per_dispatch": 50.0001,
+            "bytes_per_dispatch": 13675.0064,
+            "calls_per_node_dispatch": 50.0001,
+            "bytes_per_node_dispatch": 13675.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 8,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 500001,
+            "count_current": 0,
+            "count_max": 29,
+            "bytes_total": 136750064,
+            "bytes_current": 0,
+            "bytes_max": 10247
+          },
+          "normalized": {
+            "calls_per_dispatch": 50.0001,
+            "bytes_per_dispatch": 13675.0064,
+            "calls_per_node_dispatch": 50.0001,
+            "bytes_per_node_dispatch": 13675.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 9,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 500001,
+            "count_current": 0,
+            "count_max": 29,
+            "bytes_total": 136750064,
+            "bytes_current": 0,
+            "bytes_max": 10247
+          },
+          "normalized": {
+            "calls_per_dispatch": 50.0001,
+            "bytes_per_dispatch": 13675.0064,
+            "calls_per_node_dispatch": 50.0001,
+            "bytes_per_node_dispatch": 13675.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        }
+      ],
+      "stable_count_total": true,
+      "stable_bytes_total": true,
+      "valid": true,
+      "invalid_reason": null
+    },
+    {
+      "name": "external_table_three_way_fan_out",
+      "payload": "Arrow table value=0..63, three terminal branches",
+      "kind": "plan_dispatch",
+      "workload_fingerprint": "578fa2fd7a99673ef0e97ad87124c2e7f7337ca145b2910cc57c81ab5ba55055",
+      "plan_fingerprint": "d32f0cb4e6df7502db5f29b16778c907b2bbf7cf9a86f18a1372542577a65ce2",
+      "channel_workload": null,
+      "compiled_node_count": 4,
+      "compiled_operator_variants": [
+        "External",
+        "External",
+        "External",
+        "External"
+      ],
+      "configured_datafusion": {
+        "batch_size": 1024,
+        "target_partitions": 1
+      },
+      "compiled_datafusion": null,
+      "requires_datafusion": false,
+      "metric_assertion": "no DataFusion metrics",
+      "output_assertion": "terminal schema, array, and value-buffer pointer identity",
+      "warmup_dispatches": 1000,
+      "requested_dispatches": 10000,
+      "repetitions_requested": 10,
+      "repetitions": [
+        {
+          "repetition_index": 0,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 1230001,
+            "count_current": 0,
+            "count_max": 54,
+            "bytes_total": 255630064,
+            "bytes_current": 0,
+            "bytes_max": 12645
+          },
+          "normalized": {
+            "calls_per_dispatch": 123.0001,
+            "bytes_per_dispatch": 25563.0064,
+            "calls_per_node_dispatch": 30.750025,
+            "bytes_per_node_dispatch": 6390.7516
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 1,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 1230001,
+            "count_current": 0,
+            "count_max": 54,
+            "bytes_total": 255630064,
+            "bytes_current": 0,
+            "bytes_max": 12645
+          },
+          "normalized": {
+            "calls_per_dispatch": 123.0001,
+            "bytes_per_dispatch": 25563.0064,
+            "calls_per_node_dispatch": 30.750025,
+            "bytes_per_node_dispatch": 6390.7516
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 2,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 1230001,
+            "count_current": 0,
+            "count_max": 54,
+            "bytes_total": 255630064,
+            "bytes_current": 0,
+            "bytes_max": 12645
+          },
+          "normalized": {
+            "calls_per_dispatch": 123.0001,
+            "bytes_per_dispatch": 25563.0064,
+            "calls_per_node_dispatch": 30.750025,
+            "bytes_per_node_dispatch": 6390.7516
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 3,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 1230001,
+            "count_current": 0,
+            "count_max": 54,
+            "bytes_total": 255630064,
+            "bytes_current": 0,
+            "bytes_max": 12645
+          },
+          "normalized": {
+            "calls_per_dispatch": 123.0001,
+            "bytes_per_dispatch": 25563.0064,
+            "calls_per_node_dispatch": 30.750025,
+            "bytes_per_node_dispatch": 6390.7516
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 4,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 1230001,
+            "count_current": 0,
+            "count_max": 54,
+            "bytes_total": 255630064,
+            "bytes_current": 0,
+            "bytes_max": 12645
+          },
+          "normalized": {
+            "calls_per_dispatch": 123.0001,
+            "bytes_per_dispatch": 25563.0064,
+            "calls_per_node_dispatch": 30.750025,
+            "bytes_per_node_dispatch": 6390.7516
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 5,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 1230001,
+            "count_current": 0,
+            "count_max": 54,
+            "bytes_total": 255630064,
+            "bytes_current": 0,
+            "bytes_max": 12645
+          },
+          "normalized": {
+            "calls_per_dispatch": 123.0001,
+            "bytes_per_dispatch": 25563.0064,
+            "calls_per_node_dispatch": 30.750025,
+            "bytes_per_node_dispatch": 6390.7516
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 6,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 1230001,
+            "count_current": 0,
+            "count_max": 54,
+            "bytes_total": 255630064,
+            "bytes_current": 0,
+            "bytes_max": 12645
+          },
+          "normalized": {
+            "calls_per_dispatch": 123.0001,
+            "bytes_per_dispatch": 25563.0064,
+            "calls_per_node_dispatch": 30.750025,
+            "bytes_per_node_dispatch": 6390.7516
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 7,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 1230001,
+            "count_current": 0,
+            "count_max": 54,
+            "bytes_total": 255630064,
+            "bytes_current": 0,
+            "bytes_max": 12645
+          },
+          "normalized": {
+            "calls_per_dispatch": 123.0001,
+            "bytes_per_dispatch": 25563.0064,
+            "calls_per_node_dispatch": 30.750025,
+            "bytes_per_node_dispatch": 6390.7516
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 8,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 1230001,
+            "count_current": 0,
+            "count_max": 54,
+            "bytes_total": 255630064,
+            "bytes_current": 0,
+            "bytes_max": 12645
+          },
+          "normalized": {
+            "calls_per_dispatch": 123.0001,
+            "bytes_per_dispatch": 25563.0064,
+            "calls_per_node_dispatch": 30.750025,
+            "bytes_per_node_dispatch": 6390.7516
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 9,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 1230001,
+            "count_current": 0,
+            "count_max": 54,
+            "bytes_total": 255630064,
+            "bytes_current": 0,
+            "bytes_max": 12645
+          },
+          "normalized": {
+            "calls_per_dispatch": 123.0001,
+            "bytes_per_dispatch": 25563.0064,
+            "calls_per_node_dispatch": 30.750025,
+            "bytes_per_node_dispatch": 6390.7516
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        }
+      ],
+      "stable_count_total": true,
+      "stable_bytes_total": true,
+      "valid": true,
+      "invalid_reason": null
+    },
+    {
+      "name": "builtin_expression_one_node",
+      "payload": "Arrow table value=0..63",
+      "kind": "plan_dispatch",
+      "workload_fingerprint": "ed2bc71c65ce430345e60de246086fa021dd2636a8f8f199694faffa2b6657e1",
+      "plan_fingerprint": "b52be0dd5080beeeb3d61614229fd32de26f87a49a927615c841497baa7c90a0",
+      "channel_workload": null,
+      "compiled_node_count": 1,
+      "compiled_operator_variants": [
+        "Expression"
+      ],
+      "configured_datafusion": {
+        "batch_size": 1024,
+        "target_partitions": 1
+      },
+      "compiled_datafusion": {
+        "batch_size": 1024,
+        "target_partitions": 1
+      },
+      "requires_datafusion": true,
+      "metric_assertion": "exactly one DataFusion metric for node expression",
+      "output_assertion": "single plus_one Int64 column equals 1..64",
+      "warmup_dispatches": 1000,
+      "requested_dispatches": 10000,
+      "repetitions_requested": 10,
+      "repetitions": [
+        {
+          "repetition_index": 0,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 34090001,
+            "count_current": 0,
+            "count_max": 919,
+            "bytes_total": 3726780064,
+            "bytes_current": 0,
+            "bytes_max": 140301
+          },
+          "normalized": {
+            "calls_per_dispatch": 3409.0001,
+            "bytes_per_dispatch": 372678.0064,
+            "calls_per_node_dispatch": 3409.0001,
+            "bytes_per_node_dispatch": 372678.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 1,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 34090001,
+            "count_current": 0,
+            "count_max": 919,
+            "bytes_total": 3726780064,
+            "bytes_current": 0,
+            "bytes_max": 140301
+          },
+          "normalized": {
+            "calls_per_dispatch": 3409.0001,
+            "bytes_per_dispatch": 372678.0064,
+            "calls_per_node_dispatch": 3409.0001,
+            "bytes_per_node_dispatch": 372678.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 2,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 34090001,
+            "count_current": 0,
+            "count_max": 919,
+            "bytes_total": 3726780064,
+            "bytes_current": 0,
+            "bytes_max": 140301
+          },
+          "normalized": {
+            "calls_per_dispatch": 3409.0001,
+            "bytes_per_dispatch": 372678.0064,
+            "calls_per_node_dispatch": 3409.0001,
+            "bytes_per_node_dispatch": 372678.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 3,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 34090001,
+            "count_current": 0,
+            "count_max": 919,
+            "bytes_total": 3726780064,
+            "bytes_current": 0,
+            "bytes_max": 140301
+          },
+          "normalized": {
+            "calls_per_dispatch": 3409.0001,
+            "bytes_per_dispatch": 372678.0064,
+            "calls_per_node_dispatch": 3409.0001,
+            "bytes_per_node_dispatch": 372678.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 4,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 34090001,
+            "count_current": 0,
+            "count_max": 919,
+            "bytes_total": 3726780064,
+            "bytes_current": 0,
+            "bytes_max": 140301
+          },
+          "normalized": {
+            "calls_per_dispatch": 3409.0001,
+            "bytes_per_dispatch": 372678.0064,
+            "calls_per_node_dispatch": 3409.0001,
+            "bytes_per_node_dispatch": 372678.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 5,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 34090001,
+            "count_current": 0,
+            "count_max": 919,
+            "bytes_total": 3726780064,
+            "bytes_current": 0,
+            "bytes_max": 140301
+          },
+          "normalized": {
+            "calls_per_dispatch": 3409.0001,
+            "bytes_per_dispatch": 372678.0064,
+            "calls_per_node_dispatch": 3409.0001,
+            "bytes_per_node_dispatch": 372678.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 6,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 34090001,
+            "count_current": 0,
+            "count_max": 919,
+            "bytes_total": 3726780064,
+            "bytes_current": 0,
+            "bytes_max": 140301
+          },
+          "normalized": {
+            "calls_per_dispatch": 3409.0001,
+            "bytes_per_dispatch": 372678.0064,
+            "calls_per_node_dispatch": 3409.0001,
+            "bytes_per_node_dispatch": 372678.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 7,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 34090001,
+            "count_current": 0,
+            "count_max": 919,
+            "bytes_total": 3726780064,
+            "bytes_current": 0,
+            "bytes_max": 140301
+          },
+          "normalized": {
+            "calls_per_dispatch": 3409.0001,
+            "bytes_per_dispatch": 372678.0064,
+            "calls_per_node_dispatch": 3409.0001,
+            "bytes_per_node_dispatch": 372678.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 8,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 34090001,
+            "count_current": 0,
+            "count_max": 919,
+            "bytes_total": 3726780064,
+            "bytes_current": 0,
+            "bytes_max": 140301
+          },
+          "normalized": {
+            "calls_per_dispatch": 3409.0001,
+            "bytes_per_dispatch": 372678.0064,
+            "calls_per_node_dispatch": 3409.0001,
+            "bytes_per_node_dispatch": 372678.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 9,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 34090001,
+            "count_current": 0,
+            "count_max": 919,
+            "bytes_total": 3726780064,
+            "bytes_current": 0,
+            "bytes_max": 140301
+          },
+          "normalized": {
+            "calls_per_dispatch": 3409.0001,
+            "bytes_per_dispatch": 372678.0064,
+            "calls_per_node_dispatch": 3409.0001,
+            "bytes_per_node_dispatch": 372678.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        }
+      ],
+      "stable_count_total": true,
+      "stable_bytes_total": true,
+      "valid": true,
+      "invalid_reason": null
+    },
+    {
+      "name": "builtin_sql_one_node",
+      "payload": "Arrow table input.value=0..63",
+      "kind": "plan_dispatch",
+      "workload_fingerprint": "cad9e5568cdea85e31bc4d2ee5548adc2e798cde731f35ef6ec0411a7c90403e",
+      "plan_fingerprint": "41292643e8a740413c3faaecabdb4567da89ab8793bb48e9fd43951a36afa1bb",
+      "channel_workload": null,
+      "compiled_node_count": 1,
+      "compiled_operator_variants": [
+        "Sql"
+      ],
+      "configured_datafusion": {
+        "batch_size": 1024,
+        "target_partitions": 1
+      },
+      "compiled_datafusion": {
+        "batch_size": 1024,
+        "target_partitions": 1
+      },
+      "requires_datafusion": true,
+      "metric_assertion": "exactly one DataFusion metric for node sql",
+      "output_assertion": "single doubled Int64 column equals 0,2,..126",
+      "warmup_dispatches": 1000,
+      "requested_dispatches": 10000,
+      "repetitions_requested": 10,
+      "repetitions": [
+        {
+          "repetition_index": 0,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 31040001,
+            "count_current": 0,
+            "count_max": 895,
+            "bytes_total": 3456420064,
+            "bytes_current": 0,
+            "bytes_max": 138929
+          },
+          "normalized": {
+            "calls_per_dispatch": 3104.0001,
+            "bytes_per_dispatch": 345642.0064,
+            "calls_per_node_dispatch": 3104.0001,
+            "bytes_per_node_dispatch": 345642.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 1,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 31040001,
+            "count_current": 0,
+            "count_max": 895,
+            "bytes_total": 3456420064,
+            "bytes_current": 0,
+            "bytes_max": 138929
+          },
+          "normalized": {
+            "calls_per_dispatch": 3104.0001,
+            "bytes_per_dispatch": 345642.0064,
+            "calls_per_node_dispatch": 3104.0001,
+            "bytes_per_node_dispatch": 345642.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 2,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 31040001,
+            "count_current": 0,
+            "count_max": 895,
+            "bytes_total": 3456420064,
+            "bytes_current": 0,
+            "bytes_max": 138929
+          },
+          "normalized": {
+            "calls_per_dispatch": 3104.0001,
+            "bytes_per_dispatch": 345642.0064,
+            "calls_per_node_dispatch": 3104.0001,
+            "bytes_per_node_dispatch": 345642.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 3,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 31040001,
+            "count_current": 0,
+            "count_max": 895,
+            "bytes_total": 3456420064,
+            "bytes_current": 0,
+            "bytes_max": 138929
+          },
+          "normalized": {
+            "calls_per_dispatch": 3104.0001,
+            "bytes_per_dispatch": 345642.0064,
+            "calls_per_node_dispatch": 3104.0001,
+            "bytes_per_node_dispatch": 345642.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 4,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 31040001,
+            "count_current": 0,
+            "count_max": 895,
+            "bytes_total": 3456420064,
+            "bytes_current": 0,
+            "bytes_max": 138929
+          },
+          "normalized": {
+            "calls_per_dispatch": 3104.0001,
+            "bytes_per_dispatch": 345642.0064,
+            "calls_per_node_dispatch": 3104.0001,
+            "bytes_per_node_dispatch": 345642.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 5,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 31040001,
+            "count_current": 0,
+            "count_max": 895,
+            "bytes_total": 3456420064,
+            "bytes_current": 0,
+            "bytes_max": 138929
+          },
+          "normalized": {
+            "calls_per_dispatch": 3104.0001,
+            "bytes_per_dispatch": 345642.0064,
+            "calls_per_node_dispatch": 3104.0001,
+            "bytes_per_node_dispatch": 345642.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 6,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 31040001,
+            "count_current": 0,
+            "count_max": 895,
+            "bytes_total": 3456420064,
+            "bytes_current": 0,
+            "bytes_max": 138929
+          },
+          "normalized": {
+            "calls_per_dispatch": 3104.0001,
+            "bytes_per_dispatch": 345642.0064,
+            "calls_per_node_dispatch": 3104.0001,
+            "bytes_per_node_dispatch": 345642.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 7,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 31040001,
+            "count_current": 0,
+            "count_max": 895,
+            "bytes_total": 3456420064,
+            "bytes_current": 0,
+            "bytes_max": 138929
+          },
+          "normalized": {
+            "calls_per_dispatch": 3104.0001,
+            "bytes_per_dispatch": 345642.0064,
+            "calls_per_node_dispatch": 3104.0001,
+            "bytes_per_node_dispatch": 345642.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 8,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 31040001,
+            "count_current": 0,
+            "count_max": 895,
+            "bytes_total": 3456420064,
+            "bytes_current": 0,
+            "bytes_max": 138929
+          },
+          "normalized": {
+            "calls_per_dispatch": 3104.0001,
+            "bytes_per_dispatch": 345642.0064,
+            "calls_per_node_dispatch": 3104.0001,
+            "bytes_per_node_dispatch": 345642.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 9,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 31040001,
+            "count_current": 0,
+            "count_max": 895,
+            "bytes_total": 3456420064,
+            "bytes_current": 0,
+            "bytes_max": 138929
+          },
+          "normalized": {
+            "calls_per_dispatch": 3104.0001,
+            "bytes_per_dispatch": 345642.0064,
+            "calls_per_node_dispatch": 3104.0001,
+            "bytes_per_node_dispatch": 345642.0064
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        }
+      ],
+      "stable_count_total": true,
+      "stable_bytes_total": true,
+      "valid": true,
+      "invalid_reason": null
+    },
+    {
+      "name": "edge_channel_table_round_trip",
+      "payload": "Arrow table value=0..63, one edge",
+      "kind": "channel_round_trip",
+      "workload_fingerprint": "b649540630463a02c1138f07710f3eda8e9f3dc3980d718b9455bfe81f344d55",
+      "plan_fingerprint": null,
+      "channel_workload": {
+        "edge_ids": [
+          "bench_source.output->bench_sink.input"
+        ],
+        "max_rows": 1024,
+        "max_bytes": 1048576,
+        "input_kind": "Table",
+        "input_rows": 64,
+        "input_estimated_bytes": 512
+      },
+      "compiled_node_count": 1,
+      "compiled_operator_variants": [
+        "EdgeChannel"
+      ],
+      "configured_datafusion": {
+        "batch_size": 1024,
+        "target_partitions": 1
+      },
+      "compiled_datafusion": null,
+      "requires_datafusion": false,
+      "metric_assertion": "no DataFusion metrics",
+      "output_assertion": "terminal schema, array, and value-buffer pointer identity",
+      "warmup_dispatches": 1000,
+      "requested_dispatches": 10000,
+      "repetitions_requested": 10,
+      "repetitions": [
+        {
+          "repetition_index": 0,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 20000,
+            "count_current": 0,
+            "count_max": 2,
+            "bytes_total": 480000,
+            "bytes_current": 0,
+            "bytes_max": 48
+          },
+          "normalized": {
+            "calls_per_dispatch": 2.0,
+            "bytes_per_dispatch": 48.0,
+            "calls_per_node_dispatch": 2.0,
+            "bytes_per_node_dispatch": 48.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 1,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 20000,
+            "count_current": 0,
+            "count_max": 2,
+            "bytes_total": 480000,
+            "bytes_current": 0,
+            "bytes_max": 48
+          },
+          "normalized": {
+            "calls_per_dispatch": 2.0,
+            "bytes_per_dispatch": 48.0,
+            "calls_per_node_dispatch": 2.0,
+            "bytes_per_node_dispatch": 48.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 2,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 20000,
+            "count_current": 0,
+            "count_max": 2,
+            "bytes_total": 480000,
+            "bytes_current": 0,
+            "bytes_max": 48
+          },
+          "normalized": {
+            "calls_per_dispatch": 2.0,
+            "bytes_per_dispatch": 48.0,
+            "calls_per_node_dispatch": 2.0,
+            "bytes_per_node_dispatch": 48.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 3,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 20000,
+            "count_current": 0,
+            "count_max": 2,
+            "bytes_total": 480000,
+            "bytes_current": 0,
+            "bytes_max": 48
+          },
+          "normalized": {
+            "calls_per_dispatch": 2.0,
+            "bytes_per_dispatch": 48.0,
+            "calls_per_node_dispatch": 2.0,
+            "bytes_per_node_dispatch": 48.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 4,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 20000,
+            "count_current": 0,
+            "count_max": 2,
+            "bytes_total": 480000,
+            "bytes_current": 0,
+            "bytes_max": 48
+          },
+          "normalized": {
+            "calls_per_dispatch": 2.0,
+            "bytes_per_dispatch": 48.0,
+            "calls_per_node_dispatch": 2.0,
+            "bytes_per_node_dispatch": 48.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 5,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 20000,
+            "count_current": 0,
+            "count_max": 2,
+            "bytes_total": 480000,
+            "bytes_current": 0,
+            "bytes_max": 48
+          },
+          "normalized": {
+            "calls_per_dispatch": 2.0,
+            "bytes_per_dispatch": 48.0,
+            "calls_per_node_dispatch": 2.0,
+            "bytes_per_node_dispatch": 48.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 6,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 20000,
+            "count_current": 0,
+            "count_max": 2,
+            "bytes_total": 480000,
+            "bytes_current": 0,
+            "bytes_max": 48
+          },
+          "normalized": {
+            "calls_per_dispatch": 2.0,
+            "bytes_per_dispatch": 48.0,
+            "calls_per_node_dispatch": 2.0,
+            "bytes_per_node_dispatch": 48.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 7,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 20000,
+            "count_current": 0,
+            "count_max": 2,
+            "bytes_total": 480000,
+            "bytes_current": 0,
+            "bytes_max": 48
+          },
+          "normalized": {
+            "calls_per_dispatch": 2.0,
+            "bytes_per_dispatch": 48.0,
+            "calls_per_node_dispatch": 2.0,
+            "bytes_per_node_dispatch": 48.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 8,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 20000,
+            "count_current": 0,
+            "count_max": 2,
+            "bytes_total": 480000,
+            "bytes_current": 0,
+            "bytes_max": 48
+          },
+          "normalized": {
+            "calls_per_dispatch": 2.0,
+            "bytes_per_dispatch": 48.0,
+            "calls_per_node_dispatch": 2.0,
+            "bytes_per_node_dispatch": 48.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 9,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 20000,
+            "count_current": 0,
+            "count_max": 2,
+            "bytes_total": 480000,
+            "bytes_current": 0,
+            "bytes_max": 48
+          },
+          "normalized": {
+            "calls_per_dispatch": 2.0,
+            "bytes_per_dispatch": 48.0,
+            "calls_per_node_dispatch": 2.0,
+            "bytes_per_node_dispatch": 48.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        }
+      ],
+      "stable_count_total": true,
+      "stable_bytes_total": true,
+      "valid": true,
+      "invalid_reason": null
+    },
+    {
+      "name": "edge_channel_external_round_trip",
+      "payload": "external payload, 1000 rows, one edge",
+      "kind": "channel_round_trip",
+      "workload_fingerprint": "087498529bf49ab5f4956beb0498a198a3577b541093dabb99aff48aa19eb6bf",
+      "plan_fingerprint": null,
+      "channel_workload": {
+        "edge_ids": [
+          "bench_source.output->bench_sink.input"
+        ],
+        "max_rows": 1024,
+        "max_bytes": 1048576,
+        "input_kind": "Array",
+        "input_rows": 1000,
+        "input_estimated_bytes": 8000
+      },
+      "compiled_node_count": 1,
+      "compiled_operator_variants": [
+        "EdgeChannel"
+      ],
+      "configured_datafusion": {
+        "batch_size": 1024,
+        "target_partitions": 1
+      },
+      "compiled_datafusion": null,
+      "requires_datafusion": false,
+      "metric_assertion": "no DataFusion metrics",
+      "output_assertion": "single terminal external payload Arc::ptr_eq",
+      "warmup_dispatches": 1000,
+      "requested_dispatches": 10000,
+      "repetitions_requested": 10,
+      "repetitions": [
+        {
+          "repetition_index": 0,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 0,
+            "count_current": 0,
+            "count_max": 0,
+            "bytes_total": 0,
+            "bytes_current": 0,
+            "bytes_max": 0
+          },
+          "normalized": {
+            "calls_per_dispatch": 0.0,
+            "bytes_per_dispatch": 0.0,
+            "calls_per_node_dispatch": 0.0,
+            "bytes_per_node_dispatch": 0.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 1,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 0,
+            "count_current": 0,
+            "count_max": 0,
+            "bytes_total": 0,
+            "bytes_current": 0,
+            "bytes_max": 0
+          },
+          "normalized": {
+            "calls_per_dispatch": 0.0,
+            "bytes_per_dispatch": 0.0,
+            "calls_per_node_dispatch": 0.0,
+            "bytes_per_node_dispatch": 0.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 2,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 0,
+            "count_current": 0,
+            "count_max": 0,
+            "bytes_total": 0,
+            "bytes_current": 0,
+            "bytes_max": 0
+          },
+          "normalized": {
+            "calls_per_dispatch": 0.0,
+            "bytes_per_dispatch": 0.0,
+            "calls_per_node_dispatch": 0.0,
+            "bytes_per_node_dispatch": 0.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 3,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 0,
+            "count_current": 0,
+            "count_max": 0,
+            "bytes_total": 0,
+            "bytes_current": 0,
+            "bytes_max": 0
+          },
+          "normalized": {
+            "calls_per_dispatch": 0.0,
+            "bytes_per_dispatch": 0.0,
+            "calls_per_node_dispatch": 0.0,
+            "bytes_per_node_dispatch": 0.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 4,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 0,
+            "count_current": 0,
+            "count_max": 0,
+            "bytes_total": 0,
+            "bytes_current": 0,
+            "bytes_max": 0
+          },
+          "normalized": {
+            "calls_per_dispatch": 0.0,
+            "bytes_per_dispatch": 0.0,
+            "calls_per_node_dispatch": 0.0,
+            "bytes_per_node_dispatch": 0.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 5,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 0,
+            "count_current": 0,
+            "count_max": 0,
+            "bytes_total": 0,
+            "bytes_current": 0,
+            "bytes_max": 0
+          },
+          "normalized": {
+            "calls_per_dispatch": 0.0,
+            "bytes_per_dispatch": 0.0,
+            "calls_per_node_dispatch": 0.0,
+            "bytes_per_node_dispatch": 0.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 6,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 0,
+            "count_current": 0,
+            "count_max": 0,
+            "bytes_total": 0,
+            "bytes_current": 0,
+            "bytes_max": 0
+          },
+          "normalized": {
+            "calls_per_dispatch": 0.0,
+            "bytes_per_dispatch": 0.0,
+            "calls_per_node_dispatch": 0.0,
+            "bytes_per_node_dispatch": 0.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 7,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 0,
+            "count_current": 0,
+            "count_max": 0,
+            "bytes_total": 0,
+            "bytes_current": 0,
+            "bytes_max": 0
+          },
+          "normalized": {
+            "calls_per_dispatch": 0.0,
+            "bytes_per_dispatch": 0.0,
+            "calls_per_node_dispatch": 0.0,
+            "bytes_per_node_dispatch": 0.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 8,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 0,
+            "count_current": 0,
+            "count_max": 0,
+            "bytes_total": 0,
+            "bytes_current": 0,
+            "bytes_max": 0
+          },
+          "normalized": {
+            "calls_per_dispatch": 0.0,
+            "bytes_per_dispatch": 0.0,
+            "calls_per_node_dispatch": 0.0,
+            "bytes_per_node_dispatch": 0.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 9,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 0,
+            "count_current": 0,
+            "count_max": 0,
+            "bytes_total": 0,
+            "bytes_current": 0,
+            "bytes_max": 0
+          },
+          "normalized": {
+            "calls_per_dispatch": 0.0,
+            "bytes_per_dispatch": 0.0,
+            "calls_per_node_dispatch": 0.0,
+            "bytes_per_node_dispatch": 0.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        }
+      ],
+      "stable_count_total": true,
+      "stable_bytes_total": true,
+      "valid": true,
+      "invalid_reason": null
+    },
+    {
+      "name": "edge_channel_fan_out_round_trip",
+      "payload": "Arrow table value=0..63, three fan-out edges",
+      "kind": "channel_round_trip",
+      "workload_fingerprint": "b620e02fe1c4be4697b5b924e01ebce3f635d7f0b3c82ccf81942fe09e9b4156",
+      "plan_fingerprint": null,
+      "channel_workload": {
+        "edge_ids": [
+          "bench_root.output->bench_leaf_a.input",
+          "bench_root.output->bench_leaf_b.input",
+          "bench_root.output->bench_leaf_c.input"
+        ],
+        "max_rows": 1024,
+        "max_bytes": 1048576,
+        "input_kind": "Table",
+        "input_rows": 64,
+        "input_estimated_bytes": 512
+      },
+      "compiled_node_count": 3,
+      "compiled_operator_variants": [
+        "EdgeChannel",
+        "EdgeChannel",
+        "EdgeChannel"
+      ],
+      "configured_datafusion": {
+        "batch_size": 1024,
+        "target_partitions": 1
+      },
+      "compiled_datafusion": null,
+      "requires_datafusion": false,
+      "metric_assertion": "no DataFusion metrics",
+      "output_assertion": "terminal schema, array, and value-buffer pointer identity",
+      "warmup_dispatches": 1000,
+      "requested_dispatches": 10000,
+      "repetitions_requested": 10,
+      "repetitions": [
+        {
+          "repetition_index": 0,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 60000,
+            "count_current": 0,
+            "count_max": 2,
+            "bytes_total": 1440000,
+            "bytes_current": 0,
+            "bytes_max": 48
+          },
+          "normalized": {
+            "calls_per_dispatch": 6.0,
+            "bytes_per_dispatch": 144.0,
+            "calls_per_node_dispatch": 2.0,
+            "bytes_per_node_dispatch": 48.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 1,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 60000,
+            "count_current": 0,
+            "count_max": 2,
+            "bytes_total": 1440000,
+            "bytes_current": 0,
+            "bytes_max": 48
+          },
+          "normalized": {
+            "calls_per_dispatch": 6.0,
+            "bytes_per_dispatch": 144.0,
+            "calls_per_node_dispatch": 2.0,
+            "bytes_per_node_dispatch": 48.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 2,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 60000,
+            "count_current": 0,
+            "count_max": 2,
+            "bytes_total": 1440000,
+            "bytes_current": 0,
+            "bytes_max": 48
+          },
+          "normalized": {
+            "calls_per_dispatch": 6.0,
+            "bytes_per_dispatch": 144.0,
+            "calls_per_node_dispatch": 2.0,
+            "bytes_per_node_dispatch": 48.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 3,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 60000,
+            "count_current": 0,
+            "count_max": 2,
+            "bytes_total": 1440000,
+            "bytes_current": 0,
+            "bytes_max": 48
+          },
+          "normalized": {
+            "calls_per_dispatch": 6.0,
+            "bytes_per_dispatch": 144.0,
+            "calls_per_node_dispatch": 2.0,
+            "bytes_per_node_dispatch": 48.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 4,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 60000,
+            "count_current": 0,
+            "count_max": 2,
+            "bytes_total": 1440000,
+            "bytes_current": 0,
+            "bytes_max": 48
+          },
+          "normalized": {
+            "calls_per_dispatch": 6.0,
+            "bytes_per_dispatch": 144.0,
+            "calls_per_node_dispatch": 2.0,
+            "bytes_per_node_dispatch": 48.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 5,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 60000,
+            "count_current": 0,
+            "count_max": 2,
+            "bytes_total": 1440000,
+            "bytes_current": 0,
+            "bytes_max": 48
+          },
+          "normalized": {
+            "calls_per_dispatch": 6.0,
+            "bytes_per_dispatch": 144.0,
+            "calls_per_node_dispatch": 2.0,
+            "bytes_per_node_dispatch": 48.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 6,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 60000,
+            "count_current": 0,
+            "count_max": 2,
+            "bytes_total": 1440000,
+            "bytes_current": 0,
+            "bytes_max": 48
+          },
+          "normalized": {
+            "calls_per_dispatch": 6.0,
+            "bytes_per_dispatch": 144.0,
+            "calls_per_node_dispatch": 2.0,
+            "bytes_per_node_dispatch": 48.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 7,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 60000,
+            "count_current": 0,
+            "count_max": 2,
+            "bytes_total": 1440000,
+            "bytes_current": 0,
+            "bytes_max": 48
+          },
+          "normalized": {
+            "calls_per_dispatch": 6.0,
+            "bytes_per_dispatch": 144.0,
+            "calls_per_node_dispatch": 2.0,
+            "bytes_per_node_dispatch": 48.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 8,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 60000,
+            "count_current": 0,
+            "count_max": 2,
+            "bytes_total": 1440000,
+            "bytes_current": 0,
+            "bytes_max": 48
+          },
+          "normalized": {
+            "calls_per_dispatch": 6.0,
+            "bytes_per_dispatch": 144.0,
+            "calls_per_node_dispatch": 2.0,
+            "bytes_per_node_dispatch": 48.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        },
+        {
+          "repetition_index": 9,
+          "requested_dispatches": 10000,
+          "completed_dispatches": 10000,
+          "measurement_thread_id": "ThreadId(1)",
+          "on_expected_thread": true,
+          "raw": {
+            "count_total": 60000,
+            "count_current": 0,
+            "count_max": 2,
+            "bytes_total": 1440000,
+            "bytes_current": 0,
+            "bytes_max": 48
+          },
+          "normalized": {
+            "calls_per_dispatch": 6.0,
+            "bytes_per_dispatch": 144.0,
+            "calls_per_node_dispatch": 2.0,
+            "bytes_per_node_dispatch": 48.0
+          },
+          "output_assertion_passed": true,
+          "invalid_reason": null
+        }
+      ],
+      "stable_count_total": true,
+      "stable_bytes_total": true,
+      "valid": true,
+      "invalid_reason": null
+    }
+  ]
+}

@@ -44,6 +44,10 @@ pub enum CalcFlowError {
     Conflict { resource: String, key: String },
     #[error("{resource} {key:?} was not found")]
     NotFound { resource: String, key: String },
+    /// A send on a stream edge whose receiver closed during job convergence
+    /// (spec S10.1, API note A8).
+    #[error("edge {edge:?} is closed")]
+    EdgeClosed { edge: String },
     #[error("I/O failed for {path}: {source}")]
     Io {
         path: String,

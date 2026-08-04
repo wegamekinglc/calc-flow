@@ -53,8 +53,8 @@ pub use project_store::{
     import_project_yaml_with_limit,
 };
 pub use runtime::{
-    MicroBatchRunner, SinkRouter, StreamJobContext, StreamMessage, StreamMessageKind,
-    StreamingRunner,
+    ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, MicroBatchRunner, SinkRouter,
+    StreamJobContext, StreamMessage, StreamMessageKind, StreamingRunner, edge_channel,
 };
 pub use time::{Epoch, EventTime};
 pub use udf::{
