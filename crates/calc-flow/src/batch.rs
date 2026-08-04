@@ -151,6 +151,13 @@ pub trait ExternalPayload: Any + Debug + Send + Sync {
     /// there is no opt-out (spec S10.2). The estimate is a logical queue
     /// charge used for backpressure accounting, not a process RSS
     /// measurement, and shared payloads are charged per consumer.
+    ///
+    /// An opaque host object that exposes no byte size has no observable
+    /// cost to under-report; its charge is defined by convention as a
+    /// logical per-element estimate (the built-in hosts charge one `u64`
+    /// per element). That convention prices queue occupancy for such hosts
+    /// and is a documented charging rule, not a memory bound: it can sit
+    /// below a large non-array host's true footprint.
     fn estimated_bytes(&self) -> usize;
     fn as_any(&self) -> &dyn Any;
 }

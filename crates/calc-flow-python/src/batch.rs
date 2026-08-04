@@ -110,8 +110,11 @@ pub(crate) struct PythonPayload {
 /// Charges a payload's visible byte cost: the host object's own `nbytes`
 /// report when it exposes one (`NumPy` and JAX arrays report their exact
 /// visible bytes, including views and empty arrays), otherwise a logical
-/// per-element charge. Charges are logical queue occupancy, not RSS (spec
-/// S10.2).
+/// per-element charge of one `u64` per element. The per-element fallback is
+/// the documented convention for opaque hosts without an `nbytes` report: it
+/// prices queue occupancy, is not a memory bound, and can sit below a large
+/// non-array host's true footprint. Charges are logical queue occupancy, not
+/// RSS (spec S10.2).
 fn estimate_payload_bytes(object: &Bound<'_, PyAny>, len: usize) -> usize {
     object
         .getattr("nbytes")

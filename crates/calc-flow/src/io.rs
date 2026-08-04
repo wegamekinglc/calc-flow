@@ -264,13 +264,27 @@ fn table_parts(
         });
     }
     let table = item.batch.table_payload()?;
-    let bytes = table.estimated_bytes()?;
+    let bytes = table.estimated_bytes().map_err(source_batch_error)?;
     Ok((
         table.schema().clone(),
         table.batches().to_vec(),
         item.batch.num_rows(),
         bytes,
     ))
+}
+
+/// Re-attributes a `TableBatch::estimated_bytes` failure, reported against
+/// the bare `"batch"` field, to the source item's batch. This keeps the
+/// batching boundary on the pre-M1.3 diagnostic contract (`"source.batch"`)
+/// while the message carries the measurement detail.
+fn source_batch_error(error: CalcFlowError) -> CalcFlowError {
+    match error {
+        CalcFlowError::InvalidArgument { message, .. } => CalcFlowError::InvalidArgument {
+            field: "source.batch".into(),
+            message,
+        },
+        error => error,
+    }
 }
 
 fn coalesced_item(
@@ -289,4 +303,51 @@ fn coalesced_item(
         cursor: latest.cursor.clone(),
         sequence: latest.sequence,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A `TableBatch` whose estimation fails cannot be built in safe code:
+    // Arrow validates every measurement failure mode at construction and a
+    // `usize` overflow needs impossible allocations, so the failing result
+    // `TableBatch::estimated_bytes` would return is constructed directly.
+    #[test]
+    fn measurement_failure_is_attributed_to_the_source_batch_field() {
+        let failure = CalcFlowError::InvalidArgument {
+            field: "batch".into(),
+            message: "Arrow slice memory could not be measured: boom".into(),
+        };
+        assert!(matches!(
+            source_batch_error(failure),
+            CalcFlowError::InvalidArgument { ref field, ref message }
+                if field == "source.batch"
+                    && message == "Arrow slice memory could not be measured: boom"
+        ));
+    }
+
+    #[test]
+    fn measurement_overflow_is_attributed_to_the_source_batch_field() {
+        let failure = CalcFlowError::InvalidArgument {
+            field: "batch".into(),
+            message: "size sum overflowed usize".into(),
+        };
+        assert!(matches!(
+            source_batch_error(failure),
+            CalcFlowError::InvalidArgument { ref field, ref message }
+                if field == "source.batch" && message == "size sum overflowed usize"
+        ));
+    }
+
+    #[test]
+    fn source_batch_error_passes_non_argument_errors_through() {
+        let error = CalcFlowError::Cancelled {
+            run_id: "run-1".into(),
+        };
+        assert!(matches!(
+            source_batch_error(error),
+            CalcFlowError::Cancelled { ref run_id } if run_id == "run-1"
+        ));
+    }
 }
