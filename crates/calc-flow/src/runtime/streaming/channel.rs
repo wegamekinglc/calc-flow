@@ -169,7 +169,10 @@ struct Shared {
 /// reservations; the `high_water_*` fields are their monotone maxima and
 /// never regress. `blocked_sends` counts sends that had to await capacity at
 /// least once, and `blocked_duration` accumulates the time those sends spent
-/// waiting. Snapshots are consistent: every field is read under one lock.
+/// waiting. A send cancelled while it waits still increments `blocked_sends`
+/// but contributes nothing to `blocked_duration`, which only accumulates
+/// when a blocked send eventually enqueues. Snapshots are consistent: every
+/// field is read under one lock.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ChannelMetrics {
     pub queue_depth: usize,
@@ -367,7 +370,24 @@ impl EdgeSender {
                     state.blocked_sends += 1;
                 }
             }
+            // Lost-wakeup safety at this await rests on the type-level
+            // single-producer invariant I10 (see the module doc): with at
+            // most one waiting sender, a release notification can never be
+            // consumed by a waiter that cannot make progress.
             notified.as_mut().await;
+            // A woken send hands the wakeup on before re-checking the
+            // budget. Under I10 this is a no-op: the sender is the only
+            // task that ever waits on `capacity_available`, its consumed
+            // `Notified` is no longer registered at this point, and
+            // `notify_waiters` — unlike `notify_one` — stores no permit
+            // for a later waiter. The call is insurance for a relaxed
+            // invariant, not load-bearing today: if the channel ever
+            // allowed multiple producers, a release consumed by a woken
+            // send that still does not fit could otherwise strand a parked
+            // peer whose message does fit the freed capacity. A genuine
+            // multi-producer design would still revisit the wakeup
+            // discipline; I10 is what keeps this coordination sound.
+            self.shared.capacity_available.notify_waiters();
             notified.set(self.shared.capacity_available.notified());
         }
     }
