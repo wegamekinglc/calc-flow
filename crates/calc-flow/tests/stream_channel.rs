@@ -115,7 +115,7 @@ fn channel_rejects_a_zero_byte_budget() {
 }
 
 #[test]
-fn envelope_cost_charges_data_rows_and_bytes_and_control_only_a_message() {
+fn envelope_cost_charges_data_rows_and_bytes() {
     let data = EnvelopeCost::of_message(&StreamMessage::data(external_batch(7, 41))).unwrap();
     assert_eq!(data.messages(), 1);
     assert_eq!(data.rows(), 7);

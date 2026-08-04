@@ -626,4 +626,19 @@ mod tests {
         assert_eq!(sender.edge(), "source.out->node.in");
         assert_eq!(receiver.edge(), "source.out->node.in");
     }
+
+    #[test]
+    fn control_messages_cost_one_message_and_zero_rows_and_bytes() {
+        for message in [
+            StreamMessage::watermark(EventTime::from_micros(1)),
+            StreamMessage::barrier(Epoch::INITIAL),
+            StreamMessage::idle(),
+            StreamMessage::end_of_input(),
+        ] {
+            let cost = EnvelopeCost::of_message(&message).unwrap();
+            assert_eq!(cost.messages(), 1);
+            assert_eq!(cost.rows(), 0);
+            assert_eq!(cost.bytes(), 0);
+        }
+    }
 }
