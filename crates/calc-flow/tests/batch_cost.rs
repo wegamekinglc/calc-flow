@@ -4,7 +4,8 @@ use std::{any::Any, sync::Arc};
 
 use calc_flow::{Batch, BatchMetadata, BatchingSource, CalcFlowError, ExternalPayload, Source};
 use datafusion::arrow::{
-    array::{Array, ArrayRef, Int64Array},
+    array::{Array, ArrayRef, Int64Array, ListArray},
+    buffer::{OffsetBuffer, ScalarBuffer},
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
 };
@@ -72,6 +73,37 @@ fn table_batch_estimates_zero_rows_as_zero_bytes() {
 }
 
 #[test]
+fn table_batch_estimates_the_visible_window_of_a_sliced_list_column() {
+    let item_field = Arc::new(Field::new("item", DataType::Int64, false));
+    let offsets = OffsetBuffer::new(ScalarBuffer::from(
+        (0..=16_i32).map(|index| index * 4).collect::<Vec<_>>(),
+    ));
+    let base = Arc::new(ListArray::new(
+        Arc::clone(&item_field),
+        offsets,
+        Arc::new(Int64Array::from((0..64).collect::<Vec<_>>())),
+        None,
+    )) as ArrayRef;
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "value",
+        DataType::List(item_field),
+        false,
+    )]));
+    let record = RecordBatch::try_new(schema, vec![base.slice(2, 1)]).unwrap();
+    let batch = Batch::table(vec![record], BatchMetadata::default()).unwrap();
+
+    let estimated = batch.estimated_bytes().unwrap();
+    let column = batch.table_payload().unwrap().batches()[0]
+        .column(0)
+        .clone();
+    assert_eq!(estimated, column.to_data().get_slice_memory_size().unwrap());
+    // The visible child window holds 4 i64 values; the estimate must never
+    // under-report them, and must stay below the shared base allocation.
+    assert!(estimated >= 4 * 8, "{estimated}");
+    assert!(estimated < base.to_data().get_array_memory_size());
+}
+
+#[test]
 fn external_batch_uses_the_payload_provided_byte_estimate() {
     let batch = Batch::external(Arc::new(MeasuredArray), BatchMetadata::default()).unwrap();
 
@@ -132,6 +164,48 @@ async fn batching_source_reports_every_exceeded_limit_in_the_oversize_error() {
         }
         other => panic!("expected an oversize error, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn batching_source_emits_a_single_item_exactly_at_both_limits() {
+    let item = source_item(&[1, 2], json!(2), 1);
+    let bytes = arrow_bytes(&item.batch);
+    let (source, _) = QueueSource::new(vec![item]);
+    let mut source = BatchingSource::new(source, 2, bytes).unwrap();
+    source.open(None).await.unwrap();
+
+    let emitted = source.next().await.unwrap().unwrap();
+    assert_eq!(emitted.batch.num_rows(), 2);
+    assert_eq!(emitted.cursor, Some(json!(2)));
+    assert_eq!(emitted.sequence, 1);
+    assert!(source.next().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn batching_source_reopen_clears_the_latched_oversize_fault() {
+    let (source, opens) = QueueSource::new(vec![
+        source_item(&[1, 2, 3], json!(3), 1),
+        source_item(&[4], json!(4), 2),
+    ]);
+    let mut source = BatchingSource::new(source, 2, usize::MAX).unwrap();
+    source.open(None).await.unwrap();
+
+    assert!(matches!(
+        source.next().await,
+        Err(CalcFlowError::InvalidArgument { ref field, .. }) if field == "source.batch"
+    ));
+    assert!(matches!(
+        source.next().await,
+        Err(CalcFlowError::InvalidArgument { ref field, .. }) if field == "source"
+    ));
+
+    source.open(None).await.unwrap();
+    let emitted = source.next().await.unwrap().unwrap();
+    assert_eq!(emitted.batch.num_rows(), 1);
+    assert_eq!(emitted.cursor, Some(json!(4)));
+    assert_eq!(emitted.sequence, 2);
+    assert!(source.next().await.unwrap().is_none());
+    assert_eq!(*opens.lock().unwrap(), vec![None, None]);
 }
 
 fn arrow_bytes(batch: &Batch) -> usize {
