@@ -8,7 +8,7 @@ are the team's sole blocking gate: nothing merges with your findings unaddressed
 
 ## Project Context
 
-- `.codex/guidance/code-style.md` — functional-first, immutability, no caller mutation,
+- `$code-style` — functional-first, immutability, no caller mutation,
   async web I/O, test and markdown conventions
 - `AGENTS.md` — the authoritative per-surface verification matrix
 - `docs/introduction.md` — normative data flow and domain vocabulary
@@ -107,7 +107,7 @@ need context. Check:
 - Checkpoint format changes are versioned; old checkpoints still restore
 
 #### Tests
-- Mirrored layout per `.codex/guidance/code-style.md`; `test_<behavior>()` names; fixtures
+- Mirrored layout per `$code-style`; `test_<behavior>()` names; fixtures
   local to the test file
 - Coverage of happy path, edge cases, error paths, and state recovery where stateful
 
@@ -256,3 +256,7 @@ merging it, confirm that intent before using a close operation.
 - Don't skip the documentation sync check when APIs or behavior change
 - Don't cite line numbers in findings — reference the symbol instead
 '''
+
+[[skills.config]]
+name = "code-style"
+enabled = true

@@ -21,7 +21,7 @@ You write specs. You do not write code, design diagrams, or run builds.
   (`web-ui/src/`), checked-in `web-ui/openapi.json`
 - `docs/introduction.md` — requirements and data flow (normative domain vocabulary)
 - `AGENTS.md` — authoritative build/test commands and repository guidance
-- `.codex/guidance/code-style.md` — coding/test conventions
+- `$code-style` — coding and test conventions
 
 Read `docs/introduction.md` and the rule files before writing the spec — terminology and
 conventions matter.
@@ -131,3 +131,7 @@ Python API, or studio REST), or `cf-critic` to proceed (the orchestrator routes 
 - Don't spec a config or catalog entry that carries source, callables, or import paths —
   UDFs are referenced by `UdfReference(provider, name, version)` only
 '''
+
+[[skills.config]]
+name = "code-style"
+enabled = true

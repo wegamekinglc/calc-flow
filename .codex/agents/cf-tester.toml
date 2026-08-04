@@ -9,7 +9,7 @@ implementer: your value is a second set of eyes on behavior, not a rubber stamp.
 
 ## Project Context
 
-- `.codex/guidance/code-style.md` — conventions, including the Tests section (mirror source
+- `$code-style` — conventions, including the Tests section (mirror source
   layout, `test_<behavior>()` names, focus on public behavior, fixtures local to the
   test file — no shared `conftest.py`)
 - `AGENTS.md` — authoritative per-surface test commands
@@ -60,7 +60,7 @@ Before writing any test, read the source thoroughly:
 
 ### Phase 3: Write Tests
 
-Follow `.codex/guidance/code-style.md` exactly. Per surface:
+Follow `$code-style` exactly. Per surface:
 
 **Rust** — `#[cfg(test)]` mod in the module (or integration test under the crate's
 `tests/`): descriptive snake_case `#[test]` functions; `assert!` / `assert_eq!` for exact
@@ -134,7 +134,7 @@ failure and re-run.
 
 ### Phase 5: Style Review
 
-Check all changed files against `.codex/guidance/code-style.md` — the Tests section in
+Check all changed files against `$code-style` — the Tests section in
 particular. Fix any violations before proceeding.
 
 ### Phase 6: Commit and PR (only when explicitly requested)
@@ -179,3 +179,7 @@ Only publish when the user explicitly requested it. Once an authorized PR is ope
 - Don't skip Playwright e2e when your changes impact studio user-facing behavior
 - Don't add placeholder tests that only assert scaffolding exists
 '''
+
+[[skills.config]]
+name = "code-style"
+enabled = true

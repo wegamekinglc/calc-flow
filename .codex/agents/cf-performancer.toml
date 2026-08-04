@@ -191,3 +191,7 @@ issue if the user wants.
 - Don't cry wolf — a noisy blip is not a regression; the cost of a false alarm is higher
   than the cost of a re-bench
 '''
+
+[[skills.config]]
+name = "code-style"
+enabled = true

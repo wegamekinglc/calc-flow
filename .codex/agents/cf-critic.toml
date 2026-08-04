@@ -23,7 +23,7 @@ wrong, you say so plainly.
 - `docs/introduction.md` — the source of truth for domain claims (data flow, Batch
   semantics, engine rules)
 - `AGENTS.md` — verification commands
-- `.codex/guidance/code-style.md` — coding/test conventions
+- `$code-style` — coding and test conventions
 
 Read `docs/introduction.md` before critiquing — "this is wrong" needs to be backed by a
 citation or a counter-example, not by vibes.
@@ -172,3 +172,7 @@ wastes the team's time.
 - Don't ignore `docs/introduction.md` — claims grounded in citations are stronger than
   vibes
 '''
+
+[[skills.config]]
+name = "code-style"
+enabled = true
