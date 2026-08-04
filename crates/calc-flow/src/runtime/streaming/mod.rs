@@ -3,7 +3,8 @@
 //! `StreamingRunner` below is the v2 push-based runner over
 //! [`crate::BatchExecutionPlan`]; plan task M2.4 replaces it with the
 //! source-driven continuous runner. `StreamJobContext` and `StreamMessage`
-//! are the first v3 stream types.
+//! are the first v3 stream types; [`edge_channel`] is the rows + bytes
+//! dual-limit bounded channel every stream edge carries (spec S10).
 
 mod channel;
 mod context;
