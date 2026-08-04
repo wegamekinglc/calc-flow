@@ -247,6 +247,41 @@ async fn send_rejects_a_single_message_larger_than_the_row_budget() {
 }
 
 #[tokio::test]
+async fn send_accepts_a_single_message_exactly_at_the_row_budget() {
+    let (mut sender, mut receiver) = edge_channel(
+        "source.out->node.in",
+        EdgeBudget {
+            max_rows: 4,
+            max_bytes: 1_024,
+        },
+    )
+    .unwrap();
+
+    // The oversize check is strict (S10.3): a message equal to the row
+    // limit still fits, and it fits without waiting.
+    let mut exact = Box::pin(sender.send(StreamMessage::data(external_batch(4, 8))));
+    assert_ready(&mut exact).await.unwrap();
+    drop(exact);
+
+    // Rows 4/4: one more row must wait for a release.
+    let mut blocked = Box::pin(sender.send(StreamMessage::data(external_batch(1, 1))));
+    assert_pending(&mut blocked).await;
+
+    assert_eq!(
+        receiver
+            .recv()
+            .await
+            .unwrap()
+            .unwrap()
+            .as_data()
+            .unwrap()
+            .num_rows(),
+        4
+    );
+    blocked.await.unwrap();
+}
+
+#[tokio::test]
 async fn sender_blocks_when_the_row_budget_is_full_and_resumes_after_receive() {
     let (mut sender, mut receiver) = edge_channel(
         "source.out->node.in",
@@ -338,6 +373,42 @@ async fn sender_blocks_when_the_byte_budget_is_full_with_few_messages() {
         1
     );
     blocked.await.unwrap();
+    assert_eq!(
+        receiver
+            .recv()
+            .await
+            .unwrap()
+            .unwrap()
+            .as_data()
+            .unwrap()
+            .num_rows(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn channel_with_a_budget_of_one_hands_messages_over_one_at_a_time() {
+    let (mut sender, mut receiver) = edge_channel(
+        "source.out->node.in",
+        EdgeBudget {
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )
+    .unwrap();
+
+    sender
+        .send(StreamMessage::data(external_batch(1, 1)))
+        .await
+        .unwrap();
+
+    // A single message saturates both limits: the next send rendezvous-waits
+    // for the receiver to take the first one.
+    let mut second = Box::pin(sender.send(StreamMessage::data(external_batch(1, 1))));
+    assert_pending(&mut second).await;
+
+    receiver.recv().await.unwrap().unwrap();
+    second.await.unwrap();
     assert_eq!(
         receiver
             .recv()
@@ -568,6 +639,48 @@ async fn metrics_report_queue_depth_charges_and_high_water_marks() {
     assert_eq!(metrics.high_water_depth, 2);
     assert_eq!(metrics.high_water_rows, 5);
     assert_eq!(metrics.high_water_bytes, 50);
+}
+
+#[tokio::test]
+async fn metrics_survive_repeated_fill_and_drain_cycles() {
+    let (mut sender, mut receiver) = edge_channel(
+        "source.out->node.in",
+        EdgeBudget {
+            max_rows: 4,
+            max_bytes: 64,
+        },
+    )
+    .unwrap();
+
+    for _ in 0..3 {
+        sender
+            .send(StreamMessage::data(external_batch(2, 32)))
+            .await
+            .unwrap();
+        sender
+            .send(StreamMessage::data(external_batch(2, 32)))
+            .await
+            .unwrap();
+
+        let metrics = sender.metrics();
+        assert_eq!(metrics.queue_depth, 2);
+        assert_eq!(metrics.charged_rows, 4);
+        assert_eq!(metrics.charged_bytes, 64);
+
+        receiver.recv().await.unwrap().unwrap();
+        receiver.recv().await.unwrap().unwrap();
+
+        // A full drain releases every reservation exactly once, so the next
+        // cycle can refill the whole budget; the peak high-water marks
+        // survive the empty queue and never regress (NFR-6).
+        let metrics = receiver.metrics();
+        assert_eq!(metrics.queue_depth, 0);
+        assert_eq!(metrics.charged_rows, 0);
+        assert_eq!(metrics.charged_bytes, 0);
+        assert_eq!(metrics.high_water_depth, 2);
+        assert_eq!(metrics.high_water_rows, 4);
+        assert_eq!(metrics.high_water_bytes, 64);
+    }
 }
 
 #[tokio::test(start_paused = true)]
