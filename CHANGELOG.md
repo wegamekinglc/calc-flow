@@ -5,6 +5,21 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- Unify batch memory metering ahead of bounded stream channels. `Batch` and
+  `TableBatch` gain `estimated_bytes()`: table batches are charged the Arrow
+  memory size of their visible slices (sliced arrays sharing a larger backing
+  allocation are charged only their visible window), and `ExternalPayload`
+  now requires an exact or conservative `estimated_bytes()` with no opt-out —
+  a breaking change for payload implementors. Row and byte sums use checked
+  arithmetic and report overflow as a typed `InvalidArgument` error. Python
+  NumPy and JAX payloads report their exact visible bytes (views are charged
+  their visible window, empty arrays zero); host objects without an `nbytes`
+  report receive a logical per-element charge. All charges are logical queue
+  occupancy, not process RSS. `BatchingSource` over-limit behavior converges
+  on the v3 fail-before-enqueue rule: a single source item exceeding the row
+  or byte limit now fails with a latched typed error and the source must be
+  reopened, instead of the item being emitted alone as before.
+
 - Split the operator and plan surface by lifecycle — `BatchOperator` /
   `BatchExecutionPlan` for finite one-shot graphs, `StreamOperator` /
   `StreamExecutionPlan` for continuously running graphs — and replace the

@@ -46,7 +46,7 @@ async fn batching_source_coalesces_adjacent_items_and_retains_latest_position() 
 }
 
 #[tokio::test]
-async fn batching_source_uses_arrow_memory_and_emits_an_oversized_item_alone() {
+async fn batching_source_uses_arrow_memory_and_rejects_an_oversized_item() {
     let first = source_item(&[1, 2], json!(2), 1);
     let bytes = arrow_bytes(&first.batch);
     let (source, _) = QueueSource::new(vec![
@@ -59,8 +59,10 @@ async fn batching_source_uses_arrow_memory_and_emits_an_oversized_item_alone() {
 
     assert_eq!(source.next().await.unwrap().unwrap().batch.num_rows(), 2);
     assert_eq!(source.next().await.unwrap().unwrap().batch.num_rows(), 2);
-    assert_eq!(source.next().await.unwrap().unwrap().batch.num_rows(), 4);
-    assert!(source.next().await.unwrap().is_none());
+    assert!(matches!(
+        source.next().await,
+        Err(CalcFlowError::InvalidArgument { field, .. }) if field == "source.batch"
+    ));
 }
 
 #[tokio::test]
@@ -221,7 +223,7 @@ async fn cancelled_candidate_read_retains_the_accumulated_group_for_retry() {
 }
 
 #[tokio::test]
-async fn oversized_first_item_emits_without_awaiting_a_candidate() {
+async fn oversized_first_item_fails_without_awaiting_a_candidate() {
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let source = GatedCandidateSource::new(
@@ -237,7 +239,10 @@ async fn oversized_first_item_emits_without_awaiting_a_candidate() {
     source.open(None).await.unwrap();
 
     tokio::select! {
-        result = source.next() => assert_eq!(result.unwrap().unwrap().batch.num_rows(), 2),
+        result = source.next() => assert!(
+            matches!(result, Err(CalcFlowError::InvalidArgument { ref field, .. }) if field == "source.batch"),
+            "oversized item must fail before emission: {result:?}"
+        ),
         () = started.notified() => panic!("oversized item unnecessarily awaited a candidate"),
     }
 }
@@ -349,6 +354,10 @@ impl ExternalPayload for TestArray {
 
     fn len(&self) -> usize {
         1
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        8
     }
 
     fn as_any(&self) -> &dyn Any {
