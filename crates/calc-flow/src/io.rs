@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use datafusion::arrow::{compute::concat_batches, record_batch::RecordBatch};
 use serde_json::Value;
 
-use crate::{Batch, BatchKind, CalcFlowError, Result, RunContext};
+use crate::{Batch, BatchKind, CalcFlowError, Result, RunContext, batch::checked_accumulate};
 
 /// One replayable source item with the cursor committed after its delivery.
 #[derive(Clone, Debug)]
@@ -59,6 +59,13 @@ struct TableAccumulator {
 
 impl<S> BatchingSource<S> {
     /// Wraps a source with positive row and Arrow-memory limits.
+    ///
+    /// A single source item that exceeds either limit fails with
+    /// [`CalcFlowError::InvalidArgument`] instead of being emitted alone:
+    /// an oversize item can never fit through a bounded stream edge, so
+    /// there is no "one oversize message" exception (spec S10.3). The
+    /// failure is latched and the source must be reopened before further
+    /// reads.
     ///
     /// # Errors
     ///
@@ -129,12 +136,9 @@ impl<S: Source> Source for BatchingSource<S> {
             });
         }
 
-        let first_exceeds_limit = self
-            .accumulated
-            .as_ref()
-            .is_some_and(|group| group.rows > self.max_rows || group.bytes > self.max_bytes);
-        if first_exceeds_limit {
-            return self.take_accumulated();
+        if let Some(error) = self.single_item_oversize_error() {
+            self.faulted = true;
+            return Err(error);
         }
 
         loop {
@@ -161,15 +165,23 @@ impl<S: Source> Source for BatchingSource<S> {
                     message: "adjacent table batches must have identical schemas".into(),
                 });
             }
-            let exceeds = accumulated.rows.saturating_add(candidate_parts.2) > self.max_rows
-                || accumulated.bytes.saturating_add(candidate_parts.3) > self.max_bytes;
-            if exceeds {
+            let (rows, bytes) = match (
+                checked_accumulate(accumulated.rows, candidate_parts.2, "source.batch"),
+                checked_accumulate(accumulated.bytes, candidate_parts.3, "source.batch"),
+            ) {
+                (Ok(rows), Ok(bytes)) => (rows, bytes),
+                (Err(error), _) | (_, Err(error)) => {
+                    self.faulted = true;
+                    return Err(error);
+                }
+            };
+            if rows > self.max_rows || bytes > self.max_bytes {
                 self.pending = Some(candidate);
                 break;
             }
             accumulated.batches.extend(candidate_parts.1);
-            accumulated.rows = accumulated.rows.saturating_add(candidate_parts.2);
-            accumulated.bytes = accumulated.bytes.saturating_add(candidate_parts.3);
+            accumulated.rows = rows;
+            accumulated.bytes = bytes;
             accumulated.latest = candidate;
         }
 
@@ -178,6 +190,36 @@ impl<S: Source> Source for BatchingSource<S> {
 }
 
 impl<S> BatchingSource<S> {
+    /// A single source item larger than a configured limit can never fit
+    /// through a bounded stream edge, so it is a typed error rather than a
+    /// lone emission (spec S10.3: no "one oversize message" exception).
+    fn single_item_oversize_error(&self) -> Option<CalcFlowError> {
+        let group = self.accumulated.as_ref()?;
+        let mut exceeded = Vec::new();
+        if group.rows > self.max_rows {
+            exceeded.push(format!(
+                "{} rows exceed the {} row limit",
+                group.rows, self.max_rows
+            ));
+        }
+        if group.bytes > self.max_bytes {
+            exceeded.push(format!(
+                "{} bytes exceed the {} byte limit",
+                group.bytes, self.max_bytes
+            ));
+        }
+        if exceeded.is_empty() {
+            return None;
+        }
+        Some(CalcFlowError::InvalidArgument {
+            field: "source.batch".into(),
+            message: format!(
+                "single source item exceeds the batching limits: {}",
+                exceeded.join(", ")
+            ),
+        })
+    }
+
     fn take_accumulated(&mut self) -> Result<Option<SourceItem>> {
         let accumulated = self
             .accumulated
@@ -222,29 +264,10 @@ fn table_parts(
         });
     }
     let table = item.batch.table_payload()?;
-    let batches = table.batches().to_vec();
-    let bytes = batches.iter().try_fold(0_usize, |batch_total, batch| {
-        batch
-            .columns()
-            .iter()
-            .try_fold(batch_total, |column_total, column| {
-                let bytes = column.to_data().get_slice_memory_size().map_err(|error| {
-                    CalcFlowError::InvalidArgument {
-                        field: "source.batch".into(),
-                        message: format!("Arrow slice memory could not be measured: {error}"),
-                    }
-                })?;
-                column_total
-                    .checked_add(bytes)
-                    .ok_or_else(|| CalcFlowError::InvalidArgument {
-                        field: "source.batch".into(),
-                        message: "Arrow slice memory size overflowed usize".into(),
-                    })
-            })
-    })?;
+    let bytes = table.estimated_bytes()?;
     Ok((
         table.schema().clone(),
-        batches,
+        table.batches().to_vec(),
         item.batch.num_rows(),
         bytes,
     ))

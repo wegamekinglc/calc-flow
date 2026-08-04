@@ -7,6 +7,21 @@ use serde_json::Value;
 
 use crate::{CalcFlowError, JsonMap, Result};
 
+/// Adds `addend` to `total`, reporting overflow as a typed error (spec S10.2:
+/// byte and row sums use checked arithmetic; overflow is a typed error).
+pub(crate) fn checked_accumulate(
+    total: usize,
+    addend: usize,
+    field: &'static str,
+) -> Result<usize> {
+    total
+        .checked_add(addend)
+        .ok_or_else(|| CalcFlowError::InvalidArgument {
+            field: field.into(),
+            message: "size sum overflowed usize".into(),
+        })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BatchKind {
@@ -81,7 +96,9 @@ impl TableBatch {
                 message: "schemas must match".into(),
             });
         }
-        let rows = batches.iter().map(RecordBatch::num_rows).sum();
+        let rows = batches.iter().try_fold(0_usize, |rows, batch| {
+            checked_accumulate(rows, batch.num_rows(), "batches")
+        })?;
         Ok(Self {
             schema,
             batches: batches.into(),
@@ -96,12 +113,45 @@ impl TableBatch {
     pub fn batches(&self) -> &[RecordBatch] {
         &self.batches
     }
+
+    /// Estimates the in-memory cost of the visible Arrow slices in bytes.
+    ///
+    /// Each column of each record batch is charged its Arrow slice memory
+    /// size, so sliced arrays sharing a larger backing allocation are charged
+    /// only for their visible window. The estimate is a logical queue charge,
+    /// not a process RSS measurement.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] when Arrow cannot measure a
+    /// column or the summed size overflows `usize`.
+    pub fn estimated_bytes(&self) -> Result<usize> {
+        self.batches.iter().try_fold(0_usize, |total, batch| {
+            batch.columns().iter().try_fold(total, |total, column| {
+                let bytes = column.to_data().get_slice_memory_size().map_err(|error| {
+                    CalcFlowError::InvalidArgument {
+                        field: "batch".into(),
+                        message: format!("Arrow slice memory could not be measured: {error}"),
+                    }
+                })?;
+                checked_accumulate(total, bytes, "batch")
+            })
+        })
+    }
 }
 
 #[allow(clippy::len_without_is_empty)]
 pub trait ExternalPayload: Any + Debug + Send + Sync {
     fn backend(&self) -> &str;
     fn len(&self) -> usize;
+    /// Returns an exact or conservative estimate of the payload's visible
+    /// in-memory cost in bytes.
+    ///
+    /// Implementations must never under-report the visible payload cost;
+    /// there is no opt-out (spec S10.2). The estimate is a logical queue
+    /// charge used for backpressure accounting, not a process RSS
+    /// measurement, and shared payloads are charged per consumer.
+    fn estimated_bytes(&self) -> usize;
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -164,6 +214,25 @@ impl Batch {
         }
     }
 
+    /// Estimates this batch's in-memory cost in bytes before it enters a
+    /// stream queue.
+    ///
+    /// Table batches are charged the Arrow memory size of their visible
+    /// slices; external batches are charged the payload-provided exact or
+    /// conservative estimate (spec S10.2). The result is a logical queue
+    /// charge, not a process RSS measurement.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] when a table batch cannot
+    /// be measured or the summed size overflows `usize`.
+    pub fn estimated_bytes(&self) -> Result<usize> {
+        match &self.payload {
+            BatchPayload::Table(table) => table.estimated_bytes(),
+            BatchPayload::External(payload) => Ok(payload.estimated_bytes()),
+        }
+    }
+
     pub fn metadata(&self) -> &BatchMetadata {
         &self.metadata
     }
@@ -204,5 +273,24 @@ impl Batch {
             payload: self.payload.clone(),
             metadata,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checked_accumulate_sums_within_usize() {
+        assert_eq!(checked_accumulate(2, 3, "batch").unwrap(), 5);
+        assert_eq!(checked_accumulate(0, 0, "batch").unwrap(), 0);
+    }
+
+    #[test]
+    fn checked_accumulate_rejects_usize_overflow_with_a_typed_error() {
+        assert!(matches!(
+            checked_accumulate(usize::MAX, 1, "batch"),
+            Err(CalcFlowError::InvalidArgument { ref field, .. }) if field == "batch"
+        ));
     }
 }

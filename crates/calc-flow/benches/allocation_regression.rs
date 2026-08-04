@@ -295,6 +295,10 @@ impl ExternalPayload for BenchmarkExternalPayload {
         self.rows
     }
 
+    fn estimated_bytes(&self) -> usize {
+        self.rows.saturating_mul(8)
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
