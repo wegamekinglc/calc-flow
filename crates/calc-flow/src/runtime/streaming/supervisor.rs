@@ -408,17 +408,30 @@ impl Drop for TaskSupervisor {
 }
 
 pub(crate) fn panic_message(payload: &(dyn Any + Send)) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        (*message).to_owned()
+    const MAX_PANIC_BYTES: usize = 1_024;
+    const ELLIPSIS: &str = "…";
+
+    let message = if let Some(message) = payload.downcast_ref::<&str>() {
+        *message
     } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
+        message.as_str()
     } else {
-        "non-string panic payload".into()
+        return "non-string panic payload".into();
+    };
+    if message.len() <= MAX_PANIC_BYTES {
+        return message.to_owned();
     }
+
+    let mut prefix_end = MAX_PANIC_BYTES - ELLIPSIS.len();
+    while !message.is_char_boundary(prefix_end) {
+        prefix_end -= 1;
+    }
+    format!("{}{}", &message[..prefix_end], ELLIPSIS)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -426,7 +439,7 @@ mod tests {
 
     use tokio::sync::{Barrier, oneshot};
 
-    use super::{TaskId, TaskSupervisor, TerminalArbiter, TerminalDecision};
+    use super::{TaskId, TaskSupervisor, TerminalArbiter, TerminalDecision, panic_message};
     use crate::{CalcFlowError, CancellationToken};
 
     #[test]
@@ -598,5 +611,28 @@ mod tests {
                 if message == "connector invariant"
         ));
         assert_eq!(supervisor.task_count(), 0);
+    }
+
+    #[test]
+    fn panic_payload_is_utf8_safe_and_bounded_to_1024_bytes() {
+        let long_ascii = "a".repeat(1_100);
+        let bounded_ascii = panic_message(&long_ascii);
+        assert_eq!(bounded_ascii.len(), 1_024);
+        assert!(bounded_ascii.ends_with('…'));
+        assert_eq!(&bounded_ascii[..1_021], "a".repeat(1_021));
+
+        let split_at_limit = format!("{}{}", "a".repeat(1_020), "😀".repeat(2));
+        let bounded_multibyte = panic_message(&split_at_limit);
+        assert!(bounded_multibyte.is_char_boundary(bounded_multibyte.len()));
+        assert_eq!(bounded_multibyte.len(), 1_023);
+        assert!(bounded_multibyte.ends_with('…'));
+        assert_eq!(&bounded_multibyte[..1_020], "a".repeat(1_020));
+
+        let short = String::from("short panic");
+        assert_eq!(panic_message(&short), short);
+        assert_eq!(
+            panic_message(&(7_u64) as &(dyn Any + Send)),
+            "non-string panic payload"
+        );
     }
 }

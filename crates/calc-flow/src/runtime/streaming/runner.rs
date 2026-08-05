@@ -750,7 +750,7 @@ impl ContinuousRunner {
     }
 
     #[cfg(test)]
-    fn registry_counts(&self) -> (usize, usize) {
+    pub(crate) fn registry_counts(&self) -> (usize, usize) {
         let registry = self.core.registry.lock();
         (registry.live_jobs.len(), registry.reaper_jobs.len())
     }
@@ -867,7 +867,10 @@ fn metrics_for_job(job: &ValidatedContinuousJob) -> (MetricsRecorder, BTreeMap<S
         })
         .collect::<BTreeMap<_, _>>();
     let metrics = MetricsRecorder::new(
-        job.plan.edges.keys().cloned(),
+        job.plan
+            .edges
+            .iter()
+            .map(|(edge_id, edge)| (edge_id.clone(), edge.budget)),
         job.plan.source_routes.keys().cloned(),
         job.plan.nodes.iter().map(|node| node.node_id.clone()),
         sink_outputs.keys().cloned(),
@@ -4901,7 +4904,7 @@ mod tests {
                 87,
                 RunningSourceFailure::Cursor,
                 "source:input:task",
-                "source.cursor",
+                "sources.input.cursor",
             ),
         ] {
             let plan = unary_expression_plan();

@@ -55,21 +55,10 @@ impl SinkProgress {
 
     fn record_delivery(&self, rows: usize, bytes: usize) -> Result<()> {
         let mut state = self.0.lock();
-        state.snapshot.delivered_batches = state
-            .snapshot
-            .delivered_batches
-            .checked_add(1)
-            .ok_or_else(|| counter_overflow("delivered_batches"))?;
-        state.snapshot.delivered_rows = state
-            .snapshot
-            .delivered_rows
-            .checked_add(u64::try_from(rows).map_err(|_| counter_overflow("delivered_rows"))?)
-            .ok_or_else(|| counter_overflow("delivered_rows"))?;
-        state.snapshot.delivered_bytes = state
-            .snapshot
-            .delivered_bytes
-            .checked_add(u64::try_from(bytes).map_err(|_| counter_overflow("delivered_bytes"))?)
-            .ok_or_else(|| counter_overflow("delivered_bytes"))?;
+        let (batches, rows, bytes) = next_delivery_totals(&state.snapshot, rows, bytes)?;
+        state.snapshot.delivered_batches = batches;
+        state.snapshot.delivered_rows = rows;
+        state.snapshot.delivered_bytes = bytes;
         Ok(())
     }
 
@@ -80,6 +69,30 @@ impl SinkProgress {
     fn mark_ended(&self) {
         self.0.lock().snapshot.ended = true;
     }
+}
+
+fn next_delivery_totals(
+    snapshot: &SinkProgressSnapshot,
+    rows: usize,
+    bytes: usize,
+) -> Result<(u64, u64, u64)> {
+    let rows = delivery_increment(rows, "delivered_rows")?;
+    let bytes = delivery_increment(bytes, "delivered_bytes")?;
+    Ok((
+        next_delivery_counter(snapshot.delivered_batches, 1, "delivered_batches")?,
+        next_delivery_counter(snapshot.delivered_rows, rows, "delivered_rows")?,
+        next_delivery_counter(snapshot.delivered_bytes, bytes, "delivered_bytes")?,
+    ))
+}
+
+fn delivery_increment(value: usize, counter: &str) -> Result<u64> {
+    u64::try_from(value).map_err(|_| counter_overflow(counter))
+}
+
+fn next_delivery_counter(current: u64, increment: u64, counter: &str) -> Result<u64> {
+    current
+        .checked_add(increment)
+        .ok_or_else(|| counter_overflow(counter))
 }
 
 fn counter_overflow(counter: &str) -> CalcFlowError {
@@ -153,130 +166,159 @@ async fn wait_for_data_gate(inputs: &mut SinkTaskInputs) -> Result<bool> {
     }
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "the sink loop keeps receive, ordered delivery, and failure convergence in one lifecycle"
-)]
 async fn run_sink_loop(inputs: &mut SinkTaskInputs, failure_signal: &TaskFailureSignal) -> bool {
     loop {
-        let received = tokio::select! {
-            biased;
-            () = inputs.context.job().cancellation().cancelled() => return false,
-            result = inputs.input.recv() => result,
-        };
-        let message = match received {
-            Ok(Some(message)) => message,
-            Ok(None) if inputs.context.job().cancellation().is_cancelled() => return false,
-            Ok(None) => {
-                inputs.progress.record_failure(SinkTaskFailure {
-                    output_id: inputs.output_id.clone(),
-                    sink_id: inputs.output_id.clone(),
-                    phase: SinkFailurePhase::Write,
-                    error: CalcFlowError::EdgeClosed {
-                        edge: inputs.input.edge().into(),
-                    },
-                });
-                failure_signal.cancel_siblings();
-                return true;
-            }
-            Err(error) => {
-                inputs.progress.record_failure(SinkTaskFailure {
-                    output_id: inputs.output_id.clone(),
-                    sink_id: inputs.output_id.clone(),
-                    phase: SinkFailurePhase::Write,
-                    error,
-                });
-                failure_signal.cancel_siblings();
-                return true;
-            }
-        };
-        match message.kind() {
-            StreamMessageKind::Data => {
-                let batch = message.as_data().expect("data kind always has a batch");
-                let cost = match EnvelopeCost::of_message(&StreamMessage::data(batch.clone())) {
-                    Ok(cost) => cost,
-                    Err(error) => {
-                        inputs.progress.record_failure(SinkTaskFailure {
-                            output_id: inputs.output_id.clone(),
-                            sink_id: inputs.output_id.clone(),
-                            phase: SinkFailurePhase::Write,
-                            error,
-                        });
-                        failure_signal.cancel_siblings();
-                        return true;
-                    }
-                };
-                for sink in &mut inputs.sinks {
-                    let timer = inputs.metrics.timer();
-                    let result = tokio::select! {
-                        biased;
-                        () = inputs.context.job().cancellation().cancelled() => return false,
-                        result = AssertUnwindSafe(sink.binding.sink.write(batch)).catch_unwind() => {
-                            match result {
-                                Ok(result) => result,
-                                Err(payload) => Err(CalcFlowError::TaskPanicked {
-                                    task_id: failure_signal.task_id().as_u64(),
-                                    message: panic_message(payload.as_ref()),
-                                }),
-                            }
-                        },
-                    };
-                    if let Err(error) = result {
-                        inputs.progress.record_failure(SinkTaskFailure {
-                            output_id: inputs.output_id.clone(),
-                            sink_id: sink.sink_id.clone(),
-                            phase: SinkFailurePhase::Write,
-                            error,
-                        });
-                        failure_signal.cancel_siblings();
-                        return true;
-                    }
-                    let metric_id = sink_metric_id(&inputs.output_id, &sink.sink_id);
-                    if let Err(error) = inputs
-                        .metrics
-                        .record_sink_delivery(&metric_id, cost, &timer)
-                    {
-                        inputs.progress.record_failure(SinkTaskFailure {
-                            output_id: inputs.output_id.clone(),
-                            sink_id: sink.sink_id.clone(),
-                            phase: SinkFailurePhase::Write,
-                            error,
-                        });
-                        failure_signal.cancel_siblings();
-                        return true;
-                    }
-                }
-                if let Err(error) = inputs.progress.record_delivery(cost.rows(), cost.bytes()) {
-                    inputs.progress.record_failure(SinkTaskFailure {
-                        output_id: inputs.output_id.clone(),
-                        sink_id: inputs.output_id.clone(),
-                        phase: SinkFailurePhase::Write,
-                        error,
-                    });
-                    failure_signal.cancel_siblings();
-                    return true;
-                }
-            }
-            StreamMessageKind::Watermark | StreamMessageKind::Idle => {}
-            StreamMessageKind::EndOfInput => {
-                inputs.progress.mark_ended();
-                return false;
-            }
-            StreamMessageKind::Barrier => {
-                inputs.progress.record_failure(SinkTaskFailure {
-                    output_id: inputs.output_id.clone(),
-                    sink_id: inputs.output_id.clone(),
-                    phase: SinkFailurePhase::Write,
-                    error: CalcFlowError::InvalidArgument {
-                        field: format!("sinks.{}", inputs.output_id),
-                        message: "barrier delivery is unavailable before M5".into(),
-                    },
-                });
+        match next_sink_step(inputs, failure_signal.task_id()).await {
+            SinkLoopStep::Continue => {}
+            SinkLoopStep::Complete | SinkLoopStep::Cancelled => return false,
+            SinkLoopStep::Failed { sink_id, error } => {
+                record_sink_failure(inputs, sink_id, error);
                 failure_signal.cancel_siblings();
                 return true;
             }
         }
     }
+}
+
+enum SinkLoopStep {
+    Continue,
+    Complete,
+    Cancelled,
+    Failed {
+        sink_id: String,
+        error: CalcFlowError,
+    },
+}
+
+async fn next_sink_step(inputs: &mut SinkTaskInputs, task_id: TaskId) -> SinkLoopStep {
+    match receive_sink_message(inputs).await {
+        Ok(Some(message)) => process_sink_message(inputs, message, task_id).await,
+        Ok(None) => SinkLoopStep::Cancelled,
+        Err(error) => SinkLoopStep::Failed {
+            sink_id: inputs.output_id.clone(),
+            error,
+        },
+    }
+}
+
+async fn receive_sink_message(inputs: &mut SinkTaskInputs) -> Result<Option<StreamMessage>> {
+    let received = tokio::select! {
+        biased;
+        () = inputs.context.job().cancellation().cancelled() => return Ok(None),
+        result = inputs.input.recv() => result,
+    }?;
+    match received {
+        Some(message) => Ok(Some(message)),
+        None if inputs.context.job().cancellation().is_cancelled() => Ok(None),
+        None => Err(CalcFlowError::EdgeClosed {
+            edge: inputs.input.edge().into(),
+        }),
+    }
+}
+
+async fn process_sink_message(
+    inputs: &mut SinkTaskInputs,
+    message: StreamMessage,
+    task_id: TaskId,
+) -> SinkLoopStep {
+    match message.kind() {
+        StreamMessageKind::Data => deliver_data(inputs, &message, task_id).await,
+        StreamMessageKind::Watermark | StreamMessageKind::Idle => SinkLoopStep::Continue,
+        StreamMessageKind::EndOfInput => {
+            inputs.progress.mark_ended();
+            SinkLoopStep::Complete
+        }
+        StreamMessageKind::Barrier => SinkLoopStep::Failed {
+            sink_id: inputs.output_id.clone(),
+            error: CalcFlowError::InvalidArgument {
+                field: format!("sinks.{}", inputs.output_id),
+                message: "barrier delivery is unavailable before M5".into(),
+            },
+        },
+    }
+}
+
+async fn deliver_data(
+    inputs: &mut SinkTaskInputs,
+    message: &StreamMessage,
+    task_id: TaskId,
+) -> SinkLoopStep {
+    let batch = message.as_data().expect("data kind always has a batch");
+    let cost = match EnvelopeCost::of_message(message) {
+        Ok(cost) => cost,
+        Err(error) => {
+            return SinkLoopStep::Failed {
+                sink_id: inputs.output_id.clone(),
+                error,
+            };
+        }
+    };
+    for sink in &mut inputs.sinks {
+        match write_sink(
+            sink,
+            batch,
+            cost,
+            &inputs.output_id,
+            &inputs.metrics,
+            inputs.context.job().cancellation(),
+            task_id,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => return SinkLoopStep::Cancelled,
+            Err(error) => {
+                return SinkLoopStep::Failed {
+                    sink_id: sink.sink_id.clone(),
+                    error,
+                };
+            }
+        }
+    }
+    match inputs.progress.record_delivery(cost.rows(), cost.bytes()) {
+        Ok(()) => SinkLoopStep::Continue,
+        Err(error) => SinkLoopStep::Failed {
+            sink_id: inputs.output_id.clone(),
+            error,
+        },
+    }
+}
+
+async fn write_sink(
+    sink: &mut ValidatedOrdinarySink,
+    batch: &crate::Batch,
+    cost: EnvelopeCost,
+    output_id: &str,
+    metrics: &MetricsRecorder,
+    cancellation: &CancellationToken,
+    task_id: TaskId,
+) -> Result<bool> {
+    let timer = metrics.timer();
+    let result = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Ok(false),
+        result = AssertUnwindSafe(sink.binding.sink.write(batch)).catch_unwind() => result,
+    };
+    match result {
+        Ok(result) => result?,
+        Err(payload) => {
+            return Err(CalcFlowError::TaskPanicked {
+                task_id: task_id.as_u64(),
+                message: panic_message(payload.as_ref()),
+            });
+        }
+    }
+    metrics.record_sink_delivery(&sink_metric_id(output_id, &sink.sink_id), cost, &timer)?;
+    Ok(true)
+}
+
+fn record_sink_failure(inputs: &SinkTaskInputs, sink_id: String, error: CalcFlowError) {
+    inputs.progress.record_failure(SinkTaskFailure {
+        output_id: inputs.output_id.clone(),
+        sink_id,
+        phase: SinkFailurePhase::Write,
+        error,
+    });
 }
 
 async fn close_all(inputs: &mut SinkTaskInputs, failure_signal: &TaskFailureSignal) -> bool {

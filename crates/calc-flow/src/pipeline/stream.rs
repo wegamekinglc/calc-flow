@@ -37,7 +37,11 @@ pub enum DeliveryGuarantee {
     ExactlyOnce,
 }
 
-/// Dual row and byte hard limits for one edge channel (spec S10.1).
+/// Envelope, row, and byte hard limits for one edge channel (spec S10.1).
+///
+/// `max_rows` independently caps queued envelopes and charged rows;
+/// `max_bytes` caps charged bytes. Direct channel callers should choose
+/// `max_rows >= max(required rows, required simultaneous messages)`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EdgeBudget {
     pub max_rows: usize,

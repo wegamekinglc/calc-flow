@@ -1,11 +1,14 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 
 use async_trait::async_trait;
 
-use super::{StreamJobContext, source_task::SourceBinding};
+use super::{
+    StreamJobContext,
+    source_task::{SourceBinding, SourceCapabilities},
+};
 use crate::{
     Batch, CalcFlowError, DeliveryGuarantee, EdgeBudget, Result, StreamExecutionPlan,
-    pipeline::StreamRuntimePlanParts,
+    pipeline::{RuntimeStreamNode, StreamRuntimePlanParts},
 };
 
 pub(crate) struct NamedSourceBinding {
@@ -94,22 +97,9 @@ pub(crate) fn preflight_job(spec: ContinuousJobSpec) -> Result<ValidatedContinuo
     } = spec;
     let plan = plan.into_runtime_parts(edge_budget)?;
     validate_runtime_id(&plan.name, "plan.name")?;
-    if context.fingerprint() != plan.fingerprint {
-        return Err(CalcFlowError::InvalidArgument {
-            field: "context.fingerprint".into(),
-            message: "must match the consumed stream plan fingerprint".into(),
-        });
-    }
+    validate_context_fingerprint(&context, &plan)?;
     validate_runtime_topology(&plan)?;
-    for (output_id, guarantee) in &plan.requirements.delivery {
-        if *guarantee == DeliveryGuarantee::ExactlyOnce {
-            return Err(CalcFlowError::InvalidArgument {
-                field: format!("requirements.delivery.{output_id}"),
-                message: "exactly-once delivery requires aligned checkpoints and is unavailable before M5"
-                    .into(),
-            });
-        }
-    }
+    validate_delivery_requirements(&plan)?;
 
     let validated_sources = validate_sources(&plan, sources)?;
     let validated_sinks = validate_sinks(&plan, sinks)?;
@@ -123,66 +113,130 @@ pub(crate) fn preflight_job(spec: ContinuousJobSpec) -> Result<ValidatedContinuo
     })
 }
 
+fn validate_context_fingerprint(
+    context: &StreamJobContext,
+    plan: &StreamRuntimePlanParts,
+) -> Result<()> {
+    if context.fingerprint() == plan.fingerprint {
+        return Ok(());
+    }
+    Err(CalcFlowError::InvalidArgument {
+        field: "context.fingerprint".into(),
+        message: "must match the consumed stream plan fingerprint".into(),
+    })
+}
+
+fn validate_delivery_requirements(plan: &StreamRuntimePlanParts) -> Result<()> {
+    let exactly_once = plan
+        .requirements
+        .delivery
+        .iter()
+        .find(|(_, guarantee)| **guarantee == DeliveryGuarantee::ExactlyOnce);
+    let Some((output_id, _)) = exactly_once else {
+        return Ok(());
+    };
+    Err(CalcFlowError::InvalidArgument {
+        field: format!("requirements.delivery.{output_id}"),
+        message: "exactly-once delivery requires aligned checkpoints and is unavailable before M5"
+            .into(),
+    })
+}
+
 fn validate_sources(
     plan: &StreamRuntimePlanParts,
     sources: Vec<NamedSourceBinding>,
 ) -> Result<BTreeMap<String, SourceBinding>> {
     let mut validated = BTreeMap::new();
-    for mut named in sources {
-        validate_runtime_id(&named.binding_id, &format!("sources.{}", named.binding_id))?;
-        if !plan.source_routes.contains_key(&named.binding_id) {
-            return Err(CalcFlowError::InvalidArgument {
-                field: format!("sources.{}", named.binding_id),
-                message: "binding does not match a compiled external input".into(),
-            });
+    for named in sources {
+        let (binding_id, binding) = validate_source(plan, named)?;
+        match validated.entry(binding_id) {
+            Entry::Vacant(entry) => {
+                entry.insert(binding);
+            }
+            Entry::Occupied(entry) => return Err(duplicate_source(entry.key())),
         }
-        if validated.contains_key(&named.binding_id) {
-            return Err(CalcFlowError::InvalidArgument {
-                field: format!("sources.{}", named.binding_id),
-                message: "binding is configured more than once".into(),
-            });
-        }
-        let route = &plan.source_routes[&named.binding_id];
-        let edge = &plan.edges[&route.edge_id];
-        let capabilities = named.binding.sample_capabilities_once();
-        if capabilities.max_batch_rows == 0 {
-            return Err(CalcFlowError::InvalidArgument {
-                field: format!("sources.{}.capabilities.max_batch_rows", named.binding_id),
-                message: "must be greater than zero".into(),
-            });
-        }
-        if capabilities.max_batch_bytes == 0 {
-            return Err(CalcFlowError::InvalidArgument {
-                field: format!("sources.{}.capabilities.max_batch_bytes", named.binding_id),
-                message: "must be greater than zero".into(),
-            });
-        }
-        if capabilities.max_batch_rows > edge.budget.max_rows
-            || capabilities.max_batch_bytes > edge.budget.max_bytes
-        {
-            return Err(CalcFlowError::InvalidArgument {
-                field: format!("sources.{}.capabilities", named.binding_id),
-                message: format!(
-                    "maximum batch ({} rows, {} bytes) exceeds edge {:?} budget ({} rows, {} bytes)",
-                    capabilities.max_batch_rows,
-                    capabilities.max_batch_bytes,
-                    edge.stable_id,
-                    edge.budget.max_rows,
-                    edge.budget.max_bytes
-                ),
-            });
-        }
-        validated.insert(named.binding_id, named.binding);
     }
-    for binding_id in plan.source_routes.keys() {
-        if !validated.contains_key(binding_id) {
-            return Err(CalcFlowError::InvalidArgument {
-                field: format!("sources.{binding_id}"),
-                message: format!("missing binding for external input {binding_id}"),
-            });
-        }
+    if let Some(binding_id) = plan
+        .source_routes
+        .keys()
+        .find(|binding_id| !validated.contains_key(*binding_id))
+    {
+        return Err(missing_source(binding_id));
     }
     Ok(validated)
+}
+
+fn validate_source(
+    plan: &StreamRuntimePlanParts,
+    mut named: NamedSourceBinding,
+) -> Result<(String, SourceBinding)> {
+    let field = format!("sources.{}", named.binding_id);
+    validate_runtime_id(&named.binding_id, &field)?;
+    let route = plan.source_routes.get(&named.binding_id).ok_or_else(|| {
+        CalcFlowError::InvalidArgument {
+            field,
+            message: "binding does not match a compiled external input".into(),
+        }
+    })?;
+    let edge = &plan.edges[&route.edge_id];
+    let capabilities = named.binding.sample_capabilities_once();
+    validate_source_capabilities(
+        &named.binding_id,
+        capabilities,
+        edge.budget,
+        &edge.stable_id,
+    )?;
+    Ok((named.binding_id, named.binding))
+}
+
+fn validate_source_capabilities(
+    binding_id: &str,
+    capabilities: SourceCapabilities,
+    budget: EdgeBudget,
+    edge_id: &str,
+) -> Result<()> {
+    if capabilities.max_batch_rows == 0 {
+        return Err(CalcFlowError::InvalidArgument {
+            field: format!("sources.{binding_id}.capabilities.max_batch_rows"),
+            message: "must be greater than zero".into(),
+        });
+    }
+    if capabilities.max_batch_bytes == 0 {
+        return Err(CalcFlowError::InvalidArgument {
+            field: format!("sources.{binding_id}.capabilities.max_batch_bytes"),
+            message: "must be greater than zero".into(),
+        });
+    }
+    if capabilities.max_batch_rows <= budget.max_rows
+        && capabilities.max_batch_bytes <= budget.max_bytes
+    {
+        return Ok(());
+    }
+    Err(CalcFlowError::InvalidArgument {
+        field: format!("sources.{binding_id}.capabilities"),
+        message: format!(
+            "maximum batch ({} rows, {} bytes) exceeds edge {:?} budget ({} rows, {} bytes)",
+            capabilities.max_batch_rows,
+            capabilities.max_batch_bytes,
+            edge_id,
+            budget.max_rows,
+            budget.max_bytes
+        ),
+    })
+}
+
+fn duplicate_source(binding_id: &str) -> CalcFlowError {
+    CalcFlowError::InvalidArgument {
+        field: format!("sources.{binding_id}"),
+        message: "binding is configured more than once".into(),
+    }
+}
+
+fn missing_source(binding_id: &str) -> CalcFlowError {
+    CalcFlowError::InvalidArgument {
+        field: format!("sources.{binding_id}"),
+        message: format!("missing binding for external input {binding_id}"),
+    }
 }
 
 fn validate_sinks(
@@ -190,93 +244,124 @@ fn validate_sinks(
     sinks: Vec<NamedSinkBinding>,
 ) -> Result<BTreeMap<String, Vec<ValidatedOrdinarySink>>> {
     let mut validated = BTreeMap::<String, Vec<ValidatedOrdinarySink>>::new();
-    for mut named in sinks {
-        validate_runtime_id(&named.output_id, &format!("sinks.{}", named.output_id))?;
-        validate_runtime_id(
-            &named.sink_id,
-            &format!("sinks.{}.{}", named.output_id, named.sink_id),
-        )?;
-        if !plan.sink_routes.contains_key(&named.output_id) {
-            return Err(CalcFlowError::InvalidArgument {
-                field: format!("sinks.{}", named.output_id),
-                message: "route does not match a compiled external output".into(),
-            });
-        }
-        let output_sinks = validated.entry(named.output_id.clone()).or_default();
+    for named in sinks {
+        let (output_id, sink) = validate_sink(plan, named)?;
+        let output_sinks = validated.entry(output_id.clone()).or_default();
         if output_sinks
             .iter()
-            .any(|sink| sink.sink_id == named.sink_id)
+            .any(|existing| existing.sink_id == sink.sink_id)
         {
-            return Err(CalcFlowError::InvalidArgument {
-                field: format!("sinks.{}.{}", named.output_id, named.sink_id),
-                message: "sink is configured more than once".into(),
-            });
+            return Err(duplicate_sink(&output_id, &sink.sink_id));
         }
-        if named.binding.sample_delivery_once() != M2SinkDelivery::ProcessLocalOrdered {
-            return Err(CalcFlowError::InvalidArgument {
-                field: format!("sinks.{}.{}.delivery", named.output_id, named.sink_id),
-                message: "ordinary M2 sinks require process-local ordered delivery".into(),
-            });
-        }
-        output_sinks.push(ValidatedOrdinarySink {
-            sink_id: named.sink_id,
-            binding: named.binding,
-        });
+        output_sinks.push(sink);
     }
-    for output_id in plan.sink_routes.keys() {
-        if validated.get(output_id).is_none_or(Vec::is_empty) {
-            return Err(CalcFlowError::InvalidArgument {
-                field: format!("sinks.{output_id}"),
-                message: "external output requires at least one ordinary sink".into(),
-            });
-        }
+    if let Some(output_id) = plan
+        .sink_routes
+        .keys()
+        .find(|output_id| validated.get(*output_id).is_none_or(Vec::is_empty))
+    {
+        return Err(missing_sink(output_id));
     }
     Ok(validated)
 }
 
+fn validate_sink(
+    plan: &StreamRuntimePlanParts,
+    mut named: NamedSinkBinding,
+) -> Result<(String, ValidatedOrdinarySink)> {
+    validate_runtime_id(&named.output_id, &format!("sinks.{}", named.output_id))?;
+    validate_runtime_id(
+        &named.sink_id,
+        &format!("sinks.{}.{}", named.output_id, named.sink_id),
+    )?;
+    if !plan.sink_routes.contains_key(&named.output_id) {
+        return Err(CalcFlowError::InvalidArgument {
+            field: format!("sinks.{}", named.output_id),
+            message: "route does not match a compiled external output".into(),
+        });
+    }
+    if named.binding.sample_delivery_once() != M2SinkDelivery::ProcessLocalOrdered {
+        return Err(CalcFlowError::InvalidArgument {
+            field: format!("sinks.{}.{}.delivery", named.output_id, named.sink_id),
+            message: "ordinary M2 sinks require process-local ordered delivery".into(),
+        });
+    }
+    Ok((
+        named.output_id,
+        ValidatedOrdinarySink {
+            sink_id: named.sink_id,
+            binding: named.binding,
+        },
+    ))
+}
+
+fn duplicate_sink(output_id: &str, sink_id: &str) -> CalcFlowError {
+    CalcFlowError::InvalidArgument {
+        field: format!("sinks.{output_id}.{sink_id}"),
+        message: "sink is configured more than once".into(),
+    }
+}
+
+fn missing_sink(output_id: &str) -> CalcFlowError {
+    CalcFlowError::InvalidArgument {
+        field: format!("sinks.{output_id}"),
+        message: "external output requires at least one ordinary sink".into(),
+    }
+}
+
 fn validate_runtime_topology(plan: &StreamRuntimePlanParts) -> Result<()> {
     for node in &plan.nodes {
-        for ingress in node.input_ports.keys() {
-            let edge_id =
-                node.ingress_edges
-                    .get(ingress)
-                    .ok_or_else(|| CalcFlowError::Internal {
-                        message: format!(
-                            "runtime node {:?} ingress {:?} has no compiled edge",
-                            node.node_id, ingress
-                        ),
-                    })?;
-            if !plan.edges.contains_key(edge_id) {
-                return Err(CalcFlowError::Internal {
-                    message: format!(
-                        "runtime node {:?} ingress {:?} names missing edge {:?}",
-                        node.node_id, ingress, edge_id
-                    ),
-                });
-            }
+        validate_node_ingresses(plan, node)?;
+        validate_node_outputs(plan, node)?;
+    }
+    Ok(())
+}
+
+fn validate_node_ingresses(plan: &StreamRuntimePlanParts, node: &RuntimeStreamNode) -> Result<()> {
+    for ingress in node.input_ports.keys() {
+        let edge_id = node
+            .ingress_edges
+            .get(ingress)
+            .ok_or_else(|| CalcFlowError::Internal {
+                message: format!(
+                    "runtime node {:?} ingress {:?} has no compiled edge",
+                    node.node_id, ingress
+                ),
+            })?;
+        if !plan.edges.contains_key(edge_id) {
+            return Err(CalcFlowError::Internal {
+                message: format!(
+                    "runtime node {:?} ingress {:?} names missing edge {:?}",
+                    node.node_id, ingress, edge_id
+                ),
+            });
         }
-        for output in node.output_ports.keys() {
-            let edge_ids =
-                node.output_edges
-                    .get(output)
-                    .ok_or_else(|| CalcFlowError::Internal {
-                        message: format!(
-                            "runtime node {:?} output {:?} has no compiled edge",
-                            node.node_id, output
-                        ),
-                    })?;
-            if edge_ids.is_empty()
-                || edge_ids
-                    .iter()
-                    .any(|edge_id| !plan.edges.contains_key(edge_id))
-            {
-                return Err(CalcFlowError::Internal {
-                    message: format!(
-                        "runtime node {:?} output {:?} has invalid compiled routes",
-                        node.node_id, output
-                    ),
-                });
-            }
+    }
+    Ok(())
+}
+
+fn validate_node_outputs(plan: &StreamRuntimePlanParts, node: &RuntimeStreamNode) -> Result<()> {
+    for output in node.output_ports.keys() {
+        let edge_ids = node
+            .output_edges
+            .get(output)
+            .ok_or_else(|| CalcFlowError::Internal {
+                message: format!(
+                    "runtime node {:?} output {:?} has no compiled edge",
+                    node.node_id, output
+                ),
+            })?;
+        if edge_ids.is_empty()
+            || edge_ids
+                .iter()
+                .any(|edge_id| !plan.edges.contains_key(edge_id))
+        {
+            return Err(CalcFlowError::Internal {
+                message: format!(
+                    "runtime node {:?} output {:?} has invalid compiled routes",
+                    node.node_id, output
+                ),
+            });
         }
     }
     Ok(())

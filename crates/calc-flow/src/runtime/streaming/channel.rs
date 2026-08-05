@@ -1,4 +1,4 @@
-//! The rows + bytes dual-limit bounded channel carried by every stream edge
+//! The envelope + rows + bytes bounded channel carried by every stream edge
 //! (spec S10, plan task M1.4).
 //!
 //! One edge owns exactly one channel with exactly one producer and exactly
@@ -7,11 +7,11 @@
 //! the single-producer/single-consumer contract is enforced at compile time.
 //! That invariant is what makes the coordination design sound: a single
 //! mutex-protected budget plus a [`tokio::sync::Notify`] wakeup performs the
-//! atomic two-dimension reservation, and with at most one waiting sender a
+//! atomic three-dimension reservation, and with at most one waiting sender a
 //! release notification can never be consumed by a waiter that cannot make
 //! progress (the multi-producer lost-wakeup mode the plan calls out).
 //!
-//! Reservation and release follow S10.1: a sender reserves both dimensions
+//! Reservation and release follow S10.1: a sender reserves all three dimensions
 //! atomically with the enqueue, inside one critical section, so a blocked
 //! send holds no reservation and dropping the send future leaves the budget
 //! untouched; the consumer's reservation is released exactly once, when the
@@ -35,8 +35,8 @@ use crate::{CalcFlowError, EdgeBudget, Result, batch::checked_accumulate};
 /// Data messages charge one message, the batch row count, and the batch
 /// [`Batch::estimated_bytes`](crate::Batch::estimated_bytes) estimate;
 /// control messages (watermark, barrier, idle, end-of-input) charge one
-/// message and zero rows/bytes, so control flow is never throttled by data
-/// backpressure while per-edge FIFO order is preserved (S1.1). Charges are
+/// message and zero rows/bytes. Every envelope therefore consumes one finite
+/// slot even when its row and byte cost is zero. Charges are
 /// logical reservations, not process RSS measurements; fan-out edges each
 /// charge their own channel even though the Arrow buffers are shared (S3).
 ///
@@ -220,8 +220,10 @@ impl fmt::Debug for Shared {
 /// Creates the bounded channel for one edge.
 ///
 /// `edge` is the stable edge identifier assigned at compile time (plan
-/// M1.1); it names the edge in errors and metrics. `budget` carries the two
-/// hard limits (spec S10.1); both must be positive.
+/// M1.1); it names the edge in errors and metrics. `budget.max_rows`
+/// independently caps queued envelopes and charged rows, while
+/// `budget.max_bytes` caps charged bytes (spec S10.1). Both fields must be
+/// positive.
 ///
 /// # Errors
 ///
@@ -313,16 +315,20 @@ impl fmt::Debug for EdgeReceiver {
 }
 
 /// Returns whether `cost` can be reserved on top of `charged` without
-/// crossing either budget limit. A component sum that overflows `usize`
+/// crossing any budget limit. `max_rows` independently caps both queued
+/// envelopes and charged rows. A component sum that overflows `usize`
 /// necessarily exceeds the budget, so it simply does not fit.
 fn fits(charged: &EnvelopeCost, cost: &EnvelopeCost, budget: &EdgeBudget) -> bool {
+    let Some(messages) = charged.messages().checked_add(cost.messages()) else {
+        return false;
+    };
     let Some(rows) = charged.rows().checked_add(cost.rows()) else {
         return false;
     };
     let Some(bytes) = charged.bytes().checked_add(cost.bytes()) else {
         return false;
     };
-    rows <= budget.max_rows && bytes <= budget.max_bytes
+    messages <= budget.max_rows && rows <= budget.max_rows && bytes <= budget.max_bytes
 }
 
 impl EdgeSender {
@@ -335,17 +341,16 @@ impl EdgeSender {
         self.shared.reject_oversize(&cost)
     }
 
-    /// Enqueues one message, awaiting capacity when either hard limit is
+    /// Enqueues one message, awaiting capacity when any hard dimension is
     /// reached (the `Block` policy, spec S10.4).
     ///
-    /// The two-dimensional reservation is atomic with the enqueue: a blocked
+    /// The three-dimensional reservation is atomic with the enqueue: a blocked
     /// send holds no reservation, so dropping this future while it waits
     /// leaves the budget exactly as if the send had never started (S10.1's
-    /// cancelled-send rule). A single message larger than either limit fails
-    /// before any wait; there is no oversize exception (S10.3). Control
-    /// messages charge zero rows/bytes and are therefore never throttled by
-    /// data backpressure, but they keep their FIFO position behind earlier
-    /// data (S1.1).
+    /// cancelled-send rule). A single message larger than either row/byte
+    /// limit fails before any wait; there is no oversize exception (S10.3).
+    /// Every control or data envelope consumes one slot, including a
+    /// zero-row/zero-byte data batch, and keeps its FIFO position (S1.1).
     ///
     /// # Errors
     ///
@@ -382,10 +387,9 @@ impl EdgeSender {
                         metrics_blocked_elapsed,
                     )?;
                     state.charged = state.charged.checked_add(&cost).map_err(|error| {
-                        // `fits` rejected every rows/bytes sum that could
-                        // overflow, so only the `messages` component could
-                        // fail here; that needs `usize::MAX` enqueues, which
-                        // is structurally unreachable but still checked.
+                        // `fits` rejected every component sum that could
+                        // overflow, so reaching this branch violates the
+                        // channel's locked admission invariant.
                         CalcFlowError::Internal {
                             message: format!(
                                 "edge {:?} charge overflowed after a successful capacity check: {error}",
@@ -661,51 +665,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn control_messages_charge_zero_and_are_never_throttled_by_a_full_budget() {
-        let (mut sender, mut receiver) = edge_channel(
-            "source.out->node.in",
-            EdgeBudget {
-                max_rows: 2,
-                max_bytes: 1 << 20,
+    async fn zero_cost_messages_block_at_the_slot_limit_and_resume_fifo() {
+        let message_factories: [fn(usize) -> StreamMessage; 3] = [
+            |_| StreamMessage::idle(),
+            |index| {
+                StreamMessage::watermark(EventTime::from_micros(
+                    i64::try_from(index).expect("the bounded test index fits i64"),
+                ))
             },
-        )
-        .unwrap();
+            |_| data_message(&[]),
+        ];
 
-        sender.send(data_message(&[1])).await.unwrap();
-        sender.send(data_message(&[2])).await.unwrap();
-
-        // Rows 2/2: control messages still enqueue immediately, behind the
-        // queued data (S1.1); they charge one message and zero rows/bytes.
-        sender
-            .send(StreamMessage::watermark(EventTime::from_micros(3)))
-            .await
-            .unwrap();
-        sender
-            .send(StreamMessage::barrier(Epoch::INITIAL))
-            .await
+        for make_message in message_factories {
+            let (mut sender, mut receiver) = edge_channel(
+                "source.out->node.in",
+                EdgeBudget {
+                    max_rows: 3,
+                    max_bytes: 1 << 20,
+                },
+            )
             .unwrap();
 
-        let metrics = receiver.metrics();
-        assert_eq!(metrics.queue_depth, 4);
-        assert_eq!(metrics.charged_rows, 2);
-        assert_eq!(metrics.charged_bytes, 16);
+            for index in 0..3 {
+                let message = make_message(index);
+                let cost = EnvelopeCost::of_message(&message).unwrap();
+                assert_eq!((cost.messages(), cost.rows(), cost.bytes()), (1, 0, 0));
+                sender.send(message).await.unwrap();
+            }
 
-        assert_eq!(
-            receiver.recv().await.unwrap().unwrap().kind(),
-            StreamMessageKind::Data
-        );
-        assert_eq!(
-            receiver.recv().await.unwrap().unwrap().kind(),
-            StreamMessageKind::Data
-        );
-        assert_eq!(
-            receiver.recv().await.unwrap().unwrap().kind(),
-            StreamMessageKind::Watermark
-        );
-        assert_eq!(
-            receiver.recv().await.unwrap().unwrap().kind(),
-            StreamMessageKind::Barrier
-        );
+            let mut blocked = Box::pin(sender.send(make_message(3)));
+            tokio::select! {
+                result = &mut blocked => panic!("fourth zero-cost send completed: {result:?}"),
+                () = tokio::task::yield_now() => {}
+            }
+            assert_eq!(
+                receiver.metrics(),
+                ChannelMetrics {
+                    queue_depth: 3,
+                    charged_rows: 0,
+                    charged_bytes: 0,
+                    high_water_depth: 3,
+                    high_water_rows: 0,
+                    high_water_bytes: 0,
+                    blocked_sends: 1,
+                    blocked_duration: Duration::ZERO,
+                }
+            );
+
+            let first_kind = receiver.recv().await.unwrap().unwrap().kind();
+            blocked.await.unwrap();
+            assert_eq!(receiver.metrics().queue_depth, 3);
+            assert_eq!(receiver.recv().await.unwrap().unwrap().kind(), first_kind);
+            while receiver.metrics().queue_depth > 0 {
+                receiver.recv().await.unwrap().unwrap();
+            }
+            assert_eq!(receiver.metrics().queue_depth, 0);
+        }
     }
 
     #[test]
@@ -743,7 +758,12 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_metrics_linearize_at_queue_commit_and_dequeue_release() {
-        let recorder = MetricsRecorder::new(["edge".into()], [], [], []);
+        let recorder = MetricsRecorder::new(
+            [("edge".into(), EdgeBudget::new(4, 64).unwrap())],
+            [],
+            [],
+            [],
+        );
         let (mut sender, mut receiver) = edge_channel_with_metrics(
             "edge",
             EdgeBudget {
@@ -796,7 +816,12 @@ mod tests {
 
     #[tokio::test]
     async fn receiver_drop_surfaces_a_metrics_release_invariant_violation() {
-        let recorder = MetricsRecorder::new(["edge".into()], [], [], []);
+        let recorder = MetricsRecorder::new(
+            [("edge".into(), EdgeBudget::new(1, 8).unwrap())],
+            [],
+            [],
+            [],
+        );
         let (mut sender, receiver) = edge_channel_with_metrics(
             "edge",
             EdgeBudget {

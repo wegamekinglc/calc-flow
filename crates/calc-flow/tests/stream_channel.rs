@@ -122,6 +122,36 @@ fn envelope_cost_charges_data_rows_and_bytes() {
     assert_eq!(data.bytes(), 41);
 }
 
+#[tokio::test]
+async fn public_zero_cost_data_uses_max_rows_as_the_envelope_limit() {
+    let (mut sender, mut receiver) = edge_channel(
+        "source.out->node.in",
+        EdgeBudget {
+            max_rows: 2,
+            max_bytes: 64,
+        },
+    )
+    .unwrap();
+
+    sender
+        .send(StreamMessage::data(external_batch(0, 0)))
+        .await
+        .unwrap();
+    sender
+        .send(StreamMessage::data(external_batch(0, 0)))
+        .await
+        .unwrap();
+    let mut third = Box::pin(sender.send(StreamMessage::data(external_batch(0, 0))));
+    assert_pending(&mut third).await;
+    assert_eq!(receiver.metrics().queue_depth, 2);
+    assert_eq!(receiver.metrics().charged_rows, 0);
+    assert_eq!(receiver.metrics().charged_bytes, 0);
+
+    receiver.recv().await.unwrap().unwrap();
+    assert_ready(&mut third).await.unwrap();
+    assert_eq!(receiver.metrics().queue_depth, 2);
+}
+
 #[test]
 fn envelope_cost_checked_add_sums_componentwise() {
     let left = EnvelopeCost::of_message(&StreamMessage::data(external_batch(2, 8))).unwrap();

@@ -138,41 +138,8 @@ async fn run_operator_task(mut inputs: OperatorTaskInputs, task_id: TaskId) -> R
     {
         return Ok(());
     }
-    let reset_result = match catch_unwind(AssertUnwindSafe(|| inputs.operator.reset())) {
-        Ok(result) => result,
-        Err(payload) => Err(CalcFlowError::TaskPanicked {
-            task_id: task_id.as_u64(),
-            message: panic_message(payload.as_ref()),
-        }),
-    };
-    match reset_result {
-        Ok(()) => inputs
-            .entry_ack
-            .send(OperatorEntryAck {
-                node_id: inputs.node_id.clone(),
-                result: Ok(()),
-            })
-            .map_err(|_| CalcFlowError::Internal {
-                message: format!(
-                    "operator {:?} entry acknowledgement was dropped",
-                    inputs.node_id
-                ),
-            })?,
-        Err(error) => {
-            inputs
-                .entry_ack
-                .send(OperatorEntryAck {
-                    node_id: inputs.node_id.clone(),
-                    result: Err(error),
-                })
-                .map_err(|_| CalcFlowError::Internal {
-                    message: format!(
-                        "operator {:?} failed reset after its acknowledgement was dropped",
-                        inputs.node_id
-                    ),
-                })?;
-            return Ok(());
-        }
+    if !reset_and_acknowledge(&mut inputs, task_id)? {
+        return Ok(());
     }
     if !wait_for_gate(
         &mut inputs.data_gate,
@@ -184,6 +151,42 @@ async fn run_operator_task(mut inputs: OperatorTaskInputs, task_id: TaskId) -> R
         return Ok(());
     }
     let result = run_operator_loop(&mut inputs).await;
+    normalize_cancelled_result(&inputs, result)
+}
+
+fn reset_and_acknowledge(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Result<bool> {
+    let reset_result = match catch_unwind(AssertUnwindSafe(|| inputs.operator.reset())) {
+        Ok(result) => result,
+        Err(payload) => Err(CalcFlowError::TaskPanicked {
+            task_id: task_id.as_u64(),
+            message: panic_message(payload.as_ref()),
+        }),
+    };
+    let succeeded = reset_result.is_ok();
+    let dropped_message = if succeeded {
+        format!(
+            "operator {:?} entry acknowledgement was dropped",
+            inputs.node_id
+        )
+    } else {
+        format!(
+            "operator {:?} failed reset after its acknowledgement was dropped",
+            inputs.node_id
+        )
+    };
+    inputs
+        .entry_ack
+        .send(OperatorEntryAck {
+            node_id: inputs.node_id.clone(),
+            result: reset_result,
+        })
+        .map_err(|_| CalcFlowError::Internal {
+            message: dropped_message,
+        })?;
+    Ok(succeeded)
+}
+
+fn normalize_cancelled_result(inputs: &OperatorTaskInputs, result: Result<()>) -> Result<()> {
     if inputs.context.job().cancellation().is_cancelled()
         && matches!(result, Err(CalcFlowError::Cancelled { .. }))
     {
@@ -226,54 +229,75 @@ async fn run_operator_loop(inputs: &mut OperatorTaskInputs) -> Result<()> {
             .values()
             .all(|ingress| ingress.saw_explicit_eof)
         {
-            let cancellation = inputs.context.job().cancellation().clone();
-            let context =
-                StreamOperatorContext::new(inputs.context.job(), &inputs.node_id, input_watermark);
-            let mut collector = ChannelStreamCollector::new(
-                &inputs.node_id,
-                &inputs.output_ports,
-                &mut inputs.outputs,
-                inputs.context.job().cancellation(),
-                &inputs.progress,
-                &inputs.metrics,
-            );
-            inputs.progress.record_on_end()?;
-            tokio::select! {
-                biased;
-                result = inputs.operator.on_end(&context, &mut collector) => result?,
-                () = cancellation.cancelled() => return Ok(()),
-            }
-            forward_control(
-                &mut inputs.outputs,
-                StreamMessage::end_of_input(),
-                inputs.context.job(),
-            )
-            .await?;
-            inputs.progress.mark_ended();
+            return finish_operator(inputs, input_watermark).await;
+        }
+        let Some((ingress_name, message)) = receive_operator_message(inputs).await? else {
             return Ok(());
-        }
+        };
+        dispatch_or_cancel(inputs, &ingress_name, message, &mut input_watermark).await?;
+    }
+}
 
-        let received = tokio::select! {
-            biased;
-            () = inputs.context.job().cancellation().cancelled() => return Ok(()),
-            received = receive_ready(&mut inputs.ingresses) => received?,
-        };
-        let (ingress_name, message) = received;
-        let Some(message) = message else {
-            if inputs.context.job().cancellation().is_cancelled() {
-                return Ok(());
-            }
-            let edge = inputs.ingresses[&ingress_name].edge_id.clone();
-            return Err(CalcFlowError::EdgeClosed { edge });
-        };
-        let cancellation = inputs.context.job().cancellation().clone();
-        tokio::select! {
-            biased;
-            result = dispatch_message(inputs, &ingress_name, message, &mut input_watermark) => {
-                result?;
-            }
-            () = cancellation.cancelled() => return Ok(()),
-        }
+async fn finish_operator(
+    inputs: &mut OperatorTaskInputs,
+    input_watermark: Option<EventTime>,
+) -> Result<()> {
+    let cancellation = inputs.context.job().cancellation().clone();
+    let context =
+        StreamOperatorContext::new(inputs.context.job(), &inputs.node_id, input_watermark);
+    let mut collector = ChannelStreamCollector::new(
+        &inputs.node_id,
+        &inputs.output_ports,
+        &mut inputs.outputs,
+        inputs.context.job().cancellation(),
+        &inputs.progress,
+        &inputs.metrics,
+    );
+    inputs.progress.record_on_end()?;
+    tokio::select! {
+        biased;
+        result = inputs.operator.on_end(&context, &mut collector) => result?,
+        () = cancellation.cancelled() => return Ok(()),
+    }
+    forward_control(
+        &mut inputs.outputs,
+        StreamMessage::end_of_input(),
+        inputs.context.job(),
+    )
+    .await?;
+    inputs.progress.mark_ended();
+    Ok(())
+}
+
+async fn receive_operator_message(
+    inputs: &mut OperatorTaskInputs,
+) -> Result<Option<(String, StreamMessage)>> {
+    let received = tokio::select! {
+        biased;
+        () = inputs.context.job().cancellation().cancelled() => return Ok(None),
+        received = receive_ready(&mut inputs.ingresses) => received?,
+    };
+    let (ingress_name, message) = received;
+    match message {
+        Some(message) => Ok(Some((ingress_name, message))),
+        None if inputs.context.job().cancellation().is_cancelled() => Ok(None),
+        None => Err(CalcFlowError::EdgeClosed {
+            edge: inputs.ingresses[&ingress_name].edge_id.clone(),
+        }),
+    }
+}
+
+async fn dispatch_or_cancel(
+    inputs: &mut OperatorTaskInputs,
+    ingress_name: &str,
+    message: StreamMessage,
+    input_watermark: &mut Option<EventTime>,
+) -> Result<()> {
+    let cancellation = inputs.context.job().cancellation().clone();
+    tokio::select! {
+        biased;
+        result = dispatch_message(inputs, ingress_name, message, input_watermark) => result,
+        () = cancellation.cancelled() => Ok(()),
     }
 }
 
@@ -303,87 +327,18 @@ async fn dispatch_message(
 ) -> Result<()> {
     match message.kind() {
         StreamMessageKind::Data => {
-            let batch = message
-                .as_data()
-                .expect("data kind always carries a batch")
-                .clone();
-            let cost = EnvelopeCost::of_message(&StreamMessage::data(batch.clone()))?;
-            inputs
-                .metrics
-                .record_operator_input(&inputs.node_id, cost)?;
-            inputs.progress.record_input()?;
-            let processing_timer = inputs.metrics.timer();
-            let context =
-                StreamOperatorContext::new(inputs.context.job(), &inputs.node_id, *input_watermark);
-            let mut collector = ChannelStreamCollector::new(
-                &inputs.node_id,
-                &inputs.output_ports,
-                &mut inputs.outputs,
-                inputs.context.job().cancellation(),
-                &inputs.progress,
-                &inputs.metrics,
-            );
-            let result = inputs
-                .operator
-                .process_data(ingress_name, batch, &context, &mut collector)
-                .await;
-            inputs
-                .progress
-                .observe_datafusion_runtime(inputs.operator.datafusion_runtime_initialized());
-            result?;
-            inputs
-                .metrics
-                .record_operator_processing(&inputs.node_id, &processing_timer)
+            dispatch_data(inputs, ingress_name, message, *input_watermark).await
         }
-        StreamMessageKind::Watermark if inputs.ingresses.len() == 1 => {
-            let watermark = message
-                .as_watermark()
-                .expect("watermark kind always carries event time");
-            let context =
-                StreamOperatorContext::new(inputs.context.job(), &inputs.node_id, *input_watermark);
-            let mut collector = ChannelStreamCollector::new(
-                &inputs.node_id,
-                &inputs.output_ports,
-                &mut inputs.outputs,
-                inputs.context.job().cancellation(),
-                &inputs.progress,
-                &inputs.metrics,
-            );
-            inputs
-                .operator
-                .on_watermark(watermark, &context, &mut collector)
-                .await?;
-            forward_control(&mut inputs.outputs, message, inputs.context.job()).await?;
-            *input_watermark = Some(watermark);
-            Ok(())
+        StreamMessageKind::Watermark => {
+            dispatch_watermark(inputs, ingress_name, message, input_watermark).await
         }
-        StreamMessageKind::Idle if inputs.ingresses.len() == 1 => {
-            forward_control(&mut inputs.outputs, message, inputs.context.job()).await
-        }
-        StreamMessageKind::Watermark => Err(CalcFlowError::InvalidArgument {
-            field: format!(
-                "runtime.nodes.{}.ingress.{ingress_name}.watermark",
-                inputs.node_id
-            ),
-            message: "multi-ingress watermark control is unavailable before M3; no downstream control was emitted"
-                .into(),
-        }),
-        StreamMessageKind::Idle => Err(CalcFlowError::InvalidArgument {
-            field: format!(
-                "runtime.nodes.{}.ingress.{ingress_name}.idle",
-                inputs.node_id
-            ),
-            message: "multi-ingress idle control is unavailable before M3; no downstream control was emitted"
-                .into(),
-        }),
-        StreamMessageKind::Barrier => Err(CalcFlowError::InvalidArgument {
-            field: format!(
-                "runtime.nodes.{}.ingress.{ingress_name}.barrier",
-                inputs.node_id
-            ),
-            message: "barrier control is unavailable before M5; no downstream control was emitted"
-                .into(),
-        }),
+        StreamMessageKind::Idle => dispatch_idle(inputs, ingress_name, message).await,
+        StreamMessageKind::Barrier => Err(unsupported_control(
+            inputs,
+            ingress_name,
+            "barrier",
+            "barrier control is unavailable before M5; no downstream control was emitted",
+        )),
         StreamMessageKind::EndOfInput => {
             inputs
                 .ingresses
@@ -392,6 +347,112 @@ async fn dispatch_message(
                 .saw_explicit_eof = true;
             Ok(())
         }
+    }
+}
+
+async fn dispatch_data(
+    inputs: &mut OperatorTaskInputs,
+    ingress_name: &str,
+    message: StreamMessage,
+    input_watermark: Option<EventTime>,
+) -> Result<()> {
+    let batch = message
+        .as_data()
+        .expect("data kind always carries a batch")
+        .clone();
+    let cost = EnvelopeCost::of_message(&message)?;
+    inputs
+        .metrics
+        .record_operator_input(&inputs.node_id, cost)?;
+    inputs.progress.record_input()?;
+    let processing_timer = inputs.metrics.timer();
+    let context =
+        StreamOperatorContext::new(inputs.context.job(), &inputs.node_id, input_watermark);
+    let mut collector = ChannelStreamCollector::new(
+        &inputs.node_id,
+        &inputs.output_ports,
+        &mut inputs.outputs,
+        inputs.context.job().cancellation(),
+        &inputs.progress,
+        &inputs.metrics,
+    );
+    let result = inputs
+        .operator
+        .process_data(ingress_name, batch, &context, &mut collector)
+        .await;
+    inputs
+        .progress
+        .observe_datafusion_runtime(inputs.operator.datafusion_runtime_initialized());
+    result?;
+    inputs
+        .metrics
+        .record_operator_processing(&inputs.node_id, &processing_timer)
+}
+
+async fn dispatch_watermark(
+    inputs: &mut OperatorTaskInputs,
+    ingress_name: &str,
+    message: StreamMessage,
+    input_watermark: &mut Option<EventTime>,
+) -> Result<()> {
+    if inputs.ingresses.len() != 1 {
+        return Err(unsupported_control(
+            inputs,
+            ingress_name,
+            "watermark",
+            "multi-ingress watermark control is unavailable before M3; no downstream control was emitted",
+        ));
+    }
+    let watermark = message
+        .as_watermark()
+        .expect("watermark kind always carries event time");
+    let context =
+        StreamOperatorContext::new(inputs.context.job(), &inputs.node_id, *input_watermark);
+    let mut collector = ChannelStreamCollector::new(
+        &inputs.node_id,
+        &inputs.output_ports,
+        &mut inputs.outputs,
+        inputs.context.job().cancellation(),
+        &inputs.progress,
+        &inputs.metrics,
+    );
+    inputs
+        .operator
+        .on_watermark(watermark, &context, &mut collector)
+        .await?;
+    forward_control(&mut inputs.outputs, message, inputs.context.job()).await?;
+    *input_watermark = Some(watermark);
+    Ok(())
+}
+
+async fn dispatch_idle(
+    inputs: &mut OperatorTaskInputs,
+    ingress_name: &str,
+    message: StreamMessage,
+) -> Result<()> {
+    if inputs.ingresses.len() != 1 {
+        return Err(unsupported_control(
+            inputs,
+            ingress_name,
+            "idle",
+            "multi-ingress idle control is unavailable before M3; no downstream control was emitted",
+        ));
+    }
+    forward_control(&mut inputs.outputs, message, inputs.context.job()).await
+}
+
+fn unsupported_control(
+    inputs: &OperatorTaskInputs,
+    ingress_name: &str,
+    kind: &str,
+    message: &str,
+) -> CalcFlowError {
+    CalcFlowError::InvalidArgument {
+        field: format!(
+            "runtime.nodes.{}.ingress.{ingress_name}.{kind}",
+            inputs.node_id
+        ),
+        message: message.into(),
     }
 }
 
@@ -448,48 +509,71 @@ impl<'a> ChannelStreamCollector<'a> {
 #[async_trait]
 impl StreamCollector for ChannelStreamCollector<'_> {
     async fn emit(&mut self, port: &str, batch: Batch) -> Result<()> {
-        let declared = self
-            .output_ports
-            .get(port)
-            .ok_or_else(|| CalcFlowError::Compile {
-                message: format!("node.{}.outputs.{port} is unknown", self.node_id),
-            })?;
-        declared.validate(&batch, &format!("node.{}.outputs.{port}", self.node_id))?;
-        let message = StreamMessage::data(batch);
+        let message = validate_emission(self.node_id, self.output_ports, port, batch)?;
         let cost = EnvelopeCost::of_message(&message)?;
         let senders = self
             .outputs
             .get_mut(port)
-            .ok_or_else(|| CalcFlowError::Internal {
-                message: format!(
-                    "node {:?} output {port:?} has no runtime routes",
-                    self.node_id
-                ),
-            })?;
-        if senders.is_empty() {
-            return Err(CalcFlowError::Internal {
-                message: format!(
-                    "node {:?} output {port:?} has no runtime routes",
-                    self.node_id
-                ),
-            });
-        }
-        for sender in senders.iter() {
-            sender.validate_message(&message)?;
-        }
-        for sender in senders {
-            tokio::select! {
-                biased;
-                () = self.cancellation.cancelled() => {
-                    return Err(CalcFlowError::Cancelled {
-                        run_id: "operator-task".into(),
-                    });
-                }
-                result = sender.send(message.clone()) => result?,
-            }
-        }
+            .ok_or_else(|| runtime_routes_error(self.node_id, port))?;
+        validate_senders(senders, &message, self.node_id, port)?;
+        send_emission(senders, message, self.cancellation).await?;
         self.metrics.record_operator_output(self.node_id, cost)?;
         self.progress.record_output()
+    }
+}
+
+fn validate_emission(
+    node_id: &str,
+    output_ports: &BTreeMap<String, Port>,
+    port: &str,
+    batch: Batch,
+) -> Result<StreamMessage> {
+    let declared = output_ports
+        .get(port)
+        .ok_or_else(|| CalcFlowError::Compile {
+            message: format!("node.{node_id}.outputs.{port} is unknown"),
+        })?;
+    declared.validate(&batch, &format!("node.{node_id}.outputs.{port}"))?;
+    Ok(StreamMessage::data(batch))
+}
+
+fn validate_senders(
+    senders: &[EdgeSender],
+    message: &StreamMessage,
+    node_id: &str,
+    port: &str,
+) -> Result<()> {
+    if senders.is_empty() {
+        return Err(runtime_routes_error(node_id, port));
+    }
+    for sender in senders {
+        sender.validate_message(message)?;
+    }
+    Ok(())
+}
+
+async fn send_emission(
+    senders: &mut [EdgeSender],
+    message: StreamMessage,
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    for sender in senders {
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                return Err(CalcFlowError::Cancelled {
+                    run_id: "operator-task".into(),
+                });
+            }
+            result = sender.send(message.clone()) => result?,
+        }
+    }
+    Ok(())
+}
+
+fn runtime_routes_error(node_id: &str, port: &str) -> CalcFlowError {
+    CalcFlowError::Internal {
+        message: format!("node {node_id:?} output {port:?} has no runtime routes"),
     }
 }
 
@@ -754,7 +838,22 @@ mod tests {
         let context =
             StreamJobContext::new(7, "fingerprint", JsonMap::new(), None, cancellation.clone());
         let metrics = super::MetricsRecorder::new(
-            ["source->input".into(), "output->sink".into()],
+            [
+                (
+                    "source->input".into(),
+                    EdgeBudget {
+                        max_rows: 64,
+                        max_bytes: 1 << 20,
+                    },
+                ),
+                (
+                    "output->sink".into(),
+                    EdgeBudget {
+                        max_rows: 64,
+                        max_bytes: 1 << 20,
+                    },
+                ),
+            ],
             [],
             ["node".into()],
             [],
@@ -895,7 +994,20 @@ mod tests {
             .map(|name| format!("source->{name}"))
             .chain((0..branch_count).map(|branch| format!("output->{branch}")))
             .collect::<Vec<_>>();
-        let metrics = super::MetricsRecorder::new(edge_ids, [], ["node".into()], []);
+        let metrics = super::MetricsRecorder::new(
+            edge_ids.into_iter().map(|edge_id| {
+                (
+                    edge_id,
+                    EdgeBudget {
+                        max_rows: 64,
+                        max_bytes: 1 << 20,
+                    },
+                )
+            }),
+            [],
+            ["node".into()],
+            [],
+        );
         let mut inputs = BTreeMap::new();
         let mut ingresses = BTreeMap::new();
         for name in input_names {

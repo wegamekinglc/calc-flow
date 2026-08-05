@@ -17,7 +17,7 @@ use super::{
     ChannelMetrics, EnvelopeCost, StreamMessage,
     runner::{ContinuousJobState, FailureOrigin, RuntimeFailure, TerminalCause},
 };
-use crate::{CalcFlowError, Result};
+use crate::{CalcFlowError, EdgeBudget, Result};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct JobMetrics {
@@ -32,6 +32,7 @@ pub(crate) struct JobMetrics {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct EdgeRuntimeMetrics {
+    pub(crate) message_slot_limit: usize,
     pub(crate) channel: ChannelMetrics,
     pub(crate) input_batches: u64,
     pub(crate) input_rows: u64,
@@ -147,7 +148,7 @@ impl Default for MetricsRecorder {
 
 impl MetricsRecorder {
     pub(crate) fn new(
-        edges: impl IntoIterator<Item = String>,
+        edges: impl IntoIterator<Item = (String, EdgeBudget)>,
         sources: impl IntoIterator<Item = String>,
         nodes: impl IntoIterator<Item = String>,
         sinks: impl IntoIterator<Item = String>,
@@ -162,7 +163,7 @@ impl MetricsRecorder {
     }
 
     fn with_clock(
-        edges: impl IntoIterator<Item = String>,
+        edges: impl IntoIterator<Item = (String, EdgeBudget)>,
         sources: impl IntoIterator<Item = String>,
         nodes: impl IntoIterator<Item = String>,
         sinks: impl IntoIterator<Item = String>,
@@ -172,7 +173,15 @@ impl MetricsRecorder {
             job: JobMetrics::default(),
             edges: edges
                 .into_iter()
-                .map(|id| (id, EdgeRuntimeMetrics::default()))
+                .map(|(id, budget)| {
+                    (
+                        id,
+                        EdgeRuntimeMetrics {
+                            message_slot_limit: budget.max_rows,
+                            ..EdgeRuntimeMetrics::default()
+                        },
+                    )
+                })
                 .collect(),
             sources: sources
                 .into_iter()
@@ -330,52 +339,13 @@ impl MetricsRecorder {
         blocked_elapsed: Option<Duration>,
     ) -> Result<()> {
         self.with_edge(edge_id, |metrics| {
-            let next_batches = checked_sum(
-                metrics.input_batches,
-                traffic.batches,
-                edge_id,
-                "input_batches",
-            )?;
-            let next_rows = checked_sum(metrics.input_rows, traffic.rows, edge_id, "input_rows")?;
-            let next_bytes =
-                checked_sum(metrics.input_bytes, traffic.bytes, edge_id, "input_bytes")?;
-            let next_depth = metrics
-                .channel
-                .queue_depth
-                .checked_add(traffic.messages)
-                .ok_or_else(|| metrics_error(edge_id, "queue_depth", "counter overflow"))?;
-            let next_charged_rows = metrics
-                .channel
-                .charged_rows
-                .checked_add(traffic.cost_rows)
-                .ok_or_else(|| metrics_error(edge_id, "charged_rows", "counter overflow"))?;
-            let next_charged_bytes = metrics
-                .channel
-                .charged_bytes
-                .checked_add(traffic.cost_bytes)
-                .ok_or_else(|| metrics_error(edge_id, "charged_bytes", "counter overflow"))?;
-            let next_blocked_duration = match blocked_elapsed {
-                Some(elapsed) => metrics
-                    .channel
-                    .blocked_duration
-                    .checked_add(elapsed)
-                    .ok_or_else(|| {
-                        metrics_error(edge_id, "blocked_duration", "counter overflow")
-                    })?,
-                None => metrics.channel.blocked_duration,
-            };
-            metrics.input_batches = next_batches;
-            metrics.input_rows = next_rows;
-            metrics.input_bytes = next_bytes;
-            metrics.channel.queue_depth = next_depth;
-            metrics.channel.charged_rows = next_charged_rows;
-            metrics.channel.charged_bytes = next_charged_bytes;
-            metrics.channel.high_water_depth = metrics.channel.high_water_depth.max(next_depth);
-            metrics.channel.high_water_rows =
-                metrics.channel.high_water_rows.max(next_charged_rows);
-            metrics.channel.high_water_bytes =
-                metrics.channel.high_water_bytes.max(next_charged_bytes);
-            metrics.channel.blocked_duration = next_blocked_duration;
+            let (batches, rows, bytes) = next_edge_input(metrics, traffic, edge_id)?;
+            let channel =
+                next_edge_enqueue_channel(&metrics.channel, traffic, blocked_elapsed, edge_id)?;
+            metrics.input_batches = batches;
+            metrics.input_rows = rows;
+            metrics.input_bytes = bytes;
+            metrics.channel = channel;
             Ok(())
         })
     }
@@ -390,36 +360,12 @@ impl MetricsRecorder {
     /// reservation release, while the channel queue lock is held.
     pub(super) fn record_edge_dequeue(&self, edge_id: &str, traffic: EdgeTraffic) -> Result<()> {
         self.with_edge(edge_id, |metrics| {
-            let next_batches = checked_sum(
-                metrics.output_batches,
-                traffic.batches,
-                edge_id,
-                "output_batches",
-            )?;
-            let next_rows = checked_sum(metrics.output_rows, traffic.rows, edge_id, "output_rows")?;
-            let next_bytes =
-                checked_sum(metrics.output_bytes, traffic.bytes, edge_id, "output_bytes")?;
-            let next_depth = metrics
-                .channel
-                .queue_depth
-                .checked_sub(traffic.messages)
-                .ok_or_else(|| metrics_error(edge_id, "queue_depth", "counter underflow"))?;
-            let next_charged_rows = metrics
-                .channel
-                .charged_rows
-                .checked_sub(traffic.cost_rows)
-                .ok_or_else(|| metrics_error(edge_id, "charged_rows", "counter underflow"))?;
-            let next_charged_bytes = metrics
-                .channel
-                .charged_bytes
-                .checked_sub(traffic.cost_bytes)
-                .ok_or_else(|| metrics_error(edge_id, "charged_bytes", "counter underflow"))?;
-            metrics.output_batches = next_batches;
-            metrics.output_rows = next_rows;
-            metrics.output_bytes = next_bytes;
-            metrics.channel.queue_depth = next_depth;
-            metrics.channel.charged_rows = next_charged_rows;
-            metrics.channel.charged_bytes = next_charged_bytes;
+            let (batches, rows, bytes) = next_edge_output(metrics, traffic, edge_id)?;
+            let channel = next_edge_dequeue_channel(&metrics.channel, traffic, edge_id)?;
+            metrics.output_batches = batches;
+            metrics.output_rows = rows;
+            metrics.output_bytes = bytes;
+            metrics.channel = channel;
             Ok(())
         })
     }
@@ -615,6 +561,134 @@ impl MetricsRecorder {
     }
 }
 
+fn next_edge_input(
+    metrics: &EdgeRuntimeMetrics,
+    traffic: EdgeTraffic,
+    edge_id: &str,
+) -> Result<(u64, u64, u64)> {
+    Ok((
+        checked_sum(
+            metrics.input_batches,
+            traffic.batches,
+            edge_id,
+            "input_batches",
+        )?,
+        checked_sum(metrics.input_rows, traffic.rows, edge_id, "input_rows")?,
+        checked_sum(metrics.input_bytes, traffic.bytes, edge_id, "input_bytes")?,
+    ))
+}
+
+fn next_edge_output(
+    metrics: &EdgeRuntimeMetrics,
+    traffic: EdgeTraffic,
+    edge_id: &str,
+) -> Result<(u64, u64, u64)> {
+    Ok((
+        checked_sum(
+            metrics.output_batches,
+            traffic.batches,
+            edge_id,
+            "output_batches",
+        )?,
+        checked_sum(metrics.output_rows, traffic.rows, edge_id, "output_rows")?,
+        checked_sum(metrics.output_bytes, traffic.bytes, edge_id, "output_bytes")?,
+    ))
+}
+
+fn next_edge_enqueue_channel(
+    channel: &ChannelMetrics,
+    traffic: EdgeTraffic,
+    blocked_elapsed: Option<Duration>,
+    edge_id: &str,
+) -> Result<ChannelMetrics> {
+    let mut next = channel.clone();
+    next.queue_depth = checked_add_usize(
+        channel.queue_depth,
+        traffic.messages,
+        edge_id,
+        "queue_depth",
+    )?;
+    next.charged_rows = checked_add_usize(
+        channel.charged_rows,
+        traffic.cost_rows,
+        edge_id,
+        "charged_rows",
+    )?;
+    next.charged_bytes = checked_add_usize(
+        channel.charged_bytes,
+        traffic.cost_bytes,
+        edge_id,
+        "charged_bytes",
+    )?;
+    next.blocked_duration = next_blocked_duration(channel, blocked_elapsed, edge_id)?;
+    next.high_water_depth = channel.high_water_depth.max(next.queue_depth);
+    next.high_water_rows = channel.high_water_rows.max(next.charged_rows);
+    next.high_water_bytes = channel.high_water_bytes.max(next.charged_bytes);
+    Ok(next)
+}
+
+fn next_blocked_duration(
+    channel: &ChannelMetrics,
+    blocked_elapsed: Option<Duration>,
+    edge_id: &str,
+) -> Result<Duration> {
+    blocked_elapsed.map_or(Ok(channel.blocked_duration), |elapsed| {
+        channel
+            .blocked_duration
+            .checked_add(elapsed)
+            .ok_or_else(|| metrics_error(edge_id, "blocked_duration", "counter overflow"))
+    })
+}
+
+fn next_edge_dequeue_channel(
+    channel: &ChannelMetrics,
+    traffic: EdgeTraffic,
+    edge_id: &str,
+) -> Result<ChannelMetrics> {
+    let mut next = channel.clone();
+    next.queue_depth = checked_sub_usize(
+        channel.queue_depth,
+        traffic.messages,
+        edge_id,
+        "queue_depth",
+    )?;
+    next.charged_rows = checked_sub_usize(
+        channel.charged_rows,
+        traffic.cost_rows,
+        edge_id,
+        "charged_rows",
+    )?;
+    next.charged_bytes = checked_sub_usize(
+        channel.charged_bytes,
+        traffic.cost_bytes,
+        edge_id,
+        "charged_bytes",
+    )?;
+    Ok(next)
+}
+
+fn checked_add_usize(
+    value: usize,
+    add: usize,
+    edge_id: &str,
+    counter: &'static str,
+) -> Result<usize> {
+    value
+        .checked_add(add)
+        .ok_or_else(|| metrics_error(edge_id, counter, "counter overflow"))
+}
+
+fn checked_sub_usize(
+    value: usize,
+    sub: usize,
+    edge_id: &str,
+    counter: &'static str,
+) -> Result<usize> {
+    value
+        .checked_sub(sub)
+        .ok_or_else(|| metrics_error(edge_id, counter, "counter underflow"))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct EdgeTraffic {
     batches: u64,
@@ -796,7 +870,7 @@ mod tests {
 
     use super::{MetricsClock, MetricsRecorder};
     use crate::{
-        CalcFlowError,
+        CalcFlowError, EdgeBudget,
         runtime::streaming::{
             EnvelopeCost,
             runner::{FailureOrigin, RuntimeFailure},
@@ -816,7 +890,10 @@ mod tests {
     fn stable_ids_and_injected_clock_produce_deterministic_snapshot() {
         let clock = Arc::new(TestClock::default());
         let recorder = MetricsRecorder::with_clock(
-            ["edge-b".into(), "edge-a".into()],
+            [
+                ("edge-b".into(), EdgeBudget::new(3, 64).unwrap()),
+                ("edge-a".into(), EdgeBudget::new(2, 64).unwrap()),
+            ],
             ["source".into()],
             ["node".into()],
             ["sink".into()],
@@ -840,6 +917,18 @@ mod tests {
             snapshot.nodes["node"].processing_duration,
             Duration::from_nanos(17)
         );
+    }
+
+    #[test]
+    fn edge_message_slot_limit_is_copied_from_the_validated_budget() {
+        let recorder = MetricsRecorder::new(
+            [("edge".into(), EdgeBudget::new(3, 64).unwrap())],
+            [],
+            [],
+            [],
+        );
+
+        assert_eq!(recorder.snapshot().edges["edge"].message_slot_limit, 3);
     }
 
     #[test]
@@ -887,7 +976,12 @@ mod tests {
 
     #[test]
     fn edge_drop_underflow_sets_bounded_invariant_flag_without_partial_decrement() {
-        let recorder = MetricsRecorder::new(["edge".into()], [], [], []);
+        let recorder = MetricsRecorder::new(
+            [("edge".into(), EdgeBudget::new(1, 8).unwrap())],
+            [],
+            [],
+            [],
+        );
         {
             let mut snapshot = recorder.0.snapshot.lock();
             let edge = snapshot.edges.get_mut("edge").unwrap();

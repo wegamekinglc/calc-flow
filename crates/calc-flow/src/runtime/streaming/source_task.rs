@@ -451,14 +451,36 @@ pub(crate) fn spawn_source_tasks_gated_with_metrics(
     metrics: MetricsRecorder,
 ) -> Result<SourceProgress> {
     let source_context = context.for_source(binding_id)?;
-    let binding_id = source_context.scope_id();
+    let binding_id = source_context.scope_id().to_owned();
+    validate_source_outputs(&binding_id, &outputs)?;
+    let capabilities = binding.sample_capabilities_once();
+    validate_source_capabilities(&binding_id, capabilities)?;
+    validate_source_edge_budgets(&binding_id, capabilities, &outputs)?;
+
+    Ok(spawn_validated_source_tasks(
+        supervisor,
+        &source_context,
+        binding_id,
+        binding,
+        capabilities,
+        outputs,
+        data_gate,
+        launch_cancel,
+        metrics,
+    ))
+}
+
+fn validate_source_outputs(binding_id: &str, outputs: &[EdgeSender]) -> Result<()> {
     if outputs.is_empty() {
         return Err(CalcFlowError::InvalidArgument {
             field: format!("sources.{binding_id}.outputs"),
             message: "must contain at least one edge".into(),
         });
     }
-    let capabilities = binding.sample_capabilities_once();
+    Ok(())
+}
+
+fn validate_source_capabilities(binding_id: &str, capabilities: SourceCapabilities) -> Result<()> {
     if capabilities.max_batch_rows == 0 {
         return Err(CalcFlowError::InvalidArgument {
             field: format!("sources.{binding_id}.capabilities.max_batch_rows"),
@@ -471,7 +493,15 @@ pub(crate) fn spawn_source_tasks_gated_with_metrics(
             message: "must be greater than zero".into(),
         });
     }
-    for output in &outputs {
+    Ok(())
+}
+
+fn validate_source_edge_budgets(
+    binding_id: &str,
+    capabilities: SourceCapabilities,
+    outputs: &[EdgeSender],
+) -> Result<()> {
+    for output in outputs {
         let budget = output.budget();
         if capabilities.max_batch_rows > budget.max_rows
             || capabilities.max_batch_bytes > budget.max_bytes
@@ -489,7 +519,24 @@ pub(crate) fn spawn_source_tasks_gated_with_metrics(
             });
         }
     }
+    Ok(())
+}
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the private spawn boundary owns the already-validated source lifecycle dependencies"
+)]
+fn spawn_validated_source_tasks(
+    supervisor: &mut TaskSupervisor,
+    source_context: &super::context::StreamTaskContext,
+    binding_id: String,
+    binding: SourceBinding,
+    capabilities: SourceCapabilities,
+    outputs: Vec<EdgeSender>,
+    data_gate: watch::Receiver<bool>,
+    launch_cancel: crate::CancellationToken,
+    metrics: MetricsRecorder,
+) -> SourceProgress {
     let SourceBinding {
         source,
         capabilities: _,
@@ -504,7 +551,7 @@ pub(crate) fn spawn_source_tasks_gated_with_metrics(
         let mut acceptance = SourceAcceptance::new();
         acceptance.install_accepted_sequence_recorder(
             accepted_sequence_recorder,
-            binding_id,
+            &binding_id,
             next_sequence,
         );
         acceptance
@@ -528,7 +575,7 @@ pub(crate) fn spawn_source_tasks_gated_with_metrics(
     let pump_resume_cursor = resume_cursor.clone();
     let pump_acceptance = Arc::clone(&acceptance);
     let pump_launch_cancel = launch_cancel.clone();
-    let pump_binding_id = binding_id.to_owned();
+    let pump_binding_id = binding_id.clone();
     let pump_metrics = metrics.clone();
     supervisor.spawn_with_failure_signal(
         format!("source:{binding_id}:pump"),
@@ -553,7 +600,6 @@ pub(crate) fn spawn_source_tasks_gated_with_metrics(
             .await
         },
     );
-    let binding_id = binding_id.to_owned();
     let task_progress = progress.clone();
     supervisor.spawn_with_failure_signal(
         format!("source:{binding_id}:task"),
@@ -576,7 +622,7 @@ pub(crate) fn spawn_source_tasks_gated_with_metrics(
             .await
         },
     );
-    Ok(progress)
+    progress
 }
 
 #[allow(
@@ -600,79 +646,19 @@ async fn run_source_pump(
         binding_id,
         metrics,
     } = inputs;
-    let operation = async {
-        if !open_began {
-            tokio::select! {
-                biased;
-                () = launch_cancel.cancelled() => return Ok(PumpCompletion::Cancelled),
-                () = cancellation.cancelled() => return Ok(PumpCompletion::Cancelled),
-                result = AssertUnwindSafe(source.open(resume_cursor)).catch_unwind() => {
-                    match result {
-                        Ok(result) => result?,
-                        Err(payload) => return Err(CalcFlowError::TaskPanicked {
-                            task_id: task_id.as_u64(),
-                            message: panic_message(payload.as_ref()),
-                        }),
-                    }
-                },
-            }
-        }
-        loop {
-            if *data_gate.borrow() {
-                break;
-            }
-            tokio::select! {
-                biased;
-                () = launch_cancel.cancelled() => return Ok(PumpCompletion::Cancelled),
-                () = cancellation.cancelled() => return Ok(PumpCompletion::Cancelled),
-                result = data_gate.changed() => result.map_err(|_| CalcFlowError::Internal {
-                    message: "source data gate closed before release".into(),
-                })?,
-            }
-        }
-        loop {
-            if acceptance.is_draining() {
-                return Ok(PumpCompletion::Draining);
-            }
-            let permit = tokio::select! {
-                biased;
-                () = launch_cancel.cancelled() => return Ok(PumpCompletion::Cancelled),
-                () = cancellation.cancelled() => return Ok(PumpCompletion::Cancelled),
-                () = acceptance.drain.cancelled() => return Ok(PumpCompletion::Draining),
-                permit = slot.reserve() => permit.map_err(|_| CalcFlowError::Internal {
-                    message: "source prefetch slot closed before pump convergence".into(),
-                })?,
-            };
-            metrics.record_source_poll(&binding_id)?;
-            let event = tokio::select! {
-                biased;
-                () = launch_cancel.cancelled() => return Ok(PumpCompletion::Cancelled),
-                () = cancellation.cancelled() => return Ok(PumpCompletion::Cancelled),
-                () = acceptance.drain.cancelled() => return Ok(PumpCompletion::Draining),
-                event = AssertUnwindSafe(source.next()).catch_unwind() => match event {
-                    Ok(event) => event?,
-                    Err(payload) => return Err(CalcFlowError::TaskPanicked {
-                        task_id: task_id.as_u64(),
-                        message: panic_message(payload.as_ref()),
-                    }),
-                },
-            };
-            match event {
-                Some(event) => {
-                    #[cfg(test)]
-                    let committed = acceptance.commit_event_slot(&event);
-                    #[cfg(not(test))]
-                    let committed = acceptance.commit_slot();
-                    if committed {
-                        permit.send(PumpEvent::Event(event));
-                    } else {
-                        return Ok(PumpCompletion::Draining);
-                    }
-                }
-                None => return Ok(PumpCompletion::Ended),
-            }
-        }
-    }
+    let operation = run_source_pump_operation(
+        &mut source,
+        resume_cursor,
+        open_began,
+        &slot,
+        &cancellation,
+        &launch_cancel,
+        &acceptance,
+        &mut data_gate,
+        &binding_id,
+        &metrics,
+        task_id,
+    )
     .await;
 
     if operation.is_err() {
@@ -719,6 +705,195 @@ async fn run_source_pump(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the serialized pump operation receives the source's owned lifecycle resources"
+)]
+async fn run_source_pump_operation(
+    source: &mut Box<dyn StreamSource>,
+    resume_cursor: Option<Cursor>,
+    open_began: bool,
+    slot: &mpsc::Sender<PumpEvent>,
+    cancellation: &crate::CancellationToken,
+    launch_cancel: &crate::CancellationToken,
+    acceptance: &SourceAcceptance,
+    data_gate: &mut watch::Receiver<bool>,
+    binding_id: &str,
+    metrics: &MetricsRecorder,
+    task_id: TaskId,
+) -> Result<PumpCompletion> {
+    if let Some(completion) = open_source(
+        source,
+        resume_cursor,
+        open_began,
+        cancellation,
+        launch_cancel,
+        task_id,
+    )
+    .await?
+    {
+        return Ok(completion);
+    }
+    if !wait_for_source_data_gate(data_gate, cancellation, launch_cancel).await? {
+        return Ok(PumpCompletion::Cancelled);
+    }
+    poll_source_events(
+        source,
+        slot,
+        cancellation,
+        launch_cancel,
+        acceptance,
+        binding_id,
+        metrics,
+        task_id,
+    )
+    .await
+}
+
+async fn open_source(
+    source: &mut Box<dyn StreamSource>,
+    resume_cursor: Option<Cursor>,
+    open_began: bool,
+    cancellation: &crate::CancellationToken,
+    launch_cancel: &crate::CancellationToken,
+    task_id: TaskId,
+) -> Result<Option<PumpCompletion>> {
+    if open_began {
+        return Ok(None);
+    }
+    tokio::select! {
+        biased;
+        () = launch_cancel.cancelled() => Ok(Some(PumpCompletion::Cancelled)),
+        () = cancellation.cancelled() => Ok(Some(PumpCompletion::Cancelled)),
+        result = AssertUnwindSafe(source.open(resume_cursor)).catch_unwind() => {
+            match result {
+                Ok(result) => result.map(|()| None),
+                Err(payload) => Err(CalcFlowError::TaskPanicked {
+                    task_id: task_id.as_u64(),
+                    message: panic_message(payload.as_ref()),
+                }),
+            }
+        },
+    }
+}
+
+async fn wait_for_source_data_gate(
+    data_gate: &mut watch::Receiver<bool>,
+    cancellation: &crate::CancellationToken,
+    launch_cancel: &crate::CancellationToken,
+) -> Result<bool> {
+    loop {
+        if *data_gate.borrow() {
+            return Ok(true);
+        }
+        tokio::select! {
+            biased;
+            () = launch_cancel.cancelled() => return Ok(false),
+            () = cancellation.cancelled() => return Ok(false),
+            result = data_gate.changed() => result.map_err(|_| CalcFlowError::Internal {
+                message: "source data gate closed before release".into(),
+            })?,
+        }
+    }
+}
+
+enum PumpReservation<'a> {
+    Permit(mpsc::Permit<'a, PumpEvent>),
+    Cancelled,
+    Draining,
+}
+
+async fn reserve_pump_slot<'a>(
+    slot: &'a mpsc::Sender<PumpEvent>,
+    cancellation: &crate::CancellationToken,
+    launch_cancel: &crate::CancellationToken,
+    acceptance: &SourceAcceptance,
+) -> Result<PumpReservation<'a>> {
+    tokio::select! {
+        biased;
+        () = launch_cancel.cancelled() => Ok(PumpReservation::Cancelled),
+        () = cancellation.cancelled() => Ok(PumpReservation::Cancelled),
+        () = acceptance.drain.cancelled() => Ok(PumpReservation::Draining),
+        permit = slot.reserve() => permit
+            .map(PumpReservation::Permit)
+            .map_err(|_| CalcFlowError::Internal {
+                message: "source prefetch slot closed before pump convergence".into(),
+            }),
+    }
+}
+
+enum NextSourceEvent {
+    Event(Option<SourceEvent>),
+    Complete(PumpCompletion),
+}
+
+async fn next_source_event(
+    source: &mut Box<dyn StreamSource>,
+    cancellation: &crate::CancellationToken,
+    launch_cancel: &crate::CancellationToken,
+    acceptance: &SourceAcceptance,
+    task_id: TaskId,
+) -> Result<NextSourceEvent> {
+    tokio::select! {
+        biased;
+        () = launch_cancel.cancelled() => Ok(NextSourceEvent::Complete(PumpCompletion::Cancelled)),
+        () = cancellation.cancelled() => Ok(NextSourceEvent::Complete(PumpCompletion::Cancelled)),
+        () = acceptance.drain.cancelled() => Ok(NextSourceEvent::Complete(PumpCompletion::Draining)),
+        event = AssertUnwindSafe(source.next()).catch_unwind() => match event {
+            Ok(event) => event.map(NextSourceEvent::Event),
+            Err(payload) => Err(CalcFlowError::TaskPanicked {
+                task_id: task_id.as_u64(),
+                message: panic_message(payload.as_ref()),
+            }),
+        },
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the poll loop coordinates one source with its slot and cancellation boundaries"
+)]
+async fn poll_source_events(
+    source: &mut Box<dyn StreamSource>,
+    slot: &mpsc::Sender<PumpEvent>,
+    cancellation: &crate::CancellationToken,
+    launch_cancel: &crate::CancellationToken,
+    acceptance: &SourceAcceptance,
+    binding_id: &str,
+    metrics: &MetricsRecorder,
+    task_id: TaskId,
+) -> Result<PumpCompletion> {
+    loop {
+        if acceptance.is_draining() {
+            return Ok(PumpCompletion::Draining);
+        }
+        let permit = match reserve_pump_slot(slot, cancellation, launch_cancel, acceptance).await? {
+            PumpReservation::Permit(permit) => permit,
+            PumpReservation::Cancelled => return Ok(PumpCompletion::Cancelled),
+            PumpReservation::Draining => return Ok(PumpCompletion::Draining),
+        };
+        metrics.record_source_poll(binding_id)?;
+        let event =
+            match next_source_event(source, cancellation, launch_cancel, acceptance, task_id)
+                .await?
+            {
+                NextSourceEvent::Event(event) => event,
+                NextSourceEvent::Complete(completion) => return Ok(completion),
+            };
+        let Some(event) = event else {
+            return Ok(PumpCompletion::Ended);
+        };
+        #[cfg(test)]
+        let committed = acceptance.commit_event_slot(&event);
+        #[cfg(not(test))]
+        let committed = acceptance.commit_slot();
+        if !committed {
+            return Ok(PumpCompletion::Draining);
+        }
+        permit.send(PumpEvent::Event(event));
+    }
+}
+
 fn source_close_task_failed(binding_id: &str) -> CalcFlowError {
     CalcFlowError::Internal {
         message: format!(
@@ -743,110 +918,219 @@ async fn run_source_task(
     reason = "the source loop keeps ordering validation, fan-out, and terminal handling atomic"
 )]
 async fn run_source_task_loop(inputs: &mut SourceTaskInputs) -> Result<()> {
-    let SourceTaskInputs {
-        binding_id,
-        first_sequence,
-        resume_cursor,
-        outputs,
-        slot,
-        progress,
-        acceptance,
-        cancellation,
-        launch_cancel,
-        metrics,
-    } = inputs;
-    let mut next_sequence = Some(*first_sequence);
-    let mut last_cursor = resume_cursor.clone();
-    let mut last_watermark: Option<EventTime> = None;
+    let mut order = SourceOrderState {
+        next_sequence: Some(inputs.first_sequence),
+        last_cursor: inputs.resume_cursor.clone(),
+        last_watermark: None,
+    };
     loop {
-        let event = tokio::select! {
-            biased;
-            () = launch_cancel.cancelled() => return Ok(()),
-            () = cancellation.cancelled() => return Ok(()),
-            event = slot.recv() => event,
+        let event = match receive_pump_event(inputs).await {
+            PumpReceive::Cancelled => return Ok(()),
+            PumpReceive::Closed => return handle_closed_pump(inputs).await,
+            PumpReceive::Event(event) => event,
         };
-        let Some(event) = event else {
-            return if cancellation.is_cancelled() {
-                acceptance.mark_closed();
-                Ok(())
-            } else if acceptance.is_draining() && acceptance.pump_closed.load(Ordering::Acquire) {
-                if !send_fanout(outputs, StreamMessage::end_of_input(), cancellation).await? {
-                    acceptance.mark_closed();
-                    return Ok(());
-                }
-                metrics.record_source_end(binding_id)?;
-                progress.snapshot.lock().ended = true;
-                acceptance.mark_closed();
-                Ok(())
-            } else {
-                Err(CalcFlowError::Internal {
-                    message: format!("source {binding_id:?} pump ended without end-of-input"),
-                })
-            };
-        };
-        acceptance.dequeue_slot();
-        match event {
-            PumpEvent::Event(SourceEvent::Data { batch, cursor }) => {
-                if last_cursor
-                    .as_ref()
-                    .is_some_and(|previous| !cursor.is_after(previous))
-                {
-                    return Err(CalcFlowError::InvalidArgument {
-                        field: "source.cursor".into(),
-                        message: format!(
-                            "source binding {binding_id:?} emitted a repeated or regressed cursor"
-                        ),
-                    });
-                }
-                let sequence = next_sequence.ok_or_else(|| CalcFlowError::Internal {
-                    message: format!("source binding {binding_id:?} sequence is exhausted"),
-                })?;
-                let metadata = BatchMetadata::new(
-                    binding_id.clone(),
-                    sequence,
-                    batch.metadata().attributes().clone(),
-                )?;
-                let message = StreamMessage::data(batch.with_metadata(metadata));
-                let cost = EnvelopeCost::of_message(&message)?;
-                metrics.record_source_data(binding_id, cost, sequence)?;
-                if !send_fanout(outputs, message, cancellation).await? {
-                    return Ok(());
-                }
-                metrics.record_source_output(binding_id, cost)?;
-                next_sequence = sequence.checked_add(1);
-                last_cursor = Some(cursor.clone());
-                let mut snapshot = progress.snapshot.lock();
-                snapshot.latest_observed_cursor = Some(cursor);
-                snapshot.next_sequence = next_sequence;
-            }
-            PumpEvent::Event(SourceEvent::Watermark(watermark)) => {
-                if last_watermark.is_some_and(|previous| watermark < previous) {
-                    return Err(CalcFlowError::InvalidArgument {
-                        field: "source.watermark".into(),
-                        message: format!("source binding {binding_id:?} regressed its watermark"),
-                    });
-                }
-                if !send_fanout(outputs, StreamMessage::watermark(watermark), cancellation).await? {
-                    return Ok(());
-                }
-                last_watermark = Some(watermark);
-            }
-            PumpEvent::Event(SourceEvent::Idle) => {
-                if !send_fanout(outputs, StreamMessage::idle(), cancellation).await? {
-                    return Ok(());
-                }
-            }
-            PumpEvent::End => {
-                if !send_fanout(outputs, StreamMessage::end_of_input(), cancellation).await? {
-                    return Ok(());
-                }
-                metrics.record_source_end(binding_id)?;
-                progress.snapshot.lock().ended = true;
-                acceptance.mark_closed();
-                return Ok(());
-            }
+        inputs.acceptance.dequeue_slot();
+        if process_pump_event(inputs, event, &mut order).await? == SourceLoopStep::Complete {
+            return Ok(());
         }
     }
+}
+
+struct SourceOrderState {
+    next_sequence: Option<u64>,
+    last_cursor: Option<Cursor>,
+    last_watermark: Option<EventTime>,
+}
+
+enum PumpReceive {
+    Event(PumpEvent),
+    Closed,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SourceLoopStep {
+    Continue,
+    Complete,
+}
+
+async fn receive_pump_event(inputs: &mut SourceTaskInputs) -> PumpReceive {
+    tokio::select! {
+        biased;
+        () = inputs.launch_cancel.cancelled() => PumpReceive::Cancelled,
+        () = inputs.cancellation.cancelled() => PumpReceive::Cancelled,
+        event = inputs.slot.recv() => event.map_or(PumpReceive::Closed, PumpReceive::Event),
+    }
+}
+
+async fn handle_closed_pump(inputs: &mut SourceTaskInputs) -> Result<()> {
+    if inputs.cancellation.is_cancelled() {
+        inputs.acceptance.mark_closed();
+        return Ok(());
+    }
+    if !inputs.acceptance.is_draining() || !inputs.acceptance.pump_closed.load(Ordering::Acquire) {
+        return Err(CalcFlowError::Internal {
+            message: format!(
+                "source {:?} pump ended without end-of-input",
+                inputs.binding_id
+            ),
+        });
+    }
+    finish_source_input(inputs).await
+}
+
+async fn process_pump_event(
+    inputs: &mut SourceTaskInputs,
+    event: PumpEvent,
+    order: &mut SourceOrderState,
+) -> Result<SourceLoopStep> {
+    match event {
+        PumpEvent::Event(SourceEvent::Data { batch, cursor }) => {
+            process_source_data(inputs, batch, cursor, order).await
+        }
+        PumpEvent::Event(SourceEvent::Watermark(watermark)) => {
+            process_source_watermark(inputs, watermark, order).await
+        }
+        PumpEvent::Event(SourceEvent::Idle) => {
+            let sent = send_fanout(
+                &mut inputs.outputs,
+                StreamMessage::idle(),
+                &inputs.cancellation,
+            )
+            .await?;
+            Ok(if sent {
+                SourceLoopStep::Continue
+            } else {
+                SourceLoopStep::Complete
+            })
+        }
+        PumpEvent::End => finish_source_input(inputs)
+            .await
+            .map(|()| SourceLoopStep::Complete),
+    }
+}
+
+async fn process_source_data(
+    inputs: &mut SourceTaskInputs,
+    batch: Batch,
+    cursor: Cursor,
+    order: &mut SourceOrderState,
+) -> Result<SourceLoopStep> {
+    validate_source_cursor(&inputs.binding_id, order.last_cursor.as_ref(), &cursor)?;
+    let (sequence, message, cost) =
+        sequenced_source_message(&inputs.binding_id, order.next_sequence, &batch)?;
+    if !send_source_data(inputs, message, cost, sequence).await? {
+        return Ok(SourceLoopStep::Complete);
+    }
+    record_source_progress(inputs, order, cursor, sequence);
+    Ok(SourceLoopStep::Continue)
+}
+
+fn sequenced_source_message(
+    binding_id: &str,
+    next_sequence: Option<u64>,
+    batch: &Batch,
+) -> Result<(u64, StreamMessage, EnvelopeCost)> {
+    let sequence = next_sequence.ok_or_else(|| CalcFlowError::Internal {
+        message: format!("source binding {binding_id:?} sequence is exhausted"),
+    })?;
+    let metadata = BatchMetadata::new(binding_id, sequence, batch.metadata().attributes().clone())?;
+    let message = StreamMessage::data(batch.with_metadata(metadata));
+    let cost = EnvelopeCost::of_message(&message)?;
+    Ok((sequence, message, cost))
+}
+
+async fn send_source_data(
+    inputs: &mut SourceTaskInputs,
+    message: StreamMessage,
+    cost: EnvelopeCost,
+    sequence: u64,
+) -> Result<bool> {
+    inputs
+        .metrics
+        .record_source_data(&inputs.binding_id, cost, sequence)?;
+    if !send_fanout(&mut inputs.outputs, message, &inputs.cancellation).await? {
+        return Ok(false);
+    }
+    inputs
+        .metrics
+        .record_source_output(&inputs.binding_id, cost)?;
+    Ok(true)
+}
+
+fn record_source_progress(
+    inputs: &SourceTaskInputs,
+    order: &mut SourceOrderState,
+    cursor: Cursor,
+    sequence: u64,
+) {
+    order.next_sequence = sequence.checked_add(1);
+    order.last_cursor = Some(cursor.clone());
+    let mut snapshot = inputs.progress.snapshot.lock();
+    snapshot.latest_observed_cursor = Some(cursor);
+    snapshot.next_sequence = order.next_sequence;
+}
+
+fn validate_source_cursor(
+    binding_id: &str,
+    previous: Option<&Cursor>,
+    cursor: &Cursor,
+) -> Result<()> {
+    if previous.is_some_and(|previous| !cursor.is_after(previous)) {
+        return Err(CalcFlowError::InvalidArgument {
+            field: format!("sources.{binding_id}.cursor"),
+            message: format!(
+                "source binding {binding_id:?} emitted a repeated or regressed cursor"
+            ),
+        });
+    }
+    Ok(())
+}
+
+async fn process_source_watermark(
+    inputs: &mut SourceTaskInputs,
+    watermark: EventTime,
+    order: &mut SourceOrderState,
+) -> Result<SourceLoopStep> {
+    if order
+        .last_watermark
+        .is_some_and(|previous| watermark < previous)
+    {
+        return Err(CalcFlowError::InvalidArgument {
+            field: format!("sources.{}.watermark", inputs.binding_id),
+            message: format!(
+                "source binding {:?} regressed its watermark",
+                inputs.binding_id
+            ),
+        });
+    }
+    let sent = send_fanout(
+        &mut inputs.outputs,
+        StreamMessage::watermark(watermark),
+        &inputs.cancellation,
+    )
+    .await?;
+    order.last_watermark = Some(watermark);
+    Ok(if sent {
+        SourceLoopStep::Continue
+    } else {
+        SourceLoopStep::Complete
+    })
+}
+
+async fn finish_source_input(inputs: &mut SourceTaskInputs) -> Result<()> {
+    if send_fanout(
+        &mut inputs.outputs,
+        StreamMessage::end_of_input(),
+        &inputs.cancellation,
+    )
+    .await?
+    {
+        inputs.metrics.record_source_end(&inputs.binding_id)?;
+        inputs.progress.snapshot.lock().ended = true;
+    }
+    inputs.acceptance.mark_closed();
+    Ok(())
 }
 
 async fn send_fanout(
@@ -892,8 +1176,8 @@ mod tests {
     };
     use crate::{
         Batch, BatchMetadata, CalcFlowError, CancellationToken, EdgeBudget, EdgeReceiver,
-        ExternalPayload, JsonMap, Result, StreamJobContext, StreamMessage, StreamMessageKind,
-        edge_channel,
+        EventTime, ExternalPayload, JsonMap, Result, StreamJobContext, StreamMessage,
+        StreamMessageKind, edge_channel,
         runtime::streaming::{
             metrics::MetricsRecorder,
             supervisor::{TaskId, TaskSupervisor},
@@ -1287,7 +1571,10 @@ mod tests {
         }))]);
         let binding = SourceBinding::new(Box::new(source), None, 0).unwrap();
         let metrics = MetricsRecorder::new(
-            ["source->left".into(), "source->right".into()],
+            [
+                ("source->left".into(), EdgeBudget::new(1, 1).unwrap()),
+                ("source->right".into(), EdgeBudget::new(1, 1).unwrap()),
+            ],
             ["input".into()],
             [],
             [],
@@ -1719,9 +2006,19 @@ mod tests {
             }
             let prefill = receiver.recv().await.unwrap().unwrap();
             assert_eq!(prefill.as_data().unwrap().metadata().sequence(), 99);
-            let report = supervisor.join_all().await;
-            assert!(report.errors.is_empty(), "{report:?}");
+            let mut join = Box::pin(supervisor.join_all());
             let mut delivered = Vec::new();
+            let report = loop {
+                tokio::select! {
+                    report = &mut join => break report,
+                    message = receiver.recv() => match message.unwrap() {
+                        Some(message) => delivered.push(message),
+                        None => break (&mut join).await,
+                    },
+                }
+            };
+            drop(join);
+            assert!(report.errors.is_empty(), "{report:?}");
             while let Some(message) = receiver.recv().await.unwrap() {
                 delivered.push(message);
             }
@@ -2017,7 +2314,7 @@ mod tests {
         spawn_source_tasks(
             &mut supervisor,
             &context(cancellation),
-            "input",
+            "orders",
             binding,
             vec![sender],
         )
@@ -2028,10 +2325,44 @@ mod tests {
         assert_eq!(report.errors.len(), 1);
         assert!(matches!(
             &report.errors[0].error,
-            CalcFlowError::InvalidArgument { field, .. } if field == "source.cursor"
+            CalcFlowError::InvalidArgument { field, .. } if field == "sources.orders.cursor"
         ));
         let first = receiver.recv().await.unwrap().unwrap();
         assert_eq!(first.as_data().unwrap().metadata().sequence(), 0);
+        assert!(receiver.recv().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn watermark_regression_names_the_binding_and_stays_off_the_edge() {
+        let cancellation = CancellationToken::new();
+        let mut supervisor = TaskSupervisor::new(cancellation.clone());
+        let source = StepSource::new([
+            Ok(Some(SourceEvent::Watermark(EventTime::from_micros(5)))),
+            Ok(Some(SourceEvent::Watermark(EventTime::from_micros(4)))),
+        ]);
+        let binding = SourceBinding::new(Box::new(source), None, 0).unwrap();
+        let (sender, mut receiver) = edge_channel("source->sink", EdgeBudget::default()).unwrap();
+        spawn_source_tasks(
+            &mut supervisor,
+            &context(cancellation),
+            "orders",
+            binding,
+            vec![sender],
+        )
+        .unwrap();
+
+        let report = supervisor.join_all().await;
+
+        assert_eq!(report.errors.len(), 1);
+        assert!(matches!(
+            &report.errors[0].error,
+            CalcFlowError::InvalidArgument { field, .. }
+                if field == "sources.orders.watermark"
+        ));
+        assert_eq!(
+            receiver.recv().await.unwrap().unwrap().kind(),
+            StreamMessageKind::Watermark
+        );
         assert!(receiver.recv().await.unwrap().is_none());
     }
 
@@ -2060,7 +2391,7 @@ mod tests {
         assert_eq!(report.errors.len(), 1);
         assert!(matches!(
             &report.errors[0].error,
-            CalcFlowError::InvalidArgument { field, .. } if field == "source.cursor"
+            CalcFlowError::InvalidArgument { field, .. } if field == "sources.input.cursor"
         ));
         assert!(receiver.recv().await.unwrap().is_none());
     }
