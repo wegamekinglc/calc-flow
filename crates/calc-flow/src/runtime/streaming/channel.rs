@@ -669,66 +669,71 @@ mod tests {
         const SLOT_LIMIT: usize = 3;
         const MESSAGE_COUNT: usize = 30;
 
-        let make_message = |index| match index % 3 {
-            0 => StreamMessage::idle(),
-            1 => StreamMessage::watermark(EventTime::from_micros(
-                i64::try_from(index).expect("the bounded test index fits i64"),
-            )),
-            _ => data_message(&[]),
-        };
-        let assert_message = |message: StreamMessage, index| {
-            let expected = make_message(index);
-            assert_eq!(message.kind(), expected.kind());
-            assert_eq!(message.as_watermark(), expected.as_watermark());
-        };
-        let (mut sender, mut receiver) = edge_channel(
-            "source.out->node.in",
-            EdgeBudget {
-                max_rows: SLOT_LIMIT,
-                max_bytes: 1 << 20,
+        let message_factories: [fn(usize) -> StreamMessage; 3] = [
+            |_| StreamMessage::idle(),
+            |index| {
+                StreamMessage::watermark(EventTime::from_micros(
+                    i64::try_from(index).expect("the bounded test index fits i64"),
+                ))
             },
-        )
-        .unwrap();
+            |_| data_message(&[]),
+        ];
 
-        for index in 0..SLOT_LIMIT {
-            let message = make_message(index);
-            let cost = EnvelopeCost::of_message(&message).unwrap();
-            assert_eq!((cost.messages(), cost.rows(), cost.bytes()), (1, 0, 0));
-            sender.send(message).await.unwrap();
-        }
+        for make_message in message_factories {
+            let assert_message = |message: StreamMessage, index| {
+                let expected = make_message(index);
+                assert_eq!(message.kind(), expected.kind());
+                assert_eq!(message.as_watermark(), expected.as_watermark());
+            };
+            let (mut sender, mut receiver) = edge_channel(
+                "source.out->node.in",
+                EdgeBudget {
+                    max_rows: SLOT_LIMIT,
+                    max_bytes: 1 << 20,
+                },
+            )
+            .unwrap();
 
-        for index in SLOT_LIMIT..MESSAGE_COUNT {
-            let mut blocked = Box::pin(sender.send(make_message(index)));
-            assert!(matches!(futures::poll!(blocked.as_mut()), Poll::Pending));
+            for index in 0..SLOT_LIMIT {
+                let message = make_message(index);
+                let cost = EnvelopeCost::of_message(&message).unwrap();
+                assert_eq!((cost.messages(), cost.rows(), cost.bytes()), (1, 0, 0));
+                sender.send(message).await.unwrap();
+            }
 
+            for index in SLOT_LIMIT..MESSAGE_COUNT {
+                let mut blocked = Box::pin(sender.send(make_message(index)));
+                assert!(matches!(futures::poll!(blocked.as_mut()), Poll::Pending));
+
+                let metrics = receiver.metrics();
+                assert_eq!(metrics.queue_depth, SLOT_LIMIT);
+                assert_eq!(metrics.charged_rows, 0);
+                assert_eq!(metrics.charged_bytes, 0);
+                assert_eq!(metrics.high_water_depth, SLOT_LIMIT);
+                assert_eq!(metrics.high_water_rows, 0);
+                assert_eq!(metrics.high_water_bytes, 0);
+                assert_eq!(metrics.blocked_sends, (index + 1 - SLOT_LIMIT) as u64);
+
+                let message = receiver.recv().await.unwrap().unwrap();
+                assert_message(message, index - SLOT_LIMIT);
+                assert!(matches!(
+                    futures::poll!(blocked.as_mut()),
+                    Poll::Ready(Ok(()))
+                ));
+                assert_eq!(receiver.metrics().queue_depth, SLOT_LIMIT);
+            }
+
+            for index in MESSAGE_COUNT - SLOT_LIMIT..MESSAGE_COUNT {
+                let message = receiver.recv().await.unwrap().unwrap();
+                assert_message(message, index);
+            }
             let metrics = receiver.metrics();
-            assert_eq!(metrics.queue_depth, SLOT_LIMIT);
+            assert_eq!(metrics.queue_depth, 0);
             assert_eq!(metrics.charged_rows, 0);
             assert_eq!(metrics.charged_bytes, 0);
             assert_eq!(metrics.high_water_depth, SLOT_LIMIT);
-            assert_eq!(metrics.high_water_rows, 0);
-            assert_eq!(metrics.high_water_bytes, 0);
-            assert_eq!(metrics.blocked_sends, (index + 1 - SLOT_LIMIT) as u64);
-
-            let message = receiver.recv().await.unwrap().unwrap();
-            assert_message(message, index - SLOT_LIMIT);
-            assert!(matches!(
-                futures::poll!(blocked.as_mut()),
-                Poll::Ready(Ok(()))
-            ));
-            assert_eq!(receiver.metrics().queue_depth, SLOT_LIMIT);
+            assert_eq!(metrics.blocked_sends, (MESSAGE_COUNT - SLOT_LIMIT) as u64);
         }
-
-        for index in MESSAGE_COUNT - SLOT_LIMIT..MESSAGE_COUNT {
-            let message = receiver.recv().await.unwrap().unwrap();
-            assert_message(message, index);
-        }
-        let metrics = receiver.metrics();
-        assert_eq!(metrics.queue_depth, 0);
-        assert_eq!(metrics.charged_rows, 0);
-        assert_eq!(metrics.charged_bytes, 0);
-        assert_eq!(metrics.high_water_depth, SLOT_LIMIT);
-        assert_eq!(metrics.blocked_sends, (MESSAGE_COUNT - SLOT_LIMIT) as u64);
     }
 
     #[test]
