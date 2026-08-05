@@ -536,6 +536,25 @@ def _broadcast_shape(
     return tuple(reversed(dimensions))
 
 
+def _matmul_batch_shape(
+    left: tuple[int, ...], right: tuple[int, ...]
+) -> tuple[int, ...] | None:
+    return _broadcast_shape(
+        left[:-2] if len(left) > 1 else (),
+        right[:-2] if len(right) > 1 else (),
+    )
+
+
+def _matmul_result_axes(
+    left: tuple[int, ...], right: tuple[int, ...]
+) -> tuple[int, ...]:
+    if len(left) == 1:
+        return () if len(right) == 1 else (right[-1],)
+    if len(right) == 1:
+        return (left[-2],)
+    return (left[-2], right[-1])
+
+
 def _matmul_output_shape(
     left: tuple[int, ...], right: tuple[int, ...]
 ) -> tuple[int, ...] | None:
@@ -544,17 +563,10 @@ def _matmul_output_shape(
     right_inner = right[-2] if len(right) > 1 else right[-1]
     if left[-1] != right_inner:
         return None
-    batch = _broadcast_shape(
-        left[:-2] if len(left) > 1 else (),
-        right[:-2] if len(right) > 1 else (),
-    )
+    batch = _matmul_batch_shape(left, right)
     if batch is None:
         return None
-    if len(left) == 1:
-        return batch if len(right) == 1 else (*batch, right[-1])
-    if len(right) == 1:
-        return (*batch, left[-2])
-    return (*batch, left[-2], right[-1])
+    return (*batch, *_matmul_result_axes(left, right))
 
 
 def _validate_broadcast_output_size(left: object, right: object) -> None:
