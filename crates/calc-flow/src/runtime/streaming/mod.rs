@@ -2,13 +2,28 @@
 //!
 //! `StreamingRunner` below is the v2 push-based runner over
 //! [`crate::BatchExecutionPlan`]; plan task M2.4 replaces it with the
-//! source-driven continuous runner. `StreamJobContext` and `StreamMessage`
-//! are the first v3 stream types; [`edge_channel`] is the rows + bytes
-//! dual-limit bounded channel every stream edge carries (spec S10).
+//! source-driven public runner. The crate-private M2 skeleton already owns
+//! supervised source pumps/tasks and an explicit-terminal continuous job;
+//! [`edge_channel`] is the rows + bytes dual-limit channel every edge carries.
 
 mod channel;
 mod context;
+#[allow(
+    dead_code,
+    reason = "M2.1/M2.2 merge crate-private; plan task M2.4 wires the public runner"
+)]
+mod job;
 mod message;
+#[allow(
+    dead_code,
+    reason = "M2.2 merges crate-private before plan task M2.4 wires the public runner"
+)]
+mod source_task;
+#[allow(
+    dead_code,
+    reason = "M2.1 merges crate-private before plan task M2.4 wires the public runner"
+)]
+mod supervisor;
 
 pub use channel::{ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, edge_channel};
 pub use context::StreamJobContext;

@@ -22,6 +22,15 @@ impl CancellationToken {
     pub fn is_cancelled(&self) -> bool {
         self.0.is_cancelled()
     }
+
+    /// Waits until cancellation is requested.
+    #[allow(
+        dead_code,
+        reason = "the crate-private M2 source supervisor uses this before the M2.4 public runner"
+    )]
+    pub(crate) async fn cancelled(&self) {
+        self.0.cancelled().await;
+    }
 }
 
 #[derive(Clone, Debug)]

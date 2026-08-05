@@ -406,6 +406,14 @@ impl EdgeSender {
     pub fn metrics(&self) -> ChannelMetrics {
         self.shared.state.lock().metrics()
     }
+
+    #[allow(
+        dead_code,
+        reason = "the crate-private M2 source binding validates this before the M2.4 public runner"
+    )]
+    pub(crate) fn budget(&self) -> EdgeBudget {
+        self.shared.budget
+    }
 }
 
 impl EdgeReceiver {
