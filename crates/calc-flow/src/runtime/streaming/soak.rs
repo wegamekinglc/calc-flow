@@ -241,7 +241,7 @@ fn rss_gate_passed(slope_mib_per_hour: f64, first_median_kib: u64, final_median_
 }
 
 fn evaluate_rss_gate(samples: &[RssSample]) -> Option<RssGate> {
-    if samples.len() < SAMPLE_COUNT {
+    if samples.len() != SAMPLE_COUNT {
         return None;
     }
     let post_warmup = samples.get(WARMUP_SAMPLES..)?;
@@ -853,6 +853,19 @@ fn evaluates_a_stable_full_sample_set() {
         })
         .collect::<Vec<_>>();
     assert!(evaluate_rss_gate(&stable).unwrap().passed);
+}
+
+#[test]
+fn rss_gate_rejects_incomplete_or_extra_sample_sets() {
+    let samples = (0..=SAMPLE_COUNT)
+        .map(|index| RssSample {
+            elapsed_seconds: elapsed_at_sample(index),
+            rss_kib: 100_000,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(evaluate_rss_gate(&samples[..SAMPLE_COUNT - 1]), None);
+    assert_eq!(evaluate_rss_gate(&samples), None);
 }
 
 #[test]

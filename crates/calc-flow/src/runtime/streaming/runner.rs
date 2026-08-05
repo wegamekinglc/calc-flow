@@ -3702,10 +3702,11 @@ mod tests {
                 let status = job.status();
                 assert!(status.tasks.len() <= 10, "task growth at seed {seed}");
                 assert!(
-                    status
-                        .edges
-                        .values()
-                        .all(|edge| { edge.charged_rows <= 1 && edge.charged_bytes <= (1 << 20) }),
+                    status.edges.values().all(|edge| {
+                        edge.queue_depth <= 1
+                            && edge.charged_rows <= 1
+                            && edge.charged_bytes <= (1 << 20)
+                    }),
                     "edge budget breach at seed {seed}: {:?}",
                     status.edges
                 );
@@ -3725,7 +3726,9 @@ mod tests {
             );
             assert!(
                 status.edges.values().all(|edge| {
-                    edge.high_water_rows <= 1 && edge.high_water_bytes <= (1 << 20)
+                    edge.high_water_depth <= 1
+                        && edge.high_water_rows <= 1
+                        && edge.high_water_bytes <= (1 << 20)
                 }),
                 "high-water budget breach at seed {seed}: {:?}",
                 status.edges
