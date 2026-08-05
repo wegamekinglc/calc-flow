@@ -15,24 +15,37 @@
 - Milestone plan:
   [`docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md`](../../../docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md),
   tasks M2.1-M2.5.
-- Baseline: commit `1d5546028e2ce9ebce59c976080c3d11c1225e16`
-  on `feature/streaming-v3-m2-runtime-skeleton` (PR #83).
-- Status: revision 3 of the proposed M2-internal API/UX delta. Revision 2
-  addressed
-  B1-B5 and S1-S7 from
-  [`../critiques/continuous-streaming-m2-completion.md`](../critiques/continuous-streaming-m2-completion.md)
-  against revision 2 of the delta specification. Revision 3 synchronizes the
-  approved crate-private real-runtime soak contract and the internal
-  `LaunchId`/context job-ID split. The Rust snippets below are precise
-  implementation contracts, but every newly named M2 type is `pub(crate)`.
-  This note does not revise the future public A6 surface.
+- Comparison baseline: `origin/main` at
+  `d45c2b26def2c4dfe179f2b7c7c1d2411fc069b6`; merge base
+  `c4979061cc239b43617f642e2294794f2833d95d`. The historical M2 skeleton is
+  commit `1d5546028e2ce9ebce59c976080c3d11c1225e16`, not the current-PR
+  baseline.
+- Audit anchors for this revision: implementation commit
+  `574c0fb7f678781370303100c9f5089f6ed59bca` plus completion-spec commit
+  `b530c89ccd4aa856300327aea8280244046b476a`. At the audited starting head
+  `b530c89`, the branch is three commits ahead of and one commit behind the
+  comparison `origin/main`; the implementation remains the code from
+  `574c0fb`.
+- Status: revision 4 of the proposed M2-internal API/UX delta. Revision 2
+  addressed B1-B5 and S1-S7 from
+  [`../critiques/continuous-streaming-m2-completion.md`](../critiques/continuous-streaming-m2-completion.md).
+  Revision 3 synchronized the crate-private real-runtime soak seam and the
+  internal `LaunchId`/context job-ID split. Revision 4 reconciles that contract
+  with the current PR, the universal 20-minute soak standard, binding-qualified
+  source diagnostics, bounded panic text, and the PR-added public
+  `CalcFlowError::TaskPanicked` variant. The Rust snippets below remain precise
+  implementation contracts; newly named M2 runtime types remain `pub(crate)`.
+  This note does not authorize or revise the future public A6 runner surface.
 
 ## Audiences
 
-- **Rust users:** no new callable surface in M2 completion. Existing public
-  v2 `StreamingRunner`, `MicroBatchRunner`, `Source`, `Sink`, checkpoint
-  documents, and their delivery wording remain usable and unchanged. The
-  future source-driven public A6 replacement remains the migration target.
+- **Rust users:** no new callable runner surface in M2 completion. Existing
+  public v2 `StreamingRunner`, `MicroBatchRunner`, `Source`, `Sink`, checkpoint
+  documents, and their delivery wording remain usable and unchanged. Relative
+  to `main`, PR #83 adds one semver-compatible variant to the public
+  non-exhaustive error enum: `CalcFlowError::TaskPanicked`. The future
+  source-driven public A6 replacement remains a separately reviewed post-M5
+  change.
 - **Connector and runtime implementers:** crate-private source, operator,
   ordinary-sink, lifecycle, status, metrics, and reaper contracts must be
   implementable and testable without inventing M3-M5 semantics.
@@ -45,9 +58,9 @@
   completion, a public runner, checkpoint recovery, end-to-end at-least-once,
   or exactly-once delivery.
 
-## Surface today
+## Baseline and current PR surface
 
-The crate currently exports two functioning v2 runners:
+The baseline crate exports two functioning v2 runners:
 
 ```rust
 pub struct StreamingRunner { /* push-based BatchExecutionPlan runner */ }
@@ -73,15 +86,32 @@ pub struct MicroBatchRunner { /* v2 replayable-source runner */ }
 The public M1 building blocks also remain exported: `StreamExecutionPlan`,
 `StreamOperator`, `StreamCollector`, `StreamJobContext`, `StreamMessage`,
 `EdgeBudget`, `EdgeSender`, `EdgeReceiver`, and `ChannelMetrics`. Control
-message constructors are crate-private. `CalcFlowError::TaskPanicked` and
-`CalcFlowError::EdgeClosed` already exist publicly because the non-exhaustive
-v2 error enum was extended by the M1/M2 skeleton.
+message constructors are crate-private. Baseline `CalcFlowError` is
+`#[non_exhaustive]` and already contains `EdgeClosed`.
 
-PR #83 adds crate-private `Cursor`, `SourceEvent`, `StreamSource`,
-`SourceBinding`, `TaskSupervisor`, and a consuming `ContinuousJob`. That job
-is deliberately not reusable and has no operator task, ordinary sink task,
-runner core, reaper, or complete status/metrics surface. M2 completion
-replaces that private skeleton; it does not export it.
+At audited starting head `b530c89`, every callable runner signature and
+re-export above is unchanged. The PR adds this public Rust error variant:
+
+```rust
+#[error("task {task_id} panicked: {message}")]
+TaskPanicked { task_id: u64, message: String },
+```
+
+Adding a variant to a non-exhaustive enum is semver-compatible, but it is still
+a public Rust API change and must be reported as such. Only the crate-private
+M2 supervisor and launch/runtime paths currently construct it; no public
+continuous-runner callable is added. The existing Python wildcard conversion
+would classify a future crossing instance as `ExecutionError`, so this slice
+adds no Python exception class or type-stub member.
+
+The current PR also contains the crate-private source-driven runtime:
+whole-job preflight, source/operator/sink tasks, a private runner and job
+lifecycle, reaper ownership, status and metrics, stress, the real-runtime soak
+seam, and Criterion cases. These internals are implementation evidence, not a
+public runner and not final-head completion evidence. The current gaps are the
+binding-qualified source fields, bounded panic text, 20-minute soak conversion
+and evidence, normative-document reconciliation, quality findings, review
+threads, and final-head gates recorded by the delta specification.
 
 ## Decisions
 
@@ -99,12 +129,17 @@ of those M4/M5 dependencies. Removing v2 now would delete working replay and
 checkpoint behavior, while exporting an A6-shaped type with unsupported
 checkpoint methods or fake/in-memory epochs would misrepresent durability.
 
-The public A6 cut therefore moves to the first integration milestone that
-contains the M4 state backend plus the complete M5 manifest/coordinator/sink
-protocol. At that point the replacement must be atomic: export A4-A8,
+The public A6 cut is therefore a separately reviewed post-M5 integration
+change, after the M4 state backend and complete M5 manifest/coordinator/sink
+protocol exist. At that point the replacement must be atomic: export A4-A8,
 replace the v2 runner names, migrate Rust/Python/Studio/examples/tests, and
 ship the required changelog and migration guide. Private M2 names carry no
 source- or binary-compatibility promise and may be adapted when A6 lands.
+
+This deliberately supersedes the original plan's public M2.4 cut. The
+plan's `StreamingRunner::start`, v2 runner deletion, and public source-driven
+acceptance gate are not checked off here. The only allowed completion label for
+this slice is “M2 runtime internals complete”; public A6 remains outstanding.
 
 ### Decision 2 - unary control only; multi-ingress fails closed
 
@@ -380,6 +415,28 @@ already-started edge send, emits one EOF, closes and joins the source units,
 then becomes `Closed`. A non-committed poll is dropped once and never resumed.
 Explicit cancel may discard a slot and carries no drain promise.
 
+### Binding-qualified cursor and watermark diagnostics
+
+Cursor order is strict per source binding: each accepted data cursor must be
+greater than the preceding cursor. A repeat or regression fails before the
+offending batch is enqueued to any branch. The error is
+`CalcFlowError::InvalidArgument` with machine-readable field
+`sources.<binding_id>.cursor`; the binding identity may also appear in the
+message, but it must not exist only there.
+
+Source-provided watermarks are non-decreasing per binding. Equality is allowed;
+a value less than the preceding watermark fails before any branch enqueue. The
+error is `CalcFlowError::InvalidArgument` with machine-readable field
+`sources.<binding_id>.watermark`. This validation does not generate a
+watermark, expose progress publicly, or add M3 minimum/idle/reactivation
+semantics.
+
+At audited starting head `b530c89`, `source_task.rs` still reports
+`source.cursor` and `source.watermark`, with the binding only in free-form
+text. Correcting the two fields and pinning their pre-enqueue behavior is an
+internal implementation blocker (G1); it requires no public signature or
+control API.
+
 ### Operator task and validating collector
 
 ```rust
@@ -530,10 +587,33 @@ rewriting it into an inaccurate public error variant.
 M2 never calls `flush(Epoch)`, creates `SinkPreCommit`, or accepts a
 `TransactionalSink`. Those remain exactly the future public A5/M5 surface.
 
+### Public panic variant and bounded capture
+
+The PR-added public error shape and display remain:
+
+```rust
+CalcFlowError::TaskPanicked { task_id: u64, message: String }
+// "task <task_id> panicked: <message>"
+```
+
+Every M2 panic-capture path, including supervised tasks and connector open,
+uses one crate-private conversion helper. A string payload of at most 1,024
+UTF-8 bytes is preserved unchanged. For a longer string, the helper reserves
+three bytes for `…`, keeps the longest prefix ending on a UTF-8 character
+boundary within the remaining 1,021 bytes, and appends the ellipsis. The stored
+message, including the ellipsis, is therefore valid UTF-8 and at most 1,024
+bytes. A non-string payload remains exactly `non-string panic payload`.
+
+At audited starting head `b530c89`, the shared `panic_message` helper is used
+by supervision and connector-open capture, but returns string payloads without
+a bound. Implementing the common bound plus ASCII, multibyte-boundary, short,
+and non-string tests is G2. It preserves the public variant's fields and
+display; no further public error variant is required.
+
 ### Private failure origins and start-failure aggregation
 
-No public error variant is added merely to preserve internal component
-identity. M2 wraps the existing typed error in a private, immutable record:
+No additional public error variant is added merely to preserve internal
+component identity. M2 wraps the typed error in a private, immutable record:
 
 ```rust
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -984,24 +1064,25 @@ modeled timers; it does not claim Tokio itself has a seeded scheduler.
 
 The ignored soak lives in the crate-private `#[cfg(test)]`
 `runtime::streaming::soak` module and exposes no public or integration-test
-seam. It is exactly `one_hour_two_source_slow_sink`, guarded by
+seam. It is exactly `twenty_minute_two_source_slow_sink`, guarded by
 `CALC_FLOW_STREAM_SOAK=1`. Its exact and superseding invocation is:
 
 ```bash
-CALC_FLOW_STREAM_SOAK=1 cargo test -p calc-flow --lib runtime::streaming::soak::one_hour_two_source_slow_sink -- --ignored --exact --nocapture
+CALC_FLOW_STREAM_SOAK=1 cargo test -p calc-flow --lib runtime::streaming::soak::twenty_minute_two_source_slow_sink -- --ignored --exact --nocapture
 ```
 
 Without that environment variable set exactly to `1`, the first test branch
 emits a structured disabled result and returns before constructing a runner,
 opening a connector, spawning runtime work, or entering the timed loop. The
-former `cargo test -p calc-flow --test stream_soak ...` command is superseded
-and is not valid soak evidence.
+former `one_hour_*`, duration-override, and
+`cargo test -p calc-flow --test stream_soak ...` commands are superseded and
+are not valid soak evidence.
 
 The enabled test exercises the real crate-private `ContinuousRunner`, source
 tasks, union/operator tasks, two ordered ordinary sinks, supervisor, and
 reaper. Normal termination is initiated by graceful job `shutdown()` and must
 produce `Completed + GracefulShutdown` after drain; neither owning-job Drop
-nor `ExplicitCancel` terminates the one-hour case. At the drain cut the harness
+nor `ExplicitCancel` terminates the 20-minute case. At the drain cut the harness
 freezes the accepted per-source sequence maps and total. Each sink's
 per-source sequence maps and total must exactly equal the source-accepted
 values, with `missing = 0` and `duplicate = 0`. Drop/reaper behavior is covered
@@ -1010,13 +1091,23 @@ normal termination path. This test-only seam does not expand public v2,
 Python, Studio, or any M3+ surface.
 
 On Linux it reads `VmRSS` from `/proc/self/status` every ten seconds for at
-least 360 samples and emits commit/kernel/rustc/allocator/RSS-source/cadence/
-sample-count metadata. A non-Linux run reports `unsupported_platform` and is
-not passing soak evidence. The warm-up, slope, median, task, budget, and
-loss/duplication thresholds are exactly M2C-FR32. The one-hour command is an
-external/manual delivery gate and has not been run by this artifact revision;
-handoff must continue to report it as not run unless a real captured result is
-available.
+least 120 samples and at least 1,200 seconds of measured workload. The first
+five minutes (30 samples) are warm-up; the remaining 15 minutes feed the RSS
+slope and median gates. The harness emits commit/kernel/rustc/allocator/
+RSS-source/cadence/target-duration/warm-up/sample-count metadata plus
+conservation and final task/queue/reaper convergence evidence. A non-Linux run
+reports `unsupported_platform` and is not passing soak evidence. The slope,
+median, task, budget, and loss/duplication thresholds are exactly M2C-FR32.
+The 20-minute command is an external/manual delivery gate and has not been run
+by this artifact revision; handoff must continue to report it as not run unless
+a real captured result from the synchronized final Linux head is available.
+
+At audited starting head `b530c89`, the soak is still named `one_hour_*`, uses
+360 samples and a 60-sample warm-up, and lacks the required final convergence
+evidence. Converting the private seam and producing final-head Linux evidence
+is G3. The acceptance duration is an observable test/delivery contract only;
+it does not justify a public duration setting, runner control method, or
+integration-test seam.
 
 Ordinary verification only compiles Criterion. The opt-in baseline is:
 
@@ -1033,14 +1124,23 @@ are reported only.
 
 ## Public compatibility and migration
 
-There is **no public Rust API change** in the M2 completion diff.
+There is **no new public callable runner API** in the M2 completion diff.
+There is one semver-compatible public Rust API addition relative to `main`:
+`CalcFlowError::TaskPanicked { task_id: u64, message: String }` with display
+`task <task_id> panicked: <message>`. The enum was already non-exhaustive, so
+downstream matching already requires a wildcard. Completion work preserves
+this variant while bounding the internally captured `message`; it does not add
+or change a public constructor, method, trait, runner, status type, or control
+surface. M2C-FR1A calls this shape “existing” relative to the historical
+skeleton/current PR implementation; that wording does not erase its addition
+relative to the PR base.
 
 - Do not add exports to `crates/calc-flow/src/lib.rs` or public re-exports in
   `runtime::streaming`/`runtime` for any type in this note.
 - Do not add a second `StreamingRunner`, alias the v2 type, deprecate v2, or
   change existing v2 signatures, fixtures, or delivery behavior.
-- Do not add `CheckpointTimeout` for M2. The existing public
-  `TaskPanicked` and `EdgeClosed` variants remain unchanged.
+- Do not add `CheckpointTimeout` for M2. The PR-added public `TaskPanicked`
+  shape and the baseline public `EdgeClosed` shape remain unchanged.
 - Do not add another public error variant for sink identity, multi-ingress
   control rejection, deadline expiry, metrics overflow, reaper joins, or
   internal terminal causes. Use private identity/cause records plus existing
@@ -1048,7 +1148,8 @@ There is **no public Rust API change** in the M2 completion diff.
 - Do not change Python, Studio, project/checkpoint v2 documents, schemas,
   OpenAPI, generated TypeScript, examples, or `tests/fixtures/v1/`.
 - The later A6 replacement remains a breaking 3.0 migration and must ship
-  atomically with its state/checkpoint semantics and migration documentation.
+  atomically in a separately reviewed post-M5 change with its state/checkpoint
+  semantics and migration documentation.
 
 ## Error cases and exact diagnostics
 
@@ -1065,19 +1166,20 @@ encoding every identity only in free-form text.
 | Zero source row bound            | `InvalidArgument { field: "sources.<binding_id>.capabilities.max_batch_rows", message: "must be greater than zero" }`                                                                      |
 | Zero source byte bound           | `InvalidArgument { field: "sources.<binding_id>.capabilities.max_batch_bytes", message: "must be greater than zero" }`                                                                     |
 | Source exceeds first-hop edge    | `InvalidArgument { field: "sources.<binding_id>.capabilities", message: "maximum batch (<rows> rows, <bytes> bytes) exceeds edge <edge_id> budget (<max_rows> rows, <max_bytes> bytes)" }` |
+| Source cursor repeat/regression  | `InvalidArgument { field: "sources.<binding_id>.cursor", message: "source binding <binding_id> emitted a repeated or regressed cursor" }`; fails before every branch enqueue               |
+| Source watermark regression      | `InvalidArgument { field: "sources.<binding_id>.watermark", message: "source binding <binding_id> regressed its watermark" }`; fails before every branch enqueue                           |
 | Missing sink route               | `InvalidArgument { field: "sinks.<output_id>", message: "external output requires at least one ordinary sink" }`                                                                           |
 | Unknown sink route               | `InvalidArgument { field: "sinks.<output_id>", message: "route does not match a compiled external output" }`                                                                               |
 | Duplicate sink identity          | `InvalidArgument { field: "sinks.<output_id>.<sink_id>", message: "sink is configured more than once" }`                                                                                   |
-| Unsupported exactly-once request | `InvalidArgument { field: "requirements.delivery.<output_id>", message: "exactly-once delivery requires aligned checkpoints and is unavailable before M5" }`                                |
+| Unsupported exactly-once request | `InvalidArgument { field: "requirements.delivery.<output_id>", message: "exactly-once delivery requires aligned checkpoints and is unavailable before M5" }`                               |
 | Multi-ingress watermark          | `InvalidArgument { field: "runtime.nodes.<node_id>.ingress.<ingress>.watermark", message: "multi-ingress watermark control is unavailable before M3; no downstream control was emitted" }` |
 | Multi-ingress idle               | `InvalidArgument { field: "runtime.nodes.<node_id>.ingress.<ingress>.idle", message: "multi-ingress idle control is unavailable before M3; no downstream control was emitted" }`           |
 | M2 barrier injection             | `InvalidArgument { field: "runtime.nodes.<node_id>.ingress.<ingress>.barrier", message: "barrier control is unavailable before M5; no downstream control was emitted" }`                   |
 | Operator output port/kind/schema | Existing `Compile` collector validation, naming `node.<node_id>.outputs.<port>` before any send                                                                                            |
 | Active job on runner             | `Conflict { resource: "streaming job", key: "active" }`                                                                                                                                    |
-| Supervised panic                 | Existing `TaskPanicked { task_id, message }`, exact display `task <task_id> panicked: <message>`                                                                                           |
+| Supervised panic                 | PR-added public `TaskPanicked { task_id, message }`, exact display `task <task_id> panicked: <message>`; captured text is valid UTF-8 and at most 1,024 bytes                              |
 | Closed edge during convergence   | Existing `EdgeClosed { edge }`; recorded as secondary when cancellation is already selected                                                                                                |
 | Deadline expiry                  | No `CalcFlowError`; stored as `Cancelled` plus `TerminalCause::DeadlineExceeded`                                                                                                           |
-| Metrics counter overflow         | `InvalidArgument { field: "runtime.metrics.<component_id>.<counter>", message: "counter overflow" }`                                                                                       |
 
 Angle-bracket tokens above are substituted with quoted stable IDs in the
 actual diagnostic. Source/sink connector failures preserve their typed source
@@ -1126,6 +1228,13 @@ Separate focused tests must pin:
 - failing operator `reset` completes no source/sink lifecycle call, while all
   entry successes remain parked until connector opens and handle claim release
   the separate data/control gate;
+- cursor repeat/regression reports exact field
+  `sources.<binding_id>.cursor`, watermark regression reports exact field
+  `sources.<binding_id>.watermark`, and each fails before the offending event
+  is enqueued on any branch;
+- panic capture preserves short strings, bounds long ASCII and multibyte
+  strings to valid UTF-8 of at most 1,024 bytes ending in `…`, and maps a
+  non-string payload to exactly `non-string panic payload`;
 - unary watermark handler-before-forward and unary idle forwarding;
 - multi-ingress watermark/idle and all barrier injection failing before
   downstream observation;
@@ -1237,11 +1346,29 @@ implemented by M2:
   and S9 capability reporting;
 - Python/PyO3, project v3, Studio `/api/v3`, SSE, and migration surfaces.
 
+## Public API blockers for implementation
+
+- No public API design blocker prevents G1-G7 from being implemented. The
+  remaining work is crate-private behavior, diagnostics, test evidence,
+  documentation, quality, review, and final-head verification.
+- The PR-added `TaskPanicked` variant is approved as the sole public Rust API
+  delta in this slice. Its fields and display are frozen; the remaining panic
+  work is only the private 1,024-byte capture bound.
+- Public source-driven A6 remains blocked until the separately reviewed post-M5
+  integration change. Exporting `ContinuousRunner`, `ContinuousJob`, source or
+  sink bindings, status/metrics, soak controls, or checkpoint controls would
+  violate this note.
+- Any implementation need for another public error variant or a change to v2
+  runner signatures is a new API-design issue and must stop for a reviewed
+  note revision; it must not be inferred from an internal acceptance gap.
+
 ## Open questions
 
-- **No M2 blocker after critique approval.** OQ1-OQ3 and the deadline outcome
-  are decided above.
-- The exact public A6 integration milestone is the first one that contains
+- **No open M2 behavior or public-scope question after critique approval.**
+  OQ1-OQ3, the deadline outcome, diagnostic fields, panic bound, and soak
+  duration are decided above. G1-G7 remain delivery blockers, not design
+  questions.
+- The public A6 integration is a separately reviewed post-M5 change containing
   both M4 state and complete M5 manifest/checkpoint behavior; release planning
   may name that cut, but must not split its durability promise.
 - M3 may replace only the private multi-ingress control rejection branch. It
@@ -1254,8 +1381,11 @@ implemented by M2:
 
 The three required decisions are closed: public A6 is deferred, M2
 multi-ingress watermark/idle fails closed while unary control passes through,
-and ordinary sinks report process-local ordered delivery only. There is no
-public API or new public error-variant change. The one-hour real-runtime soak
-remains an unexecuted external/manual gate at the exact command above; its
-short Drop/reaper smoke is independent. Next role: `cf-critic` for an
-adversarial pass over this delta before `cf-implementer` relies on it.
+and ordinary sinks report process-local ordered delivery only. PR #83 adds no
+public callable runner API, but it does add the semver-compatible public
+`TaskPanicked` variant; the completion work preserves its shape and bounds only
+internally captured text. The universal 20-minute real-runtime soak remains an
+unexecuted external/manual gate at the exact command above; its short
+Drop/reaper smoke is independent. Next role: `cf-critic` for an adversarial
+pass over revision 4 before `cf-implementer` closes G1-G5. This note does not
+certify M2 internals, PR #83, or the continuous-streaming feature as complete.
