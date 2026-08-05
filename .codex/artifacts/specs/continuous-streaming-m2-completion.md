@@ -16,11 +16,12 @@
 - Approved critique:
   [`../critiques/continuous-streaming-runtime.md`](../critiques/continuous-streaming-runtime.md),
   round 3, `BLOCKS REMAINING: 0`.
-- M2 completion API note and approved critique:
+- M2 completion API note and critique:
   [`../api-notes/continuous-streaming-m2-completion.md`](../api-notes/continuous-streaming-m2-completion.md)
   and
   [`../critiques/continuous-streaming-m2-completion.md`](../critiques/continuous-streaming-m2-completion.md),
-  revision 3, `BLOCKS REMAINING: 0`.
+  round 2 approved revision 3 with zero blocks; round 3 blocked revision 4 on
+  B6 at artifact head `e77a8779f22f554c85a0ab7b9d78133e5292aa88`.
 - Audit anchors, captured 2026-08-06: `origin/main` was
   `d45c2b26def2c4dfe179f2b7c7c1d2411fc069b6`; the PR head was
   `574c0fb7f678781370303100c9f5089f6ed59bca`; their merge base was
@@ -32,13 +33,16 @@
   new medium complexity findings; three Copilot threads were unresolved, one
   of them outdated but not resolved. These are current-gap evidence only.
   After any push, none of these old-head results is final-head evidence.
-- Status: revision 4 is the completion contract and current-PR ledger. It
+- Status: revision 5 is the proposed completion contract and current-PR
+  ledger. It
   does not certify PR #83 or the continuous-streaming feature as complete.
   Revision 2 addressed B1, B2, B4, B5, S1, S2, S4, S6, S7, and M1 from the
   completion critique. Revision 3 accepted the crate-private real-runtime
   soak seam. Revision 4 reconciles those requirements with the current PR,
   closes the soak duration decision at 20 minutes, and adds the remaining
-  review and delivery gates.
+  review and delivery gates. Revision 5 closes B6 with a finite message-slot
+  invariant and resolves the round-3 evidence, compatibility, verification,
+  and performance advisories. It remains pending critic review.
 - Scope precedence: D1-D9, S1-S10, I1-I10, NG1-NG13, and A1-A8 remain frozen
   except for soak duration. For every calc-flow soak, this later specification
   replaces an earlier one-hour duration, one-hour test name, sample-count
@@ -53,23 +57,28 @@
 PR #83 now implements most of the crate-private M2 runtime that revision 3
 specified, including whole-job preflight, operator and sink tasks, the private
 runner/job lifecycle, metrics, stress, a real-runtime soak harness, and
-benchmarks. It is not deliverable yet: two source diagnostics are not binding
-qualified, panic payloads are unbounded, the harness still encodes one hour,
-the required Linux 20-minute evidence does not exist, normative docs describe
-implemented work as absent, Codacy reports 16 new medium complexity findings,
-and three Copilot threads remain unresolved. Public A6 also requires the
-checkpoint and state behavior assigned to M4/M5, so the public cut remains a
-separate post-M5 integration gate.
+benchmarks. It is not deliverable yet: admission does not enforce the message
+count already carried by `EnvelopeCost`, so sustained zero-row/zero-byte
+traffic can grow an edge queue without bound. Two source diagnostics are not
+binding qualified, panic payloads are unbounded, the harness still encodes one
+hour, the required Linux 20-minute evidence does not exist, normative docs
+describe implemented work as absent, Codacy reports 16 new medium complexity
+findings, and three Copilot threads remain unresolved. Public A6 also requires
+the checkpoint and state behavior assigned to M4/M5, so the public cut remains
+a separate post-M5 integration gate.
 
 ## Completion definition
 
-“M2 runtime internals complete” means all M2C-FR1-M2C-FR33 and all acceptance
-criteria in this document are satisfied at one exact PR head, including the
-real 20-minute Linux soak and repository/review gates. It means the internal
-source-driven graph is bounded, conserves the accepted prefix in a fault-free
-run, and converges every owned task. It does **not** mean public M2.4, public
-A6, M3-M7, checkpoint recovery, exactly-once delivery, Python/Studio exposure,
-or the overall continuous-streaming feature is complete.
+“M2 runtime internals complete” means all M2C-FR1-M2C-FR33, including every
+letter-suffixed requirement, and all acceptance criteria in this document are
+satisfied at one exact PR head. Every queued data or control envelope consumes
+one finite message slot in addition to its row/byte charge. Completion also
+requires the real 20-minute Linux soak and repository/review gates. It means
+the internal source-driven graph is bounded, conserves the accepted prefix in
+a fault-free run, and converges every owned task. It does **not** mean public
+M2.4, public A6, M3-M7, checkpoint recovery, exactly-once delivery,
+Python/Studio exposure, or the overall continuous-streaming feature is
+complete.
 
 ## Current PR completion ledger
 
@@ -84,8 +93,8 @@ implementer/tester; deferred work must not be pulled into M2.
 | M2.2      | Implemented with G1 open              | Preflight, source, drain, fan-out, and resume tests    | Qualify both diagnostics; pass gates   |
 | M2.3      | Implemented                           | Operator/FIFO/control/DataFusion/graph tests           | Preserve behavior through G5-G7        |
 | M2.4      | Internal implementation present       | Sink order, private runner/job, drain/cancel/reaper    | Keep private; do not perform public A6 |
-| M2.5      | Implemented with G3-G5 open           | Metrics, stress, soak seam, and benchmarks             | Convert/run soak; clear quality/docs   |
-| M2 gate   | Behavior present; not yet deliverable | Two-source graph, backpressure, drain, and convergence | Satisfy G1-G7 at one exact pushed head |
+| M2.5      | Implemented with G3-G5/G8 open        | Metrics, stress, soak seam, and benchmarks             | Bound slots; run soak; clear gates     |
+| M2 gate   | Behavior present; not yet deliverable | Two-source graph, backpressure, drain, and convergence | Satisfy G1-G8 at one exact pushed head |
 
 The current public `StreamingRunner` remains the v2 push-based runner, and the
 current `MicroBatchRunner`, v2 `Source`, v2 `Sink`, and v2 `CheckpointStore`
@@ -114,7 +123,7 @@ Representative current-head evidence is:
   `stream/channel_data_roundtrip`, `stream/unary_operator_overhead`, and
   `stream/fanout_four`.
 
-The evidence map is not an acceptance waiver. G1-G7 and the final-head matrix
+The evidence map is not an acceptance waiver. G1-G8 and the final-head matrix
 still decide completion.
 
 ## Current acceptance gaps
@@ -141,6 +150,10 @@ still decide completion.
 - **G7 — Reviewer:** incorporate current `origin/main`, then prove the pushed
   exact head has every required Action and Codacy check green, zero unresolved
   threads, and mergeability clean.
+- **G8 — Implementer/tester:** enforce the M2C-FR24A hard message-slot limit
+  on every internal and synthesized boundary edge; prove bounded/resumable
+  sustained `Idle`, non-regressing watermark, and empty zero-cost data traffic
+  plus leak-free shutdown, cancellation, receiver-close, and task-error paths.
 
 ## Goals
 
@@ -154,7 +167,8 @@ still decide completion.
 - Deliver ordinary sink behavior with deterministic configured ordering and
   honest, M2-scoped delivery reporting.
 - Make boundedness, progress, task convergence, and backpressure observable
-  through deterministic minimum metrics and status snapshots.
+  through deterministic minimum metrics and status snapshots. Boundedness
+  covers message slots, rows, and bytes for data and control traffic.
 - Add deterministic short stress coverage, an explicitly opt-in soak, and
   compilable Criterion cases without making the 20-minute run part of ordinary
   CI.
@@ -393,6 +407,33 @@ still decide completion.
   task. A blocked sink fills only bounded downstream edges, then parks its
   upstream operator and ultimately stops source polling; no unbounded staging
   queue is permitted between an edge and a sink.
+- **M2C-FR24A — Three-dimensional edge admission.** Every enqueued
+  `StreamMessage` consumes exactly one message slot, including `Data`,
+  `Watermark`, `Idle`, `EndOfInput`, and a test-only injected `Barrier`.
+  `Data` independently retains its measured row and byte charges; therefore
+  an empty table/external batch with zero rows and a zero-byte estimate still
+  consumes one slot. To close B6 without adding a public configuration or
+  control surface, the hard per-edge slot limit is exactly the existing
+  positive `EdgeBudget.max_rows` value. The same numeric value separately
+  limits charged rows and charged messages; satisfying one dimension never
+  exempts the other. Admission atomically requires:
+  `queued_messages + 1 <= max_rows`,
+  `charged_rows + message_rows <= max_rows`, and
+  `charged_bytes + message_bytes <= max_bytes`. The rule applies to internal
+  edges, synthesized source/sink boundary edges, and the existing bounded
+  channel primitive. A full slot dimension parks even a zero-row/zero-byte
+  sender until a dequeue releases one slot. No `max_messages` field, public
+  control constructor, or public runner method is introduced in M2.
+- **M2C-FR24B — Slot lifecycle.** Slot, row, and byte reservation is one
+  atomic queue commit; a blocked send owns no reservation. Successful dequeue
+  releases all three charges exactly once and then wakes the sender.
+  Graceful shutdown drains every already-accepted queue item, committed source
+  slot, and already-started edge send before ordered EOF and completion.
+  Explicit cancellation may discard accepted contents but must close the
+  receiver, wake every blocked send, release every queued charge exactly once,
+  and join every task. Receiver close or upstream task error follows the
+  M2C-FR7A primary/secondary error rule and leaves no queued slot, row, or byte
+  charge after convergence.
 - **M2C-FR25 — Natural completion and graceful drain.** All-ended sources
   propagate one terminal end through each node. Sink tasks consume every
   batch in the accepted prefix committed before each source's M2C-FR10A drain
@@ -436,6 +477,15 @@ still decide completion.
   succeeds. Thus partial fan-out may show one edge enqueue while the operator
   fully-fanned-out output remains zero. Queue gauges are consistent snapshots
   of the channel's owned reservation.
+- **M2C-FR30B — Slot observability.** The private M2 job status and soak
+  stream report each stable edge's `message_slot_limit`, current
+  `queue_depth`, `high_water_depth`, current/high-water rows and bytes, and
+  blocked-send count/duration from one consistent snapshot. `queue_depth`
+  equals charged messages. Both depth gauges are always at most
+  `message_slot_limit`, including during sustained control or empty-data
+  traffic. A zero-cost send blocked only by slots increments blocked-send
+  accounting at the same boundaries as a row/byte-blocked send. Payloads,
+  cursor values, and unbounded labels remain forbidden.
 - **M2C-FR30A — Non-recursive error accounting.** The convergence driver
   atomically selects terminal cause and primary error before attempting error
   metrics; metrics can never replace that primary. It attempts each associated
@@ -449,15 +499,21 @@ still decide completion.
   overflow flag update cannot fail or recurse.
 - **M2C-FR31 — Short CI stress.** A paused-Tokio-time stress exercises two
   finite sources, union, unary operator, fan-out, slow sinks, cancellation,
-  and EOF repeatedly. It asserts queue charges never exceed configured rows
-  or bytes, per-source FIFO, no loss/duplication in a fault-free run, and
+  and EOF repeatedly. It asserts message slots, rows, and bytes never exceed
+  their limits, per-source FIFO, no loss/duplication in a fault-free run, and
   empty supervisor/reaper registries. Seeds `0..100` feed a pure deterministic
   seed-to-gate generator (a small test-local fixed algorithm, not executor
   randomness) that produces a permutation of named source-ready, edge-release,
   sink-release, EOF, drain, and cancel gates. The harness releases exactly that
   sequence, advances paused time only for modeled timers, and prints the seed
-  on failure. It never assumes Tokio provides a seeded scheduler and never
-  uses wall-clock performance assertions.
+  on failure. A separate paused-time unary phase sends at least ten times the
+  slot limit for each of repeated `Idle`, repeated/non-regressing watermark,
+  and verified zero-row/zero-byte `Data` while a receiver is gated. Each case
+  must hit the exact slot limit, block without increasing depth, resume one
+  send per dequeue, preserve FIFO, and converge under graceful shutdown,
+  explicit cancel, receiver close, and injected upstream task error. It never
+  assumes Tokio provides a seeded scheduler and never uses wall-clock
+  performance assertions.
 - **M2C-FR32 — Universal 20-minute soak.** The real-time two-source slow-sink
   soak lives in the crate-private `#[cfg(test)]` module
   `runtime::streaming::soak`; this architecture adds no public seam. The test
@@ -481,13 +537,19 @@ still decide completion.
   per-source sequence map at the M2C-FR10A slot-commit boundary. Each sink must
   independently contain exactly that map, with identical per-source order and
   total: source-accepted = sink-one = sink-two, `missing = 0`, and
-  `duplicate = 0`.
+  `duplicate = 0`. Throughout the timed workload, at least every fourth data
+  event is a harness-verified zero-row/zero-byte batch. The other events remain
+  positive-row data. Both shapes share the same accepted-sequence oracle, so
+  conservation covers empty batches rather than filtering them out.
 
   On Linux the soak samples `VmRSS` from `/proc/self/status` every ten seconds
-  for at least 120 samples, yielding at least 1,200 seconds of timed
-  observation. It reports commit, kernel, `rustc`, allocator, RSS source,
-  cadence, target duration, warm-up duration, and sample count in
-  machine-readable output. The first five minutes, 30 samples, are warm-up.
+  for exactly 120 samples during an exactly 1,200-second measured workload
+  window. Sample one is taken at the end of the first ten-second interval and
+  sample 120 at the workload deadline; there is no extra time-zero sample. It
+  reports commit, kernel, `rustc`, allocator, RSS source, cadence, target
+  duration, warm-up duration, and sample count in machine-readable output. The
+  first five minutes, 30 samples, are warm-up.
+  Each sample reports the M2C-FR30B slot fields as well as row/byte charges.
   Over the remaining 15 minutes it fails on any queue-budget breach,
   supervisor task-count growth after steady state, or a process-RSS
   least-squares slope above 1 MiB/hour together with a final five-minute
@@ -495,13 +557,37 @@ still decide completion.
   Conservation is checked after graceful drain. Task-convergence evidence
   must record a positive steady task count during the run, final job task
   count zero, final queue depth/row/byte charge zero on every edge, and runner
-  live/reaper registry counts `(0, 0)` after runner shutdown.
+  live/reaper registry counts `(0, 0)` after runner shutdown. At least one
+  edge must report `high_water_depth == message_slot_limit` and a blocked send
+  while processing the zero-cost batch shape; otherwise the soak did not
+  exercise slot backpressure and fails.
 
   Non-Linux execution emits a structured `unsupported_platform` skip and is
   not passing evidence. Delivery requires a real captured result from the
   exact command at the synchronized final Linux head; an unrun command, a
   disabled result, or a skip fails AC-M2.5-C. The RSS thresholds are
   soak-only provisional guards, not a portable promise.
+- **M2C-FR32A — Durable exact-head soak evidence.** `cf-tester` captures the
+  exact command's complete, unfiltered combined stdout/stderr as one UTF-8
+  command log; the engine metadata, sample, and result records embedded in
+  that log are newline-delimited JSON. The tester records a manifest with
+  schema `calc-flow.m2-soak-evidence.v1`, PR number, exact
+  40-character head SHA, literal command, UTC start/end timestamps, elapsed
+  seconds, process exit status, complete-log SHA-256, and part count. Without
+  committing any log to the branch, the tester publishes the manifest and
+  complete log to PR comments marked
+  `calc-flow-m2-soak-evidence:v1`; if one comment would exceed 60,000
+  characters, newline-aligned parts are numbered `1/N` through `N/N`, each
+  with its own SHA-256, and the manifest lists their comment URLs in order.
+  A summary, selected samples, local pathname, or external mutable link is not
+  evidence. `cf-reviewer` retrieves the comments, reassembles and hashes the
+  literal log, confirms exit status zero, exactly one metadata record, exactly
+  120 ordered sample records over the 1,200-second workload window, exactly
+  one final result record, all
+  M2C-FR30B/M2C-FR32 gates, and equality of manifest SHA, log commit, and the
+  then-current PR head. Any later push invalidates the bundle and requires a
+  new run and new SHA-keyed comments; publishing comments never changes the
+  tested Git head.
 - **M2C-FR33 — Benchmarks.** Criterion adds channel data round trip,
   unary stream overhead, and fan-out cases. Ordinary verification only
   compiles them with `cargo test -p calc-flow --benches --no-run`. The opt-in
@@ -509,37 +595,55 @@ still decide completion.
   produces the Criterion report. Because Criterion is an external target and
   this gate is crate-private, the unary case measures the already-public M1
   `StreamOperator` kernel plus public bounded-channel primitives; it does not
-  expose an internal task or fake runner solely for measurement. A 5%
-  regression blocks delivery only when compared in a same-machine paired run
-  with confidence intervals as required by NFR-1; absent that evidence,
-  benchmark compilation is the M2 gate and point estimates are reported, not
-  treated as correctness failures.
+  expose an internal task or fake runner solely for measurement. M2 requires
+  compilation, not an executed paired comparison. If a performance reviewer
+  invokes the 5% gate, the exact base and head run on the same machine,
+  toolchain, profile, allocator, and power/CPU policy. For each required case,
+  the decision statistic is Criterion's bootstrap 95% confidence interval for
+  relative change in mean execution time, head versus base. A case blocks only
+  when the interval's lower bound is strictly greater than `+5.0%`; it passes
+  when the upper bound is at most `+5.0%`. An interval touching or crossing
+  `+5.0%` is inconclusive and requires one same-machine rerun with at least
+  twice the original measurement sample size. If that rerun remains
+  inconclusive, it is recorded as a non-blocking advisory, not reclassified
+  from its point estimate. Any blocking case blocks the comparison; otherwise
+  the comparison passes, with any residual advisory reported. When no paired
+  comparison is invoked, all point estimates remain advisory and benchmark
+  compilation is the only M2 performance gate.
 
 ## Non-functional requirements
 
 - **M2C-NFR1 — Performance.** The channel, unary-stream, and fan-out
-  benchmarks compile at the exact head. A 5% regression is blocking only with
-  same-machine paired Criterion evidence and confidence intervals; point
-  estimates alone are informational.
+  benchmarks compile at the exact head. An invoked paired comparison follows
+  M2C-FR33's single 95%-interval rule and one-rerun limit; no alternate point
+  estimate, overlap heuristic, or aggregate average may override it.
 - **M2C-NFR2 — State and checkpoints.** M2 persists no source progress,
   operator state, watermark, epoch, or sink transaction. Snapshot, restore,
   reset, checkpoint-v2, and durable-cursor behavior outside fresh operator
   entry remain unchanged; M4/M5 own new durability semantics.
-- **M2C-NFR3 — Compatibility.** Existing public Rust v2 runners, crate
-  exports, Python API/stub, project/checkpoint JSON, Studio `/api/v2`, OpenAPI,
-  and generated TypeScript contracts do not change in this internal slice.
+- **M2C-NFR3 — Compatibility.** Relative to `origin/main`, preserve the
+  PR-added semver-compatible public non-exhaustive
+  `CalcFlowError::TaskPanicked { task_id, message }` as the sole public Rust
+  API addition. Its fields and display `task <task_id> panicked: <message>`
+  stay fixed; M2C-FR1A bounds only internal message capture. No other public
+  variant, export, callable, runner, configuration field, or control
+  constructor is added. Existing public Rust v2 runners, Python API/stub and
+  wildcard error fallback, project/checkpoint JSON, Studio `/api/v2`, OpenAPI,
+  and generated TypeScript contracts otherwise do not change.
 - **M2C-NFR4 — Universal soak duration.** Twenty minutes is the only
   normative calc-flow soak duration for this run and future soak gates unless
   a later separately reviewed specification replaces it. A soak uses a
   20-minute measured workload window; setup and graceful teardown may make
-  total command wall time longer. One-hour names, defaults, commands, and
-  acceptance wording are obsolete and must not remain normative.
+  total command wall time longer. On Linux that window contains exactly 120
+  ten-second RSS samples under M2C-FR32. One-hour names, defaults, commands,
+  and acceptance wording are obsolete and must not remain normative.
 - **M2C-NFR5 — Quality and final-head evidence.** Completion requires no new
   Codacy issue of any severity, no unresolved review thread, all required
   Actions green, clean mergeability, and the real Linux soak evidence at the
-  same pushed head after incorporating current `origin/main`. Quality waivers,
-  exclusions, threshold reductions, or stale-head results do not satisfy this
-  requirement.
+  same pushed head after incorporating current `origin/main`. The soak is
+  evidence only through M2C-FR32A's reviewer-verified PR-comment bundle.
+  Quality waivers, exclusions, threshold reductions, stale-head results, or a
+  prose soak summary do not satisfy this requirement.
 
 ## Public compatibility and migration
 
@@ -550,6 +654,12 @@ still decide completion.
 - Therefore this delta requires the remaining M2 implementation to coexist
   crate-privately with the v2 public runners. No alias, deprecation shim, or
   second public `StreamingRunner` is introduced.
+- Relative to `origin/main`, the already-PR-added non-exhaustive
+  `CalcFlowError::TaskPanicked` variant is the sole public Rust API addition
+  and must be preserved. M2 adds no other public variant, export, callable,
+  configuration field, control constructor, or runner surface. Enforcing a
+  slot for every message strengthens the existing bounded-channel semantics
+  without changing the public `EdgeBudget` shape.
 - This is a deliberate plan-ledger supersession: the original M2.4 public cut
   is not checked off by this gate. It is replaced by “M2 internal runtime
   completion” here and a distinct post-M5 public A6 integration gate.
@@ -559,8 +669,8 @@ still decide completion.
   behavior promised by A6; migration of Rust tests/examples/benches; removal
   of v2 `step`; bounded-source replacement for `MicroBatchRunner`; and explicit
   `CHANGELOG.md` plus migration-guide entries.
-- Public `Batch`, `BatchExecutionPlan`, v2 checkpoint documents, Python,
-  Studio, schema, and OpenAPI behavior must remain unchanged by the
+- Public `Batch`, `BatchExecutionPlan`, v2 runner/checkpoint behavior, Python,
+  Studio, schema, and OpenAPI behavior must otherwise remain unchanged by the
   crate-private M2 internal-completion slice.
 - No status or documentation may report public M2 completion, exactly-once,
   checkpoint recovery, event-time progress, state recovery, or cross-process
@@ -572,6 +682,7 @@ still decide completion.
 | ------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
 | Source preflight          | Compiled source slots, all bindings, all first-hop budgets           | Validated immutable wiring, or one deterministic error before any open                       |
 | Provisional launch        | Validated owned job plus registered core-owned launch driver         | Entry acks, connector open, delivered job handle or cancel/close/join/reap                   |
+| Edge channel              | Positive `EdgeBudget`, one data/control envelope, current charges    | FIFO commit within message-slot, row, and byte limits, or a parked/failed sender             |
 | Source task               | `SourceEvent`, binding ID, resume cursor, next sequence              | FIFO `StreamMessage` fan-out plus volatile source progress                                   |
 | Operator task             | Named ingress receivers and one owned `StreamOperator`               | Validated data fan-out and runtime-owned supported controls                                  |
 | Ordinary sink task        | One external-output edge and ordered sink bindings                   | Sequential writes, close result, delivered progress                                          |
@@ -670,13 +781,17 @@ still decide completion.
 - [ ] **AC-M2.4-B:** natural EOF and graceful shutdown drain exactly the
   M2C-FR10A slot-committed prefix and
   close every sink; explicit cancel makes no drain assertion but closes and
-  joins every task; repeated terminal calls return the same outcome.
+  joins every task; repeated terminal calls return the same outcome. For a
+  slot-full edge, graceful shutdown drains the queued controls/empty batches,
+  an already-started blocked send, and ordered EOF. Cancel, receiver close,
+  and upstream task error each wake the blocked sender and leave current
+  slot/row/byte charges zero after convergence.
 - [ ] **AC-M2.4-C:** in-memory source -> union -> expression -> recording sink
   completes end to end with two sources, preserves per-source FIFO, applies
   slow-sink backpressure to both, and leaves all queues/tasks empty.
 - [ ] **AC-M2.5-A:** metrics snapshot keys are deterministic, counters follow
-  M2C-FR30, no payload or secret canary appears, and current/high-water charges
-  never exceed configured capacity.
+  M2C-FR30/M2C-FR30B, no payload or secret canary appears, and current/high-
+  water message depth, rows, and bytes never exceed configured capacity.
 - [ ] **AC-M2.5-A2 (B4):** preset the task-error counter to `u64::MAX`, then
   submit an operator failure. The operator error remains primary, error
   accounting is attempted once, exactly one metrics-overflow secondary is
@@ -688,22 +803,62 @@ still decide completion.
   fan-out, edge one reports one input, edge two zero, and operator
   fully-fanned-out output zero. The same boundaries hold on synthesized source
   and sink boundary edges.
+- [ ] **AC-M2.5-A4 (B6):** with `EdgeBudget::new(3, sufficient_bytes)`, a
+  table-driven stalled-receiver test separately sends repeated `Idle`, equal
+  or increasing watermarks, and a data batch first proven to charge one
+  message, zero rows, and zero bytes. In each case three messages enqueue,
+  `queue_depth == high_water_depth == message_slot_limit == 3`, row/byte
+  charge remains zero, and polling the fourth send is pending with depth still
+  three. One dequeue completes exactly one blocked send in FIFO order. Cycling
+  at least 30 messages never exceeds three, records slot-only blocked sends,
+  and ends with every current charge zero.
+- [ ] **AC-M2.5-A5 (B6 lifecycle):** a real unary source/operator edge emits
+  sustained `Idle`, non-regressing watermark, and empty zero-cost data traffic
+  while its receiver is gated. Once the edge reaches its slot limit, source
+  polling stops: the connector's recorded `next` count may increase only for
+  the one poll already in flight, at most one item may occupy the D3 prefetch
+  slot, and the settled count then remains fixed until dequeue or a terminal
+  trigger. Separate gated cases prove graceful drain plus EOF, cancellation,
+  receiver close, and upstream task error follow M2C-FR24B, preserve the
+  required primary/secondary error, join every task, and leave queue/
+  supervisor/reaper state empty.
 - [ ] **AC-M2.5-B:** paused-time stress passes its boundedness, ordering,
-  lifecycle, and leak assertions under at least 100 seeded schedules.
+  lifecycle, and leak assertions under at least 100 seeded schedules, and its
+  zero-cost phase exercises at least ten slot-limit multiples of each required
+  control/data shape without any slot, row, or byte breach.
 - [ ] **AC-M2.5-C:** the crate-private soak is discoverable but ignored by
   ordinary test runs and exposes no public seam. Without
   `CALC_FLOW_STREAM_SOAK=1`, its first-branch guard performs no runtime launch
   or timed loop. At the synchronized final Linux head, the exact M2C-FR32
-  command runs for at least 1,200 timed seconds, takes at least 120 RSS samples,
-  ends through graceful drain with `Completed + GracefulShutdown`, proves
+  command runs an exactly 1,200-second timed workload and takes exactly 120 RSS
+  samples, ends through graceful drain with `Completed + GracefulShutdown`,
+  proves
   equality of the accepted source map and both sink maps/totals with zero
   missing and duplicates, proves final task/queue/reaper convergence, and
-  passes the RSS guard. Captured machine-readable output is mandatory; “not
-  run,” disabled, skipped, or stale-head output fails this criterion.
+  passes the RSS guard. At least every fourth accepted event is verified
+  zero-row/zero-byte data; at least one edge reaches but never exceeds its
+  message-slot limit and records a blocked send. Captured machine-readable
+  output is mandatory; “not run,” disabled, skipped, or stale-head output
+  fails this criterion.
   Criterion contains and compiles all three M2 cases.
+- [ ] **AC-M2.5-C2 (S9):** the exact-head soak has one complete
+  `calc-flow.m2-soak-evidence.v1` PR-comment bundle. Reassembly matches the
+  manifest and per-part SHA-256 values; exit status is zero; start/end and
+  sample timestamps prove the 1,200-second workload; exactly 120 ordered
+  samples plus one metadata and one final result record are present; the
+  manifest, log, and current PR head SHA are identical. Missing, truncated,
+  edit-only summaries or evidence for an earlier head fail.
+- [ ] **AC-PERF (S11):** benchmark compilation passes. If the paired gate is
+  invoked, raw Criterion reports demonstrate M2C-FR33's 95%-relative-mean
+  decision for every required case, including the one permitted doubled-
+  sample rerun for each inconclusive interval. Any lower bound above `+5.0%`
+  blocks; a still-crossing interval after the rerun is explicitly advisory and
+  does not become blocking from its point estimate.
 - [ ] **AC-COMPAT:** existing v2 streaming and micro-batch integration tests
-  remain unchanged and green unless a separately approved API-note revision
-  authorizes the atomic public replacement.
+  plus Python runner/exception-adapter tests remain unchanged and green unless
+  a separately approved API-note revision authorizes the atomic public
+  replacement. `TaskPanicked` remains the sole public Rust addition and maps
+  through Python's existing wildcard fallback without adding a Python class.
 - [ ] **AC-DOCS:** `docs/runtime-envelope.md` accurately describes whole-job
   preflight, private operator/sink/runner/reaper work, M2 metrics/stress/soak,
   and post-M5 public A6 deferral. Every normative calc-flow soak statement,
@@ -720,11 +875,18 @@ still decide completion.
   required Actions and Codacy checks pass for the pushed exact head; the head
   is mergeable/clean. Results from `574c0fb` or any other earlier head are not
   completion evidence.
+- [ ] **AC-VERIFY (S10):** every command group in the current root
+  `AGENTS.md` passes at the exact final head, including Rust/PyO3, Python,
+  Studio backend/frontend/browser, supply-chain, helper, coverage, rustdoc,
+  generated-contract, and diff checks. The handoff maps each exact-head Action
+  check to those groups; the focused commands below are not a waiver.
 
 ### Verification commands
 
-The handoff must map every behavioral criterion above to a named test. The
-minimum local matrix for the final M2 commit is:
+The handoff must map every behavioral criterion above to a named test. Every
+current command group in root `AGENTS.md` is mandatory for final completion.
+The subset below is for focused RED/GREEN iteration and does not replace that
+full matrix:
 
 ```bash
 cargo fmt --all --check
@@ -753,10 +915,11 @@ CALC_FLOW_STREAM_SOAK=1 cargo test -p calc-flow --lib runtime::streaming::soak::
 cargo bench -p calc-flow --bench core -- stream
 ```
 
-This specification revision is not evidence that the soak ran. Its captured
-report must record the Linux RSS/boundedness series, graceful-drain
-conservation oracle, task/queue/reaper convergence, and machine metadata
-required by M2C-FR32. A non-Linux structured skip is not a passing artifact.
+This specification revision is not evidence that the soak ran. Its complete
+M2C-FR32A PR-comment bundle must record the Linux RSS/boundedness series,
+graceful-drain conservation oracle, task/queue/reaper convergence, and machine
+metadata. A local-only log or non-Linux structured skip is not a passing
+artifact.
 Criterion point estimates and confidence intervals are reported separately;
 a performance comparison is a delivery gate only under M2C-FR33's paired-run
 rule.
@@ -764,24 +927,34 @@ rule.
 ## Expected file scope
 
 The current PR already owns the broad implementation files. Remaining edits
-must be the narrowest changes that close G1-G7; production edits outside the
+must be the narrowest changes that close G1-G8; production edits outside the
 current PR's Rust/runtime/docs/benchmark surface require an explicit spec
 delta.
 
+- Modify `crates/calc-flow/src/runtime/streaming/channel.rs` so every data or
+  control envelope consumes one finite slot under M2C-FR24A/M2C-FR24B, and add
+  the focused zero-cost admission and lifecycle tests. Reuse
+  `EdgeBudget.max_rows` as the independent slot ceiling; do not change the
+  public `EdgeBudget` shape.
+- Modify `crates/calc-flow/src/runtime/streaming/metrics.rs` and the private
+  runner/status projection as needed to expose the bounded slot gauges and
+  slot-only blocking observations required by M2C-FR30B.
 - Modify `crates/calc-flow/src/runtime/streaming/source_task.rs` for exact
   binding-qualified cursor/watermark diagnostics and focused tests.
 - Modify `crates/calc-flow/src/runtime/streaming/supervisor.rs` for the bounded
   UTF-8 panic payload and focused tests; reuse the same helper for open/task
   panic capture.
 - Modify `crates/calc-flow/src/runtime/streaming/soak.rs` for the universal
-  20-minute name, duration, sample/warm-up defaults, structured result, and
+  20-minute name, exact 1,200-second duration, exact 120-sample/30-sample
+  warm-up defaults, zero-cost slot pressure, structured result, and
   task/queue/reaper convergence evidence.
 - Simplify the current M2 runtime modules and tests as needed to clear all 16
   Codacy complexity findings without changing M2 behavior. No lint, Codacy,
   coverage, or analyzer waiver/configuration edit is in scope.
-- Do not add a public error variant in `crates/calc-flow/src/error.rs` for this
-  gate; use the completion API note's private cause/origin records plus
-  existing non-exhaustive errors.
+- Preserve the current PR's public non-exhaustive
+  `CalcFlowError::TaskPanicked { task_id, message }` variant as the sole public
+  Rust API addition. Do not add another public error variant, export,
+  configuration field, control constructor, or runner surface.
 - Keep focused tests beside the private modules or in existing Rust integration
   targets. Keep the ignored 20-minute harness in the crate-private `#[cfg(test)]`
   `runtime::streaming::soak` module so it exercises the private runtime without
@@ -795,20 +968,26 @@ delta.
 
 ## Delivery sequence and gates
 
-1. Add RED tests for G1-G3 and record the expected current-head failures.
-2. Fix binding-qualified diagnostics and bounded panic capture, then run their
+1. Add RED tests for G8's slot admission, zero-cost traffic, and terminal
+   lifecycle criteria, and record the expected current-head failures.
+2. Enforce three-dimensional slot/row/byte admission on every edge, add slot
+   observability, and make the stress/soak exercise zero-cost slot pressure.
+3. Add RED tests for G1-G3 and record the expected current-head failures.
+4. Fix binding-qualified diagnostics and bounded panic capture, then run their
    focused tests.
-3. Convert the soak seam and every governed normative reference to the
+5. Convert the soak seam and every governed normative reference to the
    universal 20-minute standard; run its short helper/smoke tests.
-4. Remove the 16 Codacy complexity findings behavior-preservingly, keeping the
+6. Remove the 16 Codacy complexity findings behavior-preservingly, keeping the
    existing named M2 tests green and adding no waiver.
-5. Reconcile runtime documentation with the current implementation while
+7. Reconcile runtime documentation with the current implementation while
    preserving the post-M5 public A6 boundary.
-6. Incorporate current `origin/main`; run the local matrix and push once the
-   intended diff is reviewed.
-7. Run and capture the exact 20-minute Linux soak at that pushed head. Then
-   require tester/reviewer checks, zero unresolved threads, green exact-head
-   Actions and Codacy, and clean mergeability.
+8. Incorporate current `origin/main`; run the full root-`AGENTS.md` matrix and
+   push once the intended diff is reviewed.
+9. Run and capture the exact 20-minute/120-sample Linux soak at that pushed
+   head, publish the M2C-FR32A SHA-keyed PR-comment bundle, and have the
+   reviewer independently reassemble and verify it. Then require zero
+   unresolved threads, green exact-head Actions and Codacy, and clean
+   mergeability.
 
 Every behavior change follows RED -> observed expected failure -> focused
 GREEN -> affected matrix -> reviewer. A code change cannot be considered
@@ -836,19 +1015,30 @@ complete without `cf-reviewer`; documentation disposition belongs to
 - Source monotonicity diagnostics are binding-qualified with the exact fields
   in M2C-FR11/M2C-FR14. Panic text uses the 1,024-byte UTF-8-safe bound in
   M2C-FR1A without changing the public non-exhaustive error shape.
+- Every data and control envelope consumes one slot. The hard per-edge slot
+  ceiling is the existing positive `EdgeBudget.max_rows`, independently of
+  the row ceiling; M2 adds no `max_messages` field or public configuration.
+- Exact-head soak evidence is the complete SHA-verified command log and
+  manifest published as the M2C-FR32A PR-comment bundle. Local summaries and
+  earlier-head logs are not delivery evidence.
+- Benchmark compilation is mandatory. A paired performance comparison is
+  optional unless explicitly invoked; when invoked, M2C-FR33's Criterion
+  bootstrap 95% relative-mean interval and one doubled-sample rerun are the
+  only decision rule.
 - The completion API note owns the exact core/driver/reaper and runtime-plan
   projection signatures. This spec owns their required observable outcomes.
 
 ## Open questions
 
-- None for M2 behavior or public scope. G1-G7 are closure obligations, not
+- None for M2 behavior or public scope. G1-G8 are closure obligations, not
   permission to redesign the API or defer the 20-minute evidence.
 
 ## Handoff
 
-Next role: `cf-critic` to review revision 4's current-PR ledger, timing-only
-supersession, exact diagnostic fields, panic bound, and G1-G7 gates. After a
-zero-block verdict, `cf-implementer` closes G1-G5, `cf-tester` maps and runs
-the behavioral/20-minute evidence, and `cf-reviewer` enforces G6-G7. No agent
-in this chain may expose or replace the public v2 runner before the separately
-reviewed post-M5 A6 integration gate.
+Next role: `cf-critic` to review revision 5's B6 slot invariant, durable soak
+evidence, paired-performance decision, exact diagnostic fields, panic bound,
+and G1-G8 gates. After a zero-block verdict, `cf-implementer` closes
+G1-G5/G8, `cf-tester` maps and runs the behavioral and exact
+20-minute/120-sample evidence, and `cf-reviewer` enforces G6-G7 plus independent
+evidence verification. No agent in this chain may expose or replace the public
+v2 runner before the separately reviewed post-M5 A6 integration gate.
