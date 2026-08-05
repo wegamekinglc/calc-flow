@@ -60,18 +60,18 @@ impl StreamJobContext {
 
     #[allow(
         dead_code,
-        reason = "the crate-private M2 tasks use scopes before the M2.4 public runner"
+        reason = "the crate-private M2 runtime derives source scopes"
     )]
     pub(crate) fn for_source(&self, binding_id: &str) -> Result<StreamTaskContext> {
         self.scoped(StreamTaskKind::Source, binding_id)
     }
 
-    #[allow(dead_code, reason = "node tasks begin in plan task M2.3")]
+    #[allow(dead_code, reason = "the crate-private M2 runtime derives node scopes")]
     pub(crate) fn for_node(&self, node_id: &str) -> Result<StreamTaskContext> {
         self.scoped(StreamTaskKind::Node, node_id)
     }
 
-    #[allow(dead_code, reason = "sink tasks begin in plan task M2.4")]
+    #[allow(dead_code, reason = "the crate-private M2 runtime derives sink scopes")]
     pub(crate) fn for_sink(&self, binding_id: &str) -> Result<StreamTaskContext> {
         self.scoped(StreamTaskKind::Sink, binding_id)
     }
@@ -110,7 +110,7 @@ impl StreamJobContext {
 
 #[allow(
     dead_code,
-    reason = "the crate-private M2 scopes are not public until the M2.4 runner"
+    reason = "M2 task scopes remain crate-private until the post-M5 public A6 gate"
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StreamTaskKind {
@@ -132,7 +132,7 @@ impl StreamTaskKind {
 /// Immutable task scope derived from one job context.
 #[allow(
     dead_code,
-    reason = "the crate-private M2 scopes are not public until the M2.4 runner"
+    reason = "M2 task scopes remain crate-private until the post-M5 public A6 gate"
 )]
 #[derive(Clone, Debug)]
 pub(crate) struct StreamTaskContext {
@@ -143,7 +143,7 @@ pub(crate) struct StreamTaskContext {
 
 #[allow(
     dead_code,
-    reason = "the crate-private M2 scopes are not public until the M2.4 runner"
+    reason = "M2 task scopes remain crate-private until the post-M5 public A6 gate"
 )]
 impl StreamTaskContext {
     pub(crate) const fn job(&self) -> &StreamJobContext {

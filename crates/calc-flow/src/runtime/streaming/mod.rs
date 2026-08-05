@@ -1,27 +1,49 @@
 //! The v2 push runner plus the v3 stream building blocks.
 //!
-//! `StreamingRunner` below is the v2 push-based runner over
-//! [`crate::BatchExecutionPlan`]; plan task M2.4 replaces it with the
-//! source-driven public runner. The crate-private M2 skeleton already owns
-//! supervised source pumps/tasks and an explicit-terminal continuous job;
-//! [`edge_channel`] is the rows + bytes dual-limit channel every edge carries.
+//! `StreamingRunner` below remains the v2 push-based runner over
+//! [`crate::BatchExecutionPlan`]. The crate-private M2 runtime owns compiled
+//! plans, supervised launch/jobs, and source drain internally. The public
+//! source-driven A6 cut remains deferred until its M4/M5 durability contract
+//! is complete. [`edge_channel`] is the dual-limit channel every edge carries.
 
 mod channel;
 mod context;
 #[allow(
     dead_code,
-    reason = "M2.1/M2.2 merge crate-private; plan task M2.4 wires the public runner"
+    reason = "M2 runtime completion remains crate-private until the post-M5 public A6 gate"
 )]
 mod job;
 mod message;
 #[allow(
     dead_code,
-    reason = "M2.2 merges crate-private before plan task M2.4 wires the public runner"
+    reason = "M2 metrics remain crate-private until the post-M5 public A6 gate"
+)]
+mod metrics;
+#[allow(
+    dead_code,
+    reason = "M2 operator tasks remain crate-private until the post-M5 public A6 gate"
+)]
+mod operator_task;
+#[allow(
+    dead_code,
+    reason = "M2 internal runner remains crate-private until the post-M5 public A6 gate"
+)]
+mod runner;
+#[allow(
+    dead_code,
+    reason = "M2 ordinary sink tasks remain crate-private until the post-M5 public A6 gate"
+)]
+mod sink_task;
+#[cfg(test)]
+mod soak;
+#[allow(
+    dead_code,
+    reason = "M2 source integration remains crate-private until the post-M5 public A6 gate"
 )]
 mod source_task;
 #[allow(
     dead_code,
-    reason = "M2.1 merges crate-private before plan task M2.4 wires the public runner"
+    reason = "M2 supervision remains crate-private until the post-M5 public A6 gate"
 )]
 mod supervisor;
 

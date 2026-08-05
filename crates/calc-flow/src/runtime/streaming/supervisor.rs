@@ -34,10 +34,158 @@ pub(crate) struct TaskFailure {
     pub(crate) error: CalcFlowError,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TaskStatus {
+    pub(crate) task_name: String,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct TaskRegistry(Arc<Mutex<BTreeMap<TaskId, TaskStatus>>>);
+
+impl TaskRegistry {
+    pub(crate) fn snapshot(&self) -> BTreeMap<TaskId, TaskStatus> {
+        self.0.lock().clone()
+    }
+
+    fn insert(&self, task_id: TaskId, task_name: String) {
+        self.0.lock().insert(task_id, TaskStatus { task_name });
+    }
+
+    fn remove(&self, task_id: TaskId) -> Option<TaskStatus> {
+        self.0.lock().remove(&task_id)
+    }
+
+    fn len(&self) -> usize {
+        self.0.lock().len()
+    }
+}
+
 /// Fully joined terminal report from a supervisor registry.
 #[derive(Debug, Default)]
 pub(crate) struct SupervisionReport {
+    /// Prefix of `errors` observed before convergence cancellation began.
+    pub(crate) primary_error_count: usize,
     pub(crate) errors: Vec<TaskFailure>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TerminalDecision {
+    TaskFailure(TaskId),
+    ExplicitCancel,
+    DeadlineExceeded,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TerminalObservation {
+    pub(crate) terminal: Option<TerminalDecision>,
+    pub(crate) graceful_shutdown: bool,
+}
+
+#[derive(Default)]
+struct TerminalArbiterState {
+    primary_failures: BTreeSet<TaskId>,
+    explicit_cancel: bool,
+    deadline_exceeded: bool,
+    graceful_shutdown: bool,
+    committed: Option<TerminalDecision>,
+}
+
+/// One lock shared by terminal requests, task-failure announcement, and the
+/// immutable driver commit. No caller may hold a job-state lock while entering
+/// this arbiter.
+#[derive(Clone, Default)]
+pub(crate) struct TerminalArbiter(Arc<Mutex<TerminalArbiterState>>);
+
+impl TerminalArbiter {
+    pub(crate) fn request_explicit_cancel(&self) -> bool {
+        let mut state = self.0.lock();
+        if state.committed.is_some() {
+            return false;
+        }
+        state.explicit_cancel = true;
+        true
+    }
+
+    pub(crate) fn request_deadline(&self) -> bool {
+        let mut state = self.0.lock();
+        if state.committed.is_some() {
+            return false;
+        }
+        state.deadline_exceeded = true;
+        true
+    }
+
+    pub(crate) fn request_graceful_shutdown(&self) -> bool {
+        let mut state = self.0.lock();
+        if state.committed.is_some() {
+            return false;
+        }
+        state.graceful_shutdown = true;
+        true
+    }
+
+    /// Applies task-failure > explicit > deadline and cancels workers before
+    /// releasing the same lock that makes the terminal decision immutable.
+    pub(crate) fn observe_and_commit(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> TerminalObservation {
+        let mut state = self.0.lock();
+        if state.committed.is_none() {
+            state.committed = state
+                .primary_failures
+                .first()
+                .copied()
+                .map(TerminalDecision::TaskFailure)
+                .or_else(|| {
+                    state
+                        .explicit_cancel
+                        .then_some(TerminalDecision::ExplicitCancel)
+                })
+                .or_else(|| {
+                    state
+                        .deadline_exceeded
+                        .then_some(TerminalDecision::DeadlineExceeded)
+                });
+            if state.committed.is_some() {
+                cancellation.cancel();
+            }
+        }
+        TerminalObservation {
+            terminal: state.committed,
+            graceful_shutdown: state.graceful_shutdown,
+        }
+    }
+
+    fn record_task_failure(&self, task_id: TaskId, cancellation: &CancellationToken) {
+        let mut state = self.0.lock();
+        if state.committed.is_none() && !cancellation.is_cancelled() {
+            state.primary_failures.insert(task_id);
+        }
+    }
+
+    fn record_task_failure_and_cancel(&self, task_id: TaskId, cancellation: &CancellationToken) {
+        let mut state = self.0.lock();
+        if state.committed.is_none() && !cancellation.is_cancelled() {
+            state.primary_failures.insert(task_id);
+        }
+        cancellation.cancel();
+    }
+
+    fn primary_failures(&self) -> BTreeSet<TaskId> {
+        self.0.lock().primary_failures.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn explicit_cancel_requested(&self) -> bool {
+        self.0.lock().explicit_cancel
+    }
+}
+
+impl SupervisionReport {
+    pub(crate) fn primary_errors(&self) -> &[TaskFailure] {
+        &self.errors[..self.primary_error_count]
+    }
 }
 
 struct TaskExit {
@@ -51,24 +199,23 @@ struct TaskExit {
 pub(crate) struct TaskFailureSignal {
     task_id: TaskId,
     cancellation: CancellationToken,
-    primary_failures: Arc<Mutex<BTreeSet<TaskId>>>,
+    terminal_arbiter: TerminalArbiter,
 }
 
 impl TaskFailureSignal {
+    pub(crate) const fn task_id(&self) -> TaskId {
+        self.task_id
+    }
+
     fn record_before_cancellation(&self) {
-        let mut primary_failures = self.primary_failures.lock();
-        if !self.cancellation.is_cancelled() {
-            primary_failures.insert(self.task_id);
-        }
+        self.terminal_arbiter
+            .record_task_failure(self.task_id, &self.cancellation);
     }
 
     /// Records this task as a failure trigger, then starts convergence.
     pub(crate) fn cancel_siblings(&self) {
-        let mut primary_failures = self.primary_failures.lock();
-        if !self.cancellation.is_cancelled() {
-            primary_failures.insert(self.task_id);
-        }
-        self.cancellation.cancel();
+        self.terminal_arbiter
+            .record_task_failure_and_cancel(self.task_id, &self.cancellation);
     }
 
     async fn converge_after_failure(&self) {
@@ -89,21 +236,28 @@ pub(crate) struct TaskSupervisor {
     cancellation: CancellationToken,
     tasks: JoinSet<TaskExit>,
     stable_ids: HashMap<tokio::task::Id, TaskId>,
-    registry: BTreeMap<TaskId, String>,
+    registry: TaskRegistry,
     joined_errors: Vec<TaskFailure>,
-    primary_failures: Arc<Mutex<BTreeSet<TaskId>>>,
+    terminal_arbiter: TerminalArbiter,
     next_task_id: u64,
 }
 
 impl TaskSupervisor {
     pub(crate) fn new(cancellation: CancellationToken) -> Self {
+        Self::new_with_terminal_arbiter(cancellation, TerminalArbiter::default())
+    }
+
+    pub(crate) fn new_with_terminal_arbiter(
+        cancellation: CancellationToken,
+        terminal_arbiter: TerminalArbiter,
+    ) -> Self {
         Self {
             cancellation,
             tasks: JoinSet::new(),
             stable_ids: HashMap::new(),
-            registry: BTreeMap::new(),
+            registry: TaskRegistry::default(),
             joined_errors: Vec::new(),
-            primary_failures: Arc::new(Mutex::new(BTreeSet::new())),
+            terminal_arbiter,
             next_task_id: 0,
         }
     }
@@ -136,7 +290,7 @@ impl TaskSupervisor {
         let failure_signal = TaskFailureSignal {
             task_id,
             cancellation: self.cancellation.clone(),
-            primary_failures: Arc::clone(&self.primary_failures),
+            terminal_arbiter: self.terminal_arbiter.clone(),
         };
         let future = make_future(failure_signal.clone());
         let (start_tx, start_rx) = oneshot::channel();
@@ -178,6 +332,10 @@ impl TaskSupervisor {
         self.registry.len()
     }
 
+    pub(crate) fn registry(&self) -> TaskRegistry {
+        self.registry.clone()
+    }
+
     /// Joins every registered task, cancelling siblings after the first
     /// failed task becomes observable.
     pub(crate) async fn join_all(&mut self) -> SupervisionReport {
@@ -192,10 +350,10 @@ impl TaskSupervisor {
                         .stable_ids
                         .remove(&error.id())
                         .unwrap_or(TaskId::new(u64::MAX));
-                    let task_name = self
-                        .registry
-                        .remove(&task_id)
-                        .unwrap_or_else(|| "unknown supervised task".into());
+                    let task_name = self.registry.remove(task_id).map_or_else(
+                        || "unknown supervised task".into(),
+                        |status| status.task_name,
+                    );
                     let failure = TaskFailure {
                         task_id,
                         task_name,
@@ -206,7 +364,7 @@ impl TaskSupervisor {
                     let failure_signal = TaskFailureSignal {
                         task_id,
                         cancellation: self.cancellation.clone(),
-                        primary_failures: Arc::clone(&self.primary_failures),
+                        terminal_arbiter: self.terminal_arbiter.clone(),
                     };
                     failure_signal.record_before_cancellation();
                     failure_signal.cancel_siblings();
@@ -214,7 +372,7 @@ impl TaskSupervisor {
                     continue;
                 }
             };
-            self.registry.remove(&exit.task_id);
+            self.registry.remove(exit.task_id);
             if let Err(error) = exit.result {
                 self.joined_errors.push(TaskFailure {
                     task_id: exit.task_id,
@@ -223,14 +381,20 @@ impl TaskSupervisor {
                 });
             }
         }
-        let primary_failures = std::mem::take(&mut *self.primary_failures.lock());
+        let primary_failures = self.terminal_arbiter.primary_failures();
         self.joined_errors.sort_by_key(|failure| {
             (
                 !primary_failures.contains(&failure.task_id),
                 failure.task_id,
             )
         });
+        let primary_error_count = self
+            .joined_errors
+            .iter()
+            .take_while(|failure| primary_failures.contains(&failure.task_id))
+            .count();
         SupervisionReport {
+            primary_error_count,
             errors: std::mem::take(&mut self.joined_errors),
         }
     }
@@ -243,7 +407,7 @@ impl Drop for TaskSupervisor {
     }
 }
 
-fn panic_message(payload: &(dyn Any + Send)) -> String {
+pub(crate) fn panic_message(payload: &(dyn Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         (*message).to_owned()
     } else if let Some(message) = payload.downcast_ref::<String>() {
@@ -262,8 +426,34 @@ mod tests {
 
     use tokio::sync::{Barrier, oneshot};
 
-    use super::{TaskId, TaskSupervisor};
+    use super::{TaskId, TaskSupervisor, TerminalArbiter, TerminalDecision};
     use crate::{CalcFlowError, CancellationToken};
+
+    #[test]
+    fn terminal_arbiter_prioritizes_one_locked_snapshot_and_keeps_graceful_nonterminal() {
+        let cancellation = CancellationToken::new();
+        let graceful_only = TerminalArbiter::default();
+        assert!(graceful_only.request_graceful_shutdown());
+        let observation = graceful_only.observe_and_commit(&cancellation);
+        assert_eq!(observation.terminal, None);
+        assert!(observation.graceful_shutdown);
+        assert!(!cancellation.is_cancelled());
+
+        let arbiter = TerminalArbiter::default();
+        assert!(arbiter.request_graceful_shutdown());
+        assert!(arbiter.request_deadline());
+        assert!(arbiter.request_explicit_cancel());
+        arbiter.record_task_failure(TaskId::new(7), &cancellation);
+        arbiter.record_task_failure(TaskId::new(3), &cancellation);
+
+        let observation = arbiter.observe_and_commit(&cancellation);
+        assert_eq!(
+            observation.terminal,
+            Some(TerminalDecision::TaskFailure(TaskId::new(3)))
+        );
+        assert!(observation.graceful_shutdown);
+        assert!(cancellation.is_cancelled());
+    }
 
     #[tokio::test]
     async fn first_failure_cancels_and_joins_a_sibling() {
@@ -325,29 +515,32 @@ mod tests {
 
     #[tokio::test]
     async fn simultaneous_failures_are_returned_in_stable_task_order() {
-        let release = Arc::new(Barrier::new(3));
-        let mut supervisor = TaskSupervisor::new(CancellationToken::new());
-        for message in ["zero", "one"] {
-            let release_in_task = Arc::clone(&release);
-            supervisor.spawn(message, async move {
-                release_in_task.wait().await;
-                Err(CalcFlowError::Internal {
-                    message: message.into(),
-                })
-            });
+        for repetition in 0..100 {
+            let release = Arc::new(Barrier::new(3));
+            let mut supervisor = TaskSupervisor::new(CancellationToken::new());
+            for message in ["zero", "one"] {
+                let release_in_task = Arc::clone(&release);
+                supervisor.spawn(message, async move {
+                    release_in_task.wait().await;
+                    Err(CalcFlowError::Internal {
+                        message: message.into(),
+                    })
+                });
+            }
+
+            release.wait().await;
+            let report = supervisor.join_all().await;
+
+            assert_eq!(
+                report
+                    .errors
+                    .iter()
+                    .map(|failure| failure.task_id)
+                    .collect::<Vec<_>>(),
+                [TaskId::new(0), TaskId::new(1)],
+                "unstable failure order at repetition {repetition}"
+            );
         }
-
-        release.wait().await;
-        let report = supervisor.join_all().await;
-
-        assert_eq!(
-            report
-                .errors
-                .iter()
-                .map(|failure| failure.task_id)
-                .collect::<Vec<_>>(),
-            [TaskId::new(0), TaskId::new(1)]
-        );
     }
 
     #[tokio::test]
@@ -356,8 +549,8 @@ mod tests {
         let mut supervisor = TaskSupervisor::new(cancellation.clone());
         let convergence_id = supervisor.spawn("convergence", async move {
             cancellation.cancelled().await;
-            Err(CalcFlowError::Internal {
-                message: "failed while converging cancellation".into(),
+            Err(CalcFlowError::EdgeClosed {
+                edge: "runtime-closed-secondary".into(),
             })
         });
         let (release_primary_tx, release_primary_rx) = oneshot::channel();
@@ -380,6 +573,10 @@ mod tests {
             CalcFlowError::Internal { message } if message == "primary source failure"
         ));
         assert_eq!(report.errors[1].task_id, convergence_id);
+        assert!(matches!(
+            report.errors[1].error,
+            CalcFlowError::EdgeClosed { ref edge } if edge == "runtime-closed-secondary"
+        ));
     }
 
     #[tokio::test]

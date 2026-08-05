@@ -1,13 +1,18 @@
-use std::sync::Arc;
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::{panic::AssertUnwindSafe, sync::Arc};
 
 use async_trait::async_trait;
+use futures::FutureExt;
 use parking_lot::Mutex;
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use super::{
-    EdgeSender, StreamJobContext, StreamMessage,
-    supervisor::{TaskFailureSignal, TaskSupervisor},
+    EdgeSender, EnvelopeCost, StreamJobContext, StreamMessage,
+    metrics::MetricsRecorder,
+    supervisor::{TaskFailureSignal, TaskId, TaskSupervisor, panic_message},
 };
 use crate::{Batch, BatchMetadata, CalcFlowError, EventTime, JsonMap, Result, canonical_json};
 
@@ -45,6 +50,10 @@ impl Cursor {
     fn is_after(&self, previous: &Self) -> bool {
         self.order > previous.order
     }
+
+    pub(crate) fn order(&self) -> &[u8] {
+        &self.order
+    }
 }
 
 /// Events a connector source can return; barriers remain runtime-only.
@@ -63,7 +72,7 @@ pub(crate) struct SourceCapabilities {
     pub(crate) max_batch_bytes: usize,
 }
 
-/// Internal source lifecycle contract for the M2 vertical slice.
+/// Internal source lifecycle contract for M2 runtime completion.
 #[async_trait]
 pub(crate) trait StreamSource: Send {
     async fn open(&mut self, cursor: Option<Cursor>) -> Result<()>;
@@ -79,39 +88,82 @@ pub(crate) trait StreamSource: Send {
     fn capabilities(&self) -> SourceCapabilities;
 }
 
+/// Test-only oracle populated at the FR10A slot-commit linearization point.
+/// Each job injects its own instance, so parallel tests and reused source IDs
+/// cannot share observations accidentally.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct AcceptedSequenceRecorder(Arc<Mutex<BTreeMap<String, Vec<u64>>>>);
+
+#[cfg(test)]
+impl AcceptedSequenceRecorder {
+    pub(crate) fn record_committed_for_test(&self, source_id: &str, sequence: u64) {
+        self.0
+            .lock()
+            .entry(source_id.to_owned())
+            .or_default()
+            .push(sequence);
+    }
+
+    pub(crate) fn snapshot(&self) -> BTreeMap<String, Vec<u64>> {
+        self.0.lock().clone()
+    }
+}
+
 /// One validated source binding. Binding identity is assigned by the job.
 pub(crate) struct SourceBinding {
     source: Box<dyn StreamSource>,
-    capabilities: SourceCapabilities,
+    capabilities: Option<SourceCapabilities>,
     resume_cursor: Option<Cursor>,
     next_sequence: u64,
+    open_began: bool,
+    #[cfg(test)]
+    accepted_sequence_recorder: Option<AcceptedSequenceRecorder>,
 }
 
 impl SourceBinding {
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "preserve the validated-binding constructor contract while capability validation moves to whole-job preflight"
+    )]
     pub(crate) fn new(
         source: Box<dyn StreamSource>,
         resume_cursor: Option<Cursor>,
         next_sequence: u64,
     ) -> Result<Self> {
-        let capabilities = source.capabilities();
-        if capabilities.max_batch_rows == 0 {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "source.capabilities.max_batch_rows".into(),
-                message: "must be greater than zero".into(),
-            });
-        }
-        if capabilities.max_batch_bytes == 0 {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "source.capabilities.max_batch_bytes".into(),
-                message: "must be greater than zero".into(),
-            });
-        }
         Ok(Self {
             source,
-            capabilities,
+            capabilities: None,
             resume_cursor,
             next_sequence,
+            open_began: false,
+            #[cfg(test)]
+            accepted_sequence_recorder: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_accepted_sequence_recorder(
+        mut self,
+        recorder: AcceptedSequenceRecorder,
+    ) -> Self {
+        self.accepted_sequence_recorder = Some(recorder);
+        self
+    }
+
+    pub(crate) fn sample_capabilities_once(&mut self) -> SourceCapabilities {
+        *self
+            .capabilities
+            .get_or_insert_with(|| self.source.capabilities())
+    }
+
+    pub(crate) async fn open(&mut self) -> Result<()> {
+        self.open_began = true;
+        self.source.open(self.resume_cursor.clone()).await
+    }
+
+    pub(crate) async fn close(&mut self) -> Result<()> {
+        self.source.close().await
     }
 }
 
@@ -125,12 +177,179 @@ pub(crate) struct SourceProgressSnapshot {
 }
 
 /// Separates volatile observed progress from checkpoint-durable progress.
-#[derive(Clone, Debug)]
-pub(crate) struct SourceProgress(Arc<Mutex<SourceProgressSnapshot>>);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SourceAcceptState {
+    Polling,
+    Slotted,
+    Draining { retain_slot: bool },
+    Closed,
+}
+
+struct SourceAcceptance {
+    state: Mutex<SourceAcceptState>,
+    drain: crate::CancellationToken,
+    pump_closed: AtomicBool,
+    pump_operation_failed: AtomicBool,
+    close_failures: Mutex<Vec<CalcFlowError>>,
+    #[cfg(test)]
+    accepted_sequence: Mutex<Option<TestAcceptedSequence>>,
+}
+
+#[cfg(test)]
+struct TestAcceptedSequence {
+    recorder: AcceptedSequenceRecorder,
+    source_id: String,
+    next_sequence: Option<u64>,
+}
+
+impl SourceAcceptance {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(SourceAcceptState::Polling),
+            drain: crate::CancellationToken::new(),
+            pump_closed: AtomicBool::new(false),
+            pump_operation_failed: AtomicBool::new(false),
+            close_failures: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            accepted_sequence: Mutex::new(None),
+        }
+    }
+
+    #[cfg(test)]
+    fn install_accepted_sequence_recorder(
+        &mut self,
+        recorder: Option<AcceptedSequenceRecorder>,
+        source_id: &str,
+        next_sequence: u64,
+    ) {
+        *self.accepted_sequence.get_mut() = recorder.map(|recorder| TestAcceptedSequence {
+            recorder,
+            source_id: source_id.to_owned(),
+            next_sequence: Some(next_sequence),
+        });
+    }
+
+    fn request_drain(&self) {
+        let mut state = self.state.lock();
+        *state = match *state {
+            SourceAcceptState::Polling => SourceAcceptState::Draining { retain_slot: false },
+            SourceAcceptState::Slotted => SourceAcceptState::Draining { retain_slot: true },
+            SourceAcceptState::Draining { retain_slot } => {
+                SourceAcceptState::Draining { retain_slot }
+            }
+            SourceAcceptState::Closed => SourceAcceptState::Closed,
+        };
+        if !matches!(*state, SourceAcceptState::Closed) {
+            self.drain.cancel();
+        }
+    }
+
+    fn commit_slot(&self) -> bool {
+        let mut state = self.state.lock();
+        match *state {
+            SourceAcceptState::Polling => {
+                *state = SourceAcceptState::Slotted;
+                true
+            }
+            SourceAcceptState::Slotted
+            | SourceAcceptState::Draining { .. }
+            | SourceAcceptState::Closed => false,
+        }
+    }
+
+    #[cfg(test)]
+    fn commit_event_slot(&self, event: &SourceEvent) -> bool {
+        let mut state = self.state.lock();
+        if !matches!(*state, SourceAcceptState::Polling) {
+            return false;
+        }
+        *state = SourceAcceptState::Slotted;
+        if matches!(event, SourceEvent::Data { .. })
+            && let Some(accepted) = self.accepted_sequence.lock().as_mut()
+            && let Some(sequence) = accepted.next_sequence
+        {
+            accepted
+                .recorder
+                .record_committed_for_test(&accepted.source_id, sequence);
+            accepted.next_sequence = sequence.checked_add(1);
+        }
+        true
+    }
+
+    fn dequeue_slot(&self) {
+        let mut state = self.state.lock();
+        *state = match *state {
+            SourceAcceptState::Slotted => SourceAcceptState::Polling,
+            SourceAcceptState::Draining { retain_slot: true } => {
+                SourceAcceptState::Draining { retain_slot: false }
+            }
+            state => state,
+        };
+    }
+
+    fn is_draining(&self) -> bool {
+        matches!(*self.state.lock(), SourceAcceptState::Draining { .. })
+    }
+
+    fn mark_pump_closed(&self) {
+        self.pump_closed.store(true, Ordering::Release);
+    }
+
+    fn mark_pump_operation_failed(&self) {
+        self.pump_operation_failed.store(true, Ordering::Release);
+    }
+
+    fn record_close_failure(&self, error: CalcFlowError) {
+        self.close_failures.lock().push(error);
+    }
+
+    fn mark_closed(&self) {
+        *self.state.lock() = SourceAcceptState::Closed;
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct SourceProgress {
+    snapshot: Arc<Mutex<SourceProgressSnapshot>>,
+    acceptance: Arc<SourceAcceptance>,
+}
+
+pub(crate) struct SourceCloseFailures {
+    pub(crate) pump_operation_failed: bool,
+    pub(crate) errors: Vec<CalcFlowError>,
+}
+
+impl std::fmt::Debug for SourceProgress {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SourceProgress")
+            .field("snapshot", &*self.snapshot.lock())
+            .field("acceptance", &*self.acceptance.state.lock())
+            .finish()
+    }
+}
 
 impl SourceProgress {
     pub(crate) fn snapshot(&self) -> SourceProgressSnapshot {
-        self.0.lock().clone()
+        self.snapshot.lock().clone()
+    }
+
+    pub(crate) fn request_drain(&self) {
+        self.acceptance.request_drain();
+    }
+
+    pub(crate) fn accept_state(&self) -> SourceAcceptState {
+        *self.acceptance.state.lock()
+    }
+
+    pub(crate) fn take_close_failures(&self) -> SourceCloseFailures {
+        SourceCloseFailures {
+            pump_operation_failed: self
+                .acceptance
+                .pump_operation_failed
+                .load(Ordering::Acquire),
+            errors: std::mem::take(&mut *self.acceptance.close_failures.lock()),
+        }
     }
 }
 
@@ -141,6 +360,7 @@ enum PumpEvent {
 
 enum PumpCompletion {
     Cancelled,
+    Draining,
     Ended,
 }
 
@@ -151,7 +371,23 @@ struct SourceTaskInputs {
     outputs: Vec<EdgeSender>,
     slot: mpsc::Receiver<PumpEvent>,
     progress: SourceProgress,
+    acceptance: Arc<SourceAcceptance>,
     cancellation: crate::CancellationToken,
+    launch_cancel: crate::CancellationToken,
+    metrics: MetricsRecorder,
+}
+
+struct SourcePumpInputs {
+    source: Box<dyn StreamSource>,
+    resume_cursor: Option<Cursor>,
+    open_began: bool,
+    slot: mpsc::Sender<PumpEvent>,
+    cancellation: crate::CancellationToken,
+    launch_cancel: crate::CancellationToken,
+    acceptance: Arc<SourceAcceptance>,
+    data_gate: watch::Receiver<bool>,
+    binding_id: String,
+    metrics: MetricsRecorder,
 }
 
 /// Registers the pump and source task as two owned supervised units.
@@ -162,6 +398,58 @@ pub(crate) fn spawn_source_tasks(
     binding: SourceBinding,
     outputs: Vec<EdgeSender>,
 ) -> Result<SourceProgress> {
+    let (data_gate, data_gate_rx) = watch::channel(true);
+    let progress = spawn_source_tasks_gated(
+        supervisor,
+        context,
+        binding_id,
+        binding,
+        outputs,
+        data_gate_rx,
+        crate::CancellationToken::new(),
+    )?;
+    drop(data_gate);
+    Ok(progress)
+}
+
+/// Registers a source whose connector may already have been opened by the
+/// runner launch phase. Polling remains parked until the data gate opens.
+pub(crate) fn spawn_source_tasks_gated(
+    supervisor: &mut TaskSupervisor,
+    context: &StreamJobContext,
+    binding_id: &str,
+    binding: SourceBinding,
+    outputs: Vec<EdgeSender>,
+    data_gate: watch::Receiver<bool>,
+    launch_cancel: crate::CancellationToken,
+) -> Result<SourceProgress> {
+    spawn_source_tasks_gated_with_metrics(
+        supervisor,
+        context,
+        binding_id,
+        binding,
+        outputs,
+        data_gate,
+        launch_cancel,
+        MetricsRecorder::default(),
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the private spawn boundary mirrors the source task lifecycle dependencies"
+)]
+pub(crate) fn spawn_source_tasks_gated_with_metrics(
+    supervisor: &mut TaskSupervisor,
+    context: &StreamJobContext,
+    binding_id: &str,
+    mut binding: SourceBinding,
+    outputs: Vec<EdgeSender>,
+    data_gate: watch::Receiver<bool>,
+    launch_cancel: crate::CancellationToken,
+    metrics: MetricsRecorder,
+) -> Result<SourceProgress> {
     let source_context = context.for_source(binding_id)?;
     let binding_id = source_context.scope_id();
     if outputs.is_empty() {
@@ -170,17 +458,30 @@ pub(crate) fn spawn_source_tasks(
             message: "must contain at least one edge".into(),
         });
     }
+    let capabilities = binding.sample_capabilities_once();
+    if capabilities.max_batch_rows == 0 {
+        return Err(CalcFlowError::InvalidArgument {
+            field: format!("sources.{binding_id}.capabilities.max_batch_rows"),
+            message: "must be greater than zero".into(),
+        });
+    }
+    if capabilities.max_batch_bytes == 0 {
+        return Err(CalcFlowError::InvalidArgument {
+            field: format!("sources.{binding_id}.capabilities.max_batch_bytes"),
+            message: "must be greater than zero".into(),
+        });
+    }
     for output in &outputs {
         let budget = output.budget();
-        if binding.capabilities.max_batch_rows > budget.max_rows
-            || binding.capabilities.max_batch_bytes > budget.max_bytes
+        if capabilities.max_batch_rows > budget.max_rows
+            || capabilities.max_batch_bytes > budget.max_bytes
         {
             return Err(CalcFlowError::InvalidArgument {
                 field: format!("sources.{binding_id}.capabilities"),
                 message: format!(
                     "maximum batch ({}, {} bytes) exceeds edge {:?} budget ({}, {} bytes)",
-                    binding.capabilities.max_batch_rows,
-                    binding.capabilities.max_batch_bytes,
+                    capabilities.max_batch_rows,
+                    capabilities.max_batch_bytes,
                     output.edge(),
                     budget.max_rows,
                     budget.max_bytes
@@ -191,29 +492,62 @@ pub(crate) fn spawn_source_tasks(
 
     let SourceBinding {
         source,
-        capabilities,
+        capabilities: _,
         resume_cursor,
         next_sequence,
+        open_began,
+        #[cfg(test)]
+        accepted_sequence_recorder,
     } = binding;
-    let progress = SourceProgress(Arc::new(Mutex::new(SourceProgressSnapshot {
-        replayable: capabilities.replayable,
-        latest_observed_cursor: None,
-        durable_cursor: resume_cursor.clone(),
-        next_sequence: Some(next_sequence),
-        ended: false,
-    })));
+    #[cfg(test)]
+    let source_acceptance = {
+        let mut acceptance = SourceAcceptance::new();
+        acceptance.install_accepted_sequence_recorder(
+            accepted_sequence_recorder,
+            binding_id,
+            next_sequence,
+        );
+        acceptance
+    };
+    #[cfg(not(test))]
+    let source_acceptance = SourceAcceptance::new();
+    let acceptance = Arc::new(source_acceptance);
+    let progress = SourceProgress {
+        snapshot: Arc::new(Mutex::new(SourceProgressSnapshot {
+            replayable: capabilities.replayable,
+            latest_observed_cursor: None,
+            durable_cursor: resume_cursor.clone(),
+            next_sequence: Some(next_sequence),
+            ended: false,
+        })),
+        acceptance: Arc::clone(&acceptance),
+    };
     let (slot_tx, slot_rx) = mpsc::channel(1);
     let cancellation = source_context.job().cancellation().clone();
     let pump_cancellation = cancellation.clone();
     let pump_resume_cursor = resume_cursor.clone();
+    let pump_acceptance = Arc::clone(&acceptance);
+    let pump_launch_cancel = launch_cancel.clone();
+    let pump_binding_id = binding_id.to_owned();
+    let pump_metrics = metrics.clone();
     supervisor.spawn_with_failure_signal(
         format!("source:{binding_id}:pump"),
         move |failure_signal| async move {
+            let task_id = failure_signal.task_id();
             run_source_pump(
-                source,
-                pump_resume_cursor,
-                slot_tx,
-                pump_cancellation,
+                SourcePumpInputs {
+                    source,
+                    resume_cursor: pump_resume_cursor,
+                    open_began,
+                    slot: slot_tx,
+                    cancellation: pump_cancellation,
+                    launch_cancel: pump_launch_cancel,
+                    acceptance: pump_acceptance,
+                    data_gate,
+                    binding_id: pump_binding_id,
+                    metrics: pump_metrics,
+                },
+                task_id,
                 move || failure_signal.cancel_siblings(),
             )
             .await
@@ -232,7 +566,10 @@ pub(crate) fn spawn_source_tasks(
                     outputs,
                     slot: slot_rx,
                     progress: task_progress,
+                    acceptance,
                     cancellation,
+                    launch_cancel,
+                    metrics,
                 },
                 failure_signal,
             )
@@ -242,34 +579,96 @@ pub(crate) fn spawn_source_tasks(
     Ok(progress)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "source operation, panic containment, and exactly-once close form one serialized resource-owning lifecycle"
+)]
 async fn run_source_pump(
-    mut source: Box<dyn StreamSource>,
-    resume_cursor: Option<Cursor>,
-    slot: mpsc::Sender<PumpEvent>,
-    cancellation: crate::CancellationToken,
+    inputs: SourcePumpInputs,
+    task_id: TaskId,
     on_error: impl FnOnce(),
 ) -> Result<()> {
+    let SourcePumpInputs {
+        mut source,
+        resume_cursor,
+        open_began,
+        slot,
+        cancellation,
+        launch_cancel,
+        acceptance,
+        mut data_gate,
+        binding_id,
+        metrics,
+    } = inputs;
     let operation = async {
-        tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Ok(PumpCompletion::Cancelled),
-            result = source.open(resume_cursor) => result?,
+        if !open_began {
+            tokio::select! {
+                biased;
+                () = launch_cancel.cancelled() => return Ok(PumpCompletion::Cancelled),
+                () = cancellation.cancelled() => return Ok(PumpCompletion::Cancelled),
+                result = AssertUnwindSafe(source.open(resume_cursor)).catch_unwind() => {
+                    match result {
+                        Ok(result) => result?,
+                        Err(payload) => return Err(CalcFlowError::TaskPanicked {
+                            task_id: task_id.as_u64(),
+                            message: panic_message(payload.as_ref()),
+                        }),
+                    }
+                },
+            }
         }
         loop {
+            if *data_gate.borrow() {
+                break;
+            }
+            tokio::select! {
+                biased;
+                () = launch_cancel.cancelled() => return Ok(PumpCompletion::Cancelled),
+                () = cancellation.cancelled() => return Ok(PumpCompletion::Cancelled),
+                result = data_gate.changed() => result.map_err(|_| CalcFlowError::Internal {
+                    message: "source data gate closed before release".into(),
+                })?,
+            }
+        }
+        loop {
+            if acceptance.is_draining() {
+                return Ok(PumpCompletion::Draining);
+            }
             let permit = tokio::select! {
                 biased;
+                () = launch_cancel.cancelled() => return Ok(PumpCompletion::Cancelled),
                 () = cancellation.cancelled() => return Ok(PumpCompletion::Cancelled),
+                () = acceptance.drain.cancelled() => return Ok(PumpCompletion::Draining),
                 permit = slot.reserve() => permit.map_err(|_| CalcFlowError::Internal {
                     message: "source prefetch slot closed before pump convergence".into(),
                 })?,
             };
+            metrics.record_source_poll(&binding_id)?;
             let event = tokio::select! {
                 biased;
+                () = launch_cancel.cancelled() => return Ok(PumpCompletion::Cancelled),
                 () = cancellation.cancelled() => return Ok(PumpCompletion::Cancelled),
-                event = source.next() => event?,
+                () = acceptance.drain.cancelled() => return Ok(PumpCompletion::Draining),
+                event = AssertUnwindSafe(source.next()).catch_unwind() => match event {
+                    Ok(event) => event?,
+                    Err(payload) => return Err(CalcFlowError::TaskPanicked {
+                        task_id: task_id.as_u64(),
+                        message: panic_message(payload.as_ref()),
+                    }),
+                },
             };
             match event {
-                Some(event) => permit.send(PumpEvent::Event(event)),
+                Some(event) => {
+                    #[cfg(test)]
+                    let committed = acceptance.commit_event_slot(&event);
+                    #[cfg(not(test))]
+                    let committed = acceptance.commit_slot();
+                    if committed {
+                        permit.send(PumpEvent::Event(event));
+                    } else {
+                        return Ok(PumpCompletion::Draining);
+                    }
+                }
                 None => return Ok(PumpCompletion::Ended),
             }
         }
@@ -277,15 +676,39 @@ async fn run_source_pump(
     .await;
 
     if operation.is_err() {
+        acceptance.mark_pump_operation_failed();
         on_error();
     }
-    let close_result = source.close().await;
+    let close_failed = match AssertUnwindSafe(source.close()).catch_unwind().await {
+        Ok(Ok(())) => false,
+        Ok(Err(error)) => {
+            acceptance.record_close_failure(error);
+            true
+        }
+        Err(payload) => {
+            acceptance.record_close_failure(CalcFlowError::TaskPanicked {
+                task_id: task_id.as_u64(),
+                message: panic_message(payload.as_ref()),
+            });
+            true
+        }
+    };
+    acceptance.mark_pump_closed();
     match operation {
-        Ok(PumpCompletion::Cancelled) => close_result,
+        Ok(PumpCompletion::Cancelled | PumpCompletion::Draining) if close_failed => {
+            Err(source_close_task_failed(&binding_id))
+        }
+        Ok(PumpCompletion::Cancelled | PumpCompletion::Draining) => Ok(()),
         Ok(PumpCompletion::Ended) => {
-            close_result?;
+            if close_failed {
+                return Err(source_close_task_failed(&binding_id));
+            }
+            if !acceptance.commit_slot() {
+                return Ok(());
+            }
             tokio::select! {
                 biased;
+                () = launch_cancel.cancelled() => Ok(()),
                 () = cancellation.cancelled() => Ok(()),
                 result = slot.send(PumpEvent::End) => result.map_err(|_| CalcFlowError::Internal {
                     message: "source prefetch slot closed before end-of-input delivery".into(),
@@ -293,6 +716,14 @@ async fn run_source_pump(
             }
         }
         Err(error) => Err(error),
+    }
+}
+
+fn source_close_task_failed(binding_id: &str) -> CalcFlowError {
+    CalcFlowError::Internal {
+        message: format!(
+            "source task {binding_id:?} failed during close; inspect its private failure records"
+        ),
     }
 }
 
@@ -307,6 +738,10 @@ async fn run_source_task(
     operation
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the source loop keeps ordering validation, fan-out, and terminal handling atomic"
+)]
 async fn run_source_task_loop(inputs: &mut SourceTaskInputs) -> Result<()> {
     let SourceTaskInputs {
         binding_id,
@@ -315,7 +750,10 @@ async fn run_source_task_loop(inputs: &mut SourceTaskInputs) -> Result<()> {
         outputs,
         slot,
         progress,
+        acceptance,
         cancellation,
+        launch_cancel,
+        metrics,
     } = inputs;
     let mut next_sequence = Some(*first_sequence);
     let mut last_cursor = resume_cursor.clone();
@@ -323,11 +761,22 @@ async fn run_source_task_loop(inputs: &mut SourceTaskInputs) -> Result<()> {
     loop {
         let event = tokio::select! {
             biased;
+            () = launch_cancel.cancelled() => return Ok(()),
             () = cancellation.cancelled() => return Ok(()),
             event = slot.recv() => event,
         };
         let Some(event) = event else {
             return if cancellation.is_cancelled() {
+                acceptance.mark_closed();
+                Ok(())
+            } else if acceptance.is_draining() && acceptance.pump_closed.load(Ordering::Acquire) {
+                if !send_fanout(outputs, StreamMessage::end_of_input(), cancellation).await? {
+                    acceptance.mark_closed();
+                    return Ok(());
+                }
+                metrics.record_source_end(binding_id)?;
+                progress.snapshot.lock().ended = true;
+                acceptance.mark_closed();
                 Ok(())
             } else {
                 Err(CalcFlowError::Internal {
@@ -335,6 +784,7 @@ async fn run_source_task_loop(inputs: &mut SourceTaskInputs) -> Result<()> {
                 })
             };
         };
+        acceptance.dequeue_slot();
         match event {
             PumpEvent::Event(SourceEvent::Data { batch, cursor }) => {
                 if last_cursor
@@ -357,12 +807,15 @@ async fn run_source_task_loop(inputs: &mut SourceTaskInputs) -> Result<()> {
                     batch.metadata().attributes().clone(),
                 )?;
                 let message = StreamMessage::data(batch.with_metadata(metadata));
+                let cost = EnvelopeCost::of_message(&message)?;
+                metrics.record_source_data(binding_id, cost, sequence)?;
                 if !send_fanout(outputs, message, cancellation).await? {
                     return Ok(());
                 }
+                metrics.record_source_output(binding_id, cost)?;
                 next_sequence = sequence.checked_add(1);
                 last_cursor = Some(cursor.clone());
-                let mut snapshot = progress.0.lock();
+                let mut snapshot = progress.snapshot.lock();
                 snapshot.latest_observed_cursor = Some(cursor);
                 snapshot.next_sequence = next_sequence;
             }
@@ -387,7 +840,9 @@ async fn run_source_task_loop(inputs: &mut SourceTaskInputs) -> Result<()> {
                 if !send_fanout(outputs, StreamMessage::end_of_input(), cancellation).await? {
                     return Ok(());
                 }
-                progress.0.lock().ended = true;
+                metrics.record_source_end(binding_id)?;
+                progress.snapshot.lock().ended = true;
+                acceptance.mark_closed();
                 return Ok(());
             }
         }
@@ -419,24 +874,30 @@ mod tests {
         pin::Pin,
         sync::{
             Arc,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         task::Poll,
     };
 
     use async_trait::async_trait;
+    use futures::task::AtomicWaker;
     use parking_lot::Mutex;
     use serde_json::json;
-    use tokio::sync::{mpsc, oneshot};
+    use tokio::sync::{Notify, mpsc, oneshot, watch};
 
     use super::{
-        Cursor, SourceBinding, SourceCapabilities, SourceEvent, StreamSource, run_source_pump,
-        spawn_source_tasks,
+        AcceptedSequenceRecorder, Cursor, SourceAcceptState, SourceAcceptance, SourceBinding,
+        SourceCapabilities, SourceEvent, SourcePumpInputs, StreamSource, run_source_pump,
+        spawn_source_tasks, spawn_source_tasks_gated_with_metrics,
     };
     use crate::{
-        Batch, BatchMetadata, CalcFlowError, CancellationToken, EdgeBudget, ExternalPayload,
-        JsonMap, Result, StreamJobContext, StreamMessageKind, edge_channel,
-        runtime::streaming::supervisor::TaskSupervisor,
+        Batch, BatchMetadata, CalcFlowError, CancellationToken, EdgeBudget, EdgeReceiver,
+        ExternalPayload, JsonMap, Result, StreamJobContext, StreamMessage, StreamMessageKind,
+        edge_channel,
+        runtime::streaming::{
+            metrics::MetricsRecorder,
+            supervisor::{TaskId, TaskSupervisor},
+        },
     };
 
     #[derive(Debug)]
@@ -485,6 +946,28 @@ mod tests {
         StreamJobContext::new(7, "fingerprint", JsonMap::new(), None, cancellation)
     }
 
+    #[test]
+    fn accepted_sequence_recorder_observes_only_the_winning_slot_commit() {
+        let recorder = AcceptedSequenceRecorder::default();
+        let isolated = AcceptedSequenceRecorder::default();
+        let mut acceptance = SourceAcceptance::new();
+        acceptance.install_accepted_sequence_recorder(Some(recorder.clone()), "left", 7);
+        let event = SourceEvent::Data {
+            batch: batch(7),
+            cursor: cursor(7),
+        };
+
+        assert!(acceptance.commit_event_slot(&event));
+        acceptance.request_drain();
+        assert!(!acceptance.commit_event_slot(&event));
+
+        assert_eq!(
+            recorder.snapshot(),
+            BTreeMap::from([("left".into(), vec![7])])
+        );
+        assert!(isolated.snapshot().is_empty());
+    }
+
     #[derive(Clone, Debug, Eq, PartialEq)]
     enum OpenObservation {
         NotOpened,
@@ -498,6 +981,109 @@ mod tests {
         next_count: usize,
         opened_at: Arc<Mutex<OpenObservation>>,
         closed: Arc<AtomicBool>,
+    }
+
+    struct ControlledNextState {
+        next_calls: AtomicUsize,
+        next_entered: AtomicBool,
+        ready: AtomicBool,
+        value: Mutex<Option<SourceEvent>>,
+        waker: AtomicWaker,
+        dropped_polls: AtomicUsize,
+        close_started: AtomicBool,
+        block_close: AtomicBool,
+        close_release: Notify,
+        closed: AtomicBool,
+    }
+
+    impl ControlledNextState {
+        fn new(block_close: bool) -> Arc<Self> {
+            Arc::new(Self {
+                next_calls: AtomicUsize::new(0),
+                next_entered: AtomicBool::new(false),
+                ready: AtomicBool::new(false),
+                value: Mutex::new(None),
+                waker: AtomicWaker::new(),
+                dropped_polls: AtomicUsize::new(0),
+                close_started: AtomicBool::new(false),
+                block_close: AtomicBool::new(block_close),
+                close_release: Notify::new(),
+                closed: AtomicBool::new(false),
+            })
+        }
+
+        fn release(&self, value: Option<SourceEvent>) {
+            *self.value.lock() = value;
+            self.ready.store(true, Ordering::Release);
+            self.waker.wake();
+        }
+    }
+
+    struct ControlledNextFuture {
+        state: Arc<ControlledNextState>,
+        completed: bool,
+    }
+
+    impl Future for ControlledNextFuture {
+        type Output = Result<Option<SourceEvent>>;
+
+        fn poll(
+            mut self: Pin<&mut Self>,
+            context: &mut std::task::Context<'_>,
+        ) -> Poll<Self::Output> {
+            self.state.next_entered.store(true, Ordering::Release);
+            self.state.waker.register(context.waker());
+            if self.state.ready.swap(false, Ordering::AcqRel) {
+                let value = self.state.value.lock().take();
+                self.completed = true;
+                Poll::Ready(Ok(value))
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    impl Drop for ControlledNextFuture {
+        fn drop(&mut self) {
+            if !self.completed {
+                self.state.dropped_polls.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    struct ControlledSource(Arc<ControlledNextState>);
+
+    #[async_trait]
+    impl StreamSource for ControlledSource {
+        async fn open(&mut self, _cursor: Option<Cursor>) -> Result<()> {
+            Ok(())
+        }
+
+        async fn next(&mut self) -> Result<Option<SourceEvent>> {
+            self.0.next_calls.fetch_add(1, Ordering::SeqCst);
+            ControlledNextFuture {
+                state: Arc::clone(&self.0),
+                completed: false,
+            }
+            .await
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            self.0.close_started.store(true, Ordering::Release);
+            if self.0.block_close.load(Ordering::Acquire) {
+                self.0.close_release.notified().await;
+            }
+            self.0.closed.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        fn capabilities(&self) -> SourceCapabilities {
+            SourceCapabilities {
+                replayable: true,
+                max_batch_rows: 1,
+                max_batch_bytes: 1,
+            }
+        }
     }
 
     impl StepSource {
@@ -569,12 +1155,30 @@ mod tests {
         });
         let opened_at = Arc::clone(&source.opened_at);
 
-        let result = SourceBinding::new(Box::new(source), None, 0);
+        let binding = SourceBinding::new(Box::new(source), None, 0).unwrap();
+        let cancellation = CancellationToken::new();
+        let mut supervisor = TaskSupervisor::new(cancellation.clone());
+        let (sender, _receiver) = edge_channel(
+            "source->output",
+            EdgeBudget {
+                max_rows: 1,
+                max_bytes: 1,
+            },
+        )
+        .unwrap();
+
+        let result = spawn_source_tasks(
+            &mut supervisor,
+            &context(cancellation),
+            "input",
+            binding,
+            vec![sender],
+        );
 
         assert!(matches!(
             result,
             Err(CalcFlowError::InvalidArgument { ref field, .. })
-                if field == "source.capabilities.max_batch_rows"
+                if field == "sources.input.capabilities.max_batch_rows"
         ));
         assert_eq!(*opened_at.lock(), OpenObservation::NotOpened);
     }
@@ -674,6 +1278,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn source_fanout_keeps_the_first_branch_prefix_and_exact_edge_metrics() {
+        let cancellation = CancellationToken::new();
+        let mut supervisor = TaskSupervisor::new(cancellation.clone());
+        let source = StepSource::new([Ok(Some(SourceEvent::Data {
+            batch: batch(10),
+            cursor: cursor(1),
+        }))]);
+        let binding = SourceBinding::new(Box::new(source), None, 0).unwrap();
+        let metrics = MetricsRecorder::new(
+            ["source->left".into(), "source->right".into()],
+            ["input".into()],
+            [],
+            [],
+        );
+        let budget = EdgeBudget {
+            max_rows: 1,
+            max_bytes: 1,
+        };
+        let (left_tx, mut left_rx) = crate::runtime::streaming::channel::edge_channel_with_metrics(
+            "source->left",
+            budget,
+            metrics.clone(),
+        )
+        .unwrap();
+        let (right_tx, mut right_rx) =
+            crate::runtime::streaming::channel::edge_channel_with_metrics(
+                "source->right",
+                budget,
+                metrics.clone(),
+            )
+            .unwrap();
+        right_rx.close();
+        let (_data_gate, data_gate) = watch::channel(true);
+
+        spawn_source_tasks_gated_with_metrics(
+            &mut supervisor,
+            &context(cancellation),
+            "input",
+            binding,
+            vec![left_tx, right_tx],
+            data_gate,
+            CancellationToken::new(),
+            metrics.clone(),
+        )
+        .unwrap();
+
+        let report = supervisor.join_all().await;
+
+        assert_eq!(report.errors.len(), 1);
+        assert!(matches!(
+            report.errors[0].error,
+            CalcFlowError::EdgeClosed { ref edge } if edge == "source->right"
+        ));
+        let prefix = left_rx.recv().await.unwrap().unwrap();
+        assert_eq!(prefix.as_data().unwrap().metadata().sequence(), 0);
+        assert!(left_rx.recv().await.unwrap().is_none());
+        assert!(right_rx.recv().await.unwrap().is_none());
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.edges["source->left"].input_batches, 1);
+        assert_eq!(snapshot.edges["source->right"].input_batches, 0);
+        assert_eq!(snapshot.sources["input"].data_batches, 1);
+        assert_eq!(snapshot.sources["input"].fully_fanned_out_batches, 0);
+    }
+
+    #[tokio::test]
     async fn full_edge_stops_source_polling_after_the_single_prefetch_slot() {
         let cancellation = CancellationToken::new();
         let mut supervisor = TaskSupervisor::new(cancellation.clone());
@@ -729,6 +1398,346 @@ mod tests {
         assert!(supervisor.join_all().await.errors.is_empty());
     }
 
+    #[tokio::test]
+    async fn graceful_drain_includes_the_committed_slot_and_pending_edge_send() {
+        let cancellation = CancellationToken::new();
+        let mut supervisor = TaskSupervisor::new(cancellation.clone());
+        let (calls_tx, mut calls_rx) = mpsc::unbounded_channel();
+        let source = StepSource::new((1..=4).map(|position| {
+            Ok(Some(SourceEvent::Data {
+                batch: batch(position.into()),
+                cursor: cursor(position),
+            }))
+        }))
+        .with_next_calls(calls_tx);
+        let binding = SourceBinding::new(Box::new(source), None, 0).unwrap();
+        let (sender, mut receiver) = edge_channel(
+            "source->draining",
+            EdgeBudget {
+                max_rows: 1,
+                max_bytes: 1,
+            },
+        )
+        .unwrap();
+        let progress = spawn_source_tasks(
+            &mut supervisor,
+            &context(cancellation),
+            "input",
+            binding,
+            vec![sender],
+        )
+        .unwrap();
+        for expected in 1..=3 {
+            assert_eq!(calls_rx.recv().await, Some(expected));
+        }
+
+        progress.request_drain();
+
+        for sequence in 0..=2 {
+            assert_eq!(
+                receiver
+                    .recv()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .as_data()
+                    .unwrap()
+                    .metadata()
+                    .sequence(),
+                sequence
+            );
+        }
+        assert_eq!(
+            receiver.recv().await.unwrap().unwrap().kind(),
+            StreamMessageKind::EndOfInput
+        );
+        assert!(receiver.recv().await.unwrap().is_none());
+        assert!(supervisor.join_all().await.errors.is_empty());
+        assert_eq!(
+            calls_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        );
+        assert!(progress.snapshot().ended);
+    }
+
+    #[test]
+    fn drain_cut_and_slot_commit_have_one_serialized_winner() {
+        let cut_wins = SourceAcceptance::new();
+        cut_wins.request_drain();
+        assert!(!cut_wins.commit_slot());
+        assert_eq!(
+            *cut_wins.state.lock(),
+            SourceAcceptState::Draining { retain_slot: false }
+        );
+
+        let commit_wins = SourceAcceptance::new();
+        assert!(commit_wins.commit_slot());
+        commit_wins.request_drain();
+        assert_eq!(
+            *commit_wins.state.lock(),
+            SourceAcceptState::Draining { retain_slot: true }
+        );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum UncommittedCut {
+        BeforePoll,
+        PendingPoll,
+        ReadyDataBeforeRuntimePoll,
+        ReadyNoneBeforeRuntimePoll,
+        NoneObservedWhileClosePending,
+    }
+
+    async fn wait_for_cut(state: &ControlledNextState, cut: UncommittedCut) {
+        let observed = match cut {
+            UncommittedCut::BeforePoll => return,
+            UncommittedCut::PendingPoll
+            | UncommittedCut::ReadyDataBeforeRuntimePoll
+            | UncommittedCut::ReadyNoneBeforeRuntimePoll => &state.next_entered,
+            UncommittedCut::NoneObservedWhileClosePending => &state.close_started,
+        };
+        for _ in 0..100 {
+            if observed.load(Ordering::Acquire) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(observed.load(Ordering::Acquire), "{cut:?}");
+    }
+
+    async fn collect_kinds(receiver: &mut EdgeReceiver) -> Vec<StreamMessageKind> {
+        let mut kinds = Vec::new();
+        while let Some(message) = receiver.recv().await.unwrap() {
+            kinds.push(message.kind());
+        }
+        kinds
+    }
+
+    async fn assert_uncommitted_cut(terminal_is_cancel: bool, cut: UncommittedCut) {
+        let cancellation = CancellationToken::new();
+        let state =
+            ControlledNextState::new(matches!(cut, UncommittedCut::NoneObservedWhileClosePending));
+        if matches!(cut, UncommittedCut::NoneObservedWhileClosePending) {
+            state.release(None);
+        }
+        let binding =
+            SourceBinding::new(Box::new(ControlledSource(Arc::clone(&state))), None, 0).unwrap();
+        let mut supervisor = TaskSupervisor::new(cancellation.clone());
+        let (sender, mut receiver) = edge_channel(
+            "source->cut",
+            EdgeBudget {
+                max_rows: 1,
+                max_bytes: 1,
+            },
+        )
+        .unwrap();
+        let data_initially_open = !matches!(cut, UncommittedCut::BeforePoll);
+        let (data_gate, data_gate_rx) = watch::channel(data_initially_open);
+        let progress = super::spawn_source_tasks_gated(
+            &mut supervisor,
+            &context(cancellation.clone()),
+            "input",
+            binding,
+            vec![sender],
+            data_gate_rx,
+            CancellationToken::new(),
+        )
+        .unwrap();
+
+        wait_for_cut(&state, cut).await;
+        match cut {
+            UncommittedCut::ReadyDataBeforeRuntimePoll => state.release(Some(SourceEvent::Data {
+                batch: batch(1),
+                cursor: cursor(1),
+            })),
+            UncommittedCut::ReadyNoneBeforeRuntimePoll => state.release(None),
+            _ => {}
+        }
+
+        if terminal_is_cancel {
+            cancellation.cancel();
+        } else {
+            progress.request_drain();
+        }
+        if !data_initially_open {
+            data_gate.send(true).unwrap();
+        }
+        if matches!(cut, UncommittedCut::NoneObservedWhileClosePending) {
+            state.close_release.notify_waiters();
+        }
+
+        let report = supervisor.join_all().await;
+        assert!(report.errors.is_empty(), "{cut:?}: {report:?}");
+        let kinds = collect_kinds(&mut receiver).await;
+        if terminal_is_cancel {
+            assert!(
+                !kinds.contains(&StreamMessageKind::Data),
+                "uncommitted data escaped explicit cancel at {cut:?}: {kinds:?}"
+            );
+        } else {
+            assert_eq!(kinds, [StreamMessageKind::EndOfInput], "{cut:?}");
+            assert_eq!(
+                progress.accept_state(),
+                SourceAcceptState::Closed,
+                "{cut:?}"
+            );
+        }
+        assert!(state.closed.load(Ordering::Acquire), "{cut:?}");
+        assert_eq!(supervisor.task_count(), 0, "{cut:?}");
+        let expected_drops = usize::from(matches!(
+            cut,
+            UncommittedCut::PendingPoll
+                | UncommittedCut::ReadyDataBeforeRuntimePoll
+                | UncommittedCut::ReadyNoneBeforeRuntimePoll
+        ));
+        assert_eq!(
+            state.dropped_polls.load(Ordering::SeqCst),
+            expected_drops,
+            "{cut:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn uncommitted_drain_and_cancel_cut_matrix_is_deterministic() {
+        for terminal_is_cancel in [false, true] {
+            for cut in [
+                UncommittedCut::BeforePoll,
+                UncommittedCut::PendingPoll,
+                UncommittedCut::ReadyDataBeforeRuntimePoll,
+                UncommittedCut::ReadyNoneBeforeRuntimePoll,
+                UncommittedCut::NoneObservedWhileClosePending,
+            ] {
+                assert_uncommitted_cut(terminal_is_cancel, cut).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_after_edge_enqueue_drains_only_for_graceful_shutdown() {
+        for terminal_is_cancel in [false, true] {
+            let cancellation = CancellationToken::new();
+            let state = ControlledNextState::new(false);
+            state.release(Some(SourceEvent::Data {
+                batch: batch(7),
+                cursor: cursor(1),
+            }));
+            let binding =
+                SourceBinding::new(Box::new(ControlledSource(Arc::clone(&state))), None, 0)
+                    .unwrap();
+            let mut supervisor = TaskSupervisor::new(cancellation.clone());
+            let (sender, mut receiver) = edge_channel(
+                "source->enqueued",
+                EdgeBudget {
+                    max_rows: 1,
+                    max_bytes: 1,
+                },
+            )
+            .unwrap();
+            let progress = spawn_source_tasks(
+                &mut supervisor,
+                &context(cancellation.clone()),
+                "input",
+                binding,
+                vec![sender],
+            )
+            .unwrap();
+            let first = receiver.recv().await.unwrap().unwrap();
+            assert_eq!(first.kind(), StreamMessageKind::Data);
+            for _ in 0..100 {
+                if state.next_calls.load(Ordering::SeqCst) >= 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(state.next_calls.load(Ordering::SeqCst), 2);
+
+            if terminal_is_cancel {
+                cancellation.cancel();
+            } else {
+                progress.request_drain();
+            }
+
+            let report = supervisor.join_all().await;
+            assert!(report.errors.is_empty(), "{report:?}");
+            let mut kinds = Vec::new();
+            while let Some(message) = receiver.recv().await.unwrap() {
+                kinds.push(message.kind());
+            }
+            if terminal_is_cancel {
+                assert!(kinds.is_empty());
+            } else {
+                assert_eq!(kinds, [StreamMessageKind::EndOfInput]);
+                assert_eq!(progress.accept_state(), SourceAcceptState::Closed);
+            }
+            assert!(state.closed.load(Ordering::Acquire));
+            assert_eq!(supervisor.task_count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_while_edge_send_is_pending_is_drain_or_discard_by_cause() {
+        for terminal_is_cancel in [false, true] {
+            let cancellation = CancellationToken::new();
+            let state = ControlledNextState::new(false);
+            state.release(Some(SourceEvent::Data {
+                batch: batch(8),
+                cursor: cursor(1),
+            }));
+            let binding =
+                SourceBinding::new(Box::new(ControlledSource(Arc::clone(&state))), None, 0)
+                    .unwrap();
+            let mut supervisor = TaskSupervisor::new(cancellation.clone());
+            let (mut sender, mut receiver) = edge_channel(
+                "source->pending-send",
+                EdgeBudget {
+                    max_rows: 1,
+                    max_bytes: 1,
+                },
+            )
+            .unwrap();
+            sender.send(StreamMessage::data(batch(99))).await.unwrap();
+            let progress = spawn_source_tasks(
+                &mut supervisor,
+                &context(cancellation.clone()),
+                "input",
+                binding,
+                vec![sender],
+            )
+            .unwrap();
+            for _ in 0..100 {
+                if state.next_calls.load(Ordering::SeqCst) >= 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(state.next_calls.load(Ordering::SeqCst), 2);
+
+            if terminal_is_cancel {
+                cancellation.cancel();
+            } else {
+                progress.request_drain();
+            }
+            let prefill = receiver.recv().await.unwrap().unwrap();
+            assert_eq!(prefill.as_data().unwrap().metadata().sequence(), 99);
+            let report = supervisor.join_all().await;
+            assert!(report.errors.is_empty(), "{report:?}");
+            let mut delivered = Vec::new();
+            while let Some(message) = receiver.recv().await.unwrap() {
+                delivered.push(message);
+            }
+            if terminal_is_cancel {
+                assert!(delivered.is_empty());
+            } else {
+                assert_eq!(delivered.len(), 2);
+                assert_eq!(delivered[0].as_data().unwrap().metadata().sequence(), 0);
+                assert_eq!(delivered[1].kind(), StreamMessageKind::EndOfInput);
+                assert_eq!(progress.accept_state(), SourceAcceptState::Closed);
+            }
+            assert!(state.closed.load(Ordering::Acquire));
+            assert_eq!(supervisor.task_count(), 0);
+        }
+    }
+
     struct PollGuard(Arc<AtomicBool>);
 
     impl Drop for PollGuard {
@@ -778,10 +1787,19 @@ mod tests {
         };
         let (slot_tx, _slot_rx) = mpsc::channel(1);
         let mut pump = Box::pin(run_source_pump(
-            Box::new(source),
-            None,
-            slot_tx,
-            cancellation.clone(),
+            SourcePumpInputs {
+                source: Box::new(source),
+                resume_cursor: None,
+                open_began: false,
+                slot: slot_tx,
+                cancellation: cancellation.clone(),
+                launch_cancel: CancellationToken::new(),
+                acceptance: Arc::new(SourceAcceptance::new()),
+                data_gate: watch::channel(true).1,
+                binding_id: "source".into(),
+                metrics: MetricsRecorder::default(),
+            },
+            TaskId::new(0),
             || {},
         ));
         assert_pending(&mut pump).await;
@@ -863,6 +1881,43 @@ mod tests {
         assert!(poll_dropped.load(Ordering::SeqCst));
         assert!(closed.load(Ordering::SeqCst));
         assert_eq!(supervisor.task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn graceful_drain_drops_an_uncommitted_pending_poll_and_emits_eof() {
+        let cancellation = CancellationToken::new();
+        let mut supervisor = TaskSupervisor::new(cancellation.clone());
+        let (started_tx, started_rx) = oneshot::channel();
+        let poll_dropped = Arc::new(AtomicBool::new(false));
+        let closed = Arc::new(AtomicBool::new(false));
+        let source = BlockingSource {
+            started: Arc::new(Mutex::new(Some(started_tx))),
+            poll_dropped: Arc::clone(&poll_dropped),
+            closed: Arc::clone(&closed),
+        };
+        let binding = SourceBinding::new(Box::new(source), None, 0).unwrap();
+        let (sender, mut receiver) = edge_channel("source->drain", EdgeBudget::default()).unwrap();
+        let progress = spawn_source_tasks(
+            &mut supervisor,
+            &context(cancellation),
+            "quiet",
+            binding,
+            vec![sender],
+        )
+        .unwrap();
+
+        started_rx.await.unwrap();
+        progress.request_drain();
+
+        assert_eq!(
+            receiver.recv().await.unwrap().unwrap().kind(),
+            StreamMessageKind::EndOfInput
+        );
+        assert!(receiver.recv().await.unwrap().is_none());
+        assert!(supervisor.join_all().await.errors.is_empty());
+        assert!(poll_dropped.load(Ordering::SeqCst));
+        assert!(closed.load(Ordering::SeqCst));
+        assert_eq!(progress.accept_state(), SourceAcceptState::Closed);
     }
 
     struct ErrorThenBlockingCloseSource {

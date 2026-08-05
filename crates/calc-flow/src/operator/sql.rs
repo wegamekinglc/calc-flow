@@ -49,6 +49,10 @@ impl StreamRuntimeState {
         }
         Ok(self.runtime.as_ref().expect("runtime initialized above"))
     }
+
+    const fn is_initialized(&self) -> bool {
+        self.runtime.is_some()
+    }
 }
 
 /// A multi-input `DataFusion` SQL operator.
@@ -175,6 +179,10 @@ impl SqlOperator {
         selected_udfs: Vec<UdfReference>,
     ) {
         self.stream_state.resources = Some((config, udfs, selected_udfs));
+    }
+
+    pub(crate) const fn stream_runtime_initialized(&self) -> bool {
+        self.stream_state.is_initialized()
     }
 
     #[doc(hidden)]

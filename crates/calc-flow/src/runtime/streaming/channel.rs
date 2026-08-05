@@ -24,7 +24,10 @@ use std::{collections::VecDeque, fmt, sync::Arc, time::Duration};
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 
-use super::StreamMessage;
+use super::{
+    StreamMessage,
+    metrics::{EdgeTraffic, MetricsRecorder, MetricsTimer},
+};
 use crate::{CalcFlowError, EdgeBudget, Result, batch::checked_accumulate};
 
 /// The logical queue charge of one edge message (spec S10.2).
@@ -154,6 +157,7 @@ struct ChannelState {
 struct Shared {
     edge: String,
     budget: EdgeBudget,
+    metrics: MetricsRecorder,
     state: Mutex<ChannelState>,
     /// Signalled when reserved capacity is released or the receiver closes.
     capacity_available: Notify,
@@ -239,6 +243,14 @@ pub fn edge_channel(
     edge: impl Into<String>,
     budget: EdgeBudget,
 ) -> Result<(EdgeSender, EdgeReceiver)> {
+    edge_channel_with_metrics(edge, budget, MetricsRecorder::default())
+}
+
+pub(crate) fn edge_channel_with_metrics(
+    edge: impl Into<String>,
+    budget: EdgeBudget,
+    metrics: MetricsRecorder,
+) -> Result<(EdgeSender, EdgeReceiver)> {
     let edge = edge.into();
     if edge.is_empty() {
         return Err(CalcFlowError::InvalidArgument {
@@ -250,6 +262,7 @@ pub fn edge_channel(
     let shared = Arc::new(Shared {
         edge,
         budget,
+        metrics,
         state: Mutex::new(ChannelState::default()),
         capacity_available: Notify::new(),
         message_available: Notify::new(),
@@ -313,6 +326,15 @@ fn fits(charged: &EnvelopeCost, cost: &EnvelopeCost, budget: &EdgeBudget) -> boo
 }
 
 impl EdgeSender {
+    /// Validates that one message can fit this edge without enqueueing it.
+    ///
+    /// The operator collector applies this to every fan-out branch before
+    /// its first send, which keeps validation failures side-effect free.
+    pub(crate) fn validate_message(&self, message: &StreamMessage) -> Result<()> {
+        let cost = EnvelopeCost::of_message(message)?;
+        self.shared.reject_oversize(&cost)
+    }
+
     /// Enqueues one message, awaiting capacity when either hard limit is
     /// reached (the `Block` policy, spec S10.4).
     ///
@@ -336,6 +358,7 @@ impl EdgeSender {
         let notified = self.shared.capacity_available.notified();
         tokio::pin!(notified);
         let mut blocked_since: Option<tokio::time::Instant> = None;
+        let mut metrics_blocked_since: Option<MetricsTimer> = None;
         loop {
             // Register for the wakeup before re-checking the budget so a
             // release between the check and the await cannot be lost.
@@ -348,6 +371,16 @@ impl EdgeSender {
                     });
                 }
                 if fits(&state.charged, &cost, &self.shared.budget) {
+                    let blocked_elapsed = blocked_since.map(|started| started.elapsed());
+                    let metrics_blocked_elapsed = metrics_blocked_since
+                        .as_ref()
+                        .map(|timer| timer.elapsed(&self.shared.edge, "blocked_duration"))
+                        .transpose()?;
+                    self.shared.metrics.record_edge_enqueue(
+                        &self.shared.edge,
+                        EdgeTraffic::of_message(&message, cost)?,
+                        metrics_blocked_elapsed,
+                    )?;
                     state.charged = state.charged.checked_add(&cost).map_err(|error| {
                         // `fits` rejected every rows/bytes sum that could
                         // overflow, so only the `messages` component could
@@ -362,16 +395,33 @@ impl EdgeSender {
                     })?;
                     state.high_water = state.high_water.max_components(&state.charged);
                     state.queue.push_back((message, cost));
-                    if let Some(since) = blocked_since.take() {
-                        state.blocked_duration += since.elapsed();
+                    if let Some(elapsed) = blocked_elapsed {
+                        state.blocked_duration = state
+                            .blocked_duration
+                            .checked_add(elapsed)
+                            .ok_or_else(|| CalcFlowError::InvalidArgument {
+                                field: format!(
+                                    "runtime.metrics.{}.blocked_duration",
+                                    self.shared.edge
+                                ),
+                                message: "counter overflow".into(),
+                            })?;
                     }
                     drop(state);
                     self.shared.message_available.notify_one();
                     return Ok(());
                 }
                 if blocked_since.is_none() {
+                    let next_blocked = state.blocked_sends.checked_add(1).ok_or_else(|| {
+                        CalcFlowError::InvalidArgument {
+                            field: format!("runtime.metrics.{}.blocked_sends", self.shared.edge),
+                            message: "counter overflow".into(),
+                        }
+                    })?;
+                    self.shared.metrics.record_edge_blocked(&self.shared.edge)?;
+                    state.blocked_sends = next_blocked;
                     blocked_since = Some(tokio::time::Instant::now());
-                    state.blocked_sends += 1;
+                    metrics_blocked_since = Some(self.shared.metrics.timer());
                 }
             }
             // Lost-wakeup safety at this await rests on the type-level
@@ -409,7 +459,7 @@ impl EdgeSender {
 
     #[allow(
         dead_code,
-        reason = "the crate-private M2 source binding validates this before the M2.4 public runner"
+        reason = "the crate-private M2 preflight validates source bounds"
     )]
     pub(crate) fn budget(&self) -> EdgeBudget {
         self.shared.budget
@@ -437,7 +487,21 @@ impl EdgeReceiver {
             notified.as_mut().enable();
             {
                 let mut state = self.shared.state.lock();
-                if let Some((message, cost)) = state.queue.pop_front() {
+                if let Some((message, cost)) = state.queue.front() {
+                    self.shared.metrics.record_edge_dequeue(
+                        &self.shared.edge,
+                        EdgeTraffic::of_message(message, *cost)?,
+                    )?;
+                    let (message, cost) =
+                        state
+                            .queue
+                            .pop_front()
+                            .ok_or_else(|| CalcFlowError::Internal {
+                                message: format!(
+                                    "edge {:?} queue front disappeared while its lock was held",
+                                    self.shared.edge
+                                ),
+                            })?;
                     state.charged = state.charged.checked_sub(&cost)?;
                     drop(state);
                     self.shared.capacity_available.notify_one();
@@ -484,6 +548,9 @@ impl Drop for EdgeReceiver {
     fn drop(&mut self) {
         let mut state = self.shared.state.lock();
         state.receiver_closed = true;
+        self.shared
+            .metrics
+            .record_edge_drop(&self.shared.edge, state.charged);
         state.queue.clear();
         state.charged = EnvelopeCost::ZERO;
         drop(state);
@@ -672,5 +739,84 @@ mod tests {
             assert_eq!(cost.rows(), 0);
             assert_eq!(cost.bytes(), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn runtime_metrics_linearize_at_queue_commit_and_dequeue_release() {
+        let recorder = MetricsRecorder::new(["edge".into()], [], [], []);
+        let (mut sender, mut receiver) = edge_channel_with_metrics(
+            "edge",
+            EdgeBudget {
+                max_rows: 4,
+                max_bytes: 64,
+            },
+            recorder.clone(),
+        )
+        .unwrap();
+
+        sender.send(data_message(&[1, 2])).await.unwrap();
+        let enqueued = recorder.snapshot().edges.remove("edge").unwrap();
+        assert_eq!(
+            (
+                enqueued.input_batches,
+                enqueued.input_rows,
+                enqueued.input_bytes,
+                enqueued.output_batches,
+            ),
+            (1, 2, 16, 0)
+        );
+        assert_eq!(
+            (
+                enqueued.channel.queue_depth,
+                enqueued.channel.charged_rows,
+                enqueued.channel.high_water_rows,
+            ),
+            (1, 2, 2)
+        );
+
+        receiver.recv().await.unwrap().unwrap();
+        let dequeued = recorder.snapshot().edges.remove("edge").unwrap();
+        assert_eq!(
+            (
+                dequeued.output_batches,
+                dequeued.output_rows,
+                dequeued.output_bytes,
+            ),
+            (1, 2, 16)
+        );
+        assert_eq!(
+            (
+                dequeued.channel.queue_depth,
+                dequeued.channel.charged_rows,
+                dequeued.channel.charged_bytes,
+            ),
+            (0, 0, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn receiver_drop_surfaces_a_metrics_release_invariant_violation() {
+        let recorder = MetricsRecorder::new(["edge".into()], [], [], []);
+        let (mut sender, receiver) = edge_channel_with_metrics(
+            "edge",
+            EdgeBudget {
+                max_rows: 1,
+                max_bytes: 8,
+            },
+            recorder.clone(),
+        )
+        .unwrap();
+        let message = data_message(&[1]);
+        let cost = EnvelopeCost::of_message(&message).unwrap();
+        sender.send(message).await.unwrap();
+
+        recorder.record_edge_drop("edge", cost);
+        drop(receiver);
+
+        let edge = &recorder.snapshot().edges["edge"];
+        assert_eq!(edge.channel.queue_depth, 0);
+        assert_eq!(edge.channel.charged_rows, 0);
+        assert_eq!(edge.channel.charged_bytes, 0);
+        assert!(edge.drop_invariant_violated);
     }
 }
