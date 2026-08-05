@@ -10,27 +10,29 @@
   `.codex/artifacts/critiques/continuous-streaming-runtime.md`, round 3
 - Plan: `docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md`,
   tasks M2.1-M2.5 and the M2 merge gate
-- Audited PR head: `c43392f8f4eaab3c72483261b89c5641329ecb43`
+- Audited PR head: `733d261d13d2616e174d27a2679a1e09f41a8e6a`
 - Comparison `origin/main`: `d45c2b26def2c4dfe179f2b7c7c1d2411fc069b6`
 - Historical skeleton baseline: `1d5546028e2ce9ebce59c976080c3d11c1225e16`
 
-## Current Verdict (Round 3)
+## Current Verdict (Round 4)
 
-**Block.** Revision 4 closes the requested public-scope, soak-duration,
-diagnostic, panic-bound, quality, and final-head decisions. It still cannot
-support its central claim that the internal runtime is bounded: the accepted
-two-dimensional edge budget has no capacity dimension for a message that
-charges zero rows and zero bytes. Control messages have exactly that cost in
-the current public channel, and the acceptance plan does not exercise a
-stalled receiver under sustained control or empty-batch traffic.
+**Block.** Revision 5 fully resolves B6 at the design level: every envelope
+uses one finite slot, `EdgeBudget.max_rows` independently caps message count
+and charged rows, admission/release is atomic, and focused, lifecycle, stress,
+and soak criteria exercise zero-cost traffic. The artifacts nevertheless give
+that correction no valid precedence. The delta says S1-S10 remain frozen
+except for soak duration, while FR24A and the API note deliberately replace
+S10's two-dimensional public-channel contract with three admission predicates.
+An implementer cannot preserve frozen S10 and implement FR24A at the same time.
 
 **BLOCKS REMAINING: 1**
 
-Do not route revision 4 to implementation until B6 is resolved in the spec and
-API note and its regression tests are added to the acceptance map. The live PR
-delivery gaps remain real but separate: at the audited head the branch is one
-commit behind `origin/main`, Codacy reports 16 new medium complexity issues,
-three review threads are unresolved, and required Actions are not all terminal.
+Do not route revision 5 to implementation until B7 explicitly supersedes the
+affected S10/FR23/API-note contract and requires the governed documentation and
+tests to be reconciled. The live PR delivery gaps remain real but separate: at
+the audited head the branch is one commit behind `origin/main`, Codacy reports
+16 new medium complexity issues, three review threads are unresolved, and
+required Actions are not all terminal.
 
 ## Round 1 Verdict
 
@@ -738,3 +740,165 @@ public `TaskPanicked` variant, binding-qualified cursor/watermark fields,
 UTF-8-safe panic text at most 1,024 bytes, the exact 20-minute Linux soak, all
 16 Codacy findings without waiver, current-main incorporation, resolved review
 threads, green exact-head checks, and `MERGEABLE/CLEAN` final state.
+
+## Round 4 - Revision 5 Closure Review
+
+### Verdict
+
+**Revise.** B6 and every round-3 advisory are substantively resolved, but the
+new channel rule contradicts the delta's own scope-precedence declaration and
+the still-controlling S10 contract.
+
+**BLOCKS REMAINING: 1**
+
+### Blocking Issues
+
+- **B7 - The slot correction is forbidden by the artifact's own precedence
+  rule.** The completion spec says D1-D9, S1-S10, I1-I10, NG1-NG13, and A1-A8
+  remain frozen except for soak duration
+  (`.codex/artifacts/specs/continuous-streaming-m2-completion.md`, lines 46-53).
+  The controlling spec says every edge has exactly two hard limits, rows and
+  bytes, and freezes an atomic two-dimensional reservation
+  (`.codex/artifacts/specs/continuous-streaming-runtime.md`, lines 749-780).
+  Revision 5 then requires three independently checked admission predicates
+  and applies the new message-slot constraint to the existing public
+  `edge_channel` (`.codex/artifacts/specs/continuous-streaming-m2-completion.md`,
+  lines 410-426). The API note correctly calls this an observable semantic
+  correction to a public primitive
+  (`.codex/artifacts/api-notes/continuous-streaming-m2-completion.md`, lines
+  1258-1278), which confirms that it is not mere implementation freedom under
+  frozen S10.
+  - **Counter-example:** an implementer who preserves S10 keeps the current
+    `fits` predicate limited to rows and bytes, so sustained `Idle` or empty
+    batches remain unbounded and B6 reappears. An implementer who follows
+    FR24A makes the fourth zero-cost send block at `max_rows`, directly
+    invalidating S10.1/S10.5 and the current channel rustdoc/test that controls
+    are never throttled by the data budget
+    (`crates/calc-flow/src/runtime/streaming/channel.rs`, lines 315-348 and
+    663-709). Both cannot be conforming while the scope rule says only soak
+    duration may supersede S10.
+  - **Suggested fix:** keep the proposed one-slot-per-envelope design, but make
+    its authority explicit. Amend scope precedence to say revision 5
+    supersedes S10.1, S10.5, FR23, AC-S10, and their total-API/documentation
+    projections only for the independent message-slot predicate. Extend the
+    expected file scope and AC-DOCS to require corresponding updates to the
+    controlling runtime spec/API note, `docs/runtime-envelope.md`, public
+    channel rustdoc, and the old control-capacity test. Preserve the two-field
+    `EdgeBudget` shape and the exact `max_rows` reuse; no new public knob is
+    needed.
+
+### Significant Concerns
+
+- **No new significant concern.** Revision 5 resolves S8 by reporting
+  `TaskPanicked` as the sole public Rust API addition relative to `main`; S9 by
+  defining a SHA-verified, complete PR-comment evidence bundle; S10 by making
+  the full root-`AGENTS.md` matrix mandatory; and S11 by freezing Criterion's
+  relative-mean confidence-interval decision and one doubled-sample rerun.
+- **Live PR gates are implementation-delivery blockers, not design gaps.** At
+  audited head `733d261`, Codacy still reports 16 medium complexity findings,
+  the three Copilot threads remain unresolved, and five of seven Actions jobs
+  were still running. Revision 5 correctly carries those as G4-G7 rather than
+  pretending the artifact revision satisfies them.
+
+### Minor / Style Notes
+
+- **Round-3 lineage is now accurate.** Revision 5 describes round 3 as the
+  source of B6/S8-S11 and remains explicitly pending this review. **OK.**
+- **Audit anchors remain disciplined.** Comparison baseline, skeleton,
+  implementation head, and artifact starting head are separately named.
+  **OK.**
+
+### Prior-Finding Disposition
+
+- **B6 - Resolved.** FR24A/FR24B give every data/control envelope one finite
+  slot, reuse positive `max_rows` independently for slots and rows, and define
+  atomic commit, dequeue, graceful drain, cancel, close, and error release.
+  AC-M2.5-A4/A5, stress, and soak criteria can fail the prior unbounded-queue
+  implementation; a no-op stub cannot pass them.
+- **S8 - Resolved.** The compatibility ledger consistently distinguishes no
+  new callable runner API from the sole `TaskPanicked` enum addition.
+- **S9 - Resolved.** FR32A binds complete UTF-8 command output, exit status,
+  timestamps, 120 samples, hashes, and the exact head to durable PR comments
+  without creating a later commit that invalidates the run.
+- **S10 - Resolved.** Full Rust/PyO3, Python, Studio, frontend/browser,
+  supply-chain, helper, coverage, rustdoc, contract, and diff groups are
+  mandatory; focused commands are explicitly only iteration seams.
+- **S11 - Resolved.** The optional paired gate blocks only when the bootstrap
+  95% relative-mean interval's lower bound is strictly above +5%; an interval
+  still touching/crossing +5% after one doubled-sample rerun is advisory.
+
+### Axis Sweep
+
+- **Correctness:** B6's zero-cost boundedness hole is closed. Immutable `Batch`
+  sharing, DataFusion-only table execution, provider-owned array execution,
+  FIFO, source monotonicity, and no premature checkpoint/delivery claim still
+  match `docs/introduction.md`, especially lines 91-120 and 267-290. **OK apart
+  from B7's governing-contract contradiction.**
+- **Hidden assumptions:** source/sink completeness, cursor and watermark order,
+  multi-ingress control, source polling/prefetch, UDF/session ownership, and
+  terminal races are stated. Slot capacity no longer assumes positive rows or
+  bytes. **OK.**
+- **Missing edge cases:** empty data, repeated/equal controls, exact-capacity
+  blocking, receiver close, upstream error, graceful drain, cancel, UTF-8
+  truncation, dropped observers, partial fan-out, and final zero charges all
+  have named criteria. Checkpoint skew and duplicate replay remain correctly
+  deferred because M2 exposes no durable continuous runner. **OK.**
+- **Backwards compatibility:** v2 runners, Python, Studio, project/checkpoint
+  v2, generated contracts, and fixtures remain unchanged. The public channel
+  behavior change is explicit in the delta/API note, but B7 must make it legal
+  in the controlling contract and migration ledger. **Blocked only by B7.**
+- **Performance:** per-envelope work is one checked slot addition under the
+  existing queue lock; no new per-batch plan/session or payload copy is
+  proposed. Benchmark compilation is mandatory and the optional paired gate
+  is decidable. **OK.**
+- **Surface and ergonomics:** reusing `max_rows` as both row and envelope-count
+  ceiling is surprising, but the API note documents it and private status
+  exposes `message_slot_limit`. That is acceptable for this compatibility-
+  preserving slice once all governing public docs agree. **OK after B7.**
+- **Test plan:** acceptance criteria pin exact fields, limits, lifecycle cuts,
+  outcomes, evidence records, and compatibility surfaces; they cannot pass
+  with an inert stub. The full repository matrix is mandatory. **OK.**
+- **Risk and scope:** finite envelope admission is load-bearing for M3/M5
+  controls. The proposed fix is the smallest compatible correction; B7 only
+  asks the authors to authorize and propagate it, not redesign it or add a
+  third public budget field.
+
+### Counter-Proposal
+
+Keep revision 5's exact `max_rows` reuse and tests. Make a narrow artifact-only
+revision that declares the slot predicate a deliberate supersession of the
+affected S10/FR23 statements and adds those governing files to documentation
+reconciliation. A separate `max_messages` field or public runner/configuration
+surface would be larger and is not justified for M2.
+
+### Questions for the Author
+
+1. Will revision 5 explicitly supersede the affected S10/FR23 contract and
+   require all of its normative/public documentation and tests to adopt the
+   slot predicate? There is no remaining open behavior choice once that answer
+   is yes.
+
+### Current PR Gate Audit at `733d261`
+
+- Remote head matched the requested exact starting SHA
+  `733d261d13d2616e174d27a2679a1e09f41a8e6a`.
+- `origin/main` remained `d45c2b2`; the branch was seven commits ahead and one
+  commit behind, with merge base `c497906`. `git merge-tree --write-tree`
+  completed without textual conflict, but the branch still lacked current-main
+  ancestry.
+- GitHub reported `MERGEABLE` / `UNSTABLE`. Codacy was `ACTION_REQUIRED` with
+  16 new medium complexity findings.
+- Three Copilot threads remained unresolved: binding-qualified cursor,
+  binding-qualified watermark, and bounded panic text. The panic thread was
+  outdated but unresolved.
+- Two Actions jobs were green and five were in progress at audit time. These
+  results, and the exact-head soak, become stale after any later push.
+
+### Handoff
+
+Route only B7 to `cf-spec-writer` and `cf-api-designer` for a narrow precedence
+and governed-document reconciliation. B6's chosen behavior does not need
+redesign. Return that revision to `cf-critic`; only a zero-block verdict should
+go to `cf-implementer`. G1-G8, exact-head soak evidence, all 16 Codacy findings,
+all review threads, current-main ancestry, the full verification matrix, green
+checks, and `MERGEABLE/CLEAN` remain mandatory implementation/delivery gates.
