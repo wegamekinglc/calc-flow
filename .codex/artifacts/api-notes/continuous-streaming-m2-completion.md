@@ -18,22 +18,28 @@
 - Comparison baseline: `origin/main` at
   `d45c2b26def2c4dfe179f2b7c7c1d2411fc069b6`; merge base
   `c4979061cc239b43617f642e2294794f2833d95d`. The historical M2 skeleton is
-  commit `1d5546028e2ce9ebce59c976080c3d11c1225e16`, not the current-PR
-  baseline.
-- Audit anchors for this revision: implementation commit
-  `574c0fb7f678781370303100c9f5089f6ed59bca` plus completion-spec commit
-  `b530c89ccd4aa856300327aea8280244046b476a`. At the audited starting head
-  `b530c89`, the branch is three commits ahead of and one commit behind the
-  comparison `origin/main`; the implementation remains the code from
-  `574c0fb`.
-- Status: revision 4 of the proposed M2-internal API/UX delta. Revision 2
+  commit `1d5546028e2ce9ebce59c976080c3d11c1225e16`, not the comparison
+  baseline for relative-to-`main` compatibility claims.
+- Audit anchors for this revision use four deliberately distinct terms. The
+  **comparison baseline** is `origin/main` at `d45c2b2`; the **historical M2
+  skeleton** is `1d55460`; the **audited implementation head** is
+  `574c0fb7f678781370303100c9f5089f6ed59bca`; and the **artifact starting
+  head** is `963a781b9a68fefa406d1f29400f98110979e5ce`. Commits after `574c0fb`
+  through `963a781` change completion artifacts, not implementation code. At
+  `963a781`, the branch is six commits ahead of and one commit behind the
+  comparison baseline. A future synchronized final PR head is none of these
+  anchors unless its exact 40-character SHA is recorded separately.
+- Status: revision 5 of the proposed M2-internal API/UX delta. Revision 2
   addressed B1-B5 and S1-S7 from
   [`../critiques/continuous-streaming-m2-completion.md`](../critiques/continuous-streaming-m2-completion.md).
   Revision 3 synchronized the crate-private real-runtime soak seam and the
   internal `LaunchId`/context job-ID split. Revision 4 reconciles that contract
   with the current PR, the universal 20-minute soak standard, binding-qualified
   source diagnostics, bounded panic text, and the PR-added public
-  `CalcFlowError::TaskPanicked` variant. The Rust snippets below remain precise
+  `CalcFlowError::TaskPanicked` variant. Revision 5 closes critique B6 at the
+  design level with finite envelope-slot admission and resolves round-3
+  compatibility, soak-evidence, verification, and performance precision. It
+  remains pending `cf-critic` review. The Rust snippets below remain precise
   implementation contracts; newly named M2 runtime types remain `pub(crate)`.
   This note does not authorize or revise the future public A6 runner surface.
 
@@ -89,8 +95,9 @@ The public M1 building blocks also remain exported: `StreamExecutionPlan`,
 message constructors are crate-private. Baseline `CalcFlowError` is
 `#[non_exhaustive]` and already contains `EdgeClosed`.
 
-At audited starting head `b530c89`, every callable runner signature and
-re-export above is unchanged. The PR adds this public Rust error variant:
+At artifact starting head `963a781`, every callable runner signature and
+re-export above is unchanged from audited implementation head `574c0fb`. The
+PR adds this public Rust error variant relative to the comparison baseline:
 
 ```rust
 #[error("task {task_id} panicked: {message}")]
@@ -108,10 +115,11 @@ The current PR also contains the crate-private source-driven runtime:
 whole-job preflight, source/operator/sink tasks, a private runner and job
 lifecycle, reaper ownership, status and metrics, stress, the real-runtime soak
 seam, and Criterion cases. These internals are implementation evidence, not a
-public runner and not final-head completion evidence. The current gaps are the
-binding-qualified source fields, bounded panic text, 20-minute soak conversion
-and evidence, normative-document reconciliation, quality findings, review
-threads, and final-head gates recorded by the delta specification.
+public runner and not final-head completion evidence. The implementation gaps
+at `574c0fb` are finite envelope-slot admission, binding-qualified source
+fields, bounded panic text, 20-minute soak conversion and evidence,
+normative-document reconciliation, quality findings, review threads, and
+final-head gates recorded as G1-G8 by delta-spec revision 5.
 
 ## Decisions
 
@@ -179,6 +187,36 @@ cancel has no drain promise. A connector may tolerate duplicate writes, but
 without a barrier-aligned durable source cursor and aligned manifest that
 property is not an engine delivery guarantee. The first honest at-least-once
 claim for the continuous runner belongs to M5's S9 capability derivation.
+
+### Decision 4 - reuse `max_rows` as an independent envelope-slot limit
+
+**Proposed choice for B6:** every queued `StreamMessage` consumes exactly one
+finite slot, whether it is `Data`, `Watermark`, `Idle`, `EndOfInput`, or a
+test-only injected `Barrier`. `Data` also retains its independent measured row
+and byte charges. An empty table or external batch whose measured cost is zero
+rows and zero bytes therefore still consumes one slot.
+
+M2 reuses the existing positive `EdgeBudget.max_rows` value as both the slot
+ceiling and the row ceiling, applied independently. It does not add a
+`max_messages` field, control-specific constructor, runner option, or other
+public configuration/control surface. Admission is one atomic predicate and
+queue commit:
+
+```text
+queued_messages + 1        <= budget.max_rows
+charged_rows + message_rows <= budget.max_rows
+charged_bytes + message_bytes <= budget.max_bytes
+```
+
+All three checked sums must fit. A blocked send owns no reservation. Dequeue
+releases its slot, row, and byte charges exactly once before waking the sender;
+a full slot dimension therefore parks a zero-row/zero-byte message until one
+queued envelope is removed. Receiver close, explicit cancellation, and task
+error release every queued charge and wake blocked sends during convergence;
+graceful shutdown drains every accepted queue item, committed source slot, and
+already-started edge send before ordered EOF. The same invariant applies to
+internal edges, synthesized source/sink boundary edges, and the existing
+public `edge_channel` primitive.
 
 ## Approved M2 visibility and signatures
 
@@ -262,8 +300,9 @@ hex encoding. Projection validates uniqueness across the full internal plus
 boundary ID set. `RuntimeEdgeKind::{SourceBoundary, Internal, SinkBoundary}`
 and the structured producer/consumer endpoints retain readable identities for
 diagnostics, so code never parses an ID back into topology. Every source and
-sink boundary is a real dual-budget edge and participates in status, partial
-fan-out evidence, backpressure, and enqueue/dequeue metrics.
+sink boundary is a real bounded edge. Its unchanged two-field `EdgeBudget`
+drives atomic slot/row/byte admission, and the edge participates in status,
+partial fan-out evidence, backpressure, and enqueue/dequeue metrics.
 
 ### Bindings, preflight, and three-stage launch
 
@@ -431,7 +470,7 @@ error is `CalcFlowError::InvalidArgument` with machine-readable field
 watermark, expose progress publicly, or add M3 minimum/idle/reactivation
 semantics.
 
-At audited starting head `b530c89`, `source_task.rs` still reports
+At audited implementation head `574c0fb`, `source_task.rs` still reports
 `source.cursor` and `source.watermark`, with the binding only in free-form
 text. Correcting the two fields and pinning their pre-enqueue behavior is an
 internal implementation blocker (G1); it requires no public signature or
@@ -604,7 +643,7 @@ boundary within the remaining 1,021 bytes, and appends the ellipsis. The stored
 message, including the ellipsis, is therefore valid UTF-8 and at most 1,024
 bytes. A non-string payload remains exactly `non-string panic payload`.
 
-At audited starting head `b530c89`, the shared `panic_message` helper is used
+At audited implementation head `574c0fb`, the shared `panic_message` helper is used
 by supervision and connector-open capture, but returns string payloads without
 a bound. Implementing the common bound plus ASCII, multibyte-boundary, short,
 and non-string tests is G2. It preserves the public variant's fields and
@@ -972,10 +1011,31 @@ pub(crate) struct M2MetricsSnapshot {
     pub(crate) sinks: BTreeMap<String, SinkMetrics>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct EdgeRuntimeMetrics {
+    /// Fixed from RuntimeEdge::budget.max_rows during registry construction.
+    pub(crate) message_slot_limit: usize,
+    pub(crate) channel: ChannelMetrics,
+    pub(crate) input_batches: u64,
+    pub(crate) input_rows: u64,
+    pub(crate) input_bytes: u64,
+    pub(crate) output_batches: u64,
+    pub(crate) output_rows: u64,
+    pub(crate) output_bytes: u64,
+    pub(crate) drop_invariant_violated: bool,
+}
+
 #[derive(Clone)]
 pub(crate) struct MetricsRecorder { /* bounded stable-ID registry */ }
 
 impl MetricsRecorder {
+    pub(crate) fn new(
+        edge_budgets: impl IntoIterator<Item = (String, EdgeBudget)>,
+        sources: impl IntoIterator<Item = String>,
+        nodes: impl IntoIterator<Item = String>,
+        sinks: impl IntoIterator<Item = String>,
+    ) -> Self;
+
     pub(crate) fn snapshot(&self) -> M2MetricsSnapshot;
     // Every checked record operation accepts IDs and numeric costs/durations,
     // never a cursor payload, row payload, attribute map, or arbitrary label.
@@ -1026,8 +1086,16 @@ impl MetricsRecorder {
 
 `JobMetrics` includes terminal state/cause, task-error count, reaper joins,
 reaper join errors, and abandoned-runner drops. `EdgeRuntimeMetrics` includes
-the existing consistent `ChannelMetrics` plus input/output batch, row, and
-byte counts. `SourceMetrics` includes poll count, data batch/row/byte counts,
+the fixed private `message_slot_limit`, the existing consistent
+`ChannelMetrics`, and input/output batch, row, and byte counts. The strict
+registry is constructed from stable edge IDs paired with their validated
+budgets; it copies `budget.max_rows` into `message_slot_limit`. Consequently
+the full private status projection is
+`status.metrics.edges[edge_id].message_slot_limit` beside
+`status.metrics.edges[edge_id].channel`. The existing
+`status.edges[edge_id]` convenience projection remains the same
+`ChannelMetrics` from that snapshot, and the public `ChannelMetrics` shape does
+not gain a field. `SourceMetrics` includes poll count, data batch/row/byte counts,
 latest sequence, end state, and errors. `OperatorMetrics` includes input and
 fully-fanned-out output counts, processing duration, and errors.
 `SinkMetrics` includes successfully delivered batch/row/byte counts, write
@@ -1035,14 +1103,20 @@ duration, and errors. `EdgeTraffic` is derived transiently from the message:
 one batch for `Data`, its rows/estimated bytes, and zero batches/rows/bytes
 for control. It stores no payload.
 
-Every internal or boundary `EdgeSender` calls `record_edge_enqueue` under the
-channel-state lock at successful queue commit. Every `EdgeReceiver` calls
-`record_edge_dequeue` under that lock at dequeue/reservation release. Thus an
-earlier branch may report one enqueue while a later branch reports zero and
-the source/operator fully-fanned-out counter remains zero. Operator input is
-recorded after edge dequeue; operator output after all branch sends; per-sink
-delivery after that sink write succeeds. Queue current/high-water charges
-come from the same consistent channel snapshot.
+Every internal or boundary `EdgeSender` atomically checks the prospective slot,
+row, and byte sums under the channel-state lock. If any dimension would exceed
+its limit, it records one blocked send and parks without reserving anything.
+Otherwise it calls `record_edge_enqueue` and commits the one-slot plus row/byte
+reservation with the infallible queue push under that same lock. Every
+`EdgeReceiver` calls `record_edge_dequeue` under that lock immediately before
+the pop and one-time release. Thus an earlier branch may report one enqueue
+while a later branch reports zero and the source/operator fully-fanned-out
+counter remains zero. Operator input is recorded after edge dequeue; operator
+output after all branch sends; per-sink delivery after that sink write
+succeeds. `queue_depth` equals charged messages, and both it and
+`high_water_depth` are always at most `message_slot_limit`; current/high-water
+row and byte charges remain independently bounded. All gauges come from the
+same consistent snapshot.
 
 All ordinary counters are monotone checked `u64` and never wrap. An ordinary
 record overflow is the operation's primary failure. Terminal convergence is
@@ -1060,7 +1134,14 @@ The short stress harness is test-only. Seeds `0..100` feed one fixed pure
 seed-to-gate permutation function over named source-ready, edge-release,
 sink-release, EOF, drain, and cancel gates. The harness releases exactly that
 sequence, prints the seed on failure, and advances paused Tokio time only for
-modeled timers; it does not claim Tokio itself has a seeded scheduler.
+modeled timers; it does not claim Tokio itself has a seeded scheduler. A
+separate paused-time unary phase sends at least ten times the configured slot
+limit for each of sustained `Idle`, repeated non-regressing watermarks, and a
+batch first verified to charge one message, zero rows, and zero bytes while the
+receiver is gated. Each shape reaches the exact slot limit, leaves the next send
+pending without queue growth, resumes exactly one send per dequeue, preserves
+FIFO, and converges with zero charges under graceful shutdown, explicit cancel,
+receiver close, and injected upstream task error.
 
 The ignored soak lives in the crate-private `#[cfg(test)]`
 `runtime::streaming::soak` module and exposes no public or integration-test
@@ -1090,24 +1171,48 @@ by a separate short smoke/stress test rather than being used as the soak's
 normal termination path. This test-only seam does not expand public v2,
 Python, Studio, or any M3+ surface.
 
-On Linux it reads `VmRSS` from `/proc/self/status` every ten seconds for at
-least 120 samples and at least 1,200 seconds of measured workload. The first
-five minutes (30 samples) are warm-up; the remaining 15 minutes feed the RSS
-slope and median gates. The harness emits commit/kernel/rustc/allocator/
-RSS-source/cadence/target-duration/warm-up/sample-count metadata plus
-conservation and final task/queue/reaper convergence evidence. A non-Linux run
-reports `unsupported_platform` and is not passing soak evidence. The slope,
-median, task, budget, and loss/duplication thresholds are exactly M2C-FR32.
+Throughout the enabled workload, at least every fourth data event is a harness-
+verified zero-row/zero-byte batch; positive-row and empty batches share the
+same accepted-sequence conservation oracle. At least one edge must reach
+`high_water_depth == message_slot_limit` and record a blocked send while
+processing zero-cost data, or the soak fails for not exercising slot
+backpressure.
+
+On Linux it reads `VmRSS` from `/proc/self/status` every ten seconds for an
+exactly 1,200-second measured workload and exactly 120 samples. Sample one is
+taken after the first interval and sample 120 at the deadline; there is no
+time-zero sample. The first five minutes (30 samples) are warm-up; the
+remaining 15 minutes feed the RSS slope and median gates. Every sample includes
+each edge's `message_slot_limit`, current/high-water depth, current/high-water
+rows and bytes, and blocked-send count/duration. The harness emits
+commit/kernel/rustc/allocator/RSS-source/cadence/target-duration/warm-up/sample-
+count metadata plus conservation and final task/queue/reaper convergence
+evidence. A non-Linux run reports `unsupported_platform` and is not passing
+soak evidence. The slope, median, task, budget, slot, and loss/duplication
+thresholds are exactly M2C-FR32.
+
+The tester retains the complete unfiltered combined stdout/stderr as one UTF-8
+log containing newline-delimited JSON metadata, exactly 120 ordered samples,
+and one final result. Without committing the log, the tester publishes it and
+the `calc-flow.m2-soak-evidence.v1` manifest in SHA-256-verified, newline-
+aligned PR comment parts marked `calc-flow-m2-soak-evidence:v1`. The manifest
+names PR number, exact 40-character head SHA, literal command, UTC timestamps,
+elapsed seconds, exit status, full-log hash, part count, and ordered comment
+URLs. `cf-reviewer` must reassemble the literal log, verify all hashes and
+record counts, and confirm that manifest SHA, log commit, and then-current PR
+head are equal. A summary, selected samples, local path, mutable external link,
+disabled result, non-Linux skip, or earlier-head bundle is not evidence; any
+later push requires a new run and bundle.
+
 The 20-minute command is an external/manual delivery gate and has not been run
 by this artifact revision; handoff must continue to report it as not run unless
-a real captured result from the synchronized final Linux head is available.
-
-At audited starting head `b530c89`, the soak is still named `one_hour_*`, uses
-360 samples and a 60-sample warm-up, and lacks the required final convergence
-evidence. Converting the private seam and producing final-head Linux evidence
-is G3. The acceptance duration is an observable test/delivery contract only;
-it does not justify a public duration setting, runner control method, or
-integration-test seam.
+the reviewer-verified bundle exists for the synchronized final Linux head. At
+audited implementation head `574c0fb`, the soak is still named `one_hour_*`,
+uses 360 samples and a 60-sample warm-up, and lacks the required slot and final
+convergence evidence. Converting the private seam and producing final-head
+Linux evidence is G3/G8. The acceptance duration is an observable test/delivery
+contract only; it does not justify a public duration setting, runner control
+method, or integration-test seam.
 
 Ordinary verification only compiles Criterion. The opt-in baseline is:
 
@@ -1118,9 +1223,24 @@ cargo bench -p calc-flow --bench core -- stream
 Because Criterion is an external target and M2 is private, unary overhead
 measures the already-public M1 `StreamOperator` kernel plus public bounded
 channel primitives. No internal task/runner is exported for benchmarking.
-Channel round-trip and fan-out use the same public primitives. A 5% gate
-requires same-machine paired confidence intervals; otherwise point estimates
-are reported only.
+Channel round-trip and fan-out use the same public primitives. M2 requires
+benchmark compilation, not an executed paired comparison. If a reviewer
+invokes the 5% comparison, base and head run on the same machine and
+environment, and Criterion's bootstrap 95% confidence interval for relative
+change in mean execution time decides each case: a lower bound strictly above
+`+5.0%` blocks; an upper bound at most `+5.0%` passes; an interval touching or
+crossing `+5.0%` is inconclusive. An inconclusive case gets one same-machine
+rerun with at least twice the original measurement sample size. If it remains
+inconclusive, it is a non-blocking advisory and its point estimate cannot
+override the interval. When the comparison is not invoked, point estimates are
+advisory and compilation is the only M2 performance gate.
+
+These focused seams are not a repository-verification waiver. The synchronized
+exact head must pass every current root-`AGENTS.md` command group, including
+Rust/PyO3, Python runner and wildcard-exception compatibility, Studio backend,
+frontend/browser/generated contracts, supply chain, helpers, coverage,
+rustdoc, and diff checks. The handoff maps each exact-head Action check to
+those groups.
 
 ## Public compatibility and migration
 
@@ -1132,13 +1252,38 @@ downstream matching already requires a wildcard. Completion work preserves
 this variant while bounding the internally captured `message`; it does not add
 or change a public constructor, method, trait, runner, status type, or control
 surface. M2C-FR1A calls this shape “existing” relative to the historical
-skeleton/current PR implementation; that wording does not erase its addition
-relative to the PR base.
+skeleton and audited implementation head; that wording does not erase its
+addition relative to the comparison baseline.
+
+The existing public bounded-channel signatures also remain structurally
+unchanged:
+
+```rust
+pub struct EdgeBudget {
+    pub max_rows: usize,
+    pub max_bytes: usize,
+}
+
+pub fn edge_channel(
+    edge: impl Into<String>,
+    budget: EdgeBudget,
+) -> Result<(EdgeSender, EdgeReceiver)>;
+```
+
+Their boundedness contract is strengthened: `max_rows` independently caps
+both queued envelope slots and charged rows, while `max_bytes` caps charged
+bytes. This is one observable semantic correction to an existing public
+primitive, not a new public item or configuration field. `ChannelMetrics`
+keeps its current public fields; callers already know the budget they supplied,
+while the private M2 status carries `message_slot_limit` beside the snapshot.
 
 - Do not add exports to `crates/calc-flow/src/lib.rs` or public re-exports in
   `runtime::streaming`/`runtime` for any type in this note.
 - Do not add a second `StreamingRunner`, alias the v2 type, deprecate v2, or
   change existing v2 signatures, fixtures, or delivery behavior.
+- Do not add `EdgeBudget::max_messages`, a control-specific budget, or a
+  message-limit method. Document and enforce the independent `max_rows` slot
+  ceiling on every `edge_channel` instead.
 - Do not add `CheckpointTimeout` for M2. The PR-added public `TaskPanicked`
   shape and the baseline public `EdgeClosed` shape remain unchanged.
 - Do not add another public error variant for sink identity, multi-ingress
@@ -1239,6 +1384,16 @@ Separate focused tests must pin:
 - multi-ingress watermark/idle and all barrier injection failing before
   downstream observation;
 - source/sink route and capability failures before any open flag changes;
+- `EdgeBudget::new(3, sufficient_bytes)` separately admitting exactly three
+  repeated `Idle`, equal-or-increasing watermarks, and verified one-slot/
+  zero-row/zero-byte data messages, leaving the fourth send pending at depth
+  three, then completing exactly one blocked send per dequeue in FIFO order
+  over at least 30 messages and finishing with every charge zero;
+- a real unary source/operator edge stopping source polling once sustained
+  idle, watermark, or empty-data traffic reaches its slot limit, allowing only
+  the one already-started poll and one D3 prefetch slot, then converging cleanly
+  under separate graceful-drain, cancel, receiver-close, and upstream-error
+  cases;
 - three-sink ordering and sink-two failure preventing sink three;
 - natural end/graceful shutdown drain versus explicit cancel no-drain;
 - task failure > explicit cancel > deadline, including a task that first
@@ -1330,6 +1485,10 @@ began-open resource exactly once, and verify stable bounded cleanup diagnostics.
   `CheckpointTimeout`.
 - Stable-ID-only metrics recording prevents payloads and arbitrary labels
   from entering observability by construction.
+- Reusing `max_rows` as an independent slot ceiling closes zero-cost queue
+  growth without adding a third public budget knob; the private
+  `message_slot_limit` projection makes the otherwise surprising reuse explicit
+  in runtime and soak diagnostics.
 
 ## Explicitly deferred public A6 work
 
@@ -1348,9 +1507,11 @@ implemented by M2:
 
 ## Public API blockers for implementation
 
-- No public API design blocker prevents G1-G7 from being implemented. The
-  remaining work is crate-private behavior, diagnostics, test evidence,
-  documentation, quality, review, and final-head verification.
+- No public API design blocker prevents G1-G8 from being implemented. The
+  remaining surface work is the boundedness-semantic correction on the
+  existing public channel; all new runner, status, metrics, and control shapes
+  remain crate-private. Diagnostics, tests, documentation, quality, review,
+  and final-head verification are still required.
 - The PR-added `TaskPanicked` variant is approved as the sole public Rust API
   delta in this slice. Its fields and display are frozen; the remaining panic
   work is only the private 1,024-byte capture bound.
@@ -1364,10 +1525,11 @@ implemented by M2:
 
 ## Open questions
 
-- **No open M2 behavior or public-scope question after critique approval.**
-  OQ1-OQ3, the deadline outcome, diagnostic fields, panic bound, and soak
-  duration are decided above. G1-G7 remain delivery blockers, not design
-  questions.
+- **No open proposed M2 behavior or public-scope question.** OQ1-OQ3, B6's
+  slot invariant, the deadline outcome, diagnostic fields, panic bound, soak
+  duration/evidence, and optional performance decision are specified above.
+  Revision 5 remains pending critic review, so this is not an approval claim.
+  G1-G8 remain delivery blockers, not design questions.
 - The public A6 integration is a separately reviewed post-M5 change containing
   both M4 state and complete M5 manifest/checkpoint behavior; release planning
   may name that cut, but must not split its durability promise.
@@ -1379,13 +1541,15 @@ implemented by M2:
 
 ## Handoff
 
-The three required decisions are closed: public A6 is deferred, M2
+The four required decisions are specified: public A6 is deferred, M2
 multi-ingress watermark/idle fails closed while unary control passes through,
-and ordinary sinks report process-local ordered delivery only. PR #83 adds no
-public callable runner API, but it does add the semver-compatible public
-`TaskPanicked` variant; the completion work preserves its shape and bounds only
-internally captured text. The universal 20-minute real-runtime soak remains an
-unexecuted external/manual gate at the exact command above; its short
-Drop/reaper smoke is independent. Next role: `cf-critic` for an adversarial
-pass over revision 4 before `cf-implementer` closes G1-G5. This note does not
-certify M2 internals, PR #83, or the continuous-streaming feature as complete.
+ordinary sinks report process-local ordered delivery only, and every data or
+control envelope consumes one finite slot independently of its row/byte cost.
+PR #83 adds no public callable runner API, but it does add the semver-compatible
+public `TaskPanicked` variant; the completion work preserves its shape and
+bounds only internally captured text. The universal exact 20-minute/
+120-sample real-runtime soak remains an unexecuted external/manual gate at the
+exact command above; its short Drop/reaper smoke is independent. Next role:
+`cf-critic` for an adversarial pass over revision 5 before `cf-implementer`
+closes G1-G5/G8. This note does not certify M2 internals, PR #83, or the
+continuous-streaming feature as complete.
