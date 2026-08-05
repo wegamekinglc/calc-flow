@@ -10,29 +10,25 @@
   `.codex/artifacts/critiques/continuous-streaming-runtime.md`, round 3
 - Plan: `docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md`,
   tasks M2.1-M2.5 and the M2 merge gate
-- Audited PR head: `733d261d13d2616e174d27a2679a1e09f41a8e6a`
+- Audited PR head: `6d5740d3df733a02450d45bdde168a3dfb4b03e9`
 - Comparison `origin/main`: `d45c2b26def2c4dfe179f2b7c7c1d2411fc069b6`
 - Historical skeleton baseline: `1d5546028e2ce9ebce59c976080c3d11c1225e16`
 
-## Current Verdict (Round 4)
+## Current Verdict (Round 5)
 
-**Block.** Revision 5 fully resolves B6 at the design level: every envelope
-uses one finite slot, `EdgeBudget.max_rows` independently caps message count
-and charged rows, admission/release is atomic, and focused, lifecycle, stress,
-and soak criteria exercise zero-cost traffic. The artifacts nevertheless give
-that correction no valid precedence. The delta says S1-S10 remain frozen
-except for soak duration, while FR24A and the API note deliberately replace
-S10's two-dimensional public-channel contract with three admission predicates.
-An implementer cannot preserve frozen S10 and implement FR24A at the same time.
+**Proceed.** Revision 6 resolves B7 without weakening B6 or broadening scope.
+The precedence chain now authorizes exactly the slot-related S10.1/S10.5,
+FR23, inputs-row, AC-S10, and projection changes, while preserving the rest of
+S10 and A1-A8. The public `(R, B)` behavior change, migration rule, unchanged
+signatures, sole `TaskPanicked` item addition, private runner boundary, tests,
+soak evidence, performance rule, and final-head gates are explicit.
 
-**BLOCKS REMAINING: 1**
+**BLOCKS REMAINING: 0**
 
-Do not route revision 5 to implementation until B7 explicitly supersedes the
-affected S10/FR23/API-note contract and requires the governed documentation and
-tests to be reconciled. The live PR delivery gaps remain real but separate: at
-the audited head the branch is one commit behind `origin/main`, Codacy reports
-16 new medium complexity issues, three review threads are unresolved, and
-required Actions are not all terminal.
+Revision 6 is approved for implementation. This is artifact approval only, not
+M2 completion or PR approval: G1-G8, the 20-minute exact-head Linux evidence,
+all 16 Codacy findings, all review threads, current-main ancestry, the full
+verification matrix, green checks, and `MERGEABLE/CLEAN` remain mandatory.
 
 ## Round 1 Verdict
 
@@ -902,3 +898,189 @@ redesign. Return that revision to `cf-critic`; only a zero-block verdict should
 go to `cf-implementer`. G1-G8, exact-head soak evidence, all 16 Codacy findings,
 all review threads, current-main ancestry, the full verification matrix, green
 checks, and `MERGEABLE/CLEAN` remain mandatory implementation/delivery gates.
+
+## Round 5 - Revision 6 Approval Review
+
+### Verdict
+
+**Proceed.** The revised spec and API note are internally coherent,
+implementable, and sufficiently testable. B7 is resolved and no new blocker or
+artifact-design advisory remains.
+
+**BLOCKS REMAINING: 0**
+
+### Blocking Issues
+
+None.
+
+### Significant Concerns
+
+None. The live implementation and PR gaps below remain mandatory delivery
+work, but the artifacts identify them accurately and do not claim they are
+already satisfied.
+
+### Minor / Style Notes
+
+None.
+
+### B7 Disposition
+
+- **B7 - Resolved.** Revision 6 establishes an unambiguous authority order:
+  the delta controls its two named supersessions, the completion API note owns
+  delegated signatures/projections, and the total spec/API note retain every
+  unlisted rule
+  (`.codex/artifacts/specs/continuous-streaming-m2-completion.md`, lines
+  59-74). It then enumerates the exact bounded-envelope correction: S10.1's
+  exhaustive two-dimension wording, S10.5's reservation dimensionality, and
+  only the matching parts of FR23, the edge-budget inputs row, AC-S10, and
+  their projections change; S10.2-S10.4, FIFO, close wakeup, no lost wakeups,
+  single-producer ownership, D1-D9, S1-S9, I1-I10, NG1-NG13, and A1-A8 remain
+  frozen (spec lines 87-112). The API note mirrors that boundary and states
+  that it cannot override the delta
+  (`.codex/artifacts/api-notes/continuous-streaming-m2-completion.md`, lines
+  64-114). An implementer now has one conforming path.
+- **Governed reconciliation is enforceable.** G4, AC-PRECEDENCE, AC-DOCS,
+  expected file scope, and delivery step 3 require the total spec/API note,
+  runtime-envelope documentation, `EdgeBudget`/channel rustdoc, obsolete
+  control-capacity test, and `CHANGELOG.md` to adopt the new rule before
+  delivery. The delta is immediately authoritative, so this work cannot be
+  deferred as optional documentation cleanup.
+
+### Prior-Finding Disposition
+
+- **B1-B5 - Remain resolved.** The three-stage launch, slot-commit drain cut,
+  core-owned convergence driver, non-recursive terminal metrics, and
+  cancellation-safe start observer still have precise ownership states,
+  linearization points, and adversarial poll/drop tests.
+- **B6 - Remains resolved.** Every data/control envelope consumes one slot;
+  rows and bytes retain independent charges. Atomic commit/release, zero-cost
+  exact-capacity blocking, source-poll propagation, graceful/cancel/close/error
+  convergence, metrics, 100-seed stress, and the real-runtime soak all exercise
+  the formerly unbounded case.
+- **S1-S7 - Remain resolved.** Internal-only milestone reporting,
+  non-transactional fan-out, owned runtime-plan extraction, premature-close
+  failure, start/teardown aggregation, edge metric boundaries, and executable
+  stress/soak/benchmark seams remain explicit.
+- **S8-S11 - Remain resolved.** `TaskPanicked` is correctly classified,
+  durable soak evidence is SHA-bound and reviewer-verifiable, the full
+  repository matrix is mandatory, and the optional Criterion comparison has
+  one deterministic confidence-interval rule.
+
+### Requirement Audit
+
+- **Artifact precedence:** **OK.** Only the two named supersessions outrank the
+  total artifacts; no critique, plan, or API-note text can silently widen
+  them.
+- **`(R, B)` semantics:** **OK.** One unchanged public
+  `EdgeBudget { max_rows: R, max_bytes: B }` permits at most `R` queued
+  envelopes, independently at most `R` charged rows, and at most `B` charged
+  bytes. A blocked send owns nothing and dequeue/teardown releases every
+  dimension exactly once.
+- **Compatibility and migration:** **OK.** Struct literals, constructor, and
+  `edge_channel` signature remain source-compatible; zero-cost traffic may
+  observably block earlier. Direct callers receive the actionable rule
+  `R >= max(required_row_limit, required_simultaneous_messages)`, the coupling
+  is disclosed, and docs/changelog/tests must record it. Non-empty data retains
+  its prior effective bound because each queued envelope contributes at least
+  one charged row.
+- **Public surface:** **OK.** No source-driven runner, job/status, control
+  constructor, message-limit field/method, Python/Studio member, or project/
+  checkpoint field is introduced. Public A6 remains a separately reviewed
+  post-M5 atomic cut; v2 runners remain available.
+- **`TaskPanicked`:** **OK.** It is the sole public Rust API item addition
+  relative to `main`, is semver-compatible because the enum is non-exhaustive,
+  keeps its exact fields/display, and only internal capture gains the
+  1,024-byte UTF-8-safe bound. The channel correction is separately and
+  accurately classified as an observable behavior delta, not another item.
+- **Implementability and tests:** **OK.** AC-M2.5-A4/A5/A6 reject the current
+  row/byte-only implementation and an inert stub. They pin unchanged public
+  shape, exact slot limit, stalled third send, one-send-per-dequeue resumption,
+  old-test removal, preserved row/byte/oversize/FIFO/wakeup behavior, source
+  polling, all terminal paths, and no public runner/control expansion.
+- **Soak evidence:** **OK.** The only passing command runs the real private
+  runtime on Linux for exactly 1,200 measured seconds with exactly 120
+  ten-second samples, 30-sample warm-up, zero-cost slot pressure, accepted-to-
+  both-sinks conservation, final task/queue/reaper convergence, and RSS gates.
+  The complete unfiltered log plus `calc-flow.m2-soak-evidence.v1` manifest is
+  SHA-256-parted in PR comments; reviewer reassembly, exact head equality,
+  exit zero, record counts, and invalidation after any push are mandatory.
+- **Performance:** **OK.** Benchmark compilation is mandatory. A paired run is
+  optional; if invoked, only Criterion's bootstrap 95% relative-mean interval
+  decides each case, with lower bound strictly above +5% blocking and one
+  doubled-sample rerun for an interval touching/crossing +5%. Remaining
+  inconclusiveness is advisory.
+- **Quality and verification:** **OK.** Zero Codacy findings means zero, with
+  no waiver, exclusion, threshold, or analyzer change. Every current root
+  `AGENTS.md` command group, exact-head Actions/Codacy, generated-contract
+  diffs, review threads, current-main ancestry, soak bundle, and clean
+  mergeability are required at one pushed head.
+
+### Axis Sweep
+
+- **Correctness:** immutable `Batch` sharing, DataFusion-only table execution,
+  provider-owned array execution, FIFO, source monotonicity, deterministic
+  lifecycle outcomes, and no checkpoint/delivery overclaim remain consistent
+  with `docs/introduction.md`. **OK.**
+- **Hidden assumptions:** sortedness/order, empty traffic, source/sink setup,
+  capability bounds, schema/kind checks, UDF/session ownership, multi-ingress
+  control, and terminal races are stated. **OK.**
+- **Missing edge cases:** empty/zero-cost data, repeated/equal controls,
+  exact-capacity blocking, premature close, source error, cancellation, UTF-8
+  truncation, partial fan-out, dropped observers, and final zero charges are
+  covered. Single-row and null-only-column calculation remain on the unchanged
+  DataFusion/operator path; this delta adds no value-sensitive branch.
+  Checkpoint skew and replay duplicates are correctly deferred because M2
+  exposes no durable continuous runner. **OK.**
+- **Backwards compatibility:** the exact item/behavior deltas and unaffected
+  Rust v2, Python, Studio, schemas, generated contracts, and fixtures are
+  separated and tested. **OK.**
+- **Performance:** the hot path adds one checked message-count predicate under
+  the existing channel lock; no per-batch planning/session or payload copy is
+  introduced. Measurement gates are precise. **OK.**
+- **Surface and ergonomics:** reusing `max_rows` for two independent ceilings
+  is surprising but fully documented, observable through existing depth
+  metrics/private slot status, and accompanied by a migration formula. **OK.**
+- **Test plan:** exact behaviors, failure modes, evidence records, compatibility
+  surfaces, and repository-wide commands are testable and reject a stub.
+  **OK.**
+- **Risk and scope:** finite envelope admission is load-bearing for later
+  controls; the design closes it without importing M3-M5 semantics or adding a
+  third public knob. **OK.**
+
+### Counter-Proposals
+
+None. Revision 6 is the smallest coherent version of the approved design.
+
+### Questions for the Author
+
+None.
+
+### Current PR Gate Audit at `6d5740d`
+
+- Remote head matched the requested exact SHA
+  `6d5740d3df733a02450d45bdde168a3dfb4b03e9`.
+- `origin/main` remained `d45c2b2`; the branch was ten commits ahead and one
+  commit behind, with merge base `c497906`. `git merge-tree --write-tree`
+  completed without textual conflict, but current-main ancestry was still
+  absent.
+- GitHub reported `MERGEABLE` / `UNSTABLE`. Codacy remained
+  `ACTION_REQUIRED` with 16 new medium complexity findings.
+- Three Copilot threads remained unresolved: binding-qualified cursor,
+  binding-qualified watermark, and bounded panic text. The panic thread was
+  outdated but unresolved.
+- Two Actions jobs were green and five were still in progress at audit time.
+  The exact 20-minute Linux soak bundle does not exist for this artifact head,
+  and every result becomes stale after a later push.
+
+### Handoff
+
+The artifact gate is approved with zero blockers and no design advisories.
+Route revision 6 to `cf-api-designer` for the governed total-API projection and
+to `cf-implementer` for G1-G5/G8. Implementation must preserve the exact
+`(R, B)` semantics and unchanged public signatures, keep every new runner/job/
+status/control type crate-private, retain `TaskPanicked` as the sole public item
+addition, and make no Python/Studio/schema/fixture change. `cf-tester` and
+`cf-reviewer` must still enforce the RED/GREEN map, AC-PRECEDENCE, exact
+20-minute/120-sample SHA-verified Linux bundle, zero Codacy findings without
+waiver, resolved threads, full matrix, current-main ancestry, green exact-head
+checks, and `MERGEABLE/CLEAN` before M2 or PR completion is claimed.
