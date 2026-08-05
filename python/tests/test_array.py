@@ -1651,6 +1651,52 @@ def test_expression_rejects_broadcast_output_above_operation_limit(
 
 
 @pytest.mark.parametrize("backend", ["numpy", "jax"])
+def test_expression_rejects_matmul_output_above_operation_limit_before_allocation(
+    backend: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    namespace: Any = np if backend == "numpy" else pytest.importorskip("jax.numpy")
+    runtime = Runtime()
+    {"numpy": register_numpy, "jax": register_jax}[backend](runtime)
+    plan = _external(
+        "matmul_limit",
+        backend,
+        "x @ transpose(x)",
+    ).compile(runtime)
+    source = namespace.zeros((3163, 1), dtype=namespace.uint8)
+
+    def reject_matmul(*_arguments: object) -> object:
+        raise RuntimeError("matmul executed before output limit validation")
+
+    monkeypatch.setitem(array_module._ALLOWED_BINARY, ast.MatMult, reject_matmul)
+
+    with pytest.raises(
+        ProviderError, match="operation output limit is 10000000 elements"
+    ):
+        plan.execute({"input": Batch.from_array(source, backend=backend)})
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "expected"),
+    [
+        ((), (3,), None),
+        ((2, 3), (2, 4), None),
+        ((2, 2, 3), (3, 3, 4), None),
+        ((3,), (3,), ()),
+        ((3,), (3, 4), (4,)),
+        ((2, 3), (3,), (2,)),
+        ((2, 3), (3, 4), (2, 4)),
+        ((7, 1, 2, 3), (5, 3, 4), (7, 5, 2, 4)),
+    ],
+)
+def test_matmul_output_shape_follows_array_api_rules(
+    left: tuple[int, ...],
+    right: tuple[int, ...],
+    expected: tuple[int, ...] | None,
+) -> None:
+    assert array_module._matmul_output_shape(left, right) == expected
+
+
+@pytest.mark.parametrize("backend", ["numpy", "jax"])
 def test_expression_accepts_operation_output_at_exact_limit(backend: str) -> None:
     namespace: Any = np if backend == "numpy" else pytest.importorskip("jax.numpy")
     runtime = Runtime()

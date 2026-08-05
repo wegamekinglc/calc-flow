@@ -205,7 +205,9 @@ def _evaluate(
         function = _ALLOWED_BINARY[type(node.op)]
         left = _evaluate(node.left, value, namespace, validate_result)
         right = _evaluate(node.right, value, namespace, validate_result)
-        if not isinstance(node.op, ast.MatMult):
+        if isinstance(node.op, ast.MatMult):
+            _validate_matmul_output_size(left, right)
+        else:
             _validate_broadcast_output_size(left, right)
         result = function(left, right)
     elif isinstance(node, ast.UnaryOp):
@@ -508,7 +510,11 @@ def _result_shape(value: object) -> tuple[int, ...]:
 
 
 def _validate_operation_output_size(value: object) -> None:
-    if math.prod(_result_shape(value)) > _MAX_OPERATION_ELEMENTS:
+    _validate_operation_shape(_result_shape(value))
+
+
+def _validate_operation_shape(shape: tuple[int, ...]) -> None:
+    if math.prod(shape) > _MAX_OPERATION_ELEMENTS:
         raise _array_error(
             f"operation output limit is {_MAX_OPERATION_ELEMENTS} elements"
         )
@@ -530,12 +536,49 @@ def _broadcast_shape(
     return tuple(reversed(dimensions))
 
 
+def _matmul_batch_shape(
+    left: tuple[int, ...], right: tuple[int, ...]
+) -> tuple[int, ...] | None:
+    return _broadcast_shape(
+        left[:-2] if len(left) > 1 else (),
+        right[:-2] if len(right) > 1 else (),
+    )
+
+
+def _matmul_result_axes(
+    left: tuple[int, ...], right: tuple[int, ...]
+) -> tuple[int, ...]:
+    if len(left) == 1:
+        return () if len(right) == 1 else (right[-1],)
+    if len(right) == 1:
+        return (left[-2],)
+    return (left[-2], right[-1])
+
+
+def _matmul_output_shape(
+    left: tuple[int, ...], right: tuple[int, ...]
+) -> tuple[int, ...] | None:
+    if not left or not right:
+        return None
+    right_inner = right[-2] if len(right) > 1 else right[-1]
+    if left[-1] != right_inner:
+        return None
+    batch = _matmul_batch_shape(left, right)
+    if batch is None:
+        return None
+    return (*batch, *_matmul_result_axes(left, right))
+
+
 def _validate_broadcast_output_size(left: object, right: object) -> None:
     shape = _broadcast_shape(_result_shape(left), _result_shape(right))
-    if shape is not None and math.prod(shape) > _MAX_OPERATION_ELEMENTS:
-        raise _array_error(
-            f"operation output limit is {_MAX_OPERATION_ELEMENTS} elements"
-        )
+    if shape is not None:
+        _validate_operation_shape(shape)
+
+
+def _validate_matmul_output_size(left: object, right: object) -> None:
+    shape = _matmul_output_shape(_result_shape(left), _result_shape(right))
+    if shape is not None:
+        _validate_operation_shape(shape)
 
 
 def _validate_numpy_operation_result(value: object) -> None:
