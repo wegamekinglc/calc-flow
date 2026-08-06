@@ -2243,6 +2243,13 @@ mod tests {
         panic_reset: bool,
     }
 
+    struct BlockingEntryOperator {
+        inputs: [Port; 1],
+        outputs: [Port; 1],
+        entered: Arc<AtomicBool>,
+        release: Arc<AtomicBool>,
+    }
+
     struct EntryDataProbeOperator {
         inputs: [Port; 1],
         outputs: [Port; 1],
@@ -2547,6 +2554,62 @@ mod tests {
         }
     }
 
+    impl OperatorMetadata for BlockingEntryOperator {
+        fn name(&self) -> &'static str {
+            "blocking-entry"
+        }
+
+        fn input_ports(&self) -> &[Port] {
+            &self.inputs
+        }
+
+        fn output_ports(&self) -> &[Port] {
+            &self.outputs
+        }
+
+        fn configuration(&self) -> JsonMap {
+            JsonMap::new()
+        }
+    }
+
+    #[async_trait]
+    impl StreamOperator for BlockingEntryOperator {
+        async fn process_data(
+            &mut self,
+            _ingress: &str,
+            batch: Batch,
+            _context: &StreamOperatorContext<'_>,
+            output: &mut dyn StreamCollector,
+        ) -> Result<()> {
+            output.emit("output", batch).await
+        }
+
+        async fn on_watermark(
+            &mut self,
+            _watermark: EventTime,
+            _context: &StreamOperatorContext<'_>,
+            _output: &mut dyn StreamCollector,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn on_end(
+            &mut self,
+            _context: &StreamOperatorContext<'_>,
+            _output: &mut dyn StreamCollector,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn reset(&mut self) -> Result<()> {
+            self.entered.store(true, Ordering::SeqCst);
+            while !self.release.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+            Ok(())
+        }
+    }
+
     #[derive(Clone, Default)]
     struct LifecycleProbe {
         opened: Arc<AtomicUsize>,
@@ -2792,6 +2855,19 @@ mod tests {
         closed: Arc<AtomicUsize>,
     }
 
+    struct ZeroCostLifecycleSource {
+        events: VecDeque<SourceEvent>,
+        polls: Arc<AtomicUsize>,
+        closed: Arc<AtomicUsize>,
+        fail_at_end: bool,
+    }
+
+    struct ZeroCostLifecycleSink {
+        gate: Arc<Semaphore>,
+        writes: Arc<Mutex<Vec<u64>>>,
+        closed: Arc<AtomicUsize>,
+    }
+
     #[derive(Clone, Copy)]
     enum RunningSourceFailure {
         Next,
@@ -2866,6 +2942,67 @@ mod tests {
                 max_batch_rows: 1,
                 max_batch_bytes: 1 << 20,
             }
+        }
+    }
+
+    #[async_trait]
+    impl StreamSource for ZeroCostLifecycleSource {
+        async fn open(&mut self, _cursor: Option<Cursor>) -> Result<()> {
+            Ok(())
+        }
+
+        async fn next(&mut self) -> Result<Option<SourceEvent>> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            if let Some(event) = self.events.pop_front() {
+                return Ok(Some(event));
+            }
+            if self.fail_at_end {
+                self.fail_at_end = false;
+                return Err(CalcFlowError::Internal {
+                    message: "zero-cost lifecycle source failed".into(),
+                });
+            }
+            std::future::pending().await
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            self.closed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn capabilities(&self) -> SourceCapabilities {
+            SourceCapabilities {
+                replayable: true,
+                max_batch_rows: 1,
+                max_batch_bytes: 1 << 20,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl OrdinaryStreamSink for ZeroCostLifecycleSink {
+        async fn open(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn write(&mut self, batch: &Batch) -> Result<()> {
+            let permit = self
+                .gate
+                .acquire()
+                .await
+                .map_err(|_| CalcFlowError::Internal {
+                    message: "zero-cost lifecycle sink gate closed".into(),
+                })?;
+            permit.forget();
+            assert_eq!(batch.num_rows(), 0);
+            assert_eq!(batch.estimated_bytes()?, 0);
+            self.writes.lock().push(batch.metadata().sequence());
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            self.closed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
     }
 
@@ -3119,6 +3256,7 @@ mod tests {
     struct StressSink {
         gates: VecDeque<Arc<Semaphore>>,
         writes: Arc<Mutex<Vec<(String, u64)>>>,
+        zero_cost_writes: Arc<AtomicUsize>,
         closed: Arc<AtomicUsize>,
     }
 
@@ -3139,6 +3277,9 @@ mod tests {
                 message: "stress sink gate closed".into(),
             })?;
             permit.forget();
+            if batch.num_rows() == 0 && batch.estimated_bytes()? == 0 {
+                self.zero_cost_writes.fetch_add(1, Ordering::SeqCst);
+            }
             self.writes.lock().push((
                 batch.metadata().source().into(),
                 batch.metadata().sequence(),
@@ -3199,6 +3340,15 @@ mod tests {
         let record = RecordBatch::try_from_iter(vec![(
             "value",
             Arc::new(Int64Array::from(vec![value])) as _,
+        )])
+        .unwrap();
+        Batch::table(vec![record], BatchMetadata::default()).unwrap()
+    }
+
+    fn zero_row() -> Batch {
+        let record = RecordBatch::try_from_iter(vec![(
+            "value",
+            Arc::new(Int64Array::from(Vec::<i64>::new())) as _,
         )])
         .unwrap();
         Batch::table(vec![record], BatchMetadata::default()).unwrap()
@@ -3392,6 +3542,80 @@ mod tests {
         }
     }
 
+    fn blocking_entry_spec(
+        entered: &Arc<AtomicBool>,
+        release: &Arc<AtomicBool>,
+        source: LifecycleProbe,
+        sink: LifecycleProbe,
+    ) -> ContinuousJobSpec {
+        let operator = BlockingEntryOperator {
+            inputs: [Port::new("input", BatchKind::Table, true, None).unwrap()],
+            outputs: [Port::new("output", BatchKind::Table, true, None).unwrap()],
+            entered: Arc::clone(entered),
+            release: Arc::clone(release),
+        };
+        let plan = PipelineBuilder::new("blocking-entry")
+            .unwrap()
+            .add_node("node", Box::new(operator) as Box<dyn StreamOperator>)
+            .unwrap()
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements::default(),
+            )
+            .unwrap();
+        ContinuousJobSpec {
+            context: StreamJobContext::new(
+                9,
+                plan.fingerprint(),
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            ),
+            plan,
+            sources: vec![NamedSourceBinding {
+                binding_id: "input".into(),
+                binding: SourceBinding::new(Box::new(ProbeSource(source)), None, 0).unwrap(),
+            }],
+            sinks: vec![NamedSinkBinding {
+                output_id: "output".into(),
+                sink_id: "sink".into(),
+                binding: OrdinarySinkBinding::new(Box::new(ProbeSink(sink))),
+            }],
+            edge_budget: EdgeBudget {
+                max_rows: 1,
+                max_bytes: 1,
+            },
+            delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+        }
+    }
+
+    async fn wait_for_operator_entry(entered: &AtomicBool) -> bool {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !entered.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    async fn wait_for_live_publication(runner: &ContinuousRunner, core: &Arc<JobCore>) {
+        for _ in 0..1_000 {
+            let ready =
+                core.state.lock().launch_delivery == super::LaunchDeliveryState::ReadyUnclaimed;
+            let published = {
+                let registry = runner.core.registry.lock();
+                registry.provisional == Some(core.launch_id)
+                    && registry.live_jobs.contains_key(&core.launch_id)
+            };
+            if ready && published && !core.runtime_status.lock().tasks.snapshot().is_empty() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("driver did not publish the live job before handle delivery")
+    }
+
     fn forward_spec(
         job_id: u64,
         source: SourceBinding,
@@ -3439,7 +3663,11 @@ mod tests {
         }
     }
 
-    fn stress_plan(gates: &BTreeMap<StressGate, Arc<Semaphore>>) -> crate::StreamExecutionPlan {
+    fn stress_plan(
+        gates: &BTreeMap<StressGate, Arc<Semaphore>>,
+        zero_cost_gate: &Arc<Semaphore>,
+        zero_cost_batches: usize,
+    ) -> crate::StreamExecutionPlan {
         let union = UnionOperator::new(
             "merge",
             vec![
@@ -3448,14 +3676,18 @@ mod tests {
             ],
         )
         .unwrap();
-        let unary_gates = [
-            StressGate::Edge0,
-            StressGate::Edge1,
-            StressGate::Edge2,
-            StressGate::Edge3,
-        ]
-        .map(|gate| Arc::clone(&gates[&gate]))
-        .to_vec();
+        let unary_gates = std::iter::repeat_with(|| Arc::clone(zero_cost_gate))
+            .take(zero_cost_batches)
+            .chain(
+                [
+                    StressGate::Edge0,
+                    StressGate::Edge1,
+                    StressGate::Edge2,
+                    StressGate::Edge3,
+                ]
+                .map(|gate| Arc::clone(&gates[&gate])),
+            )
+            .collect();
         PipelineBuilder::new("seeded-stress")
             .unwrap()
             .add_node("merge", Box::new(union))
@@ -3499,27 +3731,44 @@ mod tests {
 
     fn stress_source_binding(
         gates: &BTreeMap<StressGate, Arc<Semaphore>>,
+        zero_cost_phase: Option<(&Arc<Semaphore>, usize)>,
         data_gates: [StressGate; 2],
         eof_gate: StressGate,
         values: [i64; 2],
         closed: &Arc<AtomicUsize>,
     ) -> SourceBinding {
-        let events = data_gates
-            .into_iter()
-            .zip(values)
-            .enumerate()
-            .map(|(index, (gate, value))| {
+        let zero_cost_count = zero_cost_phase.map_or(0, |(_, count)| count);
+        let zero_cost_events = zero_cost_phase.into_iter().flat_map(|(gate, count)| {
+            (0..count).map(move |index| {
                 (
-                    Arc::clone(&gates[&gate]),
+                    Arc::clone(gate),
                     Some(SourceEvent::Data {
-                        batch: one_row(value),
+                        batch: zero_row(),
                         cursor: Cursor::new(vec![u8::try_from(index + 1).unwrap()], JsonMap::new())
                             .unwrap(),
                     }),
                 )
             })
-            .chain(std::iter::once((Arc::clone(&gates[&eof_gate]), None)))
-            .collect();
+        });
+        let events =
+            zero_cost_events
+                .chain(data_gates.into_iter().zip(values).enumerate().map(
+                    |(index, (gate, value))| {
+                        (
+                            Arc::clone(&gates[&gate]),
+                            Some(SourceEvent::Data {
+                                batch: one_row(value),
+                                cursor: Cursor::new(
+                                    vec![u8::try_from(zero_cost_count + index + 1).unwrap()],
+                                    JsonMap::new(),
+                                )
+                                .unwrap(),
+                            }),
+                        )
+                    },
+                ))
+                .chain(std::iter::once((Arc::clone(&gates[&eof_gate]), None)))
+                .collect();
         SourceBinding::new(
             Box::new(StressSource {
                 events,
@@ -3545,6 +3794,52 @@ mod tests {
                 (0..u64::try_from(sequence.len()).unwrap()).collect::<Vec<_>>(),
                 "per-source FIFO failed at seed {seed} for {source}"
             );
+        }
+    }
+
+    async fn wait_for_stress_writes(
+        primary_writes: &Mutex<Vec<(String, u64)>>,
+        replica_writes: &Mutex<Vec<(String, u64)>>,
+        expected: usize,
+    ) {
+        for _ in 0..100 {
+            if primary_writes.lock().len() >= expected && replica_writes.lock().len() >= expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn assert_zero_cost_active_edges(job: &super::ContinuousJob) {
+        let status = job.status();
+        assert!(status.edges.values().all(|edge| {
+            edge.queue_depth <= 1 && edge.charged_rows == 0 && edge.charged_bytes == 0
+        }));
+    }
+
+    async fn run_zero_cost_stress_phase(
+        job: &super::ContinuousJob,
+        gates: [&Semaphore; 4],
+        writes: [&Mutex<Vec<(String, u64)>>; 2],
+        batches: usize,
+        seed: u64,
+    ) {
+        let [
+            input_gate,
+            transform_gate,
+            primary_sink_gate,
+            replica_sink_gate,
+        ] = gates;
+        let [primary_writes, replica_writes] = writes;
+        input_gate.add_permits(batches);
+        transform_gate.add_permits(batches);
+        for delivered in 1..=batches {
+            primary_sink_gate.add_permits(1);
+            replica_sink_gate.add_permits(1);
+            wait_for_stress_writes(primary_writes, replica_writes, delivered).await;
+            assert_eq!(primary_writes.lock().len(), delivered, "seed {seed}");
+            assert_eq!(replica_writes.lock().len(), delivered, "seed {seed}");
+            assert_zero_cost_active_edges(job);
         }
     }
 
@@ -3583,6 +3878,7 @@ mod tests {
     )]
     #[tokio::test(start_paused = true)]
     async fn seeded_paused_time_stress_runs_one_hundred_full_graph_schedules() {
+        const ZERO_COST_PHASE_BATCHES: usize = 10;
         const DATA_GATES: [StressGate; 18] = [
             StressGate::LeftData0,
             StressGate::LeftData1,
@@ -3608,25 +3904,39 @@ mod tests {
                 .into_iter()
                 .map(|gate| (gate, Arc::new(Semaphore::new(0))))
                 .collect::<BTreeMap<_, _>>();
-            let plan = stress_plan(&gates);
+            let zero_cost_source_gate = Arc::new(Semaphore::new(0));
+            let zero_cost_operator_gate = Arc::new(Semaphore::new(0));
+            let zero_cost_sink_a_gate = Arc::new(Semaphore::new(0));
+            let zero_cost_sink_b_gate = Arc::new(Semaphore::new(0));
+            let plan = stress_plan(&gates, &zero_cost_operator_gate, ZERO_COST_PHASE_BATCHES);
             let source_closed = Arc::new(AtomicUsize::new(0));
             let sink_closed = Arc::new(AtomicUsize::new(0));
             let sink_a_writes = Arc::new(Mutex::new(Vec::new()));
             let sink_b_writes = Arc::new(Mutex::new(Vec::new()));
-            let sink_a_gates = [
-                StressGate::SinkA0,
-                StressGate::SinkA1,
-                StressGate::SinkA2,
-                StressGate::SinkA3,
-            ]
-            .map(|gate| Arc::clone(&gates[&gate]));
-            let sink_b_gates = [
-                StressGate::SinkB0,
-                StressGate::SinkB1,
-                StressGate::SinkB2,
-                StressGate::SinkB3,
-            ]
-            .map(|gate| Arc::clone(&gates[&gate]));
+            let sink_a_zero_cost_writes = Arc::new(AtomicUsize::new(0));
+            let sink_b_zero_cost_writes = Arc::new(AtomicUsize::new(0));
+            let sink_a_gates = std::iter::repeat_with(|| Arc::clone(&zero_cost_sink_a_gate))
+                .take(ZERO_COST_PHASE_BATCHES)
+                .chain(
+                    [
+                        StressGate::SinkA0,
+                        StressGate::SinkA1,
+                        StressGate::SinkA2,
+                        StressGate::SinkA3,
+                    ]
+                    .map(|gate| Arc::clone(&gates[&gate])),
+                );
+            let sink_b_gates = std::iter::repeat_with(|| Arc::clone(&zero_cost_sink_b_gate))
+                .take(ZERO_COST_PHASE_BATCHES)
+                .chain(
+                    [
+                        StressGate::SinkB0,
+                        StressGate::SinkB1,
+                        StressGate::SinkB2,
+                        StressGate::SinkB3,
+                    ]
+                    .map(|gate| Arc::clone(&gates[&gate])),
+                );
             let spec = ContinuousJobSpec {
                 context: StreamJobContext::new(
                     10_000 + seed,
@@ -3641,6 +3951,7 @@ mod tests {
                         binding_id: "left".into(),
                         binding: stress_source_binding(
                             &gates,
+                            Some((&zero_cost_source_gate, ZERO_COST_PHASE_BATCHES)),
                             [StressGate::LeftData0, StressGate::LeftData1],
                             StressGate::LeftEof,
                             [1, 2],
@@ -3651,6 +3962,7 @@ mod tests {
                         binding_id: "right".into(),
                         binding: stress_source_binding(
                             &gates,
+                            None,
                             [StressGate::RightData0, StressGate::RightData1],
                             StressGate::RightEof,
                             [10, 20],
@@ -3663,8 +3975,9 @@ mod tests {
                         output_id: "branch_a.output".into(),
                         sink_id: "slow-a".into(),
                         binding: OrdinarySinkBinding::new(Box::new(StressSink {
-                            gates: sink_a_gates.into(),
+                            gates: sink_a_gates.collect(),
                             writes: Arc::clone(&sink_a_writes),
+                            zero_cost_writes: Arc::clone(&sink_a_zero_cost_writes),
                             closed: Arc::clone(&sink_closed),
                         })),
                     },
@@ -3672,8 +3985,9 @@ mod tests {
                         output_id: "branch_b.output".into(),
                         sink_id: "slow-b".into(),
                         binding: OrdinarySinkBinding::new(Box::new(StressSink {
-                            gates: sink_b_gates.into(),
+                            gates: sink_b_gates.collect(),
                             writes: Arc::clone(&sink_b_writes),
+                            zero_cost_writes: Arc::clone(&sink_b_zero_cost_writes),
                             closed: Arc::clone(&sink_closed),
                         })),
                     },
@@ -3689,6 +4003,29 @@ mod tests {
                 .start(spec)
                 .await
                 .unwrap_or_else(|failure| panic!("start failed at seed {seed}: {failure:?}"));
+            run_zero_cost_stress_phase(
+                &job,
+                [
+                    &zero_cost_source_gate,
+                    &zero_cost_operator_gate,
+                    &zero_cost_sink_a_gate,
+                    &zero_cost_sink_b_gate,
+                ],
+                [&sink_a_writes, &sink_b_writes],
+                ZERO_COST_PHASE_BATCHES,
+                seed,
+            )
+            .await;
+            assert_eq!(
+                sink_a_zero_cost_writes.load(Ordering::SeqCst),
+                ZERO_COST_PHASE_BATCHES,
+                "seed {seed}"
+            );
+            assert_eq!(
+                sink_b_zero_cost_writes.load(Ordering::SeqCst),
+                ZERO_COST_PHASE_BATCHES,
+                "seed {seed}"
+            );
             let schedule = stress_schedule(seed);
             let mut terminal = None;
             for gate in schedule {
@@ -3735,13 +4072,17 @@ mod tests {
             );
             let a = sink_a_writes.lock().clone();
             let b = sink_b_writes.lock().clone();
+            assert!(
+                a.len() >= ZERO_COST_PHASE_BATCHES && b.len() >= ZERO_COST_PHASE_BATCHES,
+                "zero-cost phase did not span ten slot-limit multiples at seed {seed}"
+            );
             assert_source_fifo(seed, &a);
             assert_source_fifo(seed, &b);
             match seed % 3 {
                 0 => {
                     assert_eq!(outcome.cause, TerminalCause::NaturalEnd, "seed {seed}");
-                    assert_eq!(a.len(), 4, "loss at seed {seed}");
-                    assert_eq!(b.len(), 4, "loss at seed {seed}");
+                    assert_eq!(a.len(), ZERO_COST_PHASE_BATCHES + 4, "loss at seed {seed}");
+                    assert_eq!(b.len(), ZERO_COST_PHASE_BATCHES + 4, "loss at seed {seed}");
                     assert_eq!(a, b, "fan-out divergence at seed {seed}");
                     assert!(
                         status
@@ -3769,6 +4110,206 @@ mod tests {
             drop(job);
             runner.shutdown().await.unwrap();
             assert_eq!(runner.registry_counts(), (0, 0), "seed {seed}");
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ZeroCostTermination {
+        Graceful,
+        Cancel,
+        Error,
+    }
+
+    fn zero_cost_lifecycle_events(cycles: usize) -> VecDeque<SourceEvent> {
+        (0..cycles)
+            .flat_map(|index| {
+                let watermark = i64::try_from(index + 1).unwrap();
+                let cursor = u64::try_from(index + 1).unwrap().to_be_bytes().to_vec();
+                [
+                    SourceEvent::Idle,
+                    SourceEvent::Watermark(EventTime::from_micros(watermark)),
+                    SourceEvent::Data {
+                        batch: zero_row(),
+                        cursor: Cursor::new(cursor, JsonMap::new()).unwrap(),
+                    },
+                ]
+            })
+            .collect()
+    }
+
+    async fn settled_poll_count(polls: &AtomicUsize) -> usize {
+        let mut previous = polls.load(Ordering::SeqCst);
+        let mut unchanged = 0;
+        for _ in 0..1_000 {
+            tokio::task::yield_now().await;
+            let current = polls.load(Ordering::SeqCst);
+            if current == previous {
+                unchanged += 1;
+                if unchanged == 20 {
+                    return current;
+                }
+            } else {
+                previous = current;
+                unchanged = 0;
+            }
+        }
+        panic!("zero-cost producer polling did not settle")
+    }
+
+    async fn wait_for_write_count(writes: &Mutex<Vec<u64>>, expected: usize) {
+        for _ in 0..1_000 {
+            if writes.lock().len() >= expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("zero-cost sink did not reach {expected} writes")
+    }
+
+    async fn finish_zero_cost_lifecycle(
+        job: &super::ContinuousJob,
+        sink_gate: &Semaphore,
+        termination: ZeroCostTermination,
+        remaining_permits: usize,
+    ) -> Arc<super::ContinuousJobOutcome> {
+        match termination {
+            ZeroCostTermination::Graceful => {
+                let observer = job.shutdown();
+                sink_gate.add_permits(remaining_permits);
+                observer.await
+            }
+            ZeroCostTermination::Cancel => job.cancel().await,
+            ZeroCostTermination::Error => {
+                sink_gate.add_permits(remaining_permits);
+                job.wait().await
+            }
+        }
+    }
+
+    fn assert_zero_cost_terminal(
+        termination: ZeroCostTermination,
+        outcome: &super::ContinuousJobOutcome,
+    ) {
+        match termination {
+            ZeroCostTermination::Graceful => {
+                assert_eq!(outcome.state, ContinuousJobState::Completed);
+                assert_eq!(outcome.cause, TerminalCause::GracefulShutdown);
+            }
+            ZeroCostTermination::Cancel => {
+                assert_eq!(outcome.state, ContinuousJobState::Cancelled);
+                assert_eq!(outcome.cause, TerminalCause::ExplicitCancel);
+            }
+            ZeroCostTermination::Error => {
+                assert_eq!(outcome.state, ContinuousJobState::Failed);
+                assert!(matches!(outcome.cause, TerminalCause::TaskFailure { .. }));
+                assert!(outcome.errors.iter().any(|failure| {
+                    matches!(
+                        &failure.error,
+                        CalcFlowError::Internal { message }
+                            if message == "zero-cost lifecycle source failed"
+                    )
+                }));
+            }
+        }
+    }
+
+    fn assert_zero_cost_convergence(job: &super::ContinuousJob, termination: ZeroCostTermination) {
+        let status = job.status();
+        assert!(status.tasks.is_empty(), "task leak: {termination:?}");
+        assert!(status.edges.values().all(|edge| {
+            edge.queue_depth == 0
+                && edge.charged_rows == 0
+                && edge.charged_bytes == 0
+                && edge.high_water_depth <= 1
+                && edge.high_water_rows == 0
+                && edge.high_water_bytes == 0
+        }));
+        assert!(
+            status.edges.values().any(|edge| edge.blocked_sends > 0),
+            "zero-cost messages never exercised backpressure: {termination:?}"
+        );
+    }
+
+    async fn run_zero_cost_lifecycle_case(termination: ZeroCostTermination) {
+        const CYCLES: usize = 10;
+        const CREDIT_RETURNS: usize = 3;
+
+        let polls = Arc::new(AtomicUsize::new(0));
+        let source_closed = Arc::new(AtomicUsize::new(0));
+        let sink_closed = Arc::new(AtomicUsize::new(0));
+        let sink_gate = Arc::new(Semaphore::new(0));
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let source = SourceBinding::new(
+            Box::new(ZeroCostLifecycleSource {
+                events: zero_cost_lifecycle_events(CYCLES),
+                polls: Arc::clone(&polls),
+                closed: Arc::clone(&source_closed),
+                fail_at_end: matches!(termination, ZeroCostTermination::Error),
+            }),
+            None,
+            0,
+        )
+        .unwrap();
+        let sinks = vec![NamedSinkBinding {
+            output_id: "output".into(),
+            sink_id: "zero-cost-sink".into(),
+            binding: OrdinarySinkBinding::new(Box::new(ZeroCostLifecycleSink {
+                gate: Arc::clone(&sink_gate),
+                writes: Arc::clone(&writes),
+                closed: Arc::clone(&sink_closed),
+            })),
+        }];
+        let mut runner = ContinuousRunner::new();
+        let job = runner
+            .start(forward_spec(20_000, source, sinks))
+            .await
+            .unwrap();
+
+        let mut previous_polls = settled_poll_count(&polls).await;
+        assert!(
+            previous_polls < CYCLES * 3,
+            "producer polled every sustained event without receiving a credit: {termination:?}"
+        );
+        for delivered in 1..=CREDIT_RETURNS {
+            sink_gate.add_permits(1);
+            wait_for_write_count(&writes, delivered).await;
+            let current_polls = settled_poll_count(&polls).await;
+            assert!(
+                current_polls > previous_polls,
+                "producer did not regain credit after sink release: {termination:?}"
+            );
+            previous_polls = current_polls;
+            let status = job.status();
+            assert!(status.edges.values().all(|edge| {
+                edge.queue_depth <= 1 && edge.charged_rows == 0 && edge.charged_bytes == 0
+            }));
+        }
+
+        let outcome = finish_zero_cost_lifecycle(&job, &sink_gate, termination, CYCLES).await;
+        assert_zero_cost_terminal(termination, &outcome);
+        assert_zero_cost_convergence(&job, termination);
+        let observed = writes.lock().clone();
+        assert!(observed.len() >= CREDIT_RETURNS);
+        assert_eq!(
+            observed,
+            (0..u64::try_from(observed.len()).unwrap()).collect::<Vec<_>>()
+        );
+        assert_eq!(source_closed.load(Ordering::SeqCst), 1);
+        assert_eq!(sink_closed.load(Ordering::SeqCst), 1);
+        assert_eq!(runner.registry_counts(), (0, 0));
+        drop(job);
+        runner.shutdown().await.unwrap();
+        assert_eq!(runner.registry_counts(), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn real_unary_zero_cost_lifecycle_matrix_returns_credits_and_converges() {
+        for termination in [
+            ZeroCostTermination::Graceful,
+            ZeroCostTermination::Cancel,
+            ZeroCostTermination::Error,
+        ] {
+            run_zero_cost_lifecycle_case(termination).await;
         }
     }
 
@@ -4456,6 +4997,49 @@ mod tests {
         runner.shutdown().await.unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_start_during_operator_entry_reaps_before_connector_lifecycle() {
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let source = LifecycleProbe::default();
+        let sink = LifecycleProbe::default();
+        let mut runner = ContinuousRunner::new();
+        let observer = runner.start(blocking_entry_spec(
+            &entered,
+            &release,
+            source.clone(),
+            sink.clone(),
+        ));
+        let provisional = Arc::clone(observer.core.as_ref().unwrap());
+        let entry_observed = wait_for_operator_entry(&entered).await;
+        if !entry_observed {
+            release.store(true, Ordering::SeqCst);
+        }
+        assert!(entry_observed, "operator entry did not begin");
+
+        drop(observer);
+        assert!(provisional.launch_cancel.is_cancelled());
+        assert_eq!(provisional.state.lock().owner, DriverOwnership::ReaperOwned);
+        release.store(true, Ordering::SeqCst);
+
+        let next = runner
+            .start(spec(
+                false,
+                Arc::new(AtomicUsize::new(0)),
+                LifecycleProbe::default(),
+                LifecycleProbe::default(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(provisional.state.lock().owner, DriverOwnership::Terminal);
+        assert_eq!(source.opened.load(Ordering::SeqCst), 0);
+        assert_eq!(source.closed.load(Ordering::SeqCst), 0);
+        assert_eq!(sink.opened.load(Ordering::SeqCst), 0);
+        assert_eq!(sink.closed.load(Ordering::SeqCst), 0);
+        drop(next);
+        runner.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn dropping_start_immediately_after_provisional_registration_is_reaped() {
         let mut runner = ContinuousRunner::new();
@@ -4628,6 +5212,59 @@ mod tests {
         assert_eq!(source_closed.load(Ordering::SeqCst), 1);
         assert_eq!(sink.closed.load(Ordering::SeqCst), 1);
         assert_eq!(provisional.state.lock().owner, DriverOwnership::Terminal);
+        drop(next);
+        runner.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_start_after_live_publication_before_handle_delivery_is_reaped() {
+        let plan = unary_expression_plan();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let source_closed = Arc::new(AtomicUsize::new(0));
+        let sink = LifecycleProbe::default();
+        let job_spec = ContinuousJobSpec {
+            context: StreamJobContext::new(
+                90,
+                plan.fingerprint(),
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            ),
+            plan,
+            sources: vec![NamedSourceBinding {
+                binding_id: "input".into(),
+                binding: counting_pending_binding(1, &polls, &source_closed),
+            }],
+            sinks: vec![NamedSinkBinding {
+                output_id: "output".into(),
+                sink_id: "sink".into(),
+                binding: OrdinarySinkBinding::new(Box::new(ProbeSink(sink.clone()))),
+            }],
+            edge_budget: EdgeBudget::default(),
+            delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+        };
+        let mut runner = ContinuousRunner::new();
+        let observer = runner.start(job_spec);
+        let provisional = Arc::clone(observer.core.as_ref().unwrap());
+        wait_for_live_publication(&runner, &provisional).await;
+
+        drop(observer);
+        assert!(provisional.launch_cancel.is_cancelled());
+        assert_eq!(provisional.state.lock().owner, DriverOwnership::ReaperOwned);
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+
+        let next = runner
+            .start(spec(
+                false,
+                Arc::new(AtomicUsize::new(0)),
+                LifecycleProbe::default(),
+                LifecycleProbe::default(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(provisional.state.lock().owner, DriverOwnership::Terminal);
+        assert_eq!(source_closed.load(Ordering::SeqCst), 1);
+        assert_eq!(sink.closed.load(Ordering::SeqCst), 1);
         drop(next);
         runner.shutdown().await.unwrap();
     }

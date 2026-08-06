@@ -194,6 +194,28 @@ fn elapsed_at_sample(index: usize) -> f64 {
     sample_count_as_f64(index + 1) * CADENCE.as_secs_f64()
 }
 
+async fn wait_for_sample_deadline(started: tokio::time::Instant, index: usize) -> f64 {
+    let sample_number = u32::try_from(index + 1).expect("the bounded soak sample count fits u32");
+    tokio::time::sleep_until(started + CADENCE * sample_number).await;
+    started.elapsed().as_secs_f64()
+}
+
+fn observed_timeline_issue(samples: &[RssSample]) -> Option<&'static str> {
+    if samples.len() != SAMPLE_COUNT {
+        return Some("sample count differs from the soak contract");
+    }
+    for (index, sample) in samples.iter().enumerate() {
+        if sample.elapsed_seconds < elapsed_at_sample(index) {
+            return Some("sample preceded its absolute deadline");
+        }
+        if index > 0 && sample.elapsed_seconds <= samples[index - 1].elapsed_seconds {
+            return Some("observed sample timestamps are not strictly increasing");
+        }
+    }
+    (samples.last()?.elapsed_seconds < TARGET_DURATION.as_secs_f64())
+        .then_some("observed timeline ended before the soak target")
+}
+
 fn least_squares_mib_per_hour(samples: &[RssSample]) -> Option<f64> {
     if samples.len() < 2 {
         return None;
@@ -518,13 +540,13 @@ async fn run_linux_soak() {
     assert!(steady_task_count > 0, "supervisor task registry is empty");
     assert_edge_budgets(&initial_status);
     let mut samples = Vec::with_capacity(SAMPLE_COUNT);
+    let sampling_started = tokio::time::Instant::now();
     for index in 0..SAMPLE_COUNT {
-        tokio::time::sleep(CADENCE).await;
+        let elapsed_seconds = wait_for_sample_deadline(sampling_started, index).await;
         let process_status = tokio::fs::read_to_string("/proc/self/status")
             .await
             .expect("Linux soak could not read /proc/self/status");
         let rss_kib = parse_vm_rss_kib(&process_status).expect("Linux status omitted VmRSS");
-        let elapsed_seconds = elapsed_at_sample(index);
         samples.push(RssSample {
             elapsed_seconds,
             rss_kib,
@@ -553,6 +575,7 @@ async fn run_linux_soak() {
             json!({
                 "type": "calc_flow_stream_soak_sample",
                 "index": index,
+                "scheduled_elapsed_seconds": elapsed_at_sample(index),
                 "elapsed_seconds": elapsed_seconds,
                 "vmrss_kib": rss_kib,
                 "task_count": steady_task_count,
@@ -560,6 +583,11 @@ async fn run_linux_soak() {
             })
         );
     }
+    assert_eq!(
+        observed_timeline_issue(&samples),
+        None,
+        "soak sample timeline did not satisfy its machine-readable contract"
+    );
 
     let outcome = job.shutdown().await;
     assert_eq!(outcome.state, ContinuousJobState::Completed);
@@ -622,6 +650,11 @@ async fn run_linux_soak() {
             "commit": commit,
             "target_duration_seconds": TARGET_DURATION.as_secs(),
             "samples": samples.len(),
+            "observed_timeline": {
+                "validated": true,
+                "first_elapsed_seconds": samples.first().map(|sample| sample.elapsed_seconds),
+                "last_elapsed_seconds": samples.last().map(|sample| sample.elapsed_seconds),
+            },
             "slope_mib_per_hour": gate.slope_mib_per_hour,
             "first_post_warmup_five_minute_median_kib": gate.first_median_kib,
             "final_five_minute_median_kib": gate.final_median_kib,
@@ -874,6 +907,25 @@ fn twenty_minute_soak_contract_has_exact_cadence_and_sample_windows() {
     assert_eq!(SAMPLE_COUNT, 120);
     assert_eq!(WARMUP_SAMPLES, 30);
     assert!((elapsed_at_sample(SAMPLE_COUNT - 1) - 1_200.0).abs() < f64::EPSILON);
+}
+
+#[tokio::test(start_paused = true)]
+async fn absolute_soak_deadlines_do_not_accumulate_sampling_work_delay() {
+    let started = tokio::time::Instant::now();
+    let mut samples = Vec::with_capacity(SAMPLE_COUNT);
+
+    for index in 0..SAMPLE_COUNT {
+        let elapsed_seconds = wait_for_sample_deadline(started, index).await;
+        samples.push(RssSample {
+            elapsed_seconds,
+            rss_kib: 100_000,
+        });
+        tokio::time::advance(Duration::from_secs(1)).await;
+    }
+
+    assert_eq!(samples.len(), SAMPLE_COUNT);
+    assert_eq!(observed_timeline_issue(&samples), None);
+    assert!((samples.last().unwrap().elapsed_seconds - 1_200.0).abs() < f64::EPSILON);
 }
 
 #[test]
