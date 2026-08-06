@@ -11,8 +11,9 @@ vertical slice: it is runnable inside the crate, but is not yet a public
 continuous runner.
 
 The implementation lives in `crates/calc-flow/src/runtime/streaming/` (the
-message, bounded channel, job context, source task, supervisor, and internal
-continuous job), `crates/calc-flow/src/time/` (event time and epoch),
+message, bounded channel, job and task contexts, whole-job preflight, source,
+operator, and sink tasks, supervisor, private runner/job/reaper, metrics, and
+soak), `crates/calc-flow/src/time/` (event time and epoch),
 `crates/calc-flow/src/operator/stream.rs` (the operator traits and the
 validating collector), and `crates/calc-flow/src/pipeline/stream.rs` (the
 compiled stream plan). The frozen semantics behind the contract are recorded
@@ -193,14 +194,25 @@ port owns an outbox, and `drain(port)` returns that port's pending messages
 in FIFO order, with an unknown port draining to empty. The in-memory outbox
 remains the operator-facing staging boundary.
 
-Runtime edges use `edge_channel`, a bounded FIFO with atomic row and
-estimated-byte accounting. Reservation happens before enqueue and is released
-once on receive or cancellation. An oversized message fails before enqueue, a
-closed receiver wakes blocked senders, and each fan-out edge is charged
-independently even though immutable payload buffers are shared. The default
-`Block` path therefore propagates a slow consumer back through the edge. This
-is the implemented M1.3/M1.4 foundation; wiring it through every future
-operator and sink task remains part of their milestones.
+Runtime edges use `edge_channel`, a bounded FIFO with atomic envelope, row, and
+estimated-byte accounting. For `EdgeBudget { max_rows: R, max_bytes: B }`, the
+queue admits at most `R` envelopes, independently at most `R` charged rows,
+and at most `B` charged bytes. Every data or control envelope consumes one
+slot, including a zero-row/zero-byte data batch. Direct callers choose
+`R >= max(required_row_limit, required_simultaneous_messages)`. The public
+`EdgeBudget` shape and
+`edge_channel` signature are unchanged, but zero-cost traffic can now block
+earlier than it did under row/byte-only admission.
+
+Reservation is atomic with enqueue and is released exactly once on receive or
+queue teardown. A blocked send owns no reservation. An oversized data message
+fails before enqueue, a closed receiver wakes blocked senders, and each fan-out
+edge is charged independently even though immutable payload buffers are
+shared. The default `Block` path therefore propagates a slow consumer through
+sink, operator, source task, prefetch slot, and source pump. This is the narrow
+M2 completion revision of S10.1 and S10.5: S10.2 row/byte accounting, S10.3
+oversize and pre-open validation, S10.4 policy behavior, FIFO, close wakeup,
+no-lost-wakeup, and one-producer ownership remain unchanged.
 
 ## Stream plan compilation
 
@@ -222,10 +234,10 @@ schema-less.
 The compiled plan records the deterministic topology, stable edge IDs, the
 source and sink binding slots (external input and output names in
 deterministic order), the semantic fingerprint, and the per-output delivery
-requirements. It never executes directly; the continuous runner that
-executes it arrives with the runtime milestones below. Pure array graphs
-need no table engine: `requires_datafusion` reports whether any node needs
-a DataFusion session.
+requirements. It never executes directly. The crate-private M2 runner consumes
+it into owned runtime nodes, internal edges, and synthesized bounded source and
+sink boundary edges. Pure array graphs need no table engine:
+`requires_datafusion` reports whether any node needs a DataFusion session.
 
 `StreamRequirements` records the requested `DeliveryGuarantee` per graph
 output — `AtLeastOnce` or `ExactlyOnce`; outputs absent from the map default
@@ -239,23 +251,25 @@ Two hashes describe the plan (NFR-5):
 - the semantic fingerprint covers execution mode, graph structure, operator
   configurations, and the UDF catalog; it decides checkpoint compatibility;
 - the runtime-config hash covers `StreamRuntimeConfig` — checkpoint interval
-  and timeout, the per-edge row/byte budget, and retained epochs — and feeds
-  observability and diagnostics only, so retuning it never invalidates
+  and timeout, the per-edge envelope/row/byte budget, and retained epochs —
+  and feeds observability and diagnostics only, so retuning it never invalidates
   checkpoints. Durations must be exact multiples of one microsecond, and
-  both budget limits must be positive. The defaults are a 60-second
-  checkpoint interval, a 600-second checkpoint timeout, 10,000 rows and
+  both budget fields must be positive. The defaults are a 60-second checkpoint
+  interval, a 600-second checkpoint timeout, 10,000 envelopes, 10,000 rows and
   64 MiB per edge, and two retained epochs.
 
 ## Current internal M2 runtime slice
 
-The crate-private M2 slice can run a bounded source-to-consumer job. It is a
-vertical implementation seam for later operator and sink tasks, not a public
-`StreamingRunner` replacement.
+The crate-private M2 slice can run a bounded source-to-operator-to-sink job. It
+is a complete internal runtime skeleton, not a public `StreamingRunner`
+replacement.
 
-Each source binding samples replay and maximum-batch capabilities before
-opening. Its declared row and byte maxima must fit every first-hop edge before
-the pump or source task is registered. Job-wide validation across every source
-and sink binding is not implemented yet.
+One pure whole-job preflight consumes the plan and validates the context
+fingerprint, runtime topology, every source and sink route, duplicate or
+missing bindings, source capabilities and first-hop budgets, process-local
+ordinary-sink capability, and the absence of pre-M5 exactly-once requests.
+Capabilities are sampled once. No connector opens and no task is registered
+until the complete job passes.
 
 A source binding owns two supervised tasks (D3):
 
@@ -284,13 +298,62 @@ failures are reported in stable task-ID order, and panics become
 signal cancellation before potentially blocking teardown work, so siblings
 can converge promptly.
 
-The crate-private `ContinuousJob` owns the context and supervisor and provides
-consuming `wait` and `cancel` paths. A finite in-memory source can naturally
-reach `completed`; explicit cancellation closes and joins a blocked source and
-consumer; task errors select `failed` or `recovery-required` by error class.
-Deadline expiry and explicit cancellation converge to `cancelled` when no
-task error wins. The public, idempotent job handle and its Drop/reaper ownership
-model remain M2.4 work.
+One operator task owns each compiled stream operator. It selects ready
+ingresses without weakening per-ingress FIFO, validates data emissions before
+the first send, fans out over real bounded edges, and owns one lazy
+operator-scoped DataFusion runtime when table work requires it. Unary
+watermarks call `on_watermark` before runtime forwarding; unary idle and
+all-ingress end are runtime-owned. Multi-ingress watermark/idle fail closed
+until M3, and every barrier fails closed until M5. `on_end` runs exactly once
+after every ingress observes explicit end-of-input. A closed channel without
+an earlier explicit end is a failure, not synthetic EOF.
+
+One sink task owns each graph output and writes each batch to its configured
+ordinary sinks in stable order. The third sink does not see a batch when the
+second sink fails. Natural completion and graceful shutdown drain the accepted
+prefix; explicit cancellation makes no drain promise. M2 ordinary sinks offer
+process-local ordered delivery only, not a cross-process at-least-once claim.
+
+The crate-private `ContinuousRunner` and `ContinuousJob` own three-stage
+launch, status, terminal arbitration, cancellation, graceful drain, joining,
+and a runner-scoped reaper. Operator entry completes before connector open;
+all connector opens complete before the data gate is released. A dropped start
+observer cancels the provisional launch. A dropped job transfers convergence
+ownership to the reaper, and a later start or runner shutdown joins it. Task
+failure wins over explicit cancel, which wins over deadline expiry; concurrent
+and repeated observers receive one immutable outcome.
+
+Connector `open`, `next`, `write`, and `close` panics become the public,
+semver-compatible non-exhaustive `CalcFlowError::TaskPanicked` variant with a
+stable task ID. Captured panic text is valid UTF-8 and at most 1,024 bytes;
+non-string payloads become `non-string panic payload`. On a failed or cancelled
+launch, every resource whose open began is closed once in stable resource
+order. Each close has its own private five-second bound, and a close error,
+panic, or timeout becomes a typed bounded secondary diagnostic without
+replacing the primary launch failure. Cleanup continues through later
+resources and converges the provisional launch and reaper registries.
+
+Private deterministic status and metrics cover task/terminal state,
+source/operator/sink progress, per-edge input/output batches, rows, bytes,
+queue depth and high-water marks, and blocked-send counts/durations. Their
+registries use only stable preflight IDs and numeric values; batch IDs, cursor
+payloads, watermarks, epochs, row values, attributes, secrets, and arbitrary
+labels are absent.
+
+The short stress suite covers 100 deterministic gate schedules plus sustained
+zero-cost idle, watermark, and empty-data pressure. The universal calc-flow
+soak is the ignored crate-private
+`runtime::streaming::soak::twenty_minute_two_source_slow_sink` test:
+
+```bash
+CALC_FLOW_STREAM_SOAK=1 cargo test -p calc-flow --lib runtime::streaming::soak::twenty_minute_two_source_slow_sink -- --ignored --exact --nocapture
+```
+
+Every calc-flow soak uses exactly 1,200 measured seconds, a ten-second cadence,
+exactly 120 Linux RSS samples, and a 30-sample/300-second warm-up. The M2 soak
+also verifies slot pressure from zero-cost batches, accepted-to-both-sinks
+conservation, graceful drain, connector closure, and final task, queue, live,
+and reaper convergence. It remains opt-in and does not expand the public API.
 
 ## Delivery guarantees in the current runtime
 
@@ -333,8 +396,9 @@ currently produces it.
 
 Crate-private: the message representation and the four control constructors,
 the compiled-operator representation, the late-row recorder, source cursor and
-binding types, source pump/task and progress snapshots, scoped task contexts,
-the task supervisor, and `ContinuousJob`.
+binding types, source/operator/sink tasks and progress snapshots, scoped task
+contexts, whole-job preflight, the task supervisor, private status/metrics,
+`ContinuousRunner`, `ContinuousJob`, and the runner-scoped reaper.
 
 The envelope and its typed values do not appear in the current project or
 checkpoint document formats, the Python binding, or Studio routes. The
@@ -365,16 +429,6 @@ and the [v3 implementation plan](superpowers/plans/2026-08-02-continuous-streami
 assign the following behaviors to later milestones. They are not implemented
 in the current tree, and this document does not describe them as present:
 
-- **Remaining M2 validation** — one job-wide preflight validates every source
-  and sink binding before any source opens. The current internal slice validates
-  one source binding and its first-hop edge budgets when it is spawned.
-- **M2.3** — operator tasks, multi-ingress selection, and runtime-owned
-  forwarding through the compiled graph.
-- **M2.4** — stream-native sink tasks; the public source-driven
-  `StreamingRunner`; idempotent `status`, `wait`, `shutdown`, and `cancel`;
-  graceful drain; and Drop transfer to a runner-scoped reaper. The existing
-  public push-based runner remains in place until this slice lands.
-- **M2.5** — runtime metrics, stress coverage, and long-running soak tests.
 - **M3** — generated source watermark policies, idle timeout/reactivation,
   the multi-ingress watermark minimum, and late-data drop metrics (S5, D2.5).
   The current source task only forwards and validates source-provided
@@ -384,4 +438,9 @@ in the current tree, and this document does not describe them as present:
 - **M5** — runtime-generated barriers, barrier injection and alignment, epoch
   checkpoint manifests, lineage recovery numbering (D9.3–D9.6), and the
   exactly-once sink commit protocol (S7, S9).
+- **Post-M5 public A6 integration** — the source-driven runner/job, public
+  source and sink bindings, status/control methods, and v2 runner replacement
+  land atomically only after the M4 state and complete M5 durability contract
+  have passed a separate review. M2 runtime internals complete does not expose
+  or replace the current public v2 runners.
 - **M6** — Python and Studio projections of the stream surface.

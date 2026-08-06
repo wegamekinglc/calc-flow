@@ -19,9 +19,8 @@
   tasks M2.1-M2.5.
 - M2 completion critique:
   [`../critiques/continuous-streaming-m2-completion.md`](../critiques/continuous-streaming-m2-completion.md),
-  round 4 at `6e5e671174bbf68ec828211734dc5066dc7f5014` confirms B6 and
-  S8-S11 are resolved but blocks revision 5 on B7's contradictory S10
-  precedence.
+  round 5 at `6d5740d3df733a02450d45bdde168a3dfb4b03e9` approves revision 6
+  with `BLOCKS REMAINING: 0`.
 - Audit anchors for this revision use four deliberately distinct terms. The
   **comparison baseline** is `origin/main` at
   `d45c2b26def2c4dfe179f2b7c7c1d2411fc069b6`; the **historical M2 skeleton**
@@ -35,9 +34,12 @@
   `c4979061cc239b43617f642e2294794f2833d95d`; at `5fddf4f`, the branch is
   nine commits ahead of and one commit behind that baseline. The historical
   skeleton is not the baseline for relative-to-`main` compatibility claims. A
-  future synchronized final PR head is none of these anchors unless its exact
-  40-character SHA is recorded separately.
-- Status: revision 6 of the proposed M2-internal API/UX delta. Revision 2
+  later **code-approved head** is
+  `7deda2a0d801dac7ed5e8e75ca42272ecd72bb48`; it is the source and evidence
+  anchor for this delivery reconciliation, not a replacement for the earlier
+  historical audit labels.
+- Status: revision 7 reconciles the approved M2-internal API/UX delta with the
+  delivered implementation at code-approved head `7deda2a0`. Revision 2
   addressed B1-B5 and S1-S7 from
   [`../critiques/continuous-streaming-m2-completion.md`](../critiques/continuous-streaming-m2-completion.md).
   Revision 3 synchronized the crate-private real-runtime soak seam and the
@@ -48,10 +50,38 @@
   at the design level with finite envelope-slot admission and resolves round-3
   compatibility, soak-evidence, verification, and performance precision.
   Revision 6 conforms that design to the delta specification's narrow B7 S10
-  supersession and public-channel migration contract. It remains pending
-  `cf-critic` review. The Rust snippets below remain precise implementation
-  contracts; newly named M2 runtime types remain `pub(crate)`. This note does
-  not authorize or revise the future public A6 runner surface.
+  supersession and public-channel migration contract and received the round-5
+  zero-block critique. Revision 7 records delivery without changing the
+  approved requirements. The Rust snippets below remain precise
+  implementation contracts; newly named M2 runtime types remain `pub(crate)`.
+  This note does not authorize or revise the future public A6 runner surface.
+
+### Delivered G1-G8 status at `7deda2a0`
+
+The delivered test map closes AC-M2.5-A5's real-edge lifecycle case, every
+tracked M2 B-family drain/backpressure/FIFO/stress case, and AC-M2.1-F's
+dropped-start ownership and reaper convergence case.
+
+| Gap | Delivered status                                                                                                      |
+| --- | --------------------------------------------------------------------------------------------------------------------- |
+| G1  | Closed: cursor and watermark regression fields are binding-qualified and fail before enqueue.                         |
+| G2  | Closed: panic text is UTF-8-safe and at most 1,024 bytes; non-string payload text is fixed.                           |
+| G3  | Closed: the exact 20-minute private soak command ran on Linux with 120/120 samples.                                   |
+| G4  | Closed in source/rustdoc and reconciled here across the governing current-state documentation.                        |
+| G5  | Closed: Codacy reported zero annotations at the code-approved head.                                                   |
+| G6  | Closed: four of four threads were resolved; Copilot review `4871842015` added zero comments.                          |
+| G7  | Closed for the code-approved head: 15/15 checks passed and GitHub reported `MERGEABLE`/`CLEAN`.                       |
+| G8  | Closed: every edge enforces independent slot/row/byte bounds and terminal paths converge without leaked reservations. |
+
+The durable exact-head evidence is the [PR #83 soak and performance
+summary](https://github.com/wegamekinglc/calc-flow/pull/83#issuecomment-5201266650).
+Its raw log SHA-256 is
+`bc97c8f736ad41a4f228e07300f1ecd23c9af9fb09dc1be1718823430bd05f35`.
+The run recorded 120/120 RSS samples, 96,124 accepted batches at each sink,
+24,032 accepted zero-cost batches, zero missing/duplicate batches, zero final
+task/queue/reaper leaks, and an RSS slope of -2.609 MiB/hour. The paired
+base/head timing result is `INCONCLUSIVE` and non-blocking because `main` does
+not contain the stream cases; benchmark compilation passed on both refs.
 
 ## Governing artifact precedence
 
@@ -156,9 +186,9 @@ message constructors are crate-private. At the comparison baseline,
 `CalcFlowError` is
 `#[non_exhaustive]` and already contains `EdgeClosed`.
 
-At artifact starting head `5fddf4f`, every callable runner signature and
-re-export above is unchanged from audited implementation head `574c0fb`. The
-PR adds this public Rust error variant relative to the comparison baseline:
+At code-approved head `7deda2a0`, every callable runner signature and
+re-export above remains unchanged from the comparison baseline. The PR adds
+this public Rust error variant relative to that baseline:
 
 ```rust
 #[error("task {task_id} panicked: {message}")]
@@ -172,19 +202,15 @@ continuous-runner callable is added. The existing Python wildcard conversion
 would classify a future crossing instance as `ExecutionError`, so this slice
 adds no Python exception class or type-stub member.
 
-Audited implementation head `574c0fb` also contains the crate-private
-source-driven runtime: whole-job preflight, source/operator/sink tasks, a
-private runner and job lifecycle, reaper ownership, status and metrics, stress,
-the real-runtime soak seam, and Criterion cases. These internals are
-implementation evidence, not a public runner and not final-head completion
-evidence. Its implementation gaps are finite envelope-slot admission,
-binding-qualified source fields, bounded panic text, 20-minute soak conversion
-and evidence, normative-document reconciliation, quality findings, review
-threads, and final-head gates recorded as G1-G8 by delta-spec revision 6. In
-particular, it still uses row/byte-only admission and the governed total
-S10/API/rustdoc/test projections still describe that obsolete behavior; the
-artifact-only B7 revision authorizes their narrow reconciliation but is not
-implementation evidence.
+Code-approved head `7deda2a0` also contains the complete crate-private M2
+runtime: whole-job preflight, source/operator/sink tasks, private runner and
+job lifecycle, reaper ownership, status and metrics, stress, the exact
+20-minute real-runtime soak seam, and Criterion cases. It enforces finite
+envelope-slot admission, binding-qualified source fields, bounded panic text,
+and bounded failed-launch cleanup. G1-G8 are closed at that code/evidence
+anchor. These internals are implementation evidence, not a public runner; a
+later documentation push changes the PR SHA and therefore requires a final-head
+check/soak/review refresh before merge readiness can be assessed.
 
 ## Decisions
 
@@ -275,8 +301,9 @@ charged_bytes + message_bytes  <= B
 ```
 
 For a public `EdgeBudget { max_rows: R, max_bytes: B }`, all three checked sums
-must fit. A direct `edge_channel` caller that needs `M` simultaneous envelopes
-chooses `R >= max(required_row_limit, M)` and retains the required byte ceiling.
+must fit. A direct `edge_channel` caller chooses
+`R >= max(required_row_limit, required_simultaneous_messages)` and
+retains the required byte ceiling.
 Existing struct literals, constructors, and call sites remain source-compatible;
 data-only traffic in which every envelope charges at least one row retains its
 prior effective limits, while zero-cost sends may now park earlier.
@@ -548,11 +575,10 @@ error is `CalcFlowError::InvalidArgument` with machine-readable field
 watermark, expose progress publicly, or add M3 minimum/idle/reactivation
 semantics.
 
-At audited implementation head `574c0fb`, `source_task.rs` still reports
-`source.cursor` and `source.watermark`, with the binding only in free-form
-text. Correcting the two fields and pinning their pre-enqueue behavior is an
-internal implementation blocker (G1); it requires no public signature or
-control API.
+At code-approved head `7deda2a0`, `source_task.rs` reports the exact fields
+`sources.<binding_id>.cursor` and `sources.<binding_id>.watermark`, and focused
+tests pin their pre-enqueue behavior. G1 is closed without a public signature
+or control API.
 
 ### Operator task and validating collector
 
@@ -721,11 +747,10 @@ boundary within the remaining 1,021 bytes, and appends the ellipsis. The stored
 message, including the ellipsis, is therefore valid UTF-8 and at most 1,024
 bytes. A non-string payload remains exactly `non-string panic payload`.
 
-At audited implementation head `574c0fb`, the shared `panic_message` helper is used
-by supervision and connector-open capture, but returns string payloads without
-a bound. Implementing the common bound plus ASCII, multibyte-boundary, short,
-and non-string tests is G2. It preserves the public variant's fields and
-display; no further public error variant is required.
+At code-approved head `7deda2a0`, the shared `panic_message` helper is used by
+supervision and connector lifecycle capture and implements the common bound.
+ASCII, multibyte-boundary, short, and non-string tests close G2 while
+preserving the public variant's fields and display.
 
 ### Private failure origins and start-failure aggregation
 
@@ -1282,15 +1307,16 @@ head are equal. A summary, selected samples, local path, mutable external link,
 disabled result, non-Linux skip, or earlier-head bundle is not evidence; any
 later push requires a new run and bundle.
 
-The 20-minute command is an external/manual delivery gate and has not been run
-by this artifact revision; handoff must continue to report it as not run unless
-the reviewer-verified bundle exists for the synchronized final Linux head. At
-audited implementation head `574c0fb`, the soak is still named `one_hour_*`,
-uses 360 samples and a 60-sample warm-up, and lacks the required slot and final
-convergence evidence. Converting the private seam and producing final-head
-Linux evidence is G3/G8. The acceptance duration is an observable test/delivery
-contract only; it does not justify a public duration setting, runner control
-method, or integration-test seam.
+The command ran successfully on Linux at code-approved head `7deda2a0`. The
+[durable evidence bundle](https://github.com/wegamekinglc/calc-flow/pull/83#issuecomment-5201266650)
+records 120/120 samples, 96,124 accepted batches at each sink, 24,032 accepted
+zero-cost batches, zero loss or duplication, zero final task/queue/reaper
+leaks, and an RSS slope of -2.609 MiB/hour. The raw log SHA-256 is
+`bc97c8f736ad41a4f228e07300f1ecd23c9af9fb09dc1be1718823430bd05f35`.
+This closes G3/G8 at that exact code head. The acceptance duration is an
+observable test/delivery contract only; it does not justify a public duration
+setting, runner control method, or integration-test seam. Any later push
+invalidates exact-head evidence and requires a refresh.
 
 Ordinary verification only compiles Criterion. The opt-in baseline is:
 
@@ -1618,16 +1644,13 @@ implemented by M2:
   and S9 capability reporting;
 - Python/PyO3, project v3, Studio `/api/v3`, SSE, and migration surfaces.
 
-## Public API blockers for implementation
+## Public API delivery status
 
-- No public API design blocker prevents G1-G8 from being implemented. The
-  remaining surface work is the boundedness-semantic correction on the
-  existing public channel; all new runner, status, metrics, and control shapes
-  remain crate-private. Diagnostics, tests, documentation, quality, review,
-  and final-head verification are still required.
+- G1-G8 are implemented and evidenced at code-approved head `7deda2a0`. All
+  new runner, status, metrics, and control shapes remain crate-private.
 - The PR-added `TaskPanicked` variant is the sole public Rust API item addition
-  in this slice. Its fields and display are frozen; the remaining panic work is
-  only the private 1,024-byte capture bound. The source-compatible but
+  in this slice. Its fields and display are frozen; the private 1,024-byte
+  capture bound is implemented. The source-compatible but
   observable `edge_channel` admission correction is a separate behavior delta,
   not another item addition.
 - Public source-driven A6 remains blocked until the separately reviewed post-M5
@@ -1643,9 +1666,8 @@ implemented by M2:
 - **No open proposed M2 behavior or public-scope question.** OQ1-OQ3, B6's
   slot invariant, B7's governing precedence and migration rule, the deadline
   outcome, diagnostic fields, panic bound, soak duration/evidence, and optional
-  performance decision are specified above. Revision 6 remains pending critic
-  review, so this is not an approval claim. G1-G8 remain delivery blockers,
-  not design questions.
+  performance decision are specified above. Revision 6 has a zero-block
+  critique, and G1-G8 are closed at code-approved head `7deda2a0`.
 - The public A6 integration is a separately reviewed post-M5 change containing
   both M4 state and complete M5 manifest/checkpoint behavior; release planning
   may name that cut, but must not split its durability promise.
@@ -1657,7 +1679,7 @@ implemented by M2:
 
 ## Handoff
 
-The four required decisions are specified: public A6 is deferred, M2
+The four required decisions are delivered: public A6 is deferred, M2
 multi-ingress watermark/idle fails closed while unary control passes through,
 ordinary sinks report process-local ordered delivery only, and every data or
 control envelope consumes one finite slot independently of its row/byte cost.
@@ -1666,8 +1688,9 @@ public `TaskPanicked` item; the existing public channel also gains the
 source-compatible, observable `(R, B) -> (R envelopes, R rows, B bytes)`
 admission correction and no new field or callable. The completion work
 preserves the error shape and bounds only internally captured text. The exact
-20-minute, 120-sample real-runtime soak remains an unexecuted external/manual
-gate at the exact command above; its short Drop/reaper smoke is independent.
-Next role: `cf-critic` for an adversarial pass over revision 6 before
-`cf-implementer` closes G1-G5/G8. This note does not certify M2 internals,
-PR #83, or the continuous-streaming feature as complete.
+20-minute, 120-sample real-runtime soak passed at `7deda2a0` with the durable
+bundle linked above. At that code-approved head, the full supplied verification
+and review evidence supports the precise label “M2 runtime internals complete.”
+It does not certify a public continuous runner or the overall streaming
+feature. A documentation-only successor head still needs refreshed exact-head
+soak, checks, and Copilot review before merge readiness can be claimed.

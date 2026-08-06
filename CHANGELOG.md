@@ -5,6 +5,21 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-06: Complete the crate-private M2 continuous-runtime skeleton with
+  whole-job preflight, bounded source/operator/sink tasks, stable supervision,
+  private runner/job/reaper lifecycle, deterministic metrics, stress coverage,
+  and the universal 1,200-second soak gate (10-second cadence, 120 samples,
+  30-sample/300-second warm-up). Failed or cancelled launch now closes every
+  begun resource in stable order with an independent five-second timeout per
+  resource; typed cleanup diagnostics preserve the primary outcome. Add the
+  non-exhaustive `CalcFlowError::TaskPanicked` variant as this slice's sole
+  public API item. Without changing `EdgeBudget` or `edge_channel` signatures,
+  `(R, B)` now independently caps queued envelopes and charged rows at `R`, and
+  charged bytes at `B`; direct callers must choose
+  `R >= max(required_row_limit, required_simultaneous_messages)`. Existing
+  public v2 runners remain unchanged until the separately reviewed post-M5 A6
+  integration.
+
 - Unify batch memory metering ahead of bounded stream channels. `Batch` and
   `TableBatch` gain `estimated_bytes()`: table batches are charged the Arrow
   memory size of their visible slices (sliced arrays sharing a larger backing

@@ -317,7 +317,7 @@ You should see the computed totals: `[3, 7]`.
 
 Rust users get an equivalent example in the [Rust API guide](rust-api.md): the
 `expression_pipeline` example builds the same expression pipeline over Arrow
-`RecordBatch` values and awaits `ExecutionPlan::execute`. With a source
+`RecordBatch` values and awaits `BatchExecutionPlan::execute`. With a source
 checkout you can run it directly:
 
 ```bash

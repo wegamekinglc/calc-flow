@@ -1084,3 +1084,39 @@ addition, and make no Python/Studio/schema/fixture change. `cf-tester` and
 20-minute/120-sample SHA-verified Linux bundle, zero Codacy findings without
 waiver, resolved threads, full matrix, current-main ancestry, green exact-head
 checks, and `MERGEABLE/CLEAN` before M2 or PR completion is claimed.
+
+## Delivery Reconciliation at Code-Approved Head `7deda2a0`
+
+Revision 6's implementation handoff is complete. G1-G8 are closed: source
+cursor and watermark errors are binding-qualified; panic text is valid UTF-8
+and bounded to 1,024 bytes; launch failure and cancellation close every begun
+resource in stable order with an independent five-second bound per resource;
+cleanup panics and failures remain typed secondary diagnostics without
+replacing the primary outcome; terminal paths converge; and every edge applies
+independent envelope-slot, row, and byte limits. The public v2 runner remains
+unchanged. `CalcFlowError::TaskPanicked` is the sole public API item addition,
+and all M2 runner, job, status, metrics, and control types remain crate-private
+until the separately reviewed post-M5 A6 integration.
+
+The delivered test map closes AC-M2.5-A5's real-edge lifecycle case, the M2
+B-family drain/backpressure/FIFO/stress cases, and AC-M2.1-F's dropped-start
+ownership and reaper convergence case.
+
+The required Linux soak passed for exactly 1,200 seconds with ten-second
+sampling, 120 samples, and a 30-sample/300-second warm-up. The durable
+[PR-comment bundle](https://github.com/wegamekinglc/calc-flow/pull/83#issuecomment-5201266650)
+has raw-log SHA-256
+`bc97c8f736ad41a4f228e07300f1ecd23c9af9fb09dc1be1718823430bd05f35`.
+It records 96,124 accepted batches at each sink, 24,032 zero-cost envelopes,
+zero missing or duplicate IDs, zero leaked tasks/queues/reservations/reapers,
+three saturated and blocked edges, and an RSS slope of -2.609 MiB/hour.
+Benchmark targets compiled; a base/head timing comparison is inconclusive and
+non-blocking because `main` has no matching stream cases, while the
+same-reference control stayed within the noise rule.
+
+At that code head, all 15 checks passed, Codacy reported zero annotations,
+Copilot review `4871842015` added zero comments, all four review threads were
+resolved, and GitHub reported `MERGEABLE/CLEAN`. A later documentation-only
+commit changes the exact PR head, so those checks, review state, and exact-head
+acceptance must be refreshed before merge. This reconciliation records the
+completed code-head audit; it is not a final-head merge approval.

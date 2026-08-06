@@ -41,18 +41,34 @@ The runnable inventories span both surfaces and share datasets and expressions:
 The `calc_flow` crate re-exports its supported public types from
 [`lib.rs`](../crates/calc-flow/src/lib.rs).
 
-| Area                 | Primary APIs                                                        |
-| -------------------- | ------------------------------------------------------------------- |
-| Data                 | `Batch`, `BatchKind`, `BatchMetadata`, `TableBatch`                 |
-| Graph                | `PipelineBuilder`, `Edge`, `PortEndpoint`, `ExecutionPlan`          |
-| Operators            | `Port`, `Operator`, `ExpressionOperator`, `SqlOperator`             |
-| Execution            | `ExecutionOptions`, `RunResult`, `RunMetadata`, `NodeTiming`        |
-| UDF/providers        | `UdfRegistry`, `UdfReference`, `ProviderRegistry`                   |
-| Sources and sinks    | `Source`, `SourceItem`, `Sink`, `BatchingSource`                    |
-| Recovery             | `MicroBatchRunner`, `StreamingRunner`, `CheckpointStore`            |
-| Projects             | `ProjectSpec`, `compile_project`, `validate_project`                |
-| Persistence          | `FileProjectStore`, `FileCheckpointStore`                           |
-| Errors               | `CalcFlowError`, `Result<T>`                                        |
+| Area               | Primary APIs                                                                                                         |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| Data               | `Batch`, `BatchKind`, `BatchMetadata`, `TableBatch`                                                                  |
+| Batch graph        | `PipelineBuilder`, `Edge`, `PortEndpoint`, `BatchExecutionPlan`                                                      |
+| Stream plan        | `StreamExecutionPlan`, `StreamRequirements`, `DeliveryGuarantee`, `StreamRuntimeConfig`                              |
+| Operator traits    | `Port`, `OperatorMetadata`, `NodeOperator`, `BatchOperator`, `StreamOperator`                                        |
+| Built-in operators | `ExpressionOperator`, `SqlOperator`, `UnionOperator`                                                                 |
+| Execution          | `ExecutionOptions`, `RunResult`, `RunMetadata`, `NodeTiming`                                                         |
+| Stream model       | `StreamMessage`, `StreamMessageKind`, `StreamJobContext`, `EventTime`, `Epoch`                                       |
+| Stream channel     | `EdgeBudget`, `EnvelopeCost`, `ChannelMetrics`, `EdgeSender`, `EdgeReceiver`, `edge_channel`                         |
+| UDF/providers      | `UdfRegistry`, `UdfReference`, `ProviderRegistry`, `BatchOperatorFactory`, `StreamOperatorFactory`                   |
+| Sources and sinks  | `Source`, `SourceItem`, `Sink`, `BatchingSource`                                                                     |
+| Recovery           | `MicroBatchRunner`, `StreamingRunner`, `CheckpointStore`                                                             |
+| Projects           | `ProjectSpec`, `compile_project`, `validate_project`                                                                 |
+| Persistence        | `FileProjectStore`, `FileCheckpointStore`                                                                            |
+| Errors             | `CalcFlowError`, `Result<T>`                                                                                         |
+
+`compile_project` produces a `BatchExecutionPlan`. `compile_batch` and
+`compile_stream` are the Rust graph-compilation entry points. A
+`StreamExecutionPlan` is consumed only by the crate-private M2 runtime; it is
+not accepted by a public source-driven runner. The public v2
+`MicroBatchRunner` and `StreamingRunner` remain unchanged until the separately
+reviewed post-M5 A6 integration.
+
+`EdgeBudget::new(R, B)` keeps its two-field public shape and caps queued
+envelopes and charged rows independently at `R`, plus charged bytes at `B`.
+Direct `edge_channel` callers must choose
+`R >= max(required_row_limit, required_simultaneous_messages)`.
 
 Generate local rustdoc with:
 
@@ -282,6 +298,11 @@ Rust returns `CalcFlowError` variants. Python exposes the stable hierarchy:
 Invalid user documents and graph definitions are configuration/compile errors;
 execution, callbacks, source/sink failures, cancellation, and checkpoint
 storage preserve their more specific categories.
+
+`CalcFlowError::TaskPanicked { task_id, message }` is the sole public API item
+added by the private M2 runtime. Internally captured panic text is valid UTF-8
+and at most 1,024 bytes including the ellipsis. Python maps an unexpected native
+panic through its existing `ExecutionError` category; M2 adds no Python API.
 
 ## Version and compatibility
 

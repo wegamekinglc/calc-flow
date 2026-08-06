@@ -71,7 +71,7 @@ The Rust crate exposes the native data, operator, graph, runtime, project, and
 checkpoint types directly. A table `Batch` contains one or more Arrow
 `RecordBatch` values plus immutable metadata. Build a graph with
 `PipelineBuilder`, compile it against a `UdfRegistrySnapshot`, then await
-`ExecutionPlan::execute`. The canonical first example is
+`BatchExecutionPlan::execute`. The canonical first example is
 [`crates/calc-flow/examples/expression_pipeline.rs`](crates/calc-flow/examples/expression_pipeline.rs),
 a true twin of the Python quickstart:
 
@@ -96,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Vec::new(),
             )?),
         )?
-        .compile(&UdfRegistry::new().snapshot())?;
+        .compile_batch(&UdfRegistry::new().snapshot())?;
     let input = RecordBatch::try_from_iter(vec![
         (
             "a",
@@ -185,6 +185,10 @@ Python package is not a second engine.
 - Micro-batch and streaming runners deliver sinks before committing
   checkpoints. Delivery is at least once, and failed delivery restores owned
   in-memory state.
+- The crate-private M2 runtime skeleton consumes `StreamExecutionPlan` values
+  with bounded source/operator/sink tasks. It does not replace the public v2
+  runners; public source-driven integration remains a separately reviewed
+  post-M5 change.
 
 The canonical architecture is described in
 [docs/introduction.md](docs/introduction.md).

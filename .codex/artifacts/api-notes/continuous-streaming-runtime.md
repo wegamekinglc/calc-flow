@@ -24,6 +24,29 @@ contradicting the specification).
   No TBDs. Where the plan's sketches were explicitly non-binding ("目标形态，
   不是预先冻结的最终签名"), deviations are stated and justified inline.
 
+### Current delivery boundary
+
+PR #83 completes the M2 runtime internals but does not publish A6. Whole-job
+preflight, source/operator/ordinary-sink tasks, the private runner/job/status,
+supervisor/reaper, metrics, stress, soak, and benchmark seams are implemented
+under `crates/calc-flow/src/runtime/streaming/` and remain crate-private. The
+existing public v2 `StreamingRunner`, `MicroBatchRunner`, source/sink traits,
+checkpoint documents, Python API, and Studio API remain unchanged. Public A6
+is still the total target below and lands only in a separately reviewed
+post-M5 change after its M4/M5 state and durability dependencies exist.
+
+The M2 completion delta narrowly revises the already-public bounded channel
+without changing its signatures. For
+`EdgeBudget { max_rows: R, max_bytes: B }`, queued envelopes are at most `R`,
+charged rows are independently at most `R`, and charged bytes are at most
+`B`. Every control or data envelope consumes one slot. A direct caller chooses
+`R >= max(required_row_limit, required_simultaneous_messages)`. This
+supersedes only the exhaustive two-dimensional wording in total-spec
+S10.1/S10.5 and matching FR23/input/acceptance projections; S10.2-S10.4 and all
+other A1-A8 behavior remain frozen. The sole public Rust API item added by M2
+is the semver-compatible `CalcFlowError::TaskPanicked` variant on the existing
+non-exhaustive enum.
+
 ## Audiences
 
 - Rust users: new `BatchOperator`/`StreamOperator` traits, runner/job
@@ -360,7 +383,7 @@ before any downstream observation with `CalcFlowError::Compile` when the port
 is unknown, the kind mismatches, or the exact schema mismatches; with
 `CalcFlowError::EdgeClosed` (A8) when the edge receiver is closed during job
 convergence; with `CalcFlowError::InvalidArgument` when a single batch
-exceeds the edge byte budget (S10.3). Operators propagate with `?`; a failed
+exceeds the edge row or byte budget (S10.3). Operators propagate with `?`; a failed
 handler never forwards a partial control event because control forwarding is
 runtime-owned (S1.3) and happens only after the handler returns `Ok`.
 
@@ -951,10 +974,19 @@ pub struct StreamRuntimeConfig {
 }
 
 pub struct EdgeBudget {
-    pub max_rows: usize,                 // > 0 (S10.1)
-    pub max_bytes: usize,                // > 0 (S10.1)
+    // > 0; independently caps queued envelopes and charged rows (S10.1)
+    pub max_rows: usize,
+    // > 0; caps charged estimated bytes (S10.1)
+    pub max_bytes: usize,
 }
 ```
+
+The two-field shape and every constructor/call signature remain unchanged.
+For `(R, B)`, enqueue atomically requires envelope count `<= R`, charged rows
+`<= R`, and charged bytes `<= B`. Zero-cost traffic can therefore block
+earlier than under the former row/byte-only behavior. Direct `edge_channel`
+callers use `R >= max(required_row_limit, required_simultaneous_messages)`;
+there is no separate public message-limit field or control budget.
 
 **`pause` is deliberately absent.** S8.1 freezes exactly six job states; a
 pause surface would require a seventh state and new transition semantics the
@@ -2092,22 +2124,22 @@ assert outcome.completed_epoch > epoch
 
 ## Appendix A. Plan M0.2 checkbox coverage map
 
-| Plan M0.2 checkbox                                                   | Sections                      |
-| -------------------------------------------------------------------- | ----------------------------- |
-| 冻结 Rust 类型名、所有权、async 方法和错误 variant                                  | A1-A8                         |
+| Plan M0.2 checkbox                                                            | Sections                      |
+| ----------------------------------------------------------------------------- | ----------------------------- |
+| 冻结 Rust 类型名、所有权、async 方法和错误 variant                            | A1-A8                         |
 | 验证 `StreamCollector` 的 object safety、生命周期和 error propagation         | A2.1                          |
-| 冻结 `StreamingRunner` 的 start/wait/shutdown/cancel/checkpoint/status  | A6                            |
+| 冻结 `StreamingRunner` 的 start/wait/shutdown/cancel/checkpoint/status        | A6                            |
 | 冻结 Python async/blocking API；blocking API 在 running event loop 中必须拒绝 | B1-B4                         |
-| 冻结 project v3 顶层结构和 secret reference                                 | C1-C3                         |
-| 冻结 Studio `/api/v3` job route 与 SSE event model                      | D1-D3                         |
-| `StreamSource` 取下一项的取消安全契约                                           | A4 (D3.5 rustdoc contract)    |
-| `Drop` 只取消不 join 的所有权模型                                              | A6 (Drop contract, D5.3/D5.4) |
-| barrier 转发时机二选一，记录延迟代价与上限                                            | F1                            |
-| spec section 9 deferrals: 类型名/collector/Python split                 | A1-A8, B1-B5                  |
+| 冻结 project v3 顶层结构和 secret reference                                   | C1-C3                         |
+| 冻结 Studio `/api/v3` job route 与 SSE event model                            | D1-D3                         |
+| `StreamSource` 取下一项的取消安全契约                                         | A4 (D3.5 rustdoc contract)    |
+| `Drop` 只取消不 join 的所有权模型                                             | A6 (Drop contract, D5.3/D5.4) |
+| barrier 转发时机二选一，记录延迟代价与上限                                    | F1                            |
+| spec section 9 deferrals: 类型名/collector/Python split                       | A1-A8, B1-B5                  |
 | spec section 9 deferrals: connectors 依赖边、feature、CI、覆盖率              | E1-E5                         |
-| spec section 9 deferrals: project v3 与 secret、Studio 路由与 SSE         | C1-C3, D1-D3                  |
-| spec section 9 deferrals: group-key 编码、window 列时区                    | G1, G2                        |
-| spec section 9 deferrals: manifest JSON 布局与 recovery-status          | G3                            |
+| spec section 9 deferrals: project v3 与 secret、Studio 路由与 SSE             | C1-C3, D1-D3                  |
+| spec section 9 deferrals: group-key 编码、window 列时区                       | G1, G2                        |
+| spec section 9 deferrals: manifest JSON 布局与 recovery-status                | G3                            |
 
 Items on the M0.2 list owned by the critique artifact (adversarial pass,
 `Block` verdicts) are out of scope here; the "Design answers" section above

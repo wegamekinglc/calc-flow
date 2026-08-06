@@ -28,7 +28,22 @@ quotable across all three).
   AC-D4/AC-D5/AC-S10/AC-I. Revision 3 applies M0 critique round 2 (finding
   N1): the S9.1 matrix sink cell and the S9.2 sink clause now require an
   unbounded retention class for an epoch-idempotent sink to satisfy an
-  exactly-once compile, matching the API note's rule.
+  exactly-once compile, matching the API note's rule. Revision 4 applies the
+  approved M2 completion delta's deliberately narrow precedence rule: only
+  S10.1/S10.5 and the matching portions of FR23, the edge-budget inputs row,
+  and AC-S10 gain the independent envelope-slot predicate. S10.2-S10.4 and
+  every other frozen rule retain their prior meaning.
+
+### Current implementation boundary
+
+PR #83 completes the crate-private M2 runtime internals: whole-job preflight,
+source/operator/ordinary-sink tasks, private runner/job/reaper lifecycle,
+stable supervision and terminal arbitration, metrics, stress, and the
+universal soak gate. It does not publish the A6 runner surface. Existing public
+v2 runners, checkpoint/project formats, Python, and Studio remain unchanged;
+public source-driven A6 integration is a separately reviewed post-M5 change.
+The sole public API item added in M2 is
+`CalcFlowError::TaskPanicked { task_id, message }`.
 
 ## Problem Statement
 
@@ -748,12 +763,18 @@ barrier alignment, final results) MUST hold independently of it.
 
 ### S10 - Bounded channels and backpressure
 
-- **S10.1 Dual limits.** Every edge channel enforces TWO hard limits, checked
-  atomically at enqueue time: logical rows and estimated bytes. Reservation
-  happens before enqueue; release happens exactly once, when the receiver
-  dequeues or the reservation is dropped; a cancelled send releases its
-  reservation exactly once. Closing the receiver wakes all blocked senders
-  with a closed signal.
+- **S10.1 Two-field, three-predicate admission.** Every edge channel keeps the
+  public two-field budget `(max_rows = R, max_bytes = B)` and atomically checks
+  three hard predicates at enqueue: queued envelopes are at most `R`, charged
+  logical rows are independently at most `R`, and charged estimated bytes are
+  at most `B`. Every data or control envelope consumes one slot, including a
+  zero-row/zero-byte data batch. Reservation happens before enqueue; release
+  happens exactly once, when the receiver dequeues or the reservation is
+  dropped; a cancelled send releases its reservation exactly once. Closing the
+  receiver wakes all blocked senders with a closed signal. Direct channel
+  callers choose
+  `R >= max(required_row_limit, required_simultaneous_messages)`. This revision
+  changes admission only; S10.2-S10.4 remain unchanged.
 - **S10.2 Accounting.** Table batches are charged the Arrow memory size of
   their visible slices; external payloads MUST provide an exact or
   conservative byte estimate with no opt-out. Sums use checked arithmetic;
@@ -776,8 +797,9 @@ barrier alignment, final results) MUST hold independently of it.
   compilation fail (S9.2).
 - **S10.5 Implementation freedom.** The reservation mechanism (e.g., a single
   mutex-protected budget with notify) is an M1.4 implementation concern; the
-  semantics are: atomic two-dimension reservation, exactly-once release, FIFO
-  per S1, and no lost wakeups under the single-producer-per-edge invariant.
+  semantics are: atomic three-predicate reservation and release for envelope
+  slots, rows, and bytes; exactly-once release; FIFO per S1; and no lost
+  wakeups under the single-producer-per-edge invariant.
 
 ## 4. Program-wide invariants
 
@@ -886,10 +908,13 @@ Each requirement cites its defining section; acceptance tests live in section 8.
 - **FR22** - Delivery guarantees derive from the S9.1 matrix; exactly-once
   requests fail compilation before side effects when any capability is
   missing; guarantees are reported per sink (S9.2-S9.4).
-- **FR23** - Edge channels enforce rows and bytes atomically at enqueue with
-  exactly-once reservation release and sender wakeup on close; oversize single
+- **FR23** - Edge channels enforce envelope slots, rows, and bytes atomically
+  at enqueue, with `max_rows` independently bounding slots and rows, exactly-
+  once reservation release, and sender wakeup on close. Oversize single
   messages fail before enqueue and are pre-validated at compilation or runner
-  construction, always before any source opens (S10.1-S10.3).
+  construction, always before any source opens (S10.1-S10.3). Public channel
+  signatures remain unchanged; direct callers use
+  `max_rows >= max(required_row_limit, required_simultaneous_messages)`.
 - **FR24** - `Block` is the default backpressure policy; `DropOldest` is
   explicit, observable, and exactly-once-incompatible (S10.4).
 - **FR25** - Task registration, joining terminal paths, Drop-cancels-never-
@@ -908,9 +933,12 @@ Each requirement cites its defining section; acceptance tests live in section 8.
 - **NFR-2 State scale.** Keyed state larger than 10 MiB checkpoints and
   restores correctly while the manifest itself stays bounded (D4.4). Checkpoint
   duration is analyzed against dirty-key volume, not total retained state.
-- **NFR-3 Memory.** Steady-state queue charges never exceed configured edge
-  budgets (S10), and a one-hour two-source slow-sink soak shows no sustained upward
-  memory trend. External array payloads carry conservative byte accounting.
+- **NFR-3 Memory.** Steady-state envelope, row, and byte queue charges never
+  exceed configured edge budgets (S10). The universal calc-flow soak gate is
+  exactly 1,200 measured seconds with a ten-second cadence, exactly 120 Linux
+  RSS samples, and a 30-sample/300-second warm-up. A two-source slow-sink soak
+  under that standard shows no sustained upward memory trend. External array
+  payloads carry conservative byte accounting.
 - **NFR-4 Recovery.** Cold-cache and warm-cache recovery are measured
   separately. Crash consistency is proven by the M5.5 fault matrix at every
   listed injection point, asserting recovered cursors, watermarks, window
@@ -956,7 +984,7 @@ exact type names belong to the M0.2 API note):
 | Sequence                   | `u64`                                       | items per source lineage           | starts at 0; strictly +1 per item; continues across recovery (S2.1)        |
 | Cursor                     | ordered key plus opaque payload (section 1) | source-defined order               | strictly increasing within a run; durable only via manifest (S2.2, S2.3)   |
 | Late metrics               | counters and a maximum gauge                | rows, batches, microseconds        | cumulative; no payloads; never regress after recovery (D2.5)               |
-| Edge budget                | `(max rows, max estimated bytes)`           | rows and bytes                     | both > 0; enforced atomically at enqueue (S10.1, S10.2)                    |
+| Edge budget                | `(max rows, max estimated bytes)`           | envelopes, rows, and bytes         | both fields > 0; `max_rows` independently caps envelopes and rows (S10.1)  |
 
 ## 8. Acceptance criteria
 
@@ -1058,13 +1086,15 @@ assertions, I8):
   sink, a lossy source, a volatile UDF, or a missing durable aligned
   checkpoint fails compilation before any source opens, naming the failing
   path; per-sink guarantees are reported exactly as the S9.1 matrix derives.
-- [ ] **AC-S10** Channel tests: a full row budget blocks; a full byte budget
-  blocks with few messages; an oversize single message fails before enqueue;
-  a cancelled send releases its reservation exactly once; closing the
-  receiver wakes blocked senders; compilation or runner construction rejects
-  a source whose configured maximum batch exceeds its downstream edge
-  capacity before any source opens; a slow sink observably pauses source
-  polling.
+- [ ] **AC-S10** Channel tests: with `max_rows = 2`, two zero-row/zero-byte
+  envelopes enqueue and the third blocks until one dequeue; a full row budget
+  blocks; a full byte budget blocks with few messages; an oversize single
+  message fails before enqueue; a cancelled send releases its reservation
+  exactly once; closing the receiver wakes blocked senders; compilation or
+  runner construction rejects a source whose configured maximum batch exceeds
+  its downstream edge capacity before any source opens; and a slow sink
+  observably pauses source polling. The public two-field `EdgeBudget` shape and
+  `edge_channel` signature remain source-compatible.
 - [ ] **AC-I** Invariant tests: serialized configurations, projects, and
   manifests contain no executable objects (structure property test); secret
   values are absent from every persisted and observed surface (redaction

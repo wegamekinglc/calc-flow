@@ -456,7 +456,10 @@ at-least-once delivery. `reset[_async]` clears recovery state and
 Catch the narrowest exported class: `ConfigError`, `CompileError`,
 `ExecutionError`, `ProviderError`, `CheckpointError`, or `CancelledError`.
 All derive from `CalcFlowError`; provider/cancellation errors are execution
-errors.
+errors. The crate-private M2 runtime adds no Python exception type or runner
+surface. If its public non-exhaustive Rust `TaskPanicked` variant reaches the
+binding through a future public path, the existing wildcard mapping reports it
+as `ExecutionError`.
 
 ## More examples
 

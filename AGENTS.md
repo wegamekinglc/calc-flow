@@ -156,17 +156,23 @@ dashes span the full column width, including cell spaces.
   and `Epoch` values under `crates/calc-flow/src/time/`. Only the data variant
   wrapping an immutable `Batch` is publicly constructable; control messages are
   created through crate-private constructors, so the public boundaries do not
-  expand and there is no public runner control API. See
+  expand and there is no public runner control API. The crate-private M2
+  runtime consumes `StreamExecutionPlan` with whole-job preflight, bounded
+  source/operator/sink tasks, private runner/job/reaper ownership, and
+  deterministic metrics; existing public v2 runners remain unchanged. See
   `docs/runtime-envelope.md`.
 - `Port` declares name, `BatchKind`, required flag, and optional exact Arrow
   schema.
-- `Operator` owns async processing and checkpoint lifecycle. Built-ins are
-  `ExpressionOperator` and `SqlOperator`; external operators resolve through
-  `ProviderRegistry`.
+- `OperatorMetadata` owns shared graph metadata. `BatchOperator` and
+  `StreamOperator` split finite processing from continuous processing and
+  checkpoint lifecycle. Built-ins are `ExpressionOperator`, `SqlOperator`,
+  and the stream-only `UnionOperator`; external operators resolve through
+  lifecycle-specific factories in `ProviderRegistry`.
 - `PipelineBuilder` consumes immutable graph-building steps.
-  `compile()` validates endpoints, kinds, schemas, one-writer inputs, UDFs,
-  cycles, deterministic topology, inputs/outputs, and fingerprint.
-- `ExecutionPlan::execute` creates one run-scoped DataFusion session and
+  `compile_batch()` and `compile_stream()` validate endpoints, kinds, schemas,
+  one-writer inputs, UDFs, cycles, deterministic topology, inputs/outputs, and
+  fingerprint.
+- `BatchExecutionPlan::execute` creates one run-scoped DataFusion session and
   returns `RunResult` with named outputs, node timings, DataFusion metrics, and
   metadata.
 - `UdfRegistry` owns trusted native implementations.
