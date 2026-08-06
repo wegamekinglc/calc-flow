@@ -165,12 +165,71 @@ struct JobCore {
     runtime_status: Mutex<RuntimeStatus>,
     #[cfg(test)]
     terminal_commit_seam: Mutex<Option<TerminalCommitTestSeam>>,
+    #[cfg(test)]
+    launch_probe: Option<Arc<TestLaunchProbe>>,
 }
 
 #[cfg(test)]
 struct TerminalCommitTestSeam {
     reached: tokio::sync::oneshot::Sender<()>,
     release: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TestLaunchCheckpoint {
+    AfterOperatorEntry,
+    LivePublished,
+}
+
+#[cfg(test)]
+struct TestLaunchProbe {
+    checkpoint: TestLaunchCheckpoint,
+    reached: AtomicBool,
+    released: AtomicBool,
+    changed: Notify,
+}
+
+#[cfg(test)]
+impl TestLaunchProbe {
+    fn new(checkpoint: TestLaunchCheckpoint) -> Self {
+        Self {
+            checkpoint,
+            reached: AtomicBool::new(false),
+            released: AtomicBool::new(false),
+            changed: Notify::new(),
+        }
+    }
+
+    async fn pause_at(&self, checkpoint: TestLaunchCheckpoint) {
+        if self.checkpoint != checkpoint {
+            return;
+        }
+        self.reached.store(true, Ordering::Release);
+        self.changed.notify_waiters();
+        loop {
+            let notified = self.changed.notified();
+            if self.released.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    async fn wait_until_reached(&self) {
+        loop {
+            let notified = self.changed.notified();
+            if self.reached.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::Release);
+        self.changed.notify_waiters();
+    }
 }
 
 #[derive(Default)]
@@ -212,6 +271,8 @@ impl JobCore {
             }),
             #[cfg(test)]
             terminal_commit_seam: Mutex::new(None),
+            #[cfg(test)]
+            launch_probe: None,
         }
     }
 
@@ -700,6 +761,8 @@ struct RunnerCore {
     changed: Notify,
     #[cfg(test)]
     abandonment_warnings: AtomicU64,
+    #[cfg(test)]
+    next_launch_probe: Mutex<Option<Arc<TestLaunchProbe>>>,
 }
 
 const ABANDONED_RUNNER_WARNING: &str =
@@ -739,6 +802,8 @@ impl ContinuousRunner {
             changed: Notify::new(),
             #[cfg(test)]
             abandonment_warnings: AtomicU64::new(0),
+            #[cfg(test)]
+            next_launch_probe: Mutex::new(None),
         });
         let driver = tokio::spawn(runner_lifecycle(Arc::clone(&core), receiver));
         *core.driver.lock() = Some(driver);
@@ -756,6 +821,8 @@ impl ContinuousRunner {
     }
 
     pub(crate) fn start(&self, spec: ContinuousJobSpec) -> StartObserver {
+        #[cfg(test)]
+        let launch_probe = self.core.next_launch_probe.lock().take();
         let validated = match preflight_job(spec) {
             Ok(validated) => validated,
             Err(error) => {
@@ -788,13 +855,19 @@ impl ContinuousRunner {
         let launch_id = LaunchId(launch_id);
         let job_id = validated.context.job_id();
         let (metrics, sink_outputs) = metrics_for_job(&validated);
-        let core = Arc::new(JobCore::new(
+        let core = JobCore::new(
             launch_id,
             job_id,
             self.core.commands.clone(),
             metrics,
             sink_outputs,
-        ));
+        );
+        #[cfg(test)]
+        let core = JobCore {
+            launch_probe,
+            ..core
+        };
+        let core = Arc::new(core);
         {
             let mut registry = self.core.registry.lock();
             if registry.shutting_down {
@@ -842,6 +915,20 @@ impl ContinuousRunner {
             }));
         }
         StartObserver::observe(core)
+    }
+
+    #[cfg(test)]
+    fn start_with_test_launch_probe(
+        &self,
+        spec: ContinuousJobSpec,
+        probe: Arc<TestLaunchProbe>,
+    ) -> StartObserver {
+        let previous = self.core.next_launch_probe.lock().replace(probe);
+        assert!(
+            previous.is_none(),
+            "test launch probe slot was already occupied"
+        );
+        self.start(spec)
     }
 
     pub(crate) fn shutdown(&mut self) -> RunnerShutdownObserver {
@@ -1292,6 +1379,25 @@ async fn run_job_driver(
             return cancelled_driver_report(launch_id, &core.metrics);
         }
     };
+    #[cfg(test)]
+    if let Some(probe) = &core.launch_probe {
+        probe
+            .pause_at(TestLaunchCheckpoint::AfterOperatorEntry)
+            .await;
+    }
+    if core.launch_cancel.is_cancelled() {
+        runtime.supervisor.cancel();
+        let report = runtime.supervisor.join_all().await;
+        return cancelled_driver_report_with_task_cleanup(
+            launch_id,
+            report,
+            &RuntimeTaskProgress {
+                sources: BTreeMap::new(),
+                sinks: BTreeMap::new(),
+            },
+            &core.metrics,
+        );
+    }
     let mut resources = connector_resources(sources, sinks);
     let open_failures = open_connector_resources(&mut resources, &core.launch_cancel).await;
     if !open_failures.is_empty() {
@@ -1319,6 +1425,10 @@ async fn run_job_driver(
 
     core.state.lock().launch_delivery = LaunchDeliveryState::ReadyUnclaimed;
     core.changed.notify_waiters();
+    #[cfg(test)]
+    if let Some(probe) = &core.launch_probe {
+        probe.pause_at(TestLaunchCheckpoint::LivePublished).await;
+    }
     if !await_handle_claim(&core).await {
         runtime.supervisor.cancel();
         let report = runtime.supervisor.join_all().await;
@@ -2858,8 +2968,17 @@ mod tests {
     struct ZeroCostLifecycleSource {
         events: VecDeque<SourceEvent>,
         polls: Arc<AtomicUsize>,
+        poll_calls: mpsc::UnboundedSender<usize>,
+        eof_observed: Arc<AtomicUsize>,
         closed: Arc<AtomicUsize>,
-        fail_at_end: bool,
+        end: ZeroCostSourceEnd,
+    }
+
+    #[derive(Clone, Copy)]
+    enum ZeroCostSourceEnd {
+        Eof,
+        Pending,
+        Error,
     }
 
     struct ZeroCostLifecycleSink {
@@ -2952,17 +3071,28 @@ mod tests {
         }
 
         async fn next(&mut self) -> Result<Option<SourceEvent>> {
-            self.polls.fetch_add(1, Ordering::SeqCst);
+            let poll = self.polls.fetch_add(1, Ordering::SeqCst) + 1;
             if let Some(event) = self.events.pop_front() {
+                let _ = self.poll_calls.send(poll);
                 return Ok(Some(event));
             }
-            if self.fail_at_end {
-                self.fail_at_end = false;
-                return Err(CalcFlowError::Internal {
-                    message: "zero-cost lifecycle source failed".into(),
-                });
+            match std::mem::replace(&mut self.end, ZeroCostSourceEnd::Pending) {
+                ZeroCostSourceEnd::Eof => {
+                    self.eof_observed.fetch_add(1, Ordering::SeqCst);
+                    let _ = self.poll_calls.send(poll);
+                    Ok(None)
+                }
+                ZeroCostSourceEnd::Error => {
+                    let _ = self.poll_calls.send(poll);
+                    Err(CalcFlowError::Internal {
+                        message: "zero-cost lifecycle source failed".into(),
+                    })
+                }
+                ZeroCostSourceEnd::Pending => {
+                    let _ = self.poll_calls.send(poll);
+                    std::future::pending().await
+                }
             }
-            std::future::pending().await
         }
 
         async fn close(&mut self) -> Result<()> {
@@ -3183,6 +3313,7 @@ mod tests {
         inputs: [Port; 1],
         outputs: [Port; 1],
         gates: Option<Arc<Mutex<VecDeque<Arc<Semaphore>>>>>,
+        fail_watermark: Option<Arc<AtomicBool>>,
     }
 
     impl StressForwardOperator {
@@ -3191,6 +3322,14 @@ mod tests {
                 inputs: [Port::new("input", BatchKind::Table, true, None).unwrap()],
                 outputs: [Port::new("output", BatchKind::Table, true, None).unwrap()],
                 gates: gates.map(|gates| Arc::new(Mutex::new(gates.into()))),
+                fail_watermark: None,
+            }
+        }
+
+        fn failing_on_watermark(flag: Arc<AtomicBool>) -> Self {
+            Self {
+                fail_watermark: Some(flag),
+                ..Self::new(None)
             }
         }
     }
@@ -3241,6 +3380,16 @@ mod tests {
             _context: &StreamOperatorContext<'_>,
             _output: &mut dyn StreamCollector,
         ) -> Result<()> {
+            if self
+                .fail_watermark
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::SeqCst))
+            {
+                return Err(CalcFlowError::Operator {
+                    node_id: "node".into(),
+                    message: "zero-cost lifecycle receiver failed".into(),
+                });
+            }
             Ok(())
         }
 
@@ -3599,34 +3748,28 @@ mod tests {
         .is_ok()
     }
 
-    async fn wait_for_live_publication(runner: &ContinuousRunner, core: &Arc<JobCore>) {
-        for _ in 0..1_000 {
-            let ready =
-                core.state.lock().launch_delivery == super::LaunchDeliveryState::ReadyUnclaimed;
-            let published = {
-                let registry = runner.core.registry.lock();
-                registry.provisional == Some(core.launch_id)
-                    && registry.live_jobs.contains_key(&core.launch_id)
-            };
-            if ready && published && !core.runtime_status.lock().tasks.snapshot().is_empty() {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-        panic!("driver did not publish the live job before handle delivery")
-    }
-
     fn forward_spec(
         job_id: u64,
         source: SourceBinding,
         sinks: Vec<NamedSinkBinding>,
     ) -> ContinuousJobSpec {
+        forward_spec_with_operator(
+            job_id,
+            source,
+            sinks,
+            Box::new(StressForwardOperator::new(None)),
+        )
+    }
+
+    fn forward_spec_with_operator(
+        job_id: u64,
+        source: SourceBinding,
+        sinks: Vec<NamedSinkBinding>,
+        operator: Box<dyn StreamOperator>,
+    ) -> ContinuousJobSpec {
         let plan = PipelineBuilder::new("runtime-panic-cleanup")
             .unwrap()
-            .add_node(
-                "node",
-                Box::new(StressForwardOperator::new(None)) as Box<dyn StreamOperator>,
-            )
+            .add_node("node", operator)
             .unwrap()
             .compile_stream(
                 &UdfRegistry::new().snapshot(),
@@ -3878,7 +4021,9 @@ mod tests {
     )]
     #[tokio::test(start_paused = true)]
     async fn seeded_paused_time_stress_runs_one_hundred_full_graph_schedules() {
-        const ZERO_COST_PHASE_BATCHES: usize = 10;
+        const MESSAGE_SLOT_LIMIT: usize = 1;
+        const ZERO_COST_SLOT_MULTIPLIER: usize = 10;
+        const ZERO_COST_PHASE_BATCHES: usize = MESSAGE_SLOT_LIMIT * ZERO_COST_SLOT_MULTIPLIER;
         const DATA_GATES: [StressGate; 18] = [
             StressGate::LeftData0,
             StressGate::LeftData1,
@@ -3900,6 +4045,8 @@ mod tests {
             StressGate::SinkB3,
         ];
         for seed in 0..100 {
+            run_seeded_zero_cost_shape_phase(seed, MESSAGE_SLOT_LIMIT, ZERO_COST_SLOT_MULTIPLIER)
+                .await;
             let gates = DATA_GATES
                 .into_iter()
                 .map(|gate| (gate, Arc::new(Semaphore::new(0))))
@@ -4116,6 +4263,7 @@ mod tests {
     #[derive(Clone, Copy, Debug)]
     enum ZeroCostTermination {
         Graceful,
+        ReceiverClose,
         Cancel,
         Error,
     }
@@ -4126,34 +4274,191 @@ mod tests {
                 let watermark = i64::try_from(index + 1).unwrap();
                 let cursor = u64::try_from(index + 1).unwrap().to_be_bytes().to_vec();
                 [
-                    SourceEvent::Idle,
-                    SourceEvent::Watermark(EventTime::from_micros(watermark)),
                     SourceEvent::Data {
                         batch: zero_row(),
                         cursor: Cursor::new(cursor, JsonMap::new()).unwrap(),
                     },
+                    SourceEvent::Idle,
+                    SourceEvent::Watermark(EventTime::from_micros(watermark)),
                 ]
             })
             .collect()
     }
 
-    async fn settled_poll_count(polls: &AtomicUsize) -> usize {
-        let mut previous = polls.load(Ordering::SeqCst);
-        let mut unchanged = 0;
-        for _ in 0..1_000 {
-            tokio::task::yield_now().await;
-            let current = polls.load(Ordering::SeqCst);
-            if current == previous {
-                unchanged += 1;
-                if unchanged == 20 {
-                    return current;
+    fn assert_zero_cost_shape_multiplier(
+        events: &VecDeque<SourceEvent>,
+        message_slot_limit: usize,
+        multiplier: usize,
+    ) {
+        let required = message_slot_limit * multiplier;
+        let mut idle = 0;
+        let mut watermarks = Vec::new();
+        let mut empty_data = 0;
+        for event in events {
+            match event {
+                SourceEvent::Idle => idle += 1,
+                SourceEvent::Watermark(watermark) => watermarks.push(watermark.as_micros()),
+                SourceEvent::Data { batch, .. } => {
+                    assert_eq!(batch.num_rows(), 0);
+                    assert_eq!(batch.estimated_bytes().unwrap(), 0);
+                    empty_data += 1;
                 }
-            } else {
-                previous = current;
-                unchanged = 0;
             }
         }
-        panic!("zero-cost producer polling did not settle")
+        assert_eq!(idle, required);
+        assert_eq!(watermarks.len(), required);
+        assert!(watermarks.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(empty_data, required);
+    }
+
+    async fn wait_for_single_stress_writes(writes: &Mutex<Vec<(String, u64)>>, expected: usize) {
+        for _ in 0..1_000 {
+            if writes.lock().len() >= expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("seeded zero-cost sink did not reach {expected} writes")
+    }
+
+    async fn run_seeded_zero_cost_shape_phase(
+        seed: u64,
+        message_slot_limit: usize,
+        multiplier: usize,
+    ) {
+        let shape_count = message_slot_limit * multiplier;
+        let shape_events = zero_cost_lifecycle_events(shape_count);
+        assert_zero_cost_shape_multiplier(&shape_events, message_slot_limit, multiplier);
+
+        let source_gate = Arc::new(Semaphore::new(0));
+        let sink_gate = Arc::new(Semaphore::new(0));
+        let source_closed = Arc::new(AtomicUsize::new(0));
+        let sink_closed = Arc::new(AtomicUsize::new(0));
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let zero_cost_writes = Arc::new(AtomicUsize::new(0));
+        let mut events = shape_events
+            .into_iter()
+            .map(|event| (Arc::clone(&source_gate), Some(event)))
+            .collect::<VecDeque<_>>();
+        events.push_back((Arc::clone(&source_gate), None));
+        let source = SourceBinding::new(
+            Box::new(StressSource {
+                events,
+                closed: Arc::clone(&source_closed),
+            }),
+            None,
+            0,
+        )
+        .unwrap();
+        let sinks = vec![NamedSinkBinding {
+            output_id: "output".into(),
+            sink_id: "seeded-zero-cost".into(),
+            binding: OrdinarySinkBinding::new(Box::new(StressSink {
+                gates: std::iter::repeat_with(|| Arc::clone(&sink_gate))
+                    .take(shape_count)
+                    .collect(),
+                writes: Arc::clone(&writes),
+                zero_cost_writes: Arc::clone(&zero_cost_writes),
+                closed: Arc::clone(&sink_closed),
+            })),
+        }];
+        let mut runner = ContinuousRunner::new();
+        let job = runner
+            .start(forward_spec(30_000 + seed, source, sinks))
+            .await
+            .unwrap_or_else(|failure| {
+                panic!("zero-cost unary start failed at seed {seed}: {failure:?}")
+            });
+
+        source_gate.add_permits(shape_count * 3 + 1);
+        for delivered in 1..=shape_count {
+            sink_gate.add_permits(1);
+            wait_for_single_stress_writes(&writes, delivered).await;
+            assert_eq!(writes.lock().len(), delivered, "seed {seed}");
+            assert_zero_cost_active_edges(&job);
+        }
+        let outcome = job.wait().await;
+        assert_eq!(outcome.state, ContinuousJobState::Completed, "seed {seed}");
+        assert_eq!(outcome.cause, TerminalCause::NaturalEnd, "seed {seed}");
+        assert_eq!(
+            zero_cost_writes.load(Ordering::SeqCst),
+            shape_count,
+            "seed {seed}"
+        );
+        let status = job.status();
+        assert!(status.tasks.is_empty(), "unary task leak at seed {seed}");
+        assert!(status.edges.values().all(|edge| {
+            edge.queue_depth == 0
+                && edge.charged_rows == 0
+                && edge.charged_bytes == 0
+                && edge.high_water_depth <= message_slot_limit
+                && edge.high_water_rows == 0
+                && edge.high_water_bytes == 0
+        }));
+        assert!(
+            status
+                .edges
+                .values()
+                .all(|edge| edge.high_water_depth == message_slot_limit)
+        );
+        assert!(status.edges.values().any(|edge| edge.blocked_sends > 0));
+        assert_eq!(source_closed.load(Ordering::SeqCst), 1, "seed {seed}");
+        assert_eq!(sink_closed.load(Ordering::SeqCst), 1, "seed {seed}");
+        assert_eq!(runner.registry_counts(), (0, 0), "seed {seed}");
+        drop(job);
+        runner.shutdown().await.unwrap();
+        assert_eq!(runner.registry_counts(), (0, 0), "seed {seed}");
+    }
+
+    async fn expect_poll_calls(
+        poll_calls: &mut mpsc::UnboundedReceiver<usize>,
+        expected: impl IntoIterator<Item = usize>,
+    ) {
+        for expected in expected {
+            let observed = tokio::time::timeout(StdDuration::from_secs(5), poll_calls.recv())
+                .await
+                .expect("zero-cost source did not make the permitted next poll")
+                .expect("zero-cost source poll recorder closed early");
+            assert_eq!(observed, expected);
+        }
+    }
+
+    async fn wait_for_source_boundary_backpressure(job: &super::ContinuousJob) {
+        for _ in 0..1_000 {
+            let status = job.status();
+            if status.edges.iter().any(|(edge_id, edge)| {
+                edge_id.starts_with("source/")
+                    && edge.queue_depth == status.metrics.edges[edge_id].message_slot_limit
+                    && edge.blocked_sends > 0
+            }) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("unary source boundary did not reach exact slot backpressure")
+    }
+
+    async fn assert_no_additional_poll(poll_calls: &mut mpsc::UnboundedReceiver<usize>) {
+        let mut next_poll = Box::pin(poll_calls.recv());
+        assert!(matches!(futures::poll!(next_poll.as_mut()), Poll::Pending));
+    }
+
+    fn assert_exact_poll_and_prefetch_bound(
+        job: &super::ContinuousJob,
+        polls: &AtomicUsize,
+        expected: usize,
+    ) {
+        assert_eq!(polls.load(Ordering::SeqCst), expected);
+        let status = job.status();
+        assert_eq!(
+            status.metrics.sources["input"].poll_count,
+            u64::try_from(expected).unwrap()
+        );
+        assert!(status.edges.iter().all(|(edge_id, edge)| {
+            edge.queue_depth <= status.metrics.edges[edge_id].message_slot_limit
+                && edge.charged_rows == 0
+                && edge.charged_bytes == 0
+        }));
     }
 
     async fn wait_for_write_count(writes: &Mutex<Vec<u64>>, expected: usize) {
@@ -4170,17 +4475,23 @@ mod tests {
         job: &super::ContinuousJob,
         sink_gate: &Semaphore,
         termination: ZeroCostTermination,
-        remaining_permits: usize,
+        receiver_failure: &AtomicBool,
+        release_permits: usize,
     ) -> Arc<super::ContinuousJobOutcome> {
         match termination {
             ZeroCostTermination::Graceful => {
                 let observer = job.shutdown();
-                sink_gate.add_permits(remaining_permits);
+                sink_gate.add_permits(1);
                 observer.await
+            }
+            ZeroCostTermination::ReceiverClose => {
+                receiver_failure.store(true, Ordering::SeqCst);
+                sink_gate.add_permits(release_permits);
+                job.wait().await
             }
             ZeroCostTermination::Cancel => job.cancel().await,
             ZeroCostTermination::Error => {
-                sink_gate.add_permits(remaining_permits);
+                sink_gate.add_permits(release_permits);
                 job.wait().await
             }
         }
@@ -4199,16 +4510,33 @@ mod tests {
                 assert_eq!(outcome.state, ContinuousJobState::Cancelled);
                 assert_eq!(outcome.cause, TerminalCause::ExplicitCancel);
             }
+            ZeroCostTermination::ReceiverClose => {
+                assert_eq!(outcome.state, ContinuousJobState::Failed);
+                assert!(matches!(outcome.cause, TerminalCause::TaskFailure { .. }));
+                assert!(matches!(
+                    outcome.errors.first().map(|failure| (&failure.origin, &failure.error)),
+                    Some((
+                        super::FailureOrigin::Task { task_name, .. },
+                        CalcFlowError::Operator { node_id, message }
+                    )) if task_name == "operator:node"
+                        && node_id == "node"
+                        && message == "zero-cost lifecycle receiver failed"
+                ));
+            }
             ZeroCostTermination::Error => {
                 assert_eq!(outcome.state, ContinuousJobState::Failed);
                 assert!(matches!(outcome.cause, TerminalCause::TaskFailure { .. }));
-                assert!(outcome.errors.iter().any(|failure| {
-                    matches!(
-                        &failure.error,
+                assert!(matches!(
+                    outcome
+                        .errors
+                        .first()
+                        .map(|failure| (&failure.origin, &failure.error)),
+                    Some((
+                        super::FailureOrigin::Task { task_name, .. },
                         CalcFlowError::Internal { message }
-                            if message == "zero-cost lifecycle source failed"
-                    )
-                }));
+                    )) if task_name == "source:input:pump"
+                        && message == "zero-cost lifecycle source failed"
+                ));
             }
         }
     }
@@ -4233,18 +4561,31 @@ mod tests {
     async fn run_zero_cost_lifecycle_case(termination: ZeroCostTermination) {
         const CYCLES: usize = 10;
         const CREDIT_RETURNS: usize = 3;
+        const INITIAL_POLL_BOUND: usize = 6;
+        const POLLS_PER_CREDIT: usize = 3;
 
         let polls = Arc::new(AtomicUsize::new(0));
+        let (poll_call_tx, mut poll_calls) = mpsc::unbounded_channel();
+        let eof_observed = Arc::new(AtomicUsize::new(0));
         let source_closed = Arc::new(AtomicUsize::new(0));
         let sink_closed = Arc::new(AtomicUsize::new(0));
         let sink_gate = Arc::new(Semaphore::new(0));
         let writes = Arc::new(Mutex::new(Vec::new()));
+        let receiver_failure = Arc::new(AtomicBool::new(false));
         let source = SourceBinding::new(
             Box::new(ZeroCostLifecycleSource {
                 events: zero_cost_lifecycle_events(CYCLES),
                 polls: Arc::clone(&polls),
+                poll_calls: poll_call_tx,
+                eof_observed: Arc::clone(&eof_observed),
                 closed: Arc::clone(&source_closed),
-                fail_at_end: matches!(termination, ZeroCostTermination::Error),
+                end: match termination {
+                    ZeroCostTermination::Graceful => ZeroCostSourceEnd::Eof,
+                    ZeroCostTermination::Error => ZeroCostSourceEnd::Error,
+                    ZeroCostTermination::ReceiverClose | ZeroCostTermination::Cancel => {
+                        ZeroCostSourceEnd::Pending
+                    }
+                },
             }),
             None,
             0,
@@ -4260,36 +4601,55 @@ mod tests {
             })),
         }];
         let mut runner = ContinuousRunner::new();
+        let operator: Box<dyn StreamOperator> =
+            if matches!(termination, ZeroCostTermination::ReceiverClose) {
+                Box::new(StressForwardOperator::failing_on_watermark(Arc::clone(
+                    &receiver_failure,
+                )))
+            } else {
+                Box::new(StressForwardOperator::new(None))
+            };
         let job = runner
-            .start(forward_spec(20_000, source, sinks))
+            .start(forward_spec_with_operator(20_000, source, sinks, operator))
             .await
             .unwrap();
 
-        let mut previous_polls = settled_poll_count(&polls).await;
-        assert!(
-            previous_polls < CYCLES * 3,
-            "producer polled every sustained event without receiving a credit: {termination:?}"
-        );
+        expect_poll_calls(&mut poll_calls, 1..=INITIAL_POLL_BOUND).await;
+        wait_for_source_boundary_backpressure(&job).await;
+        assert_no_additional_poll(&mut poll_calls).await;
+        assert_exact_poll_and_prefetch_bound(&job, &polls, INITIAL_POLL_BOUND);
+        let mut expected_polls = INITIAL_POLL_BOUND;
         for delivered in 1..=CREDIT_RETURNS {
             sink_gate.add_permits(1);
+            let next_expected = expected_polls + POLLS_PER_CREDIT;
+            expect_poll_calls(&mut poll_calls, expected_polls + 1..=next_expected).await;
             wait_for_write_count(&writes, delivered).await;
-            let current_polls = settled_poll_count(&polls).await;
-            assert!(
-                current_polls > previous_polls,
-                "producer did not regain credit after sink release: {termination:?}"
-            );
-            previous_polls = current_polls;
-            let status = job.status();
-            assert!(status.edges.values().all(|edge| {
-                edge.queue_depth <= 1 && edge.charged_rows == 0 && edge.charged_bytes == 0
-            }));
+            wait_for_source_boundary_backpressure(&job).await;
+            assert_no_additional_poll(&mut poll_calls).await;
+            assert_exact_poll_and_prefetch_bound(&job, &polls, next_expected);
+            expected_polls = next_expected;
         }
 
-        let outcome = finish_zero_cost_lifecycle(&job, &sink_gate, termination, CYCLES).await;
+        if matches!(termination, ZeroCostTermination::Graceful) {
+            sink_gate.add_permits(CYCLES - CREDIT_RETURNS - 1);
+            expect_poll_calls(&mut poll_calls, expected_polls + 1..=CYCLES * 3 + 1).await;
+            wait_for_write_count(&writes, CYCLES - 1).await;
+            assert_eq!(eof_observed.load(Ordering::SeqCst), 1);
+            assert_eq!(job.status().state, ContinuousJobState::Running);
+        }
+
+        let outcome =
+            finish_zero_cost_lifecycle(&job, &sink_gate, termination, &receiver_failure, CYCLES)
+                .await;
         assert_zero_cost_terminal(termination, &outcome);
         assert_zero_cost_convergence(&job, termination);
         let observed = writes.lock().clone();
         assert!(observed.len() >= CREDIT_RETURNS);
+        if matches!(termination, ZeroCostTermination::Graceful) {
+            assert_eq!(observed.len(), CYCLES);
+            assert_eq!(polls.load(Ordering::SeqCst), CYCLES * 3 + 1);
+            assert!(job.status().sources["input"].ended);
+        }
         assert_eq!(
             observed,
             (0..u64::try_from(observed.len()).unwrap()).collect::<Vec<_>>()
@@ -4306,6 +4666,7 @@ mod tests {
     async fn real_unary_zero_cost_lifecycle_matrix_returns_credits_and_converges() {
         for termination in [
             ZeroCostTermination::Graceful,
+            ZeroCostTermination::ReceiverClose,
             ZeroCostTermination::Cancel,
             ZeroCostTermination::Error,
         ] {
@@ -4908,6 +5269,7 @@ mod tests {
             closed: AtomicBool::new(true),
             changed: Notify::new(),
             abandonment_warnings: AtomicU64::new(0),
+            next_launch_probe: Mutex::new(None),
         });
         let mut first = Box::pin(RunnerShutdownObserver::new(Arc::clone(&core)));
 
@@ -5217,6 +5579,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dropping_start_after_operator_entry_before_live_publication_is_reaped() {
+        let resets = Arc::new(AtomicUsize::new(0));
+        let source = LifecycleProbe::default();
+        let sink = LifecycleProbe::default();
+        let probe = Arc::new(super::TestLaunchProbe::new(
+            super::TestLaunchCheckpoint::AfterOperatorEntry,
+        ));
+        let mut runner = ContinuousRunner::new();
+        let observer = runner.start_with_test_launch_probe(
+            spec(false, Arc::clone(&resets), source.clone(), sink.clone()),
+            Arc::clone(&probe),
+        );
+        let provisional = Arc::clone(observer.core.as_ref().unwrap());
+
+        probe.wait_until_reached().await;
+        assert_eq!(resets.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            provisional.state.lock().launch_delivery,
+            super::LaunchDeliveryState::Provisional
+        );
+        assert_eq!(source.opened.load(Ordering::SeqCst), 0);
+        assert_eq!(sink.opened.load(Ordering::SeqCst), 0);
+
+        drop(observer);
+        assert!(provisional.launch_cancel.is_cancelled());
+        assert_eq!(provisional.state.lock().owner, DriverOwnership::ReaperOwned);
+        probe.release();
+
+        let next = runner
+            .start(spec(
+                false,
+                Arc::new(AtomicUsize::new(0)),
+                LifecycleProbe::default(),
+                LifecycleProbe::default(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(provisional.state.lock().owner, DriverOwnership::Terminal);
+        assert_eq!(source.closed.load(Ordering::SeqCst), 0);
+        assert_eq!(sink.closed.load(Ordering::SeqCst), 0);
+        drop(next);
+        runner.shutdown().await.unwrap();
+        assert_eq!(runner.registry_counts(), (0, 0));
+    }
+
+    #[tokio::test]
     async fn dropping_start_after_live_publication_before_handle_delivery_is_reaped() {
         let plan = unary_expression_plan();
         let polls = Arc::new(AtomicUsize::new(0));
@@ -5244,14 +5652,23 @@ mod tests {
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
         };
         let mut runner = ContinuousRunner::new();
-        let observer = runner.start(job_spec);
+        let probe = Arc::new(super::TestLaunchProbe::new(
+            super::TestLaunchCheckpoint::LivePublished,
+        ));
+        let observer = runner.start_with_test_launch_probe(job_spec, Arc::clone(&probe));
         let provisional = Arc::clone(observer.core.as_ref().unwrap());
-        wait_for_live_publication(&runner, &provisional).await;
+        probe.wait_until_reached().await;
+        assert_eq!(
+            provisional.state.lock().launch_delivery,
+            super::LaunchDeliveryState::ReadyUnclaimed
+        );
+        assert_eq!(sink.open_completed.load(Ordering::SeqCst), 1);
 
         drop(observer);
         assert!(provisional.launch_cancel.is_cancelled());
         assert_eq!(provisional.state.lock().owner, DriverOwnership::ReaperOwned);
         assert_eq!(polls.load(Ordering::SeqCst), 0);
+        probe.release();
 
         let next = runner
             .start(spec(
