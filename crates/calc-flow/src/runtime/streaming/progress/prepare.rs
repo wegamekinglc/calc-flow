@@ -501,11 +501,48 @@ fn duration_nanos(duration: Duration) -> String {
     duration.as_nanos().to_string()
 }
 
+const fn timestamp_unit_tag(unit: ArrowTimestampUnit) -> &'static str {
+    match unit {
+        ArrowTimestampUnit::Second => "second",
+        ArrowTimestampUnit::Millisecond => "millisecond",
+        ArrowTimestampUnit::Microsecond => "microsecond",
+        ArrowTimestampUnit::Nanosecond => "nanosecond",
+    }
+}
+
+const fn native_directive_tag(directive: NativeWatermarkDirective) -> &'static str {
+    match directive {
+        NativeWatermarkDirective::LeaveEnabled => "leave_enabled",
+        NativeWatermarkDirective::EnableThroughExistingPrivateRoute => {
+            "enable_through_existing_private_route"
+        }
+        NativeWatermarkDirective::DisableThroughExistingPrivateRoute => {
+            "disable_through_existing_private_route"
+        }
+        NativeWatermarkDirective::AlreadyDisabled => "already_disabled",
+    }
+}
+
+const fn watermark_mode_tag(mode: &NormalizedWatermarkMode) -> &'static str {
+    match mode {
+        NormalizedWatermarkMode::SourceProvided { .. } => "source_provided",
+        NormalizedWatermarkMode::Generated { .. } => "generated",
+        NormalizedWatermarkMode::Disabled { .. } => "disabled",
+    }
+}
+
+const fn replay_positioning_tag(capability: ReplayPositioningCapability) -> &'static str {
+    match capability {
+        ReplayPositioningCapability::ExactPauseReportAndSeek => "exact_pause_report_and_seek",
+        ReplayPositioningCapability::Unsupported => "unsupported",
+    }
+}
+
 fn normalized_fingerprint(mode: &NormalizedWatermarkMode) -> Result<NormalizedConfigFingerprint> {
     let value = match mode {
         NormalizedWatermarkMode::SourceProvided { native_directive } => json!({
             "mode": "source_provided",
-            "directive": format!("{native_directive:?}"),
+            "directive": native_directive_tag(*native_directive),
         }),
         NormalizedWatermarkMode::Generated {
             event_time,
@@ -518,12 +555,12 @@ fn normalized_fingerprint(mode: &NormalizedWatermarkMode) -> Result<NormalizedCo
             "event_time": {
                 "name": event_time.name.as_ref(),
                 "index": event_time.index,
-                "unit": format!("{:?}", event_time.unit),
+                "unit": timestamp_unit_tag(event_time.unit),
             },
             "max_out_of_orderness_ns": duration_nanos(*max_out_of_orderness),
             "emit_interval_ns": duration_nanos(*emit_interval),
             "idle_timeout_ns": idle_timeout.map(duration_nanos),
-            "directive": format!("{native_directive:?}"),
+            "directive": native_directive_tag(*native_directive),
         }),
         NormalizedWatermarkMode::Disabled {
             idle_timeout,
@@ -531,7 +568,7 @@ fn normalized_fingerprint(mode: &NormalizedWatermarkMode) -> Result<NormalizedCo
         } => json!({
             "mode": "disabled",
             "idle_timeout_ns": idle_timeout.map(duration_nanos),
-            "directive": format!("{native_directive:?}"),
+            "directive": native_directive_tag(*native_directive),
         }),
     };
     digest(&value).map(NormalizedConfigFingerprint)
@@ -559,8 +596,8 @@ fn prepared_fingerprint(
             "identity": binding.identity.as_str(),
             "ordinal": binding.ordinal.get(),
             "normalized": hex::encode(binding.normalized_config_fingerprint.0),
-            "native": format!("{:?}", binding.normalized_watermark),
-            "replay": format!("{:?}", binding.replay_positioning),
+            "watermark_mode": watermark_mode_tag(&binding.normalized_watermark),
+            "replay_positioning": replay_positioning_tag(binding.replay_positioning),
             "toggle": binding.existing_toggle_route.as_ref().map(|route| route.route_id.as_ref()),
         })).collect::<Vec<_>>(),
     }))
@@ -577,7 +614,8 @@ mod tests {
         BindingIdentity, DeclaredSchema, ExistingPrivateToggleRoute, FenceSelectionPolicy,
         NativeWatermarkCapability, NativeWatermarkDirective, NormalizedWatermarkMode,
         ReplayPositioningCapability, SourceBindingSpec, SourceDescriptor,
-        StreamProgressRuntimeConfig, WatermarkPolicy, prepare_stream_job,
+        StreamProgressRuntimeConfig, WatermarkPolicy, native_directive_tag, prepare_stream_job,
+        replay_positioning_tag, timestamp_unit_tag, watermark_mode_tag,
     };
 
     fn schema(data_type: DataType) -> Arc<Schema> {
@@ -780,5 +818,34 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("conflicts"));
+    }
+
+    #[test]
+    fn prepared_fingerprint_variant_tags_are_explicit_and_stable() {
+        let source_provided = NormalizedWatermarkMode::SourceProvided {
+            native_directive: NativeWatermarkDirective::LeaveEnabled,
+        };
+        let disabled = NormalizedWatermarkMode::Disabled {
+            idle_timeout: None,
+            native_directive: NativeWatermarkDirective::AlreadyDisabled,
+        };
+        assert_eq!(watermark_mode_tag(&source_provided), "source_provided");
+        assert_eq!(watermark_mode_tag(&disabled), "disabled");
+        assert_eq!(
+            timestamp_unit_tag(super::ArrowTimestampUnit::Second),
+            "second"
+        );
+        assert_eq!(
+            native_directive_tag(NativeWatermarkDirective::DisableThroughExistingPrivateRoute),
+            "disable_through_existing_private_route"
+        );
+        assert_eq!(
+            replay_positioning_tag(ReplayPositioningCapability::ExactPauseReportAndSeek),
+            "exact_pause_report_and_seek"
+        );
+        assert_eq!(
+            replay_positioning_tag(ReplayPositioningCapability::Unsupported),
+            "unsupported"
+        );
     }
 }

@@ -102,25 +102,25 @@ fn maximum_timestamp_nanos(column: &dyn Array, unit: ArrowTimestampUnit) -> Resu
                     message: "record batch column type differs from the prepared schema".into(),
                 }
             })?;
-            array
-                .iter()
-                .flatten()
-                .map(|value| i128::from(value).checked_mul($factor))
-                .collect::<Option<Vec<_>>>()
-                .ok_or_else(|| CalcFlowError::InvalidArgument {
-                    field: "event_time_column".into(),
-                    message: "timestamp unit conversion overflowed".into(),
-                })?
-                .into_iter()
-                .max()
+            array.iter().flatten().try_fold(None, |maximum, value| {
+                let nanos = i128::from(value).checked_mul($factor).ok_or_else(|| {
+                    CalcFlowError::InvalidArgument {
+                        field: "event_time_column".into(),
+                        message: "timestamp unit conversion overflowed".into(),
+                    }
+                })?;
+                Ok::<_, CalcFlowError>(Some(
+                    maximum.map_or(nanos, |current: i128| current.max(nanos)),
+                ))
+            })
         }};
     }
-    Ok(match unit {
+    match unit {
         ArrowTimestampUnit::Second => maximum!(TimestampSecondArray, 1_000_000_000),
         ArrowTimestampUnit::Millisecond => maximum!(TimestampMillisecondArray, 1_000_000),
         ArrowTimestampUnit::Microsecond => maximum!(TimestampMicrosecondArray, 1_000),
         ArrowTimestampUnit::Nanosecond => maximum!(TimestampNanosecondArray, 1),
-    })
+    }
 }
 
 pub(crate) fn next_phase_deadline(
