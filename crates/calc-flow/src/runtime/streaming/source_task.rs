@@ -13,6 +13,11 @@ use super::{
     EdgeSender, EnvelopeCost, StreamJobContext, StreamMessage,
     context::wait_for_task_gate,
     metrics::MetricsRecorder,
+    progress::{
+        BindingIdentity, DeclaredSchema, ExistingPrivateToggleRoute, LiveProgressCoordinator,
+        NativeWatermarkCapability, PreparedSourceBinding, RawIngressEvent, RawUpstreamPosition,
+        ReplayPositioningCapability, SourceBindingSpec, SourceDescriptor, WatermarkPolicy,
+    },
     supervisor::{TaskFailureSignal, TaskId, TaskSupervisor, panic_message},
 };
 use crate::{Batch, BatchMetadata, CalcFlowError, EventTime, JsonMap, Result, canonical_json};
@@ -87,6 +92,22 @@ pub(crate) trait StreamSource: Send {
     async fn close(&mut self) -> Result<()>;
 
     fn capabilities(&self) -> SourceCapabilities;
+
+    fn declared_schema(&self) -> DeclaredSchema {
+        DeclaredSchema::DynamicOrUnknown
+    }
+
+    fn native_watermark_capability(&self) -> NativeWatermarkCapability {
+        NativeWatermarkCapability::EmitsNative
+    }
+
+    fn replay_positioning_capability(&self) -> Option<ReplayPositioningCapability> {
+        None
+    }
+
+    fn existing_private_watermark_toggle(&self) -> Option<ExistingPrivateToggleRoute> {
+        None
+    }
 }
 
 /// Test-only oracle populated at the FR10A slot-commit linearization point.
@@ -118,6 +139,8 @@ pub(crate) struct SourceBinding {
     resume_cursor: Option<Cursor>,
     next_sequence: u64,
     open_began: bool,
+    watermark_policy: WatermarkPolicy,
+    prepared_progress: Option<PreparedSourceBinding>,
     #[cfg(test)]
     accepted_sequence_recorder: Option<AcceptedSequenceRecorder>,
 }
@@ -138,9 +161,16 @@ impl SourceBinding {
             resume_cursor,
             next_sequence,
             open_began: false,
+            watermark_policy: WatermarkPolicy::default(),
+            prepared_progress: None,
             #[cfg(test)]
             accepted_sequence_recorder: None,
         })
+    }
+
+    pub(crate) fn with_watermark_policy(mut self, policy: WatermarkPolicy) -> Self {
+        self.watermark_policy = policy;
+        self
     }
 
     #[cfg(test)]
@@ -156,6 +186,36 @@ impl SourceBinding {
         *self
             .capabilities
             .get_or_insert_with(|| self.source.capabilities())
+    }
+
+    pub(crate) fn progress_spec(&self, binding_id: &str) -> Result<SourceBindingSpec> {
+        let identity = BindingIdentity::new(binding_id)?;
+        Ok(SourceBindingSpec {
+            descriptor: SourceDescriptor::new(
+                identity,
+                self.source.declared_schema(),
+                self.source.native_watermark_capability(),
+                self.source
+                    .replay_positioning_capability()
+                    .unwrap_or_else(|| {
+                        if self
+                            .capabilities
+                            .expect("progress descriptors are collected after capability sampling")
+                            .replayable
+                        {
+                            ReplayPositioningCapability::ExactPauseReportAndSeek
+                        } else {
+                            ReplayPositioningCapability::Unsupported
+                        }
+                    }),
+                self.source.existing_private_watermark_toggle(),
+            ),
+            watermark_policy: self.watermark_policy.clone(),
+        })
+    }
+
+    pub(crate) fn install_prepared_progress(&mut self, prepared: PreparedSourceBinding) {
+        self.prepared_progress = Some(prepared);
     }
 
     pub(crate) async fn open(&mut self) -> Result<()> {
@@ -376,6 +436,7 @@ struct SourceTaskInputs {
     cancellation: crate::CancellationToken,
     launch_cancel: crate::CancellationToken,
     metrics: MetricsRecorder,
+    live_progress: Option<LiveProgressCoordinator>,
 }
 
 struct SourcePumpInputs {
@@ -445,15 +506,73 @@ pub(crate) fn spawn_source_tasks_gated_with_metrics(
     supervisor: &mut TaskSupervisor,
     context: &StreamJobContext,
     binding_id: &str,
-    mut binding: SourceBinding,
+    binding: SourceBinding,
     outputs: Vec<EdgeSender>,
     data_gate: watch::Receiver<bool>,
     launch_cancel: crate::CancellationToken,
     metrics: MetricsRecorder,
 ) -> Result<SourceProgress> {
+    spawn_source_tasks_gated_with_optional_progress(
+        supervisor,
+        context,
+        binding_id,
+        binding,
+        outputs,
+        data_gate,
+        launch_cancel,
+        metrics,
+        None,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the private spawn boundary mirrors the source task lifecycle dependencies"
+)]
+pub(crate) fn spawn_source_tasks_gated_with_live_progress(
+    supervisor: &mut TaskSupervisor,
+    context: &StreamJobContext,
+    binding_id: &str,
+    binding: SourceBinding,
+    data_gate: watch::Receiver<bool>,
+    launch_cancel: crate::CancellationToken,
+    metrics: MetricsRecorder,
+    live_progress: LiveProgressCoordinator,
+) -> Result<SourceProgress> {
+    spawn_source_tasks_gated_with_optional_progress(
+        supervisor,
+        context,
+        binding_id,
+        binding,
+        Vec::new(),
+        data_gate,
+        launch_cancel,
+        metrics,
+        Some(live_progress),
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the private spawn boundary mirrors the source task lifecycle dependencies"
+)]
+fn spawn_source_tasks_gated_with_optional_progress(
+    supervisor: &mut TaskSupervisor,
+    context: &StreamJobContext,
+    binding_id: &str,
+    mut binding: SourceBinding,
+    outputs: Vec<EdgeSender>,
+    data_gate: watch::Receiver<bool>,
+    launch_cancel: crate::CancellationToken,
+    metrics: MetricsRecorder,
+    live_progress: Option<LiveProgressCoordinator>,
+) -> Result<SourceProgress> {
     let source_context = context.for_source(binding_id)?;
     let binding_id = source_context.scope_id().to_owned();
-    validate_source_outputs(&binding_id, &outputs)?;
+    if live_progress.is_none() {
+        validate_source_outputs(&binding_id, &outputs)?;
+    }
     let capabilities = binding.sample_capabilities_once();
     validate_source_capabilities(&binding_id, capabilities)?;
     validate_source_edge_budgets(&binding_id, capabilities, &outputs)?;
@@ -468,6 +587,7 @@ pub(crate) fn spawn_source_tasks_gated_with_metrics(
         data_gate,
         launch_cancel,
         metrics,
+        live_progress,
     ))
 }
 
@@ -540,6 +660,7 @@ fn spawn_validated_source_tasks(
     data_gate: watch::Receiver<bool>,
     launch_cancel: crate::CancellationToken,
     metrics: MetricsRecorder,
+    live_progress: Option<LiveProgressCoordinator>,
 ) -> SourceProgress {
     let SourceBinding {
         source,
@@ -547,6 +668,8 @@ fn spawn_validated_source_tasks(
         resume_cursor,
         next_sequence,
         open_began,
+        watermark_policy: _,
+        prepared_progress: _,
         #[cfg(test)]
         accepted_sequence_recorder,
     } = binding;
@@ -620,6 +743,7 @@ fn spawn_validated_source_tasks(
                     cancellation,
                     launch_cancel,
                     metrics,
+                    live_progress,
                 },
                 failure_signal,
             )
@@ -983,6 +1107,16 @@ async fn process_pump_event(
             process_source_watermark(inputs, watermark, order).await
         }
         PumpEvent::Event(SourceEvent::Idle) => {
+            if let Some(progress) = &inputs.live_progress {
+                progress
+                    .submit(
+                        BindingIdentity::new(inputs.binding_id.as_str())?,
+                        RawIngressEvent::ConnectorIdle,
+                        raw_upstream_position(order.last_cursor.as_ref(), order.next_sequence),
+                    )
+                    .await?;
+                return Ok(SourceLoopStep::Continue);
+            }
             let sent = send_fanout(
                 &mut inputs.outputs,
                 StreamMessage::idle(),
@@ -1010,6 +1144,27 @@ async fn process_source_data(
     validate_source_cursor(&inputs.binding_id, order.last_cursor.as_ref(), &cursor)?;
     let (sequence, message, cost) =
         sequenced_source_message(&inputs.binding_id, order.next_sequence, &batch)?;
+    if let Some(progress) = &inputs.live_progress {
+        inputs
+            .metrics
+            .record_source_data(&inputs.binding_id, cost, sequence)?;
+        let sequenced = message
+            .as_data()
+            .expect("sequenced source message always carries data")
+            .clone();
+        progress
+            .submit(
+                BindingIdentity::new(inputs.binding_id.as_str())?,
+                RawIngressEvent::Data(sequenced),
+                raw_upstream_position(Some(&cursor), Some(sequence)),
+            )
+            .await?;
+        inputs
+            .metrics
+            .record_source_output(&inputs.binding_id, cost)?;
+        record_source_progress(inputs, order, cursor, sequence);
+        return Ok(SourceLoopStep::Continue);
+    }
     if !send_source_data(inputs, message, cost, sequence).await? {
         return Ok(SourceLoopStep::Complete);
     }
@@ -1083,6 +1238,17 @@ async fn process_source_watermark(
     watermark: EventTime,
     order: &mut SourceOrderState,
 ) -> Result<SourceLoopStep> {
+    if let Some(progress) = &inputs.live_progress {
+        progress
+            .submit(
+                BindingIdentity::new(inputs.binding_id.as_str())?,
+                RawIngressEvent::ConnectorWatermark(watermark),
+                raw_upstream_position(order.last_cursor.as_ref(), order.next_sequence),
+            )
+            .await?;
+        order.last_watermark = Some(watermark);
+        return Ok(SourceLoopStep::Continue);
+    }
     if order
         .last_watermark
         .is_some_and(|previous| watermark < previous)
@@ -1110,6 +1276,23 @@ async fn process_source_watermark(
 }
 
 async fn finish_source_input(inputs: &mut SourceTaskInputs) -> Result<()> {
+    if let Some(progress) = &inputs.live_progress {
+        let snapshot = inputs.progress.snapshot.lock().clone();
+        progress
+            .submit(
+                BindingIdentity::new(inputs.binding_id.as_str())?,
+                RawIngressEvent::EndOfInput,
+                raw_upstream_position(
+                    snapshot.latest_observed_cursor.as_ref(),
+                    snapshot.next_sequence,
+                ),
+            )
+            .await?;
+        inputs.metrics.record_source_end(&inputs.binding_id)?;
+        inputs.progress.snapshot.lock().ended = true;
+        inputs.acceptance.mark_closed();
+        return Ok(());
+    }
     if send_fanout(
         &mut inputs.outputs,
         StreamMessage::end_of_input(),
@@ -1122,6 +1305,19 @@ async fn finish_source_input(inputs: &mut SourceTaskInputs) -> Result<()> {
     }
     inputs.acceptance.mark_closed();
     Ok(())
+}
+
+fn raw_upstream_position(
+    cursor: Option<&Cursor>,
+    control_sequence: Option<u64>,
+) -> RawUpstreamPosition {
+    match (cursor, control_sequence) {
+        (Some(cursor), Some(control_sequence)) => RawUpstreamPosition::Exact {
+            delivery_replay_cursor: cursor.order().to_vec(),
+            control_frontier: control_sequence.to_be_bytes().to_vec(),
+        },
+        _ => RawUpstreamPosition::Unavailable,
+    }
 }
 
 async fn send_fanout(

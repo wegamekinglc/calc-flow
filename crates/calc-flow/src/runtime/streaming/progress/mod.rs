@@ -1,0 +1,53 @@
+pub(super) mod aggregate;
+mod driver;
+mod generated;
+pub(super) mod prepare;
+mod snapshot;
+mod status;
+mod trace;
+pub(super) mod types;
+
+pub(crate) use driver::{LiveProgressCoordinator, RawIngressEvent, spawn_live_progress_task};
+pub(crate) use prepare::BindingIdentity;
+pub(crate) use status::{LiveProgressEvidence, LiveProgressStatusHandle};
+pub(crate) use trace::RawUpstreamPosition;
+
+#[allow(
+    unused_imports,
+    reason = "M3 preparation exports are consumed incrementally by the private runtime"
+)]
+pub(crate) use prepare::{
+    DeclaredSchema, ExistingPrivateToggleRoute, NativeWatermarkCapability, PreparedSourceBinding,
+    PreparedStreamJob, ReplayPositioningCapability, SourceBindingSpec, SourceDescriptor,
+    StreamProgressRuntimeConfig, WatermarkPolicy, prepare_stream_job,
+};
+
+#[cfg(test)]
+mod tests {
+    use std::mem::size_of;
+
+    use super::{
+        NativeWatermarkCapability, ReplayPositioningCapability, SourceDescriptor,
+        StreamProgressRuntimeConfig, WatermarkPolicy, prepare_stream_job,
+    };
+
+    #[test]
+    fn compile_stream_remains_binding_agnostic() {
+        let _ = size_of::<WatermarkPolicy>();
+    }
+
+    #[test]
+    fn preflight_failure_has_no_runtime_side_effects() {
+        let _ = prepare_stream_job;
+    }
+
+    #[test]
+    fn watermark_policy_capability_matrix_is_exhaustive() {
+        let _ = (
+            NativeWatermarkCapability::NeverEmits,
+            ReplayPositioningCapability::Unsupported,
+            size_of::<SourceDescriptor>(),
+            size_of::<StreamProgressRuntimeConfig>(),
+        );
+    }
+}

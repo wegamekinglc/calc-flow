@@ -307,10 +307,11 @@ fn command_output(program: &str, arguments: &[&str]) -> String {
 
 fn soak_metadata(commit: &str, kernel: &str, rustc: &str) -> serde_json::Value {
     json!({
-        "schema": "calc-flow.m2-soak-log.v1",
+        "schema": "calc-flow.m3-soak-log.v1",
         "type": "calc_flow_stream_soak_metadata",
-        "runtime_path": "ContinuousRunner/source/operator/sink/supervisor/reaper",
+        "runtime_path": "ContinuousRunner/source/progress-driver/operator/sink/supervisor/reaper",
         "commit": commit,
+        "deterministic_seed": "sequential-two-source-v1",
         "command": SOAK_COMMAND,
         "environment": {
             "kernel": kernel,
@@ -330,6 +331,16 @@ fn soak_metadata(commit: &str, kernel: &str, rustc: &str) -> serde_json::Value {
             "charged_rows_limit": "max_rows",
             "charged_bytes_limit": "max_bytes",
             "zero_cost_envelopes_consume_message_slots": true,
+        },
+        "progress_contract": {
+            "source_count": 2,
+            "watermark_policy": "source-provided",
+            "per_binding_inbox_capacity": 64,
+            "fence_selection": "all-visible",
+            "completion_receipts": true,
+            "full_execution_trace": true,
+            "gate_cut_evidence": true,
+            "settlement_latency_evidence": true,
         },
     })
 }
@@ -593,6 +604,10 @@ async fn run_linux_soak() {
     assert_eq!(outcome.state, ContinuousJobState::Completed);
     assert_eq!(outcome.cause, TerminalCause::GracefulShutdown);
     let terminal_status = job.status();
+    let progress = terminal_status
+        .progress
+        .as_ref()
+        .expect("M3 soak status omitted progress evidence");
     assert!(
         terminal_status.tasks.is_empty(),
         "supervised tasks did not converge"
@@ -604,6 +619,40 @@ async fn run_linux_soak() {
         "edge charges did not converge: {:?}",
         terminal_status.edges
     );
+    assert_eq!(progress.current.unsettled_receipts, 0);
+    assert!(progress.maximum_unsettled_receipts > 0);
+    assert_eq!(progress.current.counters.immediate_rejections, 0);
+    assert_eq!(progress.current.counters.transaction_error_settlements, 0);
+    assert_eq!(progress.current.counters.post_end_tail_settlements, 0);
+    assert_eq!(progress.current.counters.cancelled_settlements, 0);
+    assert_eq!(progress.current.counters.fatal_settlements, 0);
+    assert_eq!(progress.current.counters.driver_phase_failures, 0);
+    assert_eq!(
+        progress.current.counters.accepted_envelopes,
+        progress.current.counters.settlement_attempts
+    );
+    assert_eq!(progress.current.terminal_gate_cuts.len(), 2);
+    assert!(progress.current.counters.trace_records > 0);
+    assert!(progress.current.counters.maximum_inbox_fences_per_drain > 0);
+    assert!(progress.current.counters.maximum_selected_items_per_drain > 0);
+    let gate_cuts = progress
+        .current
+        .terminal_gate_cuts
+        .iter()
+        .map(|(binding, close)| {
+            (
+                binding.as_str().to_owned(),
+                json!({
+                    "close_ordinal": close.close_ordinal.get(),
+                    "cause": format!("{:?}", close.cause),
+                    "old_generation": close.old_generation.get(),
+                    "new_generation": close.new_generation.get(),
+                    "closed_state": format!("{:?}", close.closed_state),
+                    "next_inbox_sequence_cut": close.next_inbox_sequence_cut.get(),
+                }),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let saturated_edges = terminal_status
         .edges
         .iter()
@@ -645,7 +694,7 @@ async fn run_linux_soak() {
     println!(
         "{}",
         json!({
-            "schema": "calc-flow.m2-soak-log.v1",
+            "schema": "calc-flow.m3-soak-log.v1",
             "type": "calc_flow_stream_soak_result",
             "commit": commit,
             "target_duration_seconds": TARGET_DURATION.as_secs(),
@@ -659,6 +708,52 @@ async fn run_linux_soak() {
             "first_post_warmup_five_minute_median_kib": gate.first_median_kib,
             "final_five_minute_median_kib": gate.final_median_kib,
             "passed": gate.passed,
+            "progress": {
+                "deterministic_seed": "sequential-two-source-v1",
+                "admission_attempts": progress.current.counters.admission_attempts,
+                "accepted_envelopes": progress.current.counters.accepted_envelopes,
+                "immediate_rejections": progress.current.counters.immediate_rejections,
+                "drain_epochs": progress.current.counters.drain_epochs,
+                "inbox_fences": progress.current.counters.inbox_fences,
+                "due_timers": progress.current.counters.due_timers,
+                "terminal_transitions": progress.current.counters.terminal_transitions,
+                "gate_transitions": progress.current.counters.gate_transitions,
+                "settlements": {
+                    "total": progress.current.counters.settlement_attempts,
+                    "commit_success": progress.current.counters.commit_success_settlements,
+                    "transaction_error": progress
+                        .current
+                        .counters
+                        .transaction_error_settlements,
+                    "post_end_tail": progress.current.counters.post_end_tail_settlements,
+                    "cancelled": progress.current.counters.cancelled_settlements,
+                    "fatal": progress.current.counters.fatal_settlements,
+                },
+                "maximum_unsettled_receipts": progress.maximum_unsettled_receipts,
+                "terminal_unsettled_receipts": progress.current.unsettled_receipts,
+                "progress_emissions": progress.current.counters.progress_emissions,
+                "terminal_timer_entries": progress.current.counters.timer_entries,
+                "maximum_timer_entries": progress.maximum_timer_entries,
+                "trace_records": progress.current.counters.trace_records,
+                "maximum_trace_records": progress.maximum_trace_records,
+                "maximum_inbox_fences_per_drain": progress
+                    .current
+                    .counters
+                    .maximum_inbox_fences_per_drain,
+                "maximum_selected_items_per_drain": progress
+                    .current
+                    .counters
+                    .maximum_selected_items_per_drain,
+                "maximum_due_timers_per_drain": progress
+                    .current
+                    .counters
+                    .maximum_due_timers_per_drain,
+                "maximum_settlement_latency_micros": progress
+                    .maximum_settlement_latency_micros,
+                "terminal_gate_cuts": gate_cuts,
+                "driver_phase_failures": progress.current.counters.driver_phase_failures,
+                "driver_phase": format!("{:?}", progress.current.phase),
+            },
             "boundedness": {
                 "all_edges_within_limits": true,
                 "saturated_edges": saturated_edges,
@@ -701,6 +796,12 @@ async fn run_linux_soak() {
                 "source_closed": source_closed.load(Ordering::SeqCst),
                 "sink_opened": sink_opened.load(Ordering::SeqCst),
                 "sink_closed": sink_closed.load(Ordering::SeqCst),
+            },
+            "outcome": {
+                "state": format!("{:?}", outcome.state),
+                "cause": format!("{:?}", outcome.cause),
+                "primary_error": null,
+                "resource_errors": [],
             },
         })
     );
@@ -946,16 +1047,22 @@ fn soak_source_uses_a_zero_cost_batch_for_every_fourth_sequence() {
 fn soak_metadata_is_machine_readable_and_declares_the_slot_contract() {
     let metadata = soak_metadata("abc123", "Linux 1", "rustc 1.88");
 
-    assert_eq!(metadata["schema"], "calc-flow.m2-soak-log.v1");
+    assert_eq!(metadata["schema"], "calc-flow.m3-soak-log.v1");
     assert_eq!(metadata["commit"], "abc123");
     assert_eq!(metadata["target_duration_seconds"], 1_200);
     assert_eq!(metadata["sample_count"], 120);
     assert_eq!(metadata["warmup_duration_seconds"], 300);
+    assert_eq!(metadata["deterministic_seed"], "sequential-two-source-v1");
     assert_eq!(metadata["environment"]["kernel"], "Linux 1");
     assert_eq!(metadata["environment"]["rustc"], "rustc 1.88");
     assert_eq!(
         metadata["boundedness_contract"]["message_slot_limit"],
         "max_rows"
+    );
+    assert_eq!(metadata["progress_contract"]["source_count"], 2);
+    assert_eq!(
+        metadata["progress_contract"]["fence_selection"],
+        "all-visible"
     );
     assert_eq!(
         metadata["command"],
