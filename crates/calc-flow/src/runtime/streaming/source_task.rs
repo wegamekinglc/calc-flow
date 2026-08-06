@@ -1318,10 +1318,7 @@ async fn finish_source_input(inputs: &mut SourceTaskInputs) -> Result<()> {
             .submit(
                 progress.binding.clone(),
                 RawIngressEvent::EndOfInput,
-                raw_upstream_position(
-                    snapshot.latest_observed_cursor.as_ref(),
-                    snapshot.next_sequence,
-                ),
+                end_upstream_position(&snapshot),
             )
             .await?;
         inputs.metrics.record_source_end(&inputs.binding_id)?;
@@ -1341,6 +1338,16 @@ async fn finish_source_input(inputs: &mut SourceTaskInputs) -> Result<()> {
     }
     inputs.acceptance.mark_closed();
     Ok(())
+}
+
+fn end_upstream_position(snapshot: &SourceProgressSnapshot) -> RawUpstreamPosition {
+    raw_upstream_position(
+        snapshot
+            .latest_observed_cursor
+            .as_ref()
+            .or(snapshot.durable_cursor.as_ref()),
+        snapshot.next_sequence,
+    )
 }
 
 fn raw_upstream_position(
@@ -1394,8 +1401,9 @@ mod tests {
 
     use super::{
         AcceptedSequenceRecorder, Cursor, SourceAcceptState, SourceAcceptance, SourceBinding,
-        SourceCapabilities, SourceEvent, SourcePumpInputs, StreamSource, run_source_pump,
-        spawn_source_tasks, spawn_source_tasks_gated_with_metrics, take_live_progress_binding,
+        SourceCapabilities, SourceEvent, SourceProgressSnapshot, SourcePumpInputs, StreamSource,
+        end_upstream_position, run_source_pump, spawn_source_tasks,
+        spawn_source_tasks_gated_with_metrics, take_live_progress_binding,
     };
     use crate::{
         Batch, BatchMetadata, CalcFlowError, CancellationToken, EdgeBudget, EdgeReceiver,
@@ -1403,6 +1411,7 @@ mod tests {
         StreamMessageKind, edge_channel,
         runtime::streaming::{
             metrics::MetricsRecorder,
+            progress::RawUpstreamPosition,
             supervisor::{TaskId, TaskSupervisor},
         },
     };
@@ -1422,6 +1431,25 @@ mod tests {
             CalcFlowError::Internal { message }
                 if message == "live source binding is missing prepared progress identity"
         ));
+    }
+
+    #[test]
+    fn resumed_source_eof_uses_the_durable_upstream_position() {
+        let snapshot = SourceProgressSnapshot {
+            replayable: true,
+            latest_observed_cursor: None,
+            durable_cursor: Some(cursor(4)),
+            next_sequence: Some(7),
+            ended: false,
+        };
+
+        assert_eq!(
+            end_upstream_position(&snapshot),
+            RawUpstreamPosition::Exact {
+                delivery_replay_cursor: vec![4],
+                control_frontier: 7_u64.to_be_bytes().to_vec(),
+            }
+        );
     }
 
     impl ExternalPayload for TestPayload {
