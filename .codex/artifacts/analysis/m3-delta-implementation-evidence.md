@@ -79,7 +79,8 @@ Additional milestone evidence:
 
 - **Rust formatting:** pass, `cargo fmt --all --check`.
 - **Workspace Clippy:** pass for all targets/features with warnings denied.
-- **Rust harness:** pass, 249 core unit tests, all
+- **Rust harness:** pass, 253 core unit tests (252 passed and the opt-in soak
+  ignored), all
   integration/examples/bench targets, and 76 isolated PyO3 Rust tests.
 - **Rust coverage:** pass, 92.13% lines against the 90% workspace floor; PyO3
   used the managed interpreter loader path.
@@ -97,10 +98,17 @@ Additional milestone evidence:
   durability, and public A6 diffs are empty.
 - **Source hygiene:** pass, `git diff --check`, with no generated
   `_native*.so` in source.
-- **Standard soak:** pass on exact implementation commit
-  `763750e16e8229cd0d0b9b9ed82e50484c96e52a`; 1,200 measured seconds and
+- **Standard soak:** pass on exact runtime implementation commit
+  `26f5abdde48b74da2760721603494aaa96cffaaf`, published as remote commit
+  `e8f560e0b4be98d11be8a1e6fd22c64bfe7cbfbb` with the identical tree
+  `eb28af6a51b135dad8a15ab41c05d0d179c2a212`; 1,200 measured seconds and
   120 samples, followed by bounded graceful drain and convergence.
-- **GitHub review/CI/Codacy:** pending PR publication.
+- **GitHub review/Codacy:** PR #86 passed Codacy with zero issues on the exact
+  runtime head. Four Copilot review rounds reported success; every inline and
+  suppressed actionable finding was fixed or, for the source-budget finding,
+  audited against the existing whole-job preflight test and documented at the
+  validated live-source boundary. A final evidence-only head review is still
+  required before merge.
 
 The local environment was already synchronized and `uv pip check` reported no
 conflicts. The execution policy rejected a fresh `uv sync`; every locked `uv`
@@ -120,13 +128,13 @@ cuts, settlement disposition counts and latency, peak unsettled receipts and
 timer/trace sizes, bounded-edge/backpressure evidence, delivery conservation,
 task/queue/resource convergence, and terminal outcome.
 
-The exact implementation-head result passed with `passed=true`, all three
-bounded edges saturated and blocked, 1,330 accepted batches conserved at both
-sinks with no missing or duplicate delivery, and 1,332 of 1,332 receipts
+The exact runtime implementation-head result passed with `passed=true`, all
+three bounded edges saturated and blocked, 1,330 accepted batches conserved at
+both sinks with no missing or duplicate delivery, and 1,332 of 1,332 receipts
 settled as commit-success. Terminal queue depth, charged rows/bytes, tasks,
 unsettled receipts, and timer entries were all zero. The run completed through
 `GracefulShutdown`; its first post-warmup and final five-minute median RSS
-values were 35,482 KiB and 22,182 KiB, respectively. The structured trace
-contained 3,998 records and retained both terminal gate cuts. PR
-review/CI/Codacy/merge evidence is recorded in the implementation PR because
-it does not exist before publication.
+values were 38,182 KiB and 14,652 KiB, respectively, with a
+`-130.84220380951814 MiB/hour` least-squares slope. The structured trace
+contained 3,998 records and retained both terminal gate cuts. PR review, CI,
+Codacy, and merge evidence is also recorded in the implementation PR.

@@ -777,7 +777,7 @@ mod tests {
     use super::{ProgressExecutionTrace, ProgressReplayRequest, TraceController};
 
     #[test]
-    fn same_raw_and_clock_with_different_fences_is_trace_inequality() {
+    fn reserving_capacity_does_not_change_trace_equality() {
         let left = ProgressExecutionTrace::default();
         let mut right = ProgressExecutionTrace::default();
         assert_eq!(left, right);
