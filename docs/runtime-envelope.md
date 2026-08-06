@@ -14,8 +14,8 @@ The implementation lives in `crates/calc-flow/src/runtime/streaming/` (the
 message, bounded channel, job and task contexts, whole-job preflight, source,
 operator, and sink tasks, supervisor, private runner/job/reaper, metrics, and
 soak), `crates/calc-flow/src/time/` (event time and epoch),
-`crates/calc-flow/src/operator/stream.rs` (the operator traits and the
-validating collector), and `crates/calc-flow/src/pipeline/stream.rs` (the
+`crates/calc-flow/src/operator/stream.rs` (the operator traits and public
+in-memory collector), and `crates/calc-flow/src/pipeline/stream.rs` (the
 compiled stream plan). The frozen semantics behind the contract are recorded
 in the [continuous streaming runtime
 specification](../.codex/artifacts/specs/continuous-streaming-runtime.md),
@@ -188,11 +188,18 @@ an edge, so an invalid batch never produces a downstream side effect (S5.4,
 S10.1). Control messages can never be emitted through this trait (S1.3):
 watermark, barrier, idle, and end-of-input forwarding is runtime-owned.
 
-`EdgeCollector` is the runtime-owned validating `StreamCollector`. One
-collector is constructed per operator from the compiled output ports; each
-port owns an outbox, and `drain(port)` returns that port's pending messages
-in FIFO order, with an unknown port draining to empty. The in-memory outbox
-remains the operator-facing staging boundary.
+`EdgeCollector` is a public in-memory `StreamCollector` helper for tests,
+benchmarks, and callers that invoke an operator directly. It validates against
+the supplied output ports and stores data messages in per-port FIFO outboxes;
+`drain(port)` empties one outbox, while an unknown port drains to empty. It is
+not the collector used by the production M2 task runtime.
+
+The crate-private M2 operator task instead constructs a
+`ChannelStreamCollector` for each handler call. It performs the same
+port/kind/schema validation, validates every destination, and then sends the
+message directly through the output's bounded `EdgeSender` fan-out. Validation
+therefore fails before any edge observes the batch, and every edge applies its
+own capacity and accounting.
 
 Runtime edges use `edge_channel`, a bounded FIFO with atomic envelope, row, and
 estimated-byte accounting. For `EdgeBudget { max_rows: R, max_bytes: B }`, the
@@ -323,14 +330,16 @@ ownership to the reaper, and a later start or runner shutdown joins it. Task
 failure wins over explicit cancel, which wins over deadline expiry; concurrent
 and repeated observers receive one immutable outcome.
 
-Connector `open`, `next`, `write`, and `close` panics become the public,
-semver-compatible non-exhaustive `CalcFlowError::TaskPanicked` variant with a
-stable task ID. Captured panic text is valid UTF-8 and at most 1,024 bytes;
-non-string payloads become `non-string panic payload`. On a failed or cancelled
-launch, every resource whose open began is closed once in stable resource
-order. Each close has its own private five-second bound, and a close error,
-panic, or timeout becomes a typed bounded secondary diagnostic without
-replacing the primary launch failure. Cleanup continues through later
+Private M2 source, operator, and sink tasks, the task supervisor, and runner
+connector-open/close paths create operational
+`CalcFlowError::TaskPanicked` values with a stable task ID. Together these
+boundaries cover connector `open`, `next`, `write`, and `close` panics plus
+operator and uncaught task panics. Captured panic text is valid UTF-8 and at
+most 1,024 bytes; non-string payloads become `non-string panic payload`. On a
+failed or cancelled launch, every resource whose open began is closed once in
+stable resource order. Each close has its own private five-second bound, and a
+close error, panic, or timeout becomes a typed bounded secondary diagnostic
+without replacing the primary launch failure. Cleanup continues through later
 resources and converges the provisional launch and reaper registries.
 
 Private deterministic status and metrics cover task/terminal state,
@@ -391,14 +400,16 @@ Public: the `StreamMessage` handle and `StreamMessageKind`, the typed
 `StreamRuntimeConfig`, `EdgeBudget`). The bounded-edge surface is also public:
 `edge_channel`, `EdgeSender`, `EdgeReceiver`, `EnvelopeCost`, and
 `ChannelMetrics`. `CalcFlowError::TaskPanicked` is public because the error
-enum is public and non-exhaustive, although only the crate-private supervisor
-currently produces it.
+enum is public and non-exhaustive. Operational instances come from the private
+M2 task, supervisor, and runner paths described above; M2 adds no public
+runner/control API or panic-capture constructor.
 
 Crate-private: the message representation and the four control constructors,
 the compiled-operator representation, the late-row recorder, source cursor and
-binding types, source/operator/sink tasks and progress snapshots, scoped task
-contexts, whole-job preflight, the task supervisor, private status/metrics,
-`ContinuousRunner`, `ContinuousJob`, and the runner-scoped reaper.
+binding types, the channel-backed operator collector, source/operator/sink
+tasks and progress snapshots, scoped task contexts, whole-job preflight, the
+task supervisor, private status/metrics, `ContinuousRunner`, `ContinuousJob`,
+and the runner-scoped reaper.
 
 The envelope and its typed values do not appear in the current project or
 checkpoint document formats, the Python binding, or Studio routes. The

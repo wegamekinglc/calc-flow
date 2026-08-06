@@ -205,7 +205,7 @@ lint posture is untouched.
 
 ```
 cargo build -p calc-flow --examples           # Finished, all examples compile
-cargo run -p calc-flow --example expression_pipeline   # calculated totals: [3, 7]
+cargo run -p calc-flow --example expression_pipeline   # Arrow Int64 totals: 3 and 7
 cargo run -p calc-flow --example sql_join              # net amounts: [70, 108, 36]
 cargo run -p calc-flow --example micro_batch_recovery  # recovered deliveries: [1, 2]
 cargo fmt --all --check                       # clean

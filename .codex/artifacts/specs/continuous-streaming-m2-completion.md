@@ -762,9 +762,9 @@ stream cases; benchmark compilation passed on both refs.
   `StreamingRunner` and `MicroBatchRunner`. Removing them now would be a net
   capability deletion because M2 has neither v3 checkpoint manifests nor a
   bounded-source replacement with durable cursor recovery.
-- Therefore this delta requires the remaining M2 implementation to coexist
-  crate-privately with the v2 public runners. No alias, deprecation shim, or
-  second public `StreamingRunner` is introduced.
+- Therefore the delivered M2 implementation coexists crate-privately with the
+  v2 public runners. No alias, deprecation shim, or second public
+  `StreamingRunner` is introduced.
 - Relative to `origin/main`, the already-PR-added non-exhaustive
   `CalcFlowError::TaskPanicked` variant is the sole public Rust API item
   addition and must be preserved. M2 adds no other public variant, export,

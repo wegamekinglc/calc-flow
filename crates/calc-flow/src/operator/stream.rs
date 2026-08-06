@@ -227,14 +227,13 @@ pub trait StreamOperator: OperatorMetadata {
     }
 }
 
-/// The runtime-owned validating [`StreamCollector`] (API note A2.1).
+/// A public in-memory validating [`StreamCollector`] helper (API note A2.1).
 ///
-/// The operator task constructs one collector per operator from the compiled
-/// output ports; `emit` validates the port name, kind, and exact schema
-/// before enqueueing, so an invalid batch never reaches an edge (S5.4's
-/// fail-closed-before-side-effect rule). This in-memory outbox is the M1.1
-/// backing; M1.4's bounded channels replace the storage without changing the
-/// validation contract.
+/// `emit` validates the port name, kind, and exact schema before storing the
+/// batch in a per-port FIFO outbox. Tests, benchmarks, and direct operator
+/// callers can inspect those messages with [`Self::drain`]. The crate-private
+/// M2 operator task instead uses `ChannelStreamCollector` to deliver emissions
+/// directly through bounded runtime edges.
 pub struct EdgeCollector {
     outboxes: BTreeMap<String, (Port, Vec<StreamMessage>)>,
 }

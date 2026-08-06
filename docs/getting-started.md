@@ -324,8 +324,17 @@ checkout you can run it directly:
 cargo run -p calc-flow --example expression_pipeline
 ```
 
-The command prints `calculated totals: [3, 7]`. The
-[`expression_pipeline.rs`](../crates/calc-flow/examples/expression_pipeline.rs)
+The command prints Arrow's debug representation:
+
+```text
+calculated totals: PrimitiveArray<Int64>
+[
+  3,
+  7,
+]
+```
+
+The [`expression_pipeline.rs`](../crates/calc-flow/examples/expression_pipeline.rs)
 source and [Rust API guide](rust-api.md) walk through the example.
 
 ## Troubleshooting
