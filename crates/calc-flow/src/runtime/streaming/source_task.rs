@@ -436,7 +436,12 @@ struct SourceTaskInputs {
     cancellation: crate::CancellationToken,
     launch_cancel: crate::CancellationToken,
     metrics: MetricsRecorder,
-    live_progress: Option<LiveProgressCoordinator>,
+    live_progress: Option<LiveSourceProgress>,
+}
+
+struct LiveSourceProgress {
+    coordinator: LiveProgressCoordinator,
+    binding: BindingIdentity,
 }
 
 struct SourcePumpInputs {
@@ -579,6 +584,13 @@ fn spawn_source_tasks_gated_with_optional_progress(
     let capabilities = binding.sample_capabilities_once();
     validate_source_capabilities(&binding_id, capabilities)?;
     validate_source_edge_budgets(&binding_id, capabilities, &outputs)?;
+    let progress_binding = take_live_progress_binding(&mut binding, live_progress.is_some())?;
+    let live_progress = live_progress
+        .zip(progress_binding)
+        .map(|(coordinator, binding)| LiveSourceProgress {
+            coordinator,
+            binding,
+        });
 
     Ok(spawn_validated_source_tasks(
         supervisor,
@@ -592,6 +604,23 @@ fn spawn_source_tasks_gated_with_optional_progress(
         metrics,
         live_progress,
     ))
+}
+
+fn take_live_progress_binding(
+    binding: &mut SourceBinding,
+    live_progress_enabled: bool,
+) -> Result<Option<BindingIdentity>> {
+    if !live_progress_enabled {
+        return Ok(None);
+    }
+    binding
+        .prepared_progress
+        .take()
+        .map(|prepared| prepared.identity)
+        .map(Some)
+        .ok_or_else(|| CalcFlowError::Internal {
+            message: "live source binding is missing prepared progress identity".into(),
+        })
 }
 
 fn validate_source_outputs(binding_id: &str, outputs: &[EdgeSender]) -> Result<()> {
@@ -663,7 +692,7 @@ fn spawn_validated_source_tasks(
     data_gate: watch::Receiver<bool>,
     launch_cancel: crate::CancellationToken,
     metrics: MetricsRecorder,
-    live_progress: Option<LiveProgressCoordinator>,
+    live_progress: Option<LiveSourceProgress>,
 ) -> SourceProgress {
     let SourceBinding {
         source,
@@ -1112,8 +1141,9 @@ async fn process_pump_event(
         PumpEvent::Event(SourceEvent::Idle) => {
             if let Some(progress) = &inputs.live_progress {
                 progress
+                    .coordinator
                     .submit(
-                        BindingIdentity::new(inputs.binding_id.as_str())?,
+                        progress.binding.clone(),
                         RawIngressEvent::ConnectorIdle,
                         raw_upstream_position(order.last_cursor.as_ref(), order.next_sequence),
                     )
@@ -1156,8 +1186,9 @@ async fn process_source_data(
             .expect("sequenced source message always carries data")
             .clone();
         progress
+            .coordinator
             .submit(
-                BindingIdentity::new(inputs.binding_id.as_str())?,
+                progress.binding.clone(),
                 RawIngressEvent::Data(sequenced),
                 raw_upstream_position(Some(&cursor), Some(sequence)),
             )
@@ -1243,8 +1274,9 @@ async fn process_source_watermark(
 ) -> Result<SourceLoopStep> {
     if let Some(progress) = &inputs.live_progress {
         progress
+            .coordinator
             .submit(
-                BindingIdentity::new(inputs.binding_id.as_str())?,
+                progress.binding.clone(),
                 RawIngressEvent::ConnectorWatermark(watermark),
                 raw_upstream_position(order.last_cursor.as_ref(), order.next_sequence),
             )
@@ -1282,8 +1314,9 @@ async fn finish_source_input(inputs: &mut SourceTaskInputs) -> Result<()> {
     if let Some(progress) = &inputs.live_progress {
         let snapshot = inputs.progress.snapshot.lock().clone();
         progress
+            .coordinator
             .submit(
-                BindingIdentity::new(inputs.binding_id.as_str())?,
+                progress.binding.clone(),
                 RawIngressEvent::EndOfInput,
                 raw_upstream_position(
                     snapshot.latest_observed_cursor.as_ref(),
@@ -1362,7 +1395,7 @@ mod tests {
     use super::{
         AcceptedSequenceRecorder, Cursor, SourceAcceptState, SourceAcceptance, SourceBinding,
         SourceCapabilities, SourceEvent, SourcePumpInputs, StreamSource, run_source_pump,
-        spawn_source_tasks, spawn_source_tasks_gated_with_metrics,
+        spawn_source_tasks, spawn_source_tasks_gated_with_metrics, take_live_progress_binding,
     };
     use crate::{
         Batch, BatchMetadata, CalcFlowError, CancellationToken, EdgeBudget, EdgeReceiver,
@@ -1376,6 +1409,20 @@ mod tests {
 
     #[derive(Debug)]
     struct TestPayload;
+
+    #[test]
+    fn live_progress_requires_prepared_binding_before_spawn() {
+        let mut binding =
+            SourceBinding::new(Box::new(StepSource::new(std::iter::empty())), None, 0).unwrap();
+
+        let error = take_live_progress_binding(&mut binding, true).unwrap_err();
+
+        assert!(matches!(
+            error,
+            CalcFlowError::Internal { message }
+                if message == "live source binding is missing prepared progress identity"
+        ));
+    }
 
     impl ExternalPayload for TestPayload {
         fn backend(&self) -> &'static str {
