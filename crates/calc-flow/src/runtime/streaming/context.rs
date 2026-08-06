@@ -73,8 +73,8 @@ impl StreamJobContext {
     }
 
     #[allow(dead_code, reason = "the crate-private M2 runtime derives sink scopes")]
-    pub(crate) fn for_sink(&self, binding_id: &str) -> Result<StreamTaskContext> {
-        self.scoped(StreamTaskKind::Sink, binding_id)
+    pub(crate) fn for_sink(&self, output_id: &str) -> Result<StreamTaskContext> {
+        self.scoped(StreamTaskKind::Sink, output_id)
     }
 
     fn scoped(&self, kind: StreamTaskKind, scope_id: &str) -> Result<StreamTaskContext> {
@@ -125,7 +125,7 @@ impl StreamTaskKind {
         match self {
             Self::Source => "source.binding_id",
             Self::Node => "node_id",
-            Self::Sink => "sink.binding_id",
+            Self::Sink => "sink.output_id",
         }
     }
 }

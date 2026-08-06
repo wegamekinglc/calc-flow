@@ -46,6 +46,8 @@ use crate::pipeline::{
 };
 use crate::{CalcFlowError, CancellationToken};
 
+const CONNECTOR_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum FailureOrigin {
     Preflight,
@@ -2269,13 +2271,27 @@ fn spawn_open_unit(
 async fn close_resources(resources: &mut [ConnectorResource]) -> Vec<Arc<RuntimeFailure>> {
     resources.sort_by_key(ConnectorResource::close_origin);
     let mut failures = Vec::new();
-    for resource in resources {
+    for (task_id, resource) in resources.iter_mut().enumerate() {
         let origin = resource.close_origin();
-        if let Err(error) = resource.close().await {
+        if let Some(error) = close_resource(task_id as u64, resource).await {
             failures.push(Arc::new(RuntimeFailure { origin, error }));
         }
     }
     failures
+}
+
+async fn close_resource(task_id: u64, resource: &mut ConnectorResource) -> Option<CalcFlowError> {
+    let close = AssertUnwindSafe(resource.close()).catch_unwind();
+    match tokio::time::timeout(CONNECTOR_CLOSE_TIMEOUT, close).await {
+        Ok(Ok(result)) => result.err(),
+        Ok(Err(payload)) => Some(CalcFlowError::TaskPanicked {
+            task_id,
+            message: panic_message(payload.as_ref()),
+        }),
+        Err(_) => Some(CalcFlowError::Internal {
+            message: "connector close exceeded private teardown bound of 5 seconds".into(),
+        }),
+    }
 }
 
 fn cancelled_driver_report(launch_id: LaunchId, metrics: &MetricsRecorder) -> DriverReport {
@@ -3754,6 +3770,16 @@ mod tests {
         })
         .await
         .is_ok()
+    }
+
+    async fn wait_for_counter(counter: &AtomicUsize, expected: usize) {
+        for _ in 0..100 {
+            if counter.load(Ordering::SeqCst) == expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), expected);
     }
 
     fn forward_spec(
@@ -5367,6 +5393,75 @@ mod tests {
         runner.shutdown().await.unwrap();
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn dropped_start_pending_close_expires_and_reaper_allows_next_start() {
+        let source = LifecycleProbe::default();
+        source.block_open.store(true, Ordering::SeqCst);
+        source.block_close.store(true, Ordering::SeqCst);
+        let sink = LifecycleProbe::default();
+        let mut runner = ContinuousRunner::new();
+        let observer = runner.start(spec(
+            false,
+            Arc::new(AtomicUsize::new(0)),
+            source.clone(),
+            sink.clone(),
+        ));
+        let provisional = Arc::clone(observer.core.as_ref().unwrap());
+        wait_for_counter(&source.opened, 1).await;
+        wait_for_counter(&sink.open_completed, 1).await;
+
+        drop(observer);
+
+        assert_eq!(provisional.state.lock().owner, DriverOwnership::ReaperOwned);
+        wait_for_counter(&source.closed, 1).await;
+        let mut next = Box::pin(runner.start(spec(
+            false,
+            Arc::new(AtomicUsize::new(0)),
+            LifecycleProbe::default(),
+            LifecycleProbe::default(),
+        )));
+        assert!(matches!(futures::poll!(next.as_mut()), Poll::Pending));
+
+        tokio::time::advance(StdDuration::from_secs(5)).await;
+        let next = tokio::time::timeout(StdDuration::from_secs(1), next)
+            .await
+            .expect("a bounded cancelled-launch close must release the reaper")
+            .unwrap();
+
+        assert_eq!(provisional.state.lock().owner, DriverOwnership::Terminal);
+        assert_eq!(source.closed.load(Ordering::SeqCst), 1);
+        assert_eq!(sink.closed.load(Ordering::SeqCst), 1);
+        let diagnostic = runner
+            .diagnostics()
+            .records
+            .into_iter()
+            .find(|record| record.launch_id == provisional.launch_id)
+            .expect("dropped start cleanup must retain its timeout diagnostic");
+        assert_eq!(diagnostic.cleanup_failures.len(), 1);
+        assert!(matches!(
+            &diagnostic.cleanup_failures[0].origin,
+            super::FailureOrigin::SourceClose { binding_id } if binding_id == "input"
+        ));
+        assert!(matches!(
+            &diagnostic.cleanup_failures[0].error,
+            CalcFlowError::Internal { message }
+                if message == "connector close exceeded private teardown bound of 5 seconds"
+        ));
+        {
+            let runtime = provisional.runtime_status.lock();
+            assert!(runtime.tasks.snapshot().is_empty());
+        }
+        assert!(provisional.metrics.snapshot().edges.values().all(|edge| {
+            edge.channel.queue_depth == 0
+                && edge.channel.charged_rows == 0
+                && edge.channel.charged_bytes == 0
+        }));
+
+        drop(next);
+        runner.shutdown().await.unwrap();
+        assert_eq!(runner.registry_counts(), (0, 0));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dropping_start_during_operator_entry_reaps_before_connector_lifecycle() {
         let entered = Arc::new(AtomicBool::new(false));
@@ -5720,6 +5815,109 @@ mod tests {
         assert_eq!(sink.opened.load(Ordering::SeqCst), 1);
         assert_eq!(sink.closed.load(Ordering::SeqCst), 1);
         runner.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_launch_bounds_close_and_keeps_stable_cleanup_diagnostics() {
+        let source = LifecycleProbe::default();
+        source.block_open.store(true, Ordering::SeqCst);
+        source.fail_open.store(true, Ordering::SeqCst);
+        source.block_close.store(true, Ordering::SeqCst);
+        let panic_sink = LifecycleProbe::default();
+        panic_sink.panic_close.store(true, Ordering::SeqCst);
+        let error_sink = LifecycleProbe::default();
+        error_sink.fail_close.store(true, Ordering::SeqCst);
+        let later_sink = LifecycleProbe::default();
+        let job_spec = forward_spec(
+            101,
+            SourceBinding::new(Box::new(ProbeSource(source.clone())), None, 0).unwrap(),
+            vec![
+                named_probe_sink("a-panic", panic_sink.clone()),
+                named_probe_sink("b-error", error_sink.clone()),
+                named_probe_sink("c-later", later_sink.clone()),
+            ],
+        );
+        let mut runner = ContinuousRunner::new();
+        let observer = runner.start(job_spec);
+        let provisional = Arc::clone(observer.core.as_ref().unwrap());
+        wait_for_counter(&source.opened, 1).await;
+        wait_for_counter(&panic_sink.open_completed, 1).await;
+        wait_for_counter(&error_sink.open_completed, 1).await;
+        wait_for_counter(&later_sink.open_completed, 1).await;
+        source.open_release.notify_waiters();
+        wait_for_counter(&source.closed, 1).await;
+        assert_eq!(panic_sink.closed.load(Ordering::SeqCst), 0);
+        let shutdown = runner.shutdown();
+
+        tokio::time::advance(StdDuration::from_secs(5)).await;
+        let failure = tokio::time::timeout(StdDuration::from_secs(1), observer)
+            .await
+            .expect("failed launch must outlive a permanently pending close")
+            .unwrap_err();
+        shutdown.await.unwrap();
+
+        assert!(matches!(
+            &failure.primary.origin,
+            super::FailureOrigin::SourceOpen { binding_id } if binding_id == "input"
+        ));
+        assert!(matches!(
+            &failure.primary.error,
+            CalcFlowError::Internal { message } if message == "source open failed"
+        ));
+        let diagnostic_id = failure
+            .diagnostic_id
+            .expect("bounded close failures must be retained as secondaries");
+        let diagnostics = runner.diagnostics();
+        let cleanup = &diagnostics
+            .records
+            .iter()
+            .find(|record| record.id == diagnostic_id)
+            .unwrap()
+            .cleanup_failures;
+        assert_eq!(cleanup.len(), 3);
+        assert!(matches!(
+            (&cleanup[0].origin, &cleanup[0].error),
+            (
+                super::FailureOrigin::SourceClose { binding_id },
+                CalcFlowError::Internal { message }
+            ) if binding_id == "input"
+                && message == "connector close exceeded private teardown bound of 5 seconds"
+        ));
+        assert!(matches!(
+            (&cleanup[1].origin, &cleanup[1].error),
+            (
+                super::FailureOrigin::SinkClose { output_id, sink_id },
+                CalcFlowError::TaskPanicked { task_id: 1, message }
+            ) if output_id == "output" && sink_id == "a-panic"
+                && message == "sink close panicked"
+        ));
+        assert!(matches!(
+            (&cleanup[2].origin, &cleanup[2].error),
+            (
+                super::FailureOrigin::SinkClose { output_id, sink_id },
+                CalcFlowError::Internal { message }
+            ) if output_id == "output" && sink_id == "b-error"
+                && message == "sink close failed"
+        ));
+        assert_eq!(source.closed.load(Ordering::SeqCst), 1);
+        assert_eq!(panic_sink.closed.load(Ordering::SeqCst), 1);
+        assert_eq!(error_sink.closed.load(Ordering::SeqCst), 1);
+        assert_eq!(later_sink.closed.load(Ordering::SeqCst), 1);
+        assert_eq!(provisional.state.lock().owner, DriverOwnership::Terminal);
+        assert!(
+            provisional
+                .runtime_status
+                .lock()
+                .tasks
+                .snapshot()
+                .is_empty()
+        );
+        assert!(provisional.metrics.snapshot().edges.values().all(|edge| {
+            edge.channel.queue_depth == 0
+                && edge.channel.charged_rows == 0
+                && edge.channel.charged_bytes == 0
+        }));
+        assert_eq!(runner.registry_counts(), (0, 0));
     }
 
     #[tokio::test]

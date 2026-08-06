@@ -798,5 +798,10 @@ mod tests {
         assert_eq!(source.scope_id(), "input");
         assert_eq!(source.job().job_id(), context.job_id());
         assert!(context.for_source("  ").is_err());
+        assert!(matches!(
+            context.for_sink("  "),
+            Err(CalcFlowError::InvalidArgument { ref field, .. })
+                if field == "sink.output_id"
+        ));
     }
 }

@@ -229,6 +229,7 @@ async fn finish_operator(
         StreamOperatorContext::new(inputs.context.job(), &inputs.node_id, input_watermark);
     let mut collector = ChannelStreamCollector::new(
         &inputs.node_id,
+        inputs.context.job().job_id(),
         &inputs.output_ports,
         &mut inputs.outputs,
         inputs.context.job().cancellation(),
@@ -352,6 +353,7 @@ async fn dispatch_data(
         StreamOperatorContext::new(inputs.context.job(), &inputs.node_id, input_watermark);
     let mut collector = ChannelStreamCollector::new(
         &inputs.node_id,
+        inputs.context.job().job_id(),
         &inputs.output_ports,
         &mut inputs.outputs,
         inputs.context.job().cancellation(),
@@ -392,6 +394,7 @@ async fn dispatch_watermark(
         StreamOperatorContext::new(inputs.context.job(), &inputs.node_id, *input_watermark);
     let mut collector = ChannelStreamCollector::new(
         &inputs.node_id,
+        inputs.context.job().job_id(),
         &inputs.output_ports,
         &mut inputs.outputs,
         inputs.context.job().cancellation(),
@@ -461,6 +464,7 @@ async fn forward_control(
 
 pub(crate) struct ChannelStreamCollector<'a> {
     node_id: &'a str,
+    job_id: u64,
     output_ports: &'a BTreeMap<String, Port>,
     outputs: &'a mut BTreeMap<String, Vec<EdgeSender>>,
     cancellation: &'a CancellationToken,
@@ -471,6 +475,7 @@ pub(crate) struct ChannelStreamCollector<'a> {
 impl<'a> ChannelStreamCollector<'a> {
     fn new(
         node_id: &'a str,
+        job_id: u64,
         output_ports: &'a BTreeMap<String, Port>,
         outputs: &'a mut BTreeMap<String, Vec<EdgeSender>>,
         cancellation: &'a CancellationToken,
@@ -479,6 +484,7 @@ impl<'a> ChannelStreamCollector<'a> {
     ) -> Self {
         Self {
             node_id,
+            job_id,
             output_ports,
             outputs,
             cancellation,
@@ -498,7 +504,7 @@ impl StreamCollector for ChannelStreamCollector<'_> {
             .get_mut(port)
             .ok_or_else(|| runtime_routes_error(self.node_id, port))?;
         validate_senders(senders, &message, self.node_id, port)?;
-        send_emission(senders, message, self.cancellation).await?;
+        send_emission(senders, message, self.cancellation, self.job_id).await?;
         self.metrics.record_operator_output(self.node_id, cost)?;
         self.progress.record_output()
     }
@@ -538,13 +544,14 @@ async fn send_emission(
     senders: &mut [EdgeSender],
     message: StreamMessage,
     cancellation: &CancellationToken,
+    job_id: u64,
 ) -> Result<()> {
     for sender in senders {
         tokio::select! {
             biased;
             () = cancellation.cancelled() => {
                 return Err(CalcFlowError::Cancelled {
-                    run_id: "operator-task".into(),
+                    run_id: job_id.to_string(),
                 });
             }
             result = sender.send(message.clone()) => result?,
@@ -578,7 +585,7 @@ mod tests {
 
     use super::{
         OperatorEntryAck, OperatorIngress, OperatorProgress, OperatorTaskInputs, run_operator_task,
-        spawn_operator_task,
+        send_emission, spawn_operator_task,
     };
     use crate::{
         Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken, EdgeBudget, EventTime,
@@ -1079,6 +1086,34 @@ mod tests {
             "operator task must stop when cancellation interrupts a pending handler"
         );
         assert!(poll_dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cancelled_emission_uses_job_id_before_outer_normalization() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let (sender, _receiver) = crate::edge_channel(
+            "node.output->sink.output",
+            EdgeBudget {
+                max_rows: 1,
+                max_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
+
+        let error = send_emission(
+            &mut [sender],
+            StreamMessage::data(batch("S", 0)),
+            &cancellation,
+            47,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CalcFlowError::Cancelled { ref run_id } if run_id == "47"
+        ));
     }
 
     #[tokio::test]
