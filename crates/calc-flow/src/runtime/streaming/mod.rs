@@ -4,7 +4,10 @@
 //! [`crate::BatchExecutionPlan`]. The crate-private M2 runtime owns compiled
 //! plans, supervised launch/jobs, and source drain internally. The public
 //! source-driven A6 cut remains deferred until its M4/M5 durability contract
-//! is complete. [`edge_channel`] is the dual-limit channel every edge carries.
+//! is complete. The two-field budget on [`edge_channel`] enforces three
+//! independent admission predicates on every edge: queued envelopes and
+//! charged rows each stay within `max_rows`, while charged bytes stay within
+//! `max_bytes`.
 
 mod channel;
 mod context;
