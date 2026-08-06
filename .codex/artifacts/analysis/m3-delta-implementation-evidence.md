@@ -97,7 +97,9 @@ Additional milestone evidence:
   durability, and public A6 diffs are empty.
 - **Source hygiene:** pass, `git diff --check`, with no generated
   `_native*.so` in source.
-- **Standard soak:** pending the exact committed implementation head.
+- **Standard soak:** pass on exact implementation commit
+  `763750e16e8229cd0d0b9b9ed82e50484c96e52a`; 1,200 measured seconds and
+  120 samples, followed by bounded graceful drain and convergence.
 - **GitHub review/CI/Codacy:** pending PR publication.
 
 The local environment was already synchronized and `uv pip check` reported no
@@ -118,5 +120,13 @@ cuts, settlement disposition counts and latency, peak unsettled receipts and
 timer/trace sizes, bounded-edge/backpressure evidence, delivery conservation,
 task/queue/resource convergence, and terminal outcome.
 
-The final exact-head result and PR review/CI/Codacy/merge evidence are recorded
-in the implementation PR because they do not exist before publication.
+The exact implementation-head result passed with `passed=true`, all three
+bounded edges saturated and blocked, 1,330 accepted batches conserved at both
+sinks with no missing or duplicate delivery, and 1,332 of 1,332 receipts
+settled as commit-success. Terminal queue depth, charged rows/bytes, tasks,
+unsettled receipts, and timer entries were all zero. The run completed through
+`GracefulShutdown`; its first post-warmup and final five-minute median RSS
+values were 35,482 KiB and 22,182 KiB, respectively. The structured trace
+contained 3,998 records and retained both terminal gate cuts. PR
+review/CI/Codacy/merge evidence is recorded in the implementation PR because
+it does not exist before publication.

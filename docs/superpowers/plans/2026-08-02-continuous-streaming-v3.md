@@ -988,7 +988,7 @@ receipt disposition 和完整 trace replay 均可确定复现；M2 lifecycle/bac
 
 - [x] PR #85 的 AC-01 至 AC-85 均有命名测试或显式等价 gate 映射。
 - [x] paused-time full-graph stress 执行 100 个 seed；exact-coordinate replay 执行 100 次。
-- [ ] 标准 20-minute two-source slow-sink soak 通过并保存 structured evidence。
+- [x] 标准 20-minute two-source slow-sink soak 通过并保存 structured evidence。
 - [x] Rust/Python/Studio/frontend、coverage、docs、supply-chain 与 generated-contract gate
   全部通过。
 - [x] Rust public API、Python、REST/OpenAPI 无 M3 surface diff；public A6 不提前暴露。
