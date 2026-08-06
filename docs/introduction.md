@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Vec::new(),
             )?),
         )?
-        .compile(&UdfRegistry::new().snapshot())?;
+        .compile_batch(&UdfRegistry::new().snapshot())?;
     let input = RecordBatch::try_from_iter(vec![
         (
             "a",
@@ -158,7 +158,7 @@ and registers only the UDFs selected by the compiled plan. An external-only
 plan stores no DataFusion configuration or UDF snapshot and creates no
 DataFusion runtime when it executes.
 
-An `ExecutionPlan` returns a `RunResult` containing:
+A `BatchExecutionPlan` returns a `RunResult` containing:
 
 - named terminal output batches;
 - run and pipeline identity metadata;
@@ -207,8 +207,8 @@ Configurations never contain executable source, Python import paths, or
 callable objects.
 
 Rust applications register native DataFusion scalar UDFs in `UdfRegistry` and
-external operator factories in `ProviderRegistry`. Compilation consumes an
-immutable registry snapshot.
+external batch or stream operator factories in `ProviderRegistry`.
+Compilation consumes an immutable registry snapshot.
 
 Python applications register trusted scalar UDF callbacks on `Runtime` with:
 
@@ -285,11 +285,22 @@ see the same batch again: delivery is at least once.
 the pipeline name/fingerprint, source cursor/sequence, node-keyed state, and
 creation time. One runner has an exclusive lease on a stateful plan.
 
-The stream message surface is not a continuous runner or a public
-watermark/checkpoint interface. `MicroBatchRunner` and `StreamingRunner` still
-submit formed `Batch` values only. The [stream message
-envelope](runtime-envelope.md) documents the message, time, and context types
-and the delivery guarantees the current runtime provides.
+The crate also contains the complete M2 continuous-runtime skeleton:
+whole-job preflight, bounded source/operator/sink tasks, a private runner/job/
+reaper lifecycle, deterministic status and metrics, panic containment, and
+bounded launch cleanup. Those types remain crate-private. They do not expose a
+continuous runner or public watermark/checkpoint interface, and they do not
+change the existing public v2 `MicroBatchRunner` or `StreamingRunner`, which
+still submit formed `Batch` values only. Public source-driven runner
+integration is a separately reviewed post-M5 change.
+
+Every private runtime edge uses the public two-field `EdgeBudget`. For
+`EdgeBudget::new(R, B)`, at most `R` envelopes, `R` rows, and `B` bytes may be
+reserved independently. The type and function signatures are unchanged.
+Direct `edge_channel` callers must choose
+`R >= max(required_row_limit, required_simultaneous_messages)`. The [stream
+message envelope](runtime-envelope.md) documents the exact message, time,
+channel, lifecycle, and current delivery boundaries.
 
 ## Python binding boundary
 

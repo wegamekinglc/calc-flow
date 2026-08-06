@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
+use tokio::sync::watch;
 
 use crate::{CalcFlowError, CancellationToken, JsonMap, Result};
 
@@ -56,6 +59,38 @@ impl StreamJobContext {
         &self.cancellation
     }
 
+    #[allow(
+        dead_code,
+        reason = "the crate-private M2 runtime derives source scopes"
+    )]
+    pub(crate) fn for_source(&self, binding_id: &str) -> Result<StreamTaskContext> {
+        self.scoped(StreamTaskKind::Source, binding_id)
+    }
+
+    #[allow(dead_code, reason = "the crate-private M2 runtime derives node scopes")]
+    pub(crate) fn for_node(&self, node_id: &str) -> Result<StreamTaskContext> {
+        self.scoped(StreamTaskKind::Node, node_id)
+    }
+
+    #[allow(dead_code, reason = "the crate-private M2 runtime derives sink scopes")]
+    pub(crate) fn for_sink(&self, output_id: &str) -> Result<StreamTaskContext> {
+        self.scoped(StreamTaskKind::Sink, output_id)
+    }
+
+    fn scoped(&self, kind: StreamTaskKind, scope_id: &str) -> Result<StreamTaskContext> {
+        if scope_id.trim().is_empty() || scope_id.contains('\0') {
+            return Err(CalcFlowError::InvalidArgument {
+                field: kind.id_field().into(),
+                message: "must be non-empty, non-whitespace, and contain no NUL".into(),
+            });
+        }
+        Ok(StreamTaskContext {
+            job: self.clone(),
+            kind,
+            scope_id: scope_id.into(),
+        })
+    }
+
     /// Verifies that the job remains active.
     ///
     /// # Errors
@@ -71,5 +106,77 @@ impl StreamJobContext {
             });
         }
         Ok(())
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "M2 task scopes remain crate-private until the post-M5 public A6 gate"
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StreamTaskKind {
+    Source,
+    Node,
+    Sink,
+}
+
+impl StreamTaskKind {
+    const fn id_field(self) -> &'static str {
+        match self {
+            Self::Source => "source.binding_id",
+            Self::Node => "node_id",
+            Self::Sink => "sink.output_id",
+        }
+    }
+}
+
+/// Immutable task scope derived from one job context.
+#[allow(
+    dead_code,
+    reason = "M2 task scopes remain crate-private until the post-M5 public A6 gate"
+)]
+#[derive(Clone, Debug)]
+pub(crate) struct StreamTaskContext {
+    job: StreamJobContext,
+    kind: StreamTaskKind,
+    scope_id: Arc<str>,
+}
+
+#[allow(
+    dead_code,
+    reason = "M2 task scopes remain crate-private until the post-M5 public A6 gate"
+)]
+impl StreamTaskContext {
+    pub(crate) const fn job(&self) -> &StreamJobContext {
+        &self.job
+    }
+
+    pub(crate) const fn kind(&self) -> StreamTaskKind {
+        self.kind
+    }
+
+    pub(crate) fn scope_id(&self) -> &str {
+        &self.scope_id
+    }
+}
+
+pub(super) async fn wait_for_task_gate(
+    gate: &mut watch::Receiver<bool>,
+    launch_cancel: &CancellationToken,
+    cancellation: &CancellationToken,
+    closed_message: &str,
+) -> Result<bool> {
+    loop {
+        if *gate.borrow() {
+            return Ok(true);
+        }
+        tokio::select! {
+            biased;
+            () = launch_cancel.cancelled() => return Ok(false),
+            () = cancellation.cancelled() => return Ok(false),
+            result = gate.changed() => result.map_err(|_| CalcFlowError::Internal {
+                message: closed_message.into(),
+            })?,
+        }
     }
 }

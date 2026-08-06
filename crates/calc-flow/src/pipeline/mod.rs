@@ -20,6 +20,10 @@ pub(crate) use batch::{OperationToken, PlanLease, PlanTransaction};
 pub(crate) use compile::{
     CompiledNode, NodeDefinition, TablePlanResources, build_nodes, compile_graph,
 };
+pub(crate) use stream::{
+    CompiledStreamOperator, RuntimeSinkRoute, RuntimeSourceRoute, RuntimeStreamNode,
+    StreamRuntimePlanParts,
+};
 
 use std::collections::BTreeMap;
 

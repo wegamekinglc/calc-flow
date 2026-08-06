@@ -225,6 +225,18 @@ mod tests {
     }
 
     #[test]
+    fn task_panicked_uses_the_wildcard_execution_error_mapping() {
+        assert_mapping(
+            calc_flow::CalcFlowError::TaskPanicked {
+                task_id: 17,
+                message: "connector invariant".into(),
+            },
+            ExpectedException::Execution,
+            "task 17 panicked: connector invariant",
+        );
+    }
+
+    #[test]
     fn preserves_io_error_as_python_cause() {
         Python::initialize();
         Python::attach(|py| {

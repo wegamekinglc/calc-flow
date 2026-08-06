@@ -1,0 +1,1122 @@
+# Continuous Streaming M2 Completion - Critic Critique
+
+## Target
+
+- Spec: `.codex/artifacts/specs/continuous-streaming-m2-completion.md`
+- API note: `.codex/artifacts/api-notes/continuous-streaming-m2-completion.md`
+- Controlling spec: `.codex/artifacts/specs/continuous-streaming-runtime.md`
+- Controlling API note: `.codex/artifacts/api-notes/continuous-streaming-runtime.md`
+- Approved total-artifact critique:
+  `.codex/artifacts/critiques/continuous-streaming-runtime.md`, round 3
+- Plan: `docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md`,
+  tasks M2.1-M2.5 and the M2 merge gate
+- Audited PR head: `6d5740d3df733a02450d45bdde168a3dfb4b03e9`
+- Comparison `origin/main`: `d45c2b26def2c4dfe179f2b7c7c1d2411fc069b6`
+- Historical skeleton baseline: `1d5546028e2ce9ebce59c976080c3d11c1225e16`
+
+## Current Verdict (Round 5)
+
+**Proceed.** Revision 6 resolves B7 without weakening B6 or broadening scope.
+The precedence chain now authorizes exactly the slot-related S10.1/S10.5,
+FR23, inputs-row, AC-S10, and projection changes, while preserving the rest of
+S10 and A1-A8. The public `(R, B)` behavior change, migration rule, unchanged
+signatures, sole `TaskPanicked` item addition, private runner boundary, tests,
+soak evidence, performance rule, and final-head gates are explicit.
+
+**BLOCKS REMAINING: 0**
+
+Revision 6 is approved for implementation. This is artifact approval only, not
+M2 completion or PR approval: G1-G8, the 20-minute exact-head Linux evidence,
+all 16 Codacy findings, all review threads, current-main ancestry, the full
+verification matrix, green checks, and `MERGEABLE/CLEAN` remain mandatory.
+
+## Round 1 Verdict
+
+**Block.** The decision to keep A6 private until M4/M5 is the honest public-API
+choice, and the current compiled plan contains enough owned topology to make an
+internal M2 runtime possible. Four lifecycle/correctness contracts are not yet
+implementable as written, however: operator initialization is gated in the
+wrong phase, the graceful-drain cut is defined by unobservable future readiness,
+the take-once supervisor has no cancellation-safe ownership protocol, and
+checked metrics overflow can recurse while recording the terminal error. A
+fifth blocking edge case is a caller-dropped `start()` future during connector
+open: the note promises close/join on open failure but gives this equally normal
+Rust cancellation path no owner.
+
+**BLOCKS REMAINING: 5**
+
+## Findings
+
+### Blocking Issues
+
+- **B1 - The proposed open gate contradicts the controlling operator-entry
+  order.** The completion API note says that, after pure preflight, sources and
+  sinks open and "pumps, operator tasks, and sink writes remain start-gated
+  until all opens succeed" (completion API note, source preflight/open phase,
+  lines 189-210). The controlling A3 contract instead requires every operator
+  `reset`/fresh-entry/`restore` to execute inside its registered operator task
+  and finish before any source opens (total API note A3, lines 502-525). These
+  cannot both hold with one start gate.
+  - **Counter-example:** an external `StreamOperator::reset()` returns
+    `CalcFlowError::Operator`. Following the completion note opens a Kafka
+    source and an ordinary HTTP sink first, then releases the operator task and
+    discovers the deterministic failure after external side effects. Following
+    A3 requires polling the operator task before the connector open phase,
+    violating the completion note's single gate.
+  - **Suggested fix:** specify two gates. After pure whole-job validation,
+    register every operator task and run only its entry phase; wait for all
+    operator entry acknowledgements. Only then run the concurrent connector
+    open phase. When all opens succeed, release a separate data/control gate for
+    pumps, operator ingress loops, and sink writes. An operator-entry failure
+    must join the registered init tasks without invoking any connector
+    lifecycle method. Add a test with a failing external `reset()` and source/
+    sink open canaries.
+
+- **B2 - Graceful drain is defined by a fact the runtime cannot observe.** The
+  completion API note defines the accepted prefix to include an event whose
+  `next` "completed before the drain decision", including the capacity-one
+  slot, while a still-pending `next` is dropped (lines 241-251). A Rust future
+  has no observable completion timestamp before the executor polls it to
+  `Ready`; a connector or worker may have completed the underlying I/O while
+  the pump has not yet observed that readiness. No implementation can decide
+  which side of this cut that event belongs to from the stated contract.
+  - **Counter-example:** the slot is empty and the pump holds its pre-reserved
+    permit while `next()` becomes ready on an external wake. Before Tokio polls
+    the pump again, `shutdown()` serializes the drain decision. The note says
+    the item is accepted if "completed" means connector completion, but the
+    runtime cannot distinguish it from a genuinely pending poll and will drop
+    it. If it polls once after the decision to discover readiness, it can accept
+    an item that became ready after the decision. Either interpretation loses
+    the promised cut.
+  - **Suggested fix:** define acceptance exclusively by runtime observation:
+    an event is accepted iff the pump has atomically committed it to the
+    one-item slot before a serialized per-source drain cut. Reserve-before-poll
+    remains valid, but readiness alone is not acceptance. Freeze a shared
+    source state machine such as `Polling -> Slotted -> Draining -> Closed` and
+    make the slot commit and drain transition mutually exclusive. The source
+    task drains the committed slot and any already-enqueued edge send, emits
+    EOF, then joins the pump; a poll not committed at the cut is dropped once
+    and never resumed. Test all cut points with gates, not sleeps.
+
+- **B3 - `JobCore`'s take-once supervisor is not safe under the very future-
+  drop and handle-Drop behavior the note promises.** The completion API note
+  gives `wait`, `shutdown`, and `cancel` concurrent `&self` methods, says a
+  dropped wait future does not cancel the job, and says `JobCore` owns a
+  take-once supervisor registry while owning-handle Drop atomically transfers
+  it to the reaper (runner/reaper section, lines 445-508). It does not define
+  where the registry lives while one terminal future is actively joining, or
+  how Drop, another terminal caller, and runner shutdown arbitrate that
+  ownership. A boolean `owns_registry` on the handle does not serialize an
+  async take from the core. The baseline demonstrates the hazard: the current
+  `wait(self)` holds `TaskSupervisor` in its future, and supervisor Drop calls
+  `abort_all` (`job.rs` lines 77-109; `supervisor.rs` lines 239-243).
+  - **Counter-example:** caller A polls `wait()` far enough to take the
+    supervisor, then drops only the wait future. If the supervisor is
+    future-local, Drop cancels/aborts the job, contradicting idempotent
+    observation. If the registry is left marked "taken", caller B's `cancel()`
+    or runner shutdown cannot join it. Concurrent owning-handle Drop can then
+    transfer either an empty registry or race the active join, violating D5.
+  - **Suggested fix:** freeze one atomic ownership state machine in `JobCore`,
+    not a handle-local boolean. It must distinguish at least `CoreOwned`,
+    `Driving`, `ReaperOwned`, and `Terminal`, and store the partially progressed
+    supervisor back into core-owned state whenever a driving future is dropped.
+    Alternatively, make one core-owned registered convergence-driver task and
+    have every terminal method observe it; that driver itself must remain in a
+    runner/job registry and be transferred to the reaper on handle Drop. State
+    exact linearization points for terminal cause selection, registry transfer,
+    and outcome publication. Add adversarial `poll`/drop tests at every await in
+    wait, cancel, shutdown, and join, plus concurrent terminal-call and
+    job-Drop/runner-shutdown races.
+
+- **B4 - Checked error metrics can recursively create terminal errors.**
+  M2C-FR30 says all counters are checked and that errors are counted when the
+  terminal decision records them (completion spec lines 251-255). The API note
+  says overflow returns `InvalidArgument` and converges the job (metrics
+  section, lines 576-590), and the diagnostics table names that terminal error
+  (lines 618-639). It never exempts the error counter that is being updated by
+  the terminal decision.
+  - **Counter-example:** inject `job.task_errors = u64::MAX` and submit an
+    operator failure. Recording that primary error overflows and produces the
+    metrics-overflow error. Recording the new error increments the same full
+    counter, producing the same error recursively; the single terminal
+    decision never reaches outcome publication. The focused checked-overflow
+    acceptance test can expose this immediately.
+  - **Suggested fix:** make terminal error accounting non-recursive. Record the
+    selected primary outcome first. Attempt each error-counter increment at
+    most once; if it overflows, attach one metrics-overflow secondary (or make
+    it primary only when the original operation was itself a metrics record),
+    set a non-failing bounded `metrics_overflowed` flag, and never feed that
+    secondary back through error accounting. Specify whether the counter stays
+    at `u64::MAX`; saturation is acceptable for the diagnostic flag even though
+    ordinary counters remain checked.
+
+- **B5 - Dropping `ContinuousRunner::start()` during open has no cleanup
+  contract.** `start(&self)` is async and the completion note requires
+  concurrent source/sink opens. It specifies close-all and join on an open
+  error (lines 205-210), but says nothing about the caller dropping the start
+  future after one or more opens begin. This is ordinary Rust cancellation,
+  not a destructor-only abuse. Async `close()` cannot run from Future Drop,
+  and moving connectors into future-local open units leaves no reaper target
+  when that future disappears.
+  - **Counter-example:** source A opens successfully, source B is blocked in
+    `open`, and the caller's `tokio::select!` drops `start()`. A's external
+    resource remains open and B's open future is dropped without the promised
+    close-all convergence. No `ContinuousJob` exists for the caller to cancel,
+    while a second `start()` can observe ambiguous active state.
+  - **Suggested fix:** make provisional launch state runner-core-owned before
+    the first open begins. A dropped start observer must either leave a
+    registered launch driver that converges to a live job held by the runner,
+    or request cancellation and transfer all open-phase units/resources to the
+    runner reaper. Freeze what the next `start()` and runner `shutdown()` do
+    with that provisional launch, and add a poll/drop test at every open-phase
+    await. Do not rely on connector object Drop as a substitute for async
+    `close()`.
+
+### Significant Concerns
+
+- **S1 - Deferring public A6 is correct, but calling this unchanged-plan M2
+  "complete" is not yet honest.** The plan's merge strategy says M2.4
+  publishes the unified runner (`plans/...continuous-streaming-v3.md`, line
+  400); task M2.4 explicitly implements `StreamingRunner::start`, deletes the
+  push runner and `MicroBatchRunner`, and gates on a usable source-driven
+  runtime (lines 795-825). The delta instead says M2 completes as crate-private
+  infrastructure and moves public A6 to a post-M4/M5 integration milestone
+  (completion spec lines 421-435; completion API decision 1, lines 82-101).
+  That is the safer technical decision, but it is a milestone deviation, not
+  completion of the plan as currently written.
+  - **Suggested fix:** the spec writer should explicitly rename this gate
+    "M2 internal runtime completion", amend the plan/handoff ledger so public
+    M2.4 is superseded rather than checked off, and name the later A6
+    integration milestone. Reports must say "M2 runtime internals complete"
+    until that plan revision lands. The API designer should keep A6 deferred;
+    do not weaken its checkpoint promise merely to preserve the old schedule.
+
+- **S2 - Fan-out failure is observably non-atomic and the artifacts should say
+  so.** `ChannelStreamCollector::emit` prevalidates all branches, then awaits
+  independent senders sequentially (completion API lines 274-291). If branch
+  one accepts and branch two closes, branch one can process or write externally
+  before `emit` returns the error. Output metrics remain zero because the
+  all-branches boundary was not reached. FR12 only promises identical sequences
+  in a fault-free run, so this is not a contradiction, but neither spec nor
+  test plan acknowledges the branch divergence. The same issue exists for
+  source fan-out and for an external operator that successfully emits once,
+  then fails on a later `emit` in the same handler.
+  - **Suggested fix:** state explicitly that M2 fan-out is not transactional:
+    a failure may leave a delivered prefix on earlier branches; convergence
+    cancels the job and no rollback or cross-branch atomicity is claimed.
+    Define the output counter as "fully fanned-out emits", retain per-edge send
+    counters so the partial delivery is observable, and add a branch-two-close
+    test. Do not assert zero downstream data on an arbitrary send/handler
+    failure; only validation-before-first-send has that property.
+
+- **S3 - Runtime boundary edges and plan extraction need a named internal
+  contract before wiring.** The current `StreamExecutionPlan` does own compiled
+  nodes/operators, internal edges, and external input/output endpoints
+  (`pipeline/stream.rs` lines 135-203), so owned non-clone operators are
+  constructible by consuming the plan; this is **not a blocker**. However,
+  source-to-first-node and last-node-to-sink channels are not entries in the
+  compiled `edges` map, and there is no crate-private `into_runtime_parts()`.
+  The proposed status/errors require stable IDs for every edge, including
+  first-hop budget diagnostics, without defining those boundary IDs. Compiled
+  operators are also wrapped in `Arc<Mutex<_>>`; an M2 task needs one owned
+  value.
+  - **Suggested fix:** add a crate-private consuming projection such as
+    `StreamRuntimePlanParts` with owned nodes/operators, explicit source routes,
+    explicit sink routes, and every internal/boundary edge's stable ID and
+    budget. Either refactor stream compiled nodes to direct ownership or prove
+    `Arc::try_unwrap` is infallible because the non-Clone plan exposes no Arc.
+    Freeze deterministic boundary-edge ID formulas and add a full topology
+    reconstruction test for unary, fan-out, independent branches, and union.
+
+- **S4 - Channel closure must not masquerade as EOF.** `EdgeReceiver::recv()`
+  returns `None` after sender teardown, while stream EOF is an explicit
+  `EndOfInput`. The operator/sink task note only specifies handling the message
+  enum. Treating `None` as ended would silently turn a producer that exited
+  without EOF into natural completion and data loss.
+  - **Suggested fix:** while the job is running or draining, `recv() == None`
+    before explicit EOF is `EdgeClosed` with the ingress/edge origin. During an
+    already-selected cancel/failure convergence it is normal wakeup or a
+    secondary error according to one stated rule. Add missing-EOF tests for
+    unary, union, and sink ingress.
+
+- **S5 - Open-phase and sink teardown errors do not fit the proposed result
+  surfaces.** Ordered sink writes preserve the failing sink through private
+  `FailureOrigin`, and close failures are secondary in stable sink-ID order
+  (completion API lines 366-379). But connector open happens before
+  `start() -> Result<ContinuousJob>` returns, so there is no
+  `ContinuousJobOutcome` in which to attach close-all failures. It is unclear
+  whether a failed sink's own `close()` is always attempted and where multiple
+  close failures are retained.
+  - **Suggested fix:** define start-failure aggregation separately: return the
+    deterministic primary open error with its binding origin, retain close
+    failures in a bounded runner diagnostic/reaper record in stable ID order,
+    and count them once. State that every resource whose `open` began,
+    including the resource whose open returned `Err`, receives one `close`.
+    For running sink tasks, keep write/open as primary and close errors as
+    secondary; test sink-two write failure plus all close combinations.
+
+- **S6 - Per-edge metrics observation boundaries are incomplete.** FR29 asks
+  for input/output batches, rows, and bytes per edge, but FR30 names only
+  operator-dequeue, fully-fanned-out operator output, and successful sink
+  write. It does not say whether edge input means successful enqueue, whether
+  edge output means dequeue, or how source/sink boundary edges count. The
+  recorder sketch has no edge record method.
+  - **Suggested fix:** define edge input at successful queue commit and edge
+    output at successful dequeue, independently of operator-level fully-fanned
+    output. Instrument the channel shared state or add stable edge-only recorder
+    methods. Add a partial-fan-out metric test so edge one can show one enqueue
+    while operator fully-fanned output remains zero.
+
+- **S7 - The stress/soak/benchmark gates need executable harness details.** A
+  paused Tokio runtime does not itself offer "seeded schedules"; the test must
+  synthesize readiness permutations with seeded gates. The soak gives an RSS
+  formula but no sample cadence, RSS provider/platform rule, allocator, or
+  minimum sample count. The ordinary matrix compiles benches with
+  `--no-run`, while FR33 also says they produce a baseline report. Finally,
+  Criterion targets are external crates and cannot call the crate-private job,
+  so "unary stream overhead" is ambiguous under the no-public-change gate.
+  - **Suggested fix:** define a deterministic seed-to-gate schedule generator
+    for 100 cases; specify the ignored soak command, Linux RSS source (or a
+    reviewed portable provider), cadence, sample count, allocator/report
+    metadata, and unsupported-platform behavior; keep the one-hour run outside
+    ordinary CI. Distinguish bench compilation from an opt-in `cargo bench`
+    baseline run. Define whether the unary case measures public
+    `StreamOperator` + channels or add a non-public in-crate measurement seam;
+    do not expose a fake public runtime solely for Criterion.
+
+### Minor / Style Notes
+
+- **M1 - M2C-FR3 still calls the deadline outcome an open API-designer
+  decision after the API note closes it.** Completion spec lines 104-109 say
+  the exact outcome is a decision item; the API note fixes
+  `Cancelled/DeadlineExceeded` with no error at lines 420-437. Replace the stale
+  sentence with the decided result so the spec is self-consistent.
+- **M2 - Current documentation comments still promise public replacement in
+  M2.4.** `runtime/streaming/mod.rs` lines 3-6 and several `dead_code` reasons,
+  plus `pipeline/stream.rs` line 5, say M2.4 publishes the public runner. If A6
+  is deferred, the eventual implementation/doc pass must update those comments
+  without claiming public continuous runtime availability.
+
+## Axis Sweep
+
+- **Correctness:** blocked by B1-B4; immutable `Batch` sharing and per-ingress
+  FIFO otherwise match `docs/introduction.md` and S1-S4.
+- **Hidden assumptions:** B2 assumes readiness is observable; B3 assumes an
+  async-taken registry still has an owner; S3 assumes boundary IDs exist.
+- **Missing edge cases:** B5, partial fan-out, premature channel close, and
+  multi-error sink teardown are missing from the acceptance map.
+- **Backwards compatibility:** the private completion approach preserves the
+  current v2 `StreamingRunner`, `MicroBatchRunner`, public tests, project/
+  checkpoint v2 documents, and `tests/fixtures/v1/`. **OK**, provided no new
+  re-export or fixture rewrite lands and AC-COMPAT remains green.
+- **Performance:** bounded channels, one-item source slots, task-local
+  DataFusion runtimes, and sequential configured sink delivery are coherent.
+  The sequential sink order is intentional, not an accidental serialization.
+  Benchmark execution details need S7.
+- **Surface and ergonomics:** deferring A6 avoids a dishonest checkpoint facade.
+  Private names carry no compatibility promise. Milestone reporting needs S1.
+- **Test plan:** broad and capable of rejecting stubs, but it needs the
+  adversarial lifecycle cases in B1-B5 and executable harness definitions in
+  S7.
+- **Risk and scope:** no M3-M5 implementation is required. Unary watermark
+  pass-through plus multi-ingress fail-closed is a valid temporary M2 boundary;
+  no generated watermark, barrier, state, checkpoint, or durability claim
+  should enter this diff.
+
+## Counter-Proposals
+
+- **Three-phase launch:** pure owned preflight; registered operator-entry phase;
+  concurrent connector-open phase; then release one data/control gate. This is
+  the smallest launch shape satisfying both A3 and no-data-before-open.
+- **Core-owned lifecycle driver:** keep the supervisor and partially joined
+  state in `JobCore`; terminal callers submit causes and observe one driver.
+  A dropped observer cannot own the registry, and handle Drop only changes the
+  driver's owner from job core to reaper.
+- **Runtime-observed drain cut:** accepted means committed to the capacity-one
+  slot before the per-source drain transition, never "the connector had made
+  the future ready". This yields a testable, exact prefix without probing a
+  future after the cut.
+
+## Questions for the Author
+
+1. Will the milestone plan itself be revised so "M2 complete" means internal
+   runtime completion, or should status reports retain a distinct
+   "M2-internal complete / public M2.4 deferred" state?
+2. Is `StreamOperator::reset()` required for every fresh internal M2 job, as
+   controlling A3 says, and if so which registered phase runs it before open?
+3. Which component owns a provisional launch when its `start()` observer is
+   dropped?
+4. Is partial fan-out delivery an explicitly accepted process-local failure
+   outcome, and which per-edge metric exposes it?
+5. What exact stable IDs name source/sink boundary channels synthesized from
+   `StreamExecutionPlan::external_inputs/outputs`?
+
+## Handoff
+
+The `cf-spec-writer` should revise B1, B2, B4, B5, S1, S2, S4, S6, and S7,
+because they are milestone/lifecycle/observation semantics. The
+`cf-api-designer` should revise B3 and S3/S5: registry ownership and start-error
+surfaces are API/ownership contracts, and the internal plan projection needs a
+precise signature. After both revisions, route the artifacts back to
+`cf-critic`; implementation should not cross the launch, drain, terminal, or
+metrics-overflow boundaries until the five Blocks are closed.
+
+---
+
+## Round 2 - Focused Closure Review
+
+### Verdict
+
+**Approve.** Revision 2 closes every blocking issue and significant concern
+from round 1 without weakening the controlling total-runtime contract or
+pulling M3-M5 behavior into M2. The launch, drain, convergence, and metrics
+contracts now have implementable linearization points, and the acceptance map
+contains the adversarial cases needed to reject future-local ownership or
+cleanup shortcuts.
+
+**BLOCKS REMAINING: 0**
+
+**Cleared for `cf-implementer`.** The labels below approve the revised
+artifacts, not an implementation that has not yet been written or verified.
+
+### Blocking-Issue Disposition
+
+- **B1 - RESOLVED.** M2C-FR7B and the launch section now require pure
+  preflight, registered in-task operator entry and acknowledgements, then
+  concurrent connector open. `OperatorEntryGate` and `DataControlGate` are
+  independent. A reset failure joins the registered entry tasks without any
+  connector lifecycle call, and AC-M2.1-D pins both the call canaries and the
+  post-entry data gate. Keeping the data gate closed until the start observer
+  claims the handle is a safe strengthening: successful opens are parked, and
+  it gives start cancellation a no-data-before-delivery boundary.
+
+- **B2 - RESOLVED.** M2C-FR10A and `SourceAcceptState` define acceptance only
+  at the atomic `Polling -> Slotted(event)` commit. Commit and drain cut share
+  one synchronization point; connector readiness and `Poll::Ready`
+  observation are explicitly non-authoritative. A committed event remains in
+  the accepted prefix when transferred from the slot into an already-started
+  edge send, which the source task drains before EOF. AC-M2.2-B2 covers all
+  relevant cut points, including ready-but-unpolled, Ready-before-commit,
+  slot-committed, and edge-send-pending cases. The cut is observable and
+  implementable without polling a future after the decision.
+
+- **B3 - RESOLVED.** The revised design removes the take-once registry from
+  terminal observers entirely. One runner-registered `JobDriver` owns the
+  `TaskSupervisor`, launch resources, and partially progressed joins for its
+  whole lifetime; `RunnerLifecycleDriver` alone polls and joins job drivers.
+  `wait`, `cancel`, and `shutdown` only observe or synchronously submit a
+  cause. Their futures never own a `JoinHandle` or supervisor, so observer
+  drop cannot abort or strand convergence.
+  - The ownership state is self-consistent under the required races.
+    `CoreOwned -> Driving` linearizes at job-driver gate release. Job or start
+    observer Drop changes result ownership to `ReaperOwned` under
+    `JobCoreState` while leaving the physical registration in the runner
+    driver. Outcome publication stores the immutable outcome and `Terminal`
+    atomically under that same lock. Whichever of Drop and publication wins
+    first, publication ends in `Terminal` with the one joined result.
+  - Runner shutdown closes admission, converges the provisional launch,
+    submits cancellation to live jobs, waits for the same registered drivers,
+    and then drains reaper diagnostics. Concurrent job Drop may change only
+    the logical owner, not move the registry. Dropping the shutdown observer
+    likewise leaves the lifecycle handle in `RunnerCore`. AC-M2.1-E and the
+    manual-poll sketches cover observer drop at every await and the combined
+    job-Drop/runner-shutdown race.
+
+- **B4 - RESOLVED.** M2C-FR30A and
+  `account_terminal_errors_once` freeze cause and primary failures first,
+  attempt each associated error counter once, retain a full counter at
+  `u64::MAX`, set an infallible bounded overflow flag, and attach at most one
+  overflow secondary for the entire outcome. The secondary is explicitly not
+  re-accounted. AC-M2.5-A2 covers both a full terminal-error counter and an
+  ordinary record operation whose own overflow is primary. No recursive path
+  remains.
+
+- **B5 - RESOLVED.** M2C-FR7C installs a runner-core-owned provisional launch
+  driver before lifecycle work, while `StartObserver` is only a cancel-on-Drop
+  observer. Operator-entry and connector-open futures/resources remain owned
+  by `JobDriver`. Drop before delivery changes
+  `Provisional|ReadyUnclaimed -> CancelRequested`, submits cancellation, and
+  makes the result reaper-owned; it never attempts async cleanup from Drop.
+  The claim/drop race is serialized on `JobCoreState`, and the data gate stays
+  closed until `ReadyUnclaimed -> Claimed`, so cancellation cannot conflict
+  with the three-stage launch or release an unobserved live job. Next start and
+  runner shutdown join the provisional/reaper registration first. AC-M2.1-F
+  covers every entry/open/delivery boundary and exactly-once close for every
+  began-open connector.
+
+### Significant-Concern Disposition
+
+- **S1 - RESOLVED.** The delta is consistently named **M2 internal runtime
+  completion**, explicitly supersedes rather than checks off the original
+  public M2.4 cut, places public A6 after complete M4/M5 integration, and
+  freezes the reporting phrase “M2 runtime internals complete.” Existing v2
+  runners remain available.
+
+- **S2 - RESOLVED.** M2C-FR12/M2C-FR18 explicitly make fan-out
+  non-transactional after the first successful send, preserve an earlier
+  branch prefix, prohibit rollback claims, distinguish per-edge enqueue from
+  fully-fanned-out output, and cover both branch-close and
+  emit-then-handler-error cases in AC-M2.2-D/AC-M2.3-E.
+
+- **S3 - RESOLVED.** `into_runtime_parts(self, default_budget)` consumes
+  directly owned, non-Clone operators into `RuntimeStreamNode`; cloning,
+  locks, and `Arc::try_unwrap` are forbidden. `StreamRuntimePlanParts` names
+  nodes, internal edges, source routes, sink routes, endpoints, kinds, and
+  budgets. Hex-encoded source/sink boundary-ID formulae are deterministic and
+  collision-checked across the full edge set. Boundary edges are real charged
+  metric/backpressure edges, and topology reconstruction tests cover unary,
+  fan-out, independent branches, and union.
+
+- **S4 - RESOLVED.** M2C-FR7A/M2C-FR19A track explicit EOF separately from
+  receiver closure. Premature `None` is `EdgeClosed` with stable ingress
+  origin while running/draining, while runtime-marked convergence close is a
+  wakeup and an already-observed close remains a secondary. AC-M2.3-D covers
+  unary, union, and sink ingress.
+
+- **S5 - RESOLVED.** `StartFailure` returns the stable primary origin and a
+  bounded runner diagnostic ID for cleanup failures. Every began-open
+  resource, including the one returning `Err`, is closed once; diagnostics
+  retain cleanup failures in stable order with explicit bounds and truncation
+  state. Running sink write/open failure remains primary and close failures
+  become ordered outcome secondaries.
+
+- **S6 - RESOLVED.** M2C-FR30 and the recorder API define edge input at the
+  successful atomic queue commit and edge output at dequeue plus reservation
+  release, under the channel-state lock. The same rules cover internal and
+  synthesized boundary edges. Operator and sink counters have separate
+  documented boundaries, and AC-M2.5-A3 pins partial-fan-out values.
+
+- **S7 - RESOLVED.** The short stress harness uses a fixed test-local
+  seed-to-gate permutation rather than claiming executor seeding. The ignored
+  soak now fixes invocation, Linux `VmRSS` provider, ten-second cadence,
+  minimum samples, warm-up, slope/median thresholds, metadata, and non-Linux
+  unsupported behavior. Bench compilation is separated from the opt-in
+  Criterion baseline, and the external benchmark uses only the public M1
+  operator/channel seam without exposing a fake runtime.
+
+### Minor-Note Disposition
+
+- **M1 - RESOLVED.** M2C-FR3 now freezes deadline as
+  `Cancelled + DeadlineExceeded`, with no error unless teardown contributes a
+  secondary, and explicitly excludes `CheckpointTimeout`.
+
+- **M2 - RESOLVED at artifact level.** The revised status, FR28, compatibility
+  section, and documentation-audience rules prohibit describing the private
+  slice as the public M2.4 replacement. The implementation/reviewer/doc-writer
+  pass must apply that rule to the stale baseline module and `dead_code`
+  comments; this is a delivery check, not a remaining artifact ambiguity.
+
+### Focused Consistency Result
+
+- **Driver ownership:** self-consistent. Observer futures own no registry;
+  physical driver registration never moves; cause commit, logical reaper
+  transfer, and outcome publication have distinct serialized points.
+- **Launch versus cleanup:** self-consistent. Entry precedes open, opened
+  connectors stay parked, handle claim precedes data-gate release, and any
+  earlier observer drop converges through the registered driver.
+- **Drain cut:** implementable. Only slot commit accepts; drain and commit are
+  mutually exclusive; accepted local/slot/send work drains before EOF.
+- **Metrics overflow:** non-recursive by construction and bounded to one
+  secondary.
+- **Runtime-plan projection:** sufficient for direct operator ownership,
+  complete boundary-channel construction, stable diagnostics, budgets,
+  backpressure, and per-edge metrics.
+
+No round-2 regression or new finding was introduced. Proceed to
+`cf-implementer`, then require the planned `cf-tester`, `cf-reviewer`, and
+`cf-doc-writer` gates before reporting the internal milestone complete.
+
+---
+
+## Round 3 - Revision 4 and Current-PR Review
+
+### Verdict
+
+**Block.** The revision is substantially stronger and accurately freezes all
+mandatory requested decisions, but B6 leaves the graph observably unbounded in
+an ordinary supported traffic pattern. The four concerns after B6 should also
+be tightened, but they do not independently prevent the runtime work once B6
+has an implementable contract and acceptance tests.
+
+**BLOCKS REMAINING: 1**
+
+### Blocking Issues
+
+- **B6 - Rows plus payload bytes do not bound zero-cost stream messages.** The
+  completion definition says the source-driven graph is bounded, M2C-FR24 says
+  a blocked sink eventually stops source polling, and M2C-FR32 makes boundedness
+  a delivery oracle (`.codex/artifacts/specs/continuous-streaming-m2-completion.md`,
+  lines 64-71, 400-404, and 461-504). But neither the delta spec nor API note
+  assigns a positive capacity charge to every envelope or limits queued message
+  count. The closest implemented analogue exposes the hole directly:
+  `EnvelopeCost` records one message but zero rows/bytes for control traffic,
+  while `fits` checks only rows and bytes
+  (`crates/calc-flow/src/runtime/streaming/channel.rs`, lines 33-41 and
+  315-326). The backing queue is an unbounded `VecDeque` (lines 146-155).
+  - **Counter-example:** connect a source producing an unbounded sequence of
+    `Idle` events, or non-regressing watermarks, to a unary operator whose
+    output is stalled by a slow sink. Every ingress enqueue fits because it
+    adds zero rows and zero bytes, so the source task never backpressures and
+    the edge grows without bound. A table/external batch with zero rows and a
+    zero-byte estimate exposes the same missing edge case. The proposed
+    two-source data soak and seeded stress can both pass because neither
+    criterion requires sustained zero-cost traffic.
+  - **Why this blocks:** “M2 runtime internals complete” cannot mean bounded
+    only for positive-row data. This contradicts the plan's bounded-channel and
+    backpressure goal, and a 20-minute RSS pass on a different traffic shape
+    does not prove the missing invariant.
+  - **Suggested fix:** before implementation, freeze one conservative rule
+    that gives every queued envelope a finite budget cost. For example, charge
+    non-zero envelope bytes against the existing byte budget, or explicitly
+    add a message-count capacity after reviewing the resulting public M1 API
+    change. Add focused tests for repeated `Idle`, repeated/non-regressing
+    watermark, and a zero-row/zero-byte data batch with the receiver stalled;
+    each must backpressure at a stated finite queue depth and resume after
+    dequeue. Add at least one such phase to stress/soak boundedness evidence.
+
+### Significant Concerns
+
+- **S8 - The spec obscures the sole public API delta that the API note
+  correctly reports.** The API note is explicit that PR #83 adds no callable
+  public runner API but does add the semver-compatible public non-exhaustive
+  `CalcFlowError::TaskPanicked` variant
+  (`.codex/artifacts/api-notes/continuous-streaming-m2-completion.md`, lines
+  40-59, 92-105, and 1125-1147). That matches `error.rs` and the Python
+  wildcard fallback. The spec instead says public crate exports do not change
+  and instructs the implementer not to add a public error variant
+  (`.codex/artifacts/specs/continuous-streaming-m2-completion.md`, lines
+  528-530 and 782-784). A reader comparing only the spec to `main` can
+  incorrectly conclude that `TaskPanicked` must be removed or is not part of
+  the compatibility ledger.
+  - **Suggested fix:** make the spec use the API note's exact baseline language:
+    preserve the PR-added `TaskPanicked` variant as the sole public Rust API
+    addition and add **no other** public variant/export/callable. Keep its
+    fields/display frozen and the 1,024-byte rule limited to internal capture.
+
+- **S9 - Mandatory soak evidence has no durable handoff protocol.** M2C-FR32
+  and AC-M2.5-C correctly require the exact Linux command, at least 1,200
+  seconds, at least 120 RSS samples, graceful conservation, queue/task/reaper
+  convergence, and the exact commit in machine-readable output
+  (`.codex/artifacts/specs/continuous-streaming-m2-completion.md`, lines
+  461-504 and 693-703). They do not say where raw output is retained, how the
+  command exit status is recorded, or what reviewer-visible object binds that
+  log to the SHA. “Captured report” alone permits a summary with no auditable
+  120-sample series. Committing the log after the run would itself create a new
+  head and make the run stale.
+  - **Suggested fix:** define a non-head-changing evidence handoff keyed by the
+    exact SHA, containing the literal command, exit status, start/end time,
+    complete sample stream, final result record, and environment metadata.
+    Name how `cf-tester` publishes or transfers it and how `cf-reviewer`
+    verifies it. A prose summary or selected sample must not satisfy the gate.
+
+- **S10 - The local verification matrix is narrower than repository policy.**
+  The spec calls its Rust-heavy command list the minimum final-M2 matrix
+  (`.codex/artifacts/specs/continuous-streaming-m2-completion.md`, lines
+  724-746), while `AGENTS.md` requires the full Rust, PyO3/Python, Studio,
+  frontend, security, and helper groups before a change is complete. This
+  matters even with private internals: `TaskPanicked` is a public core enum
+  addition and the PyO3 converter's wildcard is part of the claimed
+  compatibility behavior (`crates/calc-flow-python/src/error.rs`, lines
+  36-64). `AC-COMPAT` names only the Rust v2 runner integration tests.
+  - **Suggested fix:** say unambiguously that the full current `AGENTS.md`
+    command groups remain mandatory, then identify the focused subset used
+    during RED/GREEN iteration. Extend the compatibility mapping to the Python
+    v2 runner/exception adapter tests and record which exact-head Actions cover
+    each required group.
+
+- **S11 - The conditional 5% performance gate has no pass/fail statistic.**
+  M2C-FR33/NFR1 require same-machine paired Criterion evidence and confidence
+  intervals before a regression above 5% blocks, but they never define what
+  confidence-interval result establishes that regression
+  (`.codex/artifacts/specs/continuous-streaming-m2-completion.md`, lines
+  505-523; API note lines 1112-1123). A +6% point estimate with a -2% to +14%
+  interval can be called blocking or inconclusive under the current wording.
+  The M0 baseline handoff adds measurement discipline but still does not close
+  that decision rule.
+  - **Suggested fix:** name the statistic and threshold decision explicitly,
+    including how an interval that crosses 5% is treated and when remeasurement
+    is required. If no paired comparison is invoked for M2, record benchmark
+    compilation as the only M2 gate and leave all point estimates advisory.
+
+### Minor / Style Notes
+
+- **M3 - The approval lineage is self-referential.** The revision-4 spec says
+  the completion critique was approved at revision 3 with zero blocks before
+  this round exists (`.codex/artifacts/specs/continuous-streaming-m2-completion.md`,
+  lines 19-23), while the checked-in critique previously ended at round 2.
+  Update the status after this round is resolved; an artifact should not claim
+  its pending critique already approved it.
+- **M4 - Current-head language is otherwise disciplined.** The spec clearly
+  separates the historical skeleton, implementation head `574c0fb`, and
+  future exact-head delivery evidence. **OK.** Do not replace those anchors
+  with an unqualified “current head” that becomes stale after the next push.
+
+### Axis Sweep
+
+- **Correctness:** **Blocked by B6.** Per-edge FIFO, immutable `Batch` sharing,
+  table/DataFusion ownership, array-provider boundaries, source cursor/watermark
+  pre-enqueue validation, and no M2 checkpoint claim otherwise agree with
+  `docs/introduction.md` and the controlling S1-S10 rules.
+- **Hidden assumptions:** **B6** assumes every supported message consumes row
+  or byte capacity. Binding completeness, multi-ingress control rejection,
+  source ordering, operator entry, and UDF/session setup are otherwise stated.
+- **Missing edge cases:** **B6** covers empty/zero-cost traffic. Binding-qualified
+  cursor, binding-qualified watermark, UTF-8 boundary truncation, non-string
+  panic, premature close, partial fan-out, open failure, and observer Drop are
+  explicitly tested. Checkpoint skew and sink replay duplicates are correctly
+  deferred because M2 claims neither checkpoint recovery nor cross-process
+  at-least-once.
+- **Backwards compatibility:** **S8/S10.** The post-M5 A6 deferral preserves the
+  public v2 runners, Python, Studio, project v2, and checkpoint v2. The API note
+  correctly identifies the one semver-compatible error variant; the spec needs
+  the same carve-out.
+- **Performance:** **B6/S11.** Positive-data hot-path benchmarks are named and
+  per-operator DataFusion reuse avoids per-batch construction. Zero-cost queue
+  growth is a memory failure, and the optional 5% comparison needs one decision
+  statistic.
+- **Surface and ergonomics:** the completion label and post-M5 public A6 gate
+  are clear; exact cursor/watermark fields and the bounded panic display are
+  diagnosable. **OK** apart from S8's baseline wording.
+- **Test plan:** **B6/S9/S10.** Existing tests cover the closest v2 runner
+  analogues and broad M2 lifecycle behavior, but no named test can fail the
+  zero-cost-queue bug, the raw soak record has no retention contract, and the
+  mandatory repository-wide matrix is not explicit.
+- **Risk and scope:** B6 is load-bearing for every later watermark/barrier/idle
+  milestone. The smallest safe M2 remains crate-private source -> operator ->
+  ordinary sink plus finite envelope accounting; public A6, M3 semantics,
+  state, epochs, connectors, Python, and Studio remain correctly deferred.
+
+### Current PR Gate Audit at `c43392f`
+
+- Remote head matched the requested starting SHA.
+- `origin/main` was `d45c2b2`; the branch was four commits ahead and one commit
+  behind, with merge base `c497906`. `git merge-tree --write-tree` found no
+  textual conflict, but this is not the required update-from-main evidence.
+- GitHub reported `MERGEABLE` / `UNSTABLE`. Codacy was
+  `ACTION_REQUIRED` with 16 new medium complexity findings.
+- Three Copilot review threads were unresolved: binding-qualified cursor,
+  binding-qualified watermark, and bounded panic text. The panic thread was
+  outdated but not resolved; outdated is not closure.
+- At audit time three Actions jobs were green and four were still in progress.
+  Any result at this head becomes stale when the critique or implementation is
+  pushed. The completion spec is correct to require all required checks,
+  Codacy, threads, current-main ancestry, and `MERGEABLE/CLEAN` at the final
+  pushed head.
+
+### Counter-Proposal
+
+Keep the proposed crate-private M2 cut and its post-M5 A6 boundary. Add only
+the missing finite-envelope invariant: every enqueued `StreamMessage` consumes
+a bounded resource even when its semantic row/payload size is zero. Prove that
+in one stalled-receiver test shared by control and empty-data cases, then run
+the existing stress and exact 20-minute Linux soak with an added zero-cost
+traffic phase. This is materially smaller than exporting a premature runner or
+pulling M3/M5 semantics forward.
+
+### Questions for the Author
+
+1. Which existing budget dimension bounds a control or zero-byte envelope, or
+   is a separately reviewed public `max_messages` field intended?
+2. Where will the complete exact-head Linux soak log live without changing the
+   tested head, and what proves its exit status and 120-sample completeness?
+3. Does the 5% gate block only when a chosen relative-change confidence bound
+   is above 5%, or does any point estimate above 5% trigger remeasurement?
+4. Will the final handoff run the full `AGENTS.md` matrix, including Python and
+   Studio, or is a reviewed exception intended for unchanged surfaces?
+
+### Handoff
+
+Route B6 to `cf-spec-writer` and `cf-api-designer`; it changes a load-bearing
+bounded-channel invariant and may affect the already-public M1 channel
+semantics. Resolve S8-S11 while revising the artifacts. Return the revision to
+`cf-critic`; only a zero-block result should go to `cf-implementer`. The
+implementer must still respect the already-correct decisions: M2 internals only,
+no public runner replacement before separately reviewed post-M5 A6, exactly one
+public `TaskPanicked` variant, binding-qualified cursor/watermark fields,
+UTF-8-safe panic text at most 1,024 bytes, the exact 20-minute Linux soak, all
+16 Codacy findings without waiver, current-main incorporation, resolved review
+threads, green exact-head checks, and `MERGEABLE/CLEAN` final state.
+
+## Round 4 - Revision 5 Closure Review
+
+### Verdict
+
+**Revise.** B6 and every round-3 advisory are substantively resolved, but the
+new channel rule contradicts the delta's own scope-precedence declaration and
+the still-controlling S10 contract.
+
+**BLOCKS REMAINING: 1**
+
+### Blocking Issues
+
+- **B7 - The slot correction is forbidden by the artifact's own precedence
+  rule.** The completion spec says D1-D9, S1-S10, I1-I10, NG1-NG13, and A1-A8
+  remain frozen except for soak duration
+  (`.codex/artifacts/specs/continuous-streaming-m2-completion.md`, lines 46-53).
+  The controlling spec says every edge has exactly two hard limits, rows and
+  bytes, and freezes an atomic two-dimensional reservation
+  (`.codex/artifacts/specs/continuous-streaming-runtime.md`, lines 749-780).
+  Revision 5 then requires three independently checked admission predicates
+  and applies the new message-slot constraint to the existing public
+  `edge_channel` (`.codex/artifacts/specs/continuous-streaming-m2-completion.md`,
+  lines 410-426). The API note correctly calls this an observable semantic
+  correction to a public primitive
+  (`.codex/artifacts/api-notes/continuous-streaming-m2-completion.md`, lines
+  1258-1278), which confirms that it is not mere implementation freedom under
+  frozen S10.
+  - **Counter-example:** an implementer who preserves S10 keeps the current
+    `fits` predicate limited to rows and bytes, so sustained `Idle` or empty
+    batches remain unbounded and B6 reappears. An implementer who follows
+    FR24A makes the fourth zero-cost send block at `max_rows`, directly
+    invalidating S10.1/S10.5 and the current channel rustdoc/test that controls
+    are never throttled by the data budget
+    (`crates/calc-flow/src/runtime/streaming/channel.rs`, lines 315-348 and
+    663-709). Both cannot be conforming while the scope rule says only soak
+    duration may supersede S10.
+  - **Suggested fix:** keep the proposed one-slot-per-envelope design, but make
+    its authority explicit. Amend scope precedence to say revision 5
+    supersedes S10.1, S10.5, FR23, AC-S10, and their total-API/documentation
+    projections only for the independent message-slot predicate. Extend the
+    expected file scope and AC-DOCS to require corresponding updates to the
+    controlling runtime spec/API note, `docs/runtime-envelope.md`, public
+    channel rustdoc, and the old control-capacity test. Preserve the two-field
+    `EdgeBudget` shape and the exact `max_rows` reuse; no new public knob is
+    needed.
+
+### Significant Concerns
+
+- **No new significant concern.** Revision 5 resolves S8 by reporting
+  `TaskPanicked` as the sole public Rust API addition relative to `main`; S9 by
+  defining a SHA-verified, complete PR-comment evidence bundle; S10 by making
+  the full root-`AGENTS.md` matrix mandatory; and S11 by freezing Criterion's
+  relative-mean confidence-interval decision and one doubled-sample rerun.
+- **Live PR gates are implementation-delivery blockers, not design gaps.** At
+  audited head `733d261`, Codacy still reports 16 medium complexity findings,
+  the three Copilot threads remain unresolved, and five of seven Actions jobs
+  were still running. Revision 5 correctly carries those as G4-G7 rather than
+  pretending the artifact revision satisfies them.
+
+### Minor / Style Notes
+
+- **Round-3 lineage is now accurate.** Revision 5 describes round 3 as the
+  source of B6/S8-S11 and remains explicitly pending this review. **OK.**
+- **Audit anchors remain disciplined.** Comparison baseline, skeleton,
+  implementation head, and artifact starting head are separately named.
+  **OK.**
+
+### Prior-Finding Disposition
+
+- **B6 - Resolved.** FR24A/FR24B give every data/control envelope one finite
+  slot, reuse positive `max_rows` independently for slots and rows, and define
+  atomic commit, dequeue, graceful drain, cancel, close, and error release.
+  AC-M2.5-A4/A5, stress, and soak criteria can fail the prior unbounded-queue
+  implementation; a no-op stub cannot pass them.
+- **S8 - Resolved.** The compatibility ledger consistently distinguishes no
+  new callable runner API from the sole `TaskPanicked` enum addition.
+- **S9 - Resolved.** FR32A binds complete UTF-8 command output, exit status,
+  timestamps, 120 samples, hashes, and the exact head to durable PR comments
+  without creating a later commit that invalidates the run.
+- **S10 - Resolved.** Full Rust/PyO3, Python, Studio, frontend/browser,
+  supply-chain, helper, coverage, rustdoc, contract, and diff groups are
+  mandatory; focused commands are explicitly only iteration seams.
+- **S11 - Resolved.** The optional paired gate blocks only when the bootstrap
+  95% relative-mean interval's lower bound is strictly above +5%; an interval
+  still touching/crossing +5% after one doubled-sample rerun is advisory.
+
+### Axis Sweep
+
+- **Correctness:** B6's zero-cost boundedness hole is closed. Immutable `Batch`
+  sharing, DataFusion-only table execution, provider-owned array execution,
+  FIFO, source monotonicity, and no premature checkpoint/delivery claim still
+  match `docs/introduction.md`, especially lines 91-120 and 267-290. **OK apart
+  from B7's governing-contract contradiction.**
+- **Hidden assumptions:** source/sink completeness, cursor and watermark order,
+  multi-ingress control, source polling/prefetch, UDF/session ownership, and
+  terminal races are stated. Slot capacity no longer assumes positive rows or
+  bytes. **OK.**
+- **Missing edge cases:** empty data, repeated/equal controls, exact-capacity
+  blocking, receiver close, upstream error, graceful drain, cancel, UTF-8
+  truncation, dropped observers, partial fan-out, and final zero charges all
+  have named criteria. Checkpoint skew and duplicate replay remain correctly
+  deferred because M2 exposes no durable continuous runner. **OK.**
+- **Backwards compatibility:** v2 runners, Python, Studio, project/checkpoint
+  v2, generated contracts, and fixtures remain unchanged. The public channel
+  behavior change is explicit in the delta/API note, but B7 must make it legal
+  in the controlling contract and migration ledger. **Blocked only by B7.**
+- **Performance:** per-envelope work is one checked slot addition under the
+  existing queue lock; no new per-batch plan/session or payload copy is
+  proposed. Benchmark compilation is mandatory and the optional paired gate
+  is decidable. **OK.**
+- **Surface and ergonomics:** reusing `max_rows` as both row and envelope-count
+  ceiling is surprising, but the API note documents it and private status
+  exposes `message_slot_limit`. That is acceptable for this compatibility-
+  preserving slice once all governing public docs agree. **OK after B7.**
+- **Test plan:** acceptance criteria pin exact fields, limits, lifecycle cuts,
+  outcomes, evidence records, and compatibility surfaces; they cannot pass
+  with an inert stub. The full repository matrix is mandatory. **OK.**
+- **Risk and scope:** finite envelope admission is load-bearing for M3/M5
+  controls. The proposed fix is the smallest compatible correction; B7 only
+  asks the authors to authorize and propagate it, not redesign it or add a
+  third public budget field.
+
+### Counter-Proposal
+
+Keep revision 5's exact `max_rows` reuse and tests. Make a narrow artifact-only
+revision that declares the slot predicate a deliberate supersession of the
+affected S10/FR23 statements and adds those governing files to documentation
+reconciliation. A separate `max_messages` field or public runner/configuration
+surface would be larger and is not justified for M2.
+
+### Questions for the Author
+
+1. Will revision 5 explicitly supersede the affected S10/FR23 contract and
+   require all of its normative/public documentation and tests to adopt the
+   slot predicate? There is no remaining open behavior choice once that answer
+   is yes.
+
+### Current PR Gate Audit at `733d261`
+
+- Remote head matched the requested exact starting SHA
+  `733d261d13d2616e174d27a2679a1e09f41a8e6a`.
+- `origin/main` remained `d45c2b2`; the branch was seven commits ahead and one
+  commit behind, with merge base `c497906`. `git merge-tree --write-tree`
+  completed without textual conflict, but the branch still lacked current-main
+  ancestry.
+- GitHub reported `MERGEABLE` / `UNSTABLE`. Codacy was `ACTION_REQUIRED` with
+  16 new medium complexity findings.
+- Three Copilot threads remained unresolved: binding-qualified cursor,
+  binding-qualified watermark, and bounded panic text. The panic thread was
+  outdated but unresolved.
+- Two Actions jobs were green and five were in progress at audit time. These
+  results, and the exact-head soak, become stale after any later push.
+
+### Handoff
+
+Route only B7 to `cf-spec-writer` and `cf-api-designer` for a narrow precedence
+and governed-document reconciliation. B6's chosen behavior does not need
+redesign. Return that revision to `cf-critic`; only a zero-block verdict should
+go to `cf-implementer`. G1-G8, exact-head soak evidence, all 16 Codacy findings,
+all review threads, current-main ancestry, the full verification matrix, green
+checks, and `MERGEABLE/CLEAN` remain mandatory implementation/delivery gates.
+
+## Round 5 - Revision 6 Approval Review
+
+### Verdict
+
+**Proceed.** The revised spec and API note are internally coherent,
+implementable, and sufficiently testable. B7 is resolved and no new blocker or
+artifact-design advisory remains.
+
+**BLOCKS REMAINING: 0**
+
+### Blocking Issues
+
+None.
+
+### Significant Concerns
+
+None. The live implementation and PR gaps below remain mandatory delivery
+work, but the artifacts identify them accurately and do not claim they are
+already satisfied.
+
+### Minor / Style Notes
+
+None.
+
+### B7 Disposition
+
+- **B7 - Resolved.** Revision 6 establishes an unambiguous authority order:
+  the delta controls its two named supersessions, the completion API note owns
+  delegated signatures/projections, and the total spec/API note retain every
+  unlisted rule
+  (`.codex/artifacts/specs/continuous-streaming-m2-completion.md`, lines
+  59-74). It then enumerates the exact bounded-envelope correction: S10.1's
+  exhaustive two-dimension wording, S10.5's reservation dimensionality, and
+  only the matching parts of FR23, the edge-budget inputs row, AC-S10, and
+  their projections change; S10.2-S10.4, FIFO, close wakeup, no lost wakeups,
+  single-producer ownership, D1-D9, S1-S9, I1-I10, NG1-NG13, and A1-A8 remain
+  frozen (spec lines 87-112). The API note mirrors that boundary and states
+  that it cannot override the delta
+  (`.codex/artifacts/api-notes/continuous-streaming-m2-completion.md`, lines
+  64-114). An implementer now has one conforming path.
+- **Governed reconciliation is enforceable.** G4, AC-PRECEDENCE, AC-DOCS,
+  expected file scope, and delivery step 3 require the total spec/API note,
+  runtime-envelope documentation, `EdgeBudget`/channel rustdoc, obsolete
+  control-capacity test, and `CHANGELOG.md` to adopt the new rule before
+  delivery. The delta is immediately authoritative, so this work cannot be
+  deferred as optional documentation cleanup.
+
+### Prior-Finding Disposition
+
+- **B1-B5 - Remain resolved.** The three-stage launch, slot-commit drain cut,
+  core-owned convergence driver, non-recursive terminal metrics, and
+  cancellation-safe start observer still have precise ownership states,
+  linearization points, and adversarial poll/drop tests.
+- **B6 - Remains resolved.** Every data/control envelope consumes one slot;
+  rows and bytes retain independent charges. Atomic commit/release, zero-cost
+  exact-capacity blocking, source-poll propagation, graceful/cancel/close/error
+  convergence, metrics, 100-seed stress, and the real-runtime soak all exercise
+  the formerly unbounded case.
+- **S1-S7 - Remain resolved.** Internal-only milestone reporting,
+  non-transactional fan-out, owned runtime-plan extraction, premature-close
+  failure, start/teardown aggregation, edge metric boundaries, and executable
+  stress/soak/benchmark seams remain explicit.
+- **S8-S11 - Remain resolved.** `TaskPanicked` is correctly classified,
+  durable soak evidence is SHA-bound and reviewer-verifiable, the full
+  repository matrix is mandatory, and the optional Criterion comparison has
+  one deterministic confidence-interval rule.
+
+### Requirement Audit
+
+- **Artifact precedence:** **OK.** Only the two named supersessions outrank the
+  total artifacts; no critique, plan, or API-note text can silently widen
+  them.
+- **`(R, B)` semantics:** **OK.** One unchanged public
+  `EdgeBudget { max_rows: R, max_bytes: B }` permits at most `R` queued
+  envelopes, independently at most `R` charged rows, and at most `B` charged
+  bytes. A blocked send owns nothing and dequeue/teardown releases every
+  dimension exactly once.
+- **Compatibility and migration:** **OK.** Struct literals, constructor, and
+  `edge_channel` signature remain source-compatible; zero-cost traffic may
+  observably block earlier. Direct callers receive the actionable rule
+  `R >= max(required_row_limit, required_simultaneous_messages)`, the coupling
+  is disclosed, and docs/changelog/tests must record it. Non-empty data retains
+  its prior effective bound because each queued envelope contributes at least
+  one charged row.
+- **Public surface:** **OK.** No source-driven runner, job/status, control
+  constructor, message-limit field/method, Python/Studio member, or project/
+  checkpoint field is introduced. Public A6 remains a separately reviewed
+  post-M5 atomic cut; v2 runners remain available.
+- **`TaskPanicked`:** **OK.** It is the sole public Rust API item addition
+  relative to `main`, is semver-compatible because the enum is non-exhaustive,
+  keeps its exact fields/display, and only internal capture gains the
+  1,024-byte UTF-8-safe bound. The channel correction is separately and
+  accurately classified as an observable behavior delta, not another item.
+- **Implementability and tests:** **OK.** AC-M2.5-A4/A5/A6 reject the current
+  row/byte-only implementation and an inert stub. They pin unchanged public
+  shape, exact slot limit, stalled third send, one-send-per-dequeue resumption,
+  old-test removal, preserved row/byte/oversize/FIFO/wakeup behavior, source
+  polling, all terminal paths, and no public runner/control expansion.
+- **Soak evidence:** **OK.** The only passing command runs the real private
+  runtime on Linux for exactly 1,200 measured seconds with exactly 120
+  ten-second samples, 30-sample warm-up, zero-cost slot pressure, accepted-to-
+  both-sinks conservation, final task/queue/reaper convergence, and RSS gates.
+  The complete unfiltered log plus `calc-flow.m2-soak-evidence.v1` manifest is
+  SHA-256-parted in PR comments; reviewer reassembly, exact head equality,
+  exit zero, record counts, and invalidation after any push are mandatory.
+- **Performance:** **OK.** Benchmark compilation is mandatory. A paired run is
+  optional; if invoked, only Criterion's bootstrap 95% relative-mean interval
+  decides each case, with lower bound strictly above +5% blocking and one
+  doubled-sample rerun for an interval touching/crossing +5%. Remaining
+  inconclusiveness is advisory.
+- **Quality and verification:** **OK.** Zero Codacy findings means zero, with
+  no waiver, exclusion, threshold, or analyzer change. Every current root
+  `AGENTS.md` command group, exact-head Actions/Codacy, generated-contract
+  diffs, review threads, current-main ancestry, soak bundle, and clean
+  mergeability are required at one pushed head.
+
+### Axis Sweep
+
+- **Correctness:** immutable `Batch` sharing, DataFusion-only table execution,
+  provider-owned array execution, FIFO, source monotonicity, deterministic
+  lifecycle outcomes, and no checkpoint/delivery overclaim remain consistent
+  with `docs/introduction.md`. **OK.**
+- **Hidden assumptions:** sortedness/order, empty traffic, source/sink setup,
+  capability bounds, schema/kind checks, UDF/session ownership, multi-ingress
+  control, and terminal races are stated. **OK.**
+- **Missing edge cases:** empty/zero-cost data, repeated/equal controls,
+  exact-capacity blocking, premature close, source error, cancellation, UTF-8
+  truncation, partial fan-out, dropped observers, and final zero charges are
+  covered. Single-row and null-only-column calculation remain on the unchanged
+  DataFusion/operator path; this delta adds no value-sensitive branch.
+  Checkpoint skew and replay duplicates are correctly deferred because M2
+  exposes no durable continuous runner. **OK.**
+- **Backwards compatibility:** the exact item/behavior deltas and unaffected
+  Rust v2, Python, Studio, schemas, generated contracts, and fixtures are
+  separated and tested. **OK.**
+- **Performance:** the hot path adds one checked message-count predicate under
+  the existing channel lock; no per-batch planning/session or payload copy is
+  introduced. Measurement gates are precise. **OK.**
+- **Surface and ergonomics:** reusing `max_rows` for two independent ceilings
+  is surprising but fully documented, observable through existing depth
+  metrics/private slot status, and accompanied by a migration formula. **OK.**
+- **Test plan:** exact behaviors, failure modes, evidence records, compatibility
+  surfaces, and repository-wide commands are testable and reject a stub.
+  **OK.**
+- **Risk and scope:** finite envelope admission is load-bearing for later
+  controls; the design closes it without importing M3-M5 semantics or adding a
+  third public knob. **OK.**
+
+### Counter-Proposals
+
+None. Revision 6 is the smallest coherent version of the approved design.
+
+### Questions for the Author
+
+None.
+
+### Current PR Gate Audit at `6d5740d`
+
+- Remote head matched the requested exact SHA
+  `6d5740d3df733a02450d45bdde168a3dfb4b03e9`.
+- `origin/main` remained `d45c2b2`; the branch was ten commits ahead and one
+  commit behind, with merge base `c497906`. `git merge-tree --write-tree`
+  completed without textual conflict, but current-main ancestry was still
+  absent.
+- GitHub reported `MERGEABLE` / `UNSTABLE`. Codacy remained
+  `ACTION_REQUIRED` with 16 new medium complexity findings.
+- Three Copilot threads remained unresolved: binding-qualified cursor,
+  binding-qualified watermark, and bounded panic text. The panic thread was
+  outdated but unresolved.
+- Two Actions jobs were green and five were still in progress at audit time.
+  The exact 20-minute Linux soak bundle does not exist for this artifact head,
+  and every result becomes stale after a later push.
+
+### Handoff
+
+The artifact gate is approved with zero blockers and no design advisories.
+Route revision 6 to `cf-api-designer` for the governed total-API projection and
+to `cf-implementer` for G1-G5/G8. Implementation must preserve the exact
+`(R, B)` semantics and unchanged public signatures, keep every new runner/job/
+status/control type crate-private, retain `TaskPanicked` as the sole public item
+addition, and make no Python/Studio/schema/fixture change. `cf-tester` and
+`cf-reviewer` must still enforce the RED/GREEN map, AC-PRECEDENCE, exact
+20-minute/120-sample SHA-verified Linux bundle, zero Codacy findings without
+waiver, resolved threads, full matrix, current-main ancestry, green exact-head
+checks, and `MERGEABLE/CLEAN` before M2 or PR completion is claimed.
+
+## Delivery Reconciliation at Code-Approved Head `7deda2a0`
+
+Revision 6's implementation handoff is complete. G1-G8 are closed: source
+cursor and watermark errors are binding-qualified; panic text is valid UTF-8
+and bounded to 1,024 bytes; launch failure and cancellation close every begun
+resource in stable order with an independent five-second bound per resource;
+cleanup panics and failures remain typed secondary diagnostics without
+replacing the primary outcome; terminal paths converge; and every edge applies
+independent envelope-slot, row, and byte limits. The public v2 runner remains
+unchanged. `CalcFlowError::TaskPanicked` is the sole public API item addition,
+and all M2 runner, job, status, metrics, and control types remain crate-private
+until the separately reviewed post-M5 A6 integration.
+
+The delivered test map closes AC-M2.5-A5's real-edge lifecycle case, the M2
+B-family drain/backpressure/FIFO/stress cases, and AC-M2.1-F's dropped-start
+ownership and reaper convergence case.
+
+The required Linux soak passed for exactly 1,200 seconds with ten-second
+sampling, 120 samples, and a 30-sample/300-second warm-up. The durable
+[PR-comment bundle](https://github.com/wegamekinglc/calc-flow/pull/83#issuecomment-5201266650)
+has raw-log SHA-256
+`bc97c8f736ad41a4f228e07300f1ecd23c9af9fb09dc1be1718823430bd05f35`.
+It records 96,124 accepted batches at each sink, 24,032 zero-cost envelopes,
+zero missing or duplicate IDs, zero leaked tasks/queues/reservations/reapers,
+three saturated and blocked edges, and an RSS slope of -2.609 MiB/hour.
+Benchmark targets compiled; a base/head timing comparison is inconclusive and
+non-blocking because `main` has no matching stream cases, while the
+same-reference control stayed within the noise rule.
+
+At that code head, all 15 checks passed, Codacy reported zero annotations,
+Copilot review `4871842015` added zero comments, all four review threads were
+resolved, and GitHub reported `MERGEABLE/CLEAN`. A later documentation-only
+commit changes the exact PR head, so those checks, review state, and exact-head
+acceptance must be refreshed before merge. This reconciliation records the
+completed code-head audit; it is not a final-head merge approval.

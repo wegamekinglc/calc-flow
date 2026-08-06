@@ -11,42 +11,9 @@ use crate::{
 
 use super::{
     BatchOperator, BatchOperatorContext, OperatorMetadata, StreamCollector, StreamOperator,
-    StreamOperatorContext, table_port, udf_configuration, validate_builtin_port,
-    validate_operator_name, validate_required_input,
+    StreamOperatorContext, StreamRuntimeState, table_port, udf_configuration,
+    validate_builtin_port, validate_operator_name, validate_required_input,
 };
-
-/// Lazily built operator-scoped `DataFusion` resources for the stream and
-/// standalone-trait paths (plan section 2.2: one lazy runtime per table
-/// stream-operator task).
-struct StreamRuntimeState {
-    resources: Option<(DataFusionConfig, UdfRegistrySnapshot, Vec<UdfReference>)>,
-    runtime: Option<DataFusionRuntime>,
-}
-
-impl StreamRuntimeState {
-    const fn new() -> Self {
-        Self {
-            resources: None,
-            runtime: None,
-        }
-    }
-
-    fn runtime(&mut self) -> Result<&DataFusionRuntime> {
-        if self.runtime.is_none() {
-            let (config, udfs, selected) = self.resources.clone().unwrap_or_else(|| {
-                (
-                    DataFusionConfig::default(),
-                    UdfRegistrySnapshot::default(),
-                    Vec::new(),
-                )
-            });
-            let mut runtime = DataFusionRuntime::new(config)?;
-            runtime.register_udfs(&udfs, &selected)?;
-            self.runtime = Some(runtime);
-        }
-        Ok(self.runtime.as_ref().expect("runtime initialized above"))
-    }
-}
 
 /// A `DataFusion` expression or projection operator.
 ///
@@ -80,10 +47,7 @@ impl Clone for ExpressionOperator {
             udfs: self.udfs.clone(),
             input_ports: self.input_ports.clone(),
             output_ports: self.output_ports.clone(),
-            stream_state: StreamRuntimeState {
-                resources: self.stream_state.resources.clone(),
-                runtime: None,
-            },
+            stream_state: self.stream_state.clone(),
         }
     }
 }
@@ -174,7 +138,11 @@ impl ExpressionOperator {
         udfs: UdfRegistrySnapshot,
         selected_udfs: Vec<UdfReference>,
     ) {
-        self.stream_state.resources = Some((config, udfs, selected_udfs));
+        self.stream_state.set_resources(config, udfs, selected_udfs);
+    }
+
+    pub(crate) const fn stream_runtime_initialized(&self) -> bool {
+        self.stream_state.is_initialized()
     }
 
     #[doc(hidden)]

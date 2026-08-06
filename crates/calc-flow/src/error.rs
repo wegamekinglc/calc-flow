@@ -48,6 +48,9 @@ pub enum CalcFlowError {
     /// (spec S10.1, API note A8).
     #[error("edge {edge:?} is closed")]
     EdgeClosed { edge: String },
+    /// A supervised streaming-runtime task panicked (spec S8.4, API note A8).
+    #[error("task {task_id} panicked: {message}")]
+    TaskPanicked { task_id: u64, message: String },
     #[error("I/O failed for {path}: {source}")]
     Io {
         path: String,

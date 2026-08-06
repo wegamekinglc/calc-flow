@@ -209,7 +209,8 @@ struct NormalizedAllocationInfo {
 }
 
 /// The workload identity of a channel round-trip case: the edge
-/// identities, the dual-limit budget, and the fixed input's M1.3 cost.
+/// identities, the two-field budget and its three envelope/row/byte
+/// predicates, and the fixed input's M1.3 cost.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ChannelWorkload {
@@ -510,8 +511,8 @@ impl PreparedCase {
     }
 
     /// Builds a channel round-trip case: one edge channel per edge ID with
-    /// the dual-limit budget, charged by the M1.4 `EnvelopeCost` path on
-    /// every send.
+    /// the two-field budget and its three envelope/row/byte predicates,
+    /// charged by the M1.4 `EnvelopeCost` path on every send.
     fn channel(
         name: &'static str,
         payload: &'static str,
@@ -1016,8 +1017,9 @@ fn workload_fingerprint(
 }
 
 /// Hashes the channel round-trip workload identity: the edges, the
-/// dual-limit budget, and the fixed input's kind/rows/estimated bytes (a
-/// metering change shifts the fingerprint).
+/// two-field budget and its three envelope/row/byte predicates, and the fixed
+/// input's kind/rows/estimated bytes (a metering change shifts the
+/// fingerprint).
 fn channel_workload_fingerprint(
     name: &str,
     payload: &str,

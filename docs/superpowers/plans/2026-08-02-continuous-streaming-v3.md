@@ -1,7 +1,8 @@
 # Calc-Flow 3.0 持续流计算详细开发计划
 
-> **状态：** 待评审。只有 M0 的需求规格、API 设计和故障模型全部通过评审后，
-> 才进入生产代码实现。
+> **状态：** M0 与 M1 已完成；M2 的 crate-private runtime internals 已在
+> code-approved head `7deda2a0` 完成。当前 public v2 runner 保持不变；public A6
+> 必须等 M4/M5 完整状态与 checkpoint 语义完成后另行评审、原子集成。
 >
 > **依据：**
 > [`Arroyo / RisingWave 独立调研与 Calc-Flow 流式演进建议`](../../research/2026-08-02-arroyo-risingwave-streaming-research.md)
@@ -14,10 +15,10 @@
 有状态流计算引擎，同时保留一个职责清晰的有限批执行器。
 
 **核心架构：** 把当前含义混合的执行模型拆成 `BatchExecutionPlan` 和
-`StreamExecutionPlan`。流计划由 source task 主动驱动，节点间通过同时限制行数与
-估算字节数的有界 channel 连接；data、watermark、barrier、idle 和 end-of-input
-在同一条 edge 上保序。coordinator 统一管理 epoch、barrier 对齐、状态 manifest
-和事务 sink 提交。
+`StreamExecutionPlan`。流计划由 source task 主动驱动，节点间通过同时限制 envelope
+数量、行数与估算字节数的有界 channel 连接；data、watermark、barrier、idle 和
+end-of-input 在同一条 edge 上保序。coordinator 统一管理 epoch、barrier 对齐、状态
+manifest 和事务 sink 提交。
 
 ---
 
@@ -29,7 +30,7 @@
 - source 驱动、可长期运行的 `StreamExecutionPlan` 和 `StreamingRunner`。
 - 多 source 并发、独立分支、fan-out 和同 schema 多输入 union。
 - 每条 edge 上 data/control 统一 FIFO。
-- 按 rows 和 estimated bytes 两个维度强制限流的异步 channel。
+- 用两个配置字段独立限制 envelope 数量、rows 和 estimated bytes 的异步 channel。
 - 从 sink 向 operator、source 逐级传播的背压。
 - event time、watermark、idle input 和 late-row 指标。
 - final-only tumbling/hopping aggregate window。
@@ -203,7 +204,7 @@ checkpoint 恢复三种入口下的状态语义也必须一并冻结。
 | 单 alias SQL                 | 单输入；逐 batch 执行                                             |
 | 多 alias SQL                 | 编译失败；尚未定义增量 join 语义                                  |
 | External provider            | factory 必须显式构造 `StreamOperator`                             |
-| Union                        | 新增多输入算子；转发同 kind、同 schema batch                       |
+| Union                        | 新增多输入算子；转发同 kind、同 schema batch                      |
 | Window aggregate             | 新增有状态 tumbling/hopping 算子                                  |
 | Session window               | 3.0 不支持                                                        |
 
@@ -376,9 +377,9 @@ M7 hardening / 3.0 release
 
 | 里程碑 | 核心产出                                      | 单工程师估算 | 前置依赖 |
 | ------ | --------------------------------------------- | ------------ | -------- |
-| M0     | 通过评审的语义、API、故障模型                | 2 至 3 周    | 无       |
+| M0     | 通过评审的语义、API、故障模型                 | 2 至 3 周    | 无       |
 | M1     | v3 trait、plan、compiler、message、channel    | 4 至 6 周    | M0       |
-| M2     | source-driven continuous runtime              | 5 至 7 周    | M1       |
+| M2     | crate-private source-driven runtime internals | 5 至 7 周    | M1       |
 | M3     | event time、watermark、idle、late metrics     | 3 至 5 周    | M2       |
 | M4     | 增量本地状态与 final-only window              | 6 至 9 周    | M3       |
 | M5     | epoch checkpoint 与 transactional sink        | 8 至 11 周   | M4       |
@@ -397,7 +398,8 @@ M7 hardening / 3.0 release
 
 - M1.1 与 M1.2 是一个原子 PR：trait 和 plan 公共名称必须一起切换。
 - M1.3、M1.4 可在其后分别合入。
-- M2 各 task 先以 crate-private 模块纵向合入，M2.4 再统一公开 runner。
+- M2.1 至 M2.5 以 crate-private 模块完成。public runner 不在 M2.4 公开；它作为
+  post-M5 A6，在 M4/M5 状态与 checkpoint 语义完整后另行评审并原子集成。
 - M5.1 至 M5.4 使用一个 milestone integration branch 接受 stacked PR，完整协议通过
   后一次合入 `main`，避免暴露半套 checkpoint 公共 API。
 - M6.7 至 M6.9 同样使用 stacked PR：Rust project v3、Python、Studio、生成文件全部
@@ -660,7 +662,7 @@ CARGO_TARGET_DIR="$PWD/target/cargo" cargo test -p calc-flow --test operator \
 
 **验收门：** 任意能进入 stream queue 的 `Batch` 都能在入队前给出保守 byte cost。
 
-### Task M1.4：实现 rows + bytes 双限制 channel
+### Task M1.4：实现 envelope、rows 与 bytes 三重限制 channel
 
 **文件：**
 
@@ -669,99 +671,117 @@ CARGO_TARGET_DIR="$PWD/target/cargo" cargo test -p calc-flow --test operator \
 
 **先写 RED：**
 
-- [ ] rows 或 bytes capacity 为零时构造失败。
-- [ ] 单消息大于 byte limit 时入队前失败。
-- [ ] rows 已满时 sender 阻塞，receiver 消费后恢复。
-- [ ] bytes 已满时即使消息数很少也阻塞。
-- [ ] cancelled send 只释放一次 reservation。
-- [ ] receiver close 唤醒全部 blocked sender。
-- [ ] data/control 混合消息仍 FIFO。
+- [x] `max_rows` 或 `max_bytes` 为零时构造失败。
+- [x] 单消息大于 byte limit 时入队前失败。
+- [x] rows 已满时 sender 阻塞，receiver 消费后恢复。
+- [x] bytes 已满时即使消息数很少也阻塞。
+- [x] 即使 row/byte cost 为零，第 `R + 1` 个 envelope 仍会在
+  `EdgeBudget::new(R, B)` 上阻塞。
+- [x] cancelled send 只释放一次 reservation。
+- [x] receiver close 唤醒全部 blocked sender。
+- [x] data/control 混合消息仍 FIFO。
 
 **实现：**
 
-- [ ] 定义 `EnvelopeCost { messages, rows, bytes }` 并使用 checked arithmetic。
-- [ ] 明确并在编译期依赖“每条 edge 恰有一个生产者”这一不变量（沿用现有单写入者
+- [x] 定义 `EnvelopeCost { messages, rows, bytes }` 并使用 checked arithmetic。
+- [x] 明确并在编译期依赖“每条 edge 恰有一个生产者”这一不变量（沿用现有单写入者
   校验，fan-out 的每条出边是独立 channel）。它是下面单一预算设计成立的前提，
   避免多生产者场景下 `Notify` 唤醒到无法推进的等待者而丢失唤醒。
-- [ ] 用单一 mutex-protected budget + `Notify` 做原子双维度 reservation，避免两个
-  semaphore 分别申请造成死锁或饥饿。
-- [ ] 入队前 reserve，receiver 取出或 drop 时 release。
-- [ ] fan-out 每条 edge 独立计费，虽然 Arrow buffer 实际共享。
-- [ ] 暴露 queue depth、charged rows/bytes、blocked sends、blocked duration。
+- [x] 用单一 mutex-protected budget + `Notify` 原子检查并预留 envelope slot、rows
+  和 bytes，避免多个 semaphore 分别申请造成死锁或饥饿。
+- [x] 入队前 reserve，receiver 取出或 drop 时 release。
+- [x] fan-out 每条 edge 独立计费，虽然 Arrow buffer 实际共享。
+- [x] 暴露 queue depth、charged rows/bytes、blocked sends、blocked duration。
 
-**验收门：** 测试明确证明 rows 和 bytes 都是硬上限；不复制 Arroyo 仅 row count
-真正限流的实现缺口。
+**验收门：** `EdgeBudget` 的 public shape 与调用签名保持不变，但 `(R, B)` 现在分别
+表示最多 `R` 个 envelopes、`R` rows 和 `B` bytes。三条谓词独立成立；直接 channel
+调用者必须选择 `R >= max(required_row_limit, required_simultaneous_messages)`。该窄化
+只覆盖 admission 谓词，不改变 FIFO、oversize error、reservation lifecycle、single-
+producer ownership 或其余 S10 行为。
 
 ## 8. M2：构建持续运行 task runtime
 
+**当前交付状态：** M2.1-M2.5 的 runtime internals 已完成；whole-job preflight、
+source/operator/sink tasks、private runner/job/reaper、status/metrics、stress 与 universal
+soak 均有实现和证据。所有新增 runner/control surface 仍为 crate-private。
+
 ### Task M2.1：实现 job context 与结构化 task supervisor
+
+**状态：** 已在 crate-private runtime 完成。
 
 **文件：**
 
 - 新建：`crates/calc-flow/src/runtime/streaming/{mod,context,supervisor}.rs`
-- 修改：`crates/calc-flow/src/context.rs`
-- 新建：`crates/calc-flow/tests/stream_supervisor.rs`
+- 新建：`crates/calc-flow/src/runtime/streaming/runner.rs`
+- 聚焦测试位于对应 private 模块的 inline test 中。
 
 **先写 RED：**
 
-- [ ] 第一个 task failure 会 cancel 并 join 所有 sibling。
-- [ ] 已经同时观测到的多个错误按稳定 task ID 排序返回。
-- [ ] panic 转成带 task identity 的 typed internal error。
-- [ ] drop owning handle 会 cancel 并回收 task，不产生 detached task；断言方式不得
+- [x] 第一个 task failure 会 cancel 并 join 所有 sibling。
+- [x] 已经同时观测到的多个错误按稳定 task ID 排序返回。
+- [x] panic 转成带 task identity 的 `CalcFlowError::TaskPanicked`。
+- [x] drop owning handle 会 cancel 并回收 task，不产生 detached task；断言方式不得
   依赖在 `Drop` 内 join，而应通过 supervisor 侧的注册表在 runtime 关闭时校验。
-- [ ] deadline 和显式 cancel 收敛到唯一 terminal state。
+- [x] deadline 和显式 cancel 收敛到唯一 terminal state。
 
 **实现：**
 
-- [ ] 引入 immutable `StreamJobContext`：job ID、fingerprint、settings、deadline、
+- [x] 引入 immutable `StreamJobContext`：job ID、fingerprint、settings、deadline、
   cancellation token。
-- [ ] 派生 source/node/sink scoped context，不修改 caller mapping。
-- [ ] 使用 `JoinSet` 或等价的 owned supervisor。
-- [ ] task 必须先登记再运行。
-- [ ] failure 时先 cancel、关闭入口 sender、join 全部 task，再形成稳定错误。
-- [ ] 定义 running、draining、completed、cancelled、failed、recovery-required。
+- [x] 派生 source/node/sink scoped context，不修改 caller mapping。
+- [x] 使用 `JoinSet` 或等价的 owned supervisor。
+- [x] task 必须先登记再运行。
+- [x] failure 时先 cancel、关闭入口 sender、join 全部 task，再形成稳定错误。
+- [x] 定义 running、draining、completed、cancelled、failed、recovery-required。
 
 **验收门：** success/failure/cancel/drop 四条路径都没有后台 task 泄漏。
 
 ### Task M2.2：实现 stream source binding 与 source task
 
+**状态：** 已在 crate-private runtime 完成；public A4 source surface 仍与 A6 一起
+延后到 post-M5。
+
 **文件：**
 
-- 替换 stream 部分：`crates/calc-flow/src/io.rs`
 - 新建：`crates/calc-flow/src/runtime/streaming/source_task.rs`
-- 新建：`crates/calc-flow/tests/stream_source.rs`
-- 扩展：`crates/calc-flow/tests/support/mod.rs`
+- 新建：`crates/calc-flow/src/runtime/streaming/job.rs` 的 whole-job preflight
+- 聚焦测试位于对应 private 模块的 inline test 中。
 
 **先写 RED：**
 
-- [ ] 每个 external input 恰有一个 source binding。
-- [ ] unknown/duplicate binding 在任何 source.open 前失败。
-- [ ] source 先按 recovered cursor open，再开始 poll。
-- [ ] 每个 source 的 sequence 严格递增。
-- [ ] `None` 只产生一个有序 `EndOfInput`。
-- [ ] 下游 edge 满时暂停后续 `next()`。
-- [ ] source 在 `next()` 长时间未返回时仍能观察到 barrier/cancel 请求，且丢弃或
-  中断该等待不会丢数据、不会前进 cursor。
-- [ ] source error 通过 supervisor cancel sibling。
-- [ ] native/Python I/O 中取消后能够 join。
+- [x] 每个 external input 恰有一个 source binding。
+- [x] unknown/duplicate binding 在任何 source open 前失败。
+- [x] source 先按 recovered cursor open，再开始 poll。
+- [x] 每个 source 的 sequence 严格递增。
+- [x] `None` 只产生一个有序 `EndOfInput`。
+- [x] 下游 edge 满时暂停后续 `next()`。
+- [x] source 在 `next()` 长时间未返回时仍能观察 cancel；teardown 丢弃该 future 后
+  不再 poll source，并在 pump 退出前调用 close。Barrier injection 延后到 M5。
+- [x] source error 通过 supervisor cancel sibling。
+- [x] connector I/O 取消后能够 join。
 
 **实现：**
 
-- [ ] 用 `StreamSource -> SourceEvent` 替换旧 `Source`。
-- [ ] 按 M0 结论实现 source task 的控制响应形状：或者要求 `next()` 取消安全并在
-  `select!` 中与 barrier 请求复用，或者用预取槽位把外部 I/O 拆到独立协作单元。
-  该选择必须体现在 trait 的 rustdoc 契约中，而不只是实现细节。
-- [ ] `SourceEvent` 支持 data、source watermark、idle 和 end。
-- [ ] binding ID 是 `BatchMetadata.source` 的权威来源；用 `with_metadata()` 不可变地
+- [x] 用 private `StreamSource -> SourceEvent` seam 驱动 M2，不替换 public v2
+  `Source`。
+- [x] 用一项预取槽把外部 I/O 拆到独立 pump；`next()` 可以被 teardown 丢弃但该
+  source 随后只允许 close，契约固定在 private trait 上。
+- [x] `SourceEvent` 支持 data、source watermark 和 idle；`None` 产生 end。
+- [x] binding ID 是 `BatchMetadata.source` 的权威来源；用 `with_metadata()` 不可变地
   写入 source/sequence 并保留 attributes。
-- [ ] 每个 binding 一个 source task。
-- [ ] fan-out 通过 bounded channel 发送到所有 ingress。
-- [ ] 控制事件必须验证后才进入 edge。
-- [ ] 分开记录 latest observed item 与 latest durable cursor，为 barrier 做准备。
+- [x] 每个 binding 一个 source pump 和一个 source task。
+- [x] fan-out 通过 bounded channel 发送到所有 ingress。
+- [x] 控制事件必须验证后才进入 edge。
+- [x] 分开记录 latest observed cursor 与 durable recovery cursor，为 M5 做准备。
 
 **验收门：** 两个独立 source 可并发持续运行，slow sink 会停止 source polling。
 
 ### Task M2.3：实现 operator task 与 runtime-owned control forwarding
+
+**状态：** 已在 crate-private runtime 完成。每个 compiled operator 对应一个
+task；per-ingress FIFO、bounded fan-out、unary watermark/idle 的 runtime-owned
+转发、multi-ingress control fail-closed、barrier fail-before-output、显式 EOF 与
+`on_end` exactly once 已由当前实现固定。
 
 **文件：**
 
@@ -771,77 +791,101 @@ CARGO_TARGET_DIR="$PWD/target/cargo" cargo test -p calc-flow --test operator \
 
 **先写 RED：**
 
-- [ ] unary expression/SQL 按 ingress FIFO 处理每个 batch。
-- [ ] union 保证每 ingress FIFO，但不伪造跨 ingress 全局顺序。
-- [ ] fan-out 共享 batch payload，同时每条 edge 独立收费。
-- [ ] output kind/schema 在任何 successor 观察前校验。
-- [ ] operator error 后不转发半个 control 事件。
-- [ ] array-only chain 不初始化 DataFusion。
-- [ ] 每个 table operator 只创建并关闭一个 lazy DataFusion runtime。
+- [x] unary expression/SQL 按 ingress FIFO 处理每个 batch。
+- [x] union 保证每 ingress FIFO，但不伪造跨 ingress 全局顺序。
+- [x] fan-out 共享 batch payload，同时每条 edge 独立收费。
+- [x] output kind/schema 在任何 successor 观察前校验。
+- [x] operator error 后不转发半个 control 事件。
+- [x] array-only chain 不初始化 DataFusion。
+- [x] 每个 table operator 只创建并关闭一个 lazy DataFusion runtime。
 
 **实现：**
 
-- [ ] 每个 compiled node 一个 task。
-- [ ] `select!` 多个 ingress receiver，同时保持各自 FIFO。
-- [ ] 只有 data 调用 `process_data()`。
-- [ ] control 转发始终留在 runtime。
-- [ ] `on_watermark()` 先输出已关闭窗口，再由 runtime 转发 watermark。
-- [ ] 通过 `StreamCollector` 校验并 enqueue output。
-- [ ] 所有 terminal path 关闭 operator-scoped DataFusion runtime。
+- [x] 每个 compiled node 一个 task。
+- [x] `select!` 多个 ingress receiver，同时保持各自 FIFO。
+- [x] 只有 data 调用 `process_data()`。
+- [x] control 转发始终留在 runtime。
+- [x] `on_watermark()` 先输出已关闭窗口，再由 runtime 转发 watermark。
+- [x] 通过 `StreamCollector` 校验并 enqueue output。
+- [x] 所有 terminal path 关闭 operator-scoped DataFusion runtime。
 
 **验收门：** two-source union -> expression 图完整输出全部数据，保持 per-source 顺序，
 且 slow downstream 同时反压两条分支。
 
-### Task M2.4：实现 sink task、runner 与 job handle
+### Task M2.4：实现 crate-private sink task、runner 与 job handle
+
+**状态：** 已完成 private M2.4。该 task 不公开或替换任何 runner；现有 public v2
+`StreamingRunner` 与 `MicroBatchRunner` 保持不变，public source-driven A6 延后到
+post-M5 的独立评审与原子集成。
 
 **文件：**
 
-- 新建：`crates/calc-flow/src/runtime/streaming/{sink_task,job}.rs`
-- 替换：`crates/calc-flow/src/runtime/streaming.rs`
-- 删除：`crates/calc-flow/src/runtime/micro_batch.rs`
-- 替换：`crates/calc-flow/tests/streaming.rs`
-- 删除或重写：`crates/calc-flow/tests/micro_batch.rs`
+- 新建：`crates/calc-flow/src/runtime/streaming/{job,runner,sink_task}.rs`
+- 保留：`crates/calc-flow/src/runtime/streaming.rs`
+- 保留：`crates/calc-flow/src/runtime/micro_batch.rs`
+- 聚焦测试位于对应 private 模块的 inline test 中。
 
 **先写 RED：**
 
-- [ ] 每个 external output 至少一个 sink，或显式 discard policy。
-- [ ] 全部 sink binding 在 source.open 前验证完成。
-- [ ] 一个 output 的多个 sink 按配置顺序观察数据。
-- [ ] `shutdown()` 停止 source poll、drain 已接受数据并 completed。
-- [ ] `cancel()` 不承诺 drain。
-- [ ] `wait()` 幂等返回同一 terminal result。
-- [ ] drop wait future 不 cancel job；drop owning job handle 会 cancel。
+- [x] Whole-job preflight 在任何 source/sink lifecycle 前校验 fingerprint、topology、
+  delivery、binding 和 capability。
+- [x] 一个 output 的多个普通 sink 按稳定配置顺序观察数据，且只承诺 process-local
+  ordered delivery。
+- [x] graceful shutdown、cancellation、natural EOF 和 task failure 各自产生稳定的
+  terminal outcome，并收敛到零 live task/queue/reservation/reaper。
+- [x] `wait()` 幂等观察同一 terminal result；drop wait future 不取消 job，drop owning
+  private job handle 会取消并由 reaper 回收。
+- [x] launch failure 或 cancellation 会按稳定 resource ID 关闭全部已 begin 的资源；
+  每个资源独立最多等待五秒，close panic/failure 成为 typed secondary diagnostic，
+  不覆盖 primary outcome。
 
 **实现：**
 
-- [ ] 用 stream-native `StreamSink` lifecycle 替换旧 `Sink`。
-- [ ] 首先实现普通 at-least-once sink task。
-- [ ] 实现 `StreamingRunner::start()` 和 owning `StreamingJob`。
-- [ ] 分开 graceful shutdown 与 cancellation。
-- [ ] status snapshot 包含 queue、source progress、watermark、epoch、terminal state。
-- [ ] 删除旧 push `step()` 和 `MicroBatchRunner`。
+- [x] 使用 private source/sink bindings、`ContinuousRunner`、`ContinuousJob`、driver
+  与 reaper，完成 validate -> begin -> publish 三阶段 launch。
+- [x] 分开 graceful shutdown 与 cancellation，并用稳定 task/resource ID 聚合错误。
+- [x] private status/metrics 只暴露 payload-free 的稳定 ID 与数值；不公开
+  cursor、watermark 或 epoch 状态。
+- [x] 将 panic 转成 `CalcFlowError::TaskPanicked`；非字符串 panic 使用固定文案，
+  字符串按 UTF-8 安全边界限制到 1,024 bytes（含省略号）。
+- [x] 保留旧 push `step()`、public `StreamingRunner` 和 `MicroBatchRunner`。
 
-**验收门：** M2 在没有 event time/state 时已是一套可用的有界、source-driven、
-at-least-once continuous runtime。
+**验收门：** M2 internals 是可验证的有界 source-driven runtime skeleton，但不是
+public continuous runner，也不承诺 durable at-least-once、checkpoint recovery 或
+event-time 完整性。
 
 ### Task M2.5：补齐 metrics、stress 与 soak
+
+**状态：** 已完成。下面的 soak 标准适用于 calc-flow 当前和未来所有 soak；其他
+名称、时长、采样默认值或命令均不构成通过证据。
+
+```bash
+CALC_FLOW_STREAM_SOAK=1 cargo test -p calc-flow --lib runtime::streaming::soak::twenty_minute_two_source_slow_sink -- --ignored --exact --nocapture
+```
 
 **文件：**
 
 - 新建：`crates/calc-flow/src/runtime/streaming/metrics.rs`
-- 新建：`crates/calc-flow/tests/stream_soak.rs`
+- 新建：crate-private `crates/calc-flow/src/runtime/streaming/soak.rs`
 - 修改：`crates/calc-flow/benches/core.rs`
 
 **步骤：**
 
-- [ ] 记录 input/output batches、rows、bytes、errors、blocked sends、queue high-water。
-- [ ] 提供 per-edge charge 与 source/sink progress gauge。
-- [ ] 记录 operator processing 和 backpressure duration，禁止 batch ID 高基数 label。
-- [ ] 用 paused Tokio time 写短 CI stress。
-- [ ] 增加 opt-in/nightly one-hour two-source slow-sink soak。
-- [ ] 增加 channel、unary stream overhead、fan-out Criterion case。
+- [x] 记录 input/output batches、rows、bytes、errors、blocked sends、queue high-water。
+- [x] 提供 per-edge slot/row/byte charge 与 source/sink progress gauge。
+- [x] 记录 operator processing 和 backpressure duration，禁止 batch ID 高基数 label。
+- [x] 用 paused Tokio time 写短 CI stress。
+- [x] 增加 opt-in Linux two-source slow-sink soak：精确 1,200 秒 measured workload，
+  10 秒 cadence、120 samples、前 30 samples/300 秒 warm-up。
+- [x] 增加 channel、unary stream overhead、fan-out Criterion case；benchmark targets
+  必须编译，paired comparison 仅在存在匹配 base case 时判定。
 
-**验收门：** steady state 下 queue 不超过配置，内存不存在持续上升趋势。
+**验收门：** code-approved head `7deda2a0` 的
+[durable evidence bundle](https://github.com/wegamekinglc/calc-flow/pull/83#issuecomment-5201266650)
+记录 120/120 samples、每个 sink 96,124 accepted batches、24,032 zero-cost
+envelopes、零 missing/duplicate/leak、三条 saturated/blocked edges 与 -2.609 MiB/hour
+RSS slope。raw log SHA-256 为
+`bc97c8f736ad41a4f228e07300f1ecd23c9af9fb09dc1be1718823430bd05f35`。
 
 ## 9. M3：Event time 与 watermark
 
@@ -1691,7 +1735,8 @@ PostgreSQL CDC -> window -> ClickHouse/Parquet stream。
 
 - [ ] 同机比较全部 M0 Criterion baseline。
 - [ ] 超过 5% 的回归必须经过置信区间与重复测量评审。
-- [ ] 运行 one-hour two-source backpressure soak。
+- [ ] 按 universal soak 标准运行 two-source backpressure soak：精确 1,200 秒 measured
+  workload、10 秒 cadence、120 samples、前 30 samples/300 秒 warm-up。
 - [ ] 运行大于旧 10 MiB JSON 上限的高基数 window-state soak。
 - [ ] checkpoint duration 按 dirty-key volume 分析，不按 total retained state 混报。
 - [ ] recovery 分开测 cold cache 与 warm cache。
@@ -1747,16 +1792,16 @@ PostgreSQL CDC -> window -> ClickHouse/Parquet stream。
 | 关注点               | Unit/property test                              | Integration/soak                              |
 | -------------------- | ----------------------------------------------- | --------------------------------------------- |
 | Edge ordering        | mixed-message FIFO、fan-out                     | two-source slow-sink                          |
-| Backpressure         | rows/bytes reservation、cancel                  | one-hour bounded-memory soak                  |
+| Backpressure         | envelope/rows/bytes reservation、cancel         | 20-minute bounded-memory soak                 |
 | Source recovery      | sequence/cursor validation                      | restart at every barrier boundary             |
-| Watermark            | monotonic、minimum、idle、reactivate             | out-of-order multi-source                     |
+| Watermark            | monotonic、minimum、idle、reactivate            | out-of-order multi-source                     |
 | Window correctness   | randomized batch partition                      | large state checkpoint/recovery               |
-| State durability     | checksum、atomic manifest、compaction            | crash around every rename                     |
+| State durability     | checksum、atomic manifest、compaction           | crash around every rename                     |
 | Barrier alignment    | all arrival permutations                        | slow/idle/ended source combinations           |
 | Exactly-once         | transaction state machine                       | file/Kafka/PostgreSQL fault matrix            |
-| Connector safety     | bounds、path、SQL、redaction、capability         | broker/database/HTTP failure integration      |
+| Connector safety     | bounds、path、SQL、redaction、capability        | broker/database/HTTP failure integration      |
 | Python lifecycle     | await/cancel/GC                                 | repeated native-Python cancellation           |
-| Studio lifecycle     | API/React cleanup                               | Playwright start-observe-checkpoint-stop       |
+| Studio lifecycle     | API/React cleanup                               | Playwright start-observe-checkpoint-stop      |
 | Packaging            | artifact inspector                              | clean install/smoke                           |
 
 ## 15. 各里程碑合入门槛
@@ -1765,15 +1810,16 @@ PostgreSQL CDC -> window -> ClickHouse/Parquet stream。
 
 - batch/stream trait 与 plan 完全分离。
 - 不支持的 stream graph 在副作用前失败。
-- typed message 与双限制 channel 通过测试。
+- typed message 与 envelope/rows/bytes 三重限制 channel 通过测试。
 - 不再存在语义含混的 v2 public name。
 
 ### M2
 
-- source 持续驱动图。
+- **内部 gate 已完成：** source 持续驱动 private runtime graph。
 - slow sink 能反压到 source。
 - graceful shutdown drain；cancel join 全部 task。
-- two-source union 通过 stress/soak。
+- two-source union 通过 stress 与 universal 20-minute soak。
+- public v2 runner 保持不变；public A6 仍为 post-M5 独立 gate。
 
 ### M3
 
@@ -1837,7 +1883,7 @@ M0 批准后，只启动以下 vertical slice：
 1. 原子拆分 `BatchOperator`/`StreamOperator`；
 2. 原子拆分 `BatchExecutionPlan`/`StreamExecutionPlan`；
 3. 引入 typed `StreamMessage`；
-4. 引入 rows + bytes 双限制 channel；
+4. 引入 envelope/rows/bytes 三重限制 channel；
 5. 跑通 in-memory source -> unary expression -> recording sink；
 6. 证明 backpressure、FIFO、cancel、end-of-input、无 task leak；
 7. 暂不公开 Python/Studio API。

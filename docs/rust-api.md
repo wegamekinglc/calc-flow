@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Vec::new(),
             )?),
         )?
-        .compile(&UdfRegistry::new().snapshot())?;
+        .compile_batch(&UdfRegistry::new().snapshot())?;
     let input = RecordBatch::try_from_iter(vec![
         (
             "a",
@@ -71,25 +71,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `PipelineBuilder` consumes and returns itself, so partially built graphs cannot
 be mutated through aliases. Compilation validates ports and topology and binds
-an immutable `UdfRegistrySnapshot`. `ExecutionPlan::execute` is asynchronous and
-accepts only `Batch` values.
+an immutable `UdfRegistrySnapshot`. `BatchExecutionPlan::execute` is
+asynchronous and accepts only `Batch` values.
 
 ### Engine boundary
 
-`ExpressionOperator` and `SqlOperator` are built-in operators. They are not
-implementations of the external `Operator` trait, so do not cast them to
-`dyn Operator` or call their processing seam directly. Add them through
-`PipelineBuilder::add_node`, which accepts an `OperatorDefinition` produced
-from any boxed built-in, custom, or external operator.
+`ExpressionOperator` and `SqlOperator` are built-in operators. Each implements
+both `BatchOperator` and `StreamOperator`; `UnionOperator` is stream-only. Add
+them through `PipelineBuilder::add_node`, which accepts a `NodeOperator`
+conversion from a boxed built-in, custom batch operator, or custom stream
+operator.
 
-Custom operators implement `Operator`, whose `OperatorContext` carries only the
-run-scoped context (`run`). External operators resolve through
-`ProviderRegistry` and `ExternalOperatorFactory`, covered below.
+Every operator implements `OperatorMetadata`. Custom finite operators implement
+`BatchOperator`, whose `BatchOperatorContext` carries the run-scoped context;
+custom continuous operators implement `StreamOperator`, whose
+`StreamOperatorContext` carries the stream-job context, operator identity,
+current input watermark, and late-row counters. External operators resolve
+through `ProviderRegistry` and lifecycle-specific factories, covered below.
 
-`ExecutionPlan::datafusion_config()` returns `Option<DataFusionConfig>`:
+`BatchExecutionPlan::datafusion_config()` returns `Option<DataFusionConfig>`:
 `None` means the plan is external-only and owns no table resources, so its runs
 create no DataFusion session or UDF snapshot.
-`ExecutionPlan::requires_datafusion()` returns the classification alone.
+`BatchExecutionPlan::requires_datafusion()` returns the classification alone.
 
 ## SQL operators
 
@@ -123,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Vec::new(),
             )?),
         )?
-        .compile(&UdfRegistry::new().snapshot())?;
+        .compile_batch(&UdfRegistry::new().snapshot())?;
     let orders = RecordBatch::try_from_iter(vec![
         (
             "order_id",
@@ -167,6 +170,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Stream compilation and the M2 runtime
+
+`PipelineBuilder::compile_stream` produces an immutable
+`StreamExecutionPlan`. The plan records stable edges, source and sink binding
+slots, stream requirements, and the semantic fingerprint, but it does not
+execute directly through a public source-driven runner.
+
+The crate-private M2 runtime consumes that plan after a whole-job preflight.
+It runs one task per source, compiled operator, and graph output; preserves
+per-ingress FIFO; forwards unary watermark/idle controls through the runtime;
+rejects unsupported multi-ingress controls and barriers before output; and
+converges source, operator, sink, queue, reservation, driver, and reaper state
+on every terminal path. Launch failure and cancellation close all resources
+whose lifecycle began, in stable order, with an independent five-second bound
+per resource. Cleanup failures and panics remain typed secondary diagnostics
+and do not replace the primary outcome.
+
+This runtime is not exported. The existing public v2 `StreamingRunner` and
+`MicroBatchRunner` retain their signatures and formed-batch behavior. Public
+source-driven runner integration remains a separately reviewed post-M5 change.
+The sole public API item added by M2 is the non-exhaustive
+`CalcFlowError::TaskPanicked { task_id, message }` variant.
+
+`edge_channel` retains its public signature and `EdgeBudget` retains the fields
+`max_rows` and `max_bytes`. For `EdgeBudget::new(R, B)`, envelope count and
+charged rows are each independently capped at `R`, while charged bytes are
+capped at `B`. Direct callers must choose
+`R >= max(required_row_limit, required_simultaneous_messages)`.
+
 ## Batches
 
 - `Batch::table(Vec<RecordBatch>, BatchMetadata)` creates an Arrow table batch.
@@ -189,8 +221,10 @@ UDFs, then compile against `registry.snapshot()`. Operators hold serializable
 `UdfReference` values; they never own source code or import paths.
 
 `ProviderRegistry` binds `ExternalOperatorSpec` values to trusted
-`ExternalOperatorFactory` implementations. External provider state and payloads
-must satisfy Rust's `Send + Sync` boundaries.
+`BatchOperatorFactory` and `StreamOperatorFactory` implementations through
+separate `register_batch`/`resolve_batch` and `register_stream`/`resolve_stream`
+paths. External provider state and payloads must satisfy Rust's `Send + Sync`
+boundaries.
 
 ## Micro-batch recovery
 
@@ -239,7 +273,7 @@ cargo run -p calc-flow --example micro_batch_recovery
 ## Projects and stores
 
 `ProjectSpec` is the strict v2 data model. Use `validate_project` for a
-`ValidationReport`, `compile_project` for an `ExecutionPlan`, and
+`ValidationReport`, `compile_project` for a `BatchExecutionPlan`, and
 `project_json_schema` for the generated schema.
 
 `FileProjectStore` and `FileCheckpointStore` are async atomic local stores.
@@ -252,7 +286,10 @@ schema with
 
 Public operations return `calc_flow::Result<T>`. `CalcFlowError` preserves
 invalid arguments/documents, compilation errors, execution/provider failures,
-checkpoint errors, I/O paths, and cancellation.
+checkpoint errors, I/O paths, cancellation, closed stream edges, and supervised
+task panics. Private M2 panic capture keeps `TaskPanicked.message` valid UTF-8
+and at most 1,024 bytes including its ellipsis; non-string panic payloads use a
+fixed message.
 
 `ExecutionOptions` carries cancellation/deadline controls. Operators receive a
 `RunContext` and must check cancellation at safe work boundaries.
