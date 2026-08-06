@@ -130,11 +130,30 @@ impl MultiInputProgress {
         if self.terminal {
             return Ok(Vec::new());
         }
+        self.pending_emission_kinds()?
+            .into_iter()
+            .map(|kind| self.allocate_emission(kind))
+            .collect()
+    }
+
+    fn pending_emission_kinds(&mut self) -> Result<Vec<ProgressEmissionKind>, ProgressFailure> {
         let mut kinds = Vec::new();
-        let all_ended = self
-            .ingresses
-            .values()
-            .all(|activity| matches!(activity, IngressActivity::Ended { .. }));
+        if let Some(minimum) = self.next_watermark() {
+            self.last_emitted_watermark = Some(minimum);
+            kinds.push(ProgressEmissionKind::Watermark(minimum));
+        }
+        if self.all_ended() {
+            self.terminal = true;
+            self.idle_latched = false;
+            kinds.push(ProgressEmissionKind::EndOfInput);
+        } else if self.all_live_idle() && !self.idle_latched {
+            self.advance_idle_epoch()?;
+            kinds.push(ProgressEmissionKind::Idle);
+        }
+        Ok(kinds)
+    }
+
+    fn next_watermark(&self) -> Option<EventTime> {
         let active = self
             .ingresses
             .values()
@@ -143,53 +162,52 @@ impl MultiInputProgress {
                 IngressActivity::Idle { .. } | IngressActivity::Ended { .. } => None,
             })
             .collect::<Vec<_>>();
-        if !active.is_empty()
-            && active.iter().all(Option::is_some)
-            && let Some(minimum) = active.into_iter().flatten().min()
-            && self
-                .last_emitted_watermark
-                .is_none_or(|previous| minimum > previous)
-        {
-            self.last_emitted_watermark = Some(minimum);
-            kinds.push(ProgressEmissionKind::Watermark(minimum));
+        if active.is_empty() || active.iter().any(Option::is_none) {
+            return None;
         }
-        if all_ended {
-            self.terminal = true;
-            self.idle_latched = false;
-            kinds.push(ProgressEmissionKind::EndOfInput);
-        } else {
-            let has_live = self
-                .ingresses
-                .values()
-                .any(|activity| !matches!(activity, IngressActivity::Ended { .. }));
-            let all_live_idle = has_live
-                && self.ingresses.values().all(|activity| {
-                    matches!(
-                        activity,
-                        IngressActivity::Idle { .. } | IngressActivity::Ended { .. }
-                    )
-                });
-            if all_live_idle && !self.idle_latched {
-                let epoch = self.next_idle_epoch.allocate().map_err(|_| {
-                    ProgressFailure::counter("runtime.progress.counters.idle_epoch")
-                })?;
-                self.idle_epoch = IdleEpoch(epoch);
-                self.idle_latched = true;
-                kinds.push(ProgressEmissionKind::Idle);
-            }
-        }
-        kinds
-            .into_iter()
-            .map(|kind| {
-                self.next_global_sequence
-                    .allocate()
-                    .map(GlobalSequence)
-                    .map(|sequence| ProgressEmission { sequence, kind })
-                    .map_err(|_| {
-                        ProgressFailure::counter("runtime.progress.counters.global_sequence")
-                    })
+        active.into_iter().flatten().min().filter(|minimum| {
+            self.last_emitted_watermark
+                .is_none_or(|previous| *minimum > previous)
+        })
+    }
+
+    fn all_ended(&self) -> bool {
+        self.ingresses
+            .values()
+            .all(|activity| matches!(activity, IngressActivity::Ended { .. }))
+    }
+
+    fn all_live_idle(&self) -> bool {
+        self.ingresses
+            .values()
+            .any(|activity| !matches!(activity, IngressActivity::Ended { .. }))
+            && self.ingresses.values().all(|activity| {
+                matches!(
+                    activity,
+                    IngressActivity::Idle { .. } | IngressActivity::Ended { .. }
+                )
             })
-            .collect()
+    }
+
+    fn advance_idle_epoch(&mut self) -> Result<(), ProgressFailure> {
+        let epoch = self
+            .next_idle_epoch
+            .allocate()
+            .map_err(|_| ProgressFailure::counter("runtime.progress.counters.idle_epoch"))?;
+        self.idle_epoch = IdleEpoch(epoch);
+        self.idle_latched = true;
+        Ok(())
+    }
+
+    fn allocate_emission(
+        &mut self,
+        kind: ProgressEmissionKind,
+    ) -> Result<ProgressEmission, ProgressFailure> {
+        self.next_global_sequence
+            .allocate()
+            .map(GlobalSequence)
+            .map(|sequence| ProgressEmission { sequence, kind })
+            .map_err(|_| ProgressFailure::counter("runtime.progress.counters.global_sequence"))
     }
 
     pub(crate) fn activity(&self, ordinal: BindingOrdinal) -> Option<IngressActivity> {

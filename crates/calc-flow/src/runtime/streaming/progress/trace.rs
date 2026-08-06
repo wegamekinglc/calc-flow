@@ -411,234 +411,358 @@ pub(crate) struct ProgressReplayRequest {
     pub(super) expected: ProgressExecutionTrace,
 }
 
-impl ProgressReplayRequest {
-    #[allow(
-        clippy::too_many_lines,
-        reason = "complete replay-plan validation is intentionally one side-effect-free audit"
-    )]
-    pub(crate) fn prevalidate(expected: ProgressExecutionTrace) -> Result<Self> {
-        let mut accepted = BTreeMap::<AcceptedEnvelopeIdentity, usize>::new();
-        let mut rejected = BTreeSet::new();
-        let mut settlements = BTreeMap::<AcceptedEnvelopeIdentity, usize>::new();
-        let mut drains = BTreeSet::new();
-        let mut terminals = BTreeSet::new();
-        let mut terminal_tails = BTreeMap::new();
-        let mut next_attempt = 0_u64;
-        let mut next_drain = 0_u64;
-        let mut next_gate_close = 0_u64;
-        for (index, record) in expected.records.iter().enumerate() {
-            let coordinate = u64::try_from(index).map_err(|_| CalcFlowError::InvalidArgument {
-                field: "runtime.progress.replay.trace".into(),
-                message: "trace is too large".into(),
-            })?;
-            if record.ordinal().0 != coordinate || record.position().0 != coordinate {
-                return Err(CalcFlowError::InvalidArgument {
-                    field: "runtime.progress.replay.trace".into(),
-                    message: "trace coordinates are missing, repeated, or reordered".into(),
-                });
-            }
-            match record {
-                ProgressTraceRecord::Admission(record) => {
-                    if record.attempt_ordinal.0 != next_attempt {
-                        return Err(replay_plan_error(
-                            "runtime.progress.replay.trace.admission",
-                            "admission attempts are missing, repeated, or reordered",
-                        ));
-                    }
-                    next_attempt = next_attempt.checked_add(1).ok_or_else(|| {
-                        replay_plan_error(
-                            "runtime.progress.replay.trace.admission",
-                            "admission attempt coordinate overflowed",
-                        )
-                    })?;
-                    match &record.decision {
-                        AdmissionDecisionRecord::Accepted { accepted: identity } => {
-                            if record.observed_gate.state != AdmissionGateState::Open
-                                || identity.binding != record.binding
-                                || identity.binding_ordinal != record.binding_ordinal
-                                || identity.admission_attempt != record.attempt_ordinal
-                                || identity.upstream_position != record.upstream_position
-                            {
-                                return Err(replay_plan_error(
-                                    "runtime.progress.replay.trace.admission",
-                                    "accepted identity does not exactly match its admission attempt",
-                                ));
-                            }
-                            *accepted.entry(identity.clone()).or_default() += 1;
-                        }
-                        AdmissionDecisionRecord::ImmediateRejected { .. } => {
-                            if !rejected.insert((record.binding.clone(), record.attempt_ordinal)) {
-                                return Err(replay_plan_error(
-                                    "runtime.progress.replay.trace.admission",
-                                    "immediate rejection identity is duplicated",
-                                ));
-                            }
-                        }
-                    }
-                }
-                ProgressTraceRecord::Drain(record) => {
-                    if record.epoch.0 != next_drain || !drains.insert(record.epoch) {
-                        return Err(replay_plan_error(
-                            "runtime.progress.replay.trace.drain",
-                            "drain epochs are missing, repeated, or reordered",
-                        ));
-                    }
-                    next_drain = next_drain.checked_add(1).ok_or_else(|| {
-                        replay_plan_error(
-                            "runtime.progress.replay.trace.drain",
-                            "drain epoch coordinate overflowed",
-                        )
-                    })?;
-                    if !record
-                        .inbox_fences
-                        .windows(2)
-                        .all(|pair| pair[0].binding_ordinal < pair[1].binding_ordinal)
-                        || record
-                            .inbox_fences
-                            .iter()
-                            .any(|fence| fence.drain_epoch != record.epoch)
-                    {
-                        return Err(replay_plan_error(
-                            "runtime.progress.replay.trace.fences",
-                            "drain fences are not exact binding-ordered members of their epoch",
-                        ));
-                    }
-                }
-                ProgressTraceRecord::Terminal(record) => {
-                    if !terminals.insert((record.cause, record.owning_drain)) {
-                        return Err(replay_plan_error(
-                            "runtime.progress.replay.trace.terminal",
-                            "terminal transition owner is duplicated",
-                        ));
-                    }
-                    if record
-                        .owning_drain
-                        .is_some_and(|epoch| !drains.contains(&epoch))
-                        || !record
-                            .transitions_in_binding_order
-                            .windows(2)
-                            .all(|pair| pair[0].binding_ordinal < pair[1].binding_ordinal)
-                    {
-                        return Err(replay_plan_error(
-                            "runtime.progress.replay.trace.terminal",
-                            "terminal transition references a missing drain or unordered binding",
-                        ));
-                    }
-                    for transition in &record.transitions_in_binding_order {
-                        if transition.close.cause != record.cause
-                            || transition.close.close_ordinal.0 != next_gate_close
-                            || transition.close.new_generation.0
-                                != transition
-                                    .close
-                                    .old_generation
-                                    .0
-                                    .checked_add(1)
-                                    .ok_or_else(|| {
-                                        replay_plan_error(
-                                            "runtime.progress.replay.trace.gate",
-                                            "gate generation overflowed",
-                                        )
-                                    })?
-                        {
-                            return Err(replay_plan_error(
-                                "runtime.progress.replay.trace.gate",
-                                "gate transition coordinates are not exact",
-                            ));
-                        }
-                        next_gate_close = next_gate_close.checked_add(1).ok_or_else(|| {
-                            replay_plan_error(
-                                "runtime.progress.replay.trace.gate",
-                                "gate close coordinate overflowed",
-                            )
-                        })?;
-                        for identity in &transition.extracted_tail {
-                            if terminal_tails
-                                .insert(identity.clone(), (record.cause, record.owning_drain))
-                                .is_some()
-                            {
-                                return Err(replay_plan_error(
-                                    "runtime.progress.replay.trace.terminal_tail",
-                                    "accepted identity appears in more than one terminal tail",
-                                ));
-                            }
-                        }
-                    }
-                }
-                ProgressTraceRecord::Settlement(record) => {
-                    *settlements.entry(record.accepted.clone()).or_default() += 1;
-                    match (&record.owner, &record.disposition) {
-                        (
-                            SettlementOwner::Drain(epoch),
-                            SettlementDisposition::CommitSuccess
-                            | SettlementDisposition::TransactionError { .. },
-                        ) if drains.contains(epoch) => {}
-                        (
-                            SettlementOwner::Terminal {
-                                cause,
-                                owning_drain,
-                            },
-                            SettlementDisposition::PostEndTailReject,
-                        ) if *cause == TerminalTransitionCause::EndCommit
-                            && terminals.contains(&(*cause, *owning_drain)) => {}
-                        (
-                            SettlementOwner::Terminal {
-                                cause,
-                                owning_drain,
-                            },
-                            SettlementDisposition::Cancelled,
-                        ) if *cause == TerminalTransitionCause::Cancellation
-                            && terminals.contains(&(*cause, *owning_drain)) => {}
-                        (
-                            SettlementOwner::Terminal {
-                                cause,
-                                owning_drain,
-                            },
-                            SettlementDisposition::Fatal,
-                        ) if *cause == TerminalTransitionCause::Fatal
-                            && terminals.contains(&(*cause, *owning_drain)) => {}
-                        _ => {
-                            return Err(replay_plan_error(
-                                "runtime.progress.replay.trace.settlement_owner",
-                                "settlement disposition names a missing or incompatible owner",
-                            ));
-                        }
-                    }
-                }
-                ProgressTraceRecord::DriverPhaseFailure { .. } => {}
-            }
+#[derive(Default)]
+struct ReplayValidationState {
+    accepted: BTreeMap<AcceptedEnvelopeIdentity, usize>,
+    rejected: BTreeSet<(BindingIdentity, AdmissionAttemptOrdinal)>,
+    settlements: BTreeMap<AcceptedEnvelopeIdentity, usize>,
+    settlement_owners: BTreeMap<AcceptedEnvelopeIdentity, SettlementOwner>,
+    drains: BTreeSet<DrainEpoch>,
+    terminals: BTreeSet<(TerminalTransitionCause, Option<DrainEpoch>)>,
+    terminal_tails:
+        BTreeMap<AcceptedEnvelopeIdentity, (TerminalTransitionCause, Option<DrainEpoch>)>,
+    next_attempt: u64,
+    next_drain: u64,
+    next_gate_close: u64,
+}
+
+impl ReplayValidationState {
+    fn validate_record(&mut self, index: usize, record: &ProgressTraceRecord) -> Result<()> {
+        validate_trace_coordinate(index, record)?;
+        match record {
+            ProgressTraceRecord::Admission(record) => self.validate_admission(record),
+            ProgressTraceRecord::Drain(record) => self.validate_drain(record),
+            ProgressTraceRecord::Terminal(record) => self.validate_terminal(record),
+            ProgressTraceRecord::Settlement(record) => self.validate_settlement(record),
+            ProgressTraceRecord::DriverPhaseFailure { .. } => Ok(()),
         }
-        if accepted.values().any(|count| *count != 1)
-            || settlements.values().any(|count| *count != 1)
-            || accepted.len() != settlements.len()
-            || accepted
-                .keys()
-                .any(|identity| !settlements.contains_key(identity))
-        {
+    }
+
+    fn validate_admission(&mut self, record: &AdmissionAttemptRecord) -> Result<()> {
+        if record.attempt_ordinal.0 != self.next_attempt {
             return Err(replay_plan_error(
-                "runtime.progress.replay.trace.settlements",
-                "every accepted identity must have exactly one settlement",
+                "runtime.progress.replay.trace.admission",
+                "admission attempts are missing, repeated, or reordered",
             ));
         }
-        for (identity, owner) in terminal_tails {
-            let settlement = expected.records.iter().find_map(|record| match record {
-                ProgressTraceRecord::Settlement(record) if record.accepted == identity => {
-                    Some(&record.owner)
-                }
-                _ => None,
-            });
-            if !matches!(
-                settlement,
-                Some(SettlementOwner::Terminal { cause, owning_drain })
-                    if *cause == owner.0 && *owning_drain == owner.1
-            ) {
+        self.next_attempt = self.next_attempt.checked_add(1).ok_or_else(|| {
+            replay_plan_error(
+                "runtime.progress.replay.trace.admission",
+                "admission attempt coordinate overflowed",
+            )
+        })?;
+        match &record.decision {
+            AdmissionDecisionRecord::Accepted { accepted } => {
+                validate_accepted_identity(record, accepted)?;
+                *self.accepted.entry(accepted.clone()).or_default() += 1;
+            }
+            AdmissionDecisionRecord::ImmediateRejected { .. } => {
+                self.record_immediate_rejection(record)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn record_immediate_rejection(&mut self, record: &AdmissionAttemptRecord) -> Result<()> {
+        if self
+            .rejected
+            .insert((record.binding.clone(), record.attempt_ordinal))
+        {
+            return Ok(());
+        }
+        Err(replay_plan_error(
+            "runtime.progress.replay.trace.admission",
+            "immediate rejection identity is duplicated",
+        ))
+    }
+
+    fn validate_drain(&mut self, record: &DrainEpochRecord) -> Result<()> {
+        if record.epoch.0 != self.next_drain {
+            return Err(replay_plan_error(
+                "runtime.progress.replay.trace.drain",
+                "drain epochs are missing, repeated, or reordered",
+            ));
+        }
+        if !self.drains.insert(record.epoch) {
+            return Err(replay_plan_error(
+                "runtime.progress.replay.trace.drain",
+                "drain epochs are missing, repeated, or reordered",
+            ));
+        }
+        self.next_drain = self.next_drain.checked_add(1).ok_or_else(|| {
+            replay_plan_error(
+                "runtime.progress.replay.trace.drain",
+                "drain epoch coordinate overflowed",
+            )
+        })?;
+        validate_inbox_fences(record)
+    }
+
+    fn validate_terminal(&mut self, record: &TerminalTransitionRecord) -> Result<()> {
+        if !self.terminals.insert((record.cause, record.owning_drain)) {
+            return Err(replay_plan_error(
+                "runtime.progress.replay.trace.terminal",
+                "terminal transition owner is duplicated",
+            ));
+        }
+        if record
+            .owning_drain
+            .is_some_and(|epoch| !self.drains.contains(&epoch))
+        {
+            return Err(replay_plan_error(
+                "runtime.progress.replay.trace.terminal",
+                "terminal transition references a missing drain or unordered binding",
+            ));
+        }
+        validate_terminal_binding_order(record)?;
+        for transition in &record.transitions_in_binding_order {
+            self.validate_gate_transition(record, transition)?;
+        }
+        Ok(())
+    }
+
+    fn validate_gate_transition(
+        &mut self,
+        record: &TerminalTransitionRecord,
+        transition: &BindingGateTransitionRecord,
+    ) -> Result<()> {
+        validate_gate_close(record.cause, transition, self.next_gate_close)?;
+        self.next_gate_close = self.next_gate_close.checked_add(1).ok_or_else(|| {
+            replay_plan_error(
+                "runtime.progress.replay.trace.gate",
+                "gate close coordinate overflowed",
+            )
+        })?;
+        for identity in &transition.extracted_tail {
+            self.record_terminal_tail(identity, record)?;
+        }
+        Ok(())
+    }
+
+    fn record_terminal_tail(
+        &mut self,
+        identity: &AcceptedEnvelopeIdentity,
+        record: &TerminalTransitionRecord,
+    ) -> Result<()> {
+        if self
+            .terminal_tails
+            .insert(identity.clone(), (record.cause, record.owning_drain))
+            .is_none()
+        {
+            return Ok(());
+        }
+        Err(replay_plan_error(
+            "runtime.progress.replay.trace.terminal_tail",
+            "accepted identity appears in more than one terminal tail",
+        ))
+    }
+
+    fn validate_settlement(&mut self, record: &SettlementRecord) -> Result<()> {
+        *self.settlements.entry(record.accepted.clone()).or_default() += 1;
+        self.settlement_owners
+            .entry(record.accepted.clone())
+            .or_insert_with(|| record.owner.clone());
+        if self.settlement_owner_is_valid(record) {
+            return Ok(());
+        }
+        Err(replay_plan_error(
+            "runtime.progress.replay.trace.settlement_owner",
+            "settlement disposition names a missing or incompatible owner",
+        ))
+    }
+
+    fn settlement_owner_is_valid(&self, record: &SettlementRecord) -> bool {
+        match (&record.owner, &record.disposition) {
+            (
+                SettlementOwner::Drain(epoch),
+                SettlementDisposition::CommitSuccess
+                | SettlementDisposition::TransactionError { .. },
+            ) => self.drains.contains(epoch),
+            (
+                SettlementOwner::Terminal {
+                    cause,
+                    owning_drain,
+                },
+                SettlementDisposition::PostEndTailReject,
+            ) => self.terminal_owner_exists(
+                *cause,
+                *owning_drain,
+                TerminalTransitionCause::EndCommit,
+            ),
+            (
+                SettlementOwner::Terminal {
+                    cause,
+                    owning_drain,
+                },
+                SettlementDisposition::Cancelled,
+            ) => self.terminal_owner_exists(
+                *cause,
+                *owning_drain,
+                TerminalTransitionCause::Cancellation,
+            ),
+            (
+                SettlementOwner::Terminal {
+                    cause,
+                    owning_drain,
+                },
+                SettlementDisposition::Fatal,
+            ) => self.terminal_owner_exists(*cause, *owning_drain, TerminalTransitionCause::Fatal),
+            _ => false,
+        }
+    }
+
+    fn terminal_owner_exists(
+        &self,
+        cause: TerminalTransitionCause,
+        owning_drain: Option<DrainEpoch>,
+        expected_cause: TerminalTransitionCause,
+    ) -> bool {
+        cause == expected_cause && self.terminals.contains(&(cause, owning_drain))
+    }
+
+    fn finish(self) -> Result<()> {
+        self.validate_settlement_completeness()?;
+        for (identity, owner) in &self.terminal_tails {
+            if !settlement_matches_terminal_tail(self.settlement_owners.get(identity), *owner) {
                 return Err(replay_plan_error(
                     "runtime.progress.replay.trace.terminal_tail",
                     "terminal tail membership does not exactly match settlement ownership",
                 ));
             }
         }
+        Ok(())
+    }
+
+    fn validate_settlement_completeness(&self) -> Result<()> {
+        let invalid = self.accepted.values().any(|count| *count != 1)
+            || self.settlements.values().any(|count| *count != 1)
+            || self.accepted.len() != self.settlements.len()
+            || self
+                .accepted
+                .keys()
+                .any(|identity| !self.settlements.contains_key(identity));
+        if !invalid {
+            return Ok(());
+        }
+        Err(replay_plan_error(
+            "runtime.progress.replay.trace.settlements",
+            "every accepted identity must have exactly one settlement",
+        ))
+    }
+}
+
+impl ProgressReplayRequest {
+    pub(crate) fn prevalidate(expected: ProgressExecutionTrace) -> Result<Self> {
+        let mut validation = ReplayValidationState::default();
+        for (index, record) in expected.records.iter().enumerate() {
+            validation.validate_record(index, record)?;
+        }
+        validation.finish()?;
         Ok(Self { expected })
     }
+}
+
+fn validate_trace_coordinate(index: usize, record: &ProgressTraceRecord) -> Result<()> {
+    let coordinate = u64::try_from(index).map_err(|_| CalcFlowError::InvalidArgument {
+        field: "runtime.progress.replay.trace".into(),
+        message: "trace is too large".into(),
+    })?;
+    if record.ordinal().0 == coordinate && record.position().0 == coordinate {
+        return Ok(());
+    }
+    Err(CalcFlowError::InvalidArgument {
+        field: "runtime.progress.replay.trace".into(),
+        message: "trace coordinates are missing, repeated, or reordered".into(),
+    })
+}
+
+fn validate_accepted_identity(
+    record: &AdmissionAttemptRecord,
+    accepted: &AcceptedEnvelopeIdentity,
+) -> Result<()> {
+    let invalid = record.observed_gate.state != AdmissionGateState::Open
+        || accepted.binding != record.binding
+        || accepted.binding_ordinal != record.binding_ordinal
+        || accepted.admission_attempt != record.attempt_ordinal
+        || accepted.upstream_position != record.upstream_position;
+    if !invalid {
+        return Ok(());
+    }
+    Err(replay_plan_error(
+        "runtime.progress.replay.trace.admission",
+        "accepted identity does not exactly match its admission attempt",
+    ))
+}
+
+fn validate_inbox_fences(record: &DrainEpochRecord) -> Result<()> {
+    let ordered = record
+        .inbox_fences
+        .windows(2)
+        .all(|pair| pair[0].binding_ordinal < pair[1].binding_ordinal);
+    let same_epoch = record
+        .inbox_fences
+        .iter()
+        .all(|fence| fence.drain_epoch == record.epoch);
+    if ordered && same_epoch {
+        return Ok(());
+    }
+    Err(replay_plan_error(
+        "runtime.progress.replay.trace.fences",
+        "drain fences are not exact binding-ordered members of their epoch",
+    ))
+}
+
+fn validate_terminal_binding_order(record: &TerminalTransitionRecord) -> Result<()> {
+    if record
+        .transitions_in_binding_order
+        .windows(2)
+        .all(|pair| pair[0].binding_ordinal < pair[1].binding_ordinal)
+    {
+        return Ok(());
+    }
+    Err(replay_plan_error(
+        "runtime.progress.replay.trace.terminal",
+        "terminal transition references a missing drain or unordered binding",
+    ))
+}
+
+fn validate_gate_close(
+    terminal_cause: TerminalTransitionCause,
+    transition: &BindingGateTransitionRecord,
+    next_gate_close: u64,
+) -> Result<()> {
+    let expected_generation = transition
+        .close
+        .old_generation
+        .0
+        .checked_add(1)
+        .ok_or_else(|| {
+            replay_plan_error(
+                "runtime.progress.replay.trace.gate",
+                "gate generation overflowed",
+            )
+        })?;
+    let invalid = transition.close.cause != terminal_cause
+        || transition.close.close_ordinal.0 != next_gate_close
+        || transition.close.new_generation.0 != expected_generation;
+    if !invalid {
+        return Ok(());
+    }
+    Err(replay_plan_error(
+        "runtime.progress.replay.trace.gate",
+        "gate transition coordinates are not exact",
+    ))
+}
+
+fn settlement_matches_terminal_tail(
+    settlement: Option<&SettlementOwner>,
+    expected: (TerminalTransitionCause, Option<DrainEpoch>),
+) -> bool {
+    matches!(
+        settlement,
+        Some(SettlementOwner::Terminal { cause, owning_drain })
+            if *cause == expected.0 && *owning_drain == expected.1
+    )
 }
 
 fn replay_plan_error(field: &str, message: &str) -> CalcFlowError {

@@ -253,41 +253,8 @@ pub(crate) fn prepare_stream_job(
     bindings: &[SourceBindingSpec],
     runtime_progress_config: StreamProgressRuntimeConfig,
 ) -> Result<PreparedStreamJob> {
-    if compiled_fingerprint.is_empty() {
-        return Err(CalcFlowError::InvalidArgument {
-            field: "compiled.fingerprint".into(),
-            message: "must not be empty".into(),
-        });
-    }
-    let mut identities = BTreeSet::new();
-    let mut prepared = Vec::with_capacity(bindings.len());
-    for (index, binding) in bindings.iter().enumerate() {
-        if !identities.insert(binding.descriptor.binding.clone()) {
-            return Err(CalcFlowError::InvalidArgument {
-                field: format!("sources.{}", binding.descriptor.binding.as_str()),
-                message: "binding is configured more than once".into(),
-            });
-        }
-        let ordinal = u64::try_from(index)
-            .ok()
-            .filter(|value| value.checked_add(1).is_some())
-            .map(BindingOrdinal::new)
-            .ok_or_else(|| CalcFlowError::InvalidArgument {
-                field: "runtime.progress.binding_ordinal".into(),
-                message: "counter exhausted before a successor could be reserved".into(),
-            })?;
-        let normalized = normalize_policy(&binding.descriptor, &binding.watermark_policy)?;
-        let normalized_config_fingerprint = normalized_fingerprint(&normalized)?;
-        prepared.push(PreparedSourceBinding {
-            identity: binding.descriptor.binding.clone(),
-            ordinal,
-            declared_schema: binding.descriptor.declared_schema.clone(),
-            normalized_watermark: normalized,
-            normalized_config_fingerprint,
-            replay_positioning: binding.descriptor.replay_positioning,
-            existing_toggle_route: binding.descriptor.existing_toggle_route.clone(),
-        });
-    }
+    validate_compiled_fingerprint(compiled_fingerprint)?;
+    let prepared = prepare_bindings(bindings)?;
     let runtime_fence_config_fingerprint = runtime_fingerprint(&runtime_progress_config)?;
     let fingerprint = prepared_fingerprint(
         compiled_fingerprint,
@@ -300,6 +267,53 @@ pub(crate) fn prepare_stream_job(
         runtime_progress_config,
         runtime_fence_config_fingerprint,
         fingerprint,
+    })
+}
+
+fn validate_compiled_fingerprint(compiled_fingerprint: &str) -> Result<()> {
+    if !compiled_fingerprint.is_empty() {
+        return Ok(());
+    }
+    Err(CalcFlowError::InvalidArgument {
+        field: "compiled.fingerprint".into(),
+        message: "must not be empty".into(),
+    })
+}
+
+fn prepare_bindings(bindings: &[SourceBindingSpec]) -> Result<Vec<PreparedSourceBinding>> {
+    let mut identities = BTreeSet::new();
+    let mut prepared = Vec::with_capacity(bindings.len());
+    for (index, binding) in bindings.iter().enumerate() {
+        if !identities.insert(binding.descriptor.binding.clone()) {
+            return Err(CalcFlowError::InvalidArgument {
+                field: format!("sources.{}", binding.descriptor.binding.as_str()),
+                message: "binding is configured more than once".into(),
+            });
+        }
+        prepared.push(prepare_binding(index, binding)?);
+    }
+    Ok(prepared)
+}
+
+fn prepare_binding(index: usize, binding: &SourceBindingSpec) -> Result<PreparedSourceBinding> {
+    let ordinal = u64::try_from(index)
+        .ok()
+        .filter(|value| value.checked_add(1).is_some())
+        .map(BindingOrdinal::new)
+        .ok_or_else(|| CalcFlowError::InvalidArgument {
+            field: "runtime.progress.binding_ordinal".into(),
+            message: "counter exhausted before a successor could be reserved".into(),
+        })?;
+    let normalized = normalize_policy(&binding.descriptor, &binding.watermark_policy)?;
+    let normalized_config_fingerprint = normalized_fingerprint(&normalized)?;
+    Ok(PreparedSourceBinding {
+        identity: binding.descriptor.binding.clone(),
+        ordinal,
+        declared_schema: binding.descriptor.declared_schema.clone(),
+        normalized_watermark: normalized,
+        normalized_config_fingerprint,
+        replay_positioning: binding.descriptor.replay_positioning,
+        existing_toggle_route: binding.descriptor.existing_toggle_route.clone(),
     })
 }
 
@@ -329,31 +343,59 @@ fn normalize_policy(
             max_out_of_orderness,
             emit_interval,
             idle_timeout,
-        } => {
-            validate_duration(descriptor, "max_out_of_orderness", *max_out_of_orderness)?;
-            validate_duration(descriptor, "emit_interval", *emit_interval)?;
-            if let Some(timeout) = idle_timeout {
-                validate_duration(descriptor, "idle_timeout", *timeout)?;
-            }
-            let event_time = resolve_event_time(descriptor, event_time_column)?;
-            Ok(NormalizedWatermarkMode::Generated {
-                event_time,
-                max_out_of_orderness: *max_out_of_orderness,
-                emit_interval: *emit_interval,
-                idle_timeout: *idle_timeout,
-                native_directive: directive,
-            })
-        }
+        } => normalize_generated_policy(
+            descriptor,
+            event_time_column,
+            *max_out_of_orderness,
+            *emit_interval,
+            *idle_timeout,
+            directive,
+        ),
         WatermarkPolicy::Disabled { idle_timeout } => {
-            if let Some(timeout) = idle_timeout {
-                validate_duration(descriptor, "idle_timeout", *timeout)?;
-            }
-            Ok(NormalizedWatermarkMode::Disabled {
-                idle_timeout: *idle_timeout,
-                native_directive: directive,
-            })
+            normalize_disabled_policy(descriptor, *idle_timeout, directive)
         }
     }
+}
+
+fn normalize_generated_policy(
+    descriptor: &SourceDescriptor,
+    event_time_column: &Arc<str>,
+    max_out_of_orderness: Duration,
+    emit_interval: Duration,
+    idle_timeout: Option<Duration>,
+    native_directive: NativeWatermarkDirective,
+) -> Result<NormalizedWatermarkMode> {
+    validate_duration(descriptor, "max_out_of_orderness", max_out_of_orderness)?;
+    validate_duration(descriptor, "emit_interval", emit_interval)?;
+    validate_optional_idle_timeout(descriptor, idle_timeout)?;
+    Ok(NormalizedWatermarkMode::Generated {
+        event_time: resolve_event_time(descriptor, event_time_column)?,
+        max_out_of_orderness,
+        emit_interval,
+        idle_timeout,
+        native_directive,
+    })
+}
+
+fn normalize_disabled_policy(
+    descriptor: &SourceDescriptor,
+    idle_timeout: Option<Duration>,
+    native_directive: NativeWatermarkDirective,
+) -> Result<NormalizedWatermarkMode> {
+    validate_optional_idle_timeout(descriptor, idle_timeout)?;
+    Ok(NormalizedWatermarkMode::Disabled {
+        idle_timeout,
+        native_directive,
+    })
+}
+
+fn validate_optional_idle_timeout(
+    descriptor: &SourceDescriptor,
+    idle_timeout: Option<Duration>,
+) -> Result<()> {
+    idle_timeout.map_or(Ok(()), |timeout| {
+        validate_duration(descriptor, "idle_timeout", timeout)
+    })
 }
 
 #[allow(
