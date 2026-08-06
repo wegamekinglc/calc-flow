@@ -1379,24 +1379,8 @@ async fn run_job_driver(
             return cancelled_driver_report(launch_id, &core.metrics);
         }
     };
-    #[cfg(test)]
-    if let Some(probe) = &core.launch_probe {
-        probe
-            .pause_at(TestLaunchCheckpoint::AfterOperatorEntry)
-            .await;
-    }
-    if core.launch_cancel.is_cancelled() {
-        runtime.supervisor.cancel();
-        let report = runtime.supervisor.join_all().await;
-        return cancelled_driver_report_with_task_cleanup(
-            launch_id,
-            report,
-            &RuntimeTaskProgress {
-                sources: BTreeMap::new(),
-                sinks: BTreeMap::new(),
-            },
-            &core.metrics,
-        );
+    if let Some(report) = cancel_after_operator_entry(launch_id, &core, &mut runtime).await {
+        return report;
     }
     let mut resources = connector_resources(sources, sinks);
     let open_failures = open_connector_resources(&mut resources, &core.launch_cancel).await;
@@ -1452,6 +1436,33 @@ async fn run_job_driver(
         &core.metrics,
     )
     .await
+}
+
+async fn cancel_after_operator_entry(
+    launch_id: LaunchId,
+    core: &JobCore,
+    runtime: &mut RegisteredRuntime,
+) -> Option<DriverReport> {
+    #[cfg(test)]
+    if let Some(probe) = &core.launch_probe {
+        probe
+            .pause_at(TestLaunchCheckpoint::AfterOperatorEntry)
+            .await;
+    }
+    if !core.launch_cancel.is_cancelled() {
+        return None;
+    }
+    runtime.supervisor.cancel();
+    let report = runtime.supervisor.join_all().await;
+    Some(cancelled_driver_report_with_task_cleanup(
+        launch_id,
+        report,
+        &RuntimeTaskProgress {
+            sources: BTreeMap::new(),
+            sinks: BTreeMap::new(),
+        },
+        &core.metrics,
+    ))
 }
 
 enum EntryFailure {
