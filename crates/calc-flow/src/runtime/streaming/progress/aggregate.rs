@@ -55,6 +55,16 @@ pub(crate) struct MultiInputProgress {
     next_idle_epoch: CheckedSemanticAllocator,
 }
 
+struct EvaluationRollback {
+    activity: IngressActivity,
+    last_emitted_watermark: Option<EventTime>,
+    idle_latched: bool,
+    idle_epoch: IdleEpoch,
+    terminal: bool,
+    next_global_sequence: CheckedSemanticAllocator,
+    next_idle_epoch: CheckedSemanticAllocator,
+}
+
 impl MultiInputProgress {
     pub(crate) fn new(ordinals: impl IntoIterator<Item = BindingOrdinal>) -> Self {
         Self {
@@ -82,11 +92,49 @@ impl MultiInputProgress {
         ordinal: BindingOrdinal,
         input: AggregateInput,
     ) -> Result<Vec<ProgressEmission>, ProgressFailure> {
-        let mut scratch = self.clone();
-        scratch.apply(ordinal, input)?;
-        let emissions = scratch.derive_emissions()?;
-        *self = scratch;
-        Ok(emissions)
+        let rollback = self.evaluation_rollback(ordinal)?;
+        if let Err(error) = self.apply(ordinal, input) {
+            self.restore_evaluation(ordinal, rollback);
+            return Err(error);
+        }
+        match self.derive_emissions() {
+            Ok(emissions) => Ok(emissions),
+            Err(error) => {
+                self.restore_evaluation(ordinal, rollback);
+                Err(error)
+            }
+        }
+    }
+
+    fn evaluation_rollback(
+        &self,
+        ordinal: BindingOrdinal,
+    ) -> Result<EvaluationRollback, ProgressFailure> {
+        let activity = self.ingresses.get(&ordinal).copied().ok_or_else(|| {
+            ProgressFailure::protocol(
+                "runtime.progress.aggregate.binding",
+                "unknown binding ordinal",
+            )
+        })?;
+        Ok(EvaluationRollback {
+            activity,
+            last_emitted_watermark: self.last_emitted_watermark,
+            idle_latched: self.idle_latched,
+            idle_epoch: self.idle_epoch,
+            terminal: self.terminal,
+            next_global_sequence: self.next_global_sequence.clone(),
+            next_idle_epoch: self.next_idle_epoch.clone(),
+        })
+    }
+
+    fn restore_evaluation(&mut self, ordinal: BindingOrdinal, rollback: EvaluationRollback) {
+        self.ingresses.insert(ordinal, rollback.activity);
+        self.last_emitted_watermark = rollback.last_emitted_watermark;
+        self.idle_latched = rollback.idle_latched;
+        self.idle_epoch = rollback.idle_epoch;
+        self.terminal = rollback.terminal;
+        self.next_global_sequence = rollback.next_global_sequence;
+        self.next_idle_epoch = rollback.next_idle_epoch;
     }
 
     fn apply(
@@ -407,5 +455,23 @@ mod tests {
                 .is_err()
         );
         assert!(!progress.idle_latched());
+    }
+
+    #[test]
+    fn global_sequence_exhaustion_aborts_without_mutation() {
+        let ordinal = BindingOrdinal::new(0);
+        let mut progress = MultiInputProgress::new([ordinal]);
+        progress.set_next_global_for_test(u64::MAX);
+        assert!(
+            progress
+                .evaluate(ordinal, AggregateInput::Watermark(wm(5)))
+                .is_err()
+        );
+        assert_eq!(
+            progress.activity(ordinal),
+            Some(super::IngressActivity::Active { watermark: None })
+        );
+        assert_eq!(progress.last_emitted_watermark(), None);
+        assert_eq!(progress.next_global_sequence(), u64::MAX);
     }
 }

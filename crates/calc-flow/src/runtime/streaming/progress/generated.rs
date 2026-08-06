@@ -31,15 +31,17 @@ impl GeneratedWatermarkState {
     }
 
     pub(crate) fn observe_batch(&mut self, batch: &Batch, binding: &str) -> Result<()> {
+        let event_time_path = format!("sources.{binding}.watermark_policy.event_time_column");
         let table = batch
             .table_payload()
             .map_err(|_| CalcFlowError::InvalidArgument {
-                field: format!("sources.{binding}.watermark_policy.event_time_column"),
+                field: event_time_path.clone(),
                 message: "generated watermarks require table batches".into(),
             })?;
         for record in table.batches() {
             let column = record.column(self.event_time.index);
-            let maximum = maximum_timestamp_nanos(column.as_ref(), self.event_time.unit)?;
+            let maximum =
+                maximum_timestamp_nanos(column.as_ref(), self.event_time.unit, &event_time_path)?;
             if let Some(maximum) = maximum {
                 self.max_observed_nanos = Some(
                     self.max_observed_nanos
@@ -93,19 +95,23 @@ impl GeneratedWatermarkState {
     }
 }
 
-fn maximum_timestamp_nanos(column: &dyn Array, unit: ArrowTimestampUnit) -> Result<Option<i128>> {
+fn maximum_timestamp_nanos(
+    column: &dyn Array,
+    unit: ArrowTimestampUnit,
+    event_time_path: &str,
+) -> Result<Option<i128>> {
     macro_rules! maximum {
         ($array:ty, $factor:expr) => {{
             let array = column.as_any().downcast_ref::<$array>().ok_or_else(|| {
                 CalcFlowError::InvalidArgument {
-                    field: "event_time_column".into(),
+                    field: event_time_path.into(),
                     message: "record batch column type differs from the prepared schema".into(),
                 }
             })?;
             array.iter().flatten().try_fold(None, |maximum, value| {
                 let nanos = i128::from(value).checked_mul($factor).ok_or_else(|| {
                     CalcFlowError::InvalidArgument {
-                        field: "event_time_column".into(),
+                        field: event_time_path.into(),
                         message: "timestamp unit conversion overflowed".into(),
                     }
                 })?;
@@ -175,7 +181,7 @@ mod tests {
     use crate::runtime::streaming::progress::prepare::{
         ArrowTimestampUnit, ResolvedEventTimeColumn,
     };
-    use crate::{Batch, BatchMetadata, EventTime};
+    use crate::{Batch, BatchMetadata, CalcFlowError, EventTime};
 
     fn state(unit: ArrowTimestampUnit, delay: Duration) -> GeneratedWatermarkState {
         GeneratedWatermarkState::new(
@@ -287,6 +293,25 @@ mod tests {
             )
             .unwrap();
         assert!(generated.on_timer("left").is_err());
+    }
+
+    #[test]
+    fn generated_watermark_conversion_error_names_the_binding_policy_path() {
+        let mut generated = state(ArrowTimestampUnit::Second, Duration::from_secs(1));
+        let error = generated
+            .observe_batch(
+                &batch(
+                    Arc::new(TimestampMillisecondArray::from(vec![Some(1)])),
+                    TimeUnit::Millisecond,
+                ),
+                "left",
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            CalcFlowError::InvalidArgument { ref field, .. }
+                if field == "sources.left.watermark_policy.event_time_column"
+        ));
     }
 
     #[test]

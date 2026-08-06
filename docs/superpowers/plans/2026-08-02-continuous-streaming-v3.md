@@ -380,7 +380,7 @@ M7 hardening / 3.0 release
 | M0     | 通过评审的语义、API、故障模型                       | 2 至 3 周    | 无       |
 | M1     | v3 trait、plan、compiler、message、channel          | 4 至 6 周    | M0       |
 | M2     | crate-private source-driven runtime internals       | 5 至 7 周    | M1       |
-| M3     | progress driver、watermark、idle、transient replay | 3 至 5 周    | M2       |
+| M3     | progress driver、watermark、idle、transient replay  | 3 至 5 周    | M2       |
 | M4     | 增量本地状态、final-only window、late policy        | 6 至 9 周    | M3       |
 | M5     | epoch checkpoint 与 transactional sink              | 8 至 11 周   | M4       |
 | M6     | connector、project v3、Python、Studio               | 16 至 24 周  | M5       |

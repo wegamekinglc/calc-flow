@@ -539,6 +539,9 @@ pub(crate) fn spawn_source_tasks_gated_with_live_progress(
     metrics: MetricsRecorder,
     live_progress: LiveProgressCoordinator,
 ) -> Result<SourceProgress> {
+    // Whole-job preflight already validated this binding's sampled maximum
+    // batch size against its first-hop edge before those outputs moved into
+    // the live progress coordinator (job::validate_source_budget).
     spawn_source_tasks_gated_with_optional_progress(
         supervisor,
         context,
