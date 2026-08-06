@@ -4,7 +4,7 @@ use async_trait::async_trait;
 
 use super::{
     StreamJobContext,
-    source_task::{SourceBinding, SourceCapabilities},
+    source_task::{SourceBinding, SourceCapabilities, validate_source_capabilities},
 };
 use crate::{
     Batch, CalcFlowError, DeliveryGuarantee, EdgeBudget, Result, StreamExecutionPlan,
@@ -180,7 +180,7 @@ fn validate_source(
     })?;
     let edge = &plan.edges[&route.edge_id];
     let capabilities = named.binding.sample_capabilities_once();
-    validate_source_capabilities(
+    validate_source_budget(
         &named.binding_id,
         capabilities,
         edge.budget,
@@ -189,24 +189,13 @@ fn validate_source(
     Ok((named.binding_id, named.binding))
 }
 
-fn validate_source_capabilities(
+fn validate_source_budget(
     binding_id: &str,
     capabilities: SourceCapabilities,
     budget: EdgeBudget,
     edge_id: &str,
 ) -> Result<()> {
-    if capabilities.max_batch_rows == 0 {
-        return Err(CalcFlowError::InvalidArgument {
-            field: format!("sources.{binding_id}.capabilities.max_batch_rows"),
-            message: "must be greater than zero".into(),
-        });
-    }
-    if capabilities.max_batch_bytes == 0 {
-        return Err(CalcFlowError::InvalidArgument {
-            field: format!("sources.{binding_id}.capabilities.max_batch_bytes"),
-            message: "must be greater than zero".into(),
-        });
-    }
+    validate_source_capabilities(binding_id, capabilities)?;
     if capabilities.max_batch_rows <= budget.max_rows
         && capabilities.max_batch_bytes <= budget.max_bytes
     {

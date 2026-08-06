@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use tokio::sync::watch;
 
 use crate::{CalcFlowError, CancellationToken, JsonMap, Result};
 
@@ -156,5 +157,26 @@ impl StreamTaskContext {
 
     pub(crate) fn scope_id(&self) -> &str {
         &self.scope_id
+    }
+}
+
+pub(super) async fn wait_for_task_gate(
+    gate: &mut watch::Receiver<bool>,
+    launch_cancel: &CancellationToken,
+    cancellation: &CancellationToken,
+    closed_message: &str,
+) -> Result<bool> {
+    loop {
+        if *gate.borrow() {
+            return Ok(true);
+        }
+        tokio::select! {
+            biased;
+            () = launch_cancel.cancelled() => return Ok(false),
+            () = cancellation.cancelled() => return Ok(false),
+            result = gate.changed() => result.map_err(|_| CalcFlowError::Internal {
+                message: closed_message.into(),
+            })?,
+        }
     }
 }

@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, watch};
 
 use super::{
     EdgeSender, EnvelopeCost, StreamJobContext, StreamMessage,
+    context::wait_for_task_gate,
     metrics::MetricsRecorder,
     supervisor::{TaskFailureSignal, TaskId, TaskSupervisor, panic_message},
 };
@@ -480,7 +481,10 @@ fn validate_source_outputs(binding_id: &str, outputs: &[EdgeSender]) -> Result<(
     Ok(())
 }
 
-fn validate_source_capabilities(binding_id: &str, capabilities: SourceCapabilities) -> Result<()> {
+pub(super) fn validate_source_capabilities(
+    binding_id: &str,
+    capabilities: SourceCapabilities,
+) -> Result<()> {
     if capabilities.max_batch_rows == 0 {
         return Err(CalcFlowError::InvalidArgument {
             field: format!("sources.{binding_id}.capabilities.max_batch_rows"),
@@ -734,7 +738,14 @@ async fn run_source_pump_operation(
     {
         return Ok(completion);
     }
-    if !wait_for_source_data_gate(data_gate, cancellation, launch_cancel).await? {
+    if !wait_for_task_gate(
+        data_gate,
+        launch_cancel,
+        cancellation,
+        "source data gate closed before release",
+    )
+    .await?
+    {
         return Ok(PumpCompletion::Cancelled);
     }
     poll_source_events(
@@ -774,26 +785,6 @@ async fn open_source(
                 }),
             }
         },
-    }
-}
-
-async fn wait_for_source_data_gate(
-    data_gate: &mut watch::Receiver<bool>,
-    cancellation: &crate::CancellationToken,
-    launch_cancel: &crate::CancellationToken,
-) -> Result<bool> {
-    loop {
-        if *data_gate.borrow() {
-            return Ok(true);
-        }
-        tokio::select! {
-            biased;
-            () = launch_cancel.cancelled() => return Ok(false),
-            () = cancellation.cancelled() => return Ok(false),
-            result = data_gate.changed() => result.map_err(|_| CalcFlowError::Internal {
-                message: "source data gate closed before release".into(),
-            })?,
-        }
     }
 }
 

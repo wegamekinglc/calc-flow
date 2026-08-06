@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, watch};
 
 use super::{
     EdgeReceiver, EdgeSender, EnvelopeCost, StreamMessage, StreamMessageKind,
-    context::StreamTaskContext,
+    context::{StreamTaskContext, wait_for_task_gate},
     metrics::MetricsRecorder,
     supervisor::{TaskId, TaskSupervisor, panic_message},
 };
@@ -129,10 +129,11 @@ pub(crate) fn spawn_operator_task(
 }
 
 async fn run_operator_task(mut inputs: OperatorTaskInputs, task_id: TaskId) -> Result<()> {
-    if !wait_for_gate(
+    if !wait_for_task_gate(
         &mut inputs.entry_gate,
         &inputs.launch_cancel,
         inputs.context.job().cancellation(),
+        "operator launch gate closed before release",
     )
     .await?
     {
@@ -141,10 +142,11 @@ async fn run_operator_task(mut inputs: OperatorTaskInputs, task_id: TaskId) -> R
     if !reset_and_acknowledge(&mut inputs, task_id)? {
         return Ok(());
     }
-    if !wait_for_gate(
+    if !wait_for_task_gate(
         &mut inputs.data_gate,
         &inputs.launch_cancel,
         inputs.context.job().cancellation(),
+        "operator launch gate closed before release",
     )
     .await?
     {
@@ -193,26 +195,6 @@ fn normalize_cancelled_result(inputs: &OperatorTaskInputs, result: Result<()>) -
         Ok(())
     } else {
         result
-    }
-}
-
-async fn wait_for_gate(
-    gate: &mut watch::Receiver<bool>,
-    launch_cancel: &CancellationToken,
-    cancellation: &CancellationToken,
-) -> Result<bool> {
-    loop {
-        if *gate.borrow() {
-            return Ok(true);
-        }
-        tokio::select! {
-            biased;
-            () = launch_cancel.cancelled() => return Ok(false),
-            () = cancellation.cancelled() => return Ok(false),
-            result = gate.changed() => result.map_err(|_| CalcFlowError::Internal {
-                message: "operator launch gate closed before release".into(),
-            })?,
-        }
     }
 }
 

@@ -27,9 +27,62 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::{Value, json};
 
 use crate::{
-    Batch, BatchKind, CalcFlowError, JsonMap, Result, UdfReference,
-    json::validate_portable_identifier,
+    Batch, BatchKind, CalcFlowError, DataFusionConfig, DataFusionRuntime, JsonMap, Result,
+    UdfReference, UdfRegistrySnapshot, json::validate_portable_identifier,
 };
+
+/// Lazily built operator-scoped `DataFusion` resources for stream execution.
+struct StreamRuntimeState {
+    resources: Option<(DataFusionConfig, UdfRegistrySnapshot, Vec<UdfReference>)>,
+    runtime: Option<DataFusionRuntime>,
+}
+
+impl StreamRuntimeState {
+    const fn new() -> Self {
+        Self {
+            resources: None,
+            runtime: None,
+        }
+    }
+
+    fn set_resources(
+        &mut self,
+        config: DataFusionConfig,
+        udfs: UdfRegistrySnapshot,
+        selected: Vec<UdfReference>,
+    ) {
+        self.resources = Some((config, udfs, selected));
+    }
+
+    fn runtime(&mut self) -> Result<&DataFusionRuntime> {
+        if self.runtime.is_none() {
+            let (config, udfs, selected) = self.resources.clone().unwrap_or_else(|| {
+                (
+                    DataFusionConfig::default(),
+                    UdfRegistrySnapshot::default(),
+                    Vec::new(),
+                )
+            });
+            let mut runtime = DataFusionRuntime::new(config)?;
+            runtime.register_udfs(&udfs, &selected)?;
+            self.runtime = Some(runtime);
+        }
+        Ok(self.runtime.as_ref().expect("runtime initialized above"))
+    }
+
+    const fn is_initialized(&self) -> bool {
+        self.runtime.is_some()
+    }
+}
+
+impl Clone for StreamRuntimeState {
+    fn clone(&self) -> Self {
+        Self {
+            resources: self.resources.clone(),
+            runtime: None,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Port {

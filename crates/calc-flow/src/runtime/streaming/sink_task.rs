@@ -6,7 +6,7 @@ use tokio::sync::watch;
 
 use super::{
     EdgeReceiver, EnvelopeCost, StreamMessage, StreamMessageKind,
-    context::StreamTaskContext,
+    context::{StreamTaskContext, wait_for_task_gate},
     job::ValidatedOrdinarySink,
     metrics::{MetricsRecorder, sink_metric_id},
     supervisor::{TaskFailureSignal, TaskId, TaskSupervisor, panic_message},
@@ -123,7 +123,18 @@ async fn run_sink_task(
     mut inputs: SinkTaskInputs,
     failure_signal: TaskFailureSignal,
 ) -> Result<()> {
-    if !wait_for_data_gate(&mut inputs).await? {
+    let closed_message = format!(
+        "sink {:?} data gate closed before release",
+        inputs.output_id
+    );
+    if !wait_for_task_gate(
+        &mut inputs.data_gate,
+        &inputs.launch_cancel,
+        inputs.context.job().cancellation(),
+        &closed_message,
+    )
+    .await?
+    {
         let close_failed = close_all(&mut inputs, &failure_signal).await;
         return if close_failed {
             failure_signal.cancel_siblings();
@@ -147,22 +158,6 @@ fn task_failed(output_id: &str) -> CalcFlowError {
         message: format!(
             "ordinary sink task {output_id:?} failed; inspect its private failure records"
         ),
-    }
-}
-
-async fn wait_for_data_gate(inputs: &mut SinkTaskInputs) -> Result<bool> {
-    loop {
-        if *inputs.data_gate.borrow() {
-            return Ok(true);
-        }
-        tokio::select! {
-            biased;
-            () = inputs.launch_cancel.cancelled() => return Ok(false),
-            () = inputs.context.job().cancellation().cancelled() => return Ok(false),
-            result = inputs.data_gate.changed() => result.map_err(|_| CalcFlowError::Internal {
-                message: format!("sink {:?} data gate closed before release", inputs.output_id),
-            })?,
-        }
     }
 }
 

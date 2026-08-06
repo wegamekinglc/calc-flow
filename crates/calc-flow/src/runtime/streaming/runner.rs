@@ -1187,14 +1187,7 @@ fn publish_abandoned_without_driver(runner: &RunnerCore, job: &Arc<JobCore>) {
             errors,
         }));
     }
-    registry.live_jobs.remove(&job.launch_id);
-    registry.reaper_jobs.remove(&job.launch_id);
-    if registry.provisional == Some(job.launch_id) {
-        registry.provisional = None;
-    }
-    if registry.pending_start == Some(job.launch_id) {
-        registry.pending_start = None;
-    }
+    remove_job_registration(&mut registry, job.launch_id);
     drop(state);
     drop(registry);
     job.changed.notify_waiters();
@@ -1267,17 +1260,21 @@ fn publish_driver_report(runner: &RunnerCore, mut report: DriverReport) {
             state.outcome = Some(Arc::clone(outcome));
         }
     }
-    registry.live_jobs.remove(&report.launch_id);
-    registry.reaper_jobs.remove(&report.launch_id);
-    if registry.provisional == Some(report.launch_id) {
-        registry.provisional = None;
-    }
-    if registry.pending_start == Some(report.launch_id) {
-        registry.pending_start = None;
-    }
+    remove_job_registration(&mut registry, report.launch_id);
     drop(state);
     drop(registry);
     job.changed.notify_waiters();
+}
+
+fn remove_job_registration(registry: &mut RunnerRegistryState, launch_id: LaunchId) {
+    registry.live_jobs.remove(&launch_id);
+    registry.reaper_jobs.remove(&launch_id);
+    if registry.provisional == Some(launch_id) {
+        registry.provisional = None;
+    }
+    if registry.pending_start == Some(launch_id) {
+        registry.pending_start = None;
+    }
 }
 
 enum ConnectorResource {
