@@ -110,8 +110,10 @@ environment, and CI remains the authoritative clean-environment sync check.
 The only merge-gate soak is
 `twenty_minute_two_source_slow_sink` with
 `CALC_FLOW_STREAM_SOAK=1`. Its structured `calc-flow.m3-soak-log.v1` result
-records the exact commit, deterministic seed/config, observed duration and RSS
-gate, admission/drain/fence/timer/trace counts, gate generations and close
+uses the standard 500 ms sink-write delay so bounded edges remain saturated
+while the required lossless trace stays within the existing RSS-growth gate.
+It records the exact commit, deterministic seed/config, observed duration and
+RSS gate, admission/drain/fence/timer/trace counts, gate generations and close
 cuts, settlement disposition counts and latency, peak unsettled receipts and
 timer/trace sizes, bounded-edge/backpressure evidence, delivery conservation,
 task/queue/resource convergence, and terminal outcome.

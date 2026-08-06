@@ -37,6 +37,8 @@ const WARMUP_SAMPLES: usize = 30;
 const FIVE_MINUTE_SAMPLES: usize = 30;
 const MAX_RSS_SLOPE_MIB_PER_HOUR: f64 = 1.0;
 const MAX_MEDIAN_GROWTH_KIB: u64 = 8 * 1024;
+const STANDARD_SOAK_SINK_DELAY: Duration = Duration::from_millis(500);
+const SMOKE_SINK_DELAY: Duration = Duration::from_millis(5);
 const SECONDS_PER_HOUR: f64 = 60.0 * 60.0;
 const SOAK_COMMAND: &str = "CALC_FLOW_STREAM_SOAK=1 cargo test -p calc-flow --lib runtime::streaming::soak::twenty_minute_two_source_slow_sink -- --ignored --exact --nocapture";
 const EDGE_BUDGET: EdgeBudget = EdgeBudget {
@@ -136,6 +138,7 @@ struct SlowSoakSink {
     deliveries: Arc<Mutex<DeliveryState>>,
     opened: Arc<AtomicUsize>,
     closed: Arc<AtomicUsize>,
+    write_delay: Duration,
 }
 
 #[async_trait]
@@ -146,7 +149,7 @@ impl OrdinaryStreamSink for SlowSoakSink {
     }
 
     async fn write(&mut self, batch: &Batch) -> Result<()> {
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::time::sleep(self.write_delay).await;
         self.deliveries.lock().observe(batch);
         Ok(())
     }
@@ -321,6 +324,7 @@ fn soak_metadata(commit: &str, kernel: &str, rustc: &str) -> serde_json::Value {
         },
         "cadence_seconds": CADENCE.as_secs(),
         "target_duration_seconds": TARGET_DURATION.as_secs(),
+        "sink_write_delay_millis": STANDARD_SOAK_SINK_DELAY.as_millis(),
         "sample_count": SAMPLE_COUNT,
         "warmup_samples": WARMUP_SAMPLES,
         "warmup_duration_seconds": (CADENCE
@@ -434,6 +438,10 @@ fn independent_accepted_oracle_exposes_commit_after_downstream_drop() {
     );
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the soak topology receives explicit lifecycle probes, delivery oracles, and delay"
+)]
 fn soak_spec(
     source_opened: &Arc<AtomicUsize>,
     source_closed: &Arc<AtomicUsize>,
@@ -442,6 +450,7 @@ fn soak_spec(
     sink_a: &Arc<Mutex<DeliveryState>>,
     sink_b: &Arc<Mutex<DeliveryState>>,
     accepted: &AcceptedSequenceRecorder,
+    sink_write_delay: Duration,
 ) -> ContinuousJobSpec {
     let union = UnionOperator::new(
         "merge",
@@ -490,6 +499,7 @@ fn soak_spec(
                 deliveries: Arc::clone(deliveries),
                 opened: Arc::clone(sink_opened),
                 closed: Arc::clone(sink_closed),
+                write_delay: sink_write_delay,
             })),
         })
         .collect();
@@ -532,6 +542,7 @@ async fn run_linux_soak() {
             &sink_a,
             &sink_b,
             &accepted,
+            STANDARD_SOAK_SINK_DELAY,
         ))
         .await
         .expect("real continuous runtime soak must launch");
@@ -854,6 +865,7 @@ async fn real_soak_topology_smoke_converges_through_the_reaper() {
             &sink_a,
             &sink_b,
             &accepted,
+            SMOKE_SINK_DELAY,
         ))
         .await
         .unwrap();
@@ -894,6 +906,7 @@ async fn real_soak_topology_graceful_smoke_conserves_every_accepted_sequence() {
             &sink_a,
             &sink_b,
             &accepted,
+            SMOKE_SINK_DELAY,
         ))
         .await
         .unwrap();
@@ -1051,6 +1064,7 @@ fn soak_metadata_is_machine_readable_and_declares_the_slot_contract() {
     assert_eq!(metadata["commit"], "abc123");
     assert_eq!(metadata["target_duration_seconds"], 1_200);
     assert_eq!(metadata["sample_count"], 120);
+    assert_eq!(metadata["sink_write_delay_millis"], 500);
     assert_eq!(metadata["warmup_duration_seconds"], 300);
     assert_eq!(metadata["deterministic_seed"], "sequential-two-source-v1");
     assert_eq!(metadata["environment"]["kernel"], "Linux 1");
