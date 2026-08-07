@@ -30,19 +30,26 @@ def _has_literal_utf8_encoding(node: ast.Call) -> bool:
 
 
 def _non_utf8_read_text_calls(tree: ast.AST) -> list[int]:
-    return [
+    return sorted(
         node.lineno
         for node in ast.walk(tree)
         if _is_read_text_call(node)
         and isinstance(node, ast.Call)
         and not _has_literal_utf8_encoding(node)
-    ]
+    )
 
 
 class ReleaseConfigTests(unittest.TestCase):
     def test_text_read_guard_rejects_non_utf8_encoding(self) -> None:
         tree = ast.parse('Path("fixture").read_text(encoding="latin-1")')
         self.assertEqual(_non_utf8_read_text_calls(tree), [1])
+
+    def test_text_read_guard_sorts_multiple_violations(self) -> None:
+        tree = ast.parse(
+            'Path("first").read_text()\nPath("second").read_text(encoding="latin-1")'
+        )
+        tree.body.reverse()
+        self.assertEqual(_non_utf8_read_text_calls(tree), [1, 2])
 
     def test_release_config_text_reads_pin_utf8(self) -> None:
         source = Path(__file__).read_text(encoding="utf-8")
