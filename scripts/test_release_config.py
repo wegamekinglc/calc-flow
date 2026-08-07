@@ -324,6 +324,22 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("name: benchmark-smoke-${{ matrix.scale }}", benchmark_job)
         self.assertIn("path: benchmark-results/${{ matrix.scale }}.json", benchmark_job)
 
+    def test_scheduled_rust_benchmark_targets_only_core_harness(self) -> None:
+        workflow = (ROOT / ".github/workflows/benchmarks.yml").read_text()
+        rust_benchmark = workflow.split("  rust-benchmark:\n", 1)[1].split(
+            "  benchmark:\n", 1
+        )[0]
+
+        cargo_bench_commands = [
+            line.strip()
+            for line in rust_benchmark.splitlines()
+            if line.strip().startswith("run: cargo bench ")
+        ]
+        self.assertEqual(
+            cargo_bench_commands,
+            ["run: cargo bench --locked -p calc-flow --bench core"],
+        )
+
     def test_python_package_excludes_unsupported_pyarrow_25(self) -> None:
         for project in (ROOT, ROOT / "web-ui/backend"):
             with self.subTest(project=project):
