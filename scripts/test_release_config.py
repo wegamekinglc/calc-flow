@@ -325,7 +325,9 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("path: benchmark-results/${{ matrix.scale }}.json", benchmark_job)
 
     def test_scheduled_rust_benchmark_targets_only_core_harness(self) -> None:
-        workflow = (ROOT / ".github/workflows/benchmarks.yml").read_text()
+        workflow = (ROOT / ".github/workflows/benchmarks.yml").read_text(
+            encoding="utf-8"
+        )
         rust_benchmark = workflow.split("  rust-benchmark:\n", 1)[1].split(
             "  benchmark:\n", 1
         )[0]
