@@ -1190,7 +1190,7 @@ async fn process_source_data(
             .submit(
                 progress.binding.clone(),
                 RawIngressEvent::Data(sequenced),
-                raw_upstream_position(Some(&cursor), Some(sequence)),
+                data_upstream_position(&cursor, sequence),
             )
             .await?;
         inputs
@@ -1350,6 +1350,10 @@ fn end_upstream_position(snapshot: &SourceProgressSnapshot) -> RawUpstreamPositi
     )
 }
 
+fn data_upstream_position(cursor: &Cursor, sequence: u64) -> RawUpstreamPosition {
+    raw_upstream_position(Some(cursor), sequence.checked_add(1))
+}
+
 fn raw_upstream_position(
     cursor: Option<&Cursor>,
     control_sequence: Option<u64>,
@@ -1402,7 +1406,7 @@ mod tests {
     use super::{
         AcceptedSequenceRecorder, Cursor, SourceAcceptState, SourceAcceptance, SourceBinding,
         SourceCapabilities, SourceEvent, SourceProgressSnapshot, SourcePumpInputs, StreamSource,
-        end_upstream_position, run_source_pump, spawn_source_tasks,
+        data_upstream_position, end_upstream_position, run_source_pump, spawn_source_tasks,
         spawn_source_tasks_gated_with_metrics, take_live_progress_binding,
     };
     use crate::{
@@ -1448,6 +1452,17 @@ mod tests {
             RawUpstreamPosition::Exact {
                 delivery_replay_cursor: vec![4],
                 control_frontier: 7_u64.to_be_bytes().to_vec(),
+            }
+        );
+    }
+
+    #[test]
+    fn accepted_data_advances_the_upstream_control_frontier() {
+        assert_eq!(
+            data_upstream_position(&cursor(4), 7),
+            RawUpstreamPosition::Exact {
+                delivery_replay_cursor: vec![4],
+                control_frontier: 8_u64.to_be_bytes().to_vec(),
             }
         );
     }
