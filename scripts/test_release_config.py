@@ -302,8 +302,15 @@ class ReleaseConfigTests(unittest.TestCase):
             "  benchmark:\n", 1
         )[0]
 
-        self.assertIn("run: cargo bench -p calc-flow --bench core", rust_benchmark)
-        self.assertNotIn("run: cargo bench -p calc-flow\n", rust_benchmark)
+        cargo_bench_commands = [
+            line.strip()
+            for line in rust_benchmark.splitlines()
+            if line.strip().startswith("run: cargo bench ")
+        ]
+        self.assertEqual(
+            cargo_bench_commands,
+            ["run: cargo bench --locked -p calc-flow --bench core"],
+        )
 
     def test_python_package_excludes_unsupported_pyarrow_25(self) -> None:
         for project in (ROOT, ROOT / "web-ui/backend"):
