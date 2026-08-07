@@ -1190,7 +1190,7 @@ async fn process_source_data(
             .submit(
                 progress.binding.clone(),
                 RawIngressEvent::Data(sequenced),
-                data_upstream_position(&cursor, sequence),
+                data_upstream_position(&cursor, sequence)?,
             )
             .await?;
         inputs
@@ -1350,8 +1350,15 @@ fn end_upstream_position(snapshot: &SourceProgressSnapshot) -> RawUpstreamPositi
     )
 }
 
-fn data_upstream_position(cursor: &Cursor, sequence: u64) -> RawUpstreamPosition {
-    raw_upstream_position(Some(cursor), sequence.checked_add(1))
+fn data_upstream_position(cursor: &Cursor, sequence: u64) -> Result<RawUpstreamPosition> {
+    let control_frontier =
+        sequence
+            .checked_add(1)
+            .ok_or_else(|| CalcFlowError::InvalidArgument {
+                field: "runtime.progress.source.control_frontier".into(),
+                message: "data control frontier exhausted before progress admission".into(),
+            })?;
+    Ok(raw_upstream_position(Some(cursor), Some(control_frontier)))
 }
 
 fn raw_upstream_position(
@@ -1459,12 +1466,18 @@ mod tests {
     #[test]
     fn accepted_data_advances_the_upstream_control_frontier() {
         assert_eq!(
-            data_upstream_position(&cursor(4), 7),
+            data_upstream_position(&cursor(4), 7).unwrap(),
             RawUpstreamPosition::Exact {
                 delivery_replay_cursor: vec![4],
                 control_frontier: 8_u64.to_be_bytes().to_vec(),
             }
         );
+    }
+
+    #[test]
+    fn data_frontier_exhaustion_fails_before_progress_admission() {
+        let error = data_upstream_position(&cursor(4), u64::MAX).unwrap_err();
+        assert!(error.to_string().contains("control frontier"));
     }
 
     impl ExternalPayload for TestPayload {

@@ -9,20 +9,37 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class ReleaseConfigTests(unittest.TestCase):
-    def test_repository_text_reads_pin_utf8(self) -> None:
-        source = Path(__file__).read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        unpinned = [
-            node.lineno
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
+def _non_utf8_read_text_calls(tree: ast.AST) -> list[int]:
+    violations: list[int] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "read_text"
-            and not any(keyword.arg == "encoding" for keyword in node.keywords)
-        ]
+        ):
+            continue
+        encoding = next(
+            (keyword.value for keyword in node.keywords if keyword.arg == "encoding"),
+            None,
+        )
+        if not (
+            isinstance(encoding, ast.Constant)
+            and isinstance(encoding.value, str)
+            and encoding.value.lower() == "utf-8"
+        ):
+            violations.append(node.lineno)
+    return violations
 
-        self.assertEqual(unpinned, [])
+
+class ReleaseConfigTests(unittest.TestCase):
+    def test_text_read_guard_rejects_non_utf8_encoding(self) -> None:
+        tree = ast.parse('Path("fixture").read_text(encoding="latin-1")')
+        self.assertEqual(_non_utf8_read_text_calls(tree), [1])
+
+    def test_release_config_text_reads_pin_utf8(self) -> None:
+        source = Path(__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        self.assertEqual(_non_utf8_read_text_calls(tree), [])
 
     def test_release_versions_are_final_and_aligned(self) -> None:
         workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
