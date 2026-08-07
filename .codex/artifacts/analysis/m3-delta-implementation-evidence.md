@@ -79,10 +79,10 @@ Additional milestone evidence:
 
 - **Rust formatting:** pass, `cargo fmt --all --check`.
 - **Workspace Clippy:** pass for all targets/features with warnings denied.
-- **Rust harness:** pass, 253 core unit tests (252 passed and the opt-in soak
+- **Rust harness:** pass, 254 core unit tests (253 passed and the opt-in soak
   ignored), all
   integration/examples/bench targets, and 76 isolated PyO3 Rust tests.
-- **Rust coverage:** pass, 92.13% lines against the 90% workspace floor; PyO3
+- **Rust coverage:** pass, 92.14% lines against the 90% workspace floor; PyO3
   used the managed interpreter loader path.
 - **Rustdoc:** pass with warnings denied.
 - **Python:** pass, 436 tests plus Ruff check and format check.
@@ -99,12 +99,12 @@ Additional milestone evidence:
 - **Source hygiene:** pass, `git diff --check`, with no generated
   `_native*.so` in source.
 - **Standard soak:** pass on exact runtime implementation commit
-  `26f5abdde48b74da2760721603494aaa96cffaaf`, published as remote commit
-  `e8f560e0b4be98d11be8a1e6fd22c64bfe7cbfbb` with the identical tree
-  `eb28af6a51b135dad8a15ab41c05d0d179c2a212`; 1,200 measured seconds and
+  `5ac0d67dab0629d1a6aeac43e1255465ddc8b7dc`, published as remote commit
+  `939644c3d7c79fb055258e127ba0fab18053b56c` with the identical tree
+  `1563c5f2e8a052913702c7232172d8148f014029`; 1,200 measured seconds and
   120 samples, followed by bounded graceful drain and convergence.
 - **GitHub review/Codacy:** PR #86 passed Codacy with zero issues on the exact
-  runtime head. Four Copilot review rounds reported success; every inline and
+  runtime head. Six Copilot review rounds reported success; every inline and
   suppressed actionable finding was fixed or, for the source-budget finding,
   audited against the existing whole-job preflight test and documented at the
   validated live-source boundary. A final evidence-only head review is still
@@ -134,7 +134,7 @@ both sinks with no missing or duplicate delivery, and 1,332 of 1,332 receipts
 settled as commit-success. Terminal queue depth, charged rows/bytes, tasks,
 unsettled receipts, and timer entries were all zero. The run completed through
 `GracefulShutdown`; its first post-warmup and final five-minute median RSS
-values were 38,182 KiB and 14,652 KiB, respectively, with a
-`-130.84220380951814 MiB/hour` least-squares slope. The structured trace
+values were 37,928 KiB and 26,746 KiB, respectively, with a
+`-64.20250230150319 MiB/hour` least-squares slope. The structured trace
 contained 3,998 records and retained both terminal gate cuts. PR review, CI,
 Codacy, and merge evidence is also recorded in the implementation PR.
