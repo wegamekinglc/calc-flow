@@ -12,8 +12,9 @@ continuous runner.
 
 The implementation lives in `crates/calc-flow/src/runtime/streaming/` (the
 message, bounded channel, job and task contexts, whole-job preflight, source,
-operator, and sink tasks, supervisor, private runner/job/reaper, metrics, and
-soak), `crates/calc-flow/src/time/` (event time and epoch),
+operator, and sink tasks, the job-scoped progress driver, transient progress
+snapshot/status, supervisor, private runner/job/reaper, metrics, and soak),
+`crates/calc-flow/src/time/` (event time and epoch),
 `crates/calc-flow/src/operator/stream.rs` (the operator traits and public
 in-memory collector), and `crates/calc-flow/src/pipeline/stream.rs` (the
 compiled stream plan). The frozen semantics behind the contract are recorded
@@ -49,10 +50,10 @@ and other public consumers cannot forge, suppress, or reorder control
 (S1.3); the type system, not a runtime check, enforces this. Validation of
 control values — watermark monotonicity and epoch consistency — belongs to
 the runtime paths that construct and enqueue them and runs before enqueue,
-before any downstream side effect (S1.3, S5.4). The internal source task now
-validates source-provided watermark monotonicity; barrier and epoch validation
-remain checkpoint-protocol work listed under "Specified but not yet
-implemented".
+before any downstream side effect (S1.3, S5.4). The M3 job-scoped progress
+driver validates source-provided watermark monotonicity and owns generated
+watermark/timer ordering; barrier and epoch validation remain checkpoint-
+protocol work listed under "Specified but not yet implemented".
 
 Inspection goes through the message kind and typed accessors:
 
@@ -144,8 +145,9 @@ one stream operator. It borrows the job context and exposes:
   least one dropped assignment, and the maximum observed lateness. Row
   payloads are never accepted, and only window operators call this. The
   current version never fails; the `Result` keeps the frozen signature
-  stable for the validation rules later milestones add. Reporting these
-  counters as metrics arrives with the late-data policy work (D2.5).
+  stable for the validation rules later milestones add. M3 does not classify
+  or drop late rows and does not expose these counters as runtime metrics;
+  window-aware late-data policy and observability arrive in M4 (D2.5).
 
 ## The operator emission boundary
 
@@ -194,7 +196,7 @@ the supplied output ports and stores data messages in per-port FIFO outboxes;
 `drain(port)` empties one outbox, while an unknown port drains to empty. It is
 not the collector used by the production M2 task runtime.
 
-The crate-private M2 operator task instead constructs a
+The crate-private M3 operator task instead constructs a
 `ChannelStreamCollector` for each handler call. It performs the same
 port/kind/schema validation, validates every destination, and then sends the
 message directly through the output's bounded `EdgeSender` fan-out. Validation
@@ -308,10 +310,11 @@ can converge promptly.
 One operator task owns each compiled stream operator. It selects ready
 ingresses without weakening per-ingress FIFO, validates data emissions before
 the first send, fans out over real bounded edges, and owns one lazy
-operator-scoped DataFusion runtime when table work requires it. Unary
-watermarks call `on_watermark` before runtime forwarding; unary idle and
-all-ingress end are runtime-owned. Multi-ingress watermark/idle fail closed
-until M3, and every barrier fails closed until M5. `on_end` runs exactly once
+operator-scoped DataFusion runtime when table work requires it. Aggregate
+watermarks call `on_watermark` before runtime forwarding; aggregate idle and
+all-ingress end are runtime-owned. Multi-ingress watermark/idle use the M3
+minimum/idle-epoch semantics, and every barrier fails closed until M5.
+`on_end` runs exactly once
 after every ingress observes explicit end-of-input. A closed channel without
 an earlier explicit end is a failure, not synthetic EOF.
 
@@ -433,6 +436,28 @@ Non-goals:
   kinds and typed business values only; row payloads, metadata, and
   attributes never appear (I4).
 
+## M3 progress implementation boundary
+
+M3 prepares each source policy during whole-job preflight, then routes raw
+source data/control through one job-scoped progress driver. That driver alone
+owns the logical clock, binding/local/global ordering, finite inbox fences,
+timer heap, idle epochs, aggregate progress, completion receipts, and the
+lossless admission/drain/terminal/settlement execution trace. Multi-ingress
+progress uses the minimum watermark of known active inputs; idle and ended
+inputs are excluded, data and legal watermarks reactivate before processing,
+and all-ended emits one plain `EndOfInput` without a sentinel watermark.
+
+The crate-private transient snapshot captures the exact prepared/config,
+upstream cursor/control, trace, gate/fence, allocator, aggregate, and timer
+coordinate only at a receipt-quiescent boundary. Restore requires paused
+upstreams at exact captured positions and field-for-field equality before any
+state or runtime side effect is installed. This provides snapshot-ready and
+deterministically replayable progress state in one process. It is not
+serialized, durable, a checkpoint, or crash recovery.
+
+M3 forwards old/equal/new event-time rows unchanged. It neither classifies nor
+drops late rows and exposes no late-row runtime metric.
+
 ## Specified but not yet implemented
 
 The [specification](../.codex/artifacts/specs/continuous-streaming-runtime.md)
@@ -440,12 +465,9 @@ and the [v3 implementation plan](superpowers/plans/2026-08-02-continuous-streami
 assign the following behaviors to later milestones. They are not implemented
 in the current tree, and this document does not describe them as present:
 
-- **M3** — generated source watermark policies, idle timeout/reactivation,
-  the multi-ingress watermark minimum, and late-data drop metrics (S5, D2.5).
-  The current source task only forwards and validates source-provided
-  watermark/idle events.
-- **M4** — window assignment and final-only triggers (S6, D8); state
-  backends and durable segment staging (D4).
+- **M4** — window assignment, final-only triggers, window-aware late-data
+  classification/drop/metrics (S6, D2.5, D8), state backends, and durable
+  segment staging (D4).
 - **M5** — runtime-generated barriers, barrier injection and alignment, epoch
   checkpoint manifests, lineage recovery numbering (D9.3–D9.6), and the
   exactly-once sink commit protocol (S7, S9).

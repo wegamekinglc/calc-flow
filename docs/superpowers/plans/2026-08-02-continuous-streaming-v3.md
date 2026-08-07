@@ -360,7 +360,7 @@ M1 v3 类型和编译器重构
 M2 持续 task runtime
         │
         ▼
-M3 event time / watermark
+M3 progress driver / event time / transient replay
         │
         ▼
 M4 state backend / window
@@ -375,16 +375,16 @@ M6 connector / project v3 / Python / Studio
 M7 hardening / 3.0 release
 ```
 
-| 里程碑 | 核心产出                                      | 单工程师估算 | 前置依赖 |
-| ------ | --------------------------------------------- | ------------ | -------- |
-| M0     | 通过评审的语义、API、故障模型                 | 2 至 3 周    | 无       |
-| M1     | v3 trait、plan、compiler、message、channel    | 4 至 6 周    | M0       |
-| M2     | crate-private source-driven runtime internals | 5 至 7 周    | M1       |
-| M3     | event time、watermark、idle、late metrics     | 3 至 5 周    | M2       |
-| M4     | 增量本地状态与 final-only window              | 6 至 9 周    | M3       |
-| M5     | epoch checkpoint 与 transactional sink        | 8 至 11 周   | M4       |
-| M6     | connector、project v3、Python、Studio         | 16 至 24 周  | M5       |
-| M7     | soak、性能、安全、打包与发布                  | 3 至 5 周    | M6       |
+| 里程碑 | 核心产出                                            | 单工程师估算 | 前置依赖 |
+| ------ | --------------------------------------------------- | ------------ | -------- |
+| M0     | 通过评审的语义、API、故障模型                       | 2 至 3 周    | 无       |
+| M1     | v3 trait、plan、compiler、message、channel          | 4 至 6 周    | M0       |
+| M2     | crate-private source-driven runtime internals       | 5 至 7 周    | M1       |
+| M3     | progress driver、watermark、idle、transient replay  | 3 至 5 周    | M2       |
+| M4     | 增量本地状态、final-only window、late policy        | 6 至 9 周    | M3       |
+| M5     | epoch checkpoint 与 transactional sink              | 8 至 11 周   | M4       |
+| M6     | connector、project v3、Python、Studio               | 16 至 24 周  | M5       |
+| M7     | soak、性能、安全、打包与发布                        | 3 至 5 周    | M6       |
 
 顺序总量约 47 至 70 engineer-weeks，与调研报告 §9.1 给出的“单工程师 11 至 16 个月”
 量级一致。两名熟练工程师可并行数据库 connector、其他 connector、Python、Studio、
@@ -887,100 +887,118 @@ envelopes、零 missing/duplicate/leak、三条 saturated/blocked edges 与 -2.6
 RSS slope。raw log SHA-256 为
 `bc97c8f736ad41a4f228e07300f1ecd23c9af9fb09dc1be1718823430bd05f35`。
 
-## 9. M3：Event time 与 watermark
+## 9. M3：Progress driver、event time 与 transient replay
+
+本节按 PR #85 的 M3 delta specification、API note 和 critique 执行。M3 的交付语义是
+“snapshot-ready and deterministically replayable progress state”：快照只在同进程内存中
+使用，不是 checkpoint，不承诺 crash recovery。late-row 分类、drop 与指标移至 M4；
+durable progress recovery 仍属于 M5；public A6 仍在 post-M5 独立 gate。
 
 ### Task M3.1：实现 source watermark policy
 
 **文件：**
 
-- 新建：`crates/calc-flow/src/time/watermark.rs`
-- 修改：`crates/calc-flow/src/runtime/streaming/source_task.rs`
-- 新建：`crates/calc-flow/tests/watermark_source.rs`
+- 新建：`crates/calc-flow/src/runtime/streaming/progress/prepare.rs`
+- 修改：`crates/calc-flow/src/runtime/streaming/{job,source_task}.rs`
 
 **首版 policy：**
 
 ```rust
-enum WatermarkPolicy {
+pub(crate) enum WatermarkPolicy {
     SourceProvided,
     BoundedOutOfOrderness {
-        event_time_column: String,
-        delay: Duration,
+        event_time_column: Arc<str>,
+        max_out_of_orderness: Duration,
         emit_interval: Duration,
-        idle_timeout: Duration,
+        idle_timeout: Option<Duration>,
     },
-    Disabled,
+    Disabled { idle_timeout: Option<Duration> },
 }
 ```
 
-**先写 RED：**
+**RED 与实现：**
 
-- [ ] missing/non-timestamp event-time column 带 source/column path 报错。
-- [ ] 四种 Arrow timestamp unit 做 checked conversion。
-- [ ] generated watermark = observed max event time - delay。
-- [ ] 后续旧数据不能让 watermark 回退。
-- [ ] source-provided 回退 watermark 在入队前失败。
-- [ ] 全 null timestamp batch 不产生新 watermark。
+- [x] missing/non-timestamp event-time column 带 binding/column path 报错。
+- [x] 四种 Arrow timestamp unit 做 checked conversion；null-only batch 不推进。
+- [x] generated watermark 使用 observed max event time - max out-of-orderness，且不回退。
+- [x] source-provided watermark 回退在 driver transaction 中失败。
+- [x] native watermark capability × policy matrix 完整覆盖，禁止静默合并。
+- [x] whole-job preflight 在 connector open、pull 和 task spawn 前解析 policy、schema、
+  capability 与稳定 binding ordinal，并冻结 prepared/config/fence fingerprint。
+- [x] driver logical timer heap 使用 phase-anchored cadence；排序测试使用 fake time。
+- [x] 首版只支持 table source + timestamp column + fixed delay；SQL watermark expression
+  后置。
 
-**实现：**
+**验收门：** source 在完整 execution trace replay 下产生确定、单调的 watermark
+序列；policy/capability 冲突在任何 runtime side effect 前失败。
 
-- [ ] compile_stream 时校验 policy。
-- [ ] 在 Rust/Arrow 中求 timestamp max，不做逐行 Python callback。
-- [ ] 用 Tokio time 周期发射，测试使用 paused time。
-- [ ] policy state 进入 source checkpoint metadata。
-- [ ] 3.0 只支持 table source + timestamp column + fixed delay；任意 SQL watermark
-  expression 后置。
-
-**验收门：** source 在 replay 下产生确定、单调的 watermark 序列。
-
-### Task M3.2：实现 multi-input progress、idle 与 end
+### Task M3.2：实现 job-scoped progress driver、receipt 与 multi-input progress
 
 **文件：**
 
-- 新建：`crates/calc-flow/src/runtime/streaming/progress.rs`
-- 修改：`crates/calc-flow/src/runtime/streaming/operator_task.rs`
-- 新建：`crates/calc-flow/tests/watermark_progress.rs`
+- 新建：`crates/calc-flow/src/runtime/streaming/progress/{driver,aggregate,generated,trace,types}.rs`
+- 修改：`crates/calc-flow/src/runtime/streaming/{runner,source_task,operator_task}.rs`
 
-**先写 RED：**
+**RED 与实现：**
 
-- [ ] 两个 active input 输出 minimum watermark。
-- [ ] fast input 不能越过 slow active input。
-- [ ] idle input 排除出 minimum。
-- [ ] data 到来时 idle input 先 reactivate。
-- [ ] reactivate 后可能产生 late row，但 output watermark 不回退。
-- [ ] ended input 永久排除出后续 minimum。
-- [ ] 全部 input ended 只触发一次 final flush 和 end forwarding。
+- [x] 两个 active input 输出 minimum watermark；未知 active watermark 阻止推进。
+- [x] idle/ended input 排除出 minimum；所有 live idle 每个 epoch 只发一个 plain `Idle`。
+- [x] data 或合法 connector watermark 先 reactivate，再参与处理/聚合。
+- [x] reactivate 不回退已发出的 aggregate watermark。
+- [x] ended input 永久排除；全部 ended 只发一次 `EndOfInput`，不发 sentinel watermark。
+- [x] M3 不分类、不丢弃 old/equal/new event-time row，也不增加 late metric。
+- [x] 单一 job-scoped driver 拥有 logical clock、binding/local/global sequence、
+  `ReadyKey`、finite inbox fence、timer、idle epoch 与 progress emission。
+- [x] adapter 只能提交 raw data/control 与 exact upstream position，不能伪造 semantic key。
+- [x] admission、drain/fence、gate close、terminal、settlement 与 driver-phase failure
+  全部写入 lossless `ProgressExecutionTrace`。
+- [x] accepted envelope 保留 one-shot receipt；success、transaction error、End tail、
+  cancel 与 fatal 均 exactly-once settlement。
+- [x] finite ready snapshot 在 scratch state 上按 total key order 事务执行；失败不泄漏
+  state、timer、cursor acknowledgement 或 emission。
+- [x] checked counter exhaustion 不 wrap、不生成伪 `ReadyKey`，并完成 fatal settlement。
 
-**实现：**
+**验收门：** fast/slow/idle/reactivated/ended 组合、End/cancel/fatal admission race、
+receipt disposition 和完整 trace replay 均可确定复现；M2 lifecycle/backpressure/cancel
+回归保持绿色。
 
-- [ ] 每 ingress 记录 `Active`、`Idle`、`Ended` 和 last watermark。
-- [ ] 仅在 minimum 严格推进时产生 output watermark。
-- [ ] operator 先处理 watermark，再由 runtime 转发。
-- [ ] input progress 进入 operator checkpoint。
-- [ ] status snapshot 使用稳定 ingress ID 排序。
-
-**验收门：** fast/slow/idle/reactivated/ended 组合在 union 和 window 图上全部正确。
-
-### Task M3.3：实现 late-data drop 与指标
+### Task M3.3：实现 progress status/metrics 与 transient snapshot
 
 **文件：**
 
-- 修改：`crates/calc-flow/src/operator/window.rs`
-- 修改：`crates/calc-flow/src/runtime/streaming/metrics.rs`
-- 新建：`crates/calc-flow/tests/late_data.rs`
+- 新建：`crates/calc-flow/src/runtime/streaming/progress/{snapshot,status}.rs`
+- 修改：`crates/calc-flow/src/runtime/streaming/progress/driver.rs`
 
 **步骤：**
 
-- [ ] 3.0 只实现 `LateDataPolicy::Drop`。
-- [ ] 严格使用 M0 批准的 late boundary：一行迟到当且仅当其所属窗口
-  `window_end <= 当前输入 watermark`。hopping 场景下同一行可能同时命中已关闭和
-  未关闭的窗口，此时只丢弃已关闭窗口的那一份，其余窗口正常累加。
-- [ ] 记录 late rows、affected batches、maximum lateness。
-- [ ] 不记录行 payload。
-- [ ] project 中出现 allow/side_output 时编译失败。
-- [ ] 恢复后 watermark 和 late metrics 不回退、不重复累计已提交值。
+- [x] 仅在 receipt-quiescent event boundary 捕获 crate-private in-memory snapshot。
+- [x] 捕获并逐字段校验 prepared/config fingerprint、driver instant、ordered binding
+  table、upstream cursor/control frontier、full trace prefix/position、gate state/generation/
+  close cut、last fence、所有 next allocator、aggregate/idle state 与 timer coordinate。
+- [x] restore 前要求所有 upstream paused 且 exact-positioned；任一字段不等即在安装
+  state/timer、spawn task、resume connector、admission、settlement 或 emission 前失败。
+- [x] 从 exact coordinate 对相同 raw attempts、logical clock 与 full trace 重放至少
+  100 次并得到相同 admission、output、receipt、gate 与 terminal outcome。
+- [x] status 只复制稳定 progress 状态与计数，不分配 semantic sequence，不含 late metric。
 
-**验收门：** late row 不会重开 final window，且用户能观察丢弃数量。watermark 尚未
-越过 `window_end` 的乱序行必须被正常累加，不得计入 late 指标。
+**验收门：** snapshot-ready and deterministically replayable progress state；不序列化、
+不写 manifest、不声称 durable/crash recovery。
+
+### Task M3.4：集成、证据与 soak
+
+- [x] PR #85 的 AC-01 至 AC-85 均有命名测试或显式等价 gate 映射。
+- [x] paused-time full-graph stress 执行 100 个 seed；exact-coordinate replay 执行 100 次。
+- [x] 标准 20-minute two-source slow-sink soak 通过并保存 structured evidence。
+- [x] Rust/Python/Studio/frontend、coverage、docs、supply-chain 与 generated-contract gate
+  全部通过。
+- [x] Rust public API、Python、REST/OpenAPI 无 M3 surface diff；public A6 不提前暴露。
+
+20 分钟是 M3 及后续 milestone 的默认 soak 标准，除非新的 controlling specification
+明确替换。更短的 smoke 只用于开发，不满足 merge gate。
+
+M3 的 AC、stress、local gate 与 soak schema 证据记录在
+`.codex/artifacts/analysis/m3-delta-implementation-evidence.md`；exact-head soak 与
+GitHub review/CI/Codacy/merge 证据在实现 PR 中补齐。
 
 ## 10. M4：增量状态与 final-only window
 
@@ -1823,9 +1841,11 @@ PostgreSQL CDC -> window -> ClickHouse/Parquet stream。
 
 ### M3
 
-- watermark 强类型、单调、可恢复、multi-input min。
+- watermark 强类型、单调，multi-input min 正确。
 - idle 不阻塞进度且能正确 reactivate。
-- late row 被丢弃并可观测。
+- progress state 已达到 snapshot-ready and deterministically replayable；该 snapshot
+  不是 durable/crash recovery。
+- late row 在 M3 中不分类、不丢弃且没有 late metric；window-aware late policy 属于 M4。
 
 ### M4
 

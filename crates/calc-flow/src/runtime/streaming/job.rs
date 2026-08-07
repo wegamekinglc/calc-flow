@@ -4,6 +4,7 @@ use async_trait::async_trait;
 
 use super::{
     StreamJobContext,
+    progress::{PreparedStreamJob, StreamProgressRuntimeConfig, prepare_stream_job},
     source_task::{SourceBinding, SourceCapabilities, validate_source_capabilities},
 };
 use crate::{
@@ -82,6 +83,7 @@ pub(crate) struct ValidatedContinuousJob {
     pub(crate) plan: StreamRuntimePlanParts,
     pub(crate) sources: BTreeMap<String, SourceBinding>,
     pub(crate) sinks: BTreeMap<String, Vec<ValidatedOrdinarySink>>,
+    pub(crate) progress: PreparedStreamJob,
     pub(crate) delivery_mode: M2DeliveryMode,
 }
 
@@ -101,7 +103,7 @@ pub(crate) fn preflight_job(spec: ContinuousJobSpec) -> Result<ValidatedContinuo
     validate_runtime_topology(&plan)?;
     validate_delivery_requirements(&plan)?;
 
-    let validated_sources = validate_sources(&plan, sources)?;
+    let (validated_sources, progress) = validate_sources(&plan, sources)?;
     let validated_sinks = validate_sinks(&plan, sinks)?;
 
     Ok(ValidatedContinuousJob {
@@ -109,6 +111,7 @@ pub(crate) fn preflight_job(spec: ContinuousJobSpec) -> Result<ValidatedContinuo
         plan,
         sources: validated_sources,
         sinks: validated_sinks,
+        progress,
         delivery_mode,
     })
 }
@@ -145,7 +148,7 @@ fn validate_delivery_requirements(plan: &StreamRuntimePlanParts) -> Result<()> {
 fn validate_sources(
     plan: &StreamRuntimePlanParts,
     sources: Vec<NamedSourceBinding>,
-) -> Result<BTreeMap<String, SourceBinding>> {
+) -> Result<(BTreeMap<String, SourceBinding>, PreparedStreamJob)> {
     let mut validated = BTreeMap::new();
     for named in sources {
         let (binding_id, binding) = validate_source(plan, named)?;
@@ -163,7 +166,28 @@ fn validate_sources(
     {
         return Err(missing_source(binding_id));
     }
-    Ok(validated)
+    let specs = plan
+        .source_routes
+        .keys()
+        .map(|binding_id| {
+            validated
+                .get(binding_id)
+                .expect("missing sources were rejected above")
+                .progress_spec(binding_id)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let progress = prepare_stream_job(
+        &plan.fingerprint,
+        &specs,
+        StreamProgressRuntimeConfig::default(),
+    )?;
+    for prepared in progress.bindings.iter().cloned() {
+        validated
+            .get_mut(prepared.identity.as_str())
+            .expect("prepared bindings were built from validated sources")
+            .install_prepared_progress(prepared);
+    }
+    Ok((validated, progress))
 }
 
 fn validate_source(

@@ -29,6 +29,11 @@ mod metrics;
 mod operator_task;
 #[allow(
     dead_code,
+    reason = "M3 progress coordination remains crate-private until the post-M5 public A6 gate"
+)]
+mod progress;
+#[allow(
+    dead_code,
     reason = "M2 internal runner remains crate-private until the post-M5 public A6 gate"
 )]
 mod runner;

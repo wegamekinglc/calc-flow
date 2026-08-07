@@ -14,6 +14,10 @@ use super::{
     EdgeReceiver, EdgeSender, EnvelopeCost, StreamMessage, StreamMessageKind,
     context::{StreamTaskContext, wait_for_task_gate},
     metrics::MetricsRecorder,
+    progress::{
+        aggregate::{AggregateInput, MultiInputProgress, ProgressEmissionKind},
+        prepare::BindingOrdinal,
+    },
     supervisor::{TaskId, TaskSupervisor, panic_message},
 };
 use crate::{
@@ -204,19 +208,19 @@ async fn run_operator_loop(inputs: &mut OperatorTaskInputs) -> Result<()> {
             message: format!("operator {:?} has no runtime ingress", inputs.node_id),
         });
     }
-    let mut input_watermark = None;
+    let mut input_progress = OperatorInputProgress::new(inputs.ingresses.keys());
     loop {
         if inputs
             .ingresses
             .values()
             .all(|ingress| ingress.saw_explicit_eof)
         {
-            return finish_operator(inputs, input_watermark).await;
+            return finish_operator(inputs, input_progress.input_watermark()).await;
         }
         let Some((ingress_name, message)) = receive_operator_message(inputs).await? else {
             return Ok(());
         };
-        dispatch_or_cancel(inputs, &ingress_name, message, &mut input_watermark).await?;
+        dispatch_or_cancel(inputs, &ingress_name, message, &mut input_progress).await?;
     }
 }
 
@@ -274,12 +278,12 @@ async fn dispatch_or_cancel(
     inputs: &mut OperatorTaskInputs,
     ingress_name: &str,
     message: StreamMessage,
-    input_watermark: &mut Option<EventTime>,
+    input_progress: &mut OperatorInputProgress,
 ) -> Result<()> {
     let cancellation = inputs.context.job().cancellation().clone();
     tokio::select! {
         biased;
-        result = dispatch_message(inputs, ingress_name, message, input_watermark) => result,
+        result = dispatch_message(inputs, ingress_name, message, input_progress) => result,
         () = cancellation.cancelled() => Ok(()),
     }
 }
@@ -306,16 +310,28 @@ async fn dispatch_message(
     inputs: &mut OperatorTaskInputs,
     ingress_name: &str,
     message: StreamMessage,
-    input_watermark: &mut Option<EventTime>,
+    input_progress: &mut OperatorInputProgress,
 ) -> Result<()> {
     match message.kind() {
         StreamMessageKind::Data => {
-            dispatch_data(inputs, ingress_name, message, *input_watermark).await
+            let watermark = input_progress.input_watermark();
+            input_progress.evaluate(ingress_name, AggregateInput::Data)?;
+            dispatch_data(inputs, ingress_name, message, watermark).await
         }
         StreamMessageKind::Watermark => {
-            dispatch_watermark(inputs, ingress_name, message, input_watermark).await
+            let previous = input_progress.input_watermark();
+            let watermark = message
+                .as_watermark()
+                .expect("watermark kind always carries event time");
+            let emissions =
+                input_progress.evaluate(ingress_name, AggregateInput::Watermark(watermark))?;
+            dispatch_progress_emissions(inputs, ingress_name, emissions, previous).await
         }
-        StreamMessageKind::Idle => dispatch_idle(inputs, ingress_name, message).await,
+        StreamMessageKind::Idle => {
+            let previous = input_progress.input_watermark();
+            let emissions = input_progress.evaluate(ingress_name, AggregateInput::Idle)?;
+            dispatch_progress_emissions(inputs, ingress_name, emissions, previous).await
+        }
         StreamMessageKind::Barrier => Err(unsupported_control(
             inputs,
             ingress_name,
@@ -323,6 +339,9 @@ async fn dispatch_message(
             "barrier control is unavailable before M5; no downstream control was emitted",
         )),
         StreamMessageKind::EndOfInput => {
+            let previous = input_progress.input_watermark();
+            let emissions = input_progress.evaluate(ingress_name, AggregateInput::End)?;
+            dispatch_progress_emissions(inputs, ingress_name, emissions, previous).await?;
             inputs
                 .ingresses
                 .get_mut(ingress_name)
@@ -375,18 +394,10 @@ async fn dispatch_data(
 
 async fn dispatch_watermark(
     inputs: &mut OperatorTaskInputs,
-    ingress_name: &str,
+    _ingress_name: &str,
     message: StreamMessage,
     input_watermark: &mut Option<EventTime>,
 ) -> Result<()> {
-    if inputs.ingresses.len() != 1 {
-        return Err(unsupported_control(
-            inputs,
-            ingress_name,
-            "watermark",
-            "multi-ingress watermark control is unavailable before M3; no downstream control was emitted",
-        ));
-    }
     let watermark = message
         .as_watermark()
         .expect("watermark kind always carries event time");
@@ -412,18 +423,89 @@ async fn dispatch_watermark(
 
 async fn dispatch_idle(
     inputs: &mut OperatorTaskInputs,
-    ingress_name: &str,
+    _ingress_name: &str,
     message: StreamMessage,
 ) -> Result<()> {
-    if inputs.ingresses.len() != 1 {
-        return Err(unsupported_control(
-            inputs,
-            ingress_name,
-            "idle",
-            "multi-ingress idle control is unavailable before M3; no downstream control was emitted",
-        ));
-    }
     forward_control(&mut inputs.outputs, message, inputs.context.job()).await
+}
+
+async fn dispatch_progress_emissions(
+    inputs: &mut OperatorTaskInputs,
+    ingress_name: &str,
+    emissions: Vec<ProgressEmissionKind>,
+    mut previous_watermark: Option<EventTime>,
+) -> Result<()> {
+    for emission in emissions {
+        match emission {
+            ProgressEmissionKind::Watermark(watermark) => {
+                dispatch_watermark(
+                    inputs,
+                    ingress_name,
+                    StreamMessage::watermark(watermark),
+                    &mut previous_watermark,
+                )
+                .await?;
+            }
+            ProgressEmissionKind::Idle => {
+                dispatch_idle(inputs, ingress_name, StreamMessage::idle()).await?;
+            }
+            ProgressEmissionKind::EndOfInput => {}
+        }
+    }
+    Ok(())
+}
+
+struct OperatorInputProgress {
+    ordinal_by_ingress: BTreeMap<String, BindingOrdinal>,
+    aggregate: MultiInputProgress,
+}
+
+impl OperatorInputProgress {
+    fn new<'a>(ingresses: impl IntoIterator<Item = &'a String>) -> Self {
+        let ordinal_by_ingress = ingresses
+            .into_iter()
+            .enumerate()
+            .map(|(index, ingress)| {
+                (
+                    ingress.clone(),
+                    BindingOrdinal::new(
+                        u64::try_from(index).expect("ingress count fits the binding ordinal"),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        Self {
+            aggregate: MultiInputProgress::new(ordinal_by_ingress.values().copied()),
+            ordinal_by_ingress,
+        }
+    }
+
+    fn evaluate(
+        &mut self,
+        ingress: &str,
+        input: AggregateInput,
+    ) -> Result<Vec<ProgressEmissionKind>> {
+        let ordinal =
+            *self
+                .ordinal_by_ingress
+                .get(ingress)
+                .ok_or_else(|| CalcFlowError::Internal {
+                    message: format!("unknown operator ingress {ingress:?}"),
+                })?;
+        self.aggregate
+            .evaluate(ordinal, input)
+            .map(|emissions| {
+                emissions
+                    .into_iter()
+                    .map(|emission| emission.kind)
+                    .collect()
+            })
+            .map_err(super::progress::types::ProgressFailure::into_existing_error)
+    }
+
+    const fn input_watermark(&self) -> Option<EventTime> {
+        self.aggregate.last_emitted_watermark()
+    }
 }
 
 fn unsupported_control(
@@ -1246,22 +1328,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watermark_error_and_multi_ingress_control_and_barrier_fail_closed() {
+    async fn watermark_error_and_barrier_fail_closed() {
         for (names, message, behavior) in [
             (
                 &["input"][..],
                 StreamMessage::watermark(EventTime::from_micros(1)),
                 Behavior::WatermarkError,
-            ),
-            (
-                &["left", "right"][..],
-                StreamMessage::idle(),
-                Behavior::Forward,
-            ),
-            (
-                &["left", "right"][..],
-                StreamMessage::watermark(EventTime::from_micros(1)),
-                Behavior::Forward,
             ),
             (
                 &["input"][..],
@@ -1286,30 +1358,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multi_ingress_control_and_barrier_use_exact_fail_closed_diagnostics() {
-        for (names, ingress, message, expected_field, expected_message) in [
-            (
-                &["left", "right"][..],
-                "left",
-                StreamMessage::watermark(EventTime::from_micros(1)),
-                "runtime.nodes.node.ingress.left.watermark",
-                "multi-ingress watermark control is unavailable before M3; no downstream control was emitted",
-            ),
-            (
-                &["left", "right"][..],
-                "left",
-                StreamMessage::idle(),
-                "runtime.nodes.node.ingress.left.idle",
-                "multi-ingress idle control is unavailable before M3; no downstream control was emitted",
-            ),
-            (
-                &["input"][..],
-                "input",
-                StreamMessage::barrier(crate::Epoch::INITIAL),
-                "runtime.nodes.node.ingress.input.barrier",
-                "barrier control is unavailable before M5; no downstream control was emitted",
-            ),
-        ] {
+    async fn barrier_uses_exact_fail_closed_diagnostics() {
+        for (names, ingress, message, expected_field, expected_message) in [(
+            &["input"][..],
+            "input",
+            StreamMessage::barrier(crate::Epoch::INITIAL),
+            "runtime.nodes.node.ingress.input.barrier",
+            "barrier control is unavailable before M5; no downstream control was emitted",
+        )] {
             let watermarks = Arc::new(AtomicUsize::new(0));
             let ends = Arc::new(AtomicUsize::new(0));
             let observed = Arc::new(Mutex::new(Vec::new()));
@@ -1353,6 +1409,58 @@ mod tests {
             assert!(observed.lock().is_empty());
             assert!(harness.outputs[0].recv().await.unwrap().is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn multi_ingress_watermark_and_idle_are_aggregated_once() {
+        let mut harness = harness(&["left", "right"], 2, Behavior::Forward);
+        start(&mut harness).await;
+        harness
+            .inputs
+            .get_mut("left")
+            .unwrap()
+            .send(StreamMessage::watermark(EventTime::from_micros(9)))
+            .await
+            .unwrap();
+        harness
+            .inputs
+            .get_mut("right")
+            .unwrap()
+            .send(StreamMessage::watermark(EventTime::from_micros(7)))
+            .await
+            .unwrap();
+        let watermark = harness.outputs[0].recv().await.unwrap().unwrap();
+        assert_eq!(watermark.as_watermark(), Some(EventTime::from_micros(7)));
+
+        for ingress in ["left", "right"] {
+            harness
+                .inputs
+                .get_mut(ingress)
+                .unwrap()
+                .send(StreamMessage::idle())
+                .await
+                .unwrap();
+        }
+        assert!(harness.outputs[0].recv().await.unwrap().unwrap().is_idle());
+        for ingress in ["left", "right"] {
+            harness
+                .inputs
+                .get_mut(ingress)
+                .unwrap()
+                .send(StreamMessage::end_of_input())
+                .await
+                .unwrap();
+        }
+        let report = harness.supervisor.join_all().await;
+        assert!(report.errors.is_empty());
+        assert!(
+            harness.outputs[0]
+                .recv()
+                .await
+                .unwrap()
+                .unwrap()
+                .is_end_of_input()
+        );
     }
 
     #[tokio::test]

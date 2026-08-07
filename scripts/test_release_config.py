@@ -9,16 +9,68 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _is_read_text_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "read_text"
+    )
+
+
+def _has_literal_utf8_encoding(node: ast.Call) -> bool:
+    encoding = next(
+        (keyword.value for keyword in node.keywords if keyword.arg == "encoding"),
+        None,
+    )
+    return (
+        isinstance(encoding, ast.Constant)
+        and isinstance(encoding.value, str)
+        and encoding.value.lower() == "utf-8"
+    )
+
+
+def _non_utf8_read_text_calls(tree: ast.AST) -> list[int]:
+    return sorted(
+        node.lineno
+        for node in ast.walk(tree)
+        if _is_read_text_call(node)
+        and isinstance(node, ast.Call)
+        and not _has_literal_utf8_encoding(node)
+    )
+
+
 class ReleaseConfigTests(unittest.TestCase):
-    def test_release_versions_are_final_and_aligned(self) -> None:
-        workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())
-        binding = tomllib.loads(
-            (ROOT / "crates/calc-flow-python/Cargo.toml").read_text()
+    def test_text_read_guard_rejects_non_utf8_encoding(self) -> None:
+        tree = ast.parse('Path("fixture").read_text(encoding="latin-1")')
+        self.assertEqual(_non_utf8_read_text_calls(tree), [1])
+
+    def test_text_read_guard_sorts_multiple_violations(self) -> None:
+        tree = ast.parse(
+            'Path("first").read_text()\nPath("second").read_text(encoding="latin-1")'
         )
-        package = tomllib.loads((ROOT / "pyproject.toml").read_text())
-        studio = tomllib.loads((ROOT / "web-ui/backend/pyproject.toml").read_text())
-        frontend = json.loads((ROOT / "web-ui/package.json").read_text())
-        frontend_lock = json.loads((ROOT / "web-ui/package-lock.json").read_text())
+        tree.body.reverse()
+        self.assertEqual(_non_utf8_read_text_calls(tree), [1, 2])
+
+    def test_release_config_text_reads_pin_utf8(self) -> None:
+        source = Path(__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        self.assertEqual(_non_utf8_read_text_calls(tree), [])
+
+    def test_release_versions_are_final_and_aligned(self) -> None:
+        workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        binding = tomllib.loads(
+            (ROOT / "crates/calc-flow-python/Cargo.toml").read_text(encoding="utf-8")
+        )
+        package = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        studio = tomllib.loads(
+            (ROOT / "web-ui/backend/pyproject.toml").read_text(encoding="utf-8")
+        )
+        frontend = json.loads(
+            (ROOT / "web-ui/package.json").read_text(encoding="utf-8")
+        )
+        frontend_lock = json.loads(
+            (ROOT / "web-ui/package-lock.json").read_text(encoding="utf-8")
+        )
 
         self.assertEqual(workspace["workspace"]["package"]["version"], "2.0.0")
         self.assertEqual(binding["dependencies"]["calc-flow"]["version"], "=2.0.0")
@@ -30,17 +82,19 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(frontend_lock["packages"][""]["version"], "2.0.0")
         self.assertIn(
             '__version__ = "2.0.0"',
-            (ROOT / "python/calc_flow/__init__.py").read_text(),
+            (ROOT / "python/calc_flow/__init__.py").read_text(encoding="utf-8"),
         )
         self.assertIn(
             'version="2.0.0"',
-            (ROOT / "web-ui/backend/src/calc_flow_studio/app.py").read_text(),
+            (ROOT / "web-ui/backend/src/calc_flow_studio/app.py").read_text(
+                encoding="utf-8"
+            ),
         )
-        openapi = json.loads((ROOT / "web-ui/openapi.json").read_text())
+        openapi = json.loads((ROOT / "web-ui/openapi.json").read_text(encoding="utf-8"))
         self.assertEqual(openapi["info"]["version"], "2.0.0")
 
         release_text = "\n".join(
-            (ROOT / path).read_text()
+            (ROOT / path).read_text(encoding="utf-8")
             for path in (".github/workflows/ci.yml", ".github/workflows/release.yml")
         )
         self.assertNotIn(">=2.0.0a1", release_text)
@@ -49,22 +103,24 @@ class ReleaseConfigTests(unittest.TestCase):
     def test_python_projects_ship_license_files(self) -> None:
         for project in (ROOT, ROOT / "web-ui/backend"):
             with self.subTest(project=project):
-                config = tomllib.loads((project / "pyproject.toml").read_text())
+                config = tomllib.loads(
+                    (project / "pyproject.toml").read_text(encoding="utf-8")
+                )
                 self.assertEqual(config["project"]["license-files"], ["LICENSE"])
-                license_text = (project / "LICENSE").read_text()
+                license_text = (project / "LICENSE").read_text(encoding="utf-8")
                 self.assertIn("Apache License", license_text)
                 self.assertIn("Version 2.0, January 2004", license_text)
 
     def test_crate_excludes_integration_tests_and_ships_license(self) -> None:
         crate = ROOT / "crates/calc-flow"
-        config = tomllib.loads((crate / "Cargo.toml").read_text())
+        config = tomllib.loads((crate / "Cargo.toml").read_text(encoding="utf-8"))
         self.assertIn("tests/**", config["package"]["exclude"])
-        license_text = (crate / "LICENSE").read_text()
+        license_text = (crate / "LICENSE").read_text(encoding="utf-8")
         self.assertIn("Apache License", license_text)
         self.assertIn("Version 2.0, January 2004", license_text)
 
     def test_codacy_excludes_only_the_frozen_allocation_harness(self) -> None:
-        config = (ROOT / ".codacy.yml").read_text()
+        config = (ROOT / ".codacy.yml").read_text(encoding="utf-8")
         harness_path = "crates/calc-flow/benches/allocation_regression.rs"
         frozen_harness = f'  - "{harness_path}"'
 
@@ -84,25 +140,25 @@ class ReleaseConfigTests(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 self.assertNotRegex(
-                    (ROOT / path).read_text(),
+                    (ROOT / path).read_text(encoding="utf-8"),
                     r"(?i)dal(?:[_-]?38)",
                 )
 
-        harness = (ROOT / harness_path).read_text()
+        harness = (ROOT / harness_path).read_text(encoding="utf-8")
         self.assertIn(
             'env::var("ALLOCATION_REGRESSION_BACKGROUND_LOAD_POLICY")',
             harness,
         )
 
     def test_release_maturin_actions_pin_tool_and_rust_versions(self) -> None:
-        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         action_count = workflow.count("uses: PyO3/maturin-action@")
         self.assertEqual(action_count, 3)
         self.assertEqual(workflow.count("maturin-version: v1.14.1"), action_count)
         self.assertEqual(workflow.count('rust-toolchain: "1.88.0"'), action_count)
 
     def test_rust_core_ci_sets_python_313_before_all_features(self) -> None:
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         rust_core = workflow.split("  rust-core:\n", 1)[1].split(
             "  rust-supply-chain:\n", 1
         )[0]
@@ -136,7 +192,7 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn(f"run: {rust_test_command}", rust_test_step)
 
     def test_rust_core_ci_reclaims_disk_around_coverage(self) -> None:
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         rust_core = workflow.split("  rust-core:\n", 1)[1].split(
             "  rust-supply-chain:\n", 1
         )[0]
@@ -161,7 +217,7 @@ class ReleaseConfigTests(unittest.TestCase):
         )
 
     def test_rust_core_ci_isolates_frozen_allocation_harness(self) -> None:
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         rust_core = workflow.split("  rust-core:\n", 1)[1].split(
             "  rust-supply-chain:\n", 1
         )[0]
@@ -241,11 +297,13 @@ class ReleaseConfigTests(unittest.TestCase):
 
         for path in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
             with self.subTest(path=path):
-                workflow = (ROOT / path).read_text()
+                workflow = (ROOT / path).read_text(encoding="utf-8")
                 self.assertIn(command, workflow)
 
-        ci = (ROOT / ".github/workflows/ci.yml").read_text()
-        runner_tests = (ROOT / "scripts/test_run_rust_tests.py").read_text()
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        runner_tests = (ROOT / "scripts/test_run_rust_tests.py").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("WINDOWS_PROCESS_TREE_EVIDENCE", runner_tests)
         windows_job = ci.split("  windows-process-tree:\n", 1)[1].split(
             "  frontend:\n", 1
@@ -257,7 +315,7 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn(windows_test, windows_job)
 
     def test_agents_rust_runner_uses_synced_python_dependencies(self) -> None:
-        agents = (ROOT / "AGENTS.md").read_text()
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         sync = "uv sync --extra dev"
         runner = "uv run python scripts/run_rust_tests.py"
 
@@ -266,7 +324,9 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertLess(agents.index(sync), agents.index(runner))
 
     def test_benchmark_smoke_runs_every_supported_scale(self) -> None:
-        support_tree = ast.parse((ROOT / "benchmarks/support.py").read_text())
+        support_tree = ast.parse(
+            (ROOT / "benchmarks/support.py").read_text(encoding="utf-8")
+        )
         scales_assignment = next(
             node
             for node in support_tree.body
@@ -279,7 +339,7 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIsInstance(scales_assignment.value, ast.Dict)
         scales = [ast.literal_eval(key) for key in scales_assignment.value.keys]
 
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         benchmark_job = workflow.split("  benchmark-smoke:\n", 1)[1].split(
             "  rust-core:\n", 1
         )[0]
@@ -297,7 +357,9 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("path: benchmark-results/${{ matrix.scale }}.json", benchmark_job)
 
     def test_scheduled_rust_benchmark_targets_only_core_harness(self) -> None:
-        workflow = (ROOT / ".github/workflows/benchmarks.yml").read_text()
+        workflow = (ROOT / ".github/workflows/benchmarks.yml").read_text(
+            encoding="utf-8"
+        )
         rust_benchmark = workflow.split("  rust-benchmark:\n", 1)[1].split(
             "  benchmark:\n", 1
         )[0]
@@ -315,7 +377,9 @@ class ReleaseConfigTests(unittest.TestCase):
     def test_python_package_excludes_unsupported_pyarrow_25(self) -> None:
         for project in (ROOT, ROOT / "web-ui/backend"):
             with self.subTest(project=project):
-                package = tomllib.loads((project / "pyproject.toml").read_text())
+                package = tomllib.loads(
+                    (project / "pyproject.toml").read_text(encoding="utf-8")
+                )
                 self.assertIn("pyarrow>=24.0.0,<25", package["project"]["dependencies"])
 
     def test_final_release_error_docs_do_not_claim_alpha_status(self) -> None:
@@ -328,20 +392,20 @@ class ReleaseConfigTests(unittest.TestCase):
         }
 
         for path, claims in stale_claims.items():
-            text = (ROOT / path).read_text()
+            text = (ROOT / path).read_text(encoding="utf-8")
             with self.subTest(path=path):
                 for claim in claims:
                     self.assertNotIn(claim, text)
 
     def test_batch_metadata_docs_match_runtime_contract(self) -> None:
-        introduction = (ROOT / "docs/introduction.md").read_text()
+        introduction = (ROOT / "docs/introduction.md").read_text(encoding="utf-8")
         self.assertIn(
             "metadata contains a source identifier, non-negative sequence, and\n"
             "  JSON-compatible attributes.",
             introduction,
         )
 
-        rust_api = (ROOT / "docs/rust-api.md").read_text()
+        rust_api = (ROOT / "docs/rust-api.md").read_text(encoding="utf-8")
         self.assertIn(
             "`BatchMetadata::new(source, sequence, attributes)` validates the source "
             "and stores\n"
@@ -358,7 +422,7 @@ class ReleaseConfigTests(unittest.TestCase):
     ) -> None:
         guide_path = ROOT / "docs/getting-started.md"
         self.assertTrue(guide_path.is_file())
-        guide = guide_path.read_text()
+        guide = guide_path.read_text(encoding="utf-8")
 
         for heading in (
             "## Choose an installation path",
@@ -386,7 +450,7 @@ class ReleaseConfigTests(unittest.TestCase):
         ):
             self.assertIn(command, guide)
 
-        readme = (ROOT / "README.md").read_text()
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("[getting started](docs/getting-started.md)", readme)
 
 

@@ -31,10 +31,14 @@ use super::{
         OperatorIngress, OperatorProgress, OperatorProgressSnapshot, OperatorTaskInputs,
         spawn_operator_task,
     },
+    progress::{
+        LiveProgressCoordinator, LiveProgressEvidence, LiveProgressStatusHandle,
+        spawn_live_progress_task,
+    },
     sink_task::{SinkFailurePhase, SinkProgress, SinkTaskInputs, spawn_sink_task},
     source_task::{
         SourceBinding, SourceProgress, SourceProgressSnapshot,
-        spawn_source_tasks_gated_with_metrics,
+        spawn_source_tasks_gated_with_live_progress,
     },
     supervisor::{
         SupervisionReport, TaskId, TaskRegistry, TaskStatus, TaskSupervisor, TerminalArbiter,
@@ -241,6 +245,7 @@ struct RuntimeStatus {
     nodes: BTreeMap<String, OperatorProgress>,
     sinks: BTreeMap<String, SinkProgress>,
     sink_outputs: BTreeMap<String, String>,
+    progress: Option<LiveProgressStatusHandle>,
 }
 
 impl JobCore {
@@ -450,6 +455,7 @@ pub(crate) struct ContinuousJobStatus {
     pub(crate) sources: BTreeMap<String, SourceStatus>,
     pub(crate) nodes: BTreeMap<String, OperatorStatus>,
     pub(crate) sinks: BTreeMap<String, SinkStatus>,
+    pub(crate) progress: Option<LiveProgressEvidence>,
     pub(crate) metrics: M2MetricsSnapshot,
 }
 
@@ -521,6 +527,10 @@ impl ContinuousJob {
             .iter()
             .map(|(id, edge)| (id.clone(), edge.channel.clone()))
             .collect();
+        let progress = runtime
+            .progress
+            .as_ref()
+            .map(LiveProgressStatusHandle::snapshot);
         ContinuousJobStatus {
             job_id: self.core.job_id,
             state,
@@ -530,6 +540,7 @@ impl ContinuousJob {
             sources,
             nodes,
             sinks,
+            progress,
             metrics,
         }
     }
@@ -1282,7 +1293,7 @@ fn remove_job_registration(registry: &mut RunnerRegistryState, launch_id: Launch
 enum ConnectorResource {
     Source {
         binding_id: String,
-        binding: SourceBinding,
+        binding: Box<SourceBinding>,
     },
     Sink {
         output_id: String,
@@ -1358,6 +1369,7 @@ async fn run_job_driver(
         plan,
         sources,
         sinks,
+        progress: prepared_progress,
         delivery_mode: _,
     } = validated;
     let cancellation = context.cancellation().clone();
@@ -1403,8 +1415,14 @@ async fn run_job_driver(
     }
 
     let (opened_sources, opened_sinks) = opened_connector_bindings(std::mem::take(&mut resources));
-    let task_progress =
-        register_boundary_tasks(&mut runtime, &context, opened_sources, opened_sinks, &core);
+    let task_progress = register_boundary_tasks(
+        &mut runtime,
+        &context,
+        opened_sources,
+        opened_sinks,
+        prepared_progress,
+        &core,
+    );
 
     core.state.lock().launch_delivery = LaunchDeliveryState::ReadyUnclaimed;
     core.changed.notify_waiters();
@@ -1782,7 +1800,7 @@ fn connector_resources(
     for (binding_id, binding) in sources {
         resources.push(ConnectorResource::Source {
             binding_id,
-            binding,
+            binding: Box::new(binding),
         });
     }
     for (output_id, bindings) in sinks {
@@ -1812,7 +1830,7 @@ fn opened_connector_bindings(
                 binding_id,
                 binding,
             } => {
-                sources.insert(binding_id, binding);
+                sources.insert(binding_id, *binding);
             }
             ConnectorResource::Sink {
                 output_id,
@@ -1843,23 +1861,27 @@ fn register_boundary_tasks(
     context: &super::StreamJobContext,
     sources: BTreeMap<String, SourceBinding>,
     sinks: BTreeMap<String, Vec<ValidatedOrdinarySink>>,
+    prepared_progress: super::progress::PreparedStreamJob,
     core: &Arc<JobCore>,
 ) -> RuntimeTaskProgress {
+    let live_progress = LiveProgressCoordinator::new(
+        Arc::new(prepared_progress),
+        std::mem::take(&mut runtime.source_outputs),
+        context.cancellation().clone(),
+    )
+    .expect("preflight projected every prepared progress source route");
+    let progress_status = live_progress.status_handle();
     let mut source_progress = BTreeMap::new();
     for (binding_id, binding) in sources {
-        let outputs = runtime
-            .source_outputs
-            .remove(&binding_id)
-            .expect("preflight projected every validated source route");
-        let progress = spawn_source_tasks_gated_with_metrics(
+        let progress = spawn_source_tasks_gated_with_live_progress(
             &mut runtime.supervisor,
             context,
             &binding_id,
             binding,
-            outputs,
             runtime.data_gate.subscribe(),
             core.launch_cancel.clone(),
             core.metrics.clone(),
+            live_progress.clone(),
         )
         .expect("preflight validated every source task scope and first-hop budget");
         source_progress.insert(binding_id, progress);
@@ -1888,12 +1910,18 @@ fn register_boundary_tasks(
         );
         sink_progress.insert(output_id, progress);
     }
+    spawn_live_progress_task(
+        &mut runtime.supervisor,
+        live_progress,
+        context.cancellation().clone(),
+    );
     debug_assert!(runtime.source_outputs.is_empty());
     debug_assert!(runtime.sink_inputs.is_empty());
     {
         let mut status = core.runtime_status.lock();
         status.sources = source_progress.clone();
         status.sinks = sink_progress.clone();
+        status.progress = Some(progress_status);
     }
     RuntimeTaskProgress {
         sources: source_progress,
@@ -4218,7 +4246,7 @@ mod tests {
                 }
                 tokio::task::yield_now().await;
                 let status = job.status();
-                assert!(status.tasks.len() <= 10, "task growth at seed {seed}");
+                assert!(status.tasks.len() <= 11, "task growth at seed {seed}");
                 assert!(
                     status.edges.values().all(|edge| {
                         edge.queue_depth <= 1
@@ -4908,7 +4936,7 @@ mod tests {
             core.state.lock().launch_delivery,
             super::LaunchDeliveryState::ReadyUnclaimed
         );
-        assert_eq!(core.runtime_status.lock().tasks.snapshot().len(), 5);
+        assert_eq!(core.runtime_status.lock().tasks.snapshot().len(), 6);
         assert_eq!(polls.load(Ordering::SeqCst), 0);
         assert_eq!(processed.load(Ordering::SeqCst), 0);
 
