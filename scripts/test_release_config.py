@@ -9,26 +9,34 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _is_read_text_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "read_text"
+    )
+
+
+def _has_literal_utf8_encoding(node: ast.Call) -> bool:
+    encoding = next(
+        (keyword.value for keyword in node.keywords if keyword.arg == "encoding"),
+        None,
+    )
+    return (
+        isinstance(encoding, ast.Constant)
+        and isinstance(encoding.value, str)
+        and encoding.value.lower() == "utf-8"
+    )
+
+
 def _non_utf8_read_text_calls(tree: ast.AST) -> list[int]:
-    violations: list[int] = []
-    for node in ast.walk(tree):
-        if not (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "read_text"
-        ):
-            continue
-        encoding = next(
-            (keyword.value for keyword in node.keywords if keyword.arg == "encoding"),
-            None,
-        )
-        if not (
-            isinstance(encoding, ast.Constant)
-            and isinstance(encoding.value, str)
-            and encoding.value.lower() == "utf-8"
-        ):
-            violations.append(node.lineno)
-    return violations
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if _is_read_text_call(node)
+        and isinstance(node, ast.Call)
+        and not _has_literal_utf8_encoding(node)
+    ]
 
 
 class ReleaseConfigTests(unittest.TestCase):
