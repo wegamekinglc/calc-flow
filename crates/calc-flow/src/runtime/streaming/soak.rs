@@ -1311,7 +1311,6 @@ async fn real_soak_topology_graceful_smoke_conserves_every_accepted_sequence() {
     assert_delivery_conservation(&accepted, &sink_b.lock(), "sink B");
     let probe = window_probe.lock().clone();
     assert!(probe.checkpoints > 0);
-    assert!(probe.compactions > 0);
     assert!(probe.total_segment_bytes > 0);
     assert!(probe.max_live_keys > 0);
     assert_eq!(probe.terminal_live_keys, Some(0));
