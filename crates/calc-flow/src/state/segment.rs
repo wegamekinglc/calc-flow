@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,6 +27,12 @@ pub(crate) struct StateInventory {
     segments: Vec<SegmentDescriptor>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum StateOperation<T> {
+    Upsert(T),
+    Tombstone,
+}
+
 impl StateInventory {
     pub(crate) fn new(segments: Vec<SegmentDescriptor>) -> Result<Self> {
         let inventory = Self { segments };
@@ -47,6 +53,60 @@ impl StateInventory {
             [("segments".into(), value)].into_iter().collect(),
         ))
         .map(|document| document.len())
+    }
+
+    pub(crate) fn needs_compaction(
+        &self,
+        max_delta_segments: usize,
+        manifest_contribution_budget: usize,
+    ) -> Result<bool> {
+        if max_delta_segments == 0 {
+            return Err(inventory_error(
+                "maximum delta segment count must be non-zero",
+            ));
+        }
+        if manifest_contribution_budget == 0 {
+            return Err(inventory_error(
+                "manifest contribution budget must be non-zero",
+            ));
+        }
+        let delta_count = self
+            .segments
+            .iter()
+            .filter(|descriptor| descriptor.kind == SegmentKind::Delta)
+            .count();
+        Ok(delta_count > max_delta_segments
+            || self.predicted_manifest_bytes()? > manifest_contribution_budget)
+    }
+
+    pub(crate) fn replacement_after_full_compaction(
+        &self,
+        base: SegmentDescriptor,
+    ) -> Result<Self> {
+        if base.kind != SegmentKind::Base {
+            return Err(inventory_error(
+                "full compaction replacement must be a base segment",
+            ));
+        }
+        if let Some(first) = self.segments.first()
+            && (base.handle.operator_id != first.handle.operator_id
+                || base.state_layout_version != first.state_layout_version
+                || base.schema_fingerprint != first.schema_fingerprint)
+        {
+            return Err(inventory_error(
+                "compaction replacement does not match the retained inventory",
+            ));
+        }
+        if self
+            .segments
+            .last()
+            .is_some_and(|last| base.handle.epoch < last.handle.epoch)
+        {
+            return Err(inventory_error(
+                "compaction base is older than the retained inventory",
+            ));
+        }
+        Self::new(vec![base])
     }
 
     fn validate(&self) -> Result<()> {
@@ -137,6 +197,34 @@ impl StateInventory {
     }
 }
 
+pub(crate) fn fold_state_segments<K, V>(
+    segments: impl IntoIterator<Item = Vec<(K, StateOperation<V>)>>,
+) -> Result<BTreeMap<K, V>>
+where
+    K: Clone + Ord,
+{
+    let mut state = BTreeMap::new();
+    for segment in segments {
+        let mut seen = BTreeSet::new();
+        for (key, operation) in segment {
+            if !seen.insert(key.clone()) {
+                return Err(inventory_error(
+                    "state segment contains duplicate operations for one key",
+                ));
+            }
+            match operation {
+                StateOperation::Upsert(value) => {
+                    state.insert(key, value);
+                }
+                StateOperation::Tombstone => {
+                    state.remove(&key);
+                }
+            }
+        }
+    }
+    Ok(state)
+}
+
 fn inventory_error(message: impl Into<String>) -> CalcFlowError {
     CalcFlowError::Internal {
         message: message.into(),
@@ -145,7 +233,13 @@ fn inventory_error(message: impl Into<String>) -> CalcFlowError {
 
 #[cfg(test)]
 mod tests {
-    use super::{SegmentDescriptor, SegmentKind, StateInventory};
+    use std::collections::BTreeMap;
+
+    use proptest::{collection, prelude::*};
+
+    use super::{
+        SegmentDescriptor, SegmentKind, StateInventory, StateOperation, fold_state_segments,
+    };
     use crate::{CalcFlowError, Epoch, StateHandle};
 
     const SHA256: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -249,5 +343,95 @@ mod tests {
             StateInventory::new(vec![first, duplicate_path]),
             Err(CalcFlowError::Internal { .. })
         ));
+    }
+
+    #[test]
+    fn compaction_triggers_before_configured_bounds_and_replaces_immutably() {
+        let original = StateInventory::new(vec![
+            descriptor(SegmentKind::Base, 1, "base"),
+            descriptor(SegmentKind::Delta, 2, "delta-0001"),
+            descriptor(SegmentKind::Delta, 3, "delta-0002"),
+        ])
+        .unwrap();
+        let predicted = original.predicted_manifest_bytes().unwrap();
+
+        assert!(!original.needs_compaction(2, predicted).unwrap());
+        assert!(original.needs_compaction(1, predicted).unwrap());
+        assert!(original.needs_compaction(2, predicted - 1).unwrap());
+        assert!(original.needs_compaction(0, predicted).is_err());
+        assert!(original.needs_compaction(2, 0).is_err());
+
+        let replacement = original
+            .replacement_after_full_compaction(descriptor(SegmentKind::Base, 3, "base-compact"))
+            .unwrap();
+        assert_eq!(replacement.segments().len(), 1);
+        assert_eq!(original.segments().len(), 3);
+        assert_eq!(original.segments()[0].handle.segment_id, "base");
+    }
+
+    #[test]
+    fn last_operation_wins_and_duplicate_operations_fail_closed() {
+        let state = fold_state_segments(vec![
+            vec![
+                (b"alpha".to_vec(), StateOperation::Upsert(1_u64)),
+                (b"beta".to_vec(), StateOperation::Upsert(2)),
+            ],
+            vec![
+                (b"alpha".to_vec(), StateOperation::Upsert(3)),
+                (b"beta".to_vec(), StateOperation::Tombstone),
+            ],
+        ])
+        .unwrap();
+        assert_eq!(
+            state.into_iter().collect::<Vec<_>>(),
+            vec![(b"alpha".to_vec(), 3)]
+        );
+
+        assert!(matches!(
+            fold_state_segments(vec![vec![
+                (b"duplicate".to_vec(), StateOperation::Upsert(1_u64)),
+                (b"duplicate".to_vec(), StateOperation::Tombstone),
+            ]]),
+            Err(CalcFlowError::Internal { .. })
+        ));
+    }
+
+    proptest! {
+        #[test]
+        fn compaction_fold_matches_an_independent_ordered_model(
+            segments in collection::vec(
+                collection::btree_map(0_u8..24, prop::option::of(any::<i16>()), 0..20),
+                0..20,
+            )
+        ) {
+            let operations = segments
+                .iter()
+                .map(|segment| {
+                    segment
+                        .iter()
+                        .map(|(key, value)| {
+                            let operation = value.map_or(
+                                StateOperation::Tombstone,
+                                StateOperation::Upsert,
+                            );
+                            (*key, operation)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+
+            let mut expected = BTreeMap::new();
+            for segment in segments {
+                for (key, value) in segment {
+                    if let Some(value) = value {
+                        expected.insert(key, value);
+                    } else {
+                        expected.remove(&key);
+                    }
+                }
+            }
+
+            prop_assert_eq!(fold_state_segments(operations).unwrap(), expected);
+        }
     }
 }
