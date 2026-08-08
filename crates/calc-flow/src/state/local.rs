@@ -299,12 +299,30 @@ async fn publish_test_manifest(
     fault: Option<CommitFaultPoint>,
 ) -> Result<()> {
     let manifest_root = prepare_manifest_root(manifest_root).await?;
-    let temporary_root = manifest_root.clone();
+    let temporary = write_test_manifest_temporary(&manifest_root, manifest_bytes, fault).await?;
+    publish_test_manifest_temporary(manifest_root, temporary, fault).await
+}
+
+#[cfg(test)]
+async fn write_test_manifest_temporary(
+    manifest_root: &Path,
+    manifest_bytes: &[u8],
+    fault: Option<CommitFaultPoint>,
+) -> Result<tempfile::NamedTempFile> {
+    let temporary_root = manifest_root.to_owned();
     let manifest_bytes = manifest_bytes.to_vec();
     let temporary =
         worker(move || write_manifest_temporary(&temporary_root, &manifest_bytes)).await?;
     inject_fault(fault, CommitFaultPoint::AfterManifestDurableWrite)?;
+    Ok(temporary)
+}
 
+#[cfg(test)]
+async fn publish_test_manifest_temporary(
+    manifest_root: PathBuf,
+    temporary: tempfile::NamedTempFile,
+    fault: Option<CommitFaultPoint>,
+) -> Result<()> {
     let destination = manifest_root.join("manifest.json");
     worker(move || rename_manifest_temporary(temporary, &destination)).await?;
     inject_fault(fault, CommitFaultPoint::AfterManifestRename)?;
