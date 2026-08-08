@@ -51,7 +51,9 @@ const EDGE_BUDGET: EdgeBudget = EdgeBudget {
     max_rows: 64,
     max_bytes: 1 << 20,
 };
-const SOAK_WINDOW_MICROS: i64 = 64;
+// Final-only output must stay frequent enough for the slow sink to govern
+// source admission; otherwise the lossless M3 trace can outrun backpressure.
+const SOAK_WINDOW_MICROS: i64 = 1;
 const SOAK_CHECKPOINT_BATCH_INTERVAL: u64 = 8;
 
 fn soak_schema() -> Arc<Schema> {
@@ -1472,7 +1474,7 @@ fn soak_metadata_is_machine_readable_and_declares_the_slot_contract() {
         "max_rows"
     );
     assert_eq!(metadata["progress_contract"]["source_count"], 2);
-    assert_eq!(metadata["state_contract"]["window_size_micros"], 64);
+    assert_eq!(metadata["state_contract"]["window_size_micros"], 1);
     assert_eq!(metadata["state_contract"]["checkpoint_batch_interval"], 8);
     assert_eq!(metadata["state_contract"]["terminal_live_keys"], 0);
     assert_eq!(
