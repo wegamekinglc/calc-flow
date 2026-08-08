@@ -231,6 +231,46 @@ async fn checkpoint_is_incremental_arrow_ipc_and_restore_replaces_live_state() {
     assert_eq!(first_output_sum(&mut output), (0, 12));
 }
 
+#[tokio::test(start_paused = true)]
+async fn prepared_large_snapshot_keeps_the_next_control_handler_responsive() {
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "window", None);
+    let mut source = operator();
+    let mut ignored = EdgeCollector::new(source.output_ports().to_vec());
+    let groups = (0..4_096)
+        .map(|index| format!("group-{index:04}"))
+        .collect::<Vec<_>>();
+    let group_refs = groups.iter().map(String::as_str).collect::<Vec<_>>();
+    source
+        .process_data(
+            "input",
+            input_batch(vec![1; groups.len()], group_refs, vec![1; groups.len()]),
+            &context,
+            &mut ignored,
+        )
+        .await
+        .unwrap();
+
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(snapshot.segments.len(), 1);
+    assert!(
+        snapshot
+            .segments
+            .values()
+            .next()
+            .unwrap()
+            .starts_with(b"ARROW1")
+    );
+
+    tokio::time::timeout(
+        Duration::from_millis(1),
+        source.on_watermark(EventTime::from_micros(5), &context, &mut ignored),
+    )
+    .await
+    .expect("prepared checkpoint work must not delay the next control handler")
+    .unwrap();
+}
+
 #[tokio::test]
 async fn checkpointed_close_transition_and_output_sequence_survive_restore() {
     let job = job();
