@@ -1207,7 +1207,131 @@ private harness 冒充。
 
 ## 11. M5：Epoch checkpoint 与 exactly-once
 
-### Task M5.1：用 manifest v3 替换 checkpoint v2
+M5 从 `main@a5fc2c395e347041f8d16384be99af7e23d2ebff` 开始。实现以
+`.codex/artifacts/specs/m5-epoch-checkpoint.md` 和配套 API note 为准；这组 delta
+已经把历史计划与 M3/M4 当前实现对齐。M5 复用 M4 已定型的 manifest v3，保留 public
+checkpoint/runner v2 直到 post-M5 A6，不在本阶段顺带暴露 Python、Studio、project v3
+或 production connector。
+
+M5 实现使用 `feature/continuous-streaming-m5-epoch-checkpoint` 作为 milestone
+integration branch。M5.1–M5.5 可以分别准备 stacked review PR，但只能合入 integration
+branch；完整协议、故障矩阵与 exact-head evidence 通过后，再以一个原子 PR 合入
+`main`。
+
+### Task M5.0：冻结 current-main delta
+
+- [x] 新建 `.codex/artifacts/specs/m5-epoch-checkpoint.md`。
+- [x] 新建 `.codex/artifacts/api-notes/m5-epoch-checkpoint.md`。
+- [x] 新建 `.codex/artifacts/critiques/m5-epoch-checkpoint.md`。
+- [x] 明确 M4 manifest v3 是唯一模型，M5 不重定义。
+- [x] 将 `runtime_config_hash` 固定为 non-blocking diagnostic，而不是 recovery identity。
+- [x] 定义 bounded durable progress projection，不持久化 execution trace、pending
+  receipt 或 process-local timer coordinate。
+- [x] 固定 source global cut、operator immediate-after-local-snapshot forwarding、
+  manifest-before-sink-commit 与 forward recovery。
+- [x] 定义不产生 post-end barrier 的 terminal checkpoint。
+- [x] 固定 per-output capability proof、public v2 firewall、20 分钟 soak 和 exact-head
+  merge gate。
+
+**验收门：** spec、API note 与 critique 对 M5.1–M5.5 没有开放 blocker；critique 中
+`BLOCKS REMAINING: 0`。
+
+### Task M5.1：生产化 manifest transaction 与 durable restore primitive
+
+- [ ] 先写 RED：strict selection、partial/corrupt higher epoch、segment length/checksum、
+  runtime-config diagnostic、checked next epoch、reachability retention。
+- [ ] 将 M4 `#[cfg(test)]` stage/validate/publish/manifest-last harness 提升为 production
+  transaction；复用同一个 `CheckpointManifest`。
+- [ ] 将 manifest validation 拆成 semantic identity 与 non-blocking runtime config
+  diagnostic。
+- [ ] 实现 bounded candidate listing、latest completed selection、segment reload、retention
+  与 orphan cleanup。
+- [ ] 只持久化 source cursor/sequence/policy/end 和 operator progress/state handle；restore
+  建立新的 bounded trace/receipt namespace，并从新 origin 重置 timer。
+- [ ] bulk filesystem/hash/serde/decode 走 async I/O 或 owned blocking worker。
+- [ ] public v2 checkpoint/store/runner 不变。
+
+**验收门：** manifest 是唯一 recovery truth；v3 JSON 不含 window key/value state、M3
+trace 或 process-local timer coordinate。
+
+### Task M5.2：实现 single-flight coordinator 与 source global cut
+
+- [ ] 先写 RED：prefetch、ready timer、idle、ended、双 source settled cut、duplicate/
+  conflicting ack、timeout、panic 与 cancellation。
+- [ ] 用 bounded command/ack channel 实现严格递增且至多一个 in-flight epoch。
+- [ ] source 停止 poll、settle 已 accepted work，并提交 observed cursor/policy。
+- [ ] `LiveProgressCoordinator` 在其 serial drive boundary 排空 pre-cut emission，再通过
+  自己拥有的 routes fan-out barrier；checkpoint coordinator 永不写 graph edge。
+- [ ] barrier 成功后 source 才提升 durable cursor 并恢复 poll。
+- [ ] ended source 只贡献 terminal cut，不 reopen、不收 post-end barrier。
+- [ ] status/metrics payload-free，epoch/counter arithmetic checked。
+
+**验收门：** 所有 source durable cursor 与各 edge barrier 共同描述一个全局、可 seek、
+可重放的 prefix，且 no-checkpoint data path 仍 bounded。
+
+### Task M5.3：实现 multi-input alignment、operator snapshot 与 gated restore
+
+- [ ] 先写 RED：所有双 ingress barrier arrival permutation、blocked-edge backpressure、
+  future/regressed epoch、snapshot failure 和 restart boundary。
+- [ ] per-ingress 记录 `Open | Blocked(epoch) | Ended`；blocked ingress 留在 bounded edge，
+  不 drain、不复制到 alignment buffer。
+- [ ] 全部 required cut 到齐后 checkpoint/stage/ack；local snapshot 成功后立即 forward
+  barrier 并 unblock，失败则不 forward 并 cancel。
+- [ ] restore 依次执行 manifest/segment validation、fresh progress、operator restore、
+  source paused seek、sink recovery，再 release data gate。
+- [ ] 失败按 ownership reverse order close，任何 handler/poll/write/send 都不得提前发生。
+
+**验收门：** union/window 在全部 arrival 与 restart schedule 下满足 before/after state
+断言，没有 unbounded alignment buffer。
+
+### Task M5.4：实现 sink transaction 与 per-output capability proof
+
+- [ ] 先写 RED：ordinary sink、non-seekable source、non-restorable operator、lossy edge、
+  volatile UDF、短 retention、pre/post-manifest failure 与 partial multi-sink commit。
+- [ ] 为每个 requested output 验证完整 reachable source/operator/edge/sink capability，且
+  在任何 lifecycle side effect 前失败。
+- [ ] sink task 保持 connector 单 owner，执行 begin/write/pre-commit，并接收
+  `ManifestDurable(epoch)` 或 `Abort(epoch)` command。
+- [ ] 收齐 canonical ack 后才 publish manifest；manifest durable 后才 external commit。
+- [ ] pre-manifest failure abort；post-manifest failure 保留 manifest/pre-commit 并在 restart
+  forward-complete。
+- [ ] commit/recover 以 `(pipeline fingerprint, sink ID, epoch)` 幂等，不新增 competing
+  completion document。
+- [ ] filesystem-backed deterministic test sink 只证明 protocol/fault boundary，不导出为
+  M6 production connector。
+
+**验收门：** 普通 sink 或任何不完整 reachable capability 永远不会被标为 exactly-once；
+partial multi-sink commit 可确定恢复。
+
+### Task M5.5：实现 terminal checkpoint 并完成 fault/evidence gates
+
+- [ ] 先写 RED：final-only output、post-`on_end` state、terminal restore、no post-end
+  barrier、periodic/terminal serialization。
+- [ ] terminal epoch out of band 捕获 final cursor、ended progress、post-end operator state
+  和 final sink pre-commit；恢复时不 reopen source 或重复 `on_end`。
+- [ ] 在 source admission/cut、alignment、state stage、pre-commit、manifest rename、partial
+  multi-sink commit、retention/compaction 每个边界注入 cancel/I/O/panic/restart。
+- [ ] fault matrix 断言 selected epoch、cursor/watermark/idle/end、window state、visible
+  output、duplicate/missing、artifact cleanup、terminal error。
+- [ ] full Rust/Python/Studio/frontend/supply-chain/generated-file/diff gates 全通过。
+- [ ] paired benchmark 覆盖 steady-state、cut、alignment、state/manifest、restore 与 commit；
+  无未批准且高于 5% 的 regression。
+- [ ] exact final head 运行 20 分钟 soak：两 replayable source、union、window、slow
+  transactional test sink、periodic checkpoint、retention/compaction、deterministic restart；
+  记录 raw SHA、120 个一分钟 sample、零重复/零丢失、bounded resource 与 terminal zero。
+- [ ] 所有 Copilot、Codacy、CI 和 review thread 在同一 final remote head 解决；任何 push
+  后重跑失效 evidence。
+
+**验收门：** 完整 fault matrix 与 20 分钟 soak 通过，final head 为
+`MERGEABLE/CLEAN`，M5 integration PR 原子合入 `main`。
+
+### 历史 M5 task breakdown（已由 M5 delta 取代）
+
+以下内容保留为 2026-08-02 原始计划的追踪依据，不再直接控制实现。文件布局、public
+v2 替换、source barrier owner、progress durability、terminal epoch 与 sink completion
+规则以上述 M5.0 delta 和 current tasks 为准。
+
+#### 历史 Task M5.1：用 manifest v3 替换 checkpoint v2
 
 **文件：**
 
@@ -1247,7 +1371,7 @@ private harness 冒充。
 
 **验收门：** v3 checkpoint JSON 不含 window key/value state。
 
-### Task M5.2：在精确 cursor 边界注入 source barrier
+#### 历史 Task M5.2：在精确 cursor 边界注入 source barrier
 
 **文件：**
 
@@ -1275,7 +1399,7 @@ private harness 冒充。
 
 **验收门：** 所有 source cursor 与 edge barrier 共同描述一个可重放 prefix。
 
-### Task M5.3：实现 multi-input barrier alignment 与 operator snapshot
+#### 历史 Task M5.3：实现 multi-input barrier alignment 与 operator snapshot
 
 **文件：**
 
@@ -1306,7 +1430,7 @@ private harness 冒充。
 **验收门：** union/window 在所有双输入 barrier 到达排列下都通过 before/after state
 断言。
 
-### Task M5.4：实现 transactional sink 与 commit protocol
+#### 历史 Task M5.4：实现 transactional sink 与 commit protocol
 
 **文件：**
 
@@ -1350,7 +1474,7 @@ trait TransactionalSink: StreamSink {
 
 **验收门：** 普通 sink 或 lossy source 永远不会被标为 exactly-once。
 
-### Task M5.5：执行 crash consistency fault matrix
+#### 历史 Task M5.5：执行 crash consistency fault matrix
 
 **文件：**
 
