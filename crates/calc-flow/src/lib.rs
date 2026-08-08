@@ -18,6 +18,7 @@ mod operator;
 mod pipeline;
 mod project_store;
 mod runtime;
+mod state;
 mod time;
 mod udf;
 
@@ -55,6 +56,13 @@ pub use project_store::{
 pub use runtime::{
     ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, MicroBatchRunner, SinkRouter,
     StreamJobContext, StreamMessage, StreamMessageKind, StreamingRunner, edge_channel,
+};
+pub use state::{
+    CheckpointManifest, CheckpointManifestFields, CursorManifestEntry, MANIFEST_FORMAT_VERSION,
+    MAX_MANIFEST_DOCUMENT_BYTES, ManifestExpectation, ManifestIngressState,
+    OperatorIngressManifestEntry, OperatorManifestEntry, RecoveryStatus, RetentionClass,
+    SinkDeliveryManifest, SinkManifestEntry, SourceManifestEntry, SourceWatermarkManifestState,
+    StateBackend, StateHandle, StateLineageBackend, StateLineageKey,
 };
 pub use time::{Epoch, EventTime};
 pub use udf::{
