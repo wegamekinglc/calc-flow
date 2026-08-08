@@ -117,10 +117,19 @@ impl<'a> StreamOperatorContext<'a> {
     ///
     /// The runtime derives `affected_batches` from any call with `dropped > 0`
     /// and keeps a running maximum lateness. Only window operators call this.
+    /// A call with `dropped == 0` is a complete telemetry no-op: the supplied
+    /// `max_lateness` is neither recorded nor validated.
     ///
     /// # Errors
     ///
+    /// Returns [`CalcFlowError::Internal`] for a nonzero sample when the
+    /// supplied maximum lateness cannot be represented in `u64` microseconds,
+    /// or when accumulating the dropped-assignment or affected-batch counter
+    /// would overflow `u64`.
     pub fn record_late_rows(&self, dropped: u64, max_lateness: Option<Duration>) -> Result<()> {
+        if dropped == 0 {
+            return Ok(());
+        }
         let max_lateness_micros = max_lateness
             .map(|lateness| {
                 u64::try_from(lateness.as_micros()).map_err(|_| CalcFlowError::Internal {
@@ -409,6 +418,57 @@ mod tests {
                 late_rows: 4,
                 affected_batches: 1,
                 max_lateness_micros: Some(11),
+                ..LateMetricDelta::default()
+            }
+        );
+    }
+
+    #[test]
+    fn zero_dropped_rows_do_not_change_late_metrics() {
+        let job = StreamJobContext::new(
+            7,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let recorder = Arc::new(LateMetricRecorder::default());
+        let context = StreamOperatorContext::for_task(
+            &job,
+            "window",
+            None,
+            EdgeBudget::default(),
+            recorder.clone(),
+        );
+        context
+            .record_late_rows(2, Some(Duration::from_micros(5)))
+            .unwrap();
+
+        assert!(
+            context
+                .record_late_rows(0, Some(Duration::from_secs(u64::MAX)))
+                .is_ok()
+        );
+        assert_eq!(
+            *recorder.0.lock(),
+            LateMetricDelta {
+                late_rows: 2,
+                affected_batches: 1,
+                max_lateness_micros: Some(5),
+                ..LateMetricDelta::default()
+            }
+        );
+
+        context
+            .record_late_rows(0, Some(Duration::from_micros(99)))
+            .unwrap();
+
+        assert_eq!(
+            *recorder.0.lock(),
+            LateMetricDelta {
+                late_rows: 2,
+                affected_batches: 1,
+                max_lateness_micros: Some(5),
                 ..LateMetricDelta::default()
             }
         );
