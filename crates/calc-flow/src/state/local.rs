@@ -259,33 +259,13 @@ pub(crate) async fn commit_manifest_for_test(
     fault: Option<CommitFaultPoint>,
 ) -> Result<()> {
     inject_fault(fault, CommitFaultPoint::AfterLease)?;
-
-    for (index, (handle, bytes)) in staged.iter().enumerate() {
-        state.stage_segment(handle, bytes).await?;
-        if index == 0 {
-            inject_fault(fault, CommitFaultPoint::AfterFirstSegmentStage)?;
-        }
-    }
+    stage_test_segments(state, staged, fault).await?;
     inject_fault(fault, CommitFaultPoint::AfterAllSegmentsDurable)?;
-
-    for handle in staged.keys() {
-        state.validate_segment(handle).await?;
-    }
+    validate_test_segments(state, staged).await?;
     inject_fault(fault, CommitFaultPoint::AfterSegmentValidation)?;
-
-    for (index, handle) in staged.keys().enumerate() {
-        state.publish_segment(handle).await?;
-        if index == 0 {
-            inject_fault(fault, CommitFaultPoint::AfterFirstSegmentPublication)?;
-        }
-    }
+    publish_test_segments(state, staged, fault).await?;
     inject_fault(fault, CommitFaultPoint::AfterCommittedSynchronization)?;
-
-    for operator in manifest.operators().values() {
-        for handle in &operator.segments {
-            state.load_segment(handle).await?;
-        }
-    }
+    load_manifest_segments(state, manifest).await?;
     let manifest = manifest.clone();
     let manifest_bytes = worker(move || manifest.canonical_bytes()).await?;
     inject_fault(fault, CommitFaultPoint::AfterManifestValidation)?;
@@ -301,6 +281,60 @@ pub(crate) async fn commit_manifest_for_test(
     inject_fault(fault, CommitFaultPoint::AfterManifestRename)?;
     worker(move || sync_directory(&manifest_root)).await?;
     inject_fault(fault, CommitFaultPoint::AfterManifestPublication)?;
+    Ok(())
+}
+
+#[cfg(test)]
+async fn stage_test_segments(
+    state: &dyn StateLineageBackend,
+    staged: &BTreeMap<StateHandle, Vec<u8>>,
+    fault: Option<CommitFaultPoint>,
+) -> Result<()> {
+    for (index, (handle, bytes)) in staged.iter().enumerate() {
+        state.stage_segment(handle, bytes).await?;
+        if index == 0 {
+            inject_fault(fault, CommitFaultPoint::AfterFirstSegmentStage)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+async fn validate_test_segments(
+    state: &dyn StateLineageBackend,
+    staged: &BTreeMap<StateHandle, Vec<u8>>,
+) -> Result<()> {
+    for handle in staged.keys() {
+        state.validate_segment(handle).await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+async fn publish_test_segments(
+    state: &dyn StateLineageBackend,
+    staged: &BTreeMap<StateHandle, Vec<u8>>,
+    fault: Option<CommitFaultPoint>,
+) -> Result<()> {
+    for (index, handle) in staged.keys().enumerate() {
+        state.publish_segment(handle).await?;
+        if index == 0 {
+            inject_fault(fault, CommitFaultPoint::AfterFirstSegmentPublication)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+async fn load_manifest_segments(
+    state: &dyn StateLineageBackend,
+    manifest: &CheckpointManifest,
+) -> Result<()> {
+    for operator in manifest.operators().values() {
+        for handle in &operator.segments {
+            state.load_segment(handle).await?;
+        }
+    }
     Ok(())
 }
 
@@ -365,7 +399,14 @@ fn open_lock_file(root: &Path, lineage_hash: &str) -> Result<File> {
     validate_directory(root)?;
     let lock_directory = ensure_child_directory(root, "locks")?;
     let path = lock_directory.join(format!("{lineage_hash}.lock"));
-    if let Ok(metadata) = std::fs::symlink_metadata(&path) {
+    validate_lock_path(&path)?;
+    let file = open_lock_path(&path)?;
+    FileExt::try_lock_exclusive(&file).map_err(|error| lock_error(&path, lineage_hash, error))?;
+    Ok(file)
+}
+
+fn validate_lock_path(path: &Path) -> Result<()> {
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(format_error(format!(
                 "state lock {} is not a regular file",
@@ -373,38 +414,56 @@ fn open_lock_file(root: &Path, lineage_hash: &str) -> Result<File> {
             )));
         }
     }
-    let file = OpenOptions::new()
+    Ok(())
+}
+
+fn open_lock_path(path: &Path) -> Result<File> {
+    OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false)
-        .open(&path)
-        .map_err(|source| io_error(&path, source))?;
-    FileExt::try_lock_exclusive(&file).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::WouldBlock {
-            lease_conflict(lineage_hash)
-        } else {
-            io_error(&path, error)
-        }
-    })?;
-    Ok(file)
+        .open(path)
+        .map_err(|source| io_error(path, source))
+}
+
+fn lock_error(path: &Path, lineage_hash: &str, error: std::io::Error) -> CalcFlowError {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        lease_conflict(lineage_hash)
+    } else {
+        io_error(path, error)
+    }
 }
 
 fn stage_file(paths: &ManagedSegmentPaths, handle: &StateHandle, bytes: &[u8]) -> Result<()> {
     validate_expected_bytes(handle, bytes)?;
     prepare_segment_directories(paths)?;
-    match std::fs::symlink_metadata(&paths.staging) {
-        Ok(_) => return read_validated_file(&paths.staging, handle).map(|_| ()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(source) => return Err(io_error(&paths.staging, source)),
+    if reuse_staged_file(paths, handle)? {
+        return Ok(());
     }
+    reject_committed_file(paths, handle)?;
+    write_staged_file(paths, bytes)
+}
+
+fn reuse_staged_file(paths: &ManagedSegmentPaths, handle: &StateHandle) -> Result<bool> {
+    match std::fs::symlink_metadata(&paths.staging) {
+        Ok(_) => read_validated_file(&paths.staging, handle).map(|_| true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(io_error(&paths.staging, source)),
+    }
+}
+
+fn reject_committed_file(paths: &ManagedSegmentPaths, handle: &StateHandle) -> Result<()> {
     if paths.committed.exists() {
         return Err(CalcFlowError::Conflict {
             resource: "committed state segment".into(),
             key: handle.segment_id.clone(),
         });
     }
+    Ok(())
+}
 
+fn write_staged_file(paths: &ManagedSegmentPaths, bytes: &[u8]) -> Result<()> {
     let mut temporary = tempfile::NamedTempFile::new_in(&paths.staging_parent)
         .map_err(|source| io_error(&paths.staging_parent, source))?;
     temporary
@@ -439,24 +498,9 @@ fn prepare_segment_directories(paths: &ManagedSegmentPaths) -> Result<()> {
         .ok_or_else(|| format_error("managed staging path has no root".into()))?;
     validate_directory(root)?;
     let staging = ensure_child_directory(root, "staging")?;
-    let lineage = paths
-        .staging_parent
-        .ancestors()
-        .nth(2)
-        .and_then(Path::file_name)
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| format_error("managed staging lineage is invalid".into()))?;
-    let epoch = paths
-        .staging_parent
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| format_error("managed staging epoch is invalid".into()))?;
-    let operator = paths
-        .staging_parent
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| format_error("managed staging operator is invalid".into()))?;
+    let lineage = staging_path_component(&paths.staging_parent, 2, "lineage")?;
+    let epoch = staging_path_component(&paths.staging_parent, 1, "epoch")?;
+    let operator = staging_path_component(&paths.staging_parent, 0, "operator")?;
     let staging_lineage = ensure_child_directory(&staging, lineage)?;
     let staging_epoch = ensure_child_directory(&staging_lineage, epoch)?;
     ensure_child_directory(&staging_epoch, operator)?;
@@ -467,26 +511,17 @@ fn prepare_segment_directories(paths: &ManagedSegmentPaths) -> Result<()> {
     Ok(())
 }
 
+fn staging_path_component<'a>(path: &'a Path, parents: usize, label: &str) -> Result<&'a str> {
+    path.ancestors()
+        .nth(parents)
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format_error(format!("managed staging {label} is invalid")))
+}
+
 fn read_validated_file(path: &Path, handle: &StateHandle) -> Result<Vec<u8>> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(CalcFlowError::NotFound {
-                resource: "state segment".into(),
-                key: handle.segment_id.clone(),
-            });
-        }
-        Err(source) => return Err(io_error(path, source)),
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(format_error(format!(
-            "state segment {} is not a regular file",
-            path.display()
-        )));
-    }
-    if metadata.len() != handle.byte_len {
-        return Err(segment_mismatch(handle, "byte length"));
-    }
+    let metadata = segment_metadata(path, handle)?;
+    validate_segment_metadata(path, handle, &metadata)?;
     let capacity = usize::try_from(metadata.len()).map_err(|_| CalcFlowError::Internal {
         message: "state segment length does not fit usize".into(),
     })?;
@@ -496,6 +531,36 @@ fn read_validated_file(path: &Path, handle: &StateHandle) -> Result<Vec<u8>> {
         .map_err(|source| io_error(path, source))?;
     validate_expected_bytes(handle, &bytes)?;
     Ok(bytes)
+}
+
+fn segment_metadata(path: &Path, handle: &StateHandle) -> Result<std::fs::Metadata> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(CalcFlowError::NotFound {
+                resource: "state segment".into(),
+                key: handle.segment_id.clone(),
+            })
+        }
+        Err(source) => Err(io_error(path, source)),
+    }
+}
+
+fn validate_segment_metadata(
+    path: &Path,
+    handle: &StateHandle,
+    metadata: &std::fs::Metadata,
+) -> Result<()> {
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format_error(format!(
+            "state segment {} is not a regular file",
+            path.display()
+        )));
+    }
+    if metadata.len() != handle.byte_len {
+        return Err(segment_mismatch(handle, "byte length"));
+    }
+    Ok(())
 }
 
 fn committed_file_matches(path: &Path, handle: &StateHandle) -> Result<bool> {
@@ -536,16 +601,8 @@ fn collect_unreachable_with(
 ) -> Result<usize> {
     validate_directory(root)?;
     let lineage_root = root.join("committed").join(lineage_hash);
-    let lineage_metadata = match std::fs::symlink_metadata(&lineage_root) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(source) => return Err(io_error(&lineage_root, source)),
-    };
-    if lineage_metadata.file_type().is_symlink() || !lineage_metadata.is_dir() {
-        return Err(format_error(format!(
-            "committed lineage {} is not a directory",
-            lineage_root.display()
-        )));
+    if !validate_lineage_root(&lineage_root)? {
+        return Ok(0);
     }
 
     let mut deletions = Vec::new();
@@ -553,55 +610,128 @@ fn collect_unreachable_with(
     for operator_entry in
         std::fs::read_dir(&lineage_root).map_err(|source| io_error(&lineage_root, source))?
     {
-        let operator_entry = operator_entry.map_err(|source| io_error(&lineage_root, source))?;
-        let operator_path = operator_entry.path();
-        let operator_name = portable_hash_name(&operator_entry.file_name())?;
-        let metadata = std::fs::symlink_metadata(&operator_path)
-            .map_err(|source| io_error(&operator_path, source))?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(format_error(format!(
-                "committed operator entry {} is not a directory",
-                operator_path.display()
-            )));
-        }
-        for segment_entry in
-            std::fs::read_dir(&operator_path).map_err(|source| io_error(&operator_path, source))?
-        {
-            let segment_entry = segment_entry.map_err(|source| io_error(&operator_path, source))?;
-            let segment_path = segment_entry.path();
-            let metadata = std::fs::symlink_metadata(&segment_path)
-                .map_err(|source| io_error(&segment_path, source))?;
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(format_error(format!(
-                    "committed segment entry {} is not a regular file",
-                    segment_path.display()
-                )));
-            }
-            let file_name = segment_entry
-                .file_name()
-                .into_string()
-                .map_err(|_| format_error("committed segment name is not UTF-8".into()))?;
-            let epoch = parse_segment_file_name(&file_name)?;
-            let relative = format!("committed/{lineage_hash}/{operator_name}/{file_name}");
-            let is_newer = latest_epoch.is_none_or(|latest| epoch > latest);
-            if !retained_paths.contains(&relative) && !is_newer {
-                deletions.push(segment_path);
-                sync_directories.insert(operator_path.clone());
-            }
-        }
+        collect_operator_deletions(
+            &operator_entry.map_err(|source| io_error(&lineage_root, source))?,
+            lineage_hash,
+            retained_paths,
+            latest_epoch,
+            &mut deletions,
+            &mut sync_directories,
+        )?;
     }
+    remove_unreachable_files(&deletions, &mut remove_file)?;
+    synchronize_compacted_directories(&lineage_root, &deletions, sync_directories)?;
+    Ok(deletions.len())
+}
 
-    deletions.sort();
-    for path in &deletions {
-        remove_file(path).map_err(|source| io_error(path, source))?;
+fn validate_lineage_root(lineage_root: &Path) -> Result<bool> {
+    let lineage_metadata = match std::fs::symlink_metadata(lineage_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => return Err(io_error(lineage_root, source)),
+    };
+    if lineage_metadata.file_type().is_symlink() || !lineage_metadata.is_dir() {
+        return Err(format_error(format!(
+            "committed lineage {} is not a directory",
+            lineage_root.display()
+        )));
     }
+    Ok(true)
+}
+
+fn collect_operator_deletions(
+    operator_entry: &std::fs::DirEntry,
+    lineage_hash: &str,
+    retained_paths: &BTreeSet<String>,
+    latest_epoch: Option<Epoch>,
+    deletions: &mut Vec<PathBuf>,
+    sync_directories: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    let operator_path = operator_entry.path();
+    let operator_name = portable_hash_name(&operator_entry.file_name())?;
+    validate_managed_entry(&operator_path, true, "committed operator entry")?;
+    for segment_entry in
+        std::fs::read_dir(&operator_path).map_err(|source| io_error(&operator_path, source))?
+    {
+        let segment_entry = segment_entry.map_err(|source| io_error(&operator_path, source))?;
+        if should_delete_segment(
+            &segment_entry,
+            lineage_hash,
+            &operator_name,
+            retained_paths,
+            latest_epoch,
+        )? {
+            deletions.push(segment_entry.path());
+            sync_directories.insert(operator_path.clone());
+        }
+    }
+    Ok(())
+}
+
+fn should_delete_segment(
+    segment_entry: &std::fs::DirEntry,
+    lineage_hash: &str,
+    operator_name: &str,
+    retained_paths: &BTreeSet<String>,
+    latest_epoch: Option<Epoch>,
+) -> Result<bool> {
+    let segment_path = segment_entry.path();
+    validate_managed_entry(&segment_path, false, "committed segment entry")?;
+    let file_name = segment_entry
+        .file_name()
+        .into_string()
+        .map_err(|_| format_error("committed segment name is not UTF-8".into()))?;
+    let epoch = parse_segment_file_name(&file_name)?;
+    let relative = format!("committed/{lineage_hash}/{operator_name}/{file_name}");
+    let is_newer = latest_epoch.is_none_or(|latest| epoch > latest);
+    Ok(!retained_paths.contains(&relative) && !is_newer)
+}
+
+fn validate_managed_entry(path: &Path, expect_directory: bool, label: &str) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
+    let has_expected_type = if expect_directory {
+        metadata.is_dir()
+    } else {
+        metadata.is_file()
+    };
+    if metadata.file_type().is_symlink() || !has_expected_type {
+        let expected = if expect_directory {
+            "a directory"
+        } else {
+            "a regular file"
+        };
+        return Err(format_error(format!(
+            "{label} {} is not {expected}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn remove_unreachable_files(
+    deletions: &[PathBuf],
+    remove_file: &mut impl FnMut(&Path) -> std::io::Result<()>,
+) -> Result<()> {
+    let mut ordered = deletions.to_vec();
+    ordered.sort();
+    for path in ordered {
+        remove_file(&path).map_err(|source| io_error(&path, source))?;
+    }
+    Ok(())
+}
+
+fn synchronize_compacted_directories(
+    lineage_root: &Path,
+    deletions: &[PathBuf],
+    sync_directories: BTreeSet<PathBuf>,
+) -> Result<()> {
     for directory in sync_directories {
         sync_directory(&directory)?;
     }
     if !deletions.is_empty() {
-        sync_directory(&lineage_root)?;
+        sync_directory(lineage_root)?;
     }
-    Ok(deletions.len())
+    Ok(())
 }
 
 fn parse_segment_file_name(file_name: &str) -> Result<Epoch> {

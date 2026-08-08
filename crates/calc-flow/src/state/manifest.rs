@@ -280,26 +280,9 @@ impl CheckpointManifest {
     /// Fails before exposing a value when the byte bound, JSON depth, version,
     /// typed fields, handle ownership, or state checksum is invalid.
     pub fn from_bytes(document: &[u8]) -> Result<Self> {
-        if document.len() > MAX_MANIFEST_DOCUMENT_BYTES {
-            return Err(format_error(format!(
-                "manifest exceeds the {MAX_MANIFEST_DOCUMENT_BYTES}-byte limit"
-            )));
-        }
+        validate_document_size(document)?;
         let value = parse_json_value(document, "checkpoint manifest")?;
-        let object = value
-            .as_object()
-            .ok_or_else(|| format_error("checkpoint manifest must contain a JSON object".into()))?;
-        let found = object
-            .get("format_version")
-            .and_then(Value::as_u64)
-            .and_then(|version| u32::try_from(version).ok())
-            .ok_or_else(|| format_error("manifest format_version must be a u32".into()))?;
-        if found != MANIFEST_FORMAT_VERSION {
-            return Err(CalcFlowError::UnsupportedVersion {
-                expected: MANIFEST_FORMAT_VERSION,
-                found,
-            });
-        }
+        validate_document_version(&value)?;
         let fields: SerializedManifest =
             serde_json::from_value(value).map_err(|error| format_error(error.to_string()))?;
         let manifest = Self::from(fields);
@@ -315,6 +298,15 @@ impl CheckpointManifest {
     /// ID-set, or checksum mismatch.
     pub fn validate(&self, expected: &ManifestExpectation<'_>) -> Result<()> {
         self.validate_internal()?;
+        self.validate_identity(expected)?;
+        self.validate_epoch(expected.epoch)?;
+        validate_id_set("source", self.sources.keys(), expected.source_ids)?;
+        validate_id_set("operator", self.operators.keys(), expected.operator_ids)?;
+        validate_id_set("sink", self.sinks.keys(), expected.sink_ids)?;
+        Ok(())
+    }
+
+    fn validate_identity(&self, expected: &ManifestExpectation<'_>) -> Result<()> {
         validate_expected("pipeline name", &self.pipeline_name, expected.pipeline_name)?;
         validate_expected(
             "pipeline fingerprint",
@@ -325,17 +317,17 @@ impl CheckpointManifest {
             "runtime configuration hash",
             &self.runtime_config_hash,
             expected.runtime_config_hash,
-        )?;
-        if self.epoch != expected.epoch {
+        )
+    }
+
+    fn validate_epoch(&self, expected: Epoch) -> Result<()> {
+        if self.epoch != expected {
             return Err(mismatch(format!(
                 "manifest epoch {} does not match expected epoch {}",
                 self.epoch.as_u64(),
-                expected.epoch.as_u64()
+                expected.as_u64()
             )));
         }
-        validate_id_set("source", self.sources.keys(), expected.source_ids)?;
-        validate_id_set("operator", self.operators.keys(), expected.operator_ids)?;
-        validate_id_set("sink", self.sinks.keys(), expected.sink_ids)?;
         Ok(())
     }
 
@@ -450,69 +442,149 @@ impl CheckpointManifest {
         validate_portable_identifier("pipeline_name", &self.pipeline_name)?;
         validate_sha256("pipeline_fingerprint", &self.pipeline_fingerprint)?;
         validate_sha256("runtime_config_hash", &self.runtime_config_hash)?;
-
-        for (source_id, source) in &self.sources {
-            validate_portable_identifier("sources.id", source_id)?;
-            validate_sha256("sources.identity_hash", &source.identity_hash)?;
-            if let Some(cursor) = &source.cursor {
-                validate_portable_identifier("sources.cursor.order", &cursor.order)?;
-                validate_json_map(&cursor.payload, "source cursor payload")?;
-            }
-        }
-
+        validate_sources(&self.sources)?;
         let mut identities = BTreeSet::new();
         let mut paths = BTreeSet::new();
-        for (operator_id, operator) in &self.operators {
-            validate_portable_identifier("operators.id", operator_id)?;
-            validate_json_map(&operator.inline_metadata, "operator inline metadata")?;
-            for ingress_id in operator.progress.keys() {
-                validate_portable_identifier("operators.progress.id", ingress_id)?;
-            }
-            let mut previous = None;
-            for handle in &operator.segments {
-                handle.validate_for(operator_id, handle.epoch)?;
-                if handle.epoch > self.epoch {
-                    return Err(mismatch(format!(
-                        "state handle epoch {} is newer than manifest epoch {}",
-                        handle.epoch.as_u64(),
-                        self.epoch.as_u64()
-                    )));
-                }
-                if previous.is_some_and(|value| value >= handle) {
-                    return Err(format_error(format!(
-                        "operator {operator_id:?} state handles are not in canonical order"
-                    )));
-                }
-                previous = Some(handle);
-                let identity = (
-                    handle.operator_id.clone(),
-                    handle.epoch,
-                    handle.segment_id.clone(),
-                );
-                if !identities.insert(identity) {
-                    return Err(format_error("duplicate state handle identity".into()));
-                }
-                if !paths.insert(handle.relative_path.clone()) {
-                    return Err(format_error("duplicate committed state path".into()));
-                }
-            }
-        }
-
-        for (sink_id, sink) in &self.sinks {
-            validate_portable_identifier("sinks.id", sink_id)?;
-            if let SinkDeliveryManifest::EpochIdempotent { mechanism, .. } = &sink.delivery {
-                validate_portable_identifier("sinks.delivery.mechanism", mechanism)?;
-            }
-            if let Some(pre_commit) = &sink.pre_commit {
-                validate_json_map(pre_commit, "sink pre-commit metadata")?;
-            }
-        }
-        Ok(())
+        validate_operators(&self.operators, self.epoch, &mut identities, &mut paths)?;
+        validate_sinks(&self.sinks)
     }
 
     fn ensure_size_bound(&self) -> Result<()> {
         self.canonical_bytes().map(|_| ())
     }
+}
+
+fn validate_document_size(document: &[u8]) -> Result<()> {
+    if document.len() > MAX_MANIFEST_DOCUMENT_BYTES {
+        Err(format_error(format!(
+            "manifest exceeds the {MAX_MANIFEST_DOCUMENT_BYTES}-byte limit"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_document_version(value: &Value) -> Result<()> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| format_error("checkpoint manifest must contain a JSON object".into()))?;
+    let found = object
+        .get("format_version")
+        .and_then(Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+        .ok_or_else(|| format_error("manifest format_version must be a u32".into()))?;
+    if found == MANIFEST_FORMAT_VERSION {
+        Ok(())
+    } else {
+        Err(CalcFlowError::UnsupportedVersion {
+            expected: MANIFEST_FORMAT_VERSION,
+            found,
+        })
+    }
+}
+
+fn validate_sources(sources: &BTreeMap<String, SourceManifestEntry>) -> Result<()> {
+    for (source_id, source) in sources {
+        validate_portable_identifier("sources.id", source_id)?;
+        validate_sha256("sources.identity_hash", &source.identity_hash)?;
+        if let Some(cursor) = &source.cursor {
+            validate_portable_identifier("sources.cursor.order", &cursor.order)?;
+            validate_json_map(&cursor.payload, "source cursor payload")?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_operators(
+    operators: &BTreeMap<String, OperatorManifestEntry>,
+    manifest_epoch: Epoch,
+    identities: &mut BTreeSet<(String, Epoch, String)>,
+    paths: &mut BTreeSet<String>,
+) -> Result<()> {
+    for (operator_id, operator) in operators {
+        validate_portable_identifier("operators.id", operator_id)?;
+        validate_json_map(&operator.inline_metadata, "operator inline metadata")?;
+        validate_ingress_ids(operator)?;
+        validate_operator_handles(operator_id, operator, manifest_epoch, identities, paths)?;
+    }
+    Ok(())
+}
+
+fn validate_ingress_ids(operator: &OperatorManifestEntry) -> Result<()> {
+    for ingress_id in operator.progress.keys() {
+        validate_portable_identifier("operators.progress.id", ingress_id)?;
+    }
+    Ok(())
+}
+
+fn validate_operator_handles(
+    operator_id: &str,
+    operator: &OperatorManifestEntry,
+    manifest_epoch: Epoch,
+    identities: &mut BTreeSet<(String, Epoch, String)>,
+    paths: &mut BTreeSet<String>,
+) -> Result<()> {
+    let mut previous = None;
+    for handle in &operator.segments {
+        validate_operator_handle(operator_id, handle, manifest_epoch, previous)?;
+        record_unique_handle(handle, identities, paths)?;
+        previous = Some(handle);
+    }
+    Ok(())
+}
+
+fn validate_operator_handle(
+    operator_id: &str,
+    handle: &StateHandle,
+    manifest_epoch: Epoch,
+    previous: Option<&StateHandle>,
+) -> Result<()> {
+    handle.validate_for(operator_id, handle.epoch)?;
+    if handle.epoch > manifest_epoch {
+        return Err(mismatch(format!(
+            "state handle epoch {} is newer than manifest epoch {}",
+            handle.epoch.as_u64(),
+            manifest_epoch.as_u64()
+        )));
+    }
+    if previous.is_some_and(|value| value >= handle) {
+        return Err(format_error(format!(
+            "operator {operator_id:?} state handles are not in canonical order"
+        )));
+    }
+    Ok(())
+}
+
+fn record_unique_handle(
+    handle: &StateHandle,
+    identities: &mut BTreeSet<(String, Epoch, String)>,
+    paths: &mut BTreeSet<String>,
+) -> Result<()> {
+    let identity = (
+        handle.operator_id.clone(),
+        handle.epoch,
+        handle.segment_id.clone(),
+    );
+    if !identities.insert(identity) {
+        return Err(format_error("duplicate state handle identity".into()));
+    }
+    if !paths.insert(handle.relative_path.clone()) {
+        return Err(format_error("duplicate committed state path".into()));
+    }
+    Ok(())
+}
+
+fn validate_sinks(sinks: &BTreeMap<String, SinkManifestEntry>) -> Result<()> {
+    for (sink_id, sink) in sinks {
+        validate_portable_identifier("sinks.id", sink_id)?;
+        if let SinkDeliveryManifest::EpochIdempotent { mechanism, .. } = &sink.delivery {
+            validate_portable_identifier("sinks.delivery.mechanism", mechanism)?;
+        }
+        if let Some(pre_commit) = &sink.pre_commit {
+            validate_json_map(pre_commit, "sink pre-commit metadata")?;
+        }
+    }
+    Ok(())
 }
 
 impl<'de> Deserialize<'de> for CheckpointManifest {

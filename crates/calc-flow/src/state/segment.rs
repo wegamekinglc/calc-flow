@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{StateHandle, backend::validate_sha256};
-use crate::{CalcFlowError, Result, canonical_json};
+use crate::{CalcFlowError, Epoch, Result, canonical_json};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -113,12 +113,7 @@ impl StateInventory {
         let Some(first) = self.segments.first() else {
             return Ok(());
         };
-        if first.state_layout_version == 0 {
-            return Err(inventory_error("state layout version must be non-zero"));
-        }
-        validate_sha256("schema_fingerprint", &first.schema_fingerprint)
-            .map_err(|error| inventory_error(error.to_string()))?;
-
+        validate_inventory_header(first)?;
         let operator_id = &first.handle.operator_id;
         let layout = first.state_layout_version;
         let schema = &first.schema_fingerprint;
@@ -129,72 +124,106 @@ impl StateInventory {
         let mut paths = BTreeSet::new();
 
         for descriptor in &self.segments {
-            if descriptor.handle.operator_id != *operator_id {
-                return Err(inventory_error(
-                    "state inventory contains more than one operator",
-                ));
-            }
-            if descriptor.state_layout_version != layout {
-                return Err(inventory_error(
-                    "state inventory contains more than one layout version",
-                ));
-            }
-            if descriptor.schema_fingerprint != *schema {
-                return Err(inventory_error(
-                    "state inventory contains more than one schema fingerprint",
-                ));
-            }
-            descriptor
-                .handle
-                .validate_for(operator_id, descriptor.handle.epoch)
-                .map_err(|error| inventory_error(error.to_string()))?;
-
-            let coordinate = (
-                descriptor.handle.epoch,
-                descriptor.handle.segment_id.as_str(),
-            );
-            if previous_coordinate.is_some_and(|previous| previous >= coordinate) {
-                return Err(inventory_error(
-                    "state inventory segments are not in canonical epoch/segment order",
-                ));
-            }
-            previous_coordinate = Some(coordinate);
-
-            match descriptor.kind {
-                SegmentKind::Base => {
-                    if saw_base {
-                        return Err(inventory_error(
-                            "state inventory contains more than one base segment",
-                        ));
-                    }
-                    if saw_delta {
-                        return Err(inventory_error(
-                            "state inventory contains a delta older than its base",
-                        ));
-                    }
-                    saw_base = true;
-                }
-                SegmentKind::Delta => saw_delta = true,
-            }
-
-            let identity = (
-                descriptor.handle.operator_id.clone(),
-                descriptor.handle.epoch,
-                descriptor.handle.segment_id.clone(),
-            );
-            if !identities.insert(identity) {
-                return Err(inventory_error(
-                    "state inventory contains a duplicate handle identity",
-                ));
-            }
-            if !paths.insert(descriptor.handle.relative_path.clone()) {
-                return Err(inventory_error(
-                    "state inventory contains a duplicate committed path",
-                ));
-            }
+            validate_descriptor_identity(descriptor, operator_id, layout, schema)?;
+            previous_coordinate = validate_descriptor_order(descriptor, previous_coordinate)?;
+            record_segment_kind(descriptor.kind, &mut saw_base, &mut saw_delta)?;
+            record_descriptor_identity(descriptor, &mut identities, &mut paths)?;
         }
         Ok(())
     }
+}
+
+fn validate_inventory_header(first: &SegmentDescriptor) -> Result<()> {
+    if first.state_layout_version == 0 {
+        return Err(inventory_error("state layout version must be non-zero"));
+    }
+    validate_sha256("schema_fingerprint", &first.schema_fingerprint)
+        .map_err(|error| inventory_error(error.to_string()))
+}
+
+fn validate_descriptor_identity(
+    descriptor: &SegmentDescriptor,
+    operator_id: &str,
+    layout: u32,
+    schema: &str,
+) -> Result<()> {
+    if descriptor.handle.operator_id != operator_id {
+        return Err(inventory_error(
+            "state inventory contains more than one operator",
+        ));
+    }
+    if descriptor.state_layout_version != layout {
+        return Err(inventory_error(
+            "state inventory contains more than one layout version",
+        ));
+    }
+    if descriptor.schema_fingerprint != schema {
+        return Err(inventory_error(
+            "state inventory contains more than one schema fingerprint",
+        ));
+    }
+    descriptor
+        .handle
+        .validate_for(operator_id, descriptor.handle.epoch)
+        .map_err(|error| inventory_error(error.to_string()))
+}
+
+fn validate_descriptor_order<'a>(
+    descriptor: &'a SegmentDescriptor,
+    previous: Option<(Epoch, &'a str)>,
+) -> Result<Option<(Epoch, &'a str)>> {
+    let coordinate = (
+        descriptor.handle.epoch,
+        descriptor.handle.segment_id.as_str(),
+    );
+    if previous.is_some_and(|value| value >= coordinate) {
+        return Err(inventory_error(
+            "state inventory segments are not in canonical epoch/segment order",
+        ));
+    }
+    Ok(Some(coordinate))
+}
+
+fn record_segment_kind(kind: SegmentKind, saw_base: &mut bool, saw_delta: &mut bool) -> Result<()> {
+    match kind {
+        SegmentKind::Base if *saw_base => Err(inventory_error(
+            "state inventory contains more than one base segment",
+        )),
+        SegmentKind::Base if *saw_delta => Err(inventory_error(
+            "state inventory contains a delta older than its base",
+        )),
+        SegmentKind::Base => {
+            *saw_base = true;
+            Ok(())
+        }
+        SegmentKind::Delta => {
+            *saw_delta = true;
+            Ok(())
+        }
+    }
+}
+
+fn record_descriptor_identity(
+    descriptor: &SegmentDescriptor,
+    identities: &mut BTreeSet<(String, Epoch, String)>,
+    paths: &mut BTreeSet<String>,
+) -> Result<()> {
+    let identity = (
+        descriptor.handle.operator_id.clone(),
+        descriptor.handle.epoch,
+        descriptor.handle.segment_id.clone(),
+    );
+    if !identities.insert(identity) {
+        return Err(inventory_error(
+            "state inventory contains a duplicate handle identity",
+        ));
+    }
+    if !paths.insert(descriptor.handle.relative_path.clone()) {
+        return Err(inventory_error(
+            "state inventory contains a duplicate committed path",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn fold_state_segments<K, V>(

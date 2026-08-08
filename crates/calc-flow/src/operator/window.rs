@@ -191,53 +191,64 @@ impl WindowSpec {
         }
         validate_geometry(self.geometry)?;
 
-        let mut group_names = BTreeSet::new();
-        for (index, column) in self.group_by.iter().enumerate() {
-            let field = format!("window.group_by[{index}]");
-            if column.is_empty() {
-                return Err(invalid_argument(&field, "must not be empty"));
-            }
-            if is_reserved_output(column) {
-                return Err(invalid_argument(
-                    &field,
-                    "collides with a reserved window output name",
-                ));
-            }
-            if !group_names.insert(column) {
-                return Err(invalid_argument(
-                    &field,
-                    "duplicates an earlier group column",
-                ));
-            }
-        }
-
-        let mut aggregate_outputs = BTreeSet::new();
-        for (index, aggregate) in self.aggregates.iter().enumerate() {
-            if aggregate.column.is_empty() {
-                return Err(invalid_argument(
-                    &format!("window.aggregates[{index}].column"),
-                    "must not be empty",
-                ));
-            }
-            let output_field = format!("window.aggregates[{index}].output");
-            if aggregate.output.is_empty() {
-                return Err(invalid_argument(&output_field, "must not be empty"));
-            }
-            if is_reserved_output(&aggregate.output) || group_names.contains(&aggregate.output) {
-                return Err(invalid_argument(
-                    &output_field,
-                    "collides with a reserved or group-column output name",
-                ));
-            }
-            if !aggregate_outputs.insert(&aggregate.output) {
-                return Err(invalid_argument(
-                    &output_field,
-                    "duplicates an earlier aggregate output",
-                ));
-            }
-        }
-        Ok(())
+        let group_names = validate_group_names(&self.group_by)?;
+        validate_aggregate_names(&self.aggregates, &group_names)
     }
+}
+
+fn validate_group_names(columns: &[String]) -> Result<BTreeSet<&String>> {
+    let mut names = BTreeSet::new();
+    for (index, column) in columns.iter().enumerate() {
+        let field = format!("window.group_by[{index}]");
+        if column.is_empty() {
+            return Err(invalid_argument(&field, "must not be empty"));
+        }
+        if is_reserved_output(column) {
+            return Err(invalid_argument(
+                &field,
+                "collides with a reserved window output name",
+            ));
+        }
+        if !names.insert(column) {
+            return Err(invalid_argument(
+                &field,
+                "duplicates an earlier group column",
+            ));
+        }
+    }
+    Ok(names)
+}
+
+fn validate_aggregate_names(
+    aggregates: &[AggregateSpec],
+    group_names: &BTreeSet<&String>,
+) -> Result<()> {
+    let mut outputs = BTreeSet::new();
+    for (index, aggregate) in aggregates.iter().enumerate() {
+        if aggregate.column.is_empty() {
+            return Err(invalid_argument(
+                &format!("window.aggregates[{index}].column"),
+                "must not be empty",
+            ));
+        }
+        let output_field = format!("window.aggregates[{index}].output");
+        if aggregate.output.is_empty() {
+            return Err(invalid_argument(&output_field, "must not be empty"));
+        }
+        if is_reserved_output(&aggregate.output) || group_names.contains(&aggregate.output) {
+            return Err(invalid_argument(
+                &output_field,
+                "collides with a reserved or group-column output name",
+            ));
+        }
+        if !outputs.insert(&aggregate.output) {
+            return Err(invalid_argument(
+                &output_field,
+                "duplicates an earlier aggregate output",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Built-in stream-only event-time window aggregation operator.
@@ -382,6 +393,25 @@ struct InputBatchUpdate {
     metrics: LateMetricDelta,
 }
 
+#[derive(Default)]
+struct PreparedInputMetrics {
+    late_rows: u64,
+    max_lateness_micros: Option<u64>,
+    null_event_time_rows: u64,
+}
+
+impl PreparedInputMetrics {
+    fn into_delta(self) -> LateMetricDelta {
+        LateMetricDelta {
+            late_rows: self.late_rows,
+            affected_batches: u64::from(self.late_rows > 0),
+            max_lateness_micros: self.max_lateness_micros,
+            null_event_time_rows: self.null_event_time_rows,
+            null_event_time_batches: u64::from(self.null_event_time_rows > 0),
+        }
+    }
+}
+
 impl fmt::Debug for WindowAggregateOperator {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -428,10 +458,6 @@ impl WindowAggregateOperator {
         })
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "the transactional window scan keeps all fallible row work before one commit boundary"
-    )]
     fn prepare_input_batch(
         &self,
         batch: &Batch,
@@ -445,110 +471,134 @@ impl WindowAggregateOperator {
         }
         let table = batch.table_payload()?;
         let mut scratch = BTreeMap::<WindowKey, AccumulatorRow>::new();
-        let mut late_rows = 0_u64;
-        let mut max_lateness = None::<u64>;
-        let mut null_event_time_rows = 0_u64;
+        let mut metrics = PreparedInputMetrics::default();
 
         for record in table.batches() {
-            for row_index in 0..record.num_rows() {
-                let Some(event_time) = event_time_at(
-                    record.column(self.compiled.event_time_index).as_ref(),
-                    record
-                        .schema()
-                        .field(self.compiled.event_time_index)
-                        .data_type(),
-                    row_index,
-                    context.operator_id(),
-                    &self.spec.event_time_column,
-                )?
-                else {
-                    null_event_time_rows =
-                        null_event_time_rows.checked_add(1).ok_or_else(|| {
-                            operator_error(
-                                context.operator_id(),
-                                "null event-time row counter overflowed",
-                            )
-                        })?;
-                    continue;
-                };
-                let assignments = window_assignments(event_time, self.compiled.geometry)
-                    .map_err(|message| operator_error(context.operator_id(), &message))?;
-                let mut open_assignments = Vec::with_capacity(assignments.len());
-                for (start, end) in assignments {
-                    if let Some(watermark) = context.input_watermark()
-                        && end <= watermark
-                    {
-                        late_rows = late_rows.checked_add(1).ok_or_else(|| {
-                            operator_error(context.operator_id(), "late row counter overflowed")
-                        })?;
-                        let lateness = watermark
-                            .as_micros()
-                            .checked_sub(end.as_micros())
-                            .and_then(|value| u64::try_from(value).ok())
-                            .ok_or_else(|| {
-                                operator_error(
-                                    context.operator_id(),
-                                    "late assignment distance overflowed",
-                                )
-                            })?;
-                        max_lateness = Some(max_lateness.map_or(lateness, |max| max.max(lateness)));
-                    } else {
-                        open_assignments.push((start, end));
-                    }
-                }
-                if open_assignments.is_empty() {
-                    continue;
-                }
-
-                let (stable_group_key, group_values) = encode_group_key(
-                    record,
-                    row_index,
-                    &self.compiled.group_columns,
-                    context.operator_id(),
-                    &self.spec.group_by,
-                )?;
-                for (start, end) in open_assignments {
-                    let key = WindowKey {
-                        start,
-                        end,
-                        stable_group_key: stable_group_key.clone(),
-                    };
-                    if !scratch.contains_key(&key) {
-                        let accumulator = self
-                            .state
-                            .accumulators
-                            .get(&key)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                new_accumulator_row(&self.spec, &self.compiled, &group_values)
-                            });
-                        scratch.insert(key.clone(), accumulator);
-                    }
-                    let accumulator = scratch
-                        .get_mut(&key)
-                        .expect("scratch accumulator inserted above");
-                    update_accumulators(
-                        accumulator,
-                        record,
-                        row_index,
-                        &self.spec,
-                        &self.compiled,
-                        context.operator_id(),
-                    )?;
-                }
-            }
+            self.prepare_record(record, context, &mut scratch, &mut metrics)?;
         }
 
         Ok(InputBatchUpdate {
             accumulators: scratch,
-            metrics: LateMetricDelta {
-                late_rows,
-                affected_batches: u64::from(late_rows > 0),
-                max_lateness_micros: max_lateness,
-                null_event_time_rows,
-                null_event_time_batches: u64::from(null_event_time_rows > 0),
-            },
+            metrics: metrics.into_delta(),
         })
+    }
+
+    fn prepare_record(
+        &self,
+        record: &RecordBatch,
+        context: &StreamOperatorContext<'_>,
+        scratch: &mut BTreeMap<WindowKey, AccumulatorRow>,
+        metrics: &mut PreparedInputMetrics,
+    ) -> Result<()> {
+        for row_index in 0..record.num_rows() {
+            self.prepare_row(record, row_index, context, scratch, metrics)?;
+        }
+        Ok(())
+    }
+
+    fn prepare_row(
+        &self,
+        record: &RecordBatch,
+        row_index: usize,
+        context: &StreamOperatorContext<'_>,
+        scratch: &mut BTreeMap<WindowKey, AccumulatorRow>,
+        metrics: &mut PreparedInputMetrics,
+    ) -> Result<()> {
+        let Some(event_time) = self.row_event_time(record, row_index, context.operator_id())?
+        else {
+            record_null_event_time(metrics, context.operator_id())?;
+            return Ok(());
+        };
+        let assignments = window_assignments(event_time, self.compiled.geometry)
+            .map_err(|message| operator_error(context.operator_id(), &message))?;
+        let open_assignments = partition_open_assignments(
+            assignments,
+            context.input_watermark(),
+            metrics,
+            context.operator_id(),
+        )?;
+        if open_assignments.is_empty() {
+            return Ok(());
+        }
+        let (stable_group_key, group_values) = encode_group_key(
+            record,
+            row_index,
+            &self.compiled.group_columns,
+            context.operator_id(),
+            &self.spec.group_by,
+        )?;
+        for (start, end) in open_assignments {
+            self.prepare_assignment(
+                record,
+                row_index,
+                start,
+                end,
+                &stable_group_key,
+                &group_values,
+                scratch,
+                context.operator_id(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn row_event_time(
+        &self,
+        record: &RecordBatch,
+        row_index: usize,
+        operator_id: &str,
+    ) -> Result<Option<EventTime>> {
+        event_time_at(
+            record.column(self.compiled.event_time_index).as_ref(),
+            record
+                .schema()
+                .field(self.compiled.event_time_index)
+                .data_type(),
+            row_index,
+            operator_id,
+            &self.spec.event_time_column,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one prepared assignment carries its immutable row and key coordinates"
+    )]
+    fn prepare_assignment(
+        &self,
+        record: &RecordBatch,
+        row_index: usize,
+        start: EventTime,
+        end: EventTime,
+        stable_group_key: &[u8],
+        group_values: &[Option<ScalarValue>],
+        scratch: &mut BTreeMap<WindowKey, AccumulatorRow>,
+        operator_id: &str,
+    ) -> Result<()> {
+        let key = WindowKey {
+            start,
+            end,
+            stable_group_key: stable_group_key.to_vec(),
+        };
+        let accumulator = scratch.entry(key).or_insert_with(|| {
+            self.state
+                .accumulators
+                .get(&WindowKey {
+                    start,
+                    end,
+                    stable_group_key: stable_group_key.to_vec(),
+                })
+                .cloned()
+                .unwrap_or_else(|| new_accumulator_row(&self.spec, &self.compiled, group_values))
+        });
+        update_accumulators(
+            accumulator,
+            record,
+            row_index,
+            &self.spec,
+            &self.compiled,
+            operator_id,
+        )
     }
 
     fn observe_context(&self, context: &StreamOperatorContext<'_>) -> Result<()> {
@@ -727,6 +777,13 @@ fn chunk_output_record(
     first_sequence: u64,
     budget: crate::EdgeBudget,
 ) -> Result<Vec<Batch>> {
+    let row_costs = output_row_costs(record, budget)?;
+    let ranges = output_chunk_ranges(&row_costs, record.num_rows(), budget)?;
+    validate_output_sequence_range(operator_id, first_sequence, ranges.len())?;
+    build_output_batches(record, operator_id, first_sequence, budget, ranges)
+}
+
+fn output_row_costs(record: &RecordBatch, budget: crate::EdgeBudget) -> Result<Vec<usize>> {
     let mut row_costs = Vec::with_capacity(record.num_rows());
     for index in 0..record.num_rows() {
         let row = record.slice(index, 1);
@@ -743,22 +800,18 @@ fn chunk_output_record(
         }
         row_costs.push(bytes);
     }
+    Ok(row_costs)
+}
 
+fn output_chunk_ranges(
+    row_costs: &[usize],
+    row_count: usize,
+    budget: crate::EdgeBudget,
+) -> Result<Vec<(usize, usize)>> {
     let mut ranges = Vec::<(usize, usize)>::new();
     let mut start = 0;
-    while start < record.num_rows() {
-        let mut end = start;
-        let mut bytes = 0_usize;
-        while end < record.num_rows() && end - start < budget.max_rows {
-            let Some(candidate_bytes) = bytes.checked_add(row_costs[end]) else {
-                break;
-            };
-            if candidate_bytes > budget.max_bytes {
-                break;
-            }
-            bytes = candidate_bytes;
-            end += 1;
-        }
+    while start < row_count {
+        let end = next_output_chunk_end(row_costs, start, row_count, budget);
         if end == start {
             return Err(internal_error(
                 "validated output row did not fit the effective edge budget",
@@ -767,7 +820,36 @@ fn chunk_output_record(
         ranges.push((start, end));
         start = end;
     }
-    let chunk_count = u64::try_from(ranges.len()).map_err(|_| {
+    Ok(ranges)
+}
+
+fn next_output_chunk_end(
+    row_costs: &[usize],
+    start: usize,
+    row_count: usize,
+    budget: crate::EdgeBudget,
+) -> usize {
+    let mut end = start;
+    let mut bytes = 0_usize;
+    while end < row_count && end - start < budget.max_rows {
+        let Some(candidate_bytes) = bytes.checked_add(row_costs[end]) else {
+            break;
+        };
+        if candidate_bytes > budget.max_bytes {
+            break;
+        }
+        bytes = candidate_bytes;
+        end += 1;
+    }
+    end
+}
+
+fn validate_output_sequence_range(
+    operator_id: &str,
+    first_sequence: u64,
+    range_count: usize,
+) -> Result<()> {
+    let chunk_count = u64::try_from(range_count).map_err(|_| {
         operator_error(
             operator_id,
             "output chunk count does not fit the sequence range",
@@ -776,7 +858,16 @@ fn chunk_output_record(
     first_sequence
         .checked_add(chunk_count)
         .ok_or_else(|| operator_error(operator_id, "output sequence overflowed before emission"))?;
+    Ok(())
+}
 
+fn build_output_batches(
+    record: &RecordBatch,
+    operator_id: &str,
+    first_sequence: u64,
+    budget: crate::EdgeBudget,
+    ranges: Vec<(usize, usize)>,
+) -> Result<Vec<Batch>> {
     ranges
         .into_iter()
         .enumerate()
@@ -825,14 +916,7 @@ impl StreamOperator for WindowAggregateOperator {
         context: &StreamOperatorContext<'_>,
         _output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        if ingress != "input" {
-            return Err(CalcFlowError::Operator {
-                node_id: self.name.clone(),
-                message: format!("unknown ingress {ingress:?}; expected \"input\""),
-            });
-        }
-        self.input_ports[0].validate(&batch, &format!("{}.input", self.name))?;
-        self.observe_context(context)?;
+        self.validate_process_input(ingress, &batch, context)?;
         self.compact_prepared_if_needed(context).await?;
         let update = self.prepare_input_batch(&batch, context)?;
         let next_metrics = accumulate_late_metrics(self.state.metrics, update.metrics)?;
@@ -844,19 +928,7 @@ impl StreamOperator for WindowAggregateOperator {
             update.metrics.max_lateness_micros,
             update.metrics.null_event_time_rows,
         )?;
-
-        self.install_context_identity(context);
-        self.state.metrics = next_metrics;
-        for (key, accumulator) in update.accumulators {
-            self.state.dirty.insert(key.clone());
-            self.state.accumulators.insert(key, accumulator);
-        }
-        if let Some(encoded) = encoded {
-            self.state.prepared_segments.push(PreparedStateSegment {
-                kind: PreparedSegmentKind::Delta,
-                bytes: encoded,
-            });
-        }
+        self.install_input_update(update, next_metrics, encoded, context);
         Ok(())
     }
 
@@ -1010,28 +1082,68 @@ impl StreamOperator for WindowAggregateOperator {
         if snapshot.inline_metadata.is_empty() && snapshot.segments.is_empty() {
             return self.reset();
         }
-        let metadata = serde_json::from_value::<WindowSnapshotMetadata>(Value::Object(
-            snapshot.inline_metadata.clone().into_iter().collect(),
-        ))
-        .map_err(|error| format_error(&error))?;
+        let metadata = parse_snapshot_metadata(snapshot)?;
         validate_snapshot_metadata(&metadata, &self.compiled, snapshot)?;
+        let decoded = self.decode_snapshot_segments(snapshot, &metadata)?;
+        self.install_restored_state(metadata, decoded);
+        Ok(())
+    }
 
-        let segments = metadata
-            .segment_ids
-            .iter()
-            .map(|segment_id| {
-                snapshot.segments.get(segment_id).cloned().ok_or_else(|| {
-                    checkpoint_mismatch(format!(
-                        "window snapshot is missing segment {segment_id:?}"
-                    ))
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+    fn reset(&mut self) -> Result<()> {
+        self.state = WindowState::default();
+        Ok(())
+    }
+}
+
+impl WindowAggregateOperator {
+    fn validate_process_input(
+        &self,
+        ingress: &str,
+        batch: &Batch,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        if ingress != "input" {
+            return Err(CalcFlowError::Operator {
+                node_id: self.name.clone(),
+                message: format!("unknown ingress {ingress:?}; expected \"input\""),
+            });
+        }
+        self.input_ports[0].validate(batch, &format!("{}.input", self.name))?;
+        self.observe_context(context)
+    }
+
+    fn install_input_update(
+        &mut self,
+        update: InputBatchUpdate,
+        next_metrics: LateMetricDelta,
+        encoded: Option<Vec<u8>>,
+        context: &StreamOperatorContext<'_>,
+    ) {
+        self.install_context_identity(context);
+        self.state.metrics = next_metrics;
+        for (key, accumulator) in update.accumulators {
+            self.state.dirty.insert(key.clone());
+            self.state.accumulators.insert(key, accumulator);
+        }
+        if let Some(encoded) = encoded {
+            self.state.prepared_segments.push(PreparedStateSegment {
+                kind: PreparedSegmentKind::Delta,
+                bytes: encoded,
+            });
+        }
+    }
+
+    fn decode_snapshot_segments(
+        &self,
+        snapshot: &crate::OperatorStateSnapshot,
+        metadata: &WindowSnapshotMetadata,
+    ) -> Result<BTreeMap<WindowKey, AccumulatorRow>> {
+        let segments = snapshot_segments(snapshot, &metadata.segment_ids)?;
         let spec = self.spec.clone();
         let compiled = self.compiled.clone();
         let pipeline_fingerprint = metadata.pipeline_fingerprint.clone();
         let operator_id = metadata.operator_id.clone();
-        let decoded = std::thread::spawn(move || {
+        std::thread::spawn(move || {
             decode_state_segments(
                 segments,
                 &spec,
@@ -1041,8 +1153,14 @@ impl StreamOperator for WindowAggregateOperator {
             )
         })
         .join()
-        .map_err(|_| internal_error("window state decoder worker panicked"))??;
+        .map_err(|_| internal_error("window state decoder worker panicked"))?
+    }
 
+    fn install_restored_state(
+        &mut self,
+        metadata: WindowSnapshotMetadata,
+        decoded: BTreeMap<WindowKey, AccumulatorRow>,
+    ) {
         self.state = WindowState {
             accumulators: decoded,
             last_input_watermark: metadata.last_input_watermark,
@@ -1055,13 +1173,78 @@ impl StreamOperator for WindowAggregateOperator {
             operator_id: metadata.operator_id,
             ..WindowState::default()
         };
-        Ok(())
     }
+}
 
-    fn reset(&mut self) -> Result<()> {
-        self.state = WindowState::default();
-        Ok(())
+fn parse_snapshot_metadata(
+    snapshot: &crate::OperatorStateSnapshot,
+) -> Result<WindowSnapshotMetadata> {
+    serde_json::from_value::<WindowSnapshotMetadata>(Value::Object(
+        snapshot.inline_metadata.clone().into_iter().collect(),
+    ))
+    .map_err(|error| format_error(&error))
+}
+
+fn snapshot_segments(
+    snapshot: &crate::OperatorStateSnapshot,
+    segment_ids: &[String],
+) -> Result<Vec<Vec<u8>>> {
+    segment_ids
+        .iter()
+        .map(|segment_id| {
+            snapshot.segments.get(segment_id).cloned().ok_or_else(|| {
+                checkpoint_mismatch(format!("window snapshot is missing segment {segment_id:?}"))
+            })
+        })
+        .collect()
+}
+
+fn record_null_event_time(metrics: &mut PreparedInputMetrics, operator_id: &str) -> Result<()> {
+    metrics.null_event_time_rows = metrics
+        .null_event_time_rows
+        .checked_add(1)
+        .ok_or_else(|| operator_error(operator_id, "null event-time row counter overflowed"))?;
+    Ok(())
+}
+
+fn partition_open_assignments(
+    assignments: Vec<(EventTime, EventTime)>,
+    watermark: Option<EventTime>,
+    metrics: &mut PreparedInputMetrics,
+    operator_id: &str,
+) -> Result<Vec<(EventTime, EventTime)>> {
+    let mut open = Vec::with_capacity(assignments.len());
+    for assignment in assignments {
+        if let Some(closing_watermark) = watermark.filter(|value| assignment.1 <= *value) {
+            record_late_assignment(metrics, closing_watermark, assignment.1, operator_id)?;
+        } else {
+            open.push(assignment);
+        }
     }
+    Ok(open)
+}
+
+fn record_late_assignment(
+    metrics: &mut PreparedInputMetrics,
+    watermark: EventTime,
+    end: EventTime,
+    operator_id: &str,
+) -> Result<()> {
+    metrics.late_rows = metrics
+        .late_rows
+        .checked_add(1)
+        .ok_or_else(|| operator_error(operator_id, "late row counter overflowed"))?;
+    let lateness = watermark
+        .as_micros()
+        .checked_sub(end.as_micros())
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| operator_error(operator_id, "late assignment distance overflowed"))?;
+    metrics.max_lateness_micros = Some(
+        metrics
+            .max_lateness_micros
+            .map_or(lateness, |maximum| maximum.max(lateness)),
+    );
+    Ok(())
 }
 
 fn event_time_at(
@@ -1133,19 +1316,28 @@ fn window_assignments(
             .map_err(|_| "window overlap does not fit usize".to_string())?,
     );
     for offset in (0..geometry.overlap).rev() {
-        let start = latest_start
-            .checked_sub(i128::from(offset) * slide)
-            .ok_or_else(|| "window assignment start overflowed".to_string())?;
-        let end = start
-            .checked_add(size)
-            .ok_or_else(|| "window assignment end overflowed".to_string())?;
-        let start = i64::try_from(start)
-            .map_err(|_| "window assignment start is outside EventTime".to_string())?;
-        let end = i64::try_from(end)
-            .map_err(|_| "window assignment end is outside EventTime".to_string())?;
-        assignments.push((EventTime::from_micros(start), EventTime::from_micros(end)));
+        assignments.push(window_assignment(latest_start, slide, size, offset)?);
     }
     Ok(assignments)
+}
+
+fn window_assignment(
+    latest_start: i128,
+    slide: i128,
+    size: i128,
+    offset: u64,
+) -> std::result::Result<(EventTime, EventTime), String> {
+    let start = latest_start
+        .checked_sub(i128::from(offset) * slide)
+        .ok_or_else(|| "window assignment start overflowed".to_string())?;
+    let end = start
+        .checked_add(size)
+        .ok_or_else(|| "window assignment end overflowed".to_string())?;
+    let start = i64::try_from(start)
+        .map_err(|_| "window assignment start is outside EventTime".to_string())?;
+    let end =
+        i64::try_from(end).map_err(|_| "window assignment end is outside EventTime".to_string())?;
+    Ok((EventTime::from_micros(start), EventTime::from_micros(end)))
 }
 
 fn encode_group_key(
@@ -1190,92 +1382,178 @@ fn encode_group_scalar(
         return Ok(());
     };
     extend_group_encoding(encoded, &[0x01])?;
+    match data_type {
+        DataType::Boolean => encode_boolean_group(encoded, value),
+        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
+            encode_signed_group(encoded, data_type, value)
+        }
+        DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+            encode_unsigned_group(encoded, data_type, value)
+        }
+        DataType::Float32 | DataType::Float64 => encode_float_group(encoded, data_type, value),
+        DataType::Utf8 | DataType::LargeUtf8 => encode_string_group(encoded, value),
+        DataType::Date32 | DataType::Date64 | DataType::Timestamp(TimeUnit::Microsecond, _) => {
+            encode_temporal_group(encoded, data_type, value)
+        }
+        _ => Err("compiled group scalar type mismatch".into()),
+    }
+}
+
+fn encode_boolean_group(
+    encoded: &mut Vec<u8>,
+    value: &ScalarValue,
+) -> std::result::Result<(), String> {
+    let ScalarValue::Boolean(value) = value else {
+        return Err("compiled group scalar type mismatch".into());
+    };
+    extend_group_encoding(encoded, &[u8::from(*value)])
+}
+
+fn encode_signed_group(
+    encoded: &mut Vec<u8>,
+    data_type: &DataType,
+    value: &ScalarValue,
+) -> std::result::Result<(), String> {
+    let ScalarValue::Signed(value) = value else {
+        return Err("compiled group scalar type mismatch".into());
+    };
+    match data_type {
+        DataType::Int8 => encode_group_i8(encoded, *value),
+        DataType::Int16 => encode_group_i16(encoded, *value),
+        DataType::Int32 => encode_group_i32(encoded, *value),
+        DataType::Int64 => extend_group_encoding(encoded, &ordered_i64(*value)),
+        _ => Err("compiled group scalar type mismatch".into()),
+    }
+}
+
+fn encode_group_i8(encoded: &mut Vec<u8>, value: i64) -> std::result::Result<(), String> {
+    let value = i8::try_from(value).map_err(|_| "Int8 group scalar escaped its compiled range")?;
+    extend_group_encoding(encoded, &[value.to_be_bytes()[0] ^ 0x80])
+}
+
+fn encode_group_i16(encoded: &mut Vec<u8>, value: i64) -> std::result::Result<(), String> {
+    let value =
+        i16::try_from(value).map_err(|_| "Int16 group scalar escaped its compiled range")?;
+    let mut bytes = value.to_be_bytes();
+    bytes[0] ^= 0x80;
+    extend_group_encoding(encoded, &bytes)
+}
+
+fn encode_group_i32(encoded: &mut Vec<u8>, value: i64) -> std::result::Result<(), String> {
+    let value =
+        i32::try_from(value).map_err(|_| "Int32 group scalar escaped its compiled range")?;
+    let mut bytes = value.to_be_bytes();
+    bytes[0] ^= 0x80;
+    extend_group_encoding(encoded, &bytes)
+}
+
+fn ordered_i64(value: i64) -> [u8; 8] {
+    let mut bytes = value.to_be_bytes();
+    bytes[0] ^= 0x80;
+    bytes
+}
+
+fn encode_unsigned_group(
+    encoded: &mut Vec<u8>,
+    data_type: &DataType,
+    value: &ScalarValue,
+) -> std::result::Result<(), String> {
+    let ScalarValue::Unsigned(value) = value else {
+        return Err("compiled group scalar type mismatch".into());
+    };
+    match data_type {
+        DataType::UInt8 => encode_group_u8(encoded, *value),
+        DataType::UInt16 => encode_group_u16(encoded, *value),
+        DataType::UInt32 => encode_group_u32(encoded, *value),
+        DataType::UInt64 => extend_group_encoding(encoded, &value.to_be_bytes()),
+        _ => Err("compiled group scalar type mismatch".into()),
+    }
+}
+
+fn encode_group_u8(encoded: &mut Vec<u8>, value: u64) -> std::result::Result<(), String> {
+    let value = u8::try_from(value).map_err(|_| "UInt8 group scalar escaped its compiled range")?;
+    extend_group_encoding(encoded, &[value])
+}
+
+fn encode_group_u16(encoded: &mut Vec<u8>, value: u64) -> std::result::Result<(), String> {
+    let value =
+        u16::try_from(value).map_err(|_| "UInt16 group scalar escaped its compiled range")?;
+    extend_group_encoding(encoded, &value.to_be_bytes())
+}
+
+fn encode_group_u32(encoded: &mut Vec<u8>, value: u64) -> std::result::Result<(), String> {
+    let value =
+        u32::try_from(value).map_err(|_| "UInt32 group scalar escaped its compiled range")?;
+    extend_group_encoding(encoded, &value.to_be_bytes())
+}
+
+fn encode_float_group(
+    encoded: &mut Vec<u8>,
+    data_type: &DataType,
+    value: &ScalarValue,
+) -> std::result::Result<(), String> {
     match (data_type, value) {
-        (DataType::Boolean, ScalarValue::Boolean(value)) => {
-            extend_group_encoding(encoded, &[u8::from(*value)])?;
-        }
-        (DataType::Int8, ScalarValue::Signed(value)) => {
-            let value =
-                i8::try_from(*value).map_err(|_| "Int8 group scalar escaped its compiled range")?;
-            extend_group_encoding(encoded, &[value.to_be_bytes()[0] ^ 0x80])?;
-        }
-        (DataType::Int16, ScalarValue::Signed(value)) => {
-            let mut bytes = i16::try_from(*value)
-                .map_err(|_| "Int16 group scalar escaped its compiled range")?
-                .to_be_bytes();
-            bytes[0] ^= 0x80;
-            extend_group_encoding(encoded, &bytes)?;
-        }
-        (DataType::Int32, ScalarValue::Signed(value)) => {
-            let mut bytes = i32::try_from(*value)
-                .map_err(|_| "Int32 group scalar escaped its compiled range")?
-                .to_be_bytes();
-            bytes[0] ^= 0x80;
-            extend_group_encoding(encoded, &bytes)?;
-        }
-        (DataType::Int64, ScalarValue::Signed(value)) => {
-            let mut bytes = value.to_be_bytes();
-            bytes[0] ^= 0x80;
-            extend_group_encoding(encoded, &bytes)?;
-        }
-        (DataType::UInt8, ScalarValue::Unsigned(value)) => {
-            let value = u8::try_from(*value)
-                .map_err(|_| "UInt8 group scalar escaped its compiled range")?;
-            extend_group_encoding(encoded, &[value])?;
-        }
-        (DataType::UInt16, ScalarValue::Unsigned(value)) => {
-            let value = u16::try_from(*value)
-                .map_err(|_| "UInt16 group scalar escaped its compiled range")?;
-            extend_group_encoding(encoded, &value.to_be_bytes())?;
-        }
-        (DataType::UInt32, ScalarValue::Unsigned(value)) => {
-            let value = u32::try_from(*value)
-                .map_err(|_| "UInt32 group scalar escaped its compiled range")?;
-            extend_group_encoding(encoded, &value.to_be_bytes())?;
-        }
-        (DataType::UInt64, ScalarValue::Unsigned(value)) => {
-            extend_group_encoding(encoded, &value.to_be_bytes())?;
-        }
         (DataType::Float32, ScalarValue::Float32(bits)) => {
-            let ordered = if bits & (1 << 31) != 0 {
-                !bits
-            } else {
-                bits | (1 << 31)
-            };
-            extend_group_encoding(encoded, &ordered.to_be_bytes())?;
+            extend_group_encoding(encoded, &ordered_float32(*bits).to_be_bytes())
         }
         (DataType::Float64, ScalarValue::Float64(bits)) => {
-            let ordered = if bits & (1 << 63) != 0 {
-                !bits
-            } else {
-                bits | (1 << 63)
-            };
-            extend_group_encoding(encoded, &ordered.to_be_bytes())?;
+            extend_group_encoding(encoded, &ordered_float64(*bits).to_be_bytes())
         }
-        (DataType::Utf8 | DataType::LargeUtf8, ScalarValue::String(value)) => {
-            for byte in value.as_bytes() {
-                if *byte == 0 {
-                    extend_group_encoding(encoded, &[0x00, 0xff])?;
-                } else {
-                    extend_group_encoding(encoded, &[*byte])?;
-                }
-            }
-            extend_group_encoding(encoded, &[0x00, 0x00])?;
-        }
+        _ => Err("compiled group scalar type mismatch".into()),
+    }
+}
+
+fn ordered_float32(bits: u32) -> u32 {
+    if bits & (1 << 31) != 0 {
+        !bits
+    } else {
+        bits | (1 << 31)
+    }
+}
+
+fn ordered_float64(bits: u64) -> u64 {
+    if bits & (1 << 63) != 0 {
+        !bits
+    } else {
+        bits | (1 << 63)
+    }
+}
+
+fn encode_string_group(
+    encoded: &mut Vec<u8>,
+    value: &ScalarValue,
+) -> std::result::Result<(), String> {
+    let ScalarValue::String(value) = value else {
+        return Err("compiled group scalar type mismatch".into());
+    };
+    for byte in value.as_bytes() {
+        let escaped = if *byte == 0 {
+            &[0x00, 0xff][..]
+        } else {
+            std::slice::from_ref(byte)
+        };
+        extend_group_encoding(encoded, escaped)?;
+    }
+    extend_group_encoding(encoded, &[0x00, 0x00])
+}
+
+fn encode_temporal_group(
+    encoded: &mut Vec<u8>,
+    data_type: &DataType,
+    value: &ScalarValue,
+) -> std::result::Result<(), String> {
+    match (data_type, value) {
         (DataType::Date32, ScalarValue::Date32(value)) => {
             let mut bytes = value.to_be_bytes();
             bytes[0] ^= 0x80;
-            extend_group_encoding(encoded, &bytes)?;
+            extend_group_encoding(encoded, &bytes)
         }
         (DataType::Date64, ScalarValue::Date64(value))
         | (DataType::Timestamp(TimeUnit::Microsecond, _), ScalarValue::Timestamp(value)) => {
-            let mut bytes = value.to_be_bytes();
-            bytes[0] ^= 0x80;
-            extend_group_encoding(encoded, &bytes)?;
+            extend_group_encoding(encoded, &ordered_i64(*value))
         }
-        _ => return Err("compiled group scalar type mismatch".into()),
+        _ => Err("compiled group scalar type mismatch".into()),
     }
-    Ok(())
 }
 
 fn extend_group_encoding(encoded: &mut Vec<u8>, bytes: &[u8]) -> std::result::Result<(), String> {
@@ -1378,76 +1656,126 @@ fn update_accumulator(
     function: AggregateFunction,
     value: ScalarValue,
 ) -> std::result::Result<(), String> {
-    match (function, accumulator) {
-        (AggregateFunction::Count, AccumulatorValue::Count(count)) => {
-            *count = count
-                .checked_add(1)
-                .ok_or_else(|| "count overflowed UInt64".to_string())?;
-        }
-        (AggregateFunction::Sum, AccumulatorValue::SignedSum(sum)) => {
-            let value = signed_value(&value)?;
-            let updated = sum
-                .unwrap_or(0)
-                .checked_add(i128::from(value))
-                .ok_or_else(|| "signed sum overflowed its widened state".to_string())?;
-            i64::try_from(updated).map_err(|_| "signed sum overflowed Int64".to_string())?;
-            *sum = Some(updated);
-        }
-        (AggregateFunction::Sum, AccumulatorValue::UnsignedSum(sum)) => {
-            let value = unsigned_value(&value)?;
-            let updated = sum
-                .unwrap_or(0)
-                .checked_add(u128::from(value))
-                .ok_or_else(|| "unsigned sum overflowed its widened state".to_string())?;
-            u64::try_from(updated).map_err(|_| "unsigned sum overflowed UInt64".to_string())?;
-            *sum = Some(updated);
-        }
-        (AggregateFunction::Sum, AccumulatorValue::FloatSum(sum)) => {
-            *sum = Some(canonical_float_add(
-                sum.unwrap_or(0.0),
-                float_value(&value)?,
-            ));
-        }
-        (AggregateFunction::Min, AccumulatorValue::Min(current)) => {
-            if current
-                .as_ref()
-                .is_none_or(|current| scalar_total_cmp(&value, current) == Ordering::Less)
-            {
-                *current = Some(value);
-            }
-        }
-        (AggregateFunction::Max, AccumulatorValue::Max(current)) => {
-            if current
-                .as_ref()
-                .is_none_or(|current| scalar_total_cmp(&value, current) == Ordering::Greater)
-            {
-                *current = Some(value);
-            }
-        }
-        (AggregateFunction::Avg, AccumulatorValue::SignedAverage { sum, count }) => {
-            *sum = sum
-                .checked_add(i128::from(signed_value(&value)?))
-                .ok_or_else(|| "signed average sum overflowed Int128".to_string())?;
-            *count = count
-                .checked_add(1)
-                .ok_or_else(|| "average count overflowed UInt64".to_string())?;
-        }
-        (AggregateFunction::Avg, AccumulatorValue::UnsignedAverage { sum, count }) => {
-            *sum = sum
-                .checked_add(u128::from(unsigned_value(&value)?))
-                .ok_or_else(|| "unsigned average sum overflowed UInt128".to_string())?;
-            *count = count
-                .checked_add(1)
-                .ok_or_else(|| "average count overflowed UInt64".to_string())?;
-        }
-        (AggregateFunction::Avg, AccumulatorValue::FloatAverage { sum, count }) => {
-            *sum = canonical_float_add(*sum, float_value(&value)?);
-            *count = count
-                .checked_add(1)
-                .ok_or_else(|| "average count overflowed UInt64".to_string())?;
-        }
-        _ => return Err("compiled aggregate accumulator type mismatch".into()),
+    match function {
+        AggregateFunction::Count => update_count(accumulator),
+        AggregateFunction::Sum => update_sum(accumulator, &value),
+        AggregateFunction::Min => update_extreme(accumulator, value, Ordering::Less),
+        AggregateFunction::Max => update_extreme(accumulator, value, Ordering::Greater),
+        AggregateFunction::Avg => update_average(accumulator, &value),
     }
+}
+
+fn update_count(accumulator: &mut AccumulatorValue) -> std::result::Result<(), String> {
+    let AccumulatorValue::Count(count) = accumulator else {
+        return Err("compiled aggregate accumulator type mismatch".into());
+    };
+    *count = count
+        .checked_add(1)
+        .ok_or_else(|| "count overflowed UInt64".to_string())?;
+    Ok(())
+}
+
+fn update_sum(
+    accumulator: &mut AccumulatorValue,
+    value: &ScalarValue,
+) -> std::result::Result<(), String> {
+    match accumulator {
+        AccumulatorValue::SignedSum(sum) => update_signed_sum(sum, value),
+        AccumulatorValue::UnsignedSum(sum) => update_unsigned_sum(sum, value),
+        AccumulatorValue::FloatSum(sum) => {
+            *sum = Some(canonical_float_add(sum.unwrap_or(0.0), float_value(value)?));
+            Ok(())
+        }
+        _ => Err("compiled aggregate accumulator type mismatch".into()),
+    }
+}
+
+fn update_signed_sum(
+    sum: &mut Option<i128>,
+    value: &ScalarValue,
+) -> std::result::Result<(), String> {
+    let updated = sum
+        .unwrap_or(0)
+        .checked_add(i128::from(signed_value(value)?))
+        .ok_or_else(|| "signed sum overflowed its widened state".to_string())?;
+    i64::try_from(updated).map_err(|_| "signed sum overflowed Int64".to_string())?;
+    *sum = Some(updated);
+    Ok(())
+}
+
+fn update_unsigned_sum(
+    sum: &mut Option<u128>,
+    value: &ScalarValue,
+) -> std::result::Result<(), String> {
+    let updated = sum
+        .unwrap_or(0)
+        .checked_add(u128::from(unsigned_value(value)?))
+        .ok_or_else(|| "unsigned sum overflowed its widened state".to_string())?;
+    u64::try_from(updated).map_err(|_| "unsigned sum overflowed UInt64".to_string())?;
+    *sum = Some(updated);
+    Ok(())
+}
+
+fn update_extreme(
+    accumulator: &mut AccumulatorValue,
+    value: ScalarValue,
+    ordering: Ordering,
+) -> std::result::Result<(), String> {
+    let (AccumulatorValue::Min(current) | AccumulatorValue::Max(current)) = accumulator else {
+        return Err("compiled aggregate accumulator type mismatch".into());
+    };
+    if current
+        .as_ref()
+        .is_none_or(|current| scalar_total_cmp(&value, current) == ordering)
+    {
+        *current = Some(value);
+    }
+    Ok(())
+}
+
+fn update_average(
+    accumulator: &mut AccumulatorValue,
+    value: &ScalarValue,
+) -> std::result::Result<(), String> {
+    match accumulator {
+        AccumulatorValue::SignedAverage { sum, count } => update_signed_average(sum, count, value),
+        AccumulatorValue::UnsignedAverage { sum, count } => {
+            update_unsigned_average(sum, count, value)
+        }
+        AccumulatorValue::FloatAverage { sum, count } => {
+            *sum = canonical_float_add(*sum, float_value(value)?);
+            increment_average_count(count)
+        }
+        _ => Err("compiled aggregate accumulator type mismatch".into()),
+    }
+}
+
+fn update_signed_average(
+    sum: &mut i128,
+    count: &mut u64,
+    value: &ScalarValue,
+) -> std::result::Result<(), String> {
+    *sum = sum
+        .checked_add(i128::from(signed_value(value)?))
+        .ok_or_else(|| "signed average sum overflowed Int128".to_string())?;
+    increment_average_count(count)
+}
+
+fn update_unsigned_average(
+    sum: &mut u128,
+    count: &mut u64,
+    value: &ScalarValue,
+) -> std::result::Result<(), String> {
+    *sum = sum
+        .checked_add(u128::from(unsigned_value(value)?))
+        .ok_or_else(|| "unsigned average sum overflowed UInt128".to_string())?;
+    increment_average_count(count)
+}
+
+fn increment_average_count(count: &mut u64) -> std::result::Result<(), String> {
+    *count = count
+        .checked_add(1)
+        .ok_or_else(|| "average count overflowed UInt64".to_string())?;
     Ok(())
 }
 
@@ -1632,76 +1960,159 @@ fn scalar_at(
     if array.is_null(row) {
         return Ok(None);
     }
-    let value = match data_type {
-        DataType::Boolean => ScalarValue::Boolean(
+    scalar_non_null_at(array, data_type, row, operator_id).map(Some)
+}
+
+fn scalar_non_null_at(
+    array: &dyn Array,
+    data_type: &DataType,
+    row: usize,
+    operator_id: &str,
+) -> Result<ScalarValue> {
+    match data_type {
+        DataType::Boolean => Ok(ScalarValue::Boolean(
             downcast_array::<BooleanArray>(array, operator_id, "Boolean")?.value(row),
-        ),
-        DataType::Int8 => ScalarValue::Signed(i64::from(
-            downcast_array::<Int8Array>(array, operator_id, "Int8")?.value(row),
         )),
-        DataType::Int16 => ScalarValue::Signed(i64::from(
-            downcast_array::<Int16Array>(array, operator_id, "Int16")?.value(row),
+        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
+            signed_scalar_at(array, data_type, row, operator_id)
+        }
+        DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+            unsigned_scalar_at(array, data_type, row, operator_id)
+        }
+        DataType::Float32 | DataType::Float64 => {
+            float_scalar_at(array, data_type, row, operator_id)
+        }
+        DataType::Utf8 | DataType::LargeUtf8 => {
+            string_scalar_at(array, data_type, row, operator_id)
+        }
+        DataType::Date32 | DataType::Date64 | DataType::Timestamp(TimeUnit::Microsecond, _) => {
+            temporal_scalar_at(array, data_type, row, operator_id)
+        }
+        _ => Err(operator_error(
+            operator_id,
+            &format!("compiled scalar type {data_type} is unsupported"),
         )),
-        DataType::Int32 => ScalarValue::Signed(i64::from(
-            downcast_array::<Int32Array>(array, operator_id, "Int32")?.value(row),
-        )),
-        DataType::Int64 => ScalarValue::Signed(
-            downcast_array::<Int64Array>(array, operator_id, "Int64")?.value(row),
-        ),
-        DataType::UInt8 => ScalarValue::Unsigned(u64::from(
-            downcast_array::<UInt8Array>(array, operator_id, "UInt8")?.value(row),
-        )),
-        DataType::UInt16 => ScalarValue::Unsigned(u64::from(
-            downcast_array::<UInt16Array>(array, operator_id, "UInt16")?.value(row),
-        )),
-        DataType::UInt32 => ScalarValue::Unsigned(u64::from(
-            downcast_array::<UInt32Array>(array, operator_id, "UInt32")?.value(row),
-        )),
-        DataType::UInt64 => ScalarValue::Unsigned(
-            downcast_array::<UInt64Array>(array, operator_id, "UInt64")?.value(row),
-        ),
-        DataType::Float32 => ScalarValue::Float32(
+    }
+}
+
+fn signed_scalar_at(
+    array: &dyn Array,
+    data_type: &DataType,
+    row: usize,
+    operator_id: &str,
+) -> Result<ScalarValue> {
+    let value = match data_type {
+        DataType::Int8 => {
+            i64::from(downcast_array::<Int8Array>(array, operator_id, "Int8")?.value(row))
+        }
+        DataType::Int16 => {
+            i64::from(downcast_array::<Int16Array>(array, operator_id, "Int16")?.value(row))
+        }
+        DataType::Int32 => {
+            i64::from(downcast_array::<Int32Array>(array, operator_id, "Int32")?.value(row))
+        }
+        DataType::Int64 => downcast_array::<Int64Array>(array, operator_id, "Int64")?.value(row),
+        _ => return Err(internal_error("compiled signed scalar type mismatch")),
+    };
+    Ok(ScalarValue::Signed(value))
+}
+
+fn unsigned_scalar_at(
+    array: &dyn Array,
+    data_type: &DataType,
+    row: usize,
+    operator_id: &str,
+) -> Result<ScalarValue> {
+    let value = match data_type {
+        DataType::UInt8 => {
+            u64::from(downcast_array::<UInt8Array>(array, operator_id, "UInt8")?.value(row))
+        }
+        DataType::UInt16 => {
+            u64::from(downcast_array::<UInt16Array>(array, operator_id, "UInt16")?.value(row))
+        }
+        DataType::UInt32 => {
+            u64::from(downcast_array::<UInt32Array>(array, operator_id, "UInt32")?.value(row))
+        }
+        DataType::UInt64 => downcast_array::<UInt64Array>(array, operator_id, "UInt64")?.value(row),
+        _ => return Err(internal_error("compiled unsigned scalar type mismatch")),
+    };
+    Ok(ScalarValue::Unsigned(value))
+}
+
+fn float_scalar_at(
+    array: &dyn Array,
+    data_type: &DataType,
+    row: usize,
+    operator_id: &str,
+) -> Result<ScalarValue> {
+    match data_type {
+        DataType::Float32 => Ok(ScalarValue::Float32(
             downcast_array::<Float32Array>(array, operator_id, "Float32")?
                 .value(row)
                 .to_bits(),
-        ),
-        DataType::Float64 => ScalarValue::Float64(
+        )),
+        DataType::Float64 => Ok(ScalarValue::Float64(
             downcast_array::<Float64Array>(array, operator_id, "Float64")?
                 .value(row)
                 .to_bits(),
-        ),
-        DataType::Utf8 => ScalarValue::String(
-            downcast_array::<StringArray>(array, operator_id, "Utf8")?
-                .value(row)
-                .into(),
-        ),
-        DataType::LargeUtf8 => ScalarValue::String(
-            downcast_array::<LargeStringArray>(array, operator_id, "LargeUtf8")?
-                .value(row)
-                .into(),
-        ),
-        DataType::Date32 => ScalarValue::Date32(
+        )),
+        _ => Err(internal_error("compiled float scalar type mismatch")),
+    }
+}
+
+fn string_scalar_at(
+    array: &dyn Array,
+    data_type: &DataType,
+    row: usize,
+    operator_id: &str,
+) -> Result<ScalarValue> {
+    let value = match data_type {
+        DataType::Utf8 => downcast_array::<StringArray>(array, operator_id, "Utf8")?.value(row),
+        DataType::LargeUtf8 => {
+            downcast_array::<LargeStringArray>(array, operator_id, "LargeUtf8")?.value(row)
+        }
+        _ => return Err(internal_error("compiled string scalar type mismatch")),
+    };
+    Ok(ScalarValue::String(value.into()))
+}
+
+fn temporal_scalar_at(
+    array: &dyn Array,
+    data_type: &DataType,
+    row: usize,
+    operator_id: &str,
+) -> Result<ScalarValue> {
+    match data_type {
+        DataType::Date32 => Ok(ScalarValue::Date32(
             downcast_array::<Date32Array>(array, operator_id, "Date32")?.value(row),
-        ),
-        DataType::Date64 => ScalarValue::Date64(
+        )),
+        DataType::Date64 => Ok(ScalarValue::Date64(
             downcast_array::<Date64Array>(array, operator_id, "Date64")?.value(row),
-        ),
-        DataType::Timestamp(TimeUnit::Microsecond, _) => ScalarValue::Timestamp(
+        )),
+        DataType::Timestamp(TimeUnit::Microsecond, _) => Ok(ScalarValue::Timestamp(
             downcast_array::<TimestampMicrosecondArray>(
                 array,
                 operator_id,
                 "Timestamp(Microsecond)",
             )?
             .value(row),
-        ),
-        _ => {
-            return Err(operator_error(
-                operator_id,
-                &format!("compiled scalar type {data_type} is unsupported"),
-            ));
-        }
-    };
-    Ok(Some(value))
+        )),
+        _ => Err(internal_error("compiled temporal scalar type mismatch")),
+    }
+}
+
+macro_rules! primitive_scalar_array {
+    ($values:expr, $array:ty, $pattern:pat => $value:expr) => {{
+        let values = $values
+            .iter()
+            .map(|value| match value {
+                None => Ok(None),
+                Some($pattern) => Ok(Some($value)),
+                Some(_) => Err(internal_error("output scalar type mismatch")),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Arc::new(<$array>::from(values)) as ArrayRef)
+    }};
 }
 
 fn scalar_array(
@@ -1709,95 +2120,126 @@ fn scalar_array(
     values: &[Option<ScalarValue>],
     operator_id: &str,
 ) -> Result<ArrayRef> {
-    macro_rules! primitive {
-        ($array:ty, $pattern:pat => $value:expr) => {{
-            let values = values
-                .iter()
-                .map(|value| match value {
-                    None => Ok(None),
-                    Some($pattern) => Ok(Some($value)),
-                    Some(_) => Err(internal_error("output scalar type mismatch")),
-                })
-                .collect::<Result<Vec<_>>>()?;
-            Arc::new(<$array>::from(values)) as ArrayRef
-        }};
+    match data_type {
+        DataType::Boolean => {
+            primitive_scalar_array!(values, BooleanArray, ScalarValue::Boolean(value) => *value)
+        }
+        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
+            signed_scalar_array(data_type, values)
+        }
+        DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+            unsigned_scalar_array(data_type, values)
+        }
+        DataType::Float32 | DataType::Float64 => float_scalar_array(data_type, values),
+        DataType::Utf8 | DataType::LargeUtf8 => string_scalar_array(data_type, values),
+        DataType::Date32 | DataType::Date64 | DataType::Timestamp(TimeUnit::Microsecond, _) => {
+            temporal_scalar_array(data_type, values)
+        }
+        _ => Err(operator_error(
+            operator_id,
+            &format!("cannot build window output array for type {data_type}"),
+        )),
     }
+}
 
-    let array = match data_type {
-        DataType::Boolean => primitive!(BooleanArray, ScalarValue::Boolean(value) => *value),
-        DataType::Int8 => primitive!(Int8Array, ScalarValue::Signed(value) => i8::try_from(*value)
-            .map_err(|_| internal_error("Int8 output scalar overflowed"))?),
+fn signed_scalar_array(data_type: &DataType, values: &[Option<ScalarValue>]) -> Result<ArrayRef> {
+    match data_type {
+        DataType::Int8 => primitive_scalar_array!(values, Int8Array, ScalarValue::Signed(value) =>
+            i8::try_from(*value).map_err(|_| internal_error("Int8 output scalar overflowed"))?),
         DataType::Int16 => {
-            primitive!(Int16Array, ScalarValue::Signed(value) => i16::try_from(*value)
-            .map_err(|_| internal_error("Int16 output scalar overflowed"))?)
+            primitive_scalar_array!(values, Int16Array, ScalarValue::Signed(value) =>
+            i16::try_from(*value).map_err(|_| internal_error("Int16 output scalar overflowed"))?)
         }
         DataType::Int32 => {
-            primitive!(Int32Array, ScalarValue::Signed(value) => i32::try_from(*value)
-            .map_err(|_| internal_error("Int32 output scalar overflowed"))?)
+            primitive_scalar_array!(values, Int32Array, ScalarValue::Signed(value) =>
+            i32::try_from(*value).map_err(|_| internal_error("Int32 output scalar overflowed"))?)
         }
-        DataType::Int64 => primitive!(Int64Array, ScalarValue::Signed(value) => *value),
+        DataType::Int64 => {
+            primitive_scalar_array!(values, Int64Array, ScalarValue::Signed(value) => *value)
+        }
+        _ => Err(internal_error("compiled signed output type mismatch")),
+    }
+}
+
+fn unsigned_scalar_array(data_type: &DataType, values: &[Option<ScalarValue>]) -> Result<ArrayRef> {
+    match data_type {
         DataType::UInt8 => {
-            primitive!(UInt8Array, ScalarValue::Unsigned(value) => u8::try_from(*value)
-            .map_err(|_| internal_error("UInt8 output scalar overflowed"))?)
+            primitive_scalar_array!(values, UInt8Array, ScalarValue::Unsigned(value) =>
+            u8::try_from(*value).map_err(|_| internal_error("UInt8 output scalar overflowed"))?)
         }
         DataType::UInt16 => {
-            primitive!(UInt16Array, ScalarValue::Unsigned(value) => u16::try_from(*value)
-            .map_err(|_| internal_error("UInt16 output scalar overflowed"))?)
+            primitive_scalar_array!(values, UInt16Array, ScalarValue::Unsigned(value) =>
+            u16::try_from(*value).map_err(|_| internal_error("UInt16 output scalar overflowed"))?)
         }
         DataType::UInt32 => {
-            primitive!(UInt32Array, ScalarValue::Unsigned(value) => u32::try_from(*value)
-            .map_err(|_| internal_error("UInt32 output scalar overflowed"))?)
+            primitive_scalar_array!(values, UInt32Array, ScalarValue::Unsigned(value) =>
+            u32::try_from(*value).map_err(|_| internal_error("UInt32 output scalar overflowed"))?)
         }
-        DataType::UInt64 => primitive!(UInt64Array, ScalarValue::Unsigned(value) => *value),
+        DataType::UInt64 => {
+            primitive_scalar_array!(values, UInt64Array, ScalarValue::Unsigned(value) => *value)
+        }
+        _ => Err(internal_error("compiled unsigned output type mismatch")),
+    }
+}
+
+fn float_scalar_array(data_type: &DataType, values: &[Option<ScalarValue>]) -> Result<ArrayRef> {
+    match data_type {
         DataType::Float32 => {
-            primitive!(Float32Array, ScalarValue::Float32(value) => f32::from_bits(*value))
+            primitive_scalar_array!(values, Float32Array, ScalarValue::Float32(value) => f32::from_bits(*value))
         }
         DataType::Float64 => {
-            primitive!(Float64Array, ScalarValue::Float64(value) => f64::from_bits(*value))
+            primitive_scalar_array!(values, Float64Array, ScalarValue::Float64(value) => f64::from_bits(*value))
         }
-        DataType::Utf8 => {
-            let values = values
-                .iter()
-                .map(|value| match value {
-                    None => Ok(None),
-                    Some(ScalarValue::String(value)) => Ok(Some(value.as_str())),
-                    Some(_) => Err(internal_error("Utf8 output scalar type mismatch")),
-                })
-                .collect::<Result<Vec<_>>>()?;
-            Arc::new(StringArray::from(values))
+        _ => Err(internal_error("compiled float output type mismatch")),
+    }
+}
+
+fn string_scalar_array(data_type: &DataType, values: &[Option<ScalarValue>]) -> Result<ArrayRef> {
+    let values = values
+        .iter()
+        .map(|value| match value {
+            None => Ok(None),
+            Some(ScalarValue::String(value)) => Ok(Some(value.as_str())),
+            Some(_) => Err(internal_error("string output scalar type mismatch")),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    match data_type {
+        DataType::Utf8 => Ok(Arc::new(StringArray::from(values))),
+        DataType::LargeUtf8 => Ok(Arc::new(LargeStringArray::from(values))),
+        _ => Err(internal_error("compiled string output type mismatch")),
+    }
+}
+
+fn temporal_scalar_array(data_type: &DataType, values: &[Option<ScalarValue>]) -> Result<ArrayRef> {
+    match data_type {
+        DataType::Date32 => {
+            primitive_scalar_array!(values, Date32Array, ScalarValue::Date32(value) => *value)
         }
-        DataType::LargeUtf8 => {
-            let values = values
-                .iter()
-                .map(|value| match value {
-                    None => Ok(None),
-                    Some(ScalarValue::String(value)) => Ok(Some(value.as_str())),
-                    Some(_) => Err(internal_error("LargeUtf8 output scalar type mismatch")),
-                })
-                .collect::<Result<Vec<_>>>()?;
-            Arc::new(LargeStringArray::from(values))
+        DataType::Date64 => {
+            primitive_scalar_array!(values, Date64Array, ScalarValue::Date64(value) => *value)
         }
-        DataType::Date32 => primitive!(Date32Array, ScalarValue::Date32(value) => *value),
-        DataType::Date64 => primitive!(Date64Array, ScalarValue::Date64(value) => *value),
         DataType::Timestamp(TimeUnit::Microsecond, timezone) => {
-            let values = values
-                .iter()
-                .map(|value| match value {
-                    None => Ok(None),
-                    Some(ScalarValue::Timestamp(value)) => Ok(Some(*value)),
-                    Some(_) => Err(internal_error("timestamp output scalar type mismatch")),
-                })
-                .collect::<Result<Vec<_>>>()?;
-            Arc::new(TimestampMicrosecondArray::from(values).with_timezone_opt(timezone.clone()))
+            timestamp_scalar_array(values, timezone.clone())
         }
-        _ => {
-            return Err(operator_error(
-                operator_id,
-                &format!("cannot build window output array for type {data_type}"),
-            ));
-        }
-    };
-    Ok(array)
+        _ => Err(internal_error("compiled temporal output type mismatch")),
+    }
+}
+
+fn timestamp_scalar_array(
+    values: &[Option<ScalarValue>],
+    timezone: Option<Arc<str>>,
+) -> Result<ArrayRef> {
+    let values = values
+        .iter()
+        .map(|value| match value {
+            None => Ok(None),
+            Some(ScalarValue::Timestamp(value)) => Ok(Some(*value)),
+            Some(_) => Err(internal_error("timestamp output scalar type mismatch")),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Arc::new(
+        TimestampMicrosecondArray::from(values).with_timezone_opt(timezone),
+    ))
 }
 
 fn downcast_array<'a, T: 'static>(
@@ -1836,9 +2278,27 @@ fn compile_spec(
         input_schema.field(event_time_index).data_type(),
         &spec.event_time_column,
     )?;
+    let group_columns = compile_group_columns(input_schema, spec)?;
+    let aggregates = compile_aggregates(input_schema, spec)?;
+    let geometry = compile_geometry(spec.geometry);
+    let canonical = canonical_json(&Value::Object(configuration.clone().into_iter().collect()))?;
+    let mut compiled = CompiledWindowSpec {
+        event_time_index,
+        group_columns,
+        aggregates,
+        geometry,
+        configuration_hash: hex::encode(Sha256::digest(canonical.as_bytes())),
+        state_schema_fingerprint: String::new(),
+    };
+    compiled.state_schema_fingerprint = state_schema_fingerprint(spec, &compiled);
+    Ok(compiled)
+}
 
-    let group_columns = spec
-        .group_by
+fn compile_group_columns(
+    input_schema: &Schema,
+    spec: &WindowSpec,
+) -> Result<Vec<CompiledGroupColumn>> {
+    spec.group_by
         .iter()
         .map(|column| {
             let index = exact_field_index(input_schema, column)?;
@@ -1850,10 +2310,11 @@ fn compile_spec(
             }
             Ok(CompiledGroupColumn { index, data_type })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect()
+}
 
-    let aggregates = spec
-        .aggregates
+fn compile_aggregates(input_schema: &Schema, spec: &WindowSpec) -> Result<Vec<CompiledAggregate>> {
+    spec.aggregates
         .iter()
         .map(|aggregate| {
             let input_index = exact_field_index(input_schema, &aggregate.column)?;
@@ -1871,30 +2332,22 @@ fn compile_spec(
                 output_type,
             })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect()
+}
 
-    let (size_micros, slide_micros) = match spec.geometry {
+fn compile_geometry(geometry: WindowGeometry) -> CompiledWindowGeometry {
+    let (size_micros, slide_micros) = match geometry {
         WindowGeometry::Tumbling { size_micros } => (size_micros, size_micros),
         WindowGeometry::Hopping {
             size_micros,
             slide_micros,
         } => (size_micros, slide_micros),
     };
-    let canonical = canonical_json(&Value::Object(configuration.clone().into_iter().collect()))?;
-    let mut compiled = CompiledWindowSpec {
-        event_time_index,
-        group_columns,
-        aggregates,
-        geometry: CompiledWindowGeometry {
-            size_micros,
-            slide_micros,
-            overlap: size_micros / slide_micros,
-        },
-        configuration_hash: hex::encode(Sha256::digest(canonical.as_bytes())),
-        state_schema_fingerprint: String::new(),
-    };
-    compiled.state_schema_fingerprint = state_schema_fingerprint(spec, &compiled);
-    Ok(compiled)
+    CompiledWindowGeometry {
+        size_micros,
+        slide_micros,
+        overlap: size_micros / slide_micros,
+    }
 }
 
 fn state_schema_fingerprint(spec: &WindowSpec, compiled: &CompiledWindowSpec) -> String {
@@ -2005,20 +2458,30 @@ fn encode_state_segment(
     pipeline_fingerprint: &str,
     operator_id: &str,
 ) -> Result<Vec<u8>> {
+    validate_state_operations(operations)?;
+    let schema = state_schema(spec, compiled, pipeline_fingerprint, operator_id);
+    let mut arrays = state_key_arrays(operations);
+    append_group_state_arrays(&mut arrays, operations, compiled, operator_id)?;
+    append_aggregate_state_arrays(&mut arrays, operations, spec, compiled, operator_id)?;
+    write_state_ipc(&schema, arrays)
+}
+
+fn validate_state_operations(operations: &[StateOperationRow]) -> Result<()> {
     if operations.is_empty() {
         return Err(internal_error(
             "cannot encode an empty window state segment",
         ));
     }
-    for pair in operations.windows(2) {
-        if pair[0].key >= pair[1].key {
-            return Err(internal_error(
-                "window state operations are not in strict key order",
-            ));
-        }
+    if operations.windows(2).any(|pair| pair[0].key >= pair[1].key) {
+        return Err(internal_error(
+            "window state operations are not in strict key order",
+        ));
     }
-    let schema = state_schema(spec, compiled, pipeline_fingerprint, operator_id);
-    let mut arrays: Vec<ArrayRef> = vec![
+    Ok(())
+}
+
+fn state_key_arrays(operations: &[StateOperationRow]) -> Vec<ArrayRef> {
+    vec![
         Arc::new(UInt8Array::from(
             operations
                 .iter()
@@ -2048,7 +2511,15 @@ fn encode_state_segment(
                 .iter()
                 .map(|row| row.key.stable_group_key.as_slice()),
         )),
-    ];
+    ]
+}
+
+fn append_group_state_arrays(
+    arrays: &mut Vec<ArrayRef>,
+    operations: &[StateOperationRow],
+    compiled: &CompiledWindowSpec,
+    operator_id: &str,
+) -> Result<()> {
     for (ordinal, group) in compiled.group_columns.iter().enumerate() {
         let values = operations
             .iter()
@@ -2056,11 +2527,21 @@ fn encode_state_segment(
             .collect::<Vec<_>>();
         arrays.push(scalar_array(&group.data_type, &values, operator_id)?);
     }
+    Ok(())
+}
+
+fn append_aggregate_state_arrays(
+    arrays: &mut Vec<ArrayRef>,
+    operations: &[StateOperationRow],
+    spec: &WindowSpec,
+    compiled: &CompiledWindowSpec,
+    operator_id: &str,
+) -> Result<()> {
     for (ordinal, (aggregate, compiled_aggregate)) in
         spec.aggregates.iter().zip(&compiled.aggregates).enumerate()
     {
         append_accumulator_state_array(
-            &mut arrays,
+            arrays,
             operations,
             ordinal,
             aggregate.function,
@@ -2068,12 +2549,15 @@ fn encode_state_segment(
             operator_id,
         )?;
     }
+    Ok(())
+}
 
+fn write_state_ipc(schema: &Schema, arrays: Vec<ArrayRef>) -> Result<Vec<u8>> {
     let record = RecordBatch::try_new(Arc::new(schema.clone()), arrays)
         .map_err(|error| state_format(format!("window state batch is invalid: {error}")))?;
     let mut bytes = Vec::new();
     {
-        let mut writer = FileWriter::try_new(&mut bytes, &schema)
+        let mut writer = FileWriter::try_new(&mut bytes, schema)
             .map_err(|error| state_format(format!("window state IPC header failed: {error}")))?;
         writer
             .write(&record)
@@ -2116,69 +2600,100 @@ fn append_accumulator_state_array(
                 .collect::<Result<Vec<_>>>()?;
             arrays.push(scalar_array(state_type, &values, operator_id)?);
         }
-        AggregateFunction::Avg => match compiled.input_type {
-            DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
-                let values = operations
-                    .iter()
-                    .map(
-                        |row| match (&row.entry.aggregates[ordinal], row.tombstone) {
-                            (_, true) => Ok(None),
-                            (AccumulatorValue::SignedAverage { sum, .. }, false) => {
-                                Ok(Some(sum.to_be_bytes()))
-                            }
-                            _ => Err(internal_error("signed average state type mismatch")),
-                        },
-                    )
-                    .collect::<Result<Vec<_>>>()?;
-                arrays.push(Arc::new(
-                    FixedSizeBinaryArray::try_from_sparse_iter_with_size(values.into_iter(), 16)
-                        .map_err(|error| {
-                            state_format(format!("signed average state array failed: {error}"))
-                        })?,
-                ));
-                arrays.push(average_count_array(operations, ordinal)?);
-            }
-            DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
-                let values = operations
-                    .iter()
-                    .map(
-                        |row| match (&row.entry.aggregates[ordinal], row.tombstone) {
-                            (_, true) => Ok(None),
-                            (AccumulatorValue::UnsignedAverage { sum, .. }, false) => {
-                                Ok(Some(sum.to_be_bytes()))
-                            }
-                            _ => Err(internal_error("unsigned average state type mismatch")),
-                        },
-                    )
-                    .collect::<Result<Vec<_>>>()?;
-                arrays.push(Arc::new(
-                    FixedSizeBinaryArray::try_from_sparse_iter_with_size(values.into_iter(), 16)
-                        .map_err(|error| {
-                            state_format(format!("unsigned average state array failed: {error}"))
-                        })?,
-                ));
-                arrays.push(average_count_array(operations, ordinal)?);
-            }
-            DataType::Float32 | DataType::Float64 => {
-                let values = operations
-                    .iter()
-                    .map(
-                        |row| match (&row.entry.aggregates[ordinal], row.tombstone) {
-                            (_, true) => Ok(None),
-                            (AccumulatorValue::FloatAverage { sum, .. }, false) => {
-                                Ok(Some(ScalarValue::Float64(sum.to_bits())))
-                            }
-                            _ => Err(internal_error("float average state type mismatch")),
-                        },
-                    )
-                    .collect::<Result<Vec<_>>>()?;
-                arrays.push(scalar_array(&DataType::Float64, &values, operator_id)?);
-                arrays.push(average_count_array(operations, ordinal)?);
-            }
-            _ => unreachable!("average input matrix validated at construction"),
-        },
+        AggregateFunction::Avg => append_average_state_arrays(
+            arrays,
+            operations,
+            ordinal,
+            &compiled.input_type,
+            operator_id,
+        )?,
     }
     Ok(())
+}
+
+fn append_average_state_arrays(
+    arrays: &mut Vec<ArrayRef>,
+    operations: &[StateOperationRow],
+    ordinal: usize,
+    input_type: &DataType,
+    operator_id: &str,
+) -> Result<()> {
+    match input_type {
+        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
+            arrays.push(signed_average_state_array(operations, ordinal)?);
+        }
+        DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+            arrays.push(unsigned_average_state_array(operations, ordinal)?);
+        }
+        DataType::Float32 | DataType::Float64 => {
+            arrays.push(float_average_state_array(operations, ordinal, operator_id)?);
+        }
+        _ => unreachable!("average input matrix validated at construction"),
+    }
+    arrays.push(average_count_array(operations, ordinal)?);
+    Ok(())
+}
+
+fn signed_average_state_array(
+    operations: &[StateOperationRow],
+    ordinal: usize,
+) -> Result<ArrayRef> {
+    let values = operations
+        .iter()
+        .map(
+            |row| match (&row.entry.aggregates[ordinal], row.tombstone) {
+                (_, true) => Ok(None),
+                (AccumulatorValue::SignedAverage { sum, .. }, false) => Ok(Some(sum.to_be_bytes())),
+                _ => Err(internal_error("signed average state type mismatch")),
+            },
+        )
+        .collect::<Result<Vec<_>>>()?;
+    fixed_average_state_array(values, "signed")
+}
+
+fn unsigned_average_state_array(
+    operations: &[StateOperationRow],
+    ordinal: usize,
+) -> Result<ArrayRef> {
+    let values = operations
+        .iter()
+        .map(
+            |row| match (&row.entry.aggregates[ordinal], row.tombstone) {
+                (_, true) => Ok(None),
+                (AccumulatorValue::UnsignedAverage { sum, .. }, false) => {
+                    Ok(Some(sum.to_be_bytes()))
+                }
+                _ => Err(internal_error("unsigned average state type mismatch")),
+            },
+        )
+        .collect::<Result<Vec<_>>>()?;
+    fixed_average_state_array(values, "unsigned")
+}
+
+fn fixed_average_state_array(values: Vec<Option<[u8; 16]>>, label: &str) -> Result<ArrayRef> {
+    FixedSizeBinaryArray::try_from_sparse_iter_with_size(values.into_iter(), 16)
+        .map(|array| Arc::new(array) as ArrayRef)
+        .map_err(|error| state_format(format!("{label} average state array failed: {error}")))
+}
+
+fn float_average_state_array(
+    operations: &[StateOperationRow],
+    ordinal: usize,
+    operator_id: &str,
+) -> Result<ArrayRef> {
+    let values = operations
+        .iter()
+        .map(
+            |row| match (&row.entry.aggregates[ordinal], row.tombstone) {
+                (_, true) => Ok(None),
+                (AccumulatorValue::FloatAverage { sum, .. }, false) => {
+                    Ok(Some(ScalarValue::Float64(sum.to_bits())))
+                }
+                _ => Err(internal_error("float average state type mismatch")),
+            },
+        )
+        .collect::<Result<Vec<_>>>()?;
+    scalar_array(&DataType::Float64, &values, operator_id)
 }
 
 fn accumulator_state_scalar(accumulator: &AccumulatorValue) -> Result<Option<ScalarValue>> {
