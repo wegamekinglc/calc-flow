@@ -1,8 +1,9 @@
 # Calc-Flow 3.0 持续流计算详细开发计划
 
-> **状态：** M0 与 M1 已完成；M2 的 crate-private runtime internals 已在
-> code-approved head `7deda2a0` 完成。当前 public v2 runner 保持不变；public A6
-> 必须等 M4/M5 完整状态与 checkpoint 语义完成后另行评审、原子集成。
+> **状态：** M0 至 M3 已完成；最新 `main@6275599c` 包含 PR #86 的 M3 progress
+> coordination、20 分钟 soak 与实现证据。当前 public v2 runner 保持不变；public A6
+> 必须等 M4/M5 完整状态与 checkpoint 语义完成后另行评审、原子集成。M4 按
+> `m4-state-window` specification、API note 与 critique 执行。
 >
 > **依据：**
 > [`Arroyo / RisingWave 独立调研与 Calc-Flow 流式演进建议`](../../research/2026-08-02-arroyo-risingwave-streaming-research.md)
@@ -198,15 +199,15 @@ checkpoint 恢复三种入口下的状态语义也必须一并冻结。
 
 首版支持矩阵：
 
-| 算子                         | 3.0 流式行为                                                      |
+| 算子                           | 3.0 流式行为                                                          |
 | ---------------------------- | ----------------------------------------------------------------- |
-| Expression                   | 单输入；一个输入 batch 产生零或一个输出 batch                     |
-| 单 alias SQL                 | 单输入；逐 batch 执行                                             |
-| 多 alias SQL                 | 编译失败；尚未定义增量 join 语义                                  |
-| External provider            | factory 必须显式构造 `StreamOperator`                             |
-| Union                        | 新增多输入算子；转发同 kind、同 schema batch                      |
-| Window aggregate             | 新增有状态 tumbling/hopping 算子                                  |
-| Session window               | 3.0 不支持                                                        |
+| Expression                   | 单输入；一个输入 batch 产生零或一个输出 batch                                     |
+| 单 alias SQL                  | 单输入；逐 batch 执行                                                    |
+| 多 alias SQL                  | 编译失败；尚未定义增量 join 语义                                               |
+| External provider            | factory 必须显式构造 `StreamOperator`                                   |
+| Union                        | 新增多输入算子；转发同 kind、同 schema batch                                   |
+| Window aggregate             | 新增有状态 tumbling/hopping 算子                                         |
+| Session window               | 3.0 不支持                                                           |
 
 每个 table stream-operator task 拥有一个 lazy、operator-scoped
 `DataFusionRuntime`，避免所有节点争用一个 job-wide query lock，也避免临时表 alias 跨
@@ -375,16 +376,16 @@ M6 connector / project v3 / Python / Studio
 M7 hardening / 3.0 release
 ```
 
-| 里程碑 | 核心产出                                            | 单工程师估算 | 前置依赖 |
-| ------ | --------------------------------------------------- | ------------ | -------- |
-| M0     | 通过评审的语义、API、故障模型                       | 2 至 3 周    | 无       |
-| M1     | v3 trait、plan、compiler、message、channel          | 4 至 6 周    | M0       |
-| M2     | crate-private source-driven runtime internals       | 5 至 7 周    | M1       |
-| M3     | progress driver、watermark、idle、transient replay  | 3 至 5 周    | M2       |
-| M4     | 增量本地状态、final-only window、late policy        | 6 至 9 周    | M3       |
-| M5     | epoch checkpoint 与 transactional sink              | 8 至 11 周   | M4       |
-| M6     | connector、project v3、Python、Studio               | 16 至 24 周  | M5       |
-| M7     | soak、性能、安全、打包与发布                        | 3 至 5 周    | M6       |
+| 里程碑    | 核心产出                                                          | 单工程师估算       | 前置依赖     |
+| ------ | ------------------------------------------------------------- | ------------ | -------- |
+| M0     | 通过评审的语义、API、故障模型                                              | 2 至 3 周      | 无        |
+| M1     | v3 trait、plan、compiler、message、channel                        | 4 至 6 周      | M0       |
+| M2     | crate-private source-driven runtime internals                 | 5 至 7 周      | M1       |
+| M3     | progress driver、watermark、idle、transient replay               | 3 至 5 周      | M2       |
+| M4     | 增量本地状态、final-only window、late policy                          | 6 至 9 周      | M3       |
+| M5     | epoch checkpoint 与 transactional sink                         | 8 至 11 周     | M4       |
+| M6     | connector、project v3、Python、Studio                            | 16 至 24 周    | M5       |
+| M7     | soak、性能、安全、打包与发布                                              | 3 至 5 周      | M6       |
 
 顺序总量约 47 至 70 engineer-weeks，与调研报告 §9.1 给出的“单工程师 11 至 16 个月”
 量级一致。两名熟练工程师可并行数据库 connector、其他 connector、Python、Studio、
@@ -1002,19 +1003,53 @@ GitHub review/CI/Codacy/merge 证据在实现 PR 中补齐。
 
 ## 10. M4：增量状态与 final-only window
 
+本节按以下 current-main delta package 执行：
+
+- `.codex/artifacts/specs/m4-state-window.md`；
+- `.codex/artifacts/api-notes/m4-state-window.md`；
+- `.codex/artifacts/critiques/m4-state-window.md`。
+
+该 package 以 `main@6275599ca3bb872ab480b677f13bcd9698b144f0` 为基线，冻结
+AC-01 至 AC-58。它解决了历史文件清单与当前 flat `checkpoint.rs` 的模块冲突，并明确
+M4 只交付 manifest 数据模型、state backend、operator snapshot/restore 与 window；
+running-job barrier、manifest selection、durable restart 和 exactly-once 仍属于 M5。
+
+### Task M4.0：冻结 state/window delta 与 current-main 边界
+
+**文件：**
+
+- 新建：`.codex/artifacts/specs/m4-state-window.md`
+- 新建：`.codex/artifacts/api-notes/m4-state-window.md`
+- 新建：`.codex/artifacts/critiques/m4-state-window.md`
+- 修改：`docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md`
+
+**文档门：**
+
+- [x] 对齐 PR #86 后的最新 main，并修正总计划顶部状态。
+- [x] 冻结 Arrow IPC、manifest/segment 发布顺序、lineage session、retention 与
+  compaction 边界。
+- [x] 冻结 window geometry、group-key equality、64 KiB key bound、aggregate 类型矩阵、
+  null/NaN/overflow/decimal/avg 语义。
+- [x] 冻结 assignment-level late policy、task-owned metric 与 M4/M5 firewall。
+- [x] critique 逐项覆盖模块冲突、假 durable recovery、manifest 无界、Tokio bulk encode、
+  tombstone callback、late metric 生命周期与 oversize close emission，最终 zero blockers。
+
+**验收门：** 文档 PR 只批准实现契约，不声称 M4 代码、测试、benchmark、soak 或 CI
+证据已完成。
+
 ### Task M4.1：定义 StateBackend 与 immutable StateHandle
 
 **文件：**
 
 - 新建：`crates/calc-flow/src/state/{mod,backend,manifest,segment}.rs`
-- 新建：`crates/calc-flow/src/checkpoint/model.rs`
 - 修改：`crates/calc-flow/src/error.rs`
 - 新建：`crates/calc-flow/tests/state_backend.rs`
 
 **前移说明：** epoch 与 checkpoint manifest 的数据模型必须在本任务一次定型，而不是
 先在 M4 自造一套临时 state manifest、再在 M5.1 推倒重来。M5.1 只负责替换
 `CheckpointStore` 的读写路径与旧 runner 的 sequence-only checkpoint，不再重新定义
-manifest 结构。
+manifest 结构。由于当前 core 使用 flat `src/checkpoint.rs`，v3 model 在 M4 放入
+`src/state/manifest.rs`；M5.1 转换 checkpoint module 时复用或 re-export 该 exact model。
 
 **目标概念：**
 
@@ -1040,7 +1075,10 @@ struct StateHandle {
 
 **实现：**
 
-- [ ] M0 在 Arrow IPC 与 Parquet 间确定首版 segment format。
+- [ ] 使用 M0 D6 已批准的 Arrow IPC 作为 built-in window segment format；不重新打开
+  Arrow IPC 与 Parquet 的选择。
+- [ ] `StateBackend` 先返回持有 cross-process exclusive lease 的 lineage-scoped session，
+  只有 session 暴露 segment operation，避免未来 `Arc<dyn StateBackend>` 绕过锁。
 - [ ] 固定 state segment 与 checkpoint manifest 的提交顺序：先落盘并校验 segment，
   再原子发布 checkpoint manifest。checkpoint manifest 是“最近完成 epoch”的唯一
   真相，恢复只读取它；任何未被保留 manifest 引用的 segment 一律按垃圾处理，不参与
@@ -1066,7 +1104,9 @@ struct StateHandle {
 
 - [ ] 创建并 canonicalize 唯一 state root。
 - [ ] 受管路径边界拒绝 symlink 和意外 file type。
-- [ ] 写 epoch staging directory，再原子发布 manifest。
+- [ ] 写 epoch staging directory，原子发布 validated segment；M4 private commit harness
+  最后发布 manifest 以验证 crash matrix，running-job publication 仍由 M5 coordinator
+  接管。
 - [ ] 保留可配置数量的 completed epoch。
 - [ ] 不删除任何 retained manifest 可达的 state。
 - [ ] 已提交但没有任何 retained checkpoint manifest 引用的 segment 视为孤儿，可以
@@ -1099,20 +1139,26 @@ struct StateHandle {
 **先写 RED：**
 
 - [ ] zero/negative size/slide 失败。
-- [ ] 3.0 要求 hopping size 可被 slide 整除，除非 M0 明确批准通用规则。
+- [ ] 3.0 要求 hopping size 可被 slide 整除，且 `size / slide <= 1_024`，避免单行
+  assignment 无界放大。
 - [ ] output name 与 window/group column 冲突时失败。
 - [ ] unsupported aggregate/type 在 compile 时失败。
-- [ ] output schema 确定且与插入顺序无关。
+- [ ] output schema 按显式 group/aggregate declaration order 确定；graph/node insertion
+  order 不改变 schema 或 fingerprint，重排 declaration 则是 fingerprinted semantic change。
 - [ ] session/early/allowed-lateness/update config 全部拒绝。
 
 **实现：**
 
 - [ ] 引入严格可序列化的 `WindowSpec`、`AggregateSpec`、
   `WindowAggregateOperator`。
+- [ ] `NodeOperator`/`CompiledStreamOperator` 增加 window variant，并补齐所有 variant 的
+  checkpoint/restore dispatch；M4 只验证 seam，不在 barrier-rejecting task 中调用。
 - [ ] 稳定时使用 DataFusion public expression API 做 input projection/filter。
 - [ ] Calc-Flow 自己维护 incremental accumulator，不依赖 DataFusion private planner
   node 或 fork。
 - [ ] 明确 null、NaN、overflow、decimal、avg 语义。
+- [ ] 按 M4 delta 固定 null event-time drop、64 KiB stable group key、float bit-level
+  equality、canonical NaN 和首版 Decimal compile rejection。
 - [ ] 所有语义进入 fingerprint。
 
 **验收门：** 支持矩阵清晰，所有不支持组合都在 source.open 前失败。
@@ -1141,10 +1187,20 @@ struct StateHandle {
 - [ ] dirty accumulator 与 committed handle 分离。
 - [ ] checkpoint 只 flush dirty key。
 - [ ] watermark 推进时先 emit closed window，再 forward watermark。
-- [ ] window output 在 checkpoint 协议下 durable 后再清理/tombstone state。
+- [ ] 将 late/null-time recorder 改为 operator-task-owned，并以 checked、transactional
+  delta 累积到 status/metrics；不得为每个 context 重建 recorder。
+- [ ] closed state 先进入 emitted-but-not-checkpointed set；下一次 operator snapshot
+  记录 tombstone intent。完整 durable publication 失败时 M5 必须终止 job，不要求新增
+  `StreamOperator` checkpoint-complete callback。
 - [ ] hopping update 避免不必要克隆 Arrow payload。
+- [ ] operator task 通过 crate-private context 提供 effective output budget；close output
+  按稳定 key range 分块，单行 oversize 在 enqueue 前失败。
+- [ ] watermark/EOF 触发的 output 使用稳定 operator ID、checked operator-owned sequence
+  与空 attributes 构造 `BatchMetadata`；next sequence 进入 snapshot/restore。
 
-**验收门：** batch partition、checkpoint recovery、compaction 都不改变 final result。
+**验收门：** batch partition、operator snapshot/restore、state-inventory round-trip 与
+compaction 都不改变 final result。完整 running-job checkpoint recovery 属于 M5，不以 M4
+private harness 冒充。
 注意“同一窗口只关闭一次”只能在事务/幂等 sink 边界成立：at-least-once 下故障重放
 必然可能让算子重新发出已关闭窗口，因此该断言写在 sink 层，算子层只断言重放后最终
 结果不变。
@@ -1807,17 +1863,17 @@ PostgreSQL CDC -> window -> ClickHouse/Parquet stream。
 
 ## 14. 验证矩阵
 
-| 关注点               | Unit/property test                              | Integration/soak                              |
+| 关注点                  | Unit/property test                              | Integration/soak                              |
 | -------------------- | ----------------------------------------------- | --------------------------------------------- |
-| Edge ordering        | mixed-message FIFO、fan-out                     | two-source slow-sink                          |
-| Backpressure         | envelope/rows/bytes reservation、cancel         | 20-minute bounded-memory soak                 |
+| Edge ordering        | mixed-message FIFO、fan-out                      | two-source slow-sink                          |
+| Backpressure         | envelope/rows/bytes reservation、cancel          | 20-minute bounded-memory soak                 |
 | Source recovery      | sequence/cursor validation                      | restart at every barrier boundary             |
-| Watermark            | monotonic、minimum、idle、reactivate            | out-of-order multi-source                     |
+| Watermark            | monotonic、minimum、idle、reactivate               | out-of-order multi-source                     |
 | Window correctness   | randomized batch partition                      | large state checkpoint/recovery               |
-| State durability     | checksum、atomic manifest、compaction           | crash around every rename                     |
+| State durability     | checksum、atomic manifest、compaction             | crash around every rename                     |
 | Barrier alignment    | all arrival permutations                        | slow/idle/ended source combinations           |
 | Exactly-once         | transaction state machine                       | file/Kafka/PostgreSQL fault matrix            |
-| Connector safety     | bounds、path、SQL、redaction、capability        | broker/database/HTTP failure integration      |
+| Connector safety     | bounds、path、SQL、redaction、capability            | broker/database/HTTP failure integration      |
 | Python lifecycle     | await/cancel/GC                                 | repeated native-Python cancellation           |
 | Studio lifecycle     | API/React cleanup                               | Playwright start-observe-checkpoint-stop      |
 | Packaging            | artifact inspector                              | clean install/smoke                           |
