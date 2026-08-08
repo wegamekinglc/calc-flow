@@ -522,6 +522,22 @@ fn collect_unreachable(
     retained_paths: &BTreeSet<String>,
     latest_epoch: Option<Epoch>,
 ) -> Result<usize> {
+    collect_unreachable_with(
+        root,
+        lineage_hash,
+        retained_paths,
+        latest_epoch,
+        |path| std::fs::remove_file(path),
+    )
+}
+
+fn collect_unreachable_with(
+    root: &Path,
+    lineage_hash: &str,
+    retained_paths: &BTreeSet<String>,
+    latest_epoch: Option<Epoch>,
+    mut remove_file: impl FnMut(&Path) -> std::io::Result<()>,
+) -> Result<usize> {
     validate_directory(root)?;
     let lineage_root = root.join("committed").join(lineage_hash);
     let lineage_metadata = match std::fs::symlink_metadata(&lineage_root) {
@@ -579,8 +595,9 @@ fn collect_unreachable(
         }
     }
 
+    deletions.sort();
     for path in &deletions {
-        std::fs::remove_file(path).map_err(|source| io_error(path, source))?;
+        remove_file(path).map_err(|source| io_error(path, source))?;
     }
     for directory in sync_directories {
         sync_directory(&directory)?;
@@ -718,13 +735,17 @@ async fn worker<T: Send + 'static>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        io::ErrorKind,
+    };
 
     use chrono::{TimeZone, Utc};
     use tempfile::TempDir;
 
     use super::{
-        CommitFaultPoint, LocalStateBackend, commit_manifest_for_test, digest, lineage_hash,
+        CommitFaultPoint, LocalStateBackend, collect_unreachable_with, commit_manifest_for_test,
+        digest, lineage_hash,
     };
     use crate::{
         CheckpointManifest, CheckpointManifestFields, Epoch, OperatorManifestEntry, RecoveryStatus,
@@ -793,6 +814,46 @@ mod tests {
             sinks: BTreeMap::new(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn orphan_collection_stops_after_the_first_delete_failure() {
+        let directory = TempDir::new().unwrap();
+        let lineage = digest("lineage");
+        let operator = digest("window");
+        let operator_root = directory
+            .path()
+            .join("committed")
+            .join(&lineage)
+            .join(operator);
+        std::fs::create_dir_all(&operator_root).unwrap();
+        for segment in ["first", "second"] {
+            std::fs::write(
+                operator_root.join(format!("1-{}.arrow", digest(segment))),
+                segment,
+            )
+            .unwrap();
+        }
+        let mut attempts = Vec::new();
+
+        let error = collect_unreachable_with(
+            directory.path(),
+            &lineage,
+            &BTreeSet::new(),
+            Some(Epoch::INITIAL),
+            |path| {
+                attempts.push(path.to_path_buf());
+                Err(std::io::Error::new(
+                    ErrorKind::PermissionDenied,
+                    "injected delete failure",
+                ))
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(attempts.len(), 1);
+        assert!(matches!(error, crate::CalcFlowError::Io { .. }));
+        assert_eq!(std::fs::read_dir(operator_root).unwrap().count(), 2);
     }
 
     #[tokio::test]

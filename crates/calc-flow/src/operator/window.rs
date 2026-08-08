@@ -2962,4 +2962,27 @@ mod tests {
         .unwrap();
         assert_eq!(encoded, [0x01, 0x80, 0x00, 0x00, 0x01]);
     }
+
+    #[test]
+    fn count_and_average_counts_reject_uint64_overflow() {
+        let mut count = AccumulatorValue::Count(u64::MAX);
+        assert_eq!(
+            update_accumulator(
+                &mut count,
+                AggregateFunction::Count,
+                ScalarValue::Unsigned(0),
+            ),
+            Err("count overflowed UInt64".into())
+        );
+        assert!(matches!(count, AccumulatorValue::Count(u64::MAX)));
+
+        let mut average = AccumulatorValue::SignedAverage {
+            sum: 7,
+            count: u64::MAX,
+        };
+        assert_eq!(
+            update_accumulator(&mut average, AggregateFunction::Avg, ScalarValue::Signed(1),),
+            Err("average count overflowed UInt64".into())
+        );
+    }
 }
