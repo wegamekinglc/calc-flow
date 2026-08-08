@@ -30,10 +30,11 @@ use super::{
     },
 };
 use crate::{
-    AggregateFunction, Batch, BatchKind, BatchMetadata, CancellationToken, Edge, EdgeBudget, Epoch,
-    EventTime, JsonMap, OperatorMetadata, OperatorStateSnapshot, PipelineBuilder, Port,
-    PortEndpoint, Result, StreamCollector, StreamOperator, StreamOperatorContext,
-    StreamRequirements, UdfRegistry, UnionOperator, WindowAggregateOperator, WindowSpec,
+    AggregateFunction, Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken, Edge,
+    EdgeBudget, Epoch, EventTime, JsonMap, OperatorMetadata, OperatorStateSnapshot,
+    PipelineBuilder, Port, PortEndpoint, Result, StreamCollector, StreamOperator,
+    StreamOperatorContext, StreamRequirements, UdfRegistry, UnionOperator, WindowAggregateOperator,
+    WindowSpec,
 };
 
 const CADENCE: Duration = Duration::from_secs(10);
@@ -233,11 +234,7 @@ impl SoakWindowOperator {
             .checked_add(1)
             .expect("the twenty-minute soak cannot exhaust epochs");
         let snapshot = self.inner.checkpoint(epoch)?;
-        let retained_segments = snapshot
-            .inline_metadata
-            .get("segment_ids")
-            .and_then(serde_json::Value::as_array)
-            .map_or(0, Vec::len);
+        let retained_segments = snapshot_inventory_len(&snapshot)?;
         let segment_bytes = snapshot
             .segments
             .values()
@@ -268,6 +265,17 @@ impl SoakWindowOperator {
         }
         Ok(())
     }
+}
+
+fn snapshot_inventory_len(snapshot: &OperatorStateSnapshot) -> Result<usize> {
+    snapshot
+        .inline_metadata
+        .get("segment_inventory")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .ok_or_else(|| CalcFlowError::Internal {
+            message: "window snapshot omitted its segment inventory".into(),
+        })
 }
 
 impl OperatorMetadata for SoakWindowOperator {
@@ -1094,6 +1102,10 @@ async fn run_linux_soak() {
         "soak produced no Arrow state segments"
     );
     assert!(state.max_live_keys > 0, "soak observed no live window keys");
+    assert!(
+        state.max_retained_segments > 0,
+        "soak observed no retained window inventory"
+    );
     assert_eq!(state.terminal_live_keys, Some(0));
     assert!(
         state.max_retained_segments
@@ -1345,6 +1357,7 @@ async fn real_soak_topology_graceful_smoke_conserves_every_accepted_sequence() {
     assert!(probe.checkpoints > 0);
     assert!(probe.total_segment_bytes > 0);
     assert!(probe.max_live_keys > 0);
+    assert!(probe.max_retained_segments > 0);
     assert_eq!(probe.terminal_live_keys, Some(0));
     assert_eq!(source_opened.load(Ordering::SeqCst), 2);
     assert_eq!(source_closed.load(Ordering::SeqCst), 2);
