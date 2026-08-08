@@ -121,6 +121,9 @@ impl<'a> StreamOperatorContext<'a> {
     /// # Errors
     ///
     pub fn record_late_rows(&self, dropped: u64, max_lateness: Option<Duration>) -> Result<()> {
+        if dropped == 0 {
+            return Ok(());
+        }
         let max_lateness_micros = max_lateness
             .map(|lateness| {
                 u64::try_from(lateness.as_micros()).map_err(|_| CalcFlowError::Internal {
@@ -409,6 +412,41 @@ mod tests {
                 late_rows: 4,
                 affected_batches: 1,
                 max_lateness_micros: Some(11),
+                ..LateMetricDelta::default()
+            }
+        );
+    }
+
+    #[test]
+    fn zero_dropped_rows_do_not_change_late_metrics() {
+        let job = StreamJobContext::new(
+            7,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let recorder = Arc::new(LateMetricRecorder::default());
+        let context = StreamOperatorContext::for_task(
+            &job,
+            "window",
+            None,
+            EdgeBudget::default(),
+            recorder.clone(),
+        );
+        context
+            .record_late_rows(2, Some(Duration::from_micros(5)))
+            .unwrap();
+        context
+            .record_late_rows(0, Some(Duration::from_micros(99)))
+            .unwrap();
+
+        assert_eq!(
+            *recorder.0.lock(),
+            LateMetricDelta {
+                late_rows: 2,
+                affected_batches: 1,
+                max_lateness_micros: Some(5),
                 ..LateMetricDelta::default()
             }
         );
