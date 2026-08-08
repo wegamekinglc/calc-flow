@@ -167,6 +167,47 @@ async fn tumbling_windows_use_euclidean_boundaries_and_emit_once_in_key_order() 
 }
 
 #[tokio::test]
+async fn watermark_gaps_do_not_materialize_empty_windows() {
+    let mut operator = operator();
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "window-node", None);
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data(
+            "input",
+            input_batch(vec![Some(1)], vec![Some("a")], vec![Some(2)]),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+
+    operator
+        .on_watermark(
+            EventTime::from_micros(5 * 60_000_000),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    let output = collector.drain("output");
+    assert_eq!(output.len(), 1);
+    assert_eq!(
+        output[0]
+            .as_data()
+            .unwrap()
+            .table_payload()
+            .unwrap()
+            .batches()[0]
+            .num_rows(),
+        1
+    );
+
+    operator.on_end(&context, &mut collector).await.unwrap();
+    assert!(collector.drain("output").is_empty());
+}
+
+#[tokio::test]
 async fn all_null_aggregate_inputs_emit_count_zero_and_nullable_results() {
     let spec = WindowSpec::tumbling("event_time", Duration::from_secs(60))
         .unwrap()

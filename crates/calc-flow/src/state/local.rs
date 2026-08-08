@@ -522,13 +522,9 @@ fn collect_unreachable(
     retained_paths: &BTreeSet<String>,
     latest_epoch: Option<Epoch>,
 ) -> Result<usize> {
-    collect_unreachable_with(
-        root,
-        lineage_hash,
-        retained_paths,
-        latest_epoch,
-        |path| std::fs::remove_file(path),
-    )
+    collect_unreachable_with(root, lineage_hash, retained_paths, latest_epoch, |path| {
+        std::fs::remove_file(path)
+    })
 }
 
 fn collect_unreachable_with(
@@ -814,6 +810,121 @@ mod tests {
             sinks: BTreeMap::new(),
         })
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn local_segment_state_machine_checks_visibility_bytes_and_large_payloads() {
+        let directory = TempDir::new().unwrap();
+        let key = StateLineageKey::new("orders", PIPELINE_FINGERPRINT).unwrap();
+        let backend = LocalStateBackend::new(directory.path()).await.unwrap();
+        let lineage = backend.open_lineage(&key).await.unwrap();
+        let bytes = vec![7_u8; 10 * 1024 * 1024 + 1];
+        let handle = state_handle(&key, Epoch::INITIAL, "large-base", &bytes);
+
+        assert!(matches!(
+            lineage.load_segment(&handle).await,
+            Err(crate::CalcFlowError::NotFound { .. })
+        ));
+        lineage.stage_segment(&handle, &bytes).await.unwrap();
+        assert!(matches!(
+            lineage.load_segment(&handle).await,
+            Err(crate::CalcFlowError::NotFound { .. })
+        ));
+        assert!(matches!(
+            lineage.publish_segment(&handle).await,
+            Err(crate::CalcFlowError::Conflict { .. })
+        ));
+        lineage.validate_segment(&handle).await.unwrap();
+        lineage.publish_segment(&handle).await.unwrap();
+        assert_eq!(lineage.load_segment(&handle).await.unwrap(), bytes);
+
+        std::fs::write(directory.path().join(&handle.relative_path), b"truncated").unwrap();
+        assert!(matches!(
+            lineage.load_segment(&handle).await,
+            Err(crate::CalcFlowError::CheckpointMismatch { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn orphan_collection_removes_old_unreachable_and_preserves_retained_and_newer() {
+        let directory = TempDir::new().unwrap();
+        let key = StateLineageKey::new("orders", PIPELINE_FINGERPRINT).unwrap();
+        let backend = LocalStateBackend::new(directory.path()).await.unwrap();
+        let lineage = backend.open_lineage(&key).await.unwrap();
+        let mut handles = Vec::new();
+        for epoch in 1..=3 {
+            let bytes = format!("epoch-{epoch}").into_bytes();
+            let handle = state_handle(
+                &key,
+                Epoch::new(epoch).unwrap(),
+                &format!("delta-{epoch:04}"),
+                &bytes,
+            );
+            lineage.stage_segment(&handle, &bytes).await.unwrap();
+            lineage.validate_segment(&handle).await.unwrap();
+            lineage.publish_segment(&handle).await.unwrap();
+            handles.push((handle, bytes));
+        }
+
+        assert_eq!(
+            lineage
+                .collect_orphans(&[handles[1].0.clone()])
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(matches!(
+            lineage.load_segment(&handles[0].0).await,
+            Err(crate::CalcFlowError::NotFound { .. })
+        ));
+        assert_eq!(
+            lineage.load_segment(&handles[1].0).await.unwrap(),
+            handles[1].1
+        );
+        assert_eq!(
+            lineage.load_segment(&handles[2].0).await.unwrap(),
+            handles[2].1
+        );
+    }
+
+    #[tokio::test]
+    async fn lineage_lease_and_unexpected_managed_file_type_fail_closed() {
+        let directory = TempDir::new().unwrap();
+        let key = StateLineageKey::new("orders", PIPELINE_FINGERPRINT).unwrap();
+        let first_backend = LocalStateBackend::new(directory.path()).await.unwrap();
+        let second_backend = LocalStateBackend::new(directory.path()).await.unwrap();
+        let first_lineage = first_backend.open_lineage(&key).await.unwrap();
+        assert!(matches!(
+            second_backend.open_lineage(&key).await,
+            Err(crate::CalcFlowError::Conflict { .. })
+        ));
+        drop(first_lineage);
+
+        let lineage = second_backend.open_lineage(&key).await.unwrap();
+        let lineage_root = directory.path().join("committed").join(lineage_hash(&key));
+        std::fs::create_dir_all(&lineage_root).unwrap();
+        std::fs::write(lineage_root.join(digest("window")), b"not-a-directory").unwrap();
+        assert!(matches!(
+            lineage.collect_orphans(&[]).await,
+            Err(crate::CalcFlowError::Format { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_symlink_fails_closed_before_orphan_collection() {
+        let directory = TempDir::new().unwrap();
+        let key = StateLineageKey::new("orders", PIPELINE_FINGERPRINT).unwrap();
+        let backend = LocalStateBackend::new(directory.path()).await.unwrap();
+        let lineage = backend.open_lineage(&key).await.unwrap();
+        let lineage_root = directory.path().join("committed").join(lineage_hash(&key));
+        std::fs::create_dir_all(&lineage_root).unwrap();
+        std::os::unix::fs::symlink(directory.path(), lineage_root.join(digest("window"))).unwrap();
+
+        assert!(matches!(
+            lineage.collect_orphans(&[]).await,
+            Err(crate::CalcFlowError::Format { .. })
+        ));
     }
 
     #[test]
