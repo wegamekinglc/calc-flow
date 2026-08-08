@@ -5,6 +5,7 @@
 //! filesystem paths and gives M5 one backend-neutral recovery boundary.
 
 mod backend;
+mod local;
 mod manifest;
 #[allow(
     dead_code,
@@ -13,6 +14,7 @@ mod manifest;
 mod segment;
 
 pub use backend::{StateBackend, StateHandle, StateLineageBackend, StateLineageKey};
+pub use local::LocalStateBackend;
 pub use manifest::{
     CheckpointManifest, CheckpointManifestFields, CursorManifestEntry, MANIFEST_FORMAT_VERSION,
     MAX_MANIFEST_DOCUMENT_BYTES, ManifestExpectation, ManifestIngressState,

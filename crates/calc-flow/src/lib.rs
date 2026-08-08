@@ -58,11 +58,11 @@ pub use runtime::{
     StreamJobContext, StreamMessage, StreamMessageKind, StreamingRunner, edge_channel,
 };
 pub use state::{
-    CheckpointManifest, CheckpointManifestFields, CursorManifestEntry, MANIFEST_FORMAT_VERSION,
-    MAX_MANIFEST_DOCUMENT_BYTES, ManifestExpectation, ManifestIngressState,
-    OperatorIngressManifestEntry, OperatorManifestEntry, RecoveryStatus, RetentionClass,
-    SinkDeliveryManifest, SinkManifestEntry, SourceManifestEntry, SourceWatermarkManifestState,
-    StateBackend, StateHandle, StateLineageBackend, StateLineageKey,
+    CheckpointManifest, CheckpointManifestFields, CursorManifestEntry, LocalStateBackend,
+    MANIFEST_FORMAT_VERSION, MAX_MANIFEST_DOCUMENT_BYTES, ManifestExpectation,
+    ManifestIngressState, OperatorIngressManifestEntry, OperatorManifestEntry, RecoveryStatus,
+    RetentionClass, SinkDeliveryManifest, SinkManifestEntry, SourceManifestEntry,
+    SourceWatermarkManifestState, StateBackend, StateHandle, StateLineageBackend, StateLineageKey,
 };
 pub use time::{Epoch, EventTime};
 pub use udf::{
