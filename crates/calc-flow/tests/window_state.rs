@@ -273,3 +273,40 @@ async fn snapshot_persists_separate_assignment_late_and_null_time_metrics() {
     assert_eq!(metrics["null_event_time_rows"], 1);
     assert_eq!(metrics["null_event_time_batches"], 1);
 }
+
+#[tokio::test]
+async fn delta_threshold_prepares_one_replacement_base_before_inventory_growth() {
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "window", None);
+    let mut source = operator();
+    let mut ignored = EdgeCollector::new(source.output_ports().to_vec());
+    let mut latest = None;
+    for epoch in 1..=34 {
+        source
+            .process_data(
+                "input",
+                input_batch(vec![1], vec!["a"], vec![1]),
+                &context,
+                &mut ignored,
+            )
+            .await
+            .unwrap();
+        latest = Some(source.checkpoint(Epoch::new(epoch).unwrap()).unwrap());
+    }
+    let compacted = latest.unwrap();
+    assert_eq!(compacted.segments.len(), 2);
+    assert!(
+        compacted
+            .segments
+            .keys()
+            .next()
+            .unwrap()
+            .starts_with("base-")
+    );
+
+    let mut restored = operator();
+    restored.restore(&compacted).unwrap();
+    let mut output = EdgeCollector::new(restored.output_ports().to_vec());
+    restored.on_end(&context, &mut output).await.unwrap();
+    assert_eq!(first_output_sum(&mut output), (0, 34));
+}

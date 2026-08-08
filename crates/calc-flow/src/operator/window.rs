@@ -40,6 +40,7 @@ pub const MAX_WINDOW_OVERLAP: u64 = 1_024;
 
 const WINDOW_STATE_LAYOUT_VERSION: u32 = 1;
 const MAX_GROUP_KEY_BYTES: usize = 65_536;
+const MAX_WINDOW_DELTA_SEGMENTS: usize = 32;
 
 /// Aggregate function supported by the first built-in window operator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -292,8 +293,9 @@ struct WindowState {
     next_output_sequence: u64,
     ended: bool,
     metrics: LateMetricDelta,
-    prepared_segments: Vec<Vec<u8>>,
+    prepared_segments: Vec<PreparedStateSegment>,
     retained_segment_ids: Vec<String>,
+    replace_retained_on_checkpoint: bool,
     last_checkpoint_epoch: Option<crate::Epoch>,
     pipeline_fingerprint: Option<String>,
     operator_id: Option<String>,
@@ -343,6 +345,17 @@ struct StateOperationRow {
     key: WindowKey,
     entry: AccumulatorRow,
     tombstone: bool,
+}
+
+#[derive(Clone, Copy)]
+enum PreparedSegmentKind {
+    Base,
+    Delta,
+}
+
+struct PreparedStateSegment {
+    kind: PreparedSegmentKind,
+    bytes: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -621,6 +634,53 @@ impl WindowAggregateOperator {
             .collect()
     }
 
+    async fn compact_prepared_if_needed(
+        &mut self,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        let retained_delta_count = self
+            .state
+            .retained_segment_ids
+            .iter()
+            .filter(|segment_id| segment_id.starts_with("delta-"))
+            .count();
+        let prepared_delta_count = self
+            .state
+            .prepared_segments
+            .iter()
+            .filter(|segment| matches!(segment.kind, PreparedSegmentKind::Delta))
+            .count();
+        if retained_delta_count
+            .checked_add(prepared_delta_count)
+            .is_some_and(|count| count <= MAX_WINDOW_DELTA_SEGMENTS)
+        {
+            return Ok(());
+        }
+
+        let operations = self
+            .state
+            .accumulators
+            .iter()
+            .filter(|(key, _)| !self.state.emitted_pending_snapshot.contains(*key))
+            .map(|(key, entry)| StateOperationRow {
+                key: key.clone(),
+                entry: entry.clone(),
+                tombstone: false,
+            })
+            .collect();
+        let compacted = self.encode_operations(operations, context).await?;
+        self.state.prepared_segments = compacted
+            .map(|bytes| {
+                vec![PreparedStateSegment {
+                    kind: PreparedSegmentKind::Base,
+                    bytes,
+                }]
+            })
+            .unwrap_or_default();
+        self.state.replace_retained_on_checkpoint = true;
+        Ok(())
+    }
+
     async fn emit_keys(
         &mut self,
         keys: &[WindowKey],
@@ -773,6 +833,7 @@ impl StreamOperator for WindowAggregateOperator {
         }
         self.input_ports[0].validate(&batch, &format!("{}.input", self.name))?;
         self.observe_context(context)?;
+        self.compact_prepared_if_needed(context).await?;
         let update = self.prepare_input_batch(&batch, context)?;
         let next_metrics = accumulate_late_metrics(self.state.metrics, update.metrics)?;
         let encoded = self
@@ -791,7 +852,10 @@ impl StreamOperator for WindowAggregateOperator {
             self.state.accumulators.insert(key, accumulator);
         }
         if let Some(encoded) = encoded {
-            self.state.prepared_segments.push(encoded);
+            self.state.prepared_segments.push(PreparedStateSegment {
+                kind: PreparedSegmentKind::Delta,
+                bytes: encoded,
+            });
         }
         Ok(())
     }
@@ -803,6 +867,7 @@ impl StreamOperator for WindowAggregateOperator {
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
         self.observe_context(context)?;
+        self.compact_prepared_if_needed(context).await?;
         if self
             .state
             .last_input_watermark
@@ -827,7 +892,10 @@ impl StreamOperator for WindowAggregateOperator {
             .await?;
         self.emit_keys(&keys, context, output).await?;
         if let Some(tombstones) = tombstones {
-            self.state.prepared_segments.push(tombstones);
+            self.state.prepared_segments.push(PreparedStateSegment {
+                kind: PreparedSegmentKind::Delta,
+                bytes: tombstones,
+            });
         }
         self.install_context_identity(context);
         self.state.last_input_watermark = Some(watermark);
@@ -843,6 +911,7 @@ impl StreamOperator for WindowAggregateOperator {
         if self.state.ended {
             return Ok(());
         }
+        self.compact_prepared_if_needed(context).await?;
         let keys = self
             .state
             .accumulators
@@ -855,7 +924,10 @@ impl StreamOperator for WindowAggregateOperator {
             .await?;
         self.emit_keys(&keys, context, output).await?;
         if let Some(tombstones) = tombstones {
-            self.state.prepared_segments.push(tombstones);
+            self.state.prepared_segments.push(PreparedStateSegment {
+                kind: PreparedSegmentKind::Delta,
+                bytes: tombstones,
+            });
         }
         self.install_context_identity(context);
         self.state.ended = true;
@@ -872,10 +944,24 @@ impl StreamOperator for WindowAggregateOperator {
                 "window checkpoint epoch did not advance strictly".into(),
             ));
         }
-        let new_segment_ids = (0..self.state.prepared_segments.len())
-            .map(|ordinal| format!("delta-{:020}-{ordinal:08}", epoch.as_u64()))
+        let new_segment_ids = self
+            .state
+            .prepared_segments
+            .iter()
+            .enumerate()
+            .map(|(ordinal, segment)| {
+                let kind = match segment.kind {
+                    PreparedSegmentKind::Base => "base",
+                    PreparedSegmentKind::Delta => "delta",
+                };
+                format!("{kind}-{:020}-{ordinal:08}", epoch.as_u64())
+            })
             .collect::<Vec<_>>();
-        let mut retained_segment_ids = self.state.retained_segment_ids.clone();
+        let mut retained_segment_ids = if self.state.replace_retained_on_checkpoint {
+            Vec::new()
+        } else {
+            self.state.retained_segment_ids.clone()
+        };
         retained_segment_ids.extend(new_segment_ids.iter().cloned());
         let metadata = WindowSnapshotMetadata {
             state_layout_version: WINDOW_STATE_LAYOUT_VERSION,
@@ -899,7 +985,11 @@ impl StreamOperator for WindowAggregateOperator {
         };
         let segments = new_segment_ids
             .into_iter()
-            .zip(std::mem::take(&mut self.state.prepared_segments))
+            .zip(
+                std::mem::take(&mut self.state.prepared_segments)
+                    .into_iter()
+                    .map(|segment| segment.bytes),
+            )
             .collect();
 
         for key in std::mem::take(&mut self.state.emitted_pending_snapshot) {
@@ -908,6 +998,7 @@ impl StreamOperator for WindowAggregateOperator {
         }
         self.state.dirty.clear();
         self.state.retained_segment_ids = retained_segment_ids;
+        self.state.replace_retained_on_checkpoint = false;
         self.state.last_checkpoint_epoch = Some(epoch);
         Ok(crate::OperatorStateSnapshot {
             inline_metadata: inline_metadata.into_iter().collect(),
