@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     process::Command,
     sync::{
         Arc,
@@ -9,7 +9,11 @@ use std::{
 };
 
 use async_trait::async_trait;
-use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
+use datafusion::arrow::{
+    array::{Int64Array, StringArray, TimestampMicrosecondArray},
+    datatypes::{DataType, Field, Schema, TimeUnit},
+    record_batch::RecordBatch,
+};
 use parking_lot::Mutex;
 use serde_json::json;
 
@@ -26,8 +30,10 @@ use super::{
     },
 };
 use crate::{
-    Batch, BatchKind, BatchMetadata, CancellationToken, EdgeBudget, JsonMap, PipelineBuilder, Port,
-    Result, StreamRequirements, UdfRegistry, UnionOperator,
+    AggregateFunction, Batch, BatchKind, BatchMetadata, CancellationToken, Edge, EdgeBudget, Epoch,
+    EventTime, JsonMap, OperatorMetadata, OperatorStateSnapshot, PipelineBuilder, Port,
+    PortEndpoint, Result, StreamCollector, StreamOperator, StreamOperatorContext,
+    StreamRequirements, UdfRegistry, UnionOperator, WindowAggregateOperator, WindowSpec,
 };
 
 const CADENCE: Duration = Duration::from_secs(10);
@@ -45,26 +51,50 @@ const EDGE_BUDGET: EdgeBudget = EdgeBudget {
     max_rows: 64,
     max_bytes: 1 << 20,
 };
+const SOAK_WINDOW_MICROS: i64 = 64;
+const SOAK_CHECKPOINT_BATCH_INTERVAL: u64 = 8;
+
+fn soak_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new(
+            "event_time",
+            DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC"))),
+            false,
+        ),
+        Field::new("group", DataType::Utf8, false),
+        Field::new("value", DataType::Int64, false),
+    ]))
+}
 
 struct SoakSource {
     source_id: &'static str,
     sequence: u64,
+    pending_watermark: Option<EventTime>,
     opened: Arc<AtomicUsize>,
     closed: Arc<AtomicUsize>,
 }
 
 fn soak_batch(source_id: &str, sequence: u64) -> Result<Batch> {
-    let values = if sequence % 4 == 0 {
-        Vec::new()
+    let (event_times, groups, values) = if sequence % 4 == 0 {
+        (Vec::new(), Vec::new(), Vec::new())
     } else {
-        vec![
-            i64::try_from(sequence)
-                .expect("the twenty-minute soak cannot exhaust i64 source sequence space"),
-        ]
+        let value = i64::try_from(sequence)
+            .expect("the twenty-minute soak cannot exhaust i64 source sequence space");
+        (
+            vec![value],
+            vec![format!("{source_id}-{:02}", sequence % 64)],
+            vec![value],
+        )
     };
-    let record =
-        RecordBatch::try_from_iter(vec![("value", Arc::new(Int64Array::from(values)) as _)])
-            .expect("soak table schema is stable");
+    let record = RecordBatch::try_new(
+        soak_schema(),
+        vec![
+            Arc::new(TimestampMicrosecondArray::from(event_times).with_timezone("UTC")),
+            Arc::new(StringArray::from(groups)),
+            Arc::new(Int64Array::from(values)),
+        ],
+    )
+    .expect("soak table schema is stable");
     Batch::table(
         vec![record],
         BatchMetadata::new(source_id, sequence, BTreeMap::new())?,
@@ -79,10 +109,17 @@ impl StreamSource for SoakSource {
     }
 
     async fn next(&mut self) -> Result<Option<SourceEvent>> {
+        if let Some(watermark) = self.pending_watermark.take() {
+            return Ok(Some(SourceEvent::Watermark(watermark)));
+        }
         let sequence = self.sequence;
         self.sequence = sequence
             .checked_add(1)
             .expect("the twenty-minute soak cannot exhaust source sequence space");
+        self.pending_watermark = Some(EventTime::from_micros(
+            i64::try_from(self.sequence)
+                .expect("the twenty-minute soak cannot exhaust event-time space"),
+        ));
         let batch = soak_batch(self.source_id, sequence)?;
         let cursor = Cursor::new(sequence.to_be_bytes().to_vec(), JsonMap::new())?;
         Ok(Some(SourceEvent::Data { batch, cursor }))
@@ -97,40 +134,297 @@ impl StreamSource for SoakSource {
         SourceCapabilities {
             replayable: true,
             max_batch_rows: 1,
-            max_batch_bytes: 8,
+            max_batch_bytes: 256,
         }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct WindowSoakProbe {
+    checkpoints: u64,
+    compactions: u64,
+    total_segment_bytes: u64,
+    max_new_segments: usize,
+    max_retained_segments: usize,
+    live_keys: usize,
+    max_live_keys: usize,
+    terminal_live_keys: Option<usize>,
+}
+
+struct SoakWindowOperator {
+    inner: WindowAggregateOperator,
+    probe: Arc<Mutex<WindowSoakProbe>>,
+    live_keys: BTreeSet<(i64, i64, String)>,
+    processed_batches: u64,
+    next_epoch: u64,
+}
+
+impl SoakWindowOperator {
+    fn new(probe: Arc<Mutex<WindowSoakProbe>>) -> Self {
+        let spec = WindowSpec::tumbling(
+            "event_time",
+            Duration::from_micros(
+                u64::try_from(SOAK_WINDOW_MICROS).expect("the soak window is positive"),
+            ),
+        )
+        .expect("the soak window geometry is valid")
+        .group_by(["group"])
+        .expect("the soak group declaration is valid")
+        .aggregate(AggregateFunction::Sum, "value", "sum_value")
+        .expect("the soak aggregate declaration is valid");
+        Self {
+            inner: WindowAggregateOperator::new("window", soak_schema(), spec)
+                .expect("the soak window compiles"),
+            probe,
+            live_keys: BTreeSet::new(),
+            processed_batches: 0,
+            next_epoch: 1,
+        }
+    }
+
+    fn input_keys(batch: &Batch) -> Vec<(i64, i64, String)> {
+        batch
+            .table_payload()
+            .expect("the soak source always emits table batches")
+            .batches()
+            .iter()
+            .flat_map(|record| {
+                let event_times = record
+                    .column_by_name("event_time")
+                    .expect("the soak schema has event_time")
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .expect("the soak event time has its declared type");
+                let groups = record
+                    .column_by_name("group")
+                    .expect("the soak schema has group")
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("the soak group has its declared type");
+                (0..record.num_rows()).map(move |row| {
+                    let start =
+                        event_times.value(row).div_euclid(SOAK_WINDOW_MICROS) * SOAK_WINDOW_MICROS;
+                    (
+                        start,
+                        start + SOAK_WINDOW_MICROS,
+                        groups.value(row).to_owned(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn refresh_live_key_probe(&self, terminal: bool) {
+        let mut probe = self.probe.lock();
+        probe.live_keys = self.live_keys.len();
+        probe.max_live_keys = probe.max_live_keys.max(probe.live_keys);
+        if terminal {
+            probe.terminal_live_keys = Some(probe.live_keys);
+        }
+    }
+
+    fn capture_prepared_state(&mut self) -> Result<()> {
+        let epoch =
+            Epoch::new(self.next_epoch).expect("the twenty-minute soak never captures epoch zero");
+        self.next_epoch = self
+            .next_epoch
+            .checked_add(1)
+            .expect("the twenty-minute soak cannot exhaust epochs");
+        let snapshot = self.inner.checkpoint(epoch)?;
+        let retained_segments = snapshot
+            .inline_metadata
+            .get("segment_ids")
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len);
+        let segment_bytes = snapshot
+            .segments
+            .values()
+            .try_fold(0_u64, |total, bytes| {
+                total.checked_add(u64::try_from(bytes.len()).ok()?)
+            })
+            .expect("the bounded soak cannot overflow segment byte accounting");
+        let mut probe = self.probe.lock();
+        probe.checkpoints = probe
+            .checkpoints
+            .checked_add(1)
+            .expect("the twenty-minute soak cannot exhaust checkpoint counts");
+        probe.total_segment_bytes = probe
+            .total_segment_bytes
+            .checked_add(segment_bytes)
+            .expect("the twenty-minute soak cannot exhaust segment byte accounting");
+        probe.max_new_segments = probe.max_new_segments.max(snapshot.segments.len());
+        probe.max_retained_segments = probe.max_retained_segments.max(retained_segments);
+        if snapshot
+            .segments
+            .keys()
+            .any(|segment_id| segment_id.starts_with("base-"))
+        {
+            probe.compactions = probe
+                .compactions
+                .checked_add(1)
+                .expect("the twenty-minute soak cannot exhaust compaction counts");
+        }
+        Ok(())
+    }
+}
+
+impl OperatorMetadata for SoakWindowOperator {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn input_ports(&self) -> &[Port] {
+        self.inner.input_ports()
+    }
+
+    fn output_ports(&self) -> &[Port] {
+        self.inner.output_ports()
+    }
+
+    fn configuration(&self) -> JsonMap {
+        self.inner.configuration()
+    }
+}
+
+#[async_trait]
+impl StreamOperator for SoakWindowOperator {
+    async fn process_data(
+        &mut self,
+        ingress: &str,
+        batch: Batch,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        let new_keys = Self::input_keys(&batch);
+        self.inner
+            .process_data(ingress, batch, context, output)
+            .await?;
+        self.live_keys.extend(new_keys);
+        self.processed_batches = self
+            .processed_batches
+            .checked_add(1)
+            .expect("the twenty-minute soak cannot exhaust batch counts");
+        if self
+            .processed_batches
+            .is_multiple_of(SOAK_CHECKPOINT_BATCH_INTERVAL)
+        {
+            self.capture_prepared_state()?;
+        }
+        self.refresh_live_key_probe(false);
+        Ok(())
+    }
+
+    async fn on_watermark(
+        &mut self,
+        watermark: EventTime,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        self.inner.on_watermark(watermark, context, output).await?;
+        self.live_keys
+            .retain(|(_, end, _)| *end > watermark.as_micros());
+        self.refresh_live_key_probe(false);
+        Ok(())
+    }
+
+    async fn on_end(
+        &mut self,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        self.inner.on_end(context, output).await?;
+        self.live_keys.clear();
+        self.capture_prepared_state()?;
+        self.refresh_live_key_probe(true);
+        Ok(())
+    }
+
+    fn checkpoint(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
+        self.inner.checkpoint(epoch)
+    }
+
+    fn restore(&mut self, snapshot: &OperatorStateSnapshot) -> Result<()> {
+        self.inner.restore(snapshot)
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        self.live_keys.clear();
+        self.processed_batches = 0;
+        self.next_epoch = 1;
+        self.refresh_live_key_probe(false);
+        self.inner.reset()
     }
 }
 
 #[derive(Default)]
 struct DeliveryState {
-    next: BTreeMap<String, u64>,
-    sequences: BTreeMap<String, Vec<u64>>,
+    next_sequence: u64,
+    rows: BTreeMap<(i64, i64, String), i64>,
     total: u64,
     error: Option<String>,
 }
 
 impl DeliveryState {
     fn observe(&mut self, batch: &Batch) {
-        let source = batch.metadata().source();
         let sequence = batch.metadata().sequence();
-        let expected = self.next.entry(source.into()).or_default();
-        if sequence != *expected && self.error.is_none() {
+        if batch.metadata().source() != "window" && self.error.is_none() {
+            self.error = Some("window output used an unexpected source ID".into());
+        }
+        if sequence != self.next_sequence && self.error.is_none() {
             self.error = Some(format!(
-                "source {source:?} expected sequence {expected}, observed {sequence}"
+                "window output expected sequence {}, observed {sequence}",
+                self.next_sequence
             ));
         }
-        self.sequences
-            .entry(source.into())
-            .or_default()
-            .push(sequence);
-        *expected = expected
+        self.next_sequence = self
+            .next_sequence
             .checked_add(1)
             .expect("the twenty-minute soak cannot exhaust sink sequence space");
         self.total = self
             .total
             .checked_add(1)
             .expect("the twenty-minute soak cannot exhaust sink delivery space");
+
+        for record in batch
+            .table_payload()
+            .expect("the soak window emits table batches")
+            .batches()
+        {
+            let starts = record
+                .column_by_name("window_start")
+                .expect("the soak output has window_start")
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .expect("the soak output start type is stable");
+            let ends = record
+                .column_by_name("window_end")
+                .expect("the soak output has window_end")
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .expect("the soak output end type is stable");
+            let groups = record
+                .column_by_name("group")
+                .expect("the soak output has group")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("the soak output group type is stable");
+            let sums = record
+                .column_by_name("sum_value")
+                .expect("the soak output has sum_value")
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("the soak output sum type is stable");
+            for row in 0..record.num_rows() {
+                let key = (
+                    starts.value(row),
+                    ends.value(row),
+                    groups.value(row).to_owned(),
+                );
+                if self.rows.insert(key, sums.value(row)).is_some() && self.error.is_none() {
+                    self.error = Some("window output emitted a duplicate final row".into());
+                }
+            }
+        }
     }
 }
 
@@ -310,11 +604,11 @@ fn command_output(program: &str, arguments: &[&str]) -> String {
 
 fn soak_metadata(commit: &str, kernel: &str, rustc: &str) -> serde_json::Value {
     json!({
-        "schema": "calc-flow.m3-soak-log.v1",
+        "schema": "calc-flow.m4-soak-log.v1",
         "type": "calc_flow_stream_soak_metadata",
-        "runtime_path": "ContinuousRunner/source/progress-driver/operator/sink/supervisor/reaper",
+        "runtime_path": "ContinuousRunner/source/progress-driver/union/window/sink/supervisor/reaper",
         "commit": commit,
-        "deterministic_seed": "sequential-two-source-v1",
+        "deterministic_seed": "sequential-two-source-window-v1",
         "command": SOAK_COMMAND,
         "environment": {
             "kernel": kernel,
@@ -345,6 +639,14 @@ fn soak_metadata(commit: &str, kernel: &str, rustc: &str) -> serde_json::Value {
             "full_execution_trace": true,
             "gate_cut_evidence": true,
             "settlement_latency_evidence": true,
+        },
+        "state_contract": {
+            "window_size_micros": SOAK_WINDOW_MICROS,
+            "checkpoint_batch_interval": SOAK_CHECKPOINT_BATCH_INTERVAL,
+            "incremental_arrow_segments": true,
+            "compaction_required": true,
+            "terminal_live_keys": 0,
+            "deterministic_final_aggregate": true,
         },
     })
 }
@@ -399,18 +701,44 @@ fn assert_delivery_conservation(
     );
 }
 
+fn expected_window_rows(
+    accepted: &BTreeMap<String, Vec<u64>>,
+) -> BTreeMap<(i64, i64, String), i64> {
+    let mut expected = BTreeMap::new();
+    for (source, sequences) in accepted {
+        for sequence in sequences {
+            if sequence % 4 == 0 {
+                continue;
+            }
+            let event_time = i64::try_from(*sequence)
+                .expect("the twenty-minute soak cannot exhaust event-time space");
+            let start = event_time.div_euclid(SOAK_WINDOW_MICROS) * SOAK_WINDOW_MICROS;
+            let key = (
+                start,
+                start + SOAK_WINDOW_MICROS,
+                format!("{source}-{:02}", sequence % 64),
+            );
+            expected
+                .entry(key)
+                .and_modify(|sum: &mut i64| {
+                    *sum = sum
+                        .checked_add(event_time)
+                        .expect("the twenty-minute soak cannot overflow aggregate state");
+                })
+                .or_insert(event_time);
+        }
+    }
+    expected
+}
+
 fn delivery_conservation_issue(
     accepted: &BTreeMap<String, Vec<u64>>,
     sink: &DeliveryState,
 ) -> Option<&'static str> {
     if sink.error.is_some() {
         Some("order or duplicate failure")
-    } else if sink.sequences != *accepted {
-        Some("missing accepted data")
-    } else if usize::try_from(sink.total).ok()
-        != Some(accepted.values().map(Vec::len).sum::<usize>())
-    {
-        Some("accepted and delivered totals differ")
+    } else if sink.rows != expected_window_rows(accepted) {
+        Some("missing or incorrect final window state")
     } else {
         None
     }
@@ -429,12 +757,12 @@ fn zero_cost_batch_counts(accepted: &BTreeMap<String, Vec<u64>>) -> (usize, usiz
 #[test]
 fn independent_accepted_oracle_exposes_commit_after_downstream_drop() {
     let accepted = AcceptedSequenceRecorder::default();
-    accepted.record_committed_for_test("left", 0);
+    accepted.record_committed_for_test("left", 1);
     let sink_after_injected_drop = DeliveryState::default();
 
     assert_eq!(
         delivery_conservation_issue(&accepted.snapshot(), &sink_after_injected_drop),
-        Some("missing accepted data")
+        Some("missing or incorrect final window state")
     );
 }
 
@@ -449,20 +777,36 @@ fn soak_spec(
     sink_closed: &Arc<AtomicUsize>,
     sink_a: &Arc<Mutex<DeliveryState>>,
     sink_b: &Arc<Mutex<DeliveryState>>,
+    window_probe: &Arc<Mutex<WindowSoakProbe>>,
     accepted: &AcceptedSequenceRecorder,
     sink_write_delay: Duration,
 ) -> ContinuousJobSpec {
+    let input_fields = soak_schema()
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
     let union = UnionOperator::new(
         "merge",
         vec![
-            Port::new("left", BatchKind::Table, true, None).unwrap(),
-            Port::new("right", BatchKind::Table, true, None).unwrap(),
+            Port::new("left", BatchKind::Table, true, Some(input_fields.clone())).unwrap(),
+            Port::new("right", BatchKind::Table, true, Some(input_fields)).unwrap(),
         ],
     )
     .unwrap();
     let plan = PipelineBuilder::new("continuous-runtime-soak")
         .unwrap()
         .add_node("merge", Box::new(union))
+        .unwrap()
+        .add_node(
+            "window",
+            Box::new(SoakWindowOperator::new(Arc::clone(window_probe))) as Box<dyn StreamOperator>,
+        )
+        .unwrap()
+        .connect(Edge::new(
+            PortEndpoint::new("merge", "output").unwrap(),
+            PortEndpoint::new("window", "input").unwrap(),
+        ))
         .unwrap()
         .compile_stream(
             &UdfRegistry::new().snapshot(),
@@ -476,6 +820,7 @@ fn soak_spec(
                 Box::new(SoakSource {
                     source_id,
                     sequence: 0,
+                    pending_watermark: None,
                     opened: Arc::clone(source_opened),
                     closed: Arc::clone(source_closed),
                 }),
@@ -531,6 +876,7 @@ async fn run_linux_soak() {
     let sink_closed = Arc::new(AtomicUsize::new(0));
     let sink_a = Arc::new(Mutex::new(DeliveryState::default()));
     let sink_b = Arc::new(Mutex::new(DeliveryState::default()));
+    let window_probe = Arc::new(Mutex::new(WindowSoakProbe::default()));
     let accepted = AcceptedSequenceRecorder::default();
     let mut runner = ContinuousRunner::new();
     let job = runner
@@ -541,6 +887,7 @@ async fn run_linux_soak() {
             &sink_closed,
             &sink_a,
             &sink_b,
+            &window_probe,
             &accepted,
             STANDARD_SOAK_SINK_DELAY,
         ))
@@ -592,6 +939,7 @@ async fn run_linux_soak() {
                 soak_queue_sample(edge, metrics, runtime)
             })
             .collect::<Vec<_>>();
+        let state = window_probe.lock().clone();
         println!(
             "{}",
             json!({
@@ -602,6 +950,15 @@ async fn run_linux_soak() {
                 "vmrss_kib": rss_kib,
                 "task_count": steady_task_count,
                 "queues": queues,
+                "state": {
+                    "checkpoints": state.checkpoints,
+                    "compactions": state.compactions,
+                    "total_segment_bytes": state.total_segment_bytes,
+                    "max_new_segments": state.max_new_segments,
+                    "max_retained_segments": state.max_retained_segments,
+                    "live_keys": state.live_keys,
+                    "max_live_keys": state.max_live_keys,
+                },
             })
         );
     }
@@ -618,7 +975,7 @@ async fn run_linux_soak() {
     let progress = terminal_status
         .progress
         .as_ref()
-        .expect("M3 soak status omitted progress evidence");
+        .expect("M4 soak status omitted progress evidence");
     assert!(
         terminal_status.tasks.is_empty(),
         "supervised tasks did not converge"
@@ -686,6 +1043,7 @@ async fn run_linux_soak() {
     );
     let accepted = accepted.snapshot();
     let (zero_cost_batches, accepted_total) = zero_cost_batch_counts(&accepted);
+    let expected_rows = expected_window_rows(&accepted);
     assert!(zero_cost_batches > 0, "soak accepted no zero-cost data");
     drop(job);
     runner.shutdown().await.unwrap();
@@ -700,12 +1058,28 @@ async fn run_linux_soak() {
     let sink_b = sink_b.lock();
     assert_delivery_conservation(&accepted, &sink_a, "sink A");
     assert_delivery_conservation(&accepted, &sink_b, "sink B");
+    let state = window_probe.lock().clone();
+    assert!(state.checkpoints > 0, "soak captured no window state");
+    assert!(state.compactions > 0, "soak exercised no state compaction");
+    assert!(
+        state.total_segment_bytes > 0,
+        "soak produced no Arrow state segments"
+    );
+    assert!(state.max_live_keys > 0, "soak observed no live window keys");
+    assert_eq!(state.terminal_live_keys, Some(0));
+    assert!(
+        state.max_retained_segments
+            <= 32
+                + usize::try_from(SOAK_CHECKPOINT_BATCH_INTERVAL)
+                    .expect("the checkpoint interval fits usize"),
+        "window state inventory grew beyond its checkpoint interval bound: {state:?}"
+    );
 
     let gate = evaluate_rss_gate(&samples).expect("soak RSS sample set was incomplete");
     println!(
         "{}",
         json!({
-            "schema": "calc-flow.m3-soak-log.v1",
+            "schema": "calc-flow.m4-soak-log.v1",
             "type": "calc_flow_stream_soak_result",
             "commit": commit,
             "target_duration_seconds": TARGET_DURATION.as_secs(),
@@ -720,7 +1094,7 @@ async fn run_linux_soak() {
             "final_five_minute_median_kib": gate.final_median_kib,
             "passed": gate.passed,
             "progress": {
-                "deterministic_seed": "sequential-two-source-v1",
+                "deterministic_seed": "sequential-two-source-window-v1",
                 "admission_attempts": progress.current.counters.admission_attempts,
                 "accepted_envelopes": progress.current.counters.accepted_envelopes,
                 "immediate_rejections": progress.current.counters.immediate_rejections,
@@ -778,8 +1152,20 @@ async fn run_linux_soak() {
                 "accepted_zero_cost_batches": zero_cost_batches,
                 "sink_a_batches": sink_a.total,
                 "sink_b_batches": sink_b.total,
+                "expected_window_rows": expected_rows.len(),
+                "sink_a_window_rows": sink_a.rows.len(),
+                "sink_b_window_rows": sink_b.rows.len(),
                 "missing": 0,
                 "duplicate": 0,
+            },
+            "state": {
+                "checkpoints": state.checkpoints,
+                "compactions": state.compactions,
+                "total_segment_bytes": state.total_segment_bytes,
+                "max_new_segments": state.max_new_segments,
+                "max_retained_segments": state.max_retained_segments,
+                "max_live_keys": state.max_live_keys,
+                "terminal_live_keys": state.terminal_live_keys,
             },
             "convergence": {
                 "steady_task_count": steady_task_count,
@@ -854,6 +1240,7 @@ async fn real_soak_topology_smoke_converges_through_the_reaper() {
     let sink_closed = Arc::new(AtomicUsize::new(0));
     let sink_a = Arc::new(Mutex::new(DeliveryState::default()));
     let sink_b = Arc::new(Mutex::new(DeliveryState::default()));
+    let window_probe = Arc::new(Mutex::new(WindowSoakProbe::default()));
     let accepted = AcceptedSequenceRecorder::default();
     let mut runner = ContinuousRunner::new();
     let job = runner
@@ -864,6 +1251,7 @@ async fn real_soak_topology_smoke_converges_through_the_reaper() {
             &sink_closed,
             &sink_a,
             &sink_b,
+            &window_probe,
             &accepted,
             SMOKE_SINK_DELAY,
         ))
@@ -895,6 +1283,7 @@ async fn real_soak_topology_graceful_smoke_conserves_every_accepted_sequence() {
     let sink_closed = Arc::new(AtomicUsize::new(0));
     let sink_a = Arc::new(Mutex::new(DeliveryState::default()));
     let sink_b = Arc::new(Mutex::new(DeliveryState::default()));
+    let window_probe = Arc::new(Mutex::new(WindowSoakProbe::default()));
     let accepted = AcceptedSequenceRecorder::default();
     let mut runner = ContinuousRunner::new();
     let job = runner
@@ -905,6 +1294,7 @@ async fn real_soak_topology_graceful_smoke_conserves_every_accepted_sequence() {
             &sink_closed,
             &sink_a,
             &sink_b,
+            &window_probe,
             &accepted,
             SMOKE_SINK_DELAY,
         ))
@@ -919,6 +1309,12 @@ async fn real_soak_topology_graceful_smoke_conserves_every_accepted_sequence() {
     let accepted = accepted.snapshot();
     assert_delivery_conservation(&accepted, &sink_a.lock(), "sink A");
     assert_delivery_conservation(&accepted, &sink_b.lock(), "sink B");
+    let probe = window_probe.lock().clone();
+    assert!(probe.checkpoints > 0);
+    assert!(probe.compactions > 0);
+    assert!(probe.total_segment_bytes > 0);
+    assert!(probe.max_live_keys > 0);
+    assert_eq!(probe.terminal_live_keys, Some(0));
     assert_eq!(source_opened.load(Ordering::SeqCst), 2);
     assert_eq!(source_closed.load(Ordering::SeqCst), 2);
     assert_eq!(sink_opened.load(Ordering::SeqCst), 2);
@@ -1060,13 +1456,16 @@ fn soak_source_uses_a_zero_cost_batch_for_every_fourth_sequence() {
 fn soak_metadata_is_machine_readable_and_declares_the_slot_contract() {
     let metadata = soak_metadata("abc123", "Linux 1", "rustc 1.88");
 
-    assert_eq!(metadata["schema"], "calc-flow.m3-soak-log.v1");
+    assert_eq!(metadata["schema"], "calc-flow.m4-soak-log.v1");
     assert_eq!(metadata["commit"], "abc123");
     assert_eq!(metadata["target_duration_seconds"], 1_200);
     assert_eq!(metadata["sample_count"], 120);
     assert_eq!(metadata["sink_write_delay_millis"], 500);
     assert_eq!(metadata["warmup_duration_seconds"], 300);
-    assert_eq!(metadata["deterministic_seed"], "sequential-two-source-v1");
+    assert_eq!(
+        metadata["deterministic_seed"],
+        "sequential-two-source-window-v1"
+    );
     assert_eq!(metadata["environment"]["kernel"], "Linux 1");
     assert_eq!(metadata["environment"]["rustc"], "rustc 1.88");
     assert_eq!(
@@ -1074,6 +1473,9 @@ fn soak_metadata_is_machine_readable_and_declares_the_slot_contract() {
         "max_rows"
     );
     assert_eq!(metadata["progress_contract"]["source_count"], 2);
+    assert_eq!(metadata["state_contract"]["window_size_micros"], 64);
+    assert_eq!(metadata["state_contract"]["checkpoint_batch_interval"], 8);
+    assert_eq!(metadata["state_contract"]["terminal_live_keys"], 0);
     assert_eq!(
         metadata["progress_contract"]["fence_selection"],
         "all-visible"
