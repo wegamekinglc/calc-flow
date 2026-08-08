@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use calc_flow::{
     AggregateFunction, Batch, BatchMetadata, CancellationToken, EdgeCollector, JsonMap,
@@ -6,10 +6,11 @@ use calc_flow::{
     WindowAggregateOperator, WindowSpec,
 };
 use datafusion::arrow::{
-    array::{ArrayRef, Float64Array, TimestampMicrosecondArray, UInt64Array},
+    array::{ArrayRef, Float64Array, Int64Array, TimestampMicrosecondArray, UInt64Array},
     datatypes::{DataType, Field, Schema, TimeUnit},
     record_batch::RecordBatch,
 };
+use proptest::prelude::*;
 
 fn schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
@@ -224,4 +225,100 @@ async fn ordered_rows_produce_identical_float_bits_across_input_batch_partitions
         run(&[&values]).await,
         run(&[&values[..2], &values[2..4], &values[4..]]).await
     );
+}
+
+fn integer_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new(
+            "event_time",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        ),
+        Field::new("group", DataType::Int64, false),
+        Field::new("value", DataType::Int64, false),
+    ]))
+}
+
+fn integer_batch(rows: &[(i64, i64)]) -> Batch {
+    let record = RecordBatch::try_new(
+        integer_schema(),
+        vec![
+            Arc::new(TimestampMicrosecondArray::from(vec![0; rows.len()])) as ArrayRef,
+            Arc::new(Int64Array::from_iter_values(
+                rows.iter().map(|(group, _)| *group),
+            )),
+            Arc::new(Int64Array::from_iter_values(
+                rows.iter().map(|(_, value)| *value),
+            )),
+        ],
+    )
+    .unwrap();
+    Batch::table(vec![record], BatchMetadata::default()).unwrap()
+}
+
+async fn integer_window_result(rows: &[(i64, i64)], partition_width: usize) -> Vec<(i64, i64)> {
+    let spec = WindowSpec::tumbling("event_time", Duration::from_secs(1))
+        .unwrap()
+        .group_by(["group"])
+        .unwrap()
+        .aggregate(AggregateFunction::Sum, "value", "sum_value")
+        .unwrap();
+    let mut operator = WindowAggregateOperator::new("window", integer_schema(), spec).unwrap();
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "window", None);
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    for partition in rows.chunks(partition_width) {
+        operator
+            .process_data("input", integer_batch(partition), &context, &mut collector)
+            .await
+            .unwrap();
+    }
+    operator.on_end(&context, &mut collector).await.unwrap();
+    let output = collector.drain("output");
+    let record = &output[0]
+        .as_data()
+        .unwrap()
+        .table_payload()
+        .unwrap()
+        .batches()[0];
+    let groups = record
+        .column_by_name("group")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    let sums = record
+        .column_by_name("sum_value")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    groups
+        .values()
+        .iter()
+        .zip(sums.values())
+        .map(|(group, sum)| (*group, *sum))
+        .collect()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn randomized_partitions_match_a_finite_group_by_oracle(
+        rows in prop::collection::vec((-1_000_i64..1_000, -1_000_i64..1_000), 1..64),
+        partition_width in 1_usize..16,
+    ) {
+        let mut expected = BTreeMap::<i64, i64>::new();
+        for (group, value) in &rows {
+            *expected.entry(*group).or_default() += value;
+        }
+        let expected = expected.into_iter().collect::<Vec<_>>();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let partitioned = runtime.block_on(integer_window_result(&rows, partition_width));
+        let unpartitioned = runtime.block_on(integer_window_result(&rows, rows.len()));
+        prop_assert_eq!(&partitioned, &expected);
+        prop_assert_eq!(&unpartitioned, &expected);
+        prop_assert_eq!(partitioned, unpartitioned);
+    }
 }

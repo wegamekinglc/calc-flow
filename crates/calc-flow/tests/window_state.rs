@@ -2,15 +2,20 @@ use std::{io::Cursor, sync::Arc, time::Duration};
 
 use calc_flow::{
     AggregateFunction, Batch, BatchMetadata, CancellationToken, EdgeCollector, Epoch, EventTime,
-    JsonMap, OperatorMetadata, StreamJobContext, StreamOperator, StreamOperatorContext,
+    JsonMap, LocalStateBackend, OperatorMetadata, OperatorStateSnapshot, StateBackend, StateHandle,
+    StateLineageKey, StreamJobContext, StreamOperator, StreamOperatorContext,
     WindowAggregateOperator, WindowSpec,
 };
 use datafusion::arrow::{
-    array::{ArrayRef, Int64Array, StringArray, TimestampMicrosecondArray},
+    array::{
+        ArrayRef, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray, UInt64Array,
+    },
     datatypes::{DataType, Field, Schema, TimeUnit},
     ipc::reader::FileReader,
     record_batch::RecordBatch,
 };
+use sha2::{Digest, Sha256};
+use tempfile::TempDir;
 
 const PIPELINE_FINGERPRINT: &str =
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -67,6 +72,38 @@ fn job() -> StreamJobContext {
     )
 }
 
+fn digest(bytes: impl AsRef<[u8]>) -> String {
+    hex::encode(Sha256::digest(bytes.as_ref()))
+}
+
+fn local_handle(
+    key: &StateLineageKey,
+    epoch: Epoch,
+    segment_id: &str,
+    bytes: &[u8],
+) -> StateHandle {
+    let lineage_hash = digest(format!(
+        "{}\0{}",
+        key.pipeline_name(),
+        key.pipeline_fingerprint()
+    ));
+    StateHandle::new(
+        "window",
+        epoch,
+        segment_id,
+        &format!(
+            "committed/{}/{}/{}-{}.arrow",
+            lineage_hash,
+            digest("window"),
+            epoch.as_u64(),
+            digest(segment_id)
+        ),
+        u64::try_from(bytes.len()).unwrap(),
+        &digest(bytes),
+    )
+    .unwrap()
+}
+
 fn operator() -> WindowAggregateOperator {
     let spec = WindowSpec::tumbling("event_time", Duration::from_micros(10))
         .unwrap()
@@ -75,6 +112,60 @@ fn operator() -> WindowAggregateOperator {
         .aggregate(AggregateFunction::Sum, "value", "sum_value")
         .unwrap();
     WindowAggregateOperator::new("window", input_schema(), spec).unwrap()
+}
+
+fn aggregate_state_operator() -> WindowAggregateOperator {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "event_time",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        ),
+        Field::new("group", DataType::Utf8, false),
+        Field::new("signed", DataType::Int64, false),
+        Field::new("unsigned", DataType::UInt64, false),
+        Field::new("float", DataType::Float64, false),
+    ]));
+    let spec = WindowSpec::tumbling("event_time", Duration::from_micros(10))
+        .unwrap()
+        .group_by(["group"])
+        .unwrap()
+        .aggregate(AggregateFunction::Count, "signed", "count_value")
+        .unwrap()
+        .aggregate(AggregateFunction::Sum, "signed", "signed_sum")
+        .unwrap()
+        .aggregate(AggregateFunction::Min, "signed", "signed_min")
+        .unwrap()
+        .aggregate(AggregateFunction::Max, "signed", "signed_max")
+        .unwrap()
+        .aggregate(AggregateFunction::Avg, "signed", "signed_avg")
+        .unwrap()
+        .aggregate(AggregateFunction::Avg, "unsigned", "unsigned_avg")
+        .unwrap()
+        .aggregate(AggregateFunction::Sum, "float", "float_sum")
+        .unwrap()
+        .aggregate(AggregateFunction::Avg, "float", "float_avg")
+        .unwrap();
+    WindowAggregateOperator::new("window", schema, spec).unwrap()
+}
+
+fn aggregate_state_batch() -> Batch {
+    let schema = aggregate_state_operator().input_ports()[0]
+        .schema()
+        .unwrap()
+        .clone();
+    let record = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(TimestampMicrosecondArray::from(vec![1, 2])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["g", "g"])),
+            Arc::new(Int64Array::from(vec![2, 4])),
+            Arc::new(UInt64Array::from(vec![4, 8])),
+            Arc::new(Float64Array::from(vec![1.5, 2.5])),
+        ],
+    )
+    .unwrap();
+    Batch::table(vec![record], BatchMetadata::default()).unwrap()
 }
 
 fn first_output_sum(collector: &mut EdgeCollector) -> (u64, i64) {
@@ -309,4 +400,105 @@ async fn delta_threshold_prepares_one_replacement_base_before_inventory_growth()
     let mut output = EdgeCollector::new(restored.output_ports().to_vec());
     restored.on_end(&context, &mut output).await.unwrap();
     assert_eq!(first_output_sum(&mut output), (0, 34));
+}
+
+#[tokio::test]
+async fn every_accumulator_state_shape_round_trips_through_arrow_ipc() {
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "window", None);
+    let mut source = aggregate_state_operator();
+    let mut ignored = EdgeCollector::new(source.output_ports().to_vec());
+    source
+        .process_data("input", aggregate_state_batch(), &context, &mut ignored)
+        .await
+        .unwrap();
+    let snapshot = source.checkpoint(Epoch::INITIAL).unwrap();
+
+    let mut restored = aggregate_state_operator();
+    restored.restore(&snapshot).unwrap();
+    let mut output = EdgeCollector::new(restored.output_ports().to_vec());
+    restored.on_end(&context, &mut output).await.unwrap();
+    let output = output.drain("output");
+    let record = &output[0]
+        .as_data()
+        .unwrap()
+        .table_payload()
+        .unwrap()
+        .batches()[0];
+    let int_value = |name: &str| {
+        record
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0)
+    };
+    let float_value = |name: &str| {
+        record
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .value(0)
+    };
+    assert_eq!(
+        record
+            .column_by_name("count_value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .value(0),
+        2
+    );
+    assert_eq!(int_value("signed_sum"), 6);
+    assert_eq!(int_value("signed_min"), 2);
+    assert_eq!(int_value("signed_max"), 4);
+    assert_eq!(float_value("signed_avg").to_bits(), 3.0_f64.to_bits());
+    assert_eq!(float_value("unsigned_avg").to_bits(), 6.0_f64.to_bits());
+    assert_eq!(float_value("float_sum").to_bits(), 4.0_f64.to_bits());
+    assert_eq!(float_value("float_avg").to_bits(), 2.0_f64.to_bits());
+}
+
+#[tokio::test]
+async fn snapshot_segments_round_trip_through_the_validating_local_backend() {
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "window", None);
+    let mut source = operator();
+    let mut ignored = EdgeCollector::new(source.output_ports().to_vec());
+    source
+        .process_data(
+            "input",
+            input_batch(vec![1], vec!["a"], vec![5]),
+            &context,
+            &mut ignored,
+        )
+        .await
+        .unwrap();
+    let snapshot = source.checkpoint(Epoch::INITIAL).unwrap();
+
+    let directory = TempDir::new().unwrap();
+    let key = StateLineageKey::new("window-test", PIPELINE_FINGERPRINT).unwrap();
+    let backend = LocalStateBackend::new(directory.path()).await.unwrap();
+    let lineage = backend.open_lineage(&key).await.unwrap();
+    let mut loaded = std::collections::BTreeMap::new();
+    for (segment_id, bytes) in snapshot.segments {
+        let handle = local_handle(&key, Epoch::INITIAL, &segment_id, &bytes);
+        lineage.stage_segment(&handle, &bytes).await.unwrap();
+        lineage.validate_segment(&handle).await.unwrap();
+        lineage.publish_segment(&handle).await.unwrap();
+        loaded.insert(segment_id, lineage.load_segment(&handle).await.unwrap());
+    }
+    let persisted = OperatorStateSnapshot {
+        inline_metadata: snapshot.inline_metadata,
+        segments: loaded,
+    };
+
+    let mut restored = operator();
+    restored.restore(&persisted).unwrap();
+    let mut output = EdgeCollector::new(restored.output_ports().to_vec());
+    restored.on_end(&context, &mut output).await.unwrap();
+    assert_eq!(first_output_sum(&mut output), (0, 5));
 }

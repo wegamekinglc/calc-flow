@@ -867,7 +867,6 @@ impl StreamOperator for WindowAggregateOperator {
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
         self.observe_context(context)?;
-        self.compact_prepared_if_needed(context).await?;
         if self
             .state
             .last_input_watermark
@@ -878,6 +877,7 @@ impl StreamOperator for WindowAggregateOperator {
                 "input watermark did not advance strictly",
             ));
         }
+        self.compact_prepared_if_needed(context).await?;
         let keys = self
             .state
             .accumulators
@@ -2326,6 +2326,11 @@ fn decode_state_segment(
     expected_schema: &Schema,
     operator_id: &str,
 ) -> Result<Vec<(WindowKey, Option<AccumulatorRow>)>> {
+    if !bytes.starts_with(b"ARROW1") || !bytes.ends_with(b"ARROW1") {
+        return Err(state_format(
+            "window state segment is missing the Arrow IPC file magic",
+        ));
+    }
     let mut reader = FileReader::try_new(Cursor::new(bytes), None)
         .map_err(|error| state_format(format!("window state IPC is invalid: {error}")))?;
     if reader.schema().as_ref() != expected_schema {
@@ -2944,5 +2949,17 @@ mod tests {
             error,
             CalcFlowError::InvalidArgument { field, .. } if field == "message.bytes"
         ));
+    }
+
+    #[test]
+    fn date32_group_encoding_uses_one_signed_big_endian_payload() {
+        let mut encoded = Vec::new();
+        encode_group_scalar(
+            &mut encoded,
+            &DataType::Date32,
+            Some(&ScalarValue::Date32(1)),
+        )
+        .unwrap();
+        assert_eq!(encoded, [0x01, 0x80, 0x00, 0x00, 0x01]);
     }
 }
