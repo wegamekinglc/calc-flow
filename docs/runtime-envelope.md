@@ -500,6 +500,40 @@ cleanup is reachability-based and fails closed on links or unexpected files.
 The M4 commit harness proves publication crash boundaries, but the running job
 still rejects barriers and does not perform durable checkpoint coordination.
 
+## M5 planned checkpoint boundary
+
+The reviewed M5 plan is defined by the
+[epoch checkpoint specification](../.codex/artifacts/specs/m5-epoch-checkpoint.md),
+its [API note](../.codex/artifacts/api-notes/m5-epoch-checkpoint.md), and its
+[adversarial critique](../.codex/artifacts/critiques/m5-epoch-checkpoint.md).
+These documents describe future implementation; none of the behavior in this
+section is present merely because the plan exists.
+
+M5 reuses the M4 `CheckpointManifest` v3 as the single durable truth and
+productionizes segment/manifest publication, strict latest-completed
+selection, retention, and complete-job restore. Semantic identity includes
+the pipeline fingerprint and exact participant sets. The runtime configuration
+hash remains canonical diagnostic metadata but does not invalidate compatible
+state. Recovery persists a bounded semantic projection of source/operator
+progress, not the M3 execution trace, pending receipts, or process-local timer
+coordinates.
+
+One single-flight coordinator creates a global source cut through the
+`LiveProgressCoordinator`, which remains the sole owner of source-output
+edges. Operators block only ingresses that have received the current epoch,
+snapshot after full alignment, and immediately forward the barrier after the
+local snapshot succeeds. Transactional sinks pre-commit before manifest
+publication and commit only after the manifest is durable; a post-manifest
+failure completes forward during recovery.
+
+Final-only output uses a coordinator-owned terminal epoch after the data-plane
+end cut. No barrier follows `EndOfInput`. Recovery from a terminal manifest
+finishes any sink commit and returns terminal success without reopening
+sources or re-emitting final windows. Exactly-once is proved per output over
+every reachable source, operator, edge policy, and sink before lifecycle work.
+The milestone remains crate-private; public v2 checkpoint/runner APIs stay
+unchanged until post-M5 A6.
+
 ## Specified but not yet implemented
 
 The [specification](../.codex/artifacts/specs/continuous-streaming-runtime.md)
@@ -507,9 +541,10 @@ and the [v3 implementation plan](superpowers/plans/2026-08-02-continuous-streami
 assign the following behaviors to later milestones. They are not implemented
 in the current tree, and this document does not describe them as present:
 
-- **M5** — runtime-generated barriers, barrier injection and alignment, epoch
-  manifest publication/selection, complete-job restore, lineage recovery
-  numbering (D9.3–D9.6), and the exactly-once sink commit protocol (S7, S9).
+- **M5** — the checkpoint behavior summarized above: runtime-generated source
+  cuts and barriers, alignment, epoch manifest publication/selection,
+  complete-job and terminal restore, lineage recovery numbering, per-output
+  capability proof, and exactly-once sink commit/recovery.
 - **Post-M5 public A6 integration** — the source-driven runner/job, public
   source and sink bindings, status/control methods, and v2 runner replacement
   land atomically only after the M4 state and complete M5 durability contract
