@@ -1066,29 +1066,29 @@ struct StateHandle {
 
 **先写 RED：**
 
-- [ ] handle 拒绝 absolute path、traversal、空 ID、错误 checksum、错误 pipeline/operator。
-- [ ] staged segment 在 epoch manifest commit 前不可见。
-- [ ] stage failure 不破坏上个 committed epoch。
-- [ ] checksum mismatch 在 decode 前失败。
-- [ ] unknown/duplicate handle fail closed。
-- [ ] compaction 前后逻辑 row 和确定性顺序一致。
+- [x] handle 拒绝 absolute path、traversal、空 ID、错误 checksum、错误 pipeline/operator。
+- [x] staged segment 在 epoch manifest commit 前不可见。
+- [x] stage failure 不破坏上个 committed epoch。
+- [x] checksum mismatch 在 decode 前失败。
+- [x] unknown/duplicate handle fail closed。
+- [x] compaction 前后逻辑 row 和确定性顺序一致。
 
 **实现：**
 
-- [ ] 使用 M0 D6 已批准的 Arrow IPC 作为 built-in window segment format；不重新打开
+- [x] 使用 M0 D6 已批准的 Arrow IPC 作为 built-in window segment format；不重新打开
   Arrow IPC 与 Parquet 的选择。
-- [ ] `StateBackend` 先返回持有 cross-process exclusive lease 的 lineage-scoped session，
+- [x] `StateBackend` 先返回持有 cross-process exclusive lease 的 lineage-scoped session，
   只有 session 暴露 segment operation，避免未来 `Arc<dyn StateBackend>` 绕过锁。
-- [ ] 固定 state segment 与 checkpoint manifest 的提交顺序：先落盘并校验 segment，
+- [x] 固定 state segment 与 checkpoint manifest 的提交顺序：先落盘并校验 segment，
   再原子发布 checkpoint manifest。checkpoint manifest 是“最近完成 epoch”的唯一
   真相，恢复只读取它；任何未被保留 manifest 引用的 segment 一律按垃圾处理，不参与
   恢复判定，也不得让恢复失败。
-- [ ] checkpoint JSON 只保存 handle，不保存 keyed row。
-- [ ] pipeline/operator 名称先 hash 再用于路径。
-- [ ] staging 与 committed state 位于同一受管 filesystem root。
-- [ ] 校验目标后才 atomic rename。
-- [ ] compression/compaction 放到 Tokio executor 外。
-- [ ] manifest 发布前记录 segment byte length 与 checksum。
+- [x] checkpoint JSON 只保存 handle，不保存 keyed row。
+- [x] pipeline/operator 名称先 hash 再用于路径。
+- [x] staging 与 committed state 位于同一受管 filesystem root。
+- [x] 校验目标后才 atomic rename。
+- [x] compression/compaction 放到 Tokio executor 外。
+- [x] manifest 发布前记录 segment byte length 与 checksum。
 
 **验收门：** 超过 10 MiB 的 state 能 checkpoint/restore，但 manifest 本身保持有界。
 
@@ -1102,19 +1102,19 @@ struct StateHandle {
 
 **步骤：**
 
-- [ ] 创建并 canonicalize 唯一 state root。
-- [ ] 受管路径边界拒绝 symlink 和意外 file type。
-- [ ] 写 epoch staging directory，原子发布 validated segment；M4 private commit harness
+- [x] 创建并 canonicalize 唯一 state root。
+- [x] 受管路径边界拒绝 symlink 和意外 file type。
+- [x] 写 epoch staging directory，原子发布 validated segment；M4 private commit harness
   最后发布 manifest 以验证 crash matrix，running-job publication 仍由 M5 coordinator
   接管。
-- [ ] 保留可配置数量的 completed epoch。
-- [ ] 不删除任何 retained manifest 可达的 state。
-- [ ] 已提交但没有任何 retained checkpoint manifest 引用的 segment 视为孤儿，可以
+- [x] 保留可配置数量的 completed epoch。
+- [x] 不删除任何 retained manifest 可达的 state。
+- [x] 已提交但没有任何 retained checkpoint manifest 引用的 segment 视为孤儿，可以
   安全回收，且其存在不得让恢复失败。
-- [ ] 只 compact immutable committed segment。
-- [ ] locked/delete failure 立即停止，不扩大 cleanup target。
-- [ ] 模拟 segment/manifest rename 前后 crash。
-- [ ] 分开 benchmark incremental write、full restore、compaction。
+- [x] 只 compact immutable committed segment。
+- [x] locked/delete failure 立即停止，不扩大 cleanup target。
+- [x] 模拟 segment/manifest rename 前后 crash。
+- [x] 分开 benchmark incremental write、full restore、compaction。
 
 **验收门：** crash 后只选择最近完整 committed manifest，从不读取 partial epoch。
 
@@ -1138,28 +1138,28 @@ struct StateHandle {
 
 **先写 RED：**
 
-- [ ] zero/negative size/slide 失败。
-- [ ] 3.0 要求 hopping size 可被 slide 整除，且 `size / slide <= 1_024`，避免单行
+- [x] zero/negative size/slide 失败。
+- [x] 3.0 要求 hopping size 可被 slide 整除，且 `size / slide <= 1_024`，避免单行
   assignment 无界放大。
-- [ ] output name 与 window/group column 冲突时失败。
-- [ ] unsupported aggregate/type 在 compile 时失败。
-- [ ] output schema 按显式 group/aggregate declaration order 确定；graph/node insertion
+- [x] output name 与 window/group column 冲突时失败。
+- [x] unsupported aggregate/type 在 compile 时失败。
+- [x] output schema 按显式 group/aggregate declaration order 确定；graph/node insertion
   order 不改变 schema 或 fingerprint，重排 declaration 则是 fingerprinted semantic change。
-- [ ] session/early/allowed-lateness/update config 全部拒绝。
+- [x] session/early/allowed-lateness/update config 全部拒绝。
 
 **实现：**
 
-- [ ] 引入严格可序列化的 `WindowSpec`、`AggregateSpec`、
+- [x] 引入严格可序列化的 `WindowSpec`、`AggregateSpec`、
   `WindowAggregateOperator`。
-- [ ] `NodeOperator`/`CompiledStreamOperator` 增加 window variant，并补齐所有 variant 的
+- [x] `NodeOperator`/`CompiledStreamOperator` 增加 window variant，并补齐所有 variant 的
   checkpoint/restore dispatch；M4 只验证 seam，不在 barrier-rejecting task 中调用。
-- [ ] 稳定时使用 DataFusion public expression API 做 input projection/filter。
-- [ ] Calc-Flow 自己维护 incremental accumulator，不依赖 DataFusion private planner
+- [x] 稳定时使用 DataFusion public expression API 做 input projection/filter。
+- [x] Calc-Flow 自己维护 incremental accumulator，不依赖 DataFusion private planner
   node 或 fork。
-- [ ] 明确 null、NaN、overflow、decimal、avg 语义。
-- [ ] 按 M4 delta 固定 null event-time drop、64 KiB stable group key、float bit-level
+- [x] 明确 null、NaN、overflow、decimal、avg 语义。
+- [x] 按 M4 delta 固定 null event-time drop、64 KiB stable group key、float bit-level
   equality、canonical NaN 和首版 Decimal compile rejection。
-- [ ] 所有语义进入 fingerprint。
+- [x] 所有语义进入 fingerprint。
 
 **验收门：** 支持矩阵清晰，所有不支持组合都在 source.open 前失败。
 
@@ -1172,30 +1172,30 @@ struct StateHandle {
 
 **先写 RED：**
 
-- [ ] Unix epoch 前后时间都正确分配 tumbling window。
-- [ ] hopping row 进入精确的多个重叠 window。
-- [ ] incremental 结果与 finite batch group-by oracle 一致。
-- [ ] watermark close 后每个 window 只输出一次。
-- [ ] late row 不改变已关闭结果。
-- [ ] empty/all-null aggregate 遵循已批准语义。
-- [ ] 任意 batch boundary 恢复后 final output 一致。
-- [ ] proptest 随机切分相同 rows，结果仍一致。
+- [x] Unix epoch 前后时间都正确分配 tumbling window。
+- [x] hopping row 进入精确的多个重叠 window。
+- [x] incremental 结果与 finite batch group-by oracle 一致。
+- [x] watermark close 后每个 window 只输出一次。
+- [x] late row 不改变已关闭结果。
+- [x] empty/all-null aggregate 遵循已批准语义。
+- [x] 任意 batch boundary 恢复后 final output 一致。
+- [x] proptest 随机切分相同 rows，结果仍一致。
 
 **实现：**
 
-- [ ] 稳定编码 `(window_start, window_end, group_key)`。
-- [ ] dirty accumulator 与 committed handle 分离。
-- [ ] checkpoint 只 flush dirty key。
-- [ ] watermark 推进时先 emit closed window，再 forward watermark。
-- [ ] 将 late/null-time recorder 改为 operator-task-owned，并以 checked、transactional
+- [x] 稳定编码 `(window_start, window_end, group_key)`。
+- [x] dirty accumulator 与 committed handle 分离。
+- [x] checkpoint 只 flush dirty key。
+- [x] watermark 推进时先 emit closed window，再 forward watermark。
+- [x] 将 late/null-time recorder 改为 operator-task-owned，并以 checked、transactional
   delta 累积到 status/metrics；不得为每个 context 重建 recorder。
-- [ ] closed state 先进入 emitted-but-not-checkpointed set；下一次 operator snapshot
+- [x] closed state 先进入 emitted-but-not-checkpointed set；下一次 operator snapshot
   记录 tombstone intent。完整 durable publication 失败时 M5 必须终止 job，不要求新增
   `StreamOperator` checkpoint-complete callback。
-- [ ] hopping update 避免不必要克隆 Arrow payload。
-- [ ] operator task 通过 crate-private context 提供 effective output budget；close output
+- [x] hopping update 避免不必要克隆 Arrow payload。
+- [x] operator task 通过 crate-private context 提供 effective output budget；close output
   按稳定 key range 分块，单行 oversize 在 enqueue 前失败。
-- [ ] watermark/EOF 触发的 output 使用稳定 operator ID、checked operator-owned sequence
+- [x] watermark/EOF 触发的 output 使用稳定 operator ID、checked operator-owned sequence
   与空 attributes 构造 `BatchMetadata`；next sequence 进入 snapshot/restore。
 
 **验收门：** batch partition、operator snapshot/restore、state-inventory round-trip 与
