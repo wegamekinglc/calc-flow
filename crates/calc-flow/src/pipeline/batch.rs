@@ -32,12 +32,14 @@ impl CompiledBatchOperator {
             NodeOperator::Expression(operator) => Ok(Self::Expression(operator)),
             NodeOperator::Sql(operator) => Ok(Self::Sql(operator)),
             NodeOperator::Batch(operator) => Ok(Self::External(operator)),
-            NodeOperator::Union(_) | NodeOperator::Stream(_) => Err(CalcFlowError::Compile {
-                message: format!(
-                    "node {:?} is stream-only; batch graphs compose multi-input logic through SQL aliases",
-                    definition.node_id
-                ),
-            }),
+            NodeOperator::Union(_) | NodeOperator::Window(_) | NodeOperator::Stream(_) => {
+                Err(CalcFlowError::Compile {
+                    message: format!(
+                        "node {:?} is stream-only; batch graphs compose multi-input logic through SQL aliases",
+                        definition.node_id
+                    ),
+                })
+            }
         }
     }
 
@@ -223,7 +225,7 @@ impl PipelineBuilder {
         for (node_id, node) in &self.nodes {
             if matches!(
                 node.operator,
-                NodeOperator::Union(_) | NodeOperator::Stream(_)
+                NodeOperator::Union(_) | NodeOperator::Window(_) | NodeOperator::Stream(_)
             ) {
                 return Err(CalcFlowError::Compile {
                     message: format!(

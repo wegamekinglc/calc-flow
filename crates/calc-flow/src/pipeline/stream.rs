@@ -145,6 +145,7 @@ pub(crate) enum CompiledStreamOperator {
     Expression(crate::ExpressionOperator),
     Sql(crate::SqlOperator),
     Union(UnionOperator),
+    Window(crate::WindowAggregateOperator),
 }
 
 /// A directly owned compiled node ready to move into one runtime task.
@@ -233,6 +234,7 @@ impl CompiledStreamOperator {
                 Ok(Self::Sql(operator))
             }
             NodeOperator::Union(operator) => Ok(Self::Union(operator)),
+            NodeOperator::Window(operator) => Ok(Self::Window(operator)),
             NodeOperator::Stream(operator) => Ok(Self::External(operator)),
             NodeOperator::Batch(_) => Err(CalcFlowError::Compile {
                 message: format!(
@@ -249,6 +251,38 @@ impl CompiledStreamOperator {
             Self::Expression(operator) => operator.reset(),
             Self::Sql(operator) => operator.reset(),
             Self::Union(operator) => operator.reset(),
+            Self::Window(operator) => operator.reset(),
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "M5 barrier coordination calls the M4 lifecycle dispatch seam"
+    )]
+    pub(crate) fn checkpoint(
+        &mut self,
+        epoch: crate::Epoch,
+    ) -> Result<crate::OperatorStateSnapshot> {
+        match self {
+            Self::External(operator) => operator.checkpoint(epoch),
+            Self::Expression(operator) => operator.checkpoint(epoch),
+            Self::Sql(operator) => operator.checkpoint(epoch),
+            Self::Union(operator) => operator.checkpoint(epoch),
+            Self::Window(operator) => operator.checkpoint(epoch),
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "M5 recovery coordination calls the M4 lifecycle dispatch seam"
+    )]
+    pub(crate) fn restore(&mut self, snapshot: &crate::OperatorStateSnapshot) -> Result<()> {
+        match self {
+            Self::External(operator) => operator.restore(snapshot),
+            Self::Expression(operator) => operator.restore(snapshot),
+            Self::Sql(operator) => operator.restore(snapshot),
+            Self::Union(operator) => operator.restore(snapshot),
+            Self::Window(operator) => operator.restore(snapshot),
         }
     }
 
@@ -268,6 +302,7 @@ impl CompiledStreamOperator {
             }
             Self::Sql(operator) => operator.process_data(ingress, batch, context, output).await,
             Self::Union(operator) => operator.process_data(ingress, batch, context, output).await,
+            Self::Window(operator) => operator.process_data(ingress, batch, context, output).await,
         }
     }
 
@@ -282,6 +317,7 @@ impl CompiledStreamOperator {
             Self::Expression(operator) => operator.on_watermark(watermark, context, output).await,
             Self::Sql(operator) => operator.on_watermark(watermark, context, output).await,
             Self::Union(operator) => operator.on_watermark(watermark, context, output).await,
+            Self::Window(operator) => operator.on_watermark(watermark, context, output).await,
         }
     }
 
@@ -295,6 +331,7 @@ impl CompiledStreamOperator {
             Self::Expression(operator) => operator.on_end(context, output).await,
             Self::Sql(operator) => operator.on_end(context, output).await,
             Self::Union(operator) => operator.on_end(context, output).await,
+            Self::Window(operator) => operator.on_end(context, output).await,
         }
     }
 
@@ -302,7 +339,7 @@ impl CompiledStreamOperator {
         match self {
             Self::Expression(operator) => operator.stream_runtime_initialized(),
             Self::Sql(operator) => operator.stream_runtime_initialized(),
-            Self::External(_) | Self::Union(_) => false,
+            Self::External(_) | Self::Union(_) | Self::Window(_) => false,
         }
     }
 }
@@ -467,7 +504,10 @@ fn build_runtime_nodes(
 
 fn validate_stream_node(node_id: &str, operator: &NodeOperator) -> Result<()> {
     match operator {
-        NodeOperator::Expression(_) | NodeOperator::Union(_) | NodeOperator::Stream(_) => Ok(()),
+        NodeOperator::Expression(_)
+        | NodeOperator::Union(_)
+        | NodeOperator::Window(_)
+        | NodeOperator::Stream(_) => Ok(()),
         NodeOperator::Sql(operator) if operator.input_ports().len() == 1 => Ok(()),
         NodeOperator::Sql(_) => Err(CalcFlowError::Compile {
             message: format!(
@@ -785,12 +825,16 @@ fn insert_runtime_edge(edges: &mut BTreeMap<String, RuntimeEdge>, edge: RuntimeE
 
 #[cfg(test)]
 mod runtime_projection_tests {
+    use std::{sync::Arc, time::Duration};
+
+    use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+
     use crate::{
-        BatchKind, Edge, PipelineBuilder, Port, PortEndpoint, StreamRequirements, UdfRegistry,
-        UnionOperator,
+        BatchKind, Edge, Epoch, OperatorStateSnapshot, PipelineBuilder, Port, PortEndpoint,
+        StreamRequirements, UdfRegistry, UnionOperator, WindowAggregateOperator, WindowSpec,
     };
 
-    use super::{EdgeBudget, RuntimeEdgeKind, RuntimeProducer};
+    use super::{CompiledStreamOperator, EdgeBudget, RuntimeEdgeKind, RuntimeProducer};
 
     fn endpoint(node_id: &str, port: &str) -> PortEndpoint {
         PortEndpoint::new(node_id, port).unwrap()
@@ -871,5 +915,26 @@ mod runtime_projection_tests {
                 .all(|edge| edge.budget.max_rows == 7 && edge.budget.max_bytes == 11)
         );
         assert_eq!(parts.edges.len(), 5);
+    }
+
+    #[test]
+    fn compiled_window_dispatches_checkpoint_and_restore_lifecycle() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "event_time",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        )]));
+        let window = WindowAggregateOperator::new(
+            "window",
+            schema,
+            WindowSpec::tumbling("event_time", Duration::from_secs(1)).unwrap(),
+        )
+        .unwrap();
+        let mut compiled = CompiledStreamOperator::Window(window);
+
+        let snapshot = compiled.checkpoint(Epoch::INITIAL).unwrap();
+        assert!(snapshot.inline_metadata.is_empty());
+        assert!(snapshot.segments.is_empty());
+        compiled.restore(&OperatorStateSnapshot::default()).unwrap();
     }
 }

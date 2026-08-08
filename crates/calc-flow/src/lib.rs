@@ -38,10 +38,11 @@ pub use error::{CalcFlowError, Result};
 pub use io::{BatchingSource, Sink, Source, SourceItem};
 pub use json::{JsonMap, MAX_JSON_DEPTH, canonical_json};
 pub use operator::{
-    BatchOperator, BatchOperatorContext, BatchOperatorFactory, EdgeCollector, ExpressionOperator,
-    ExternalOperatorSpec, NodeOperator, OperatorMetadata, OperatorStateSnapshot, Port,
-    ProviderRegistry, SqlOperator, StreamCollector, StreamOperator, StreamOperatorContext,
-    StreamOperatorFactory, UnionOperator,
+    AggregateFunction, AggregateSpec, BatchOperator, BatchOperatorContext, BatchOperatorFactory,
+    EdgeCollector, ExpressionOperator, ExternalOperatorSpec, MAX_WINDOW_OVERLAP, NodeOperator,
+    OperatorMetadata, OperatorStateSnapshot, Port, ProviderRegistry, SqlOperator, StreamCollector,
+    StreamOperator, StreamOperatorContext, StreamOperatorFactory, UnionOperator,
+    WindowAggregateOperator, WindowGeometry, WindowSpec,
 };
 pub use pipeline::{
     BatchExecutionPlan, DeliveryGuarantee, Edge, EdgeBudget, ExecutionOptions, NodeTiming,

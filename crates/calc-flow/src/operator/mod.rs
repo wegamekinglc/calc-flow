@@ -5,6 +5,7 @@ mod expression;
 mod sql;
 mod stream;
 mod union;
+mod window;
 
 pub use batch::{BatchOperator, BatchOperatorContext};
 pub use expression::ExpressionOperator;
@@ -13,6 +14,10 @@ pub use stream::{
     EdgeCollector, OperatorStateSnapshot, StreamCollector, StreamOperator, StreamOperatorContext,
 };
 pub use union::UnionOperator;
+pub use window::{
+    AggregateFunction, AggregateSpec, MAX_WINDOW_OVERLAP, WindowAggregateOperator, WindowGeometry,
+    WindowSpec,
+};
 
 pub(crate) use expression::expression_query;
 
@@ -208,14 +213,15 @@ pub trait OperatorMetadata: Send + Sync {
 
 /// One graph node's operator as accepted by [`crate::PipelineBuilder`].
 ///
-/// `Expression`, `Sql`, and `Union` are built-in operators. `Batch` and
-/// `Stream` carry external operators through their respective trait objects;
-/// `compile_batch` rejects stream-only nodes and `compile_stream` rejects
-/// batch-only nodes (plan section 2.2).
+/// `Expression`, `Sql`, `Union`, and `Window` are built-in operators. `Batch`
+/// and `Stream` carry external operators through their respective trait
+/// objects; `compile_batch` rejects stream-only nodes and `compile_stream`
+/// rejects batch-only nodes (plan section 2.2).
 pub enum NodeOperator {
     Expression(ExpressionOperator),
     Sql(SqlOperator),
     Union(UnionOperator),
+    Window(WindowAggregateOperator),
     Batch(Box<dyn BatchOperator>),
     Stream(Box<dyn StreamOperator>),
 }
@@ -226,6 +232,7 @@ impl NodeOperator {
             Self::Expression(operator) => operator,
             Self::Sql(operator) => operator,
             Self::Union(operator) => operator,
+            Self::Window(operator) => operator,
             Self::Batch(operator) => operator.as_ref(),
             Self::Stream(operator) => operator.as_ref(),
         }
@@ -267,6 +274,18 @@ impl From<Box<SqlOperator>> for NodeOperator {
 impl From<Box<UnionOperator>> for NodeOperator {
     fn from(value: Box<UnionOperator>) -> Self {
         Self::Union(*value)
+    }
+}
+
+impl From<WindowAggregateOperator> for NodeOperator {
+    fn from(value: WindowAggregateOperator) -> Self {
+        Self::Window(value)
+    }
+}
+
+impl From<Box<WindowAggregateOperator>> for NodeOperator {
+    fn from(value: Box<WindowAggregateOperator>) -> Self {
+        Self::Window(*value)
     }
 }
 
