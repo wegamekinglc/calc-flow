@@ -1,7 +1,8 @@
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
+    io::Cursor,
     sync::Arc,
     time::Duration,
 };
@@ -9,15 +10,21 @@ use std::{
 use async_trait::async_trait;
 use datafusion::arrow::{
     array::{
-        Array, ArrayRef, BooleanArray, Date32Array, Date64Array, Float32Array, Float64Array,
-        Int8Array, Int16Array, Int32Array, Int64Array, LargeStringArray, StringArray,
-        TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-        TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+        Array, ArrayRef, BooleanArray, Date32Array, Date64Array, FixedSizeBinaryArray,
+        Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
+        LargeBinaryArray, LargeStringArray, StringArray, TimestampMicrosecondArray,
+        TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt8Array,
+        UInt16Array, UInt32Array, UInt64Array,
     },
     datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
+    ipc::{
+        convert::IpcSchemaEncoder,
+        reader::FileReader,
+        writer::{DictionaryTracker, FileWriter},
+    },
     record_batch::RecordBatch,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -26,7 +33,7 @@ use crate::{
     StreamCollector, StreamOperator, StreamOperatorContext, canonical_json,
 };
 
-use super::{OperatorMetadata, validate_operator_name};
+use super::{LateMetricDelta, OperatorMetadata, accumulate_late_metrics, validate_operator_name};
 
 /// Maximum number of concrete hopping-window assignments for one input row.
 pub const MAX_WINDOW_OVERLAP: u64 = 1_024;
@@ -242,6 +249,7 @@ pub struct WindowAggregateOperator {
     state: WindowState,
 }
 
+#[derive(Clone)]
 struct CompiledWindowSpec {
     event_time_index: usize,
     group_columns: Vec<CompiledGroupColumn>,
@@ -252,13 +260,16 @@ struct CompiledWindowSpec {
         reason = "the M4 persistence work package records the compiled configuration hash"
     )]
     configuration_hash: String,
+    state_schema_fingerprint: String,
 }
 
+#[derive(Clone)]
 struct CompiledGroupColumn {
     index: usize,
     data_type: DataType,
 }
 
+#[derive(Clone)]
 struct CompiledAggregate {
     input_index: usize,
     input_type: DataType,
@@ -280,6 +291,12 @@ struct WindowState {
     last_input_watermark: Option<EventTime>,
     next_output_sequence: u64,
     ended: bool,
+    metrics: LateMetricDelta,
+    prepared_segments: Vec<Vec<u8>>,
+    retained_segment_ids: Vec<String>,
+    last_checkpoint_epoch: Option<crate::Epoch>,
+    pipeline_fingerprint: Option<String>,
+    operator_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -319,6 +336,37 @@ enum AccumulatorValue {
     SignedAverage { sum: i128, count: u64 },
     UnsignedAverage { sum: u128, count: u64 },
     FloatAverage { sum: f64, count: u64 },
+}
+
+#[derive(Clone)]
+struct StateOperationRow {
+    key: WindowKey,
+    entry: AccumulatorRow,
+    tombstone: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WindowSnapshotMetadata {
+    state_layout_version: u32,
+    configuration_hash: String,
+    state_schema_fingerprint: String,
+    epoch: crate::Epoch,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pipeline_fingerprint: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    operator_id: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    last_input_watermark: Option<EventTime>,
+    next_output_sequence: u64,
+    ended: bool,
+    metrics: LateMetricDelta,
+    segment_ids: Vec<String>,
+}
+
+struct InputBatchUpdate {
+    accumulators: BTreeMap<WindowKey, AccumulatorRow>,
+    metrics: LateMetricDelta,
 }
 
 impl fmt::Debug for WindowAggregateOperator {
@@ -367,11 +415,15 @@ impl WindowAggregateOperator {
         })
     }
 
-    fn apply_input_batch(
-        &mut self,
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the transactional window scan keeps all fallible row work before one commit boundary"
+    )]
+    fn prepare_input_batch(
+        &self,
         batch: &Batch,
         context: &StreamOperatorContext<'_>,
-    ) -> Result<()> {
+    ) -> Result<InputBatchUpdate> {
         if self.state.ended {
             return Err(operator_error(
                 context.operator_id(),
@@ -382,6 +434,7 @@ impl WindowAggregateOperator {
         let mut scratch = BTreeMap::<WindowKey, AccumulatorRow>::new();
         let mut late_rows = 0_u64;
         let mut max_lateness = None::<u64>;
+        let mut null_event_time_rows = 0_u64;
 
         for record in table.batches() {
             for row_index in 0..record.num_rows() {
@@ -396,6 +449,13 @@ impl WindowAggregateOperator {
                     &self.spec.event_time_column,
                 )?
                 else {
+                    null_event_time_rows =
+                        null_event_time_rows.checked_add(1).ok_or_else(|| {
+                            operator_error(
+                                context.operator_id(),
+                                "null event-time row counter overflowed",
+                            )
+                        })?;
                     continue;
                 };
                 let assignments = window_assignments(event_time, self.compiled.geometry)
@@ -466,14 +526,99 @@ impl WindowAggregateOperator {
             }
         }
 
-        for (key, accumulator) in scratch {
-            self.state.dirty.insert(key.clone());
-            self.state.accumulators.insert(key, accumulator);
+        Ok(InputBatchUpdate {
+            accumulators: scratch,
+            metrics: LateMetricDelta {
+                late_rows,
+                affected_batches: u64::from(late_rows > 0),
+                max_lateness_micros: max_lateness,
+                null_event_time_rows,
+                null_event_time_batches: u64::from(null_event_time_rows > 0),
+            },
+        })
+    }
+
+    fn observe_context(&self, context: &StreamOperatorContext<'_>) -> Result<()> {
+        if self
+            .state
+            .pipeline_fingerprint
+            .as_deref()
+            .is_some_and(|value| value != context.job().fingerprint())
+        {
+            return Err(operator_error(
+                context.operator_id(),
+                "window state was used with a different pipeline fingerprint",
+            ));
         }
-        if late_rows > 0 {
-            context.record_late_rows(late_rows, max_lateness.map(Duration::from_micros))?;
+        if self
+            .state
+            .operator_id
+            .as_deref()
+            .is_some_and(|value| value != context.operator_id())
+        {
+            return Err(operator_error(
+                context.operator_id(),
+                "window state was used with a different operator ID",
+            ));
         }
         Ok(())
+    }
+
+    fn install_context_identity(&mut self, context: &StreamOperatorContext<'_>) {
+        self.state
+            .pipeline_fingerprint
+            .get_or_insert_with(|| context.job().fingerprint().to_owned());
+        self.state
+            .operator_id
+            .get_or_insert_with(|| context.operator_id().to_owned());
+    }
+
+    async fn encode_operations(
+        &self,
+        operations: Vec<StateOperationRow>,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<Option<Vec<u8>>> {
+        if operations.is_empty() {
+            return Ok(None);
+        }
+        let spec = self.spec.clone();
+        let compiled = self.compiled.clone();
+        let pipeline_fingerprint = context.job().fingerprint().to_owned();
+        let operator_id = context.operator_id().to_owned();
+        tokio::task::spawn_blocking(move || {
+            encode_state_segment(
+                &operations,
+                &spec,
+                &compiled,
+                &pipeline_fingerprint,
+                &operator_id,
+            )
+        })
+        .await
+        .map_err(|error| internal_error(&format!("window state encoder task failed: {error}")))?
+        .map(Some)
+    }
+
+    fn upsert_operations(update: &InputBatchUpdate) -> Vec<StateOperationRow> {
+        update
+            .accumulators
+            .iter()
+            .map(|(key, entry)| StateOperationRow {
+                key: key.clone(),
+                entry: entry.clone(),
+                tombstone: false,
+            })
+            .collect()
+    }
+
+    fn tombstone_operations(&self, keys: &[WindowKey]) -> Vec<StateOperationRow> {
+        keys.iter()
+            .map(|key| StateOperationRow {
+                key: key.clone(),
+                entry: self.state.accumulators[key].clone(),
+                tombstone: true,
+            })
+            .collect()
     }
 
     async fn emit_keys(
@@ -485,11 +630,6 @@ impl WindowAggregateOperator {
         if keys.is_empty() {
             return Ok(());
         }
-        let next_sequence = self
-            .state
-            .next_output_sequence
-            .checked_add(1)
-            .ok_or_else(|| operator_error(context.operator_id(), "output sequence overflowed"))?;
         let record = build_output_record(
             keys,
             &self.state.accumulators,
@@ -500,19 +640,102 @@ impl WindowAggregateOperator {
                 .expect("window output always has an exact schema"),
             context.operator_id(),
         )?;
-        let metadata = BatchMetadata::new(
+        let batches = chunk_output_record(
+            &record,
             context.operator_id(),
             self.state.next_output_sequence,
-            BTreeMap::new(),
+            context.output_budget(),
         )?;
-        let batch = Batch::table(vec![record], metadata)?;
-        output.emit("output", batch).await?;
-        self.state.next_output_sequence = next_sequence;
+        for batch in batches {
+            output.emit("output", batch).await?;
+            self.state.next_output_sequence = self
+                .state
+                .next_output_sequence
+                .checked_add(1)
+                .expect("all output sequences were prevalidated");
+        }
         self.state
             .emitted_pending_snapshot
             .extend(keys.iter().cloned());
         Ok(())
     }
+}
+
+fn chunk_output_record(
+    record: &RecordBatch,
+    operator_id: &str,
+    first_sequence: u64,
+    budget: crate::EdgeBudget,
+) -> Result<Vec<Batch>> {
+    let mut row_costs = Vec::with_capacity(record.num_rows());
+    for index in 0..record.num_rows() {
+        let row = record.slice(index, 1);
+        let batch = Batch::table(vec![row], BatchMetadata::default())?;
+        let bytes = batch.estimated_bytes()?;
+        if bytes > budget.max_bytes {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "message.bytes".into(),
+                message: format!(
+                    "one window output row requires {bytes} bytes, exceeding the effective edge byte budget {}",
+                    budget.max_bytes
+                ),
+            });
+        }
+        row_costs.push(bytes);
+    }
+
+    let mut ranges = Vec::<(usize, usize)>::new();
+    let mut start = 0;
+    while start < record.num_rows() {
+        let mut end = start;
+        let mut bytes = 0_usize;
+        while end < record.num_rows() && end - start < budget.max_rows {
+            let Some(candidate_bytes) = bytes.checked_add(row_costs[end]) else {
+                break;
+            };
+            if candidate_bytes > budget.max_bytes {
+                break;
+            }
+            bytes = candidate_bytes;
+            end += 1;
+        }
+        if end == start {
+            return Err(internal_error(
+                "validated output row did not fit the effective edge budget",
+            ));
+        }
+        ranges.push((start, end));
+        start = end;
+    }
+    let chunk_count = u64::try_from(ranges.len()).map_err(|_| {
+        operator_error(
+            operator_id,
+            "output chunk count does not fit the sequence range",
+        )
+    })?;
+    first_sequence
+        .checked_add(chunk_count)
+        .ok_or_else(|| operator_error(operator_id, "output sequence overflowed before emission"))?;
+
+    ranges
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, (start, end))| {
+            let ordinal = u64::try_from(ordinal)
+                .map_err(|_| internal_error("output chunk ordinal does not fit UInt64"))?;
+            let sequence = first_sequence
+                .checked_add(ordinal)
+                .expect("complete sequence range validated above");
+            let metadata = BatchMetadata::new(operator_id, sequence, BTreeMap::new())?;
+            let batch = Batch::table(vec![record.slice(start, end - start)], metadata)?;
+            if batch.estimated_bytes()? > budget.max_bytes {
+                return Err(internal_error(
+                    "conservative row charges underreported a window output chunk",
+                ));
+            }
+            Ok(batch)
+        })
+        .collect()
 }
 
 impl OperatorMetadata for WindowAggregateOperator {
@@ -549,7 +772,28 @@ impl StreamOperator for WindowAggregateOperator {
             });
         }
         self.input_ports[0].validate(&batch, &format!("{}.input", self.name))?;
-        self.apply_input_batch(&batch, context)
+        self.observe_context(context)?;
+        let update = self.prepare_input_batch(&batch, context)?;
+        let next_metrics = accumulate_late_metrics(self.state.metrics, update.metrics)?;
+        let encoded = self
+            .encode_operations(Self::upsert_operations(&update), context)
+            .await?;
+        context.record_window_metrics(
+            update.metrics.late_rows,
+            update.metrics.max_lateness_micros,
+            update.metrics.null_event_time_rows,
+        )?;
+
+        self.install_context_identity(context);
+        self.state.metrics = next_metrics;
+        for (key, accumulator) in update.accumulators {
+            self.state.dirty.insert(key.clone());
+            self.state.accumulators.insert(key, accumulator);
+        }
+        if let Some(encoded) = encoded {
+            self.state.prepared_segments.push(encoded);
+        }
+        Ok(())
     }
 
     async fn on_watermark(
@@ -558,6 +802,7 @@ impl StreamOperator for WindowAggregateOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        self.observe_context(context)?;
         if self
             .state
             .last_input_watermark
@@ -577,7 +822,14 @@ impl StreamOperator for WindowAggregateOperator {
             })
             .cloned()
             .collect::<Vec<_>>();
+        let tombstones = self
+            .encode_operations(self.tombstone_operations(&keys), context)
+            .await?;
         self.emit_keys(&keys, context, output).await?;
+        if let Some(tombstones) = tombstones {
+            self.state.prepared_segments.push(tombstones);
+        }
+        self.install_context_identity(context);
         self.state.last_input_watermark = Some(watermark);
         Ok(())
     }
@@ -587,6 +839,7 @@ impl StreamOperator for WindowAggregateOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        self.observe_context(context)?;
         if self.state.ended {
             return Ok(());
         }
@@ -597,8 +850,120 @@ impl StreamOperator for WindowAggregateOperator {
             .filter(|key| !self.state.emitted_pending_snapshot.contains(*key))
             .cloned()
             .collect::<Vec<_>>();
+        let tombstones = self
+            .encode_operations(self.tombstone_operations(&keys), context)
+            .await?;
         self.emit_keys(&keys, context, output).await?;
+        if let Some(tombstones) = tombstones {
+            self.state.prepared_segments.push(tombstones);
+        }
+        self.install_context_identity(context);
         self.state.ended = true;
+        Ok(())
+    }
+
+    fn checkpoint(&mut self, epoch: crate::Epoch) -> Result<crate::OperatorStateSnapshot> {
+        if self
+            .state
+            .last_checkpoint_epoch
+            .is_some_and(|previous| epoch <= previous)
+        {
+            return Err(checkpoint_mismatch(
+                "window checkpoint epoch did not advance strictly".into(),
+            ));
+        }
+        let new_segment_ids = (0..self.state.prepared_segments.len())
+            .map(|ordinal| format!("delta-{:020}-{ordinal:08}", epoch.as_u64()))
+            .collect::<Vec<_>>();
+        let mut retained_segment_ids = self.state.retained_segment_ids.clone();
+        retained_segment_ids.extend(new_segment_ids.iter().cloned());
+        let metadata = WindowSnapshotMetadata {
+            state_layout_version: WINDOW_STATE_LAYOUT_VERSION,
+            configuration_hash: self.compiled.configuration_hash.clone(),
+            state_schema_fingerprint: self.compiled.state_schema_fingerprint.clone(),
+            epoch,
+            pipeline_fingerprint: self.state.pipeline_fingerprint.clone(),
+            operator_id: self.state.operator_id.clone(),
+            last_input_watermark: self.state.last_input_watermark,
+            next_output_sequence: self.state.next_output_sequence,
+            ended: self.state.ended,
+            metrics: self.state.metrics,
+            segment_ids: retained_segment_ids.clone(),
+        };
+        let Value::Object(inline_metadata) =
+            serde_json::to_value(metadata).map_err(|error| format_error(&error))?
+        else {
+            return Err(internal_error(
+                "window snapshot metadata did not serialize as an object",
+            ));
+        };
+        let segments = new_segment_ids
+            .into_iter()
+            .zip(std::mem::take(&mut self.state.prepared_segments))
+            .collect();
+
+        for key in std::mem::take(&mut self.state.emitted_pending_snapshot) {
+            self.state.accumulators.remove(&key);
+            self.state.dirty.remove(&key);
+        }
+        self.state.dirty.clear();
+        self.state.retained_segment_ids = retained_segment_ids;
+        self.state.last_checkpoint_epoch = Some(epoch);
+        Ok(crate::OperatorStateSnapshot {
+            inline_metadata: inline_metadata.into_iter().collect(),
+            segments,
+        })
+    }
+
+    fn restore(&mut self, snapshot: &crate::OperatorStateSnapshot) -> Result<()> {
+        if snapshot.inline_metadata.is_empty() && snapshot.segments.is_empty() {
+            return self.reset();
+        }
+        let metadata = serde_json::from_value::<WindowSnapshotMetadata>(Value::Object(
+            snapshot.inline_metadata.clone().into_iter().collect(),
+        ))
+        .map_err(|error| format_error(&error))?;
+        validate_snapshot_metadata(&metadata, &self.compiled, snapshot)?;
+
+        let segments = metadata
+            .segment_ids
+            .iter()
+            .map(|segment_id| {
+                snapshot.segments.get(segment_id).cloned().ok_or_else(|| {
+                    checkpoint_mismatch(format!(
+                        "window snapshot is missing segment {segment_id:?}"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let spec = self.spec.clone();
+        let compiled = self.compiled.clone();
+        let pipeline_fingerprint = metadata.pipeline_fingerprint.clone();
+        let operator_id = metadata.operator_id.clone();
+        let decoded = std::thread::spawn(move || {
+            decode_state_segments(
+                segments,
+                &spec,
+                &compiled,
+                pipeline_fingerprint.as_deref(),
+                operator_id.as_deref(),
+            )
+        })
+        .join()
+        .map_err(|_| internal_error("window state decoder worker panicked"))??;
+
+        self.state = WindowState {
+            accumulators: decoded,
+            last_input_watermark: metadata.last_input_watermark,
+            next_output_sequence: metadata.next_output_sequence,
+            ended: metadata.ended,
+            metrics: metadata.metrics,
+            retained_segment_ids: metadata.segment_ids,
+            last_checkpoint_epoch: Some(metadata.epoch),
+            pipeline_fingerprint: metadata.pipeline_fingerprint,
+            operator_id: metadata.operator_id,
+            ..WindowState::default()
+        };
         Ok(())
     }
 
@@ -1425,7 +1790,7 @@ fn compile_spec(
         } => (size_micros, slide_micros),
     };
     let canonical = canonical_json(&Value::Object(configuration.clone().into_iter().collect()))?;
-    Ok(CompiledWindowSpec {
+    let mut compiled = CompiledWindowSpec {
         event_time_index,
         group_columns,
         aggregates,
@@ -1435,7 +1800,743 @@ fn compile_spec(
             overlap: size_micros / slide_micros,
         },
         configuration_hash: hex::encode(Sha256::digest(canonical.as_bytes())),
-    })
+        state_schema_fingerprint: String::new(),
+    };
+    compiled.state_schema_fingerprint = state_schema_fingerprint(spec, &compiled);
+    Ok(compiled)
+}
+
+fn state_schema_fingerprint(spec: &WindowSpec, compiled: &CompiledWindowSpec) -> String {
+    let schema = Schema::new(state_fields(spec, compiled));
+    let mut dictionary_tracker = DictionaryTracker::new(true);
+    let encoded = IpcSchemaEncoder::new()
+        .with_dictionary_tracker(&mut dictionary_tracker)
+        .schema_to_fb(&schema);
+    hex::encode(Sha256::digest(encoded.finished_data()))
+}
+
+fn state_schema(
+    spec: &WindowSpec,
+    compiled: &CompiledWindowSpec,
+    pipeline_fingerprint: &str,
+    operator_id: &str,
+) -> Schema {
+    Schema::new_with_metadata(
+        state_fields(spec, compiled),
+        HashMap::from([
+            (
+                "calc_flow.state_layout_version".into(),
+                WINDOW_STATE_LAYOUT_VERSION.to_string(),
+            ),
+            (
+                "calc_flow.pipeline_fingerprint".into(),
+                pipeline_fingerprint.into(),
+            ),
+            ("calc_flow.operator_id".into(), operator_id.into()),
+            (
+                "calc_flow.operator_configuration_hash".into(),
+                compiled.configuration_hash.clone(),
+            ),
+            (
+                "calc_flow.state_schema_fingerprint".into(),
+                compiled.state_schema_fingerprint.clone(),
+            ),
+            ("calc_flow.group_key_encoding".into(), "g1".into()),
+        ]),
+    )
+}
+
+fn state_fields(spec: &WindowSpec, compiled: &CompiledWindowSpec) -> Vec<Field> {
+    let utc_timestamp = DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC")));
+    let mut fields = vec![
+        Field::new("_operation", DataType::UInt8, false),
+        Field::new("window_start", utc_timestamp.clone(), false),
+        Field::new("window_end", utc_timestamp, false),
+        Field::new("_stable_group_key", DataType::LargeBinary, false),
+    ];
+    fields.extend(
+        spec.group_by
+            .iter()
+            .zip(&compiled.group_columns)
+            .map(|(name, column)| Field::new(name, column.data_type.clone(), true)),
+    );
+    for (ordinal, (aggregate, compiled_aggregate)) in
+        spec.aggregates.iter().zip(&compiled.aggregates).enumerate()
+    {
+        let value_name = format!("_agg_{ordinal:04}_value");
+        match aggregate.function {
+            AggregateFunction::Count => {
+                fields.push(Field::new(value_name, DataType::UInt64, true));
+            }
+            AggregateFunction::Sum => {
+                fields.push(Field::new(
+                    value_name,
+                    compiled_aggregate.output_type.clone(),
+                    true,
+                ));
+            }
+            AggregateFunction::Min | AggregateFunction::Max => {
+                fields.push(Field::new(
+                    value_name,
+                    compiled_aggregate.input_type.clone(),
+                    true,
+                ));
+            }
+            AggregateFunction::Avg => {
+                let state_type = match compiled_aggregate.input_type {
+                    DataType::Int8
+                    | DataType::Int16
+                    | DataType::Int32
+                    | DataType::Int64
+                    | DataType::UInt8
+                    | DataType::UInt16
+                    | DataType::UInt32
+                    | DataType::UInt64 => DataType::FixedSizeBinary(16),
+                    DataType::Float32 | DataType::Float64 => DataType::Float64,
+                    _ => unreachable!("average input matrix validated at construction"),
+                };
+                fields.push(Field::new(value_name, state_type, true));
+                fields.push(Field::new(
+                    format!("_agg_{ordinal:04}_count"),
+                    DataType::UInt64,
+                    true,
+                ));
+            }
+        }
+    }
+    fields
+}
+
+fn encode_state_segment(
+    operations: &[StateOperationRow],
+    spec: &WindowSpec,
+    compiled: &CompiledWindowSpec,
+    pipeline_fingerprint: &str,
+    operator_id: &str,
+) -> Result<Vec<u8>> {
+    if operations.is_empty() {
+        return Err(internal_error(
+            "cannot encode an empty window state segment",
+        ));
+    }
+    for pair in operations.windows(2) {
+        if pair[0].key >= pair[1].key {
+            return Err(internal_error(
+                "window state operations are not in strict key order",
+            ));
+        }
+    }
+    let schema = state_schema(spec, compiled, pipeline_fingerprint, operator_id);
+    let mut arrays: Vec<ArrayRef> = vec![
+        Arc::new(UInt8Array::from(
+            operations
+                .iter()
+                .map(|row| u8::from(row.tombstone))
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(
+            TimestampMicrosecondArray::from(
+                operations
+                    .iter()
+                    .map(|row| row.key.start.as_micros())
+                    .collect::<Vec<_>>(),
+            )
+            .with_timezone("UTC"),
+        ),
+        Arc::new(
+            TimestampMicrosecondArray::from(
+                operations
+                    .iter()
+                    .map(|row| row.key.end.as_micros())
+                    .collect::<Vec<_>>(),
+            )
+            .with_timezone("UTC"),
+        ),
+        Arc::new(LargeBinaryArray::from_iter_values(
+            operations
+                .iter()
+                .map(|row| row.key.stable_group_key.as_slice()),
+        )),
+    ];
+    for (ordinal, group) in compiled.group_columns.iter().enumerate() {
+        let values = operations
+            .iter()
+            .map(|row| row.entry.group_values[ordinal].clone())
+            .collect::<Vec<_>>();
+        arrays.push(scalar_array(&group.data_type, &values, operator_id)?);
+    }
+    for (ordinal, (aggregate, compiled_aggregate)) in
+        spec.aggregates.iter().zip(&compiled.aggregates).enumerate()
+    {
+        append_accumulator_state_array(
+            &mut arrays,
+            operations,
+            ordinal,
+            aggregate.function,
+            compiled_aggregate,
+            operator_id,
+        )?;
+    }
+
+    let record = RecordBatch::try_new(Arc::new(schema.clone()), arrays)
+        .map_err(|error| state_format(format!("window state batch is invalid: {error}")))?;
+    let mut bytes = Vec::new();
+    {
+        let mut writer = FileWriter::try_new(&mut bytes, &schema)
+            .map_err(|error| state_format(format!("window state IPC header failed: {error}")))?;
+        writer
+            .write(&record)
+            .map_err(|error| state_format(format!("window state IPC write failed: {error}")))?;
+        writer
+            .finish()
+            .map_err(|error| state_format(format!("window state IPC finish failed: {error}")))?;
+    }
+    Ok(bytes)
+}
+
+fn append_accumulator_state_array(
+    arrays: &mut Vec<ArrayRef>,
+    operations: &[StateOperationRow],
+    ordinal: usize,
+    function: AggregateFunction,
+    compiled: &CompiledAggregate,
+    operator_id: &str,
+) -> Result<()> {
+    match function {
+        AggregateFunction::Count
+        | AggregateFunction::Sum
+        | AggregateFunction::Min
+        | AggregateFunction::Max => {
+            let state_type = match function {
+                AggregateFunction::Count => &DataType::UInt64,
+                AggregateFunction::Sum => &compiled.output_type,
+                AggregateFunction::Min | AggregateFunction::Max => &compiled.input_type,
+                AggregateFunction::Avg => unreachable!(),
+            };
+            let values = operations
+                .iter()
+                .map(|row| {
+                    if row.tombstone {
+                        Ok(None)
+                    } else {
+                        accumulator_state_scalar(&row.entry.aggregates[ordinal])
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?;
+            arrays.push(scalar_array(state_type, &values, operator_id)?);
+        }
+        AggregateFunction::Avg => match compiled.input_type {
+            DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
+                let values = operations
+                    .iter()
+                    .map(
+                        |row| match (&row.entry.aggregates[ordinal], row.tombstone) {
+                            (_, true) => Ok(None),
+                            (AccumulatorValue::SignedAverage { sum, .. }, false) => {
+                                Ok(Some(sum.to_be_bytes()))
+                            }
+                            _ => Err(internal_error("signed average state type mismatch")),
+                        },
+                    )
+                    .collect::<Result<Vec<_>>>()?;
+                arrays.push(Arc::new(
+                    FixedSizeBinaryArray::try_from_sparse_iter_with_size(values.into_iter(), 16)
+                        .map_err(|error| {
+                            state_format(format!("signed average state array failed: {error}"))
+                        })?,
+                ));
+                arrays.push(average_count_array(operations, ordinal)?);
+            }
+            DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+                let values = operations
+                    .iter()
+                    .map(
+                        |row| match (&row.entry.aggregates[ordinal], row.tombstone) {
+                            (_, true) => Ok(None),
+                            (AccumulatorValue::UnsignedAverage { sum, .. }, false) => {
+                                Ok(Some(sum.to_be_bytes()))
+                            }
+                            _ => Err(internal_error("unsigned average state type mismatch")),
+                        },
+                    )
+                    .collect::<Result<Vec<_>>>()?;
+                arrays.push(Arc::new(
+                    FixedSizeBinaryArray::try_from_sparse_iter_with_size(values.into_iter(), 16)
+                        .map_err(|error| {
+                            state_format(format!("unsigned average state array failed: {error}"))
+                        })?,
+                ));
+                arrays.push(average_count_array(operations, ordinal)?);
+            }
+            DataType::Float32 | DataType::Float64 => {
+                let values = operations
+                    .iter()
+                    .map(
+                        |row| match (&row.entry.aggregates[ordinal], row.tombstone) {
+                            (_, true) => Ok(None),
+                            (AccumulatorValue::FloatAverage { sum, .. }, false) => {
+                                Ok(Some(ScalarValue::Float64(sum.to_bits())))
+                            }
+                            _ => Err(internal_error("float average state type mismatch")),
+                        },
+                    )
+                    .collect::<Result<Vec<_>>>()?;
+                arrays.push(scalar_array(&DataType::Float64, &values, operator_id)?);
+                arrays.push(average_count_array(operations, ordinal)?);
+            }
+            _ => unreachable!("average input matrix validated at construction"),
+        },
+    }
+    Ok(())
+}
+
+fn accumulator_state_scalar(accumulator: &AccumulatorValue) -> Result<Option<ScalarValue>> {
+    match accumulator {
+        AccumulatorValue::Count(value) => Ok(Some(ScalarValue::Unsigned(*value))),
+        AccumulatorValue::SignedSum(value) => value
+            .map(|value| {
+                i64::try_from(value)
+                    .map(ScalarValue::Signed)
+                    .map_err(|_| internal_error("signed sum state escaped Int64"))
+            })
+            .transpose(),
+        AccumulatorValue::UnsignedSum(value) => value
+            .map(|value| {
+                u64::try_from(value)
+                    .map(ScalarValue::Unsigned)
+                    .map_err(|_| internal_error("unsigned sum state escaped UInt64"))
+            })
+            .transpose(),
+        AccumulatorValue::FloatSum(value) => {
+            Ok(value.map(|value| ScalarValue::Float64(value.to_bits())))
+        }
+        AccumulatorValue::Min(value) | AccumulatorValue::Max(value) => Ok(value.clone()),
+        AccumulatorValue::SignedAverage { .. }
+        | AccumulatorValue::UnsignedAverage { .. }
+        | AccumulatorValue::FloatAverage { .. } => Err(internal_error(
+            "average state requires two physical columns",
+        )),
+    }
+}
+
+fn average_count_array(operations: &[StateOperationRow], ordinal: usize) -> Result<ArrayRef> {
+    let values = operations
+        .iter()
+        .map(|row| {
+            if row.tombstone {
+                return Ok(None);
+            }
+            match &row.entry.aggregates[ordinal] {
+                AccumulatorValue::SignedAverage { count, .. }
+                | AccumulatorValue::UnsignedAverage { count, .. }
+                | AccumulatorValue::FloatAverage { count, .. } => Ok(Some(*count)),
+                _ => Err(internal_error("average count state type mismatch")),
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Arc::new(UInt64Array::from(values)))
+}
+
+fn validate_snapshot_metadata(
+    metadata: &WindowSnapshotMetadata,
+    compiled: &CompiledWindowSpec,
+    snapshot: &crate::OperatorStateSnapshot,
+) -> Result<()> {
+    if metadata.state_layout_version != WINDOW_STATE_LAYOUT_VERSION {
+        return Err(checkpoint_mismatch(format!(
+            "window state layout version {} does not match expected {}",
+            metadata.state_layout_version, WINDOW_STATE_LAYOUT_VERSION
+        )));
+    }
+    if metadata.configuration_hash != compiled.configuration_hash {
+        return Err(checkpoint_mismatch(
+            "window operator configuration hash does not match the compiled operator".into(),
+        ));
+    }
+    if metadata.state_schema_fingerprint != compiled.state_schema_fingerprint {
+        return Err(checkpoint_mismatch(
+            "window state schema fingerprint does not match the compiled operator".into(),
+        ));
+    }
+    let actual_ids = snapshot.segments.keys().cloned().collect::<Vec<_>>();
+    if metadata.segment_ids != actual_ids {
+        return Err(checkpoint_mismatch(
+            "window snapshot segment IDs are missing, extra, duplicated, or non-canonical".into(),
+        ));
+    }
+    if !snapshot.segments.is_empty()
+        && (metadata.pipeline_fingerprint.is_none() || metadata.operator_id.is_none())
+    {
+        return Err(checkpoint_mismatch(
+            "window segments require pipeline and operator identity metadata".into(),
+        ));
+    }
+    if let Some(fingerprint) = &metadata.pipeline_fingerprint
+        && (fingerprint.len() != 64
+            || !fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    {
+        return Err(checkpoint_mismatch(
+            "window pipeline fingerprint is not lowercase SHA-256".into(),
+        ));
+    }
+    if metadata
+        .operator_id
+        .as_deref()
+        .is_some_and(|operator_id| operator_id.is_empty() || operator_id.contains('\0'))
+    {
+        return Err(checkpoint_mismatch(
+            "window operator ID is empty or contains NUL".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn decode_state_segments(
+    segments: Vec<Vec<u8>>,
+    spec: &WindowSpec,
+    compiled: &CompiledWindowSpec,
+    pipeline_fingerprint: Option<&str>,
+    operator_id: Option<&str>,
+) -> Result<BTreeMap<WindowKey, AccumulatorRow>> {
+    if segments.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let pipeline_fingerprint = pipeline_fingerprint.ok_or_else(|| {
+        checkpoint_mismatch("window state is missing its pipeline fingerprint".into())
+    })?;
+    let operator_id = operator_id
+        .ok_or_else(|| checkpoint_mismatch("window state is missing its operator ID".into()))?;
+    let expected_schema = state_schema(spec, compiled, pipeline_fingerprint, operator_id);
+    let mut state = BTreeMap::new();
+    for bytes in segments {
+        for (key, entry) in
+            decode_state_segment(bytes, spec, compiled, &expected_schema, operator_id)?
+        {
+            if let Some(entry) = entry {
+                state.insert(key, entry);
+            } else {
+                state.remove(&key);
+            }
+        }
+    }
+    Ok(state)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "durable state validation remains a single fail-before-install decoding transaction"
+)]
+fn decode_state_segment(
+    bytes: Vec<u8>,
+    spec: &WindowSpec,
+    compiled: &CompiledWindowSpec,
+    expected_schema: &Schema,
+    operator_id: &str,
+) -> Result<Vec<(WindowKey, Option<AccumulatorRow>)>> {
+    let mut reader = FileReader::try_new(Cursor::new(bytes), None)
+        .map_err(|error| state_format(format!("window state IPC is invalid: {error}")))?;
+    if reader.schema().as_ref() != expected_schema {
+        return Err(checkpoint_mismatch(
+            "window state Arrow schema or metadata does not match the compiled operator".into(),
+        ));
+    }
+    if reader.num_batches() != 1 {
+        return Err(state_format(format!(
+            "window state segment must contain exactly one record batch, found {}",
+            reader.num_batches()
+        )));
+    }
+    let record = reader
+        .next()
+        .ok_or_else(|| state_format("window state segment has no record batch"))?
+        .map_err(|error| state_format(format!("window state batch is invalid: {error}")))?;
+    if record.num_rows() == 0 {
+        return Err(state_format(
+            "window state segment must contain at least one operation",
+        ));
+    }
+
+    let operations = state_array::<UInt8Array>(&record, 0, "_operation")?;
+    let starts = state_array::<TimestampMicrosecondArray>(&record, 1, "window_start")?;
+    let ends = state_array::<TimestampMicrosecondArray>(&record, 2, "window_end")?;
+    let stable_keys = state_array::<LargeBinaryArray>(&record, 3, "_stable_group_key")?;
+    let mut decoded = Vec::with_capacity(record.num_rows());
+    let mut previous_key = None::<WindowKey>;
+
+    for row in 0..record.num_rows() {
+        if operations.is_null(row)
+            || starts.is_null(row)
+            || ends.is_null(row)
+            || stable_keys.is_null(row)
+        {
+            return Err(state_format(
+                "window state operation and key columns must not be null",
+            ));
+        }
+        let tombstone = match operations.value(row) {
+            0 => false,
+            1 => true,
+            value => {
+                return Err(state_format(format!(
+                    "window state operation {value} is not 0 or 1"
+                )));
+            }
+        };
+        let key = WindowKey {
+            start: EventTime::from_micros(starts.value(row)),
+            end: EventTime::from_micros(ends.value(row)),
+            stable_group_key: stable_keys.value(row).to_vec(),
+        };
+        validate_restored_window_key(&key, compiled)?;
+        if previous_key
+            .as_ref()
+            .is_some_and(|previous| previous >= &key)
+        {
+            return Err(state_format(
+                "window state rows are not in strict key order or contain a duplicate key",
+            ));
+        }
+        previous_key = Some(key.clone());
+
+        let mut group_values = Vec::with_capacity(compiled.group_columns.len());
+        for (ordinal, group) in compiled.group_columns.iter().enumerate() {
+            group_values.push(
+                scalar_at(
+                    record.column(4 + ordinal).as_ref(),
+                    &group.data_type,
+                    row,
+                    operator_id,
+                )
+                .map_err(|error| state_format(error.to_string()))?,
+            );
+        }
+        let encoded_group = encode_group_values(&group_values, compiled)?;
+        if encoded_group != key.stable_group_key {
+            return Err(checkpoint_mismatch(
+                "window state stable group key does not match its declared group values".into(),
+            ));
+        }
+
+        let mut column_index = 4 + compiled.group_columns.len();
+        let mut accumulators = Vec::with_capacity(compiled.aggregates.len());
+        for (ordinal, (aggregate, compiled_aggregate)) in
+            spec.aggregates.iter().zip(&compiled.aggregates).enumerate()
+        {
+            let (accumulator, next_column) = decode_accumulator_state(
+                &record,
+                row,
+                column_index,
+                tombstone,
+                aggregate.function,
+                compiled_aggregate,
+                operator_id,
+                ordinal,
+            )?;
+            column_index = next_column;
+            if let Some(accumulator) = accumulator {
+                accumulators.push(accumulator);
+            }
+        }
+        decoded.push((
+            key,
+            (!tombstone).then_some(AccumulatorRow {
+                group_values,
+                aggregates: accumulators,
+            }),
+        ));
+    }
+    Ok(decoded)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    reason = "state decoding names every durable aggregate coordinate and aggregate matrix branch explicitly"
+)]
+fn decode_accumulator_state(
+    record: &RecordBatch,
+    row: usize,
+    column_index: usize,
+    tombstone: bool,
+    function: AggregateFunction,
+    compiled: &CompiledAggregate,
+    operator_id: &str,
+    ordinal: usize,
+) -> Result<(Option<AccumulatorValue>, usize)> {
+    let value = record.column(column_index);
+    if tombstone {
+        if !value.is_null(row)
+            || (function == AggregateFunction::Avg && !record.column(column_index + 1).is_null(row))
+        {
+            return Err(state_format(format!(
+                "window tombstone aggregate {ordinal} contains state"
+            )));
+        }
+        return Ok((
+            None,
+            column_index + 1 + usize::from(function == AggregateFunction::Avg),
+        ));
+    }
+
+    let decoded = match function {
+        AggregateFunction::Count => {
+            let Some(ScalarValue::Unsigned(value)) =
+                scalar_at(value.as_ref(), &DataType::UInt64, row, operator_id)
+                    .map_err(|error| state_format(error.to_string()))?
+            else {
+                return Err(state_format(format!(
+                    "window count aggregate {ordinal} has null or invalid state"
+                )));
+            };
+            AccumulatorValue::Count(value)
+        }
+        AggregateFunction::Sum => match compiled.output_type {
+            DataType::Int64 => AccumulatorValue::SignedSum(
+                scalar_at(value.as_ref(), &DataType::Int64, row, operator_id)
+                    .map_err(|error| state_format(error.to_string()))?
+                    .map(|value| signed_value(&value).map(i128::from))
+                    .transpose()
+                    .map_err(state_format)?,
+            ),
+            DataType::UInt64 => AccumulatorValue::UnsignedSum(
+                scalar_at(value.as_ref(), &DataType::UInt64, row, operator_id)
+                    .map_err(|error| state_format(error.to_string()))?
+                    .map(|value| unsigned_value(&value).map(u128::from))
+                    .transpose()
+                    .map_err(state_format)?,
+            ),
+            DataType::Float64 => AccumulatorValue::FloatSum(
+                scalar_at(value.as_ref(), &DataType::Float64, row, operator_id)
+                    .map_err(|error| state_format(error.to_string()))?
+                    .map(|value| float_value(&value))
+                    .transpose()
+                    .map_err(state_format)?,
+            ),
+            _ => unreachable!("sum output matrix validated at construction"),
+        },
+        AggregateFunction::Min | AggregateFunction::Max => {
+            let scalar = scalar_at(value.as_ref(), &compiled.input_type, row, operator_id)
+                .map_err(|error| state_format(error.to_string()))?;
+            if function == AggregateFunction::Min {
+                AccumulatorValue::Min(scalar)
+            } else {
+                AccumulatorValue::Max(scalar)
+            }
+        }
+        AggregateFunction::Avg => {
+            let count_array = state_array::<UInt64Array>(
+                record,
+                column_index + 1,
+                &format!("_agg_{ordinal:04}_count"),
+            )?;
+            if value.is_null(row) || count_array.is_null(row) {
+                return Err(state_format(format!(
+                    "window average aggregate {ordinal} has null state"
+                )));
+            }
+            let count = count_array.value(row);
+            match compiled.input_type {
+                DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
+                    let bytes = value
+                        .as_any()
+                        .downcast_ref::<FixedSizeBinaryArray>()
+                        .ok_or_else(|| {
+                            state_format(format!(
+                                "window average aggregate {ordinal} has invalid binary state"
+                            ))
+                        })?
+                        .value(row)
+                        .try_into()
+                        .map_err(|_| state_format("signed average state is not 16 bytes"))?;
+                    AccumulatorValue::SignedAverage {
+                        sum: i128::from_be_bytes(bytes),
+                        count,
+                    }
+                }
+                DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+                    let bytes = value
+                        .as_any()
+                        .downcast_ref::<FixedSizeBinaryArray>()
+                        .ok_or_else(|| {
+                            state_format(format!(
+                                "window average aggregate {ordinal} has invalid binary state"
+                            ))
+                        })?
+                        .value(row)
+                        .try_into()
+                        .map_err(|_| state_format("unsigned average state is not 16 bytes"))?;
+                    AccumulatorValue::UnsignedAverage {
+                        sum: u128::from_be_bytes(bytes),
+                        count,
+                    }
+                }
+                DataType::Float32 | DataType::Float64 => {
+                    let Some(ScalarValue::Float64(bits)) =
+                        scalar_at(value.as_ref(), &DataType::Float64, row, operator_id)
+                            .map_err(|error| state_format(error.to_string()))?
+                    else {
+                        return Err(state_format(format!(
+                            "window average aggregate {ordinal} has invalid float state"
+                        )));
+                    };
+                    AccumulatorValue::FloatAverage {
+                        sum: f64::from_bits(bits),
+                        count,
+                    }
+                }
+                _ => unreachable!("average input matrix validated at construction"),
+            }
+        }
+    };
+    Ok((
+        Some(decoded),
+        column_index + 1 + usize::from(function == AggregateFunction::Avg),
+    ))
+}
+
+fn validate_restored_window_key(key: &WindowKey, compiled: &CompiledWindowSpec) -> Result<()> {
+    if key.stable_group_key.len() > MAX_GROUP_KEY_BYTES {
+        return Err(state_format(
+            "window state stable group key exceeds the 64-KiB bound",
+        ));
+    }
+    let start = i128::from(key.start.as_micros());
+    let end = i128::from(key.end.as_micros());
+    if end - start != i128::from(compiled.geometry.size_micros)
+        || start.rem_euclid(i128::from(compiled.geometry.slide_micros)) != 0
+    {
+        return Err(checkpoint_mismatch(
+            "window state key does not match the compiled geometry".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn encode_group_values(
+    values: &[Option<ScalarValue>],
+    compiled: &CompiledWindowSpec,
+) -> Result<Vec<u8>> {
+    if values.len() != compiled.group_columns.len() {
+        return Err(state_format(
+            "window state group value count does not match its schema",
+        ));
+    }
+    let mut encoded = Vec::new();
+    for (value, column) in values.iter().zip(&compiled.group_columns) {
+        encode_group_scalar(&mut encoded, &column.data_type, value.as_ref())
+            .map_err(state_format)?;
+    }
+    Ok(encoded)
+}
+
+fn state_array<'a, T: 'static>(record: &'a RecordBatch, index: usize, name: &str) -> Result<&'a T> {
+    record
+        .column(index)
+        .as_any()
+        .downcast_ref::<T>()
+        .ok_or_else(|| state_format(format!("window state column {name:?} has invalid type")))
 }
 
 fn output_schema(
@@ -1661,8 +2762,96 @@ fn compile_error(message: String) -> CalcFlowError {
     CalcFlowError::Compile { message }
 }
 
+fn checkpoint_mismatch(message: String) -> CalcFlowError {
+    CalcFlowError::CheckpointMismatch { message }
+}
+
+fn state_format(message: impl Into<String>) -> CalcFlowError {
+    CalcFlowError::Format {
+        message: message.into(),
+    }
+}
+
 fn format_error(error: &serde_json::Error) -> CalcFlowError {
     CalcFlowError::Format {
         message: error.to_string(),
+    }
+}
+
+fn deserialize_required_option<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn output_record(rows: usize) -> RecordBatch {
+        RecordBatch::try_from_iter(vec![(
+            "value",
+            Arc::new(Int64Array::from(
+                (0..rows)
+                    .map(|value| i64::try_from(value).unwrap())
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef,
+        )])
+        .unwrap()
+    }
+
+    #[test]
+    fn output_chunking_preserves_rows_and_uses_consecutive_sequences() {
+        let record = output_record(5);
+        let chunks = chunk_output_record(
+            &record,
+            "window",
+            7,
+            crate::EdgeBudget {
+                max_rows: 2,
+                max_bytes: usize::MAX,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(
+            chunks.iter().map(Batch::num_rows).collect::<Vec<_>>(),
+            [2, 2, 1]
+        );
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|batch| batch.metadata().sequence())
+                .collect::<Vec<_>>(),
+            [7, 8, 9]
+        );
+    }
+
+    #[test]
+    fn one_oversized_output_row_fails_before_returning_any_chunk() {
+        let record = output_record(1);
+        let bytes = Batch::table(vec![record.clone()], BatchMetadata::default())
+            .unwrap()
+            .estimated_bytes()
+            .unwrap();
+        let error = chunk_output_record(
+            &record,
+            "window",
+            0,
+            crate::EdgeBudget {
+                max_rows: 1,
+                max_bytes: bytes - 1,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CalcFlowError::InvalidArgument { field, .. } if field == "message.bytes"
+        ));
     }
 }

@@ -423,6 +423,11 @@ pub(crate) struct OperatorStatus {
     pub(crate) datafusion_runtime_created: bool,
     pub(crate) on_end_calls: u64,
     pub(crate) ended: bool,
+    pub(crate) late_rows: u64,
+    pub(crate) affected_batches: u64,
+    pub(crate) max_lateness_micros: Option<u64>,
+    pub(crate) null_event_time_rows: u64,
+    pub(crate) null_event_time_batches: u64,
 }
 
 impl From<OperatorProgressSnapshot> for OperatorStatus {
@@ -433,6 +438,11 @@ impl From<OperatorProgressSnapshot> for OperatorStatus {
             datafusion_runtime_created: progress.datafusion_runtime_created,
             on_end_calls: progress.on_end_calls,
             ended: progress.ended,
+            late_rows: progress.late_rows,
+            affected_batches: progress.affected_batches,
+            max_lateness_micros: progress.max_lateness_micros,
+            null_event_time_rows: progress.null_event_time_rows,
+            null_event_time_batches: progress.null_event_time_batches,
         }
     }
 }

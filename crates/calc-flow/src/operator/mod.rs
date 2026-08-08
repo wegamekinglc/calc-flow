@@ -20,6 +20,7 @@ pub use window::{
 };
 
 pub(crate) use expression::expression_query;
+pub(crate) use stream::{LateMetricDelta, LateMetricSink, accumulate_late_metrics};
 
 use std::{
     collections::{BTreeMap, btree_map::Entry},

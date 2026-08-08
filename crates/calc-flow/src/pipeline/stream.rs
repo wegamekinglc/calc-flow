@@ -933,8 +933,9 @@ mod runtime_projection_tests {
         let mut compiled = CompiledStreamOperator::Window(window);
 
         let snapshot = compiled.checkpoint(Epoch::INITIAL).unwrap();
-        assert!(snapshot.inline_metadata.is_empty());
+        assert!(!snapshot.inline_metadata.is_empty());
         assert!(snapshot.segments.is_empty());
+        compiled.restore(&snapshot).unwrap();
         compiled.restore(&OperatorStateSnapshot::default()).unwrap();
     }
 }

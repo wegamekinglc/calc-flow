@@ -233,6 +233,10 @@ impl LocalStateLineageBackend {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "fault names intentionally identify the exact boundary after each D3 commit step"
+)]
 pub(crate) enum CommitFaultPoint {
     AfterLease,
     AfterFirstSegmentStage,
