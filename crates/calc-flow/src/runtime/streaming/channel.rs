@@ -461,10 +461,6 @@ impl EdgeSender {
         self.shared.state.lock().metrics()
     }
 
-    #[allow(
-        dead_code,
-        reason = "the crate-private M2 preflight validates source bounds"
-    )]
     pub(crate) fn budget(&self) -> EdgeBudget {
         self.shared.budget
     }

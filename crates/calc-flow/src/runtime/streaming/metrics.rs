@@ -67,6 +67,11 @@ pub(crate) struct OperatorMetrics {
     pub(crate) fully_fanned_out_bytes: u64,
     pub(crate) processing_duration: Duration,
     pub(crate) errors: u64,
+    pub(crate) late_rows: u64,
+    pub(crate) affected_batches: u64,
+    pub(crate) max_lateness_micros: Option<u64>,
+    pub(crate) null_event_time_rows: u64,
+    pub(crate) null_event_time_batches: u64,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -297,6 +302,21 @@ impl MetricsRecorder {
                 .processing_duration
                 .checked_add(elapsed)
                 .ok_or_else(|| metrics_error(node_id, "processing_duration", "counter overflow"))?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn observe_operator_window_metrics(
+        &self,
+        node_id: &str,
+        progress: &super::operator_task::OperatorProgressSnapshot,
+    ) -> Result<()> {
+        self.with_node(node_id, |metrics| {
+            metrics.late_rows = progress.late_rows;
+            metrics.affected_batches = progress.affected_batches;
+            metrics.max_lateness_micros = progress.max_lateness_micros;
+            metrics.null_event_time_rows = progress.null_event_time_rows;
+            metrics.null_event_time_batches = progress.null_event_time_batches;
             Ok(())
         })
     }

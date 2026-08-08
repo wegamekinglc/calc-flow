@@ -1,16 +1,12 @@
-use std::{
-    collections::BTreeMap,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::Duration,
-};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    Batch, CalcFlowError, Epoch, EventTime, JsonMap, Port, Result, StreamJobContext, StreamMessage,
+    Batch, CalcFlowError, EdgeBudget, Epoch, EventTime, JsonMap, Port, Result, StreamJobContext,
+    StreamMessage,
 };
 
 use super::OperatorMetadata;
@@ -50,7 +46,8 @@ pub struct StreamOperatorContext<'a> {
     job: &'a StreamJobContext,
     operator_id: &'a str,
     input_watermark: Option<EventTime>,
-    late_rows: Arc<LateRowRecorder>,
+    output_budget: EdgeBudget,
+    late_metrics: Arc<dyn LateMetricSink>,
 }
 
 impl<'a> StreamOperatorContext<'a> {
@@ -64,7 +61,24 @@ impl<'a> StreamOperatorContext<'a> {
             job,
             operator_id,
             input_watermark,
-            late_rows: Arc::new(LateRowRecorder::default()),
+            output_budget: EdgeBudget::default(),
+            late_metrics: Arc::new(LateMetricRecorder::default()),
+        }
+    }
+
+    pub(crate) fn for_task(
+        job: &'a StreamJobContext,
+        operator_id: &'a str,
+        input_watermark: Option<EventTime>,
+        output_budget: EdgeBudget,
+        late_metrics: Arc<dyn LateMetricSink>,
+    ) -> Self {
+        Self {
+            job,
+            operator_id,
+            input_watermark,
+            output_budget,
+            late_metrics,
         }
     }
 
@@ -82,6 +96,10 @@ impl<'a> StreamOperatorContext<'a> {
     /// (spec S5.2).
     pub const fn input_watermark(&self) -> Option<EventTime> {
         self.input_watermark
+    }
+
+    pub(crate) const fn output_budget(&self) -> EdgeBudget {
+        self.output_budget
     }
 
     /// Verifies that the owning job remains active.
@@ -102,44 +120,97 @@ impl<'a> StreamOperatorContext<'a> {
     ///
     /// # Errors
     ///
-    /// This first version never fails; the `Result` keeps the frozen
-    /// signature stable for the M3/M4 validation rules.
     pub fn record_late_rows(&self, dropped: u64, max_lateness: Option<Duration>) -> Result<()> {
-        self.late_rows.record(dropped, max_lateness);
+        let max_lateness_micros = max_lateness
+            .map(|lateness| {
+                u64::try_from(lateness.as_micros()).map_err(|_| CalcFlowError::Internal {
+                    message: "maximum lateness exceeds the UInt64 microsecond range".into(),
+                })
+            })
+            .transpose()?;
+        self.late_metrics.record(LateMetricDelta {
+            late_rows: dropped,
+            affected_batches: u64::from(dropped > 0),
+            max_lateness_micros,
+            ..LateMetricDelta::default()
+        })
+    }
+
+    pub(crate) fn record_window_metrics(
+        &self,
+        late_rows: u64,
+        max_lateness_micros: Option<u64>,
+        null_event_time_rows: u64,
+    ) -> Result<()> {
+        self.late_metrics.record(LateMetricDelta {
+            late_rows,
+            affected_batches: u64::from(late_rows > 0),
+            max_lateness_micros,
+            null_event_time_rows,
+            null_event_time_batches: u64::from(null_event_time_rows > 0),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LateMetricDelta {
+    pub(crate) late_rows: u64,
+    pub(crate) affected_batches: u64,
+    pub(crate) max_lateness_micros: Option<u64>,
+    pub(crate) null_event_time_rows: u64,
+    pub(crate) null_event_time_batches: u64,
+}
+
+pub(crate) trait LateMetricSink: Send + Sync {
+    fn record(&self, delta: LateMetricDelta) -> Result<()>;
+}
+
+#[derive(Default)]
+struct LateMetricRecorder(Mutex<LateMetricDelta>);
+
+impl LateMetricSink for LateMetricRecorder {
+    fn record(&self, delta: LateMetricDelta) -> Result<()> {
+        let mut current = self.0.lock();
+        let next = accumulate_late_metrics(*current, delta)?;
+        *current = next;
         Ok(())
     }
 }
 
-/// Cumulative late-row counters owned by one operator task (spec D2.5).
-#[derive(Default)]
-pub(crate) struct LateRowRecorder {
-    dropped: AtomicU64,
-    affected_batches: AtomicU64,
-    max_lateness_micros: AtomicU64,
+pub(crate) fn accumulate_late_metrics(
+    current: LateMetricDelta,
+    delta: LateMetricDelta,
+) -> Result<LateMetricDelta> {
+    Ok(LateMetricDelta {
+        late_rows: checked_metric_sum(current.late_rows, delta.late_rows, "late_rows")?,
+        affected_batches: checked_metric_sum(
+            current.affected_batches,
+            delta.affected_batches,
+            "affected_batches",
+        )?,
+        max_lateness_micros: match (current.max_lateness_micros, delta.max_lateness_micros) {
+            (Some(current), Some(delta)) => Some(current.max(delta)),
+            (current, delta) => current.or(delta),
+        },
+        null_event_time_rows: checked_metric_sum(
+            current.null_event_time_rows,
+            delta.null_event_time_rows,
+            "null_event_time_rows",
+        )?,
+        null_event_time_batches: checked_metric_sum(
+            current.null_event_time_batches,
+            delta.null_event_time_batches,
+            "null_event_time_batches",
+        )?,
+    })
 }
 
-impl LateRowRecorder {
-    fn record(&self, dropped: u64, max_lateness: Option<Duration>) {
-        if dropped == 0 {
-            return;
-        }
-        self.dropped.fetch_add(dropped, Ordering::Relaxed);
-        self.affected_batches.fetch_add(1, Ordering::Relaxed);
-        if let Some(lateness) = max_lateness {
-            let micros = u64::try_from(lateness.as_micros()).unwrap_or(u64::MAX);
-            self.max_lateness_micros
-                .fetch_max(micros, Ordering::Relaxed);
-        }
-    }
-
-    #[cfg(test)]
-    fn snapshot(&self) -> (u64, u64, u64) {
-        (
-            self.dropped.load(Ordering::Relaxed),
-            self.affected_batches.load(Ordering::Relaxed),
-            self.max_lateness_micros.load(Ordering::Relaxed),
-        )
-    }
+fn checked_metric_sum(left: u64, right: u64, field: &str) -> Result<u64> {
+    left.checked_add(right)
+        .ok_or_else(|| CalcFlowError::Internal {
+            message: format!("window metric {field} overflowed UInt64"),
+        })
 }
 
 /// A continuously running operator: it receives one named-ingress batch per
@@ -281,14 +352,35 @@ mod tests {
 
     #[test]
     fn late_row_recorder_accumulates_drops_batches_and_max_lateness() {
-        let recorder = LateRowRecorder::default();
-        recorder.record(0, Some(Duration::from_micros(9)));
-        assert_eq!(recorder.snapshot(), (0, 0, 0));
-
-        recorder.record(2, Some(Duration::from_micros(5)));
-        recorder.record(3, Some(Duration::from_micros(7)));
-        recorder.record(1, None);
-        assert_eq!(recorder.snapshot(), (6, 3, 7));
+        let recorder = LateMetricRecorder::default();
+        recorder.record(LateMetricDelta::default()).unwrap();
+        recorder
+            .record(LateMetricDelta {
+                late_rows: 2,
+                affected_batches: 1,
+                max_lateness_micros: Some(5),
+                ..LateMetricDelta::default()
+            })
+            .unwrap();
+        recorder
+            .record(LateMetricDelta {
+                late_rows: 3,
+                affected_batches: 1,
+                max_lateness_micros: Some(7),
+                null_event_time_rows: 4,
+                null_event_time_batches: 1,
+            })
+            .unwrap();
+        assert_eq!(
+            *recorder.0.lock(),
+            LateMetricDelta {
+                late_rows: 5,
+                affected_batches: 2,
+                max_lateness_micros: Some(7),
+                null_event_time_rows: 4,
+                null_event_time_batches: 1,
+            }
+        );
     }
 
     #[test]
@@ -300,10 +392,47 @@ mod tests {
             None,
             CancellationToken::new(),
         );
-        let context = StreamOperatorContext::new(&job, "window", None);
+        let recorder = Arc::new(LateMetricRecorder::default());
+        let context = StreamOperatorContext::for_task(
+            &job,
+            "window",
+            None,
+            EdgeBudget::default(),
+            recorder.clone(),
+        );
         context
             .record_late_rows(4, Some(Duration::from_micros(11)))
             .unwrap();
-        assert_eq!(context.late_rows.snapshot(), (4, 1, 11));
+        assert_eq!(
+            *recorder.0.lock(),
+            LateMetricDelta {
+                late_rows: 4,
+                affected_batches: 1,
+                max_lateness_micros: Some(11),
+                ..LateMetricDelta::default()
+            }
+        );
+    }
+
+    #[test]
+    fn metric_overflow_is_transactional() {
+        let current = LateMetricDelta {
+            late_rows: u64::MAX,
+            affected_batches: 2,
+            max_lateness_micros: Some(4),
+            null_event_time_rows: 3,
+            null_event_time_batches: 1,
+        };
+        assert!(
+            accumulate_late_metrics(
+                current,
+                LateMetricDelta {
+                    late_rows: 1,
+                    ..LateMetricDelta::default()
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(current.late_rows, u64::MAX);
     }
 }

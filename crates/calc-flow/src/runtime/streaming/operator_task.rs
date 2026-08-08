@@ -21,8 +21,10 @@ use super::{
     supervisor::{TaskId, TaskSupervisor, panic_message},
 };
 use crate::{
-    Batch, CalcFlowError, CancellationToken, EventTime, Port, Result, StreamCollector,
-    StreamOperatorContext, pipeline::CompiledStreamOperator,
+    Batch, CalcFlowError, CancellationToken, EdgeBudget, EventTime, Port, Result, StreamCollector,
+    StreamOperatorContext,
+    operator::{LateMetricDelta, LateMetricSink, accumulate_late_metrics},
+    pipeline::CompiledStreamOperator,
 };
 
 pub(crate) struct OperatorEntryAck {
@@ -53,6 +55,11 @@ pub(crate) struct OperatorProgressSnapshot {
     pub(crate) datafusion_runtime_created: bool,
     pub(crate) on_end_calls: u64,
     pub(crate) ended: bool,
+    pub(crate) late_rows: u64,
+    pub(crate) affected_batches: u64,
+    pub(crate) max_lateness_micros: Option<u64>,
+    pub(crate) null_event_time_rows: u64,
+    pub(crate) null_event_time_batches: u64,
 }
 
 #[derive(Clone, Default)]
@@ -104,6 +111,26 @@ impl OperatorProgress {
 
     fn observe_datafusion_runtime(&self, created: bool) {
         self.0.lock().datafusion_runtime_created |= created;
+    }
+}
+
+impl LateMetricSink for OperatorProgress {
+    fn record(&self, delta: LateMetricDelta) -> Result<()> {
+        let mut progress = self.0.lock();
+        let current = LateMetricDelta {
+            late_rows: progress.late_rows,
+            affected_batches: progress.affected_batches,
+            max_lateness_micros: progress.max_lateness_micros,
+            null_event_time_rows: progress.null_event_time_rows,
+            null_event_time_batches: progress.null_event_time_batches,
+        };
+        let next = accumulate_late_metrics(current, delta)?;
+        progress.late_rows = next.late_rows;
+        progress.affected_batches = next.affected_batches;
+        progress.max_lateness_micros = next.max_lateness_micros;
+        progress.null_event_time_rows = next.null_event_time_rows;
+        progress.null_event_time_batches = next.null_event_time_batches;
+        Ok(())
     }
 }
 
@@ -229,8 +256,15 @@ async fn finish_operator(
     input_watermark: Option<EventTime>,
 ) -> Result<()> {
     let cancellation = inputs.context.job().cancellation().clone();
-    let context =
-        StreamOperatorContext::new(inputs.context.job(), &inputs.node_id, input_watermark);
+    let output_budget = effective_output_budget(&inputs.outputs);
+    let late_metrics: Arc<dyn LateMetricSink> = Arc::new(inputs.progress.clone());
+    let context = StreamOperatorContext::for_task(
+        inputs.context.job(),
+        &inputs.node_id,
+        input_watermark,
+        output_budget,
+        late_metrics,
+    );
     let mut collector = ChannelStreamCollector::new(
         &inputs.node_id,
         inputs.context.job().job_id(),
@@ -368,8 +402,15 @@ async fn dispatch_data(
         .record_operator_input(&inputs.node_id, cost)?;
     inputs.progress.record_input()?;
     let processing_timer = inputs.metrics.timer();
-    let context =
-        StreamOperatorContext::new(inputs.context.job(), &inputs.node_id, input_watermark);
+    let output_budget = effective_output_budget(&inputs.outputs);
+    let late_metrics: Arc<dyn LateMetricSink> = Arc::new(inputs.progress.clone());
+    let context = StreamOperatorContext::for_task(
+        inputs.context.job(),
+        &inputs.node_id,
+        input_watermark,
+        output_budget,
+        late_metrics,
+    );
     let mut collector = ChannelStreamCollector::new(
         &inputs.node_id,
         inputs.context.job().job_id(),
@@ -389,6 +430,9 @@ async fn dispatch_data(
     result?;
     inputs
         .metrics
+        .observe_operator_window_metrics(&inputs.node_id, &inputs.progress.snapshot())?;
+    inputs
+        .metrics
         .record_operator_processing(&inputs.node_id, &processing_timer)
 }
 
@@ -401,8 +445,15 @@ async fn dispatch_watermark(
     let watermark = message
         .as_watermark()
         .expect("watermark kind always carries event time");
-    let context =
-        StreamOperatorContext::new(inputs.context.job(), &inputs.node_id, *input_watermark);
+    let output_budget = effective_output_budget(&inputs.outputs);
+    let late_metrics: Arc<dyn LateMetricSink> = Arc::new(inputs.progress.clone());
+    let context = StreamOperatorContext::for_task(
+        inputs.context.job(),
+        &inputs.node_id,
+        *input_watermark,
+        output_budget,
+        late_metrics,
+    );
     let mut collector = ChannelStreamCollector::new(
         &inputs.node_id,
         inputs.context.job().job_id(),
@@ -419,6 +470,18 @@ async fn dispatch_watermark(
     forward_control(&mut inputs.outputs, message, inputs.context.job()).await?;
     *input_watermark = Some(watermark);
     Ok(())
+}
+
+fn effective_output_budget(outputs: &BTreeMap<String, Vec<EdgeSender>>) -> EdgeBudget {
+    outputs
+        .values()
+        .flatten()
+        .map(EdgeSender::budget)
+        .reduce(|left, right| EdgeBudget {
+            max_rows: left.max_rows.min(right.max_rows),
+            max_bytes: left.max_bytes.min(right.max_bytes),
+        })
+        .unwrap_or_default()
 }
 
 async fn dispatch_idle(
@@ -658,6 +721,7 @@ mod tests {
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         task::Poll,
+        time::Duration,
     };
 
     use async_trait::async_trait;
@@ -688,6 +752,55 @@ mod tests {
             BatchMetadata::new(source, sequence, BTreeMap::new()).unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn window_metrics_accumulate_across_contexts_and_mirror_to_runtime_metrics() {
+        let job = StreamJobContext::new(
+            7,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let progress = OperatorProgress::default();
+        let first = StreamOperatorContext::for_task(
+            &job,
+            "window",
+            None,
+            EdgeBudget::default(),
+            Arc::new(progress.clone()),
+        );
+        first
+            .record_late_rows(2, Some(Duration::from_micros(5)))
+            .unwrap();
+        let second = StreamOperatorContext::for_task(
+            &job,
+            "window",
+            Some(EventTime::from_micros(10)),
+            EdgeBudget::default(),
+            Arc::new(progress.clone()),
+        );
+        second.record_window_metrics(3, Some(7), 4).unwrap();
+
+        let snapshot = progress.snapshot();
+        assert_eq!(snapshot.late_rows, 5);
+        assert_eq!(snapshot.affected_batches, 2);
+        assert_eq!(snapshot.max_lateness_micros, Some(7));
+        assert_eq!(snapshot.null_event_time_rows, 4);
+        assert_eq!(snapshot.null_event_time_batches, 1);
+
+        let metrics =
+            crate::runtime::streaming::metrics::MetricsRecorder::new([], [], ["window".into()], []);
+        metrics
+            .observe_operator_window_metrics("window", &snapshot)
+            .unwrap();
+        let node = &metrics.snapshot().nodes["window"];
+        assert_eq!(node.late_rows, 5);
+        assert_eq!(node.affected_batches, 2);
+        assert_eq!(node.max_lateness_micros, Some(7));
+        assert_eq!(node.null_event_time_rows, 4);
+        assert_eq!(node.null_event_time_batches, 1);
     }
 
     #[derive(Clone, Copy)]

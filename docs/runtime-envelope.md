@@ -143,11 +143,15 @@ one stream operator. It borrows the job context and exposes:
 - `record_late_rows(dropped, max_lateness)` — cumulative late-data counters:
   dropped row-window assignments, the count of batches that contained at
   least one dropped assignment, and the maximum observed lateness. Row
-  payloads are never accepted, and only window operators call this. The
-  current version never fails; the `Result` keeps the frozen signature
-  stable for the validation rules later milestones add. M3 does not classify
-  or drop late rows and does not expose these counters as runtime metrics;
-  window-aware late-data policy and observability arrive in M4 (D2.5).
+  payloads are never accepted, and only window operators call this. Counter
+  overflow fails transactionally instead of wrapping. Runtime-created
+  contexts share one task-owned recorder, so late and null-event-time totals
+  persist across handler calls and appear in crate-private status/metrics.
+
+The crate-private task constructor also supplies the minimum effective output
+edge budget. A window close uses that budget to split deterministic output
+rows before enqueue; the public constructor remains source-compatible and
+uses the default budget plus an isolated recorder.
 
 ## The operator emission boundary
 
@@ -181,6 +185,15 @@ non-empty one, and reset succeeds.
 named byte `segments`. Keyed row state never appears inline (D4.4), and no
 segment may carry secrets (I4); the runtime assigns segment paths, lengths,
 and checksums during staging (D4.1).
+
+The built-in window operator prepares immutable Arrow IPC deltas through a
+blocking worker while processing data and control events. Its synchronous
+checkpoint only assigns deterministic segment IDs, moves prepared buffers,
+and captures bounded metadata. Restore validates every metadata field, Arrow
+schema, group-key encoding, row order, and accumulator shape on a worker
+before replacing live state. More than 32 retained deltas prepares one
+replacement base before the next capture; old immutable segments remain live
+until manifest reachability collection can remove them.
 
 `StreamCollector` is the only way a stream operator emits. `emit(port,
 batch)` validates the port name, the `BatchKind`, and the optional exact
@@ -414,9 +427,10 @@ tasks and progress snapshots, scoped task contexts, whole-job preflight, the
 task supervisor, private status/metrics, `ContinuousRunner`, `ContinuousJob`,
 and the runner-scoped reaper.
 
-The envelope and its typed values do not appear in the current project or
-checkpoint document formats, the Python binding, or Studio routes. The
-durable manifest and the cross-language projections arrive with the
+The envelope and its typed values do not appear in the current project-v2 or
+checkpoint-v2 document formats, the Python binding, or Studio routes. M4 adds
+the standalone v3 manifest model and state backend without replacing those v2
+surfaces; runtime coordination and cross-language projections arrive with the
 milestones below.
 
 Non-goals:
@@ -458,6 +472,34 @@ serialized, durable, a checkpoint, or crash recovery.
 M3 forwards old/equal/new event-time rows unchanged. It neither classifies nor
 drops late rows and exposes no late-row runtime metric.
 
+## M4 state and window implementation boundary
+
+M4 adds a public, data-only `WindowSpec` for fixed UTC tumbling and hopping
+windows and the stream-only `WindowAggregateOperator`. The compiler validates
+geometry, overlap, exact event-time/group types, aggregate combinations,
+output names, state layout, and deterministic configuration fingerprints
+before source open. Supported aggregates are `count`, `sum`, `min`, `max`,
+and `avg` over the explicit first-version type matrix; decimal, session,
+early-trigger, allowed-lateness, update, and retract forms remain unavailable.
+
+Execution owns incremental accumulators in deterministic
+`(window_start, window_end, G1 group key)` order. Null event times are dropped
+and counted separately. A row-window assignment is late only when
+`window_end <= WM_in`; a hopping row can therefore update open assignments
+while dropping closed ones. Watermark and end handlers emit one final value
+per non-empty window before runtime-owned control forwarding, chunk outputs to
+the effective edge budget, and preserve checked operator-owned sequences
+across snapshot/restore.
+
+The public state surface consists of immutable `StateHandle` values,
+lineage-exclusive `StateBackend` sessions, `LocalStateBackend`, and the strict
+canonical `CheckpointManifest` v3 data model. The local backend stages,
+syncs, re-reads, checksum-validates, and atomically publishes segments before
+a manifest can reference them. Manifest selection is the sole recovery truth;
+cleanup is reachability-based and fails closed on links or unexpected files.
+The M4 commit harness proves publication crash boundaries, but the running job
+still rejects barriers and does not perform durable checkpoint coordination.
+
 ## Specified but not yet implemented
 
 The [specification](../.codex/artifacts/specs/continuous-streaming-runtime.md)
@@ -465,12 +507,9 @@ and the [v3 implementation plan](superpowers/plans/2026-08-02-continuous-streami
 assign the following behaviors to later milestones. They are not implemented
 in the current tree, and this document does not describe them as present:
 
-- **M4** — window assignment, final-only triggers, window-aware late-data
-  classification/drop/metrics (S6, D2.5, D8), state backends, and durable
-  segment staging (D4).
 - **M5** — runtime-generated barriers, barrier injection and alignment, epoch
-  checkpoint manifests, lineage recovery numbering (D9.3–D9.6), and the
-  exactly-once sink commit protocol (S7, S9).
+  manifest publication/selection, complete-job restore, lineage recovery
+  numbering (D9.3–D9.6), and the exactly-once sink commit protocol (S7, S9).
 - **Post-M5 public A6 integration** — the source-driven runner/job, public
   source and sink bindings, status/control methods, and v2 runner replacement
   land atomically only after the M4 state and complete M5 durability contract

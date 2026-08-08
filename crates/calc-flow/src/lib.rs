@@ -18,6 +18,7 @@ mod operator;
 mod pipeline;
 mod project_store;
 mod runtime;
+mod state;
 mod time;
 mod udf;
 
@@ -37,10 +38,11 @@ pub use error::{CalcFlowError, Result};
 pub use io::{BatchingSource, Sink, Source, SourceItem};
 pub use json::{JsonMap, MAX_JSON_DEPTH, canonical_json};
 pub use operator::{
-    BatchOperator, BatchOperatorContext, BatchOperatorFactory, EdgeCollector, ExpressionOperator,
-    ExternalOperatorSpec, NodeOperator, OperatorMetadata, OperatorStateSnapshot, Port,
-    ProviderRegistry, SqlOperator, StreamCollector, StreamOperator, StreamOperatorContext,
-    StreamOperatorFactory, UnionOperator,
+    AggregateFunction, AggregateSpec, BatchOperator, BatchOperatorContext, BatchOperatorFactory,
+    EdgeCollector, ExpressionOperator, ExternalOperatorSpec, MAX_WINDOW_OVERLAP, NodeOperator,
+    OperatorMetadata, OperatorStateSnapshot, Port, ProviderRegistry, SqlOperator, StreamCollector,
+    StreamOperator, StreamOperatorContext, StreamOperatorFactory, UnionOperator,
+    WindowAggregateOperator, WindowGeometry, WindowSpec,
 };
 pub use pipeline::{
     BatchExecutionPlan, DeliveryGuarantee, Edge, EdgeBudget, ExecutionOptions, NodeTiming,
@@ -55,6 +57,13 @@ pub use project_store::{
 pub use runtime::{
     ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, MicroBatchRunner, SinkRouter,
     StreamJobContext, StreamMessage, StreamMessageKind, StreamingRunner, edge_channel,
+};
+pub use state::{
+    CheckpointManifest, CheckpointManifestFields, CursorManifestEntry, LocalStateBackend,
+    MANIFEST_FORMAT_VERSION, MAX_MANIFEST_DOCUMENT_BYTES, ManifestExpectation,
+    ManifestIngressState, OperatorIngressManifestEntry, OperatorManifestEntry, RecoveryStatus,
+    RetentionClass, SinkDeliveryManifest, SinkManifestEntry, SourceManifestEntry,
+    SourceWatermarkManifestState, StateBackend, StateHandle, StateLineageBackend, StateLineageKey,
 };
 pub use time::{Epoch, EventTime};
 pub use udf::{

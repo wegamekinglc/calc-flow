@@ -13,6 +13,7 @@ async-trait.workspace = true
 chrono.workspace = true
 datafusion.workspace = true
 futures.workspace = true
+fs2.workspace = true
 hex.workspace = true
 parking_lot.workspace = true
 regex.workspace = true
@@ -40,6 +41,10 @@ harness = false
 
 [[bench]]
 name = "allocation_regression"
+harness = false
+
+[[bench]]
+name = "m4_state_window"
 harness = false
 
 [lints]
