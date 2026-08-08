@@ -117,6 +117,8 @@ impl<'a> StreamOperatorContext<'a> {
     ///
     /// The runtime derives `affected_batches` from any call with `dropped > 0`
     /// and keeps a running maximum lateness. Only window operators call this.
+    /// A call with `dropped == 0` is a complete telemetry no-op: the supplied
+    /// `max_lateness` is neither recorded nor validated.
     ///
     /// # Errors
     ///
