@@ -11,17 +11,17 @@ use crate::{CalcFlowError, Epoch, Result, json::validate_portable_identifier};
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct StateHandle {
     /// Stable logical operator identity.
-    pub operator_id: String,
+    operator_id: String,
     /// Checkpoint epoch that created the segment.
-    pub epoch: Epoch,
+    epoch: Epoch,
     /// Stable segment identity within the operator epoch.
-    pub segment_id: String,
+    segment_id: String,
     /// Portable path below the managed state root.
-    pub relative_path: String,
+    relative_path: String,
     /// Exact committed byte length.
-    pub byte_len: u64,
+    byte_len: u64,
     /// Lowercase hexadecimal SHA-256 of the committed bytes.
-    pub sha256: String,
+    sha256: String,
 }
 
 impl StateHandle {
@@ -53,12 +53,43 @@ impl StateHandle {
         })
     }
 
+    /// Returns the stable logical operator identity.
+    pub fn operator_id(&self) -> &str {
+        &self.operator_id
+    }
+
+    /// Returns the checkpoint epoch that created the segment.
+    pub const fn epoch(&self) -> Epoch {
+        self.epoch
+    }
+
+    /// Returns the stable segment identity within the operator epoch.
+    pub fn segment_id(&self) -> &str {
+        &self.segment_id
+    }
+
+    /// Returns the portable path below the managed state root.
+    pub fn relative_path(&self) -> &str {
+        &self.relative_path
+    }
+
+    /// Returns the exact committed byte length.
+    pub const fn byte_len(&self) -> u64 {
+        self.byte_len
+    }
+
+    /// Returns the lowercase hexadecimal SHA-256 of the committed bytes.
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
     /// Validates that this handle belongs to one expected operator and epoch.
     ///
     /// # Errors
     ///
-    /// Returns [`CalcFlowError::CheckpointMismatch`] before any segment load
-    /// when either ownership coordinate differs.
+    /// Returns [`CalcFlowError::InvalidArgument`] when the handle itself is
+    /// non-canonical, or [`CalcFlowError::CheckpointMismatch`] before any
+    /// segment load when either ownership coordinate differs.
     pub fn validate_for(&self, expected_operator: &str, expected_epoch: Epoch) -> Result<()> {
         validate_portable_identifier("operator_id", &self.operator_id)?;
         validate_portable_identifier("segment_id", &self.segment_id)?;

@@ -155,7 +155,7 @@ impl StateLineageBackend for LocalStateLineageBackend {
         if !self.validated.lock().contains(&handle) {
             return Err(CalcFlowError::Conflict {
                 resource: "validated state segment".into(),
-                key: handle.segment_id.clone(),
+                key: handle.segment_id().into(),
             });
         }
 
@@ -177,9 +177,9 @@ impl StateLineageBackend for LocalStateLineageBackend {
         let mut latest_epoch = None;
         for handle in retained {
             self.managed_paths(handle)?;
-            retained_paths.insert(handle.relative_path.clone());
+            retained_paths.insert(handle.relative_path().into());
             latest_epoch =
-                Some(latest_epoch.map_or(handle.epoch, |epoch: Epoch| epoch.max(handle.epoch)));
+                Some(latest_epoch.map_or(handle.epoch(), |epoch: Epoch| epoch.max(handle.epoch())));
         }
         let root = self.root.path.clone();
         let lineage_hash = self.lineage_hash.clone();
@@ -191,10 +191,10 @@ impl StateLineageBackend for LocalStateLineageBackend {
 
 impl LocalStateLineageBackend {
     fn managed_paths(&self, handle: &StateHandle) -> Result<ManagedSegmentPaths> {
-        handle.validate_for(&handle.operator_id, handle.epoch)?;
-        let operator_hash = digest(handle.operator_id.as_bytes());
-        let segment_hash = digest(handle.segment_id.as_bytes());
-        let stem = format!("{}-{segment_hash}", handle.epoch.as_u64());
+        handle.validate_for(handle.operator_id(), handle.epoch())?;
+        let operator_hash = digest(handle.operator_id().as_bytes());
+        let segment_hash = digest(handle.segment_id().as_bytes());
+        let stem = format!("{}-{segment_hash}", handle.epoch().as_u64());
         let arrow = format!(
             "committed/{}/{operator_hash}/{stem}.arrow",
             self.lineage_hash
@@ -203,7 +203,7 @@ impl LocalStateLineageBackend {
             "committed/{}/{operator_hash}/{stem}.segment",
             self.lineage_hash
         );
-        if handle.relative_path != arrow && handle.relative_path != opaque {
+        if handle.relative_path() != arrow && handle.relative_path() != opaque {
             return Err(CalcFlowError::InvalidArgument {
                 field: "state_handle.relative_path".into(),
                 message: "does not match the backend-managed hashed segment path".into(),
@@ -214,7 +214,7 @@ impl LocalStateLineageBackend {
             .path
             .join("staging")
             .join(&self.lineage_hash)
-            .join(handle.epoch.as_u64().to_string())
+            .join(handle.epoch().as_u64().to_string())
             .join(&operator_hash);
         let committed_parent = self
             .root
@@ -224,7 +224,7 @@ impl LocalStateLineageBackend {
             .join(operator_hash);
         Ok(ManagedSegmentPaths {
             staging: staging_parent.join(format!("{segment_hash}.tmp")),
-            committed: self.root.path.join(&handle.relative_path),
+            committed: self.root.path.join(handle.relative_path()),
             staging_parent,
             committed_parent,
         })
@@ -258,6 +258,17 @@ pub(crate) async fn commit_manifest_for_test(
     staged: &BTreeMap<StateHandle, Vec<u8>>,
     fault: Option<CommitFaultPoint>,
 ) -> Result<()> {
+    commit_test_segments(state, staged, fault).await?;
+    let manifest_bytes = prepare_test_manifest_bytes(state, manifest, fault).await?;
+    publish_test_manifest(manifest_root, &manifest_bytes, fault).await
+}
+
+#[cfg(test)]
+async fn commit_test_segments(
+    state: &dyn StateLineageBackend,
+    staged: &BTreeMap<StateHandle, Vec<u8>>,
+    fault: Option<CommitFaultPoint>,
+) -> Result<()> {
     inject_fault(fault, CommitFaultPoint::AfterLease)?;
     stage_test_segments(state, staged, fault).await?;
     inject_fault(fault, CommitFaultPoint::AfterAllSegmentsDurable)?;
@@ -265,13 +276,31 @@ pub(crate) async fn commit_manifest_for_test(
     inject_fault(fault, CommitFaultPoint::AfterSegmentValidation)?;
     publish_test_segments(state, staged, fault).await?;
     inject_fault(fault, CommitFaultPoint::AfterCommittedSynchronization)?;
+    Ok(())
+}
+
+#[cfg(test)]
+async fn prepare_test_manifest_bytes(
+    state: &dyn StateLineageBackend,
+    manifest: &CheckpointManifest,
+    fault: Option<CommitFaultPoint>,
+) -> Result<Vec<u8>> {
     load_manifest_segments(state, manifest).await?;
     let manifest = manifest.clone();
     let manifest_bytes = worker(move || manifest.canonical_bytes()).await?;
     inject_fault(fault, CommitFaultPoint::AfterManifestValidation)?;
+    Ok(manifest_bytes)
+}
 
+#[cfg(test)]
+async fn publish_test_manifest(
+    manifest_root: &Path,
+    manifest_bytes: &[u8],
+    fault: Option<CommitFaultPoint>,
+) -> Result<()> {
     let manifest_root = prepare_manifest_root(manifest_root).await?;
     let temporary_root = manifest_root.clone();
+    let manifest_bytes = manifest_bytes.to_vec();
     let temporary =
         worker(move || write_manifest_temporary(&temporary_root, &manifest_bytes)).await?;
     inject_fault(fault, CommitFaultPoint::AfterManifestDurableWrite)?;
@@ -457,7 +486,7 @@ fn reject_committed_file(paths: &ManagedSegmentPaths, handle: &StateHandle) -> R
     if paths.committed.exists() {
         return Err(CalcFlowError::Conflict {
             resource: "committed state segment".into(),
-            key: handle.segment_id.clone(),
+            key: handle.segment_id().into(),
         });
     }
     Ok(())
@@ -491,20 +520,40 @@ fn publish_file(paths: &ManagedSegmentPaths, handle: &StateHandle) -> Result<()>
 }
 
 fn prepare_segment_directories(paths: &ManagedSegmentPaths) -> Result<()> {
+    let (root, lineage, epoch, operator) = managed_segment_components(paths)?;
+    prepare_staging_directories(root, &lineage, &epoch, &operator)?;
+    prepare_committed_directories(root, &lineage, &operator)
+}
+
+fn managed_segment_components(
+    paths: &ManagedSegmentPaths,
+) -> Result<(&Path, String, String, String)> {
     let root = paths
         .staging_parent
         .ancestors()
         .nth(4)
         .ok_or_else(|| format_error("managed staging path has no root".into()))?;
+    let lineage = staging_path_component(&paths.staging_parent, 2, "lineage")?.to_owned();
+    let epoch = staging_path_component(&paths.staging_parent, 1, "epoch")?.to_owned();
+    let operator = staging_path_component(&paths.staging_parent, 0, "operator")?.to_owned();
+    Ok((root, lineage, epoch, operator))
+}
+
+fn prepare_staging_directories(
+    root: &Path,
+    lineage: &str,
+    epoch: &str,
+    operator: &str,
+) -> Result<()> {
     validate_directory(root)?;
     let staging = ensure_child_directory(root, "staging")?;
-    let lineage = staging_path_component(&paths.staging_parent, 2, "lineage")?;
-    let epoch = staging_path_component(&paths.staging_parent, 1, "epoch")?;
-    let operator = staging_path_component(&paths.staging_parent, 0, "operator")?;
     let staging_lineage = ensure_child_directory(&staging, lineage)?;
     let staging_epoch = ensure_child_directory(&staging_lineage, epoch)?;
     ensure_child_directory(&staging_epoch, operator)?;
+    Ok(())
+}
 
+fn prepare_committed_directories(root: &Path, lineage: &str, operator: &str) -> Result<()> {
     let committed = ensure_child_directory(root, "committed")?;
     let committed_lineage = ensure_child_directory(&committed, lineage)?;
     ensure_child_directory(&committed_lineage, operator)?;
@@ -539,7 +588,7 @@ fn segment_metadata(path: &Path, handle: &StateHandle) -> Result<std::fs::Metada
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             Err(CalcFlowError::NotFound {
                 resource: "state segment".into(),
-                key: handle.segment_id.clone(),
+                key: handle.segment_id().into(),
             })
         }
         Err(source) => Err(io_error(path, source)),
@@ -557,7 +606,7 @@ fn validate_segment_metadata(
             path.display()
         )));
     }
-    if metadata.len() != handle.byte_len {
+    if metadata.len() != handle.byte_len() {
         return Err(segment_mismatch(handle, "byte length"));
     }
     Ok(())
@@ -572,10 +621,10 @@ fn committed_file_matches(path: &Path, handle: &StateHandle) -> Result<bool> {
 }
 
 fn validate_expected_bytes(handle: &StateHandle, bytes: &[u8]) -> Result<()> {
-    if u64::try_from(bytes.len()).ok() != Some(handle.byte_len) {
+    if u64::try_from(bytes.len()).ok() != Some(handle.byte_len()) {
         return Err(segment_mismatch(handle, "byte length"));
     }
-    if digest(bytes) != handle.sha256 {
+    if digest(bytes) != handle.sha256() {
         return Err(segment_mismatch(handle, "SHA-256"));
     }
     Ok(())
@@ -605,13 +654,26 @@ fn collect_unreachable_with(
         return Ok(0);
     }
 
+    let (deletions, sync_directories) =
+        collect_deletion_candidates(&lineage_root, lineage_hash, retained_paths, latest_epoch)?;
+    remove_unreachable_files(&deletions, &mut remove_file)?;
+    synchronize_compacted_directories(&lineage_root, &deletions, sync_directories)?;
+    Ok(deletions.len())
+}
+
+fn collect_deletion_candidates(
+    lineage_root: &Path,
+    lineage_hash: &str,
+    retained_paths: &BTreeSet<String>,
+    latest_epoch: Option<Epoch>,
+) -> Result<(Vec<PathBuf>, BTreeSet<PathBuf>)> {
     let mut deletions = Vec::new();
     let mut sync_directories = BTreeSet::new();
     for operator_entry in
-        std::fs::read_dir(&lineage_root).map_err(|source| io_error(&lineage_root, source))?
+        std::fs::read_dir(lineage_root).map_err(|source| io_error(lineage_root, source))?
     {
         collect_operator_deletions(
-            &operator_entry.map_err(|source| io_error(&lineage_root, source))?,
+            &operator_entry.map_err(|source| io_error(lineage_root, source))?,
             lineage_hash,
             retained_paths,
             latest_epoch,
@@ -619,9 +681,7 @@ fn collect_unreachable_with(
             &mut sync_directories,
         )?;
     }
-    remove_unreachable_files(&deletions, &mut remove_file)?;
-    synchronize_compacted_directories(&lineage_root, &deletions, sync_directories)?;
-    Ok(deletions.len())
+    Ok((deletions, sync_directories))
 }
 
 fn validate_lineage_root(lineage_root: &Path) -> Result<bool> {
@@ -833,7 +893,7 @@ fn segment_mismatch(handle: &StateHandle, coordinate: &str) -> CalcFlowError {
     CalcFlowError::CheckpointMismatch {
         message: format!(
             "state segment {:?} {coordinate} does not match its handle",
-            handle.segment_id
+            handle.segment_id()
         ),
     }
 }
@@ -968,7 +1028,7 @@ mod tests {
         lineage.publish_segment(&handle).await.unwrap();
         assert_eq!(lineage.load_segment(&handle).await.unwrap(), bytes);
 
-        std::fs::write(directory.path().join(&handle.relative_path), b"truncated").unwrap();
+        std::fs::write(directory.path().join(handle.relative_path()), b"truncated").unwrap();
         assert!(matches!(
             lineage.load_segment(&handle).await,
             Err(crate::CalcFlowError::CheckpointMismatch { .. })

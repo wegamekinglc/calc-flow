@@ -7,11 +7,11 @@
 mod backend;
 mod local;
 mod manifest;
-#[allow(
-    dead_code,
-    reason = "M4 state inventory is consumed by local compaction and window snapshots in later work packages"
-)]
 mod segment;
+
+pub(crate) use segment::{
+    SegmentDescriptor, SegmentKind, StateInventory, StateOperation, fold_state_segments,
+};
 
 pub use backend::{StateBackend, StateHandle, StateLineageBackend, StateLineageKey};
 pub use local::LocalStateBackend;

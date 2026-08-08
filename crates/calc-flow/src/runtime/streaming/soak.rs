@@ -368,6 +368,17 @@ struct DeliveryState {
 
 impl DeliveryState {
     fn observe(&mut self, batch: &Batch) {
+        let row_count = batch
+            .table_payload()
+            .expect("the soak window emits table batches")
+            .batches()
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>();
+        if row_count == 0 && self.error.is_none() {
+            self.error = Some("window output emitted an empty batch".into());
+            return;
+        }
         let sequence = batch.metadata().sequence();
         if batch.metadata().source() != "window" && self.error.is_none() {
             self.error = Some("window output used an unexpected source ID".into());
@@ -768,6 +779,17 @@ fn independent_accepted_oracle_exposes_commit_after_downstream_drop() {
     );
 }
 
+#[test]
+fn delivery_oracle_rejects_an_empty_window_output_batch() {
+    let mut deliveries = DeliveryState::default();
+    deliveries.observe(&soak_batch("window", 0).unwrap());
+
+    assert_eq!(
+        deliveries.error.as_deref(),
+        Some("window output emitted an empty batch")
+    );
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the soak topology receives explicit lifecycle probes, delivery oracles, and delay"
@@ -971,7 +993,11 @@ async fn run_linux_soak() {
     );
 
     let outcome = job.shutdown().await;
-    assert_eq!(outcome.state, ContinuousJobState::Completed);
+    assert_eq!(
+        outcome.state,
+        ContinuousJobState::Completed,
+        "graceful soak smoke failed: {outcome:?}"
+    );
     assert_eq!(outcome.cause, TerminalCause::GracefulShutdown);
     let terminal_status = job.status();
     let progress = terminal_status
@@ -1306,7 +1332,11 @@ async fn real_soak_topology_graceful_smoke_conserves_every_accepted_sequence() {
 
     let outcome = job.shutdown().await;
 
-    assert_eq!(outcome.state, ContinuousJobState::Completed);
+    assert_eq!(
+        outcome.state,
+        ContinuousJobState::Completed,
+        "graceful soak smoke failed: {outcome:?}"
+    );
     assert_eq!(outcome.cause, TerminalCause::GracefulShutdown);
     let accepted = accepted.snapshot();
     assert_delivery_conservation(&accepted, &sink_a.lock(), "sink A");

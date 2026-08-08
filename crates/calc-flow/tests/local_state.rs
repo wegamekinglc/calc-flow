@@ -116,7 +116,7 @@ async fn local_load_rechecks_length_and_checksum_before_returning_bytes() {
     let handle = handle(&key, "window", Epoch::INITIAL, "delta-0001", bytes);
     publish(lineage.as_ref(), &handle, bytes).await;
 
-    let committed = directory.path().join(&handle.relative_path);
+    let committed = directory.path().join(handle.relative_path());
     tokio::fs::write(&committed, b"corrupt").await.unwrap();
     assert!(matches!(
         lineage.load_segment(&handle).await,
@@ -140,9 +140,9 @@ async fn state_larger_than_ten_mib_round_trips_outside_the_manifest() {
 
     publish(lineage.as_ref(), &handle, &bytes).await;
     assert_eq!(lineage.load_segment(&handle).await.unwrap(), bytes);
-    assert!(!handle.relative_path.contains("orders"));
-    assert!(!handle.relative_path.contains("window"));
-    assert!(!handle.relative_path.contains("large"));
+    assert!(!handle.relative_path().contains("orders"));
+    assert!(!handle.relative_path().contains("window"));
+    assert!(!handle.relative_path().contains("large"));
 }
 
 #[tokio::test]

@@ -199,7 +199,25 @@ async fn checkpoint_is_incremental_arrow_ipc_and_restore_replaces_live_state() {
 
     let first = original.checkpoint(Epoch::new(1).unwrap()).unwrap();
     assert_eq!(first.segments.len(), 1);
+    let inventory = first.inline_metadata["segment_inventory"]
+        .as_array()
+        .unwrap();
+    assert_eq!(inventory.len(), 1);
     let first_bytes = first.segments.values().next().unwrap();
+    let descriptor = &inventory[0];
+    assert_eq!(descriptor["kind"], "delta");
+    assert_eq!(descriptor["state_layout_version"], 1);
+    assert_eq!(descriptor["handle"]["operator_id"], "window");
+    assert_eq!(descriptor["handle"]["epoch"], 1);
+    assert_eq!(
+        descriptor["handle"]["segment_id"],
+        first.segments.keys().next().unwrap().as_str()
+    );
+    assert_eq!(
+        descriptor["handle"]["byte_len"],
+        u64::try_from(first_bytes.len()).unwrap()
+    );
+    assert_eq!(descriptor["handle"]["sha256"], digest(first_bytes));
     assert!(first_bytes.starts_with(b"ARROW1"));
     let reader = FileReader::try_new(Cursor::new(first_bytes), None).unwrap();
     assert_eq!(reader.num_batches(), 1);

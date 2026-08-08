@@ -29,8 +29,9 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    Batch, BatchKind, BatchMetadata, CalcFlowError, EventTime, JsonMap, Port, Result,
+    Batch, BatchKind, BatchMetadata, CalcFlowError, EventTime, JsonMap, Port, Result, StateHandle,
     StreamCollector, StreamOperator, StreamOperatorContext, canonical_json,
+    state::{SegmentDescriptor, SegmentKind, StateInventory, StateOperation, fold_state_segments},
 };
 
 use super::{LateMetricDelta, OperatorMetadata, accumulate_late_metrics, validate_operator_name};
@@ -305,7 +306,7 @@ struct WindowState {
     ended: bool,
     metrics: LateMetricDelta,
     prepared_segments: Vec<PreparedStateSegment>,
-    retained_segment_ids: Vec<String>,
+    retained_inventory: StateInventory,
     replace_retained_on_checkpoint: bool,
     last_checkpoint_epoch: Option<crate::Epoch>,
     pipeline_fingerprint: Option<String>,
@@ -358,15 +359,14 @@ struct StateOperationRow {
     tombstone: bool,
 }
 
-#[derive(Clone, Copy)]
-enum PreparedSegmentKind {
-    Base,
-    Delta,
+struct PreparedStateSegment {
+    kind: SegmentKind,
+    bytes: Vec<u8>,
 }
 
-struct PreparedStateSegment {
-    kind: PreparedSegmentKind,
-    bytes: Vec<u8>,
+struct PreparedSnapshotSegments {
+    descriptors: Vec<SegmentDescriptor>,
+    bytes: BTreeMap<String, Vec<u8>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -385,7 +385,7 @@ struct WindowSnapshotMetadata {
     next_output_sequence: u64,
     ended: bool,
     metrics: LateMetricDelta,
-    segment_ids: Vec<String>,
+    segment_inventory: Vec<SegmentDescriptor>,
 }
 
 struct InputBatchUpdate {
@@ -520,6 +520,17 @@ impl WindowAggregateOperator {
         if open_assignments.is_empty() {
             return Ok(());
         }
+        self.prepare_open_row(record, row_index, &open_assignments, context, scratch)
+    }
+
+    fn prepare_open_row(
+        &self,
+        record: &RecordBatch,
+        row_index: usize,
+        open_assignments: &[(EventTime, EventTime)],
+        context: &StreamOperatorContext<'_>,
+        scratch: &mut BTreeMap<WindowKey, AccumulatorRow>,
+    ) -> Result<()> {
         let (stable_group_key, group_values) = encode_group_key(
             record,
             row_index,
@@ -527,7 +538,7 @@ impl WindowAggregateOperator {
             context.operator_id(),
             &self.spec.group_by,
         )?;
-        for (start, end) in open_assignments {
+        for &(start, end) in open_assignments {
             self.prepare_assignment(
                 record,
                 row_index,
@@ -690,19 +701,25 @@ impl WindowAggregateOperator {
     ) -> Result<()> {
         let retained_delta_count = self
             .state
-            .retained_segment_ids
+            .retained_inventory
+            .segments()
             .iter()
-            .filter(|segment_id| segment_id.starts_with("delta-"))
+            .filter(|segment| segment.kind == SegmentKind::Delta)
             .count();
         let prepared_delta_count = self
             .state
             .prepared_segments
             .iter()
-            .filter(|segment| matches!(segment.kind, PreparedSegmentKind::Delta))
+            .filter(|segment| segment.kind == SegmentKind::Delta)
             .count();
-        if retained_delta_count
-            .checked_add(prepared_delta_count)
-            .is_some_and(|count| count <= MAX_WINDOW_DELTA_SEGMENTS)
+        let retained_requires_compaction = self.state.retained_inventory.needs_compaction(
+            MAX_WINDOW_DELTA_SEGMENTS,
+            crate::MAX_MANIFEST_DOCUMENT_BYTES,
+        )?;
+        if !retained_requires_compaction
+            && retained_delta_count
+                .checked_add(prepared_delta_count)
+                .is_some_and(|count| count <= MAX_WINDOW_DELTA_SEGMENTS)
         {
             return Ok(());
         }
@@ -722,7 +739,7 @@ impl WindowAggregateOperator {
         self.state.prepared_segments = compacted
             .map(|bytes| {
                 vec![PreparedStateSegment {
-                    kind: PreparedSegmentKind::Base,
+                    kind: SegmentKind::Base,
                     bytes,
                 }]
             })
@@ -965,7 +982,7 @@ impl StreamOperator for WindowAggregateOperator {
         self.emit_keys(&keys, context, output).await?;
         if let Some(tombstones) = tombstones {
             self.state.prepared_segments.push(PreparedStateSegment {
-                kind: PreparedSegmentKind::Delta,
+                kind: SegmentKind::Delta,
                 bytes: tombstones,
             });
         }
@@ -997,7 +1014,7 @@ impl StreamOperator for WindowAggregateOperator {
         self.emit_keys(&keys, context, output).await?;
         if let Some(tombstones) = tombstones {
             self.state.prepared_segments.push(PreparedStateSegment {
-                kind: PreparedSegmentKind::Delta,
+                kind: SegmentKind::Delta,
                 bytes: tombstones,
             });
         }
@@ -1016,25 +1033,8 @@ impl StreamOperator for WindowAggregateOperator {
                 "window checkpoint epoch did not advance strictly".into(),
             ));
         }
-        let new_segment_ids = self
-            .state
-            .prepared_segments
-            .iter()
-            .enumerate()
-            .map(|(ordinal, segment)| {
-                let kind = match segment.kind {
-                    PreparedSegmentKind::Base => "base",
-                    PreparedSegmentKind::Delta => "delta",
-                };
-                format!("{kind}-{:020}-{ordinal:08}", epoch.as_u64())
-            })
-            .collect::<Vec<_>>();
-        let mut retained_segment_ids = if self.state.replace_retained_on_checkpoint {
-            Vec::new()
-        } else {
-            self.state.retained_segment_ids.clone()
-        };
-        retained_segment_ids.extend(new_segment_ids.iter().cloned());
+        let prepared = self.prepare_snapshot_segments(epoch)?;
+        let retained_inventory = self.next_snapshot_inventory(prepared.descriptors)?;
         let metadata = WindowSnapshotMetadata {
             state_layout_version: WINDOW_STATE_LAYOUT_VERSION,
             configuration_hash: self.compiled.configuration_hash.clone(),
@@ -1046,7 +1046,7 @@ impl StreamOperator for WindowAggregateOperator {
             next_output_sequence: self.state.next_output_sequence,
             ended: self.state.ended,
             metrics: self.state.metrics,
-            segment_ids: retained_segment_ids.clone(),
+            segment_inventory: retained_inventory.segments().to_vec(),
         };
         let Value::Object(inline_metadata) =
             serde_json::to_value(metadata).map_err(|error| format_error(&error))?
@@ -1055,26 +1055,18 @@ impl StreamOperator for WindowAggregateOperator {
                 "window snapshot metadata did not serialize as an object",
             ));
         };
-        let segments = new_segment_ids
-            .into_iter()
-            .zip(
-                std::mem::take(&mut self.state.prepared_segments)
-                    .into_iter()
-                    .map(|segment| segment.bytes),
-            )
-            .collect();
-
+        self.state.prepared_segments.clear();
         for key in std::mem::take(&mut self.state.emitted_pending_snapshot) {
             self.state.accumulators.remove(&key);
             self.state.dirty.remove(&key);
         }
         self.state.dirty.clear();
-        self.state.retained_segment_ids = retained_segment_ids;
+        self.state.retained_inventory = retained_inventory;
         self.state.replace_retained_on_checkpoint = false;
         self.state.last_checkpoint_epoch = Some(epoch);
         Ok(crate::OperatorStateSnapshot {
             inline_metadata: inline_metadata.into_iter().collect(),
-            segments,
+            segments: prepared.bytes,
         })
     }
 
@@ -1083,9 +1075,9 @@ impl StreamOperator for WindowAggregateOperator {
             return self.reset();
         }
         let metadata = parse_snapshot_metadata(snapshot)?;
-        validate_snapshot_metadata(&metadata, &self.compiled, snapshot)?;
+        let inventory = validate_snapshot_metadata(&metadata, &self.compiled, snapshot)?;
         let decoded = self.decode_snapshot_segments(snapshot, &metadata)?;
-        self.install_restored_state(metadata, decoded);
+        self.install_restored_state(metadata, inventory, decoded);
         Ok(())
     }
 
@@ -1096,6 +1088,80 @@ impl StreamOperator for WindowAggregateOperator {
 }
 
 impl WindowAggregateOperator {
+    fn prepare_snapshot_segments(&self, epoch: crate::Epoch) -> Result<PreparedSnapshotSegments> {
+        let mut descriptors = Vec::with_capacity(self.state.prepared_segments.len());
+        let mut segments = BTreeMap::new();
+        for (ordinal, segment) in self.state.prepared_segments.iter().enumerate() {
+            let kind = match segment.kind {
+                SegmentKind::Base => "base",
+                SegmentKind::Delta => "delta",
+            };
+            let segment_id = format!("{kind}-{:020}-{ordinal:08}", epoch.as_u64());
+            let descriptor = self.snapshot_segment_descriptor(epoch, &segment_id, segment)?;
+            descriptors.push(descriptor);
+            segments.insert(segment_id, segment.bytes.clone());
+        }
+        Ok(PreparedSnapshotSegments {
+            descriptors,
+            bytes: segments,
+        })
+    }
+
+    fn snapshot_segment_descriptor(
+        &self,
+        epoch: crate::Epoch,
+        segment_id: &str,
+        segment: &PreparedStateSegment,
+    ) -> Result<SegmentDescriptor> {
+        let operator_id = self.state.operator_id.as_deref().ok_or_else(|| {
+            checkpoint_mismatch("window segment is missing its operator identity".into())
+        })?;
+        let relative_path = format!(
+            "committed/{operator_id}/{:020}-{segment_id}.arrow",
+            epoch.as_u64()
+        );
+        let byte_len = u64::try_from(segment.bytes.len())
+            .map_err(|_| internal_error("window segment length does not fit u64"))?;
+        let sha256 = hex::encode(Sha256::digest(&segment.bytes));
+        Ok(SegmentDescriptor {
+            kind: segment.kind,
+            state_layout_version: WINDOW_STATE_LAYOUT_VERSION,
+            schema_fingerprint: self.compiled.state_schema_fingerprint.clone(),
+            handle: StateHandle::new(
+                operator_id,
+                epoch,
+                segment_id,
+                &relative_path,
+                byte_len,
+                &sha256,
+            )?,
+        })
+    }
+
+    fn next_snapshot_inventory(
+        &self,
+        new_descriptors: Vec<SegmentDescriptor>,
+    ) -> Result<StateInventory> {
+        if !self.state.replace_retained_on_checkpoint {
+            let mut retained = self.state.retained_inventory.segments().to_vec();
+            retained.extend(new_descriptors);
+            return StateInventory::new(retained);
+        }
+        let Some((base, later)) = new_descriptors.split_first() else {
+            return Ok(StateInventory::default());
+        };
+        if base.kind != SegmentKind::Base {
+            return StateInventory::new(new_descriptors);
+        }
+        let replacement = self
+            .state
+            .retained_inventory
+            .replacement_after_full_compaction(base.clone())?;
+        let mut retained = replacement.segments().to_vec();
+        retained.extend_from_slice(later);
+        StateInventory::new(retained)
+    }
+
     fn validate_process_input(
         &self,
         ingress: &str,
@@ -1127,7 +1193,7 @@ impl WindowAggregateOperator {
         }
         if let Some(encoded) = encoded {
             self.state.prepared_segments.push(PreparedStateSegment {
-                kind: PreparedSegmentKind::Delta,
+                kind: SegmentKind::Delta,
                 bytes: encoded,
             });
         }
@@ -1138,7 +1204,7 @@ impl WindowAggregateOperator {
         snapshot: &crate::OperatorStateSnapshot,
         metadata: &WindowSnapshotMetadata,
     ) -> Result<BTreeMap<WindowKey, AccumulatorRow>> {
-        let segments = snapshot_segments(snapshot, &metadata.segment_ids)?;
+        let segments = snapshot_segments(snapshot, &metadata.segment_inventory)?;
         let spec = self.spec.clone();
         let compiled = self.compiled.clone();
         let pipeline_fingerprint = metadata.pipeline_fingerprint.clone();
@@ -1159,6 +1225,7 @@ impl WindowAggregateOperator {
     fn install_restored_state(
         &mut self,
         metadata: WindowSnapshotMetadata,
+        inventory: StateInventory,
         decoded: BTreeMap<WindowKey, AccumulatorRow>,
     ) {
         self.state = WindowState {
@@ -1167,7 +1234,7 @@ impl WindowAggregateOperator {
             next_output_sequence: metadata.next_output_sequence,
             ended: metadata.ended,
             metrics: metadata.metrics,
-            retained_segment_ids: metadata.segment_ids,
+            retained_inventory: inventory,
             last_checkpoint_epoch: Some(metadata.epoch),
             pipeline_fingerprint: metadata.pipeline_fingerprint,
             operator_id: metadata.operator_id,
@@ -1187,16 +1254,33 @@ fn parse_snapshot_metadata(
 
 fn snapshot_segments(
     snapshot: &crate::OperatorStateSnapshot,
-    segment_ids: &[String],
+    inventory: &[SegmentDescriptor],
 ) -> Result<Vec<Vec<u8>>> {
-    segment_ids
+    inventory
         .iter()
-        .map(|segment_id| {
-            snapshot.segments.get(segment_id).cloned().ok_or_else(|| {
+        .map(|descriptor| {
+            let segment_id = descriptor.handle.segment_id();
+            let bytes = snapshot.segments.get(segment_id).cloned().ok_or_else(|| {
                 checkpoint_mismatch(format!("window snapshot is missing segment {segment_id:?}"))
-            })
+            })?;
+            validate_snapshot_segment_bytes(descriptor, &bytes)?;
+            Ok(bytes)
         })
         .collect()
+}
+
+fn validate_snapshot_segment_bytes(descriptor: &SegmentDescriptor, bytes: &[u8]) -> Result<()> {
+    if u64::try_from(bytes.len()).ok() != Some(descriptor.handle.byte_len()) {
+        return Err(checkpoint_mismatch(
+            "window snapshot segment byte length does not match its handle".into(),
+        ));
+    }
+    if hex::encode(Sha256::digest(bytes)) != descriptor.handle.sha256() {
+        return Err(checkpoint_mismatch(
+            "window snapshot segment checksum does not match its handle".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn record_null_event_time(metrics: &mut PreparedInputMetrics, operator_id: &str) -> Result<()> {
@@ -2747,6 +2831,19 @@ fn validate_snapshot_metadata(
     metadata: &WindowSnapshotMetadata,
     compiled: &CompiledWindowSpec,
     snapshot: &crate::OperatorStateSnapshot,
+) -> Result<StateInventory> {
+    validate_snapshot_header(metadata, compiled)?;
+    let inventory = StateInventory::new(metadata.segment_inventory.clone())
+        .map_err(|error| checkpoint_mismatch(error.to_string()))?;
+    validate_snapshot_inventory(metadata, compiled, &inventory)?;
+    validate_snapshot_segment_set(snapshot, &inventory)?;
+    validate_snapshot_identity(metadata, snapshot)?;
+    Ok(inventory)
+}
+
+fn validate_snapshot_header(
+    metadata: &WindowSnapshotMetadata,
+    compiled: &CompiledWindowSpec,
 ) -> Result<()> {
     if metadata.state_layout_version != WINDOW_STATE_LAYOUT_VERSION {
         return Err(checkpoint_mismatch(format!(
@@ -2764,12 +2861,31 @@ fn validate_snapshot_metadata(
             "window state schema fingerprint does not match the compiled operator".into(),
         ));
     }
+    Ok(())
+}
+
+fn validate_snapshot_segment_set(
+    snapshot: &crate::OperatorStateSnapshot,
+    inventory: &StateInventory,
+) -> Result<()> {
+    let expected_ids = inventory
+        .segments()
+        .iter()
+        .map(|descriptor| descriptor.handle.segment_id().to_owned())
+        .collect::<Vec<_>>();
     let actual_ids = snapshot.segments.keys().cloned().collect::<Vec<_>>();
-    if metadata.segment_ids != actual_ids {
+    if expected_ids != actual_ids {
         return Err(checkpoint_mismatch(
             "window snapshot segment IDs are missing, extra, duplicated, or non-canonical".into(),
         ));
     }
+    Ok(())
+}
+
+fn validate_snapshot_identity(
+    metadata: &WindowSnapshotMetadata,
+    snapshot: &crate::OperatorStateSnapshot,
+) -> Result<()> {
     if !snapshot.segments.is_empty()
         && (metadata.pipeline_fingerprint.is_none() || metadata.operator_id.is_none())
     {
@@ -2777,7 +2893,12 @@ fn validate_snapshot_metadata(
             "window segments require pipeline and operator identity metadata".into(),
         ));
     }
-    if let Some(fingerprint) = &metadata.pipeline_fingerprint
+    validate_snapshot_pipeline_fingerprint(metadata.pipeline_fingerprint.as_deref())?;
+    validate_snapshot_operator_id(metadata.operator_id.as_deref())
+}
+
+fn validate_snapshot_pipeline_fingerprint(fingerprint: Option<&str>) -> Result<()> {
+    if let Some(fingerprint) = fingerprint
         && (fingerprint.len() != 64
             || !fingerprint
                 .bytes()
@@ -2787,14 +2908,42 @@ fn validate_snapshot_metadata(
             "window pipeline fingerprint is not lowercase SHA-256".into(),
         ));
     }
-    if metadata
-        .operator_id
-        .as_deref()
-        .is_some_and(|operator_id| operator_id.is_empty() || operator_id.contains('\0'))
-    {
+    Ok(())
+}
+
+fn validate_snapshot_operator_id(operator_id: Option<&str>) -> Result<()> {
+    if operator_id.is_some_and(|operator_id| operator_id.is_empty() || operator_id.contains('\0')) {
         return Err(checkpoint_mismatch(
             "window operator ID is empty or contains NUL".into(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_snapshot_inventory(
+    metadata: &WindowSnapshotMetadata,
+    compiled: &CompiledWindowSpec,
+    inventory: &StateInventory,
+) -> Result<()> {
+    for descriptor in inventory.segments() {
+        if descriptor.state_layout_version != WINDOW_STATE_LAYOUT_VERSION
+            || descriptor.schema_fingerprint != compiled.state_schema_fingerprint
+        {
+            return Err(checkpoint_mismatch(
+                "window segment inventory layout or schema does not match the compiled operator"
+                    .into(),
+            ));
+        }
+        if descriptor.handle.epoch() > metadata.epoch {
+            return Err(checkpoint_mismatch(
+                "window segment inventory contains a future epoch".into(),
+            ));
+        }
+        if metadata.operator_id.as_deref() != Some(descriptor.handle.operator_id()) {
+            return Err(checkpoint_mismatch(
+                "window segment inventory operator does not match snapshot metadata".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -2815,19 +2964,24 @@ fn decode_state_segments(
     let operator_id = operator_id
         .ok_or_else(|| checkpoint_mismatch("window state is missing its operator ID".into()))?;
     let expected_schema = state_schema(spec, compiled, pipeline_fingerprint, operator_id);
-    let mut state = BTreeMap::new();
-    for bytes in segments {
-        for (key, entry) in
-            decode_state_segment(bytes, spec, compiled, &expected_schema, operator_id)?
-        {
-            if let Some(entry) = entry {
-                state.insert(key, entry);
-            } else {
-                state.remove(&key);
-            }
-        }
-    }
-    Ok(state)
+    let decoded = segments
+        .into_iter()
+        .map(|bytes| {
+            decode_state_segment(bytes, spec, compiled, &expected_schema, operator_id).map(
+                |operations| {
+                    operations
+                        .into_iter()
+                        .map(|(key, entry)| {
+                            let operation =
+                                entry.map_or(StateOperation::Tombstone, StateOperation::Upsert);
+                            (key, operation)
+                        })
+                        .collect::<Vec<_>>()
+                },
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    fold_state_segments(decoded)
 }
 
 #[allow(

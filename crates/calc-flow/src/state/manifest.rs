@@ -539,11 +539,11 @@ fn validate_operator_handle(
     manifest_epoch: Epoch,
     previous: Option<&StateHandle>,
 ) -> Result<()> {
-    handle.validate_for(operator_id, handle.epoch)?;
-    if handle.epoch > manifest_epoch {
+    handle.validate_for(operator_id, handle.epoch())?;
+    if handle.epoch() > manifest_epoch {
         return Err(mismatch(format!(
             "state handle epoch {} is newer than manifest epoch {}",
-            handle.epoch.as_u64(),
+            handle.epoch().as_u64(),
             manifest_epoch.as_u64()
         )));
     }
@@ -561,14 +561,14 @@ fn record_unique_handle(
     paths: &mut BTreeSet<String>,
 ) -> Result<()> {
     let identity = (
-        handle.operator_id.clone(),
-        handle.epoch,
-        handle.segment_id.clone(),
+        handle.operator_id().into(),
+        handle.epoch(),
+        handle.segment_id().into(),
     );
     if !identities.insert(identity) {
         return Err(format_error("duplicate state handle identity".into()));
     }
-    if !paths.insert(handle.relative_path.clone()) {
+    if !paths.insert(handle.relative_path().into()) {
         return Err(format_error("duplicate committed state path".into()));
     }
     Ok(())

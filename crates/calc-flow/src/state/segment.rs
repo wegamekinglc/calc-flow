@@ -89,7 +89,7 @@ impl StateInventory {
             ));
         }
         if let Some(first) = self.segments.first()
-            && (base.handle.operator_id != first.handle.operator_id
+            && (base.handle.operator_id() != first.handle.operator_id()
                 || base.state_layout_version != first.state_layout_version
                 || base.schema_fingerprint != first.schema_fingerprint)
         {
@@ -100,7 +100,7 @@ impl StateInventory {
         if self
             .segments
             .last()
-            .is_some_and(|last| base.handle.epoch < last.handle.epoch)
+            .is_some_and(|last| base.handle.epoch() < last.handle.epoch())
         {
             return Err(inventory_error(
                 "compaction base is older than the retained inventory",
@@ -114,7 +114,7 @@ impl StateInventory {
             return Ok(());
         };
         validate_inventory_header(first)?;
-        let operator_id = &first.handle.operator_id;
+        let operator_id = first.handle.operator_id();
         let layout = first.state_layout_version;
         let schema = &first.schema_fingerprint;
         let mut previous_coordinate = None;
@@ -147,7 +147,7 @@ fn validate_descriptor_identity(
     layout: u32,
     schema: &str,
 ) -> Result<()> {
-    if descriptor.handle.operator_id != operator_id {
+    if descriptor.handle.operator_id() != operator_id {
         return Err(inventory_error(
             "state inventory contains more than one operator",
         ));
@@ -164,7 +164,7 @@ fn validate_descriptor_identity(
     }
     descriptor
         .handle
-        .validate_for(operator_id, descriptor.handle.epoch)
+        .validate_for(operator_id, descriptor.handle.epoch())
         .map_err(|error| inventory_error(error.to_string()))
 }
 
@@ -172,10 +172,7 @@ fn validate_descriptor_order<'a>(
     descriptor: &'a SegmentDescriptor,
     previous: Option<(Epoch, &'a str)>,
 ) -> Result<Option<(Epoch, &'a str)>> {
-    let coordinate = (
-        descriptor.handle.epoch,
-        descriptor.handle.segment_id.as_str(),
-    );
+    let coordinate = (descriptor.handle.epoch(), descriptor.handle.segment_id());
     if previous.is_some_and(|value| value >= coordinate) {
         return Err(inventory_error(
             "state inventory segments are not in canonical epoch/segment order",
@@ -209,16 +206,16 @@ fn record_descriptor_identity(
     paths: &mut BTreeSet<String>,
 ) -> Result<()> {
     let identity = (
-        descriptor.handle.operator_id.clone(),
-        descriptor.handle.epoch,
-        descriptor.handle.segment_id.clone(),
+        descriptor.handle.operator_id().into(),
+        descriptor.handle.epoch(),
+        descriptor.handle.segment_id().into(),
     );
     if !identities.insert(identity) {
         return Err(inventory_error(
             "state inventory contains a duplicate handle identity",
         ));
     }
-    if !paths.insert(descriptor.handle.relative_path.clone()) {
+    if !paths.insert(descriptor.handle.relative_path().into()) {
         return Err(inventory_error(
             "state inventory contains a duplicate committed path",
         ));
@@ -367,7 +364,15 @@ mod tests {
 
         let first = descriptor(SegmentKind::Delta, 1, "first");
         let mut duplicate_path = descriptor(SegmentKind::Delta, 2, "second");
-        duplicate_path.handle.relative_path = first.handle.relative_path.clone();
+        duplicate_path.handle = StateHandle::new(
+            duplicate_path.handle.operator_id(),
+            duplicate_path.handle.epoch(),
+            duplicate_path.handle.segment_id(),
+            first.handle.relative_path(),
+            duplicate_path.handle.byte_len(),
+            duplicate_path.handle.sha256(),
+        )
+        .unwrap();
         assert!(matches!(
             StateInventory::new(vec![first, duplicate_path]),
             Err(CalcFlowError::Internal { .. })
@@ -395,7 +400,7 @@ mod tests {
             .unwrap();
         assert_eq!(replacement.segments().len(), 1);
         assert_eq!(original.segments().len(), 3);
-        assert_eq!(original.segments()[0].handle.segment_id, "base");
+        assert_eq!(original.segments()[0].handle.segment_id(), "base");
     }
 
     #[test]

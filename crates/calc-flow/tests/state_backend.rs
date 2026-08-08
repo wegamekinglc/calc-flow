@@ -132,15 +132,15 @@ fn expectation<'a>(
 fn state_handle_accepts_one_portable_committed_identity() {
     let handle = handle();
 
-    assert_eq!(handle.operator_id, "window");
-    assert_eq!(handle.epoch, Epoch::INITIAL);
-    assert_eq!(handle.segment_id, "delta-0001");
+    assert_eq!(handle.operator_id(), "window");
+    assert_eq!(handle.epoch(), Epoch::INITIAL);
+    assert_eq!(handle.segment_id(), "delta-0001");
     assert_eq!(
-        handle.relative_path,
+        handle.relative_path(),
         "committed/pipeline/window/1-delta.arrow"
     );
-    assert_eq!(handle.byte_len, 42);
-    assert_eq!(handle.sha256, SHA256);
+    assert_eq!(handle.byte_len(), 42);
+    assert_eq!(handle.sha256(), SHA256);
     handle.validate_for("window", Epoch::INITIAL).unwrap();
 }
 
@@ -422,7 +422,7 @@ fn manifest_accepts_older_inventory_handles_and_rejects_future_handles() {
     later_manifest.epoch = Epoch::INITIAL.next().unwrap();
     let manifest = CheckpointManifest::new(later_manifest).unwrap();
     assert_eq!(
-        manifest.operators()["window"].segments[0].epoch,
+        manifest.operators()["window"].segments[0].epoch(),
         Epoch::INITIAL
     );
 
@@ -459,12 +459,21 @@ fn manifest_checksum_mismatch_fails_closed() {
 #[test]
 fn manifest_keeps_large_state_bytes_out_of_the_bounded_document() {
     let mut fields = manifest_fields();
-    fields.operators.get_mut("window").unwrap().segments[0].byte_len = 11 * 1024 * 1024;
+    let handle = fields.operators["window"].segments[0].clone();
+    fields.operators.get_mut("window").unwrap().segments[0] = StateHandle::new(
+        handle.operator_id(),
+        handle.epoch(),
+        handle.segment_id(),
+        handle.relative_path(),
+        11 * 1024 * 1024,
+        handle.sha256(),
+    )
+    .unwrap();
 
     let manifest = CheckpointManifest::new(fields).unwrap();
     assert!(manifest.canonical_bytes().unwrap().len() < MAX_MANIFEST_DOCUMENT_BYTES);
     assert_eq!(
-        manifest.operators()["window"].segments[0].byte_len,
+        manifest.operators()["window"].segments[0].byte_len(),
         11 * 1024 * 1024
     );
 }
