@@ -199,12 +199,53 @@ impl CheckpointFaultInjector {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct CheckpointStartedTestGate {
+    entered: Arc<AtomicBool>,
+    entered_changed: Arc<Notify>,
+    released: Arc<AtomicBool>,
+    release_changed: Arc<Notify>,
+}
+
+#[cfg(test)]
+impl CheckpointStartedTestGate {
+    pub(crate) async fn wait_until_entered(&self) {
+        while !self.entered.load(Ordering::Acquire) {
+            let changed = self.entered_changed.notified();
+            if self.entered.load(Ordering::Acquire) {
+                break;
+            }
+            changed.await;
+        }
+    }
+
+    pub(crate) fn release(&self) {
+        self.released.store(true, Ordering::Release);
+        self.release_changed.notify_waiters();
+    }
+
+    async fn pause(&self) {
+        self.entered.store(true, Ordering::Release);
+        self.entered_changed.notify_waiters();
+        while !self.released.load(Ordering::Acquire) {
+            let changed = self.release_changed.notified();
+            if self.released.load(Ordering::Acquire) {
+                break;
+            }
+            changed.await;
+        }
+    }
+}
+
 pub(crate) struct CheckpointRuntimeSpec {
     state_backend: Arc<dyn StateBackend>,
     manifest_root: PathBuf,
     config: StreamRuntimeConfig,
     #[cfg(test)]
     faults: CheckpointFaultInjector,
+    #[cfg(test)]
+    started_gate: Option<CheckpointStartedTestGate>,
 }
 
 impl CheckpointRuntimeSpec {
@@ -226,6 +267,8 @@ impl CheckpointRuntimeSpec {
             config,
             #[cfg(test)]
             faults: CheckpointFaultInjector::default(),
+            #[cfg(test)]
+            started_gate: None,
         })
     }
 
@@ -249,6 +292,12 @@ impl CheckpointRuntimeSpec {
         self.faults = faults.clone();
         (self, faults)
     }
+
+    #[cfg(test)]
+    pub(crate) fn with_started_gate(mut self, gate: CheckpointStartedTestGate) -> Self {
+        self.started_gate = Some(gate);
+        self
+    }
 }
 
 struct ValidatedCheckpointRuntime {
@@ -266,6 +315,8 @@ struct OpenedCheckpointRuntime {
     startup_orphans_removed: usize,
     #[cfg(test)]
     faults: CheckpointFaultInjector,
+    #[cfg(test)]
+    started_gate: Option<CheckpointStartedTestGate>,
 }
 
 impl OpenedCheckpointRuntime {
@@ -278,6 +329,13 @@ impl OpenedCheckpointRuntime {
         let trigger_count = self.faults.trigger_count();
         self.faults.trigger(point, cancellation)?;
         Ok(self.faults.trigger_count() != trigger_count && cancellation.is_cancelled())
+    }
+
+    #[cfg(test)]
+    async fn pause_after_started(&self) {
+        if let Some(gate) = &self.started_gate {
+            gate.pause().await;
+        }
     }
 }
 
@@ -2442,6 +2500,8 @@ async fn open_checkpoint_runtime(
         startup_orphans_removed,
         #[cfg(test)]
         faults: spec.faults,
+        #[cfg(test)]
+        started_gate: spec.started_gate,
     })
 }
 
@@ -3561,6 +3621,8 @@ async fn handle_checkpoint_event(
             if checkpoint.inject_fault(CheckpointFaultPoint::SourceAdmission, cancellation)? {
                 return Ok(false);
             }
+            #[cfg(test)]
+            checkpoint.pause_after_started().await;
             let durable = if *terminal_request_active {
                 let cuts = terminal_source_cuts.take().ok_or_else(|| {
                     checkpoint_protocol_error(epoch, "terminal source cuts are missing")

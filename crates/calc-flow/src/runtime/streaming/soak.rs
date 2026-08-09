@@ -37,8 +37,9 @@ use super::{
         SourceDescriptor, StreamProgressRuntimeConfig, WatermarkPolicy, prepare_stream_job,
     },
     runner::{
-        CheckpointFaultMode, CheckpointFaultPoint, CheckpointRuntimeSpec, ContinuousJob,
-        ContinuousJobState, ContinuousRunner, TerminalCause,
+        CheckpointFaultMode, CheckpointFaultPoint, CheckpointRuntimeSpec,
+        CheckpointStartedTestGate, ContinuousJob, ContinuousJobState, ContinuousRunner,
+        TerminalCause,
     },
     source_task::{
         AcceptedSequenceRecorder, Cursor, SourceBinding, SourceCapabilities, SourceEvent,
@@ -6296,6 +6297,146 @@ async fn private_benchmark_smoke_runs_twelve_honest_cases() {
             assert_eq!(report.manifest_count, expected_manifests);
         }
     }
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the late periodic race proves one epoch across live completion and terminal restart"
+)]
+async fn late_periodic_cut_promotes_the_same_epoch_to_terminal() {
+    let directory = tempfile::tempdir().unwrap();
+    let sink_root = directory.path().join("sinks");
+    let manifest_root = directory.path().join("manifests");
+    let backend = Arc::new(
+        LocalStateBackend::new(directory.path().join("state"))
+            .await
+            .unwrap(),
+    );
+    let source_opens = Arc::new(Mutex::new(Vec::new()));
+    let source_closed = Arc::new(AtomicUsize::new(0));
+    let sink_closed = Arc::new(AtomicUsize::new(0));
+    let sink_writes = Arc::new(AtomicUsize::new(0));
+    let gate = CheckpointStartedTestGate::default();
+    let config = StreamRuntimeConfig {
+        checkpoint_interval: Duration::from_millis(1),
+        checkpoint_timeout: Duration::from_secs(1),
+        retained_epochs: 2,
+        ..StreamRuntimeConfig::default()
+    };
+    let spec = checkpoint_matrix_spec(
+        30_001,
+        &sink_root,
+        &source_opens,
+        &source_closed,
+        &sink_closed,
+        &sink_writes,
+        Duration::from_millis(10),
+        false,
+        CancellationToken::new(),
+        true,
+    );
+    let checkpoint = CheckpointRuntimeSpec::new(
+        Arc::clone(&backend) as Arc<dyn StateBackend>,
+        &manifest_root,
+        config,
+    )
+    .unwrap()
+    .with_started_gate(gate.clone());
+    let mut runner = ContinuousRunner::new();
+    let job = runner.start_checkpointed(spec, checkpoint).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), gate.wait_until_entered())
+        .await
+        .expect("the periodic checkpoint did not reach its Started boundary");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let status = job.status();
+            if status.sources.len() == 2 && status.sources.values().all(|source| source.ended) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("finite sources did not end while the periodic cut was paused");
+    gate.release();
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), job.wait())
+        .await
+        .expect("the promoted terminal checkpoint hung");
+    assert_eq!(outcome.state, ContinuousJobState::Completed);
+    let status = job.status();
+    let checkpoint = status.checkpoint.as_ref().unwrap();
+    assert_eq!(checkpoint.current_epoch, None);
+    assert_eq!(checkpoint.phase, None);
+    assert!(!checkpoint.terminal);
+    assert_eq!(checkpoint.last_completed_epoch, Some(Epoch::INITIAL));
+    assert_eq!(status.metrics.checkpoints.requested, 1);
+    assert_eq!(status.metrics.checkpoints.terminal_requested, 1);
+    assert_eq!(status.metrics.checkpoints.completed, 1);
+    assert_eq!(status.metrics.checkpoints.terminal_completed, 1);
+    assert_eq!(status.metrics.checkpoints.failed, 0);
+    assert!(status.tasks.is_empty());
+    assert!(status.edges.values().all(|edge| edge.queue_depth == 0));
+    drop(job);
+    runner.shutdown().await.unwrap();
+    assert_eq!(runner.registry_counts(), (0, 0));
+
+    let manifests = checkpoint_manifest_documents(&manifest_root).await;
+    assert_eq!(manifests.len(), 1);
+    let manifest = &manifests[0];
+    assert_eq!(manifest.epoch(), Epoch::INITIAL);
+    assert!(manifest.sources().values().all(|source| source.ended));
+    assert!(manifest.operators().values().all(|operator| {
+        operator
+            .progress
+            .values()
+            .all(|ingress| matches!(ingress.state, crate::ManifestIngressState::Ended))
+    }));
+    assert_eq!(
+        read_checkpoint_matrix_visible(&sink_root)
+            .await
+            .values()
+            .map(Vec::len)
+            .sum::<usize>(),
+        4,
+    );
+    assert_eq!(source_opens.lock().len(), 2);
+    assert_eq!(source_closed.load(Ordering::SeqCst), 2);
+    assert_eq!(sink_closed.load(Ordering::SeqCst), 2);
+
+    let restart_spec = checkpoint_matrix_spec(
+        30_002,
+        &sink_root,
+        &source_opens,
+        &source_closed,
+        &sink_closed,
+        &sink_writes,
+        Duration::ZERO,
+        false,
+        CancellationToken::new(),
+        true,
+    );
+    let restart_checkpoint =
+        CheckpointRuntimeSpec::new(backend as Arc<dyn StateBackend>, &manifest_root, config)
+            .unwrap();
+    let mut restart_runner = ContinuousRunner::new();
+    let restart_job = restart_runner
+        .start_checkpointed(restart_spec, restart_checkpoint)
+        .await
+        .unwrap();
+    let restart_outcome = tokio::time::timeout(Duration::from_secs(5), restart_job.wait())
+        .await
+        .expect("terminal restart hung");
+    assert_eq!(restart_outcome.state, ContinuousJobState::Completed);
+    assert_eq!(source_opens.lock().len(), 2);
+    assert_eq!(source_closed.load(Ordering::SeqCst), 2);
+    assert_eq!(sink_closed.load(Ordering::SeqCst), 4);
+    assert_eq!(checkpoint_manifest_documents(&manifest_root).await.len(), 1);
+    drop(restart_job);
+    restart_runner.shutdown().await.unwrap();
+    assert_eq!(restart_runner.registry_counts(), (0, 0));
 }
 
 #[test]
