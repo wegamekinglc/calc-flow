@@ -49,11 +49,11 @@ use crate::{
     AggregateFunction, Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken,
     CheckpointManifest as BenchmarkCheckpointManifest, CheckpointManifestFields,
     CursorManifestEntry, Edge, EdgeBudget, Epoch, EventTime, JsonMap, LocalStateBackend,
-    ManifestIngressState, OperatorManifestEntry, OperatorMetadata, OperatorStateSnapshot,
-    PipelineBuilder, Port, PortEndpoint, RecoveryStatus, Result, SourceWatermarkManifestState,
-    StateBackend, StateLineageBackend, StateLineageKey, StreamCollector, StreamOperator,
-    StreamOperatorContext, StreamRequirements, StreamRuntimeConfig, UdfRegistry, UnionOperator,
-    WindowAggregateOperator, WindowSpec,
+    OperatorManifestEntry, OperatorMetadata, OperatorStateSnapshot, PipelineBuilder, Port,
+    PortEndpoint, RecoveryStatus, Result, SourceWatermarkManifestState, StateBackend,
+    StateLineageBackend, StateLineageKey, StreamCollector, StreamOperator, StreamOperatorContext,
+    StreamRequirements, StreamRuntimeConfig, UdfRegistry, UnionOperator, WindowAggregateOperator,
+    WindowSpec,
     state::{ManifestTransaction, PreparedEpochManifest, PreparedManifestIdentity},
 };
 
@@ -104,6 +104,8 @@ const CHECKPOINT_SOAK_PROCESS_SCHEMA: &str = "calc-flow.m5-checkpoint-soak-proce
 const CHECKPOINT_SOAK_PLAN_SCHEMA: &str = "calc-flow.m5-checkpoint-soak-plan.v1";
 const CHECKPOINT_SOAK_GENERATIONS: usize = 3;
 const CHECKPOINT_SOAK_REPORT_LIMIT: u64 = 1 << 20;
+const CHECKPOINT_SOAK_CADENCE_TOLERANCE: Duration = Duration::from_secs(1);
+const MAX_CHECKPOINT_SOAK_RESTART_GAP: Duration = Duration::from_secs(60);
 const CHECKPOINT_BENCHMARK_COMMAND: &str = "CARGO_TARGET_DIR=<fresh-candidate-target> CARGO_INCREMENTAL=0 CALC_FLOW_M5_CHECKPOINT_BENCHMARK=1 CALC_FLOW_M5_CHECKPOINT_BENCHMARK_RUN_ID=<unique-run-id> CALC_FLOW_M5_PRIVATE_SOURCE_COMMIT=<candidate-commit> CALC_FLOW_M5_PRIVATE_SOURCE_TREE=<candidate-tree> cargo test --release --locked -p calc-flow --lib runtime::streaming::soak::private_m5_epoch_checkpoint_absolute_benchmark -- --ignored --exact --nocapture";
 const M5_PRIVATE_BENCHMARK_CASES: [&str; 12] = [
     "m5/private_path/barrier_cut_single_source",
@@ -992,8 +994,9 @@ struct CheckpointMatrixSource {
     next_sequence: u64,
     pending_watermark: bool,
     ended: bool,
+    pause_before_eof: bool,
     poll_delay: Duration,
-    opened_with: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
+    opened_with: SourceOpenHistory,
     closed: Arc<AtomicUsize>,
 }
 
@@ -1029,9 +1032,10 @@ fn checkpoint_matrix_cursor_order(source_id: &str) -> Vec<u8> {
 #[async_trait]
 impl StreamSource for CheckpointMatrixSource {
     async fn open(&mut self, cursor: Option<Cursor>) -> Result<()> {
-        self.opened_with
-            .lock()
-            .push(cursor.as_ref().map(|cursor| cursor.order().to_vec()));
+        self.opened_with.lock().push((
+            self.source_id.into(),
+            cursor.as_ref().map(|cursor| cursor.order().to_vec()),
+        ));
         if let Some(cursor) = cursor {
             let bytes: [u8; 8] =
                 cursor
@@ -1056,6 +1060,9 @@ impl StreamSource for CheckpointMatrixSource {
         if self.pending_watermark {
             self.pending_watermark = false;
             return Ok(Some(SourceEvent::Watermark(EventTime::from_micros(1))));
+        }
+        if self.next_sequence != 0 && self.pause_before_eof {
+            return std::future::pending().await;
         }
         if self.next_sequence == 0 {
             self.next_sequence = 1;
@@ -1504,11 +1511,12 @@ fn checkpoint_matrix_window() -> WindowAggregateOperator {
 fn checkpoint_matrix_spec(
     job_id: u64,
     sink_root: &Path,
-    source_opened_with: &Arc<Mutex<Vec<Option<Vec<u8>>>>>,
+    source_opened_with: &SourceOpenHistory,
     source_closed: &Arc<AtomicUsize>,
     sink_closed: &Arc<AtomicUsize>,
     sink_writes: &Arc<AtomicUsize>,
     source_poll_delay: Duration,
+    pause_before_eof: bool,
     cancellation: CancellationToken,
     exactly_once: bool,
 ) -> ContinuousJobSpec {
@@ -1541,12 +1549,6 @@ fn checkpoint_matrix_spec(
         .unwrap()
         .add_checkpoint_capable_node(
             "branch_a",
-            Box::new(CheckpointMatrixForward::new(window_fields.clone()))
-                as Box<dyn StreamOperator>,
-        )
-        .unwrap()
-        .add_checkpoint_capable_node(
-            "branch_b",
             Box::new(CheckpointMatrixForward::new(window_fields)) as Box<dyn StreamOperator>,
         )
         .unwrap()
@@ -1560,25 +1562,14 @@ fn checkpoint_matrix_spec(
             PortEndpoint::new("branch_a", "input").unwrap(),
         ))
         .unwrap()
-        .connect(Edge::new(
-            PortEndpoint::new("window", "output").unwrap(),
-            PortEndpoint::new("branch_b", "input").unwrap(),
-        ))
-        .unwrap()
         .compile_stream(
             &UdfRegistry::new().snapshot(),
             &if exactly_once {
                 StreamRequirements {
-                    delivery: BTreeMap::from([
-                        (
-                            "branch_a.output".into(),
-                            crate::DeliveryGuarantee::ExactlyOnce,
-                        ),
-                        (
-                            "branch_b.output".into(),
-                            crate::DeliveryGuarantee::ExactlyOnce,
-                        ),
-                    ]),
+                    delivery: BTreeMap::from([(
+                        "output".into(),
+                        crate::DeliveryGuarantee::ExactlyOnce,
+                    )]),
                 }
             } else {
                 StreamRequirements::default()
@@ -1595,6 +1586,7 @@ fn checkpoint_matrix_spec(
                     next_sequence: 0,
                     pending_watermark: false,
                     ended: false,
+                    pause_before_eof,
                     poll_delay: source_poll_delay,
                     opened_with: Arc::clone(source_opened_with),
                     closed: Arc::clone(source_closed),
@@ -1605,7 +1597,7 @@ fn checkpoint_matrix_spec(
             .unwrap(),
         })
         .collect();
-    let sinks = [("branch_a.output", "sink-a"), ("branch_b.output", "sink-b")]
+    let sinks = [("output", "sink-a"), ("output", "sink-b")]
         .into_iter()
         .map(|(output_id, sink_id)| NamedSinkBinding {
             output_id: output_id.into(),
@@ -1786,6 +1778,10 @@ fn checkpoint_restart_soak_spec(
 struct CheckpointFaultMatrixReport {
     selected_before_restart: Option<Epoch>,
     prepared_artifacts_after_failure: usize,
+    committed_sinks_before_restart: BTreeSet<String>,
+    prepared_sinks_before_restart: BTreeSet<String>,
+    restart_source_opens: Vec<(String, Option<Vec<u8>>)>,
+    final_manifest_cursors: BTreeMap<String, CursorManifestEntry>,
     restored_epoch: Option<Epoch>,
     restored_cursor_orders: BTreeMap<String, Vec<u8>>,
     sources_ended: bool,
@@ -3075,6 +3071,14 @@ enum PrivateFullRunnerMode {
     CheckpointEnabled,
 }
 
+fn private_full_runner_sink_delay(mode: PrivateFullRunnerMode) -> Duration {
+    if matches!(mode, PrivateFullRunnerMode::NoCheckpoint) {
+        Duration::ZERO
+    } else {
+        Duration::from_millis(5)
+    }
+}
+
 struct PrivateFullRunnerFixture {
     directory: tempfile::TempDir,
     sink_root: PathBuf,
@@ -3104,11 +3108,8 @@ async fn prepare_private_full_runner_benchmark(
         &source_closed,
         &sink_closed,
         &sink_writes,
-        if matches!(mode, PrivateFullRunnerMode::CheckpointEnabled) {
-            Duration::from_millis(5)
-        } else {
-            Duration::ZERO
-        },
+        private_full_runner_sink_delay(mode),
+        false,
         CancellationToken::new(),
         checkpointed,
     );
@@ -3319,11 +3320,7 @@ async fn run_checkpoint_restart_fault_case(
     let sink_root = directory.path().join("sinks");
     let backend = Arc::new(LocalStateBackend::new(&state_root).await.unwrap());
     let config = StreamRuntimeConfig {
-        checkpoint_interval: if point == CheckpointFaultPoint::PartialAlignment {
-            Duration::from_millis(1)
-        } else {
-            Duration::from_secs(3_600)
-        },
+        checkpoint_interval: Duration::from_millis(10),
         checkpoint_timeout: Duration::from_secs(5),
         retained_epochs: 2,
         ..StreamRuntimeConfig::default()
@@ -3346,6 +3343,7 @@ async fn run_checkpoint_restart_fault_case(
         } else {
             Duration::ZERO
         },
+        true,
         first_cancellation.clone(),
         true,
     );
@@ -3384,11 +3382,21 @@ async fn run_checkpoint_restart_fault_case(
         }
     };
     let manifest_path = manifest_root.join("manifest-00000000000000000001.json");
-    let selected_before_restart = if manifest_path.exists() {
-        Some(Epoch::INITIAL)
+    let selected_before_restart_manifest = if manifest_path.exists() {
+        Some(
+            crate::CheckpointManifest::from_bytes(&tokio::fs::read(&manifest_path).await.unwrap())
+                .unwrap(),
+        )
     } else {
         None
     };
+    let selected_before_restart = selected_before_restart_manifest
+        .as_ref()
+        .map(crate::CheckpointManifest::epoch);
+    let window_state_restored = selected_before_restart_manifest
+        .as_ref()
+        .and_then(|manifest| manifest.operators().get("window"))
+        .is_some_and(|entry| !entry.segments.is_empty());
     drop(first_job);
     first_runner.shutdown().await.unwrap();
     assert_eq!(first_runner.registry_counts(), (0, 0));
@@ -3403,6 +3411,21 @@ async fn run_checkpoint_restart_fault_case(
                 .exists()
         })
         .count();
+    let prepared_sinks_before_restart = ["sink-a", "sink-b"]
+        .into_iter()
+        .filter(|sink_id| {
+            sink_root
+                .join(sink_id)
+                .join("prepared-00000000000000000001.json")
+                .exists()
+        })
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    let committed_sinks_before_restart = ["sink-a", "sink-b"]
+        .into_iter()
+        .filter(|sink_id| sink_root.join(sink_id).join("visible.json").exists())
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
 
     let restart_source_opens = Arc::new(Mutex::new(Vec::new()));
     let restart_source_closed = Arc::new(AtomicUsize::new(0));
@@ -3416,6 +3439,7 @@ async fn run_checkpoint_restart_fault_case(
         &restart_sink_closed,
         &restart_sink_writes,
         Duration::ZERO,
+        false,
         CancellationToken::new(),
         true,
     );
@@ -3454,9 +3478,20 @@ async fn run_checkpoint_restart_fault_case(
     restart_runner.shutdown().await.unwrap();
     assert_eq!(restart_runner.registry_counts(), (0, 0));
 
-    let manifest =
-        crate::CheckpointManifest::from_bytes(&tokio::fs::read(&manifest_path).await.unwrap())
-            .unwrap();
+    let manifests = checkpoint_manifest_documents(&manifest_root).await;
+    let manifest = manifests
+        .last()
+        .expect("restart matrix published no final manifest");
+    let final_manifest_cursors = manifest
+        .sources()
+        .iter()
+        .map(|(source_id, entry)| {
+            (
+                source_id.clone(),
+                entry.cursor.clone().expect("matrix source cursor is final"),
+            )
+        })
+        .collect();
     let restored_cursor_orders = manifest
         .sources()
         .iter()
@@ -3477,13 +3512,6 @@ async fn run_checkpoint_restart_fault_case(
             } if watermark == EventTime::from_micros(1)
         )
     });
-    let window_state_restored = manifest.operators().get("window").is_some_and(|entry| {
-        !entry.segments.is_empty()
-            && entry
-                .progress
-                .values()
-                .all(|ingress| ingress.state == ManifestIngressState::Ended)
-    });
     let visible = read_checkpoint_matrix_visible(&sink_root).await;
     let observed = visible.values().flatten().cloned().collect::<Vec<_>>();
     let unique = observed.iter().cloned().collect::<BTreeSet<_>>();
@@ -3499,9 +3527,15 @@ async fn run_checkpoint_restart_fault_case(
     let duplicate_records = observed.len().saturating_sub(unique.len());
     let missing_records = expected.difference(&unique).count();
 
+    let mut restart_source_open_events = restart_source_opens.lock().clone();
+    restart_source_open_events.sort_by(|left, right| left.0.cmp(&right.0));
     CheckpointFaultMatrixReport {
         selected_before_restart,
         prepared_artifacts_after_failure,
+        committed_sinks_before_restart,
+        prepared_sinks_before_restart,
+        restart_source_opens: restart_source_open_events,
+        final_manifest_cursors,
         restored_epoch: Some(manifest.epoch()),
         restored_cursor_orders,
         sources_ended,
@@ -3555,6 +3589,7 @@ struct CheckpointSoakProcessPlan {
     executable_sha256: String,
     run_root: PathBuf,
     parent_pid: u32,
+    parent_launch_offset_micros: u64,
     generation: usize,
     sample_start: usize,
     sample_end: usize,
@@ -3572,7 +3607,7 @@ struct CheckpointSoakProcessPlan {
 #[serde(deny_unknown_fields)]
 struct CheckpointSoakProcessSample {
     index: usize,
-    elapsed_seconds: f64,
+    elapsed_micros: u64,
     rss_kib: u64,
     task_count: usize,
     maximum_queue_depth: usize,
@@ -3597,6 +3632,8 @@ struct CheckpointSoakProcessReport {
     generation: usize,
     sample_start: usize,
     sample_end: usize,
+    generation_started_micros: u64,
+    generation_finished_micros: u64,
     restored_epoch: Option<u64>,
     restored_cursor_orders: BTreeMap<String, Option<String>>,
     terminal_epoch: u64,
@@ -3624,9 +3661,17 @@ struct CheckpointSoakProcessReport {
     temporary_artifacts: usize,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct CheckpointSoakParentTiming {
+    generation: usize,
+    launch_micros: u64,
+    finish_micros: u64,
+}
+
 struct CheckpointSoakProcessEvidence {
     report: CheckpointRestartSoakReport,
     processes: Vec<CheckpointSoakProcessReport>,
+    parent_timings: Vec<CheckpointSoakParentTiming>,
     rss_samples: Vec<RssSample>,
 }
 
@@ -3637,6 +3682,9 @@ fn checkpoint_restart_soak_metadata(commit: &str, kernel: &str, rustc: &str) -> 
         "target_duration_seconds": 1_200,
         "sample_count": CHECKPOINT_SOAK_SAMPLE_COUNT,
         "cadence_seconds": CHECKPOINT_SOAK_CADENCE.as_secs(),
+        "cadence_tolerance_seconds": CHECKPOINT_SOAK_CADENCE_TOLERANCE.as_secs(),
+        "maximum_restart_gap_seconds": MAX_CHECKPOINT_SOAK_RESTART_GAP.as_secs(),
+        "timing_source": "parent_std_instant_plus_child_local_instant",
         "restart_sample_indices": CHECKPOINT_SOAK_RESTART_SAMPLES,
         "restart_kind": "os_process",
         "process_generations": CHECKPOINT_SOAK_GENERATIONS,
@@ -3719,6 +3767,7 @@ fn checkpoint_soak_plan_hash(plan: &CheckpointSoakProcessPlan) -> String {
             "executable_sha256": plan.executable_sha256,
             "run_root": plan.run_root,
             "parent_pid": plan.parent_pid,
+            "parent_launch_offset_micros": plan.parent_launch_offset_micros,
             "generation": plan.generation,
             "sample_start": plan.sample_start,
             "sample_end": plan.sample_end,
@@ -3732,6 +3781,21 @@ fn checkpoint_soak_plan_hash(plan: &CheckpointSoakProcessPlan) -> String {
         }))
         .unwrap(),
     )
+}
+
+fn bind_checkpoint_soak_parent_launch(
+    plan: &mut CheckpointSoakProcessPlan,
+    elapsed: Duration,
+) -> Result<()> {
+    plan.parent_launch_offset_micros = checkpoint_soak_parent_elapsed_micros(elapsed)?;
+    plan.config_hash = checkpoint_soak_plan_hash(plan);
+    Ok(())
+}
+
+fn checkpoint_soak_parent_elapsed_micros(elapsed: Duration) -> Result<u64> {
+    u64::try_from(elapsed.as_micros()).map_err(|_| {
+        checkpoint_soak_process_error("checkpoint soak parent clock exhausted u64 microseconds")
+    })
 }
 
 fn checkpoint_soak_process_plans(
@@ -3754,6 +3818,7 @@ fn checkpoint_soak_process_plans(
                 executable_sha256: executable_sha256.into(),
                 run_root: run_root.to_path_buf(),
                 parent_pid: std::process::id(),
+                parent_launch_offset_micros: 0,
                 generation,
                 sample_start: samples.start,
                 sample_end: samples.end,
@@ -3876,10 +3941,18 @@ where
             path.display()
         ))
     })?;
-    if serde_json::to_vec(&value).unwrap() != bytes {
+    let canonical = serde_json::to_vec(&value).unwrap();
+    if canonical != bytes {
+        let mismatch = canonical
+            .iter()
+            .zip(&bytes)
+            .position(|(canonical, stored)| canonical != stored)
+            .unwrap_or(canonical.len().min(bytes.len()));
         return Err(checkpoint_soak_process_error(format!(
-            "checkpoint soak document {} is not canonical",
-            path.display()
+            "checkpoint soak document {} is not canonical at byte {mismatch} (stored {}, canonical {})",
+            path.display(),
+            bytes.len(),
+            canonical.len(),
         )));
     }
     Ok(value)
@@ -4057,6 +4130,7 @@ async fn checkpoint_soak_process_sample(
     state_root: &Path,
     manifest_root: &Path,
     index: usize,
+    elapsed_micros: u64,
 ) -> Result<CheckpointSoakProcessSample> {
     let status = job.status();
     if status.state != ContinuousJobState::Running || status.metrics.checkpoints.failed != 0 {
@@ -4085,7 +4159,7 @@ async fn checkpoint_soak_process_sample(
         .unwrap_or(0);
     Ok(CheckpointSoakProcessSample {
         index,
-        elapsed_seconds: elapsed_at_sample(index),
+        elapsed_micros,
         rss_kib: checkpoint_soak_process_rss_kib().await?,
         task_count: status.tasks.len(),
         maximum_queue_depth,
@@ -4197,6 +4271,8 @@ async fn read_checkpoint_manifest_document(path: &Path) -> Option<crate::Checkpo
 async fn run_checkpoint_soak_child(
     plan: &CheckpointSoakProcessPlan,
 ) -> Result<CheckpointSoakProcessReport> {
+    let generation_started = tokio::time::Instant::now();
+    let generation_started_micros = plan.parent_launch_offset_micros;
     validate_checkpoint_soak_plan(plan)?;
     let state_root = plan.run_root.join("state");
     let manifest_root = plan.run_root.join("manifests");
@@ -4253,12 +4329,26 @@ async fn run_checkpoint_soak_child(
     if plan.mode == CheckpointSoakProcessMode::Smoke {
         wait_for_completed_checkpoints(&job, plan.target_checkpoints).await;
     } else {
-        let started = tokio::time::Instant::now();
         for (local_index, index) in (plan.sample_start..plan.sample_end).enumerate() {
             let sample_number = u32::try_from(local_index + 1).unwrap();
-            tokio::time::sleep_until(started + CHECKPOINT_SOAK_CADENCE * sample_number).await;
+            tokio::time::sleep_until(generation_started + CHECKPOINT_SOAK_CADENCE * sample_number)
+                .await;
+            let elapsed_micros = generation_started_micros
+                .checked_add(checkpoint_soak_parent_elapsed_micros(
+                    generation_started.elapsed(),
+                )?)
+                .ok_or_else(|| {
+                    checkpoint_soak_process_error("checkpoint soak sample clock overflowed")
+                })?;
             samples.push(
-                checkpoint_soak_process_sample(&job, &state_root, &manifest_root, index).await?,
+                checkpoint_soak_process_sample(
+                    &job,
+                    &state_root,
+                    &manifest_root,
+                    index,
+                    elapsed_micros,
+                )
+                .await?,
             );
         }
     }
@@ -4299,6 +4389,11 @@ async fn run_checkpoint_soak_child(
     let observed = visible.values().flatten().cloned().collect::<Vec<_>>();
     let unique = observed.iter().cloned().collect::<BTreeSet<_>>();
     let expected = checkpoint_soak_expected_records(selected_terminal);
+    let generation_finished_micros = generation_started_micros
+        .checked_add(checkpoint_soak_parent_elapsed_micros(
+            generation_started.elapsed(),
+        )?)
+        .ok_or_else(|| checkpoint_soak_process_error("checkpoint soak child clock overflowed"))?;
     Ok(CheckpointSoakProcessReport {
         schema: CHECKPOINT_SOAK_PROCESS_SCHEMA.into(),
         commit: plan.commit.clone(),
@@ -4310,6 +4405,8 @@ async fn run_checkpoint_soak_child(
         generation: plan.generation,
         sample_start: plan.sample_start,
         sample_end: plan.sample_end,
+        generation_started_micros,
+        generation_finished_micros,
         restored_epoch,
         restored_cursor_orders,
         terminal_epoch: selected_terminal.epoch().as_u64(),
@@ -4362,17 +4459,30 @@ fn validate_checkpoint_soak_samples(
         .iter()
         .map(|sample| sample.index)
         .collect::<Vec<_>>();
-    if observed != expected
-        || report.samples.iter().any(|sample| {
-            !sample.elapsed_seconds.is_finite()
-                || sample.elapsed_seconds.to_bits() != elapsed_at_sample(sample.index).to_bits()
+    let cadence_micros = u64::try_from(CHECKPOINT_SOAK_CADENCE.as_micros()).unwrap();
+    let tolerance_micros = u64::try_from(CHECKPOINT_SOAK_CADENCE_TOLERANCE.as_micros()).unwrap();
+    let invalid_sample = report
+        .samples
+        .iter()
+        .enumerate()
+        .any(|(local_index, sample)| {
+            let target = cadence_micros * u64::try_from(local_index + 1).unwrap();
+            let Some(observed) = sample
+                .elapsed_micros
+                .checked_sub(report.generation_started_micros)
+            else {
+                return true;
+            };
+            observed < target - tolerance_micros
+                || observed > target + tolerance_micros
+                || sample.elapsed_micros > report.generation_finished_micros
                 || sample.rss_kib == 0
                 || sample.task_count == 0
                 || sample.failed_checkpoints != 0
                 || sample.manifest_count > 3
                 || sample.state_bytes > MAX_CHECKPOINT_SOAK_STATE_BYTES
-        })
-    {
+        });
+    if observed != expected || invalid_sample {
         return Err(checkpoint_soak_process_error(
             "checkpoint soak child sample schedule or bounds are invalid",
         ));
@@ -4447,6 +4557,8 @@ fn validate_checkpoint_soak_report(
         || report.generation != plan.generation
         || report.sample_start != plan.sample_start
         || report.sample_end != plan.sample_end
+        || report.generation_started_micros != plan.parent_launch_offset_micros
+        || report.generation_finished_micros <= report.generation_started_micros
         || report.terminal_cause != expected_cause
         || report.source_open_events != 2
         || report.source_close_events != 2
@@ -4609,10 +4721,12 @@ fn validate_checkpoint_soak_process_set(
     plans: &[CheckpointSoakProcessPlan],
     reports: &[CheckpointSoakProcessReport],
     exit_codes: &[i32],
+    parent_timings: &[CheckpointSoakParentTiming],
 ) -> Result<()> {
     if plans.len() != CHECKPOINT_SOAK_GENERATIONS
         || reports.len() != plans.len()
         || exit_codes.len() != plans.len()
+        || parent_timings.len() != plans.len()
     {
         return Err(checkpoint_soak_process_error(
             "checkpoint soak process set is incomplete",
@@ -4630,6 +4744,7 @@ fn validate_checkpoint_soak_process_set(
     for ((plan, report), exit_code) in plans.iter().zip(reports).zip(exit_codes) {
         validate_checkpoint_soak_report(plan, report, *exit_code)?;
     }
+    validate_checkpoint_soak_timeline(plans, reports, parent_timings)?;
     for pair in reports.windows(2) {
         let previous = &pair[0];
         let restarted = &pair[1];
@@ -4668,9 +4783,85 @@ fn validate_checkpoint_soak_process_set(
     Ok(())
 }
 
+fn validate_checkpoint_soak_timeline(
+    plans: &[CheckpointSoakProcessPlan],
+    reports: &[CheckpointSoakProcessReport],
+    parent_timings: &[CheckpointSoakParentTiming],
+) -> Result<()> {
+    let maximum_restart_gap = u64::try_from(MAX_CHECKPOINT_SOAK_RESTART_GAP.as_micros()).unwrap();
+    for ((plan, report), timing) in plans.iter().zip(reports).zip(parent_timings) {
+        if timing.generation != plan.generation
+            || timing.launch_micros != report.generation_started_micros
+            || timing.finish_micros < report.generation_finished_micros
+        {
+            return Err(checkpoint_soak_process_error(
+                "checkpoint soak parent timing does not bound the child report",
+            ));
+        }
+    }
+    for pair in parent_timings.windows(2) {
+        let Some(gap) = pair[1].launch_micros.checked_sub(pair[0].finish_micros) else {
+            return Err(checkpoint_soak_process_error(
+                "checkpoint soak process restart gap is invalid",
+            ));
+        };
+        if gap > maximum_restart_gap {
+            return Err(checkpoint_soak_process_error(
+                "checkpoint soak process restart gap is invalid",
+            ));
+        }
+    }
+    if plans[0].mode == CheckpointSoakProcessMode::Smoke {
+        return Ok(());
+    }
+    let samples = reports
+        .iter()
+        .flat_map(|report| report.samples.iter())
+        .collect::<Vec<_>>();
+    let tolerance = u64::try_from(CHECKPOINT_SOAK_CADENCE_TOLERANCE.as_micros()).unwrap();
+    let cadence = u64::try_from(CHECKPOINT_SOAK_CADENCE.as_micros()).unwrap();
+    for pair in samples.windows(2) {
+        let Some(gap) = pair[1].elapsed_micros.checked_sub(pair[0].elapsed_micros) else {
+            return Err(checkpoint_soak_process_error(
+                "checkpoint soak observed cadence or restart gap is invalid",
+            ));
+        };
+        let restart_boundary = CHECKPOINT_SOAK_RESTART_SAMPLES.contains(&pair[0].index);
+        let maximum = if restart_boundary {
+            cadence + maximum_restart_gap
+        } else {
+            cadence + tolerance
+        };
+        if gap < cadence - tolerance || gap > maximum {
+            return Err(checkpoint_soak_process_error(
+                "checkpoint soak observed cadence or restart gap is invalid",
+            ));
+        }
+    }
+    let Some(first) = samples.first() else {
+        return Err(checkpoint_soak_process_error(
+            "standard checkpoint soak produced no real samples",
+        ));
+    };
+    let last = samples.last().unwrap();
+    let maximum_final_elapsed =
+        u64::try_from(TARGET_DURATION.as_micros()).unwrap() + 2 * maximum_restart_gap + tolerance;
+    if first.elapsed_micros < cadence - tolerance
+        || first.elapsed_micros > cadence + tolerance
+        || last.elapsed_micros < u64::try_from(TARGET_DURATION.as_micros()).unwrap()
+        || last.elapsed_micros > maximum_final_elapsed
+    {
+        return Err(checkpoint_soak_process_error(
+            "checkpoint soak observed timeline does not span the real target duration",
+        ));
+    }
+    Ok(())
+}
+
 fn aggregate_checkpoint_soak_processes(
     reports: Vec<CheckpointSoakProcessReport>,
     exit_codes: Vec<i32>,
+    parent_timings: Vec<CheckpointSoakParentTiming>,
 ) -> CheckpointSoakProcessEvidence {
     let final_report = reports.last().unwrap();
     let compacted_epochs = reports
@@ -4681,7 +4872,7 @@ fn aggregate_checkpoint_soak_processes(
         .iter()
         .flat_map(|report| {
             report.samples.iter().map(|sample| RssSample {
-                elapsed_seconds: sample.elapsed_seconds,
+                elapsed_seconds: Duration::from_micros(sample.elapsed_micros).as_secs_f64(),
                 rss_kib: sample.rss_kib,
             })
         })
@@ -4725,6 +4916,7 @@ fn aggregate_checkpoint_soak_processes(
     CheckpointSoakProcessEvidence {
         report,
         processes: reports,
+        parent_timings,
         rss_samples,
     }
 }
@@ -4742,16 +4934,29 @@ async fn run_checkpoint_soak_processes(
     let executable = checkpoint_soak_test_executable()?;
     let executable_sha256 = checkpoint_soak_file_sha256(&executable)?;
     let commit = strict_command_output("git", &["rev-parse", "HEAD"])?;
-    let plans = checkpoint_soak_process_plans(&run_root, &commit, &executable_sha256, mode);
+    let mut plans = checkpoint_soak_process_plans(&run_root, &commit, &executable_sha256, mode);
     let mut reports = Vec::with_capacity(plans.len());
     let mut exit_codes = Vec::with_capacity(plans.len());
-    for plan in &plans {
+    let mut parent_timings = Vec::with_capacity(plans.len());
+    let parent_started = std::time::Instant::now();
+    for plan in &mut plans {
+        bind_checkpoint_soak_parent_launch(plan, parent_started.elapsed())?;
+        let launch_micros = plan.parent_launch_offset_micros;
         let (exit_code, report) = spawn_checkpoint_soak_process(&executable, plan).await?;
+        parent_timings.push(CheckpointSoakParentTiming {
+            generation: plan.generation,
+            launch_micros,
+            finish_micros: checkpoint_soak_parent_elapsed_micros(parent_started.elapsed())?,
+        });
         exit_codes.push(exit_code);
         reports.push(report);
     }
-    validate_checkpoint_soak_process_set(&plans, &reports, &exit_codes)?;
-    Ok(aggregate_checkpoint_soak_processes(reports, exit_codes))
+    validate_checkpoint_soak_process_set(&plans, &reports, &exit_codes, &parent_timings)?;
+    Ok(aggregate_checkpoint_soak_processes(
+        reports,
+        exit_codes,
+        parent_timings,
+    ))
 }
 
 fn manifest_has_compacted_window(manifest: &crate::CheckpointManifest) -> bool {
@@ -4856,11 +5061,19 @@ fn checkpoint_soak_process_summary(
         "sample_count": evidence.rss_samples.len(),
         "restart_sample_indices": CHECKPOINT_SOAK_RESTART_SAMPLES,
         "restarts": report.restarts,
-        "processes": evidence.processes.iter().map(|process| json!({
+        "processes": evidence.processes.iter().zip(&evidence.parent_timings).map(|(process, timing)| json!({
             "generation": process.generation,
             "pid": process.pid,
             "exit_code": report.generation_exit_codes[process.generation],
             "sample_range": [process.sample_start, process.sample_end],
+            "generation_started_seconds": Duration::from_micros(
+                process.generation_started_micros,
+            ).as_secs_f64(),
+            "generation_finished_seconds": Duration::from_micros(
+                process.generation_finished_micros,
+            ).as_secs_f64(),
+            "parent_launch_seconds": Duration::from_micros(timing.launch_micros).as_secs_f64(),
+            "parent_finish_seconds": Duration::from_micros(timing.finish_micros).as_secs_f64(),
             "restored_epoch": process.restored_epoch,
             "terminal_epoch": process.terminal_epoch,
             "config_hash": process.config_hash,
@@ -5676,6 +5889,7 @@ fn checkpoint_soak_process_report_fixture(
     plan: &CheckpointSoakProcessPlan,
     pid: u32,
 ) -> CheckpointSoakProcessReport {
+    let generation_started_micros = plan.parent_launch_offset_micros;
     let restored_order = u64::try_from(plan.generation).unwrap() * 10;
     let terminal_order = restored_order + 10;
     let restored_cursor_orders = ["left", "right"]
@@ -5691,10 +5905,13 @@ fn checkpoint_soak_process_report_fixture(
         .into_iter()
         .map(|source_id| (source_id.into(), hex::encode(terminal_order.to_be_bytes())))
         .collect();
-    let samples = (plan.sample_start..plan.sample_end)
-        .map(|index| CheckpointSoakProcessSample {
+    let samples: Vec<CheckpointSoakProcessSample> = (plan.sample_start..plan.sample_end)
+        .enumerate()
+        .map(|(local_index, index)| CheckpointSoakProcessSample {
             index,
-            elapsed_seconds: elapsed_at_sample(index),
+            elapsed_micros: generation_started_micros
+                + u64::try_from(local_index + 1).unwrap()
+                    * u64::try_from(CHECKPOINT_SOAK_CADENCE.as_micros()).unwrap(),
             rss_kib: 100_000,
             task_count: 8,
             maximum_queue_depth: 1,
@@ -5717,6 +5934,12 @@ fn checkpoint_soak_process_report_fixture(
         generation: plan.generation,
         sample_start: plan.sample_start,
         sample_end: plan.sample_end,
+        generation_started_micros,
+        generation_finished_micros: samples
+            .last()
+            .map_or(generation_started_micros + 250_000, |sample| {
+                sample.elapsed_micros + 250_000
+            }),
         restored_epoch: (plan.generation > 0).then_some(restored_order),
         restored_cursor_orders,
         terminal_epoch: terminal_order,
@@ -5750,14 +5973,26 @@ fn checkpoint_soak_process_report_fixture(
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fail-closed evidence test mutates every independent process proof field"
+)]
 fn checkpoint_restart_process_evidence_fails_closed() {
     let directory = tempfile::tempdir().unwrap();
-    let plans = checkpoint_soak_process_plans(
+    let mut plans = checkpoint_soak_process_plans(
         directory.path(),
         &"a".repeat(40),
         &"b".repeat(64),
         CheckpointSoakProcessMode::Standard,
     );
+    for plan in &mut plans {
+        let generation = u64::try_from(plan.generation).unwrap();
+        bind_checkpoint_soak_parent_launch(
+            plan,
+            Duration::from_micros(250_000 + generation * 400_500_000),
+        )
+        .unwrap();
+    }
     let reports = plans
         .iter()
         .enumerate()
@@ -5769,47 +6004,135 @@ fn checkpoint_restart_process_evidence_fails_closed() {
         })
         .collect::<Vec<_>>();
     let exits = vec![0; CHECKPOINT_SOAK_GENERATIONS];
-    validate_checkpoint_soak_process_set(&plans, &reports, &exits).unwrap();
+    let parent_timings = reports
+        .iter()
+        .map(|report| CheckpointSoakParentTiming {
+            generation: report.generation,
+            launch_micros: report.generation_started_micros,
+            finish_micros: report.generation_finished_micros + 250_000,
+        })
+        .collect::<Vec<_>>();
+    validate_checkpoint_soak_process_set(&plans, &reports, &exits, &parent_timings).unwrap();
 
     let mut repeated_pid = reports.clone();
     repeated_pid[1].pid = repeated_pid[0].pid;
     assert!(matches!(
-        validate_checkpoint_soak_process_set(&plans, &repeated_pid, &exits),
+        validate_checkpoint_soak_process_set(&plans, &repeated_pid, &exits, &parent_timings),
         Err(CalcFlowError::InvalidArgument { message, .. })
             if message.contains("not distinct")
     ));
     let mut bad_exit = exits.clone();
     bad_exit[1] = 9;
-    assert!(validate_checkpoint_soak_process_set(&plans, &reports, &bad_exit).is_err());
+    assert!(
+        validate_checkpoint_soak_process_set(&plans, &reports, &bad_exit, &parent_timings).is_err()
+    );
 
     let mut wrong_identity = reports.clone();
     wrong_identity[1].config_hash = "c".repeat(64);
-    assert!(validate_checkpoint_soak_process_set(&plans, &wrong_identity, &exits).is_err());
+    assert!(
+        validate_checkpoint_soak_process_set(&plans, &wrong_identity, &exits, &parent_timings)
+            .is_err()
+    );
     let mut wrong_head = reports.clone();
     wrong_head[1].commit = "d".repeat(40);
-    assert!(validate_checkpoint_soak_process_set(&plans, &wrong_head, &exits).is_err());
+    assert!(
+        validate_checkpoint_soak_process_set(&plans, &wrong_head, &exits, &parent_timings).is_err()
+    );
     let mut wrong_root = reports.clone();
     wrong_root[1].run_root.push("different-root");
-    assert!(validate_checkpoint_soak_process_set(&plans, &wrong_root, &exits).is_err());
+    assert!(
+        validate_checkpoint_soak_process_set(&plans, &wrong_root, &exits, &parent_timings).is_err()
+    );
     let mut wrong_generation = reports.clone();
     wrong_generation[1].generation = 2;
-    assert!(validate_checkpoint_soak_process_set(&plans, &wrong_generation, &exits).is_err());
+    assert!(
+        validate_checkpoint_soak_process_set(&plans, &wrong_generation, &exits, &parent_timings)
+            .is_err()
+    );
     let mut in_memory_only = reports.clone();
     in_memory_only[1].restored_epoch = None;
-    assert!(validate_checkpoint_soak_process_set(&plans, &in_memory_only, &exits).is_err());
+    assert!(
+        validate_checkpoint_soak_process_set(&plans, &in_memory_only, &exits, &parent_timings)
+            .is_err()
+    );
 
     let mut sample_gap = reports.clone();
     sample_gap[1].samples.remove(0);
-    assert!(validate_checkpoint_soak_process_set(&plans, &sample_gap, &exits).is_err());
+    assert!(
+        validate_checkpoint_soak_process_set(&plans, &sample_gap, &exits, &parent_timings).is_err()
+    );
     let mut sample_duplicate = reports.clone();
     let duplicate = sample_duplicate[0].samples[39].clone();
     sample_duplicate[1].samples.insert(0, duplicate);
-    assert!(validate_checkpoint_soak_process_set(&plans, &sample_duplicate, &exits).is_err());
+    assert!(
+        validate_checkpoint_soak_process_set(&plans, &sample_duplicate, &exits, &parent_timings)
+            .is_err()
+    );
+
+    let mut mistimed_sample = reports.clone();
+    mistimed_sample[0].samples[5].elapsed_micros += 2_000_000;
+    assert!(matches!(
+        validate_checkpoint_soak_process_set(
+            &plans,
+            &mistimed_sample,
+            &exits,
+            &parent_timings,
+        ),
+        Err(CalcFlowError::InvalidArgument { message, .. })
+            if message.contains("sample schedule")
+    ));
+
+    let mut unbounded_gap_reports = reports.clone();
+    let mut unbounded_gap_timings = parent_timings.clone();
+    let shifted_launch = parent_timings[0].finish_micros
+        + u64::try_from(MAX_CHECKPOINT_SOAK_RESTART_GAP.as_micros()).unwrap()
+        + 1_000_000;
+    let shift = shifted_launch - unbounded_gap_reports[1].generation_started_micros;
+    unbounded_gap_reports[1].generation_started_micros += shift;
+    unbounded_gap_reports[1].generation_finished_micros += shift;
+    for sample in &mut unbounded_gap_reports[1].samples {
+        sample.elapsed_micros += shift;
+    }
+    unbounded_gap_timings[1].launch_micros += shift;
+    unbounded_gap_timings[1].finish_micros += shift;
+    assert!(matches!(
+        validate_checkpoint_soak_timeline(
+            &plans,
+            &unbounded_gap_reports,
+            &unbounded_gap_timings,
+        ),
+        Err(CalcFlowError::InvalidArgument { message, .. })
+            if message.contains("restart gap")
+    ));
+
+    let mut forged_parent_timings = parent_timings.clone();
+    forged_parent_timings[1].finish_micros = reports[1].generation_finished_micros - 10_000;
+    assert!(matches!(
+        validate_checkpoint_soak_timeline(&plans, &reports, &forged_parent_timings),
+        Err(CalcFlowError::InvalidArgument { message, .. })
+            if message.contains("does not bound")
+    ));
 }
 
 #[test]
 fn checkpoint_restart_process_document_rejects_missing_and_malformed_reports() {
     let directory = tempfile::tempdir().unwrap();
+    let mut plan = checkpoint_soak_process_plans(
+        directory.path(),
+        &"a".repeat(40),
+        &"b".repeat(64),
+        CheckpointSoakProcessMode::Standard,
+    )
+    .remove(0);
+    bind_checkpoint_soak_parent_launch(&mut plan, Duration::from_micros(1_234_567)).unwrap();
+    let report = checkpoint_soak_process_report_fixture(&plan, 10_000);
+    let round_trip = directory.path().join("round-trip.json");
+    write_checkpoint_soak_document(&round_trip, &report).unwrap();
+    assert_eq!(
+        read_checkpoint_soak_document::<CheckpointSoakProcessReport>(&round_trip).unwrap(),
+        report,
+    );
+
     let missing = directory.path().join("missing.json");
     let missing_result: Result<CheckpointSoakProcessReport> =
         read_checkpoint_soak_document(&missing);
@@ -5880,6 +6203,12 @@ fn checkpoint_restart_soak_contract_is_exact_and_machine_readable() {
     assert_eq!(metadata["target_duration_seconds"], 1_200);
     assert_eq!(metadata["sample_count"], 120);
     assert_eq!(metadata["cadence_seconds"], 10);
+    assert_eq!(metadata["cadence_tolerance_seconds"], 1);
+    assert_eq!(metadata["maximum_restart_gap_seconds"], 60);
+    assert_eq!(
+        metadata["timing_source"],
+        "parent_std_instant_plus_child_local_instant"
+    );
     assert_eq!(metadata["restart_sample_indices"], json!([39, 79]));
     assert_eq!(metadata["restart_kind"], "os_process");
     assert_eq!(metadata["process_generations"], 3);
@@ -5976,6 +6305,18 @@ fn private_benchmark_errors_name_the_candidate_only_gate() {
     };
 
     assert_eq!(field, "CALC_FLOW_M5_CHECKPOINT_BENCHMARK");
+}
+
+#[test]
+fn private_full_runner_self_overhead_modes_use_identical_sink_pacing() {
+    assert_eq!(
+        private_full_runner_sink_delay(PrivateFullRunnerMode::CheckpointDisabled),
+        private_full_runner_sink_delay(PrivateFullRunnerMode::CheckpointEnabled),
+    );
+    assert_eq!(
+        private_full_runner_sink_delay(PrivateFullRunnerMode::CheckpointEnabled),
+        Duration::from_millis(5),
+    );
 }
 
 #[test]
@@ -6422,6 +6763,50 @@ async fn twenty_minute_epoch_checkpoint_restart() {
 }
 
 #[tokio::test]
+async fn partial_sink_commit_fault_preserves_the_second_sink_for_forward_recovery() {
+    for mode in CheckpointFaultMode::ALL {
+        let report =
+            run_checkpoint_restart_fault_case(CheckpointFaultPoint::PartialSinkCommit, mode).await;
+
+        assert_eq!(
+            report.committed_sinks_before_restart,
+            BTreeSet::from(["sink-a".into()]),
+            "first sink must commit before the injected fault at {mode:?}"
+        );
+        assert_eq!(
+            report.prepared_sinks_before_restart,
+            BTreeSet::from(["sink-b".into()]),
+            "second sink must remain prepared for forward recovery at {mode:?}"
+        );
+        assert_eq!(report.restored_epoch, Some(Epoch::INITIAL.next().unwrap()));
+        assert_eq!(
+            report.restart_source_opens,
+            vec![
+                ("left".into(), Some(41_u64.to_be_bytes().to_vec())),
+                ("right".into(), Some(73_u64.to_be_bytes().to_vec())),
+            ]
+        );
+        assert_eq!(
+            report.final_manifest_cursors["left"].order,
+            hex::encode(41_u64.to_be_bytes())
+        );
+        assert!(report.final_manifest_cursors["left"].payload.is_empty());
+        assert_eq!(
+            report.final_manifest_cursors["right"].order,
+            hex::encode(73_u64.to_be_bytes())
+        );
+        assert!(report.final_manifest_cursors["right"].payload.is_empty());
+        assert_eq!(report.visible_records, 4);
+        assert_eq!(report.duplicate_records, 0);
+        assert_eq!(report.missing_records, 0);
+    }
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the fault matrix asserts every recovery invariant for each point and mode"
+)]
 async fn checkpoint_restart_fault_matrix_preserves_exactly_once_window_output() {
     for point in CheckpointFaultPoint::ALL {
         for mode in CheckpointFaultMode::ALL {
@@ -6442,10 +6827,48 @@ async fn checkpoint_restart_fault_matrix_preserves_exactly_once_window_output() 
             );
             assert_eq!(
                 report.prepared_artifacts_after_failure,
-                usize::from(point == CheckpointFaultPoint::ManifestRename) * 2,
+                match point {
+                    CheckpointFaultPoint::ManifestRename => 2,
+                    CheckpointFaultPoint::PartialSinkCommit => 1,
+                    _ => 0,
+                },
                 "prepared-artifact preservation mismatch at {point:?}/{mode:?}"
             );
-            assert_eq!(report.restored_epoch, Some(Epoch::INITIAL));
+            if point == CheckpointFaultPoint::PartialSinkCommit {
+                assert_eq!(
+                    report.committed_sinks_before_restart,
+                    BTreeSet::from(["sink-a".into()]),
+                    "first sink must commit before the injected fault at {mode:?}"
+                );
+                assert_eq!(
+                    report.prepared_sinks_before_restart,
+                    BTreeSet::from(["sink-b".into()]),
+                    "second sink must remain prepared for forward recovery at {mode:?}"
+                );
+            }
+            assert_eq!(
+                report.restored_epoch,
+                Some(if durable_before_restart {
+                    Epoch::INITIAL.next().unwrap()
+                } else {
+                    Epoch::INITIAL
+                }),
+                "final epoch mismatch at {point:?}/{mode:?}"
+            );
+            assert_eq!(
+                report.restart_source_opens,
+                vec![
+                    (
+                        "left".into(),
+                        durable_before_restart.then(|| 41_u64.to_be_bytes().to_vec()),
+                    ),
+                    (
+                        "right".into(),
+                        durable_before_restart.then(|| 73_u64.to_be_bytes().to_vec()),
+                    ),
+                ],
+                "restart connectors must open once at their exact durable cursors"
+            );
             assert_eq!(
                 report.restored_cursor_orders,
                 BTreeMap::from([
@@ -6454,9 +6877,30 @@ async fn checkpoint_restart_fault_matrix_preserves_exactly_once_window_output() 
                 ]),
                 "restored source cursor mismatch at {point:?}/{mode:?}"
             );
-            assert!(report.sources_ended);
-            assert!(report.watermarks_restored);
-            assert!(report.window_state_restored);
+            assert_eq!(
+                report.final_manifest_cursors["left"].order,
+                hex::encode(41_u64.to_be_bytes()),
+                "final left cursor order mismatch at {point:?}/{mode:?}"
+            );
+            assert!(report.final_manifest_cursors["left"].payload.is_empty());
+            assert_eq!(
+                report.final_manifest_cursors["right"].order,
+                hex::encode(73_u64.to_be_bytes()),
+                "final right cursor order mismatch at {point:?}/{mode:?}"
+            );
+            assert!(report.final_manifest_cursors["right"].payload.is_empty());
+            assert!(
+                report.sources_ended,
+                "sources not ended at {point:?}/{mode:?}"
+            );
+            assert!(
+                report.watermarks_restored,
+                "watermarks not restored at {point:?}/{mode:?}"
+            );
+            assert_eq!(
+                report.window_state_restored, durable_before_restart,
+                "window restore evidence mismatch at {point:?}/{mode:?}"
+            );
             assert_eq!(report.visible_records, 4);
             assert_eq!(report.duplicate_records, 0);
             assert_eq!(report.missing_records, 0);

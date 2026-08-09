@@ -41,6 +41,20 @@ def _run(
         "median_confidence_interval_ns": [lower, upper],
         "confidence_level": 0.95,
         "sample_count": benchmark.COMMON_SAMPLE_COUNT,
+        "shared_source_sha256": "1" * 64,
+        "source_cargo_lock_sha256": "2" * 64,
+        "dependency_graph_sha256": "3" * 64,
+        "build_environment_sha256": "4" * 64,
+    }
+
+
+def _private_measurement(case: str, median: float) -> dict[str, object]:
+    return {
+        "case": case,
+        "median_ns": median,
+        "median_confidence_interval_ns": [median * 0.999, median * 1.001],
+        "confidence_level": 0.95,
+        "sample_count": benchmark.PRIVATE_SAMPLE_COUNT,
     }
 
 
@@ -111,6 +125,36 @@ class CommonDecisionTests(unittest.TestCase):
 
         self.assertEqual(decision["decision"], "inconclusive")
         self.assertFalse(decision["host_stable"])
+
+    def test_changed_cross_ref_fingerprints_or_excessive_spread_is_inconclusive(
+        self,
+    ) -> None:
+        compatible = [
+            _run("B1", 100.0, 99.9, 100.1),
+            _run("C1", 101.0, 100.9, 101.1),
+            _run("B2", 100.1, 100.0, 100.2),
+            _run("C2", 101.1, 101.0, 101.2),
+        ]
+        changed = [dict(run) for run in compatible]
+        changed[1]["dependency_graph_sha256"] = "f" * 64
+        changed[3]["dependency_graph_sha256"] = "f" * 64
+        noisy = [
+            _run("B1", 100.0, 99.9, 100.1),
+            _run("C1", 101.0, 100.9, 101.1),
+            _run("B2", 112.0, 111.9, 112.1),
+            _run("C2", 113.0, 112.9, 113.1),
+        ]
+
+        changed_result = benchmark.evaluate_common_case(changed)
+        noisy_result = benchmark.evaluate_common_case(noisy)
+
+        self.assertEqual(changed_result["decision"], "inconclusive")
+        self.assertIn(
+            "dependency_graph_sha256",
+            changed_result["incompatible_cross_ref_fingerprints"],
+        )
+        self.assertEqual(noisy_result["decision"], "inconclusive")
+        self.assertEqual(noisy_result["same_ref_spread_limit_percent"], 10.0)
 
     def test_common_case_rejects_nonfinite_or_unordered_confidence_data(self) -> None:
         valid = [
@@ -446,6 +490,7 @@ def _provenance_run(label: str) -> dict[str, object]:
         "executable_sha256": ("3" if baseline else "4") * 64,
         "target_dir": f"/targets/{label}",
         "evidence_root": f"/evidence/{label}",
+        "shared_source_sha256": ("1" if baseline else "2") * 64,
         "source_cargo_lock_sha256": "5" * 64,
         "harness_cargo_lock_sha256": "6" * 64,
         "dependency_graph_sha256": "7" * 64,
@@ -458,6 +503,13 @@ def _provenance_run(label: str) -> dict[str, object]:
 
 
 class ProvenanceContractTests(unittest.TestCase):
+    def test_introduction_baseline_is_the_frozen_main_commit(self) -> None:
+        benchmark.validate_introduction_baseline(
+            "972964413d328dfeabd4597088396bfe4516e5a3"
+        )
+        with self.assertRaisesRegex(ValueError, "introduction baseline"):
+            benchmark.validate_introduction_baseline("a" * 40)
+
     def test_reference_pair_requires_distinct_ancestor_and_exact_merge_base(
         self,
     ) -> None:
@@ -630,7 +682,7 @@ class PrivateRepeatDecisionTests(unittest.TestCase):
                 {
                     "label": label,
                     "measurements": [
-                        {"case": case, "median_ns": 100.0 + index + offset}
+                        _private_measurement(case, 100.0 + index + offset)
                         for index, case in enumerate(benchmark.M5_ABSOLUTE_CASES)
                     ],
                     "provenance": {"executable_sha256": "a" * 64},
@@ -666,7 +718,7 @@ class PrivateRepeatDecisionTests(unittest.TestCase):
                 {
                     "label": label,
                     "measurements": [
-                        {"case": case, "median_ns": (100.0 + index) * scale}
+                        _private_measurement(case, (100.0 + index) * scale)
                         for index, case in enumerate(benchmark.M5_ABSOLUTE_CASES)
                     ],
                     "provenance": {"executable_sha256": executable},
@@ -695,7 +747,7 @@ class PrivateRepeatDecisionTests(unittest.TestCase):
                 {
                     "label": label,
                     "measurements": [
-                        {"case": case, "median_ns": medians[case]}
+                        _private_measurement(case, medians[case])
                         for case in benchmark.M5_ABSOLUTE_CASES
                     ],
                     "provenance": {"executable_sha256": "a" * 64},
@@ -718,7 +770,28 @@ class PrivateRepeatDecisionTests(unittest.TestCase):
         self.assertEqual(
             diagnostic["scope"], "candidate_self_overhead_not_main_regression"
         )
+        self.assertEqual(len(diagnostic["ratio_confidence_intervals_percent"]), 2)
         self.assertEqual(unstable["decision"], "inconclusive")
+
+        crossing = [dict(report) for report in reports]
+        crossing[0] = {
+            **crossing[0],
+            "measurements": [
+                dict(measurement) for measurement in reports[0]["measurements"]
+            ],
+        }
+        enabled = crossing[0]["measurements"][11]
+        self.assertIsInstance(enabled, dict)
+        enabled["median_confidence_interval_ns"] = [102.0, 108.0]
+        crossing_repeatability = benchmark.evaluate_private_repeats(
+            crossing, host_stable=True
+        )
+        crossing_result = benchmark.evaluate_candidate_self_overhead(
+            crossing,
+            repeatability=crossing_repeatability,
+            host_stable=True,
+        )
+        self.assertEqual(crossing_result["decision"], "inconclusive")
 
 
 class ResultContractTests(unittest.TestCase):
@@ -761,6 +834,32 @@ class ResultContractTests(unittest.TestCase):
 
 
 class OuterManifestTests(unittest.TestCase):
+    def test_manifest_inventory_includes_final_report_and_excludes_itself(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            report = root / "benchmark-evidence.json"
+            benchmark.write_hashed_json(report, {"schema": "final"})
+
+            manifest = benchmark.write_artifact_manifest(
+                root,
+                [report, Path(f"{report}.sha256")],
+            )
+            payload = benchmark.validate_artifact_manifest(
+                root,
+                manifest,
+                expected_artifacts=[report, Path(f"{report}.sha256")],
+            )
+
+            paths = [entry["path"] for entry in payload["artifacts"]]
+            self.assertEqual(
+                payload["excluded_inventory"],
+                ["artifact-manifest.json", "artifact-manifest.json.sha256"],
+            )
+            self.assertEqual(
+                paths,
+                ["benchmark-evidence.json", "benchmark-evidence.json.sha256"],
+            )
+
     def test_outer_manifest_recomputes_files_and_rejects_tamper(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

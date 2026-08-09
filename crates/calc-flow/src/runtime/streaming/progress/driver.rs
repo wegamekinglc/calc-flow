@@ -9,7 +9,7 @@ use tokio::sync::oneshot;
 
 use crate::{
     Batch, CalcFlowError, Epoch, EventTime, Result, SourceManifestEntry,
-    SourceWatermarkManifestState,
+    SourceWatermarkManifestState, runtime::streaming::source_task::decode_canonical_cursor_order,
 };
 
 use super::{
@@ -912,14 +912,12 @@ impl<C: DriverLogicalClock> StreamProgressDriver<C> {
                 );
             }
             let last_committed = source.cursor.as_ref().map(|cursor| {
-                hex::decode(&cursor.order)
-                    .map(|order| RawUpstreamPosition::Exact {
+                decode_canonical_cursor_order(&cursor.order).map(|order| {
+                    RawUpstreamPosition::Exact {
                         delivery_replay_cursor: order,
                         control_frontier: source.next_sequence.to_be_bytes().to_vec(),
-                    })
-                    .map_err(|_| CalcFlowError::CheckpointMismatch {
-                        message: "durable source cursor order is not hexadecimal".into(),
-                    })
+                    }
+                })
             });
             driver
                 .admission
@@ -3324,7 +3322,7 @@ fn phase_error_marker(binding: BindingIdentity) -> DriverPhaseError {
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroUsize, sync::Arc, time::Duration};
+    use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc, time::Duration};
 
     use datafusion::arrow::{
         array::{ArrayRef, Int64Array, TimestampMicrosecondArray},
@@ -3336,6 +3334,7 @@ mod tests {
     use super::{DriverEmission, ManualClock, RawIngressEvent, StreamProgressDriver};
     use crate::runtime::streaming::progress::{
         aggregate::ProgressEmissionKind,
+        durable::{DurableProgressRestore, RestoredSourceProgress},
         prepare::{
             BindingIdentity, DeclaredSchema, FenceSelectionPolicy, NativeWatermarkCapability,
             ReplayPositioningCapability, SourceBindingSpec, SourceDescriptor,
@@ -3349,7 +3348,7 @@ mod tests {
             CheckedSemanticAllocator, DriverFailurePhase, LogicalInstant, ReadyClass, TimerKind,
         },
     };
-    use crate::{Batch, BatchMetadata, EventTime};
+    use crate::{Batch, BatchMetadata, CursorManifestEntry, EventTime, JsonMap};
 
     #[derive(Debug, Eq, PartialEq)]
     struct RecordedSeedArtifact {
@@ -3451,6 +3450,49 @@ mod tests {
             BatchMetadata::default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn durable_driver_restore_rejects_noncanonical_cursor_hex() {
+        let prepared = prepared(&[source_provided("left")]);
+        for order in ["0", "00FF"] {
+            let restored = DurableProgressRestore {
+                origin: LogicalInstant::ZERO,
+                sources: BTreeMap::from([(
+                    "left".into(),
+                    RestoredSourceProgress {
+                        cursor: Some(CursorManifestEntry {
+                            order: order.into(),
+                            payload: JsonMap::new(),
+                        }),
+                        next_sequence: 1,
+                        ended: false,
+                        idle: false,
+                        observed_max: None,
+                        last_watermark: None,
+                        watermark_deadline: None,
+                        idle_deadline: None,
+                    },
+                )]),
+                next_receipt_sequence: 0,
+                trace_records: 0,
+            };
+
+            let error = match StreamProgressDriver::restore_durable(
+                &prepared,
+                ManualClock::new(LogicalInstant::ZERO),
+                &restored,
+            ) {
+                Ok(_) => panic!("noncanonical durable cursor unexpectedly restored"),
+                Err(error) => error,
+            };
+
+            assert!(matches!(
+                error,
+                crate::CalcFlowError::CheckpointMismatch { message }
+                    if message.contains("canonical lowercase even-length hexadecimal")
+            ));
+        }
     }
 
     fn timestamp_batch(value: i64) -> Batch {

@@ -71,6 +71,24 @@ impl Cursor {
     }
 }
 
+pub(crate) fn decode_canonical_cursor_order(order: &str) -> Result<Vec<u8>> {
+    if order.len() % 2 != 0
+        || order
+            .bytes()
+            .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
+    {
+        return Err(CalcFlowError::CheckpointMismatch {
+            message:
+                "durable source cursor order is not canonical lowercase even-length hexadecimal"
+                    .into(),
+        });
+    }
+    hex::decode(order).map_err(|_| CalcFlowError::CheckpointMismatch {
+        message: "durable source cursor order is not canonical lowercase even-length hexadecimal"
+            .into(),
+    })
+}
+
 /// Events a connector source can return; barriers remain runtime-only.
 #[derive(Clone, Debug)]
 pub(crate) enum SourceEvent {
@@ -242,17 +260,7 @@ impl SourceBinding {
             .cursor
             .as_ref()
             .map(|cursor| {
-                let order =
-                    hex::decode(&cursor.order).map_err(|_| CalcFlowError::CheckpointMismatch {
-                        message: "durable source cursor order is not lowercase hexadecimal".into(),
-                    })?;
-                if hex::encode(&order) != cursor.order {
-                    return Err(CalcFlowError::CheckpointMismatch {
-                        message:
-                            "durable source cursor order is not canonical lowercase hexadecimal"
-                                .into(),
-                    });
-                }
+                let order = decode_canonical_cursor_order(&cursor.order)?;
                 Cursor::new(order, cursor.payload.clone())
             })
             .transpose()?;
@@ -1722,8 +1730,9 @@ mod tests {
     use super::{
         AcceptedSequenceRecorder, Cursor, SourceAcceptState, SourceAcceptance, SourceBinding,
         SourceCapabilities, SourceEvent, SourceProgressSnapshot, SourcePumpInputs, StreamSource,
-        data_upstream_position, end_upstream_position, run_source_pump, spawn_source_tasks,
-        spawn_source_tasks_gated_with_metrics, take_live_progress_binding,
+        data_upstream_position, decode_canonical_cursor_order, end_upstream_position,
+        run_source_pump, spawn_source_tasks, spawn_source_tasks_gated_with_metrics,
+        take_live_progress_binding,
     };
     use crate::{
         Batch, BatchMetadata, CalcFlowError, CancellationToken, EdgeBudget, EdgeReceiver, Epoch,
@@ -1738,6 +1747,18 @@ mod tests {
 
     #[derive(Debug)]
     struct TestPayload;
+
+    #[test]
+    fn durable_cursor_order_decoder_requires_even_lowercase_hex() {
+        assert_eq!(decode_canonical_cursor_order("00ff").unwrap(), [0, 255]);
+        for invalid in ["0", "00FF", "0g"] {
+            assert!(matches!(
+                decode_canonical_cursor_order(invalid),
+                Err(CalcFlowError::CheckpointMismatch { message })
+                    if message.contains("canonical lowercase even-length hexadecimal")
+            ));
+        }
+    }
 
     #[test]
     fn live_progress_requires_prepared_binding_before_spawn() {

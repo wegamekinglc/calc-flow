@@ -134,6 +134,34 @@ fn counter_overflow(counter: &str) -> CalcFlowError {
     }
 }
 
+#[derive(Default)]
+pub(super) struct SinkEpochOwner {
+    abortable_epoch: Option<Epoch>,
+}
+
+#[cfg(test)]
+pub(super) type SinkCommitFaultHook = Arc<dyn Fn() -> Result<()> + Send + Sync>;
+
+impl SinkEpochOwner {
+    fn begin(&mut self, epoch: Epoch) {
+        self.abortable_epoch = Some(epoch);
+    }
+
+    fn preserve(&mut self, epoch: Epoch) {
+        self.settle(epoch);
+    }
+
+    fn settle(&mut self, epoch: Epoch) {
+        if self.abortable_epoch == Some(epoch) {
+            self.abortable_epoch = None;
+        }
+    }
+
+    const fn abortable_epoch(&self) -> Option<Epoch> {
+        self.abortable_epoch
+    }
+}
+
 pub(crate) struct SinkTaskInputs {
     pub(crate) output_id: String,
     pub(crate) sinks: Vec<ValidatedOrdinarySink>,
@@ -144,6 +172,9 @@ pub(crate) struct SinkTaskInputs {
     pub(crate) data_gate: watch::Receiver<bool>,
     pub(crate) launch_cancel: CancellationToken,
     pub(crate) checkpoint: Option<SinkCheckpointPort>,
+    pub(super) epoch_owner: SinkEpochOwner,
+    #[cfg(test)]
+    pub(super) sink_commit_fault: Option<SinkCommitFaultHook>,
 }
 
 pub(crate) fn spawn_sink_task(supervisor: &mut TaskSupervisor, inputs: SinkTaskInputs) -> TaskId {
@@ -177,6 +208,13 @@ async fn run_sink_task(
             Ok(())
         };
     }
+    if let Some(epoch) = inputs
+        .checkpoint
+        .as_ref()
+        .map(|checkpoint| checkpoint.initial_epoch)
+    {
+        inputs.epoch_owner.begin(epoch);
+    }
     if let Err((sink_id, error)) =
         begin_checkpoint_epoch(&mut inputs, failure_signal.task_id()).await
     {
@@ -193,12 +231,23 @@ async fn run_sink_task(
                 failure_signal.task_id(),
             )
             .await;
+            inputs.epoch_owner.settle(epoch);
         }
         failure_signal.cancel_siblings();
         let _ = close_all(&mut inputs, &failure_signal).await;
         return Err(task_failed(&inputs.output_id));
     }
     let failed = run_sink_loop(&mut inputs, &failure_signal).await;
+    if let Some(epoch) = inputs.epoch_owner.abortable_epoch() {
+        abort_all(
+            &mut inputs,
+            epoch,
+            &BTreeMap::new(),
+            failure_signal.task_id(),
+        )
+        .await;
+        inputs.epoch_owner.settle(epoch);
+    }
     let close_failed = close_all(&mut inputs, &failure_signal).await;
     if failed || close_failed {
         failure_signal.cancel_siblings();
@@ -449,6 +498,7 @@ async fn process_checkpoint_barrier(
         Ok(prepared) => prepared,
         Err((sink_id, error, prepared)) => {
             abort_all(inputs, epoch, &prepared, task_id).await;
+            inputs.epoch_owner.settle(epoch);
             return SinkLoopStep::CheckpointFailed { sink_id, error };
         }
     };
@@ -468,6 +518,7 @@ async fn process_checkpoint_barrier(
         .is_ok();
     if !sent {
         abort_all(inputs, epoch, &prepared, task_id).await;
+        inputs.epoch_owner.settle(epoch);
         return SinkLoopStep::Cancelled;
     }
     let command = checkpoint.commands.recv().await;
@@ -527,6 +578,7 @@ async fn process_terminal_checkpoint(inputs: &mut SinkTaskInputs, task_id: TaskI
         Ok(prepared) => prepared,
         Err((sink_id, error, prepared)) => {
             abort_all(inputs, epoch, &prepared, task_id).await;
+            inputs.epoch_owner.settle(epoch);
             return SinkLoopStep::CheckpointFailed { sink_id, error };
         }
     };
@@ -548,6 +600,7 @@ async fn process_terminal_checkpoint(inputs: &mut SinkTaskInputs, task_id: TaskI
     };
     if !sent {
         abort_all(inputs, epoch, &prepared, task_id).await;
+        inputs.epoch_owner.settle(epoch);
         return SinkLoopStep::Cancelled;
     }
     let command = {
@@ -570,6 +623,7 @@ async fn apply_checkpoint_command(
 ) -> SinkLoopStep {
     let Some(command) = command else {
         abort_all(inputs, epoch, prepared, task_id).await;
+        inputs.epoch_owner.settle(epoch);
         return SinkLoopStep::Cancelled;
     };
     if sink_command_epoch(&command) != epoch {
@@ -577,13 +631,16 @@ async fn apply_checkpoint_command(
     }
     match command {
         SinkCheckpointCommand::ManifestDurable(_) => {
+            inputs.epoch_owner.preserve(epoch);
             finalize_if_terminal_mode(inputs, epoch, prepared, task_id, terminal, false).await
         }
         SinkCheckpointCommand::TerminalManifestDurable(_) => {
+            inputs.epoch_owner.preserve(epoch);
             finalize_if_terminal_mode(inputs, epoch, prepared, task_id, terminal, true).await
         }
         SinkCheckpointCommand::Abort(_) => {
             abort_all(inputs, epoch, prepared, task_id).await;
+            inputs.epoch_owner.settle(epoch);
             SinkLoopStep::CheckpointFailed {
                 sink_id: inputs.output_id.clone(),
                 error: CalcFlowError::Internal {
@@ -591,7 +648,10 @@ async fn apply_checkpoint_command(
                 },
             }
         }
-        SinkCheckpointCommand::Preserve(_) => preserve_checkpoint(terminal),
+        SinkCheckpointCommand::Preserve(_) => {
+            inputs.epoch_owner.preserve(epoch);
+            preserve_checkpoint(terminal)
+        }
         SinkCheckpointCommand::Terminal(_) => {
             fail_checkpoint_command(inputs, epoch, prepared, task_id).await
         }
@@ -638,6 +698,7 @@ async fn fail_checkpoint_command(
     task_id: TaskId,
 ) -> SinkLoopStep {
     abort_all(inputs, epoch, prepared, task_id).await;
+    inputs.epoch_owner.settle(epoch);
     SinkLoopStep::CheckpointFailed {
         sink_id: inputs.output_id.clone(),
         error: CalcFlowError::CheckpointMismatch {
@@ -659,6 +720,11 @@ async fn finalize_checkpoint(
     match commit_all(inputs, epoch, prepared, task_id).await {
         Ok(()) => {}
         Err((sink_id, error)) => {
+            if inputs.context.job().cancellation().is_cancelled()
+                && matches!(&error, CalcFlowError::Cancelled { .. })
+            {
+                return SinkLoopStep::Cancelled;
+            }
             return SinkLoopStep::CheckpointFailed { sink_id, error };
         }
     }
@@ -671,10 +737,14 @@ async fn finalize_checkpoint(
         .as_mut()
         .expect("checkpoint-enabled sink retains its port");
     let cancellation = inputs.context.job().cancellation().clone();
-    let sent = tokio::select! {
-        biased;
-        () = cancellation.cancelled() => false,
-        result = checkpoint.finalizations.send(finalization) => result.is_ok(),
+    let sent = match checkpoint.finalizations.try_send(finalization) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Full(finalization)) => tokio::select! {
+            biased;
+            () = cancellation.cancelled() => false,
+            result = checkpoint.finalizations.send(finalization) => result.is_ok(),
+        },
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
     };
     if !sent {
         if cancellation.is_cancelled() && checkpoint.finalizations.is_closed() {
@@ -688,6 +758,9 @@ async fn finalize_checkpoint(
     if terminal {
         return SinkLoopStep::Complete;
     }
+    if cancellation.is_cancelled() {
+        return SinkLoopStep::Cancelled;
+    }
     let next_epoch = match epoch.next() {
         Ok(epoch) => epoch,
         Err(error) => {
@@ -698,6 +771,7 @@ async fn finalize_checkpoint(
         }
     };
     checkpoint.initial_epoch = next_epoch;
+    inputs.epoch_owner.begin(next_epoch);
     match begin_checkpoint_epoch(inputs, task_id).await {
         Ok(()) => SinkLoopStep::Continue,
         Err((sink_id, error)) => SinkLoopStep::CheckpointFailed { sink_id, error },
@@ -778,6 +852,14 @@ async fn commit_all(
     prepared: &BTreeMap<String, SinkManifestEntry>,
     task_id: TaskId,
 ) -> std::result::Result<(), (String, CalcFlowError)> {
+    #[cfg(test)]
+    let transactional_sink_count = inputs
+        .sinks
+        .iter()
+        .filter(|sink| !sink.binding.is_ordinary())
+        .count();
+    #[cfg(test)]
+    let mut committed_sink_count = 0_usize;
     for sink in &mut inputs.sinks {
         if sink.binding.is_ordinary() {
             continue;
@@ -790,7 +872,30 @@ async fn commit_all(
             .catch_unwind()
             .await;
         match result {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                #[cfg(test)]
+                {
+                    committed_sink_count += 1;
+                    if committed_sink_count < transactional_sink_count
+                        && let Some(inject) = &inputs.sink_commit_fault
+                    {
+                        let result = std::panic::catch_unwind(AssertUnwindSafe(|| inject()));
+                        match result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => return Err((sink.sink_id.clone(), error)),
+                            Err(payload) => {
+                                return Err((
+                                    sink.sink_id.clone(),
+                                    CalcFlowError::TaskPanicked {
+                                        task_id: task_id.as_u64(),
+                                        message: panic_message(payload.as_ref()),
+                                    },
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
             Ok(Err(error)) => return Err((sink.sink_id.clone(), error)),
             Err(payload) => {
                 return Err((
@@ -955,8 +1060,9 @@ mod tests {
     use tokio::sync::{Notify, mpsc, watch};
 
     use super::{
-        SinkCheckpointCommand, SinkCheckpointPort, SinkFailurePhase, SinkFinalizeAck, SinkProgress,
-        SinkTaskInputs, recover_transactional_sinks, spawn_sink_task, validate_pre_commit_metadata,
+        SinkCheckpointCommand, SinkCheckpointPort, SinkEpochOwner, SinkFailurePhase,
+        SinkFinalizeAck, SinkProgress, SinkTaskInputs, recover_transactional_sinks,
+        spawn_sink_task, validate_pre_commit_metadata,
     };
     use crate::{
         Batch, BatchMetadata, CalcFlowError, CancellationToken, EdgeBudget, JsonMap, Result,
@@ -1237,6 +1343,8 @@ mod tests {
                 data_gate: data_rx,
                 launch_cancel: CancellationToken::new(),
                 checkpoint,
+                epoch_owner: SinkEpochOwner::default(),
+                sink_commit_fault: None,
             },
         );
         Harness {
@@ -1440,6 +1548,84 @@ mod tests {
         assert!(log.contains(&"b:abort:1".into()));
         assert!(!log.iter().any(|entry| entry.contains(":commit:")));
         assert_eq!(closes.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cancellation_aborts_the_active_transactional_epoch_before_a_barrier() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let closes = Arc::new(AtomicUsize::new(0));
+        let (ack_tx, _ack_rx) = mpsc::channel(1);
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (finalize_tx, _finalize_rx) = mpsc::channel(1);
+        let mut harness = harness_with_checkpoint(
+            vec![validated_transactional_sink("tx", &log, &closes)],
+            Some(SinkCheckpointPort {
+                initial_epoch: crate::Epoch::INITIAL,
+                acknowledgements: ack_tx,
+                commands: command_rx,
+                finalizations: finalize_tx,
+                terminal_ready: None,
+            }),
+        );
+        harness.data.send(true).unwrap();
+        harness
+            .sender
+            .send(StreamMessage::data(batch(0)))
+            .await
+            .unwrap();
+        while !log.lock().contains(&"tx:write:0".into()) {
+            tokio::task::yield_now().await;
+        }
+
+        harness.cancellation.cancel();
+        let report = harness.supervisor.join_all().await;
+
+        assert!(report.errors.is_empty());
+        assert_eq!(
+            &log.lock()[..],
+            ["tx:begin:1", "tx:write:0", "tx:abort:1", "tx:close"]
+        );
+    }
+
+    #[tokio::test]
+    async fn sibling_failure_aborts_the_active_transactional_epoch_before_a_barrier() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let closes = Arc::new(AtomicUsize::new(0));
+        let (ack_tx, _ack_rx) = mpsc::channel(1);
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (finalize_tx, _finalize_rx) = mpsc::channel(1);
+        let mut harness = harness_with_checkpoint(
+            vec![validated_transactional_sink("tx", &log, &closes)],
+            Some(SinkCheckpointPort {
+                initial_epoch: crate::Epoch::INITIAL,
+                acknowledgements: ack_tx,
+                commands: command_rx,
+                finalizations: finalize_tx,
+                terminal_ready: None,
+            }),
+        );
+        harness.data.send(true).unwrap();
+        harness
+            .sender
+            .send(StreamMessage::data(batch(0)))
+            .await
+            .unwrap();
+        while !log.lock().contains(&"tx:write:0".into()) {
+            tokio::task::yield_now().await;
+        }
+        harness.supervisor.spawn("failing-sibling", async {
+            Err(CalcFlowError::Internal {
+                message: "sibling failed".into(),
+            })
+        });
+
+        let report = harness.supervisor.join_all().await;
+
+        assert_eq!(report.primary_error_count, 1);
+        assert_eq!(
+            &log.lock()[..],
+            ["tx:begin:1", "tx:write:0", "tx:abort:1", "tx:close"]
+        );
     }
 
     #[tokio::test]
@@ -1758,7 +1944,7 @@ mod tests {
         let report = harness.supervisor.join_all().await;
         assert!(log.lock().contains(&"tx:commit:1".into()));
         assert!(!log.lock().iter().any(|entry| entry.contains(":abort:")));
-        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors.is_empty());
         assert_eq!(closes.load(Ordering::SeqCst), 1);
     }
 

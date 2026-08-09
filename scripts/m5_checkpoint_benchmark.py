@@ -19,8 +19,10 @@ COMMON_CASE = "m5/common/stream_channel_data_roundtrip"
 COMMON_SAMPLE_COUNT = 30
 PRIVATE_SAMPLE_COUNT = 10
 REGRESSION_THRESHOLD_PERCENT = 5.0
+M5_INTRODUCTION_BASELINE_COMMIT = "972964413d328dfeabd4597088396bfe4516e5a3"
 RUN_ORDER = ("B1", "C1", "B2", "C2")
 PRIVATE_RUN_ORDER = ("P1", "P2")
+MAX_COMMON_SAME_REF_SPREAD_PERCENT = 10.0
 MAX_PRIVATE_REPEAT_SPREAD_PERCENT = 10.0
 PRIVATE_BUILD_IDENTITY_SCHEMA = "calc-flow.m5-private-build-identity.v1"
 M5_ABSOLUTE_CASES = (
@@ -53,6 +55,17 @@ SOURCE_CONTRACT_FILES = (
     Path("scripts/m5_checkpoint_benchmark_harness/src/main.rs"),
     Path("crates/calc-flow/src/runtime/streaming/operator_task.rs"),
     Path("crates/calc-flow/src/runtime/streaming/soak.rs"),
+)
+COMMON_SOURCE_FILES = (Path("crates/calc-flow/src/runtime/streaming/operator_task.rs"),)
+COMMON_CROSS_REF_FINGERPRINT_FIELDS = (
+    "shared_source_sha256",
+    "source_cargo_lock_sha256",
+    "dependency_graph_sha256",
+    "build_environment_sha256",
+)
+ARTIFACT_MANIFEST_EXCLUSIONS = (
+    "artifact-manifest.json",
+    "artifact-manifest.json.sha256",
 )
 
 
@@ -280,6 +293,10 @@ def write_artifact_manifest(root: Path, artifacts: Sequence[Path]) -> Path:
         if not canonical.is_relative_to(canonical_root):
             raise ValueError(f"benchmark artifact escapes evidence root: {artifact}")
         relative = canonical.relative_to(canonical_root)
+        if relative.as_posix() in ARTIFACT_MANIFEST_EXCLUSIONS:
+            raise ValueError(
+                "benchmark artifact manifest must exclude itself and its digest"
+            )
         if relative in seen:
             raise ValueError(f"benchmark artifact is repeated: {relative}")
         seen.add(relative)
@@ -297,19 +314,27 @@ def write_artifact_manifest(root: Path, artifacts: Sequence[Path]) -> Path:
         {
             "schema": "calc-flow.m5-checkpoint-artifact-manifest.v1",
             "root": str(canonical_root),
+            "excluded_inventory": list(ARTIFACT_MANIFEST_EXCLUSIONS),
             "artifacts": entries,
         },
     )
     return manifest
 
 
-def validate_artifact_manifest(root: Path, manifest: Path) -> dict[str, object]:
+def validate_artifact_manifest(
+    root: Path,
+    manifest: Path,
+    *,
+    expected_artifacts: Sequence[Path] | None = None,
+) -> dict[str, object]:
     canonical_root = root.resolve()
     payload = load_hashed_json(manifest)
     if payload.get("schema") != "calc-flow.m5-checkpoint-artifact-manifest.v1":
         raise ValueError("benchmark artifact manifest schema is invalid")
     if payload.get("root") != str(canonical_root):
         raise ValueError("benchmark artifact manifest root is invalid")
+    if payload.get("excluded_inventory") != list(ARTIFACT_MANIFEST_EXCLUSIONS):
+        raise ValueError("benchmark artifact manifest exclusions are invalid")
     artifacts = payload.get("artifacts")
     if not isinstance(artifacts, list):
         raise ValueError("benchmark artifact manifest entries are missing")
@@ -320,7 +345,30 @@ def validate_artifact_manifest(root: Path, manifest: Path) -> dict[str, object]:
         set(observed_paths)
     ):
         raise ValueError("benchmark artifact manifest order is invalid")
+    if any(path in ARTIFACT_MANIFEST_EXCLUSIONS for path in observed_paths):
+        raise ValueError(
+            "benchmark artifact manifest contains an excluded self artifact"
+        )
+    if expected_artifacts is not None:
+        expected_paths = sorted(
+            _artifact_relative_path(canonical_root, artifact)
+            for artifact in expected_artifacts
+        )
+        if observed_paths != expected_paths:
+            raise ValueError("benchmark artifact manifest inventory is not exact")
     return payload
+
+
+def _artifact_relative_path(canonical_root: Path, artifact: Path) -> str:
+    canonical = artifact.resolve()
+    if not canonical.is_relative_to(canonical_root):
+        raise ValueError(f"benchmark artifact escapes evidence root: {artifact}")
+    relative = canonical.relative_to(canonical_root).as_posix()
+    if relative in ARTIFACT_MANIFEST_EXCLUSIONS:
+        raise ValueError(
+            "benchmark artifact inventory contains an excluded self artifact"
+        )
+    return relative
 
 
 def _validate_artifact_entry(entry: object, canonical_root: Path) -> str:
@@ -576,6 +624,15 @@ def validate_reference_contract(
         raise ValueError("baseline commit must be the exact candidate ancestor")
 
 
+def validate_introduction_baseline(baseline_commit: str) -> None:
+    if _full_git_oid(baseline_commit, "introduction baseline") != (
+        M5_INTRODUCTION_BASELINE_COMMIT
+    ):
+        raise ValueError(
+            f"M5 introduction baseline must be {M5_INTRODUCTION_BASELINE_COMMIT}"
+        )
+
+
 def _one_value(runs: Sequence[dict[str, object]], field: str) -> object:
     values = {str(run.get(field)) for run in runs}
     if len(values) != 1:
@@ -636,6 +693,7 @@ def _validate_shared_run_hashes(runs: Sequence[dict[str, object]]) -> None:
     ):
         _full_sha256(_one_value(runs, field), field)
     for field in (
+        "shared_source_sha256",
         "source_cargo_lock_sha256",
         "dependency_graph_sha256",
         "build_environment_sha256",
@@ -765,6 +823,7 @@ def evaluate_common_case(
     sustained, confidently_above, confidently_below = _common_pairing_evidence(pairings)
     candidate_min_regression = statistics["candidate_min_regression_percent"]
     same_ref_spread = statistics["maximum_same_ref_spread_percent"]
+    incompatible_fingerprints = _incompatible_cross_ref_fingerprints(validated)
     exceeds_noise = candidate_min_regression > 2.0 * same_ref_spread
     decision = _common_decision(
         candidate_min_regression,
@@ -773,7 +832,11 @@ def evaluate_common_case(
         confidently_above=confidently_above,
         confidently_below=confidently_below,
     )
-    if not host_stable:
+    if (
+        not host_stable
+        or incompatible_fingerprints
+        or same_ref_spread > MAX_COMMON_SAME_REF_SPREAD_PERCENT
+    ):
         decision = "inconclusive"
     return {
         "case": COMMON_CASE,
@@ -782,9 +845,22 @@ def evaluate_common_case(
         "exceeds_twice_baseline_spread": exceeds_noise,
         "sustained_in_both_pairings": sustained,
         "pairings": pairings,
+        "incompatible_cross_ref_fingerprints": incompatible_fingerprints,
+        "same_ref_spread_limit_percent": MAX_COMMON_SAME_REF_SPREAD_PERCENT,
         "host_stable": host_stable,
         "decision": decision,
     }
+
+
+def _incompatible_cross_ref_fingerprints(
+    runs: Sequence[dict[str, object]],
+) -> list[str]:
+    incompatible = []
+    for field in COMMON_CROSS_REF_FINGERPRINT_FIELDS:
+        values = {_full_sha256(run.get(field), field) for run in runs}
+        if len(values) != 1:
+            incompatible.append(field)
+    return incompatible
 
 
 def _validated_common_runs(
@@ -948,22 +1024,57 @@ def evaluate_candidate_self_overhead(
     ):
         raise ValueError(f"private benchmark run order must be {PRIVATE_RUN_ORDER}")
     deltas = {}
+    ratio_intervals = {}
+    pacing = {}
     for report in reports:
-        medians = _private_medians(report)
-        disabled = medians["m5/private_full_path/checkpoint_disabled"]
-        enabled = medians["m5/private_full_path/checkpoint_enabled"]
-        deltas[str(report["label"])] = _regression_percent(disabled, enabled)
+        measurements = _private_measurement_details(report)
+        disabled = measurements["m5/private_full_path/checkpoint_disabled"]
+        enabled = measurements["m5/private_full_path/checkpoint_enabled"]
+        if (
+            disabled["sample_count"] != enabled["sample_count"]
+            or disabled["confidence_level"] != enabled["confidence_level"]
+        ):
+            raise ValueError("candidate self-overhead cases require identical pacing")
+        label = str(report["label"])
+        deltas[label] = _regression_percent(
+            float(disabled["median_ns"]), float(enabled["median_ns"])
+        )
+        disabled_interval = disabled["median_confidence_interval_ns"]
+        enabled_interval = enabled["median_confidence_interval_ns"]
+        if not isinstance(disabled_interval, list) or not isinstance(
+            enabled_interval, list
+        ):
+            raise ValueError("candidate self-overhead confidence interval is invalid")
+        ratio_intervals[label] = [
+            _regression_percent(
+                float(disabled_interval[1]), float(enabled_interval[0])
+            ),
+            _regression_percent(
+                float(disabled_interval[0]), float(enabled_interval[1])
+            ),
+        ]
+        pacing[label] = {
+            "sample_count": disabled["sample_count"],
+            "confidence_level": disabled["confidence_level"],
+        }
     noise = _finite_nonnegative(
         repeatability.get("maximum_same_ref_spread_percent"),
         "private repeatability spread",
     )
     stable = host_stable and repeatability.get("evidence_quality") == "stable"
-    decision = _self_overhead_decision(tuple(deltas.values()), noise, stable=stable)
+    decision = _self_overhead_decision(
+        tuple(deltas.values()),
+        tuple(ratio_intervals.values()),
+        noise,
+        stable=stable,
+    )
     return {
         "scope": "candidate_self_overhead_not_main_regression",
         "comparison": "candidate_checkpoint_enabled_vs_disabled_same_ref",
         "threshold_percent": REGRESSION_THRESHOLD_PERCENT,
         "run_overhead_percent": deltas,
+        "ratio_confidence_intervals_percent": ratio_intervals,
+        "pacing": pacing,
         "maximum_same_ref_noise_percent": noise,
         "host_stable": host_stable,
         "decision": decision,
@@ -971,18 +1082,68 @@ def evaluate_candidate_self_overhead(
 
 
 def _self_overhead_decision(
-    deltas: Sequence[float], noise: float, *, stable: bool
+    deltas: Sequence[float],
+    intervals: Sequence[Sequence[float]],
+    noise: float,
+    *,
+    stable: bool,
 ) -> str:
     if not stable:
         return "inconclusive"
-    if all(delta <= REGRESSION_THRESHOLD_PERCENT for delta in deltas):
+    if any(
+        float(interval[0]) <= REGRESSION_THRESHOLD_PERCENT < float(interval[1])
+        for interval in intervals
+    ):
+        return "inconclusive"
+    if all(
+        float(interval[1]) <= REGRESSION_THRESHOLD_PERCENT for interval in intervals
+    ):
         return "pass"
     if (
-        all(delta > REGRESSION_THRESHOLD_PERCENT for delta in deltas)
+        all(float(interval[0]) > REGRESSION_THRESHOLD_PERCENT for interval in intervals)
+        and all(delta > REGRESSION_THRESHOLD_PERCENT for delta in deltas)
         and min(deltas) > 2.0 * noise
     ):
         return "regression"
     return "inconclusive"
+
+
+def _private_measurement_details(
+    report: dict[str, object],
+) -> dict[str, dict[str, object]]:
+    measurements = report.get("measurements")
+    if not isinstance(measurements, list) or len(measurements) != len(
+        M5_ABSOLUTE_CASES
+    ):
+        raise ValueError("private repeat measurements are incomplete")
+    result = {}
+    for measurement, case in zip(measurements, M5_ABSOLUTE_CASES, strict=True):
+        if not isinstance(measurement, dict) or measurement.get("case") != case:
+            raise ValueError("private repeat measurement order is invalid")
+        median = _finite_positive(
+            measurement.get("median_ns"), f"private repeat {case} median"
+        )
+        lower, upper = _validated_interval(
+            measurement.get("median_confidence_interval_ns"),
+            median,
+            f"private repeat {case}",
+        )
+        confidence_level = _finite_positive(
+            measurement.get("confidence_level"),
+            f"private repeat {case} confidence level",
+        )
+        if confidence_level != 0.95:
+            raise ValueError("private repeat confidence level must be exactly 0.95")
+        sample_count = measurement.get("sample_count")
+        if sample_count != PRIVATE_SAMPLE_COUNT:
+            raise ValueError("private repeat sample pacing is invalid")
+        result[case] = {
+            "median_ns": median,
+            "median_confidence_interval_ns": [lower, upper],
+            "confidence_level": confidence_level,
+            "sample_count": sample_count,
+        }
+    return result
 
 
 def _trusted_system_executable(name: str) -> Path:
@@ -1358,6 +1519,7 @@ def _prepare_ref_worktrees(
     candidate = _resolve_ref(
         repository, "candidate", candidate_reference, worktrees / "candidate"
     )
+    validate_introduction_baseline(baseline.commit)
     current = _git(repository, ["rev-parse", "HEAD"])
     if candidate.commit != current:
         raise ValueError(
@@ -1510,6 +1672,12 @@ def _run_common_matrix(
             "target_dir": str(plan.target_dir.resolve()),
             "evidence_root": str(plan.evidence_root.resolve()),
             "source_cargo_lock_sha256": sha256_file(source_lock),
+            "shared_source_sha256": _canonical_hash(
+                _source_file_entries(
+                    plan.snapshot.worktree,
+                    COMMON_SOURCE_FILES,
+                )
+            ),
             "harness_cargo_lock_sha256": harness_lock_sha256,
             "dependency_graph_sha256": dependency_graph_sha256,
             "dependency_metadata_path": str(metadata_path.resolve()),
@@ -1540,6 +1708,7 @@ def _run_common_matrix(
                 "report_path": str(plan.report_path.relative_to(output_root)),
                 "report_sha256": validated["report_sha256"],
                 "executable_sha256": executable_sha256,
+                "shared_source_sha256": run["shared_source_sha256"],
                 "source_cargo_lock_sha256": run["source_cargo_lock_sha256"],
                 "harness_cargo_lock_sha256": harness_lock_sha256,
                 "dependency_graph_sha256": dependency_graph_sha256,
@@ -2049,15 +2218,38 @@ def _source_contract_artifacts(
 
 
 def _artifact_manifest_reference(
-    output_root: Path, artifacts: Sequence[Path]
+    output_root: Path,
+    artifacts: Sequence[Path],
+    declaration: dict[str, object],
 ) -> dict[str, object]:
     path = write_artifact_manifest(output_root, _unique_artifacts(artifacts))
-    validate_artifact_manifest(output_root, path)
-    digest_path = Path(f"{path}.sha256")
-    return {
+    payload = validate_artifact_manifest(
+        output_root,
+        path,
+        expected_artifacts=_unique_artifacts(artifacts),
+    )
+    observed = [entry["path"] for entry in payload["artifacts"]]
+    if declaration != {
         "path": str(path.relative_to(output_root)),
-        "sha256": sha256_file(path),
-        "digest_sha256": sha256_file(digest_path),
+        "excluded_inventory": list(ARTIFACT_MANIFEST_EXCLUSIONS),
+        "inventory_paths": observed,
+    }:
+        raise ValueError("benchmark artifact manifest declaration does not match")
+    return declaration
+
+
+def _artifact_manifest_declaration(
+    output_root: Path, artifacts: Sequence[Path]
+) -> dict[str, object]:
+    canonical_root = output_root.resolve()
+    paths = sorted(
+        _artifact_relative_path(canonical_root, artifact)
+        for artifact in _unique_artifacts(artifacts)
+    )
+    return {
+        "path": "artifact-manifest.json",
+        "excluded_inventory": list(ARTIFACT_MANIFEST_EXCLUSIONS),
+        "inventory_paths": paths,
     }
 
 
@@ -2242,19 +2434,15 @@ def _validate_outer_manifest_reference(
     if (
         not isinstance(reference, dict)
         or reference.get("path") != "artifact-manifest.json"
+        or reference.get("excluded_inventory") != list(ARTIFACT_MANIFEST_EXCLUSIONS)
     ):
         raise ValueError("benchmark artifact manifest reference is invalid")
     manifest = output_root / "artifact-manifest.json"
-    digest = Path(f"{manifest}.sha256")
-    if sha256_file(manifest) != _full_sha256(
-        reference.get("sha256"), "artifact manifest hash"
-    ):
-        raise ValueError("benchmark artifact manifest hash does not match")
-    if sha256_file(digest) != _full_sha256(
-        reference.get("digest_sha256"), "artifact manifest digest hash"
-    ):
-        raise ValueError("benchmark artifact manifest digest does not match")
-    validate_artifact_manifest(output_root, manifest)
+    payload = validate_artifact_manifest(output_root, manifest)
+    inventory_paths = reference.get("inventory_paths")
+    observed = [entry["path"] for entry in payload["artifacts"]]
+    if not isinstance(inventory_paths, list) or observed != inventory_paths:
+        raise ValueError("benchmark artifact manifest inventory does not match report")
 
 
 def run_benchmark_evidence(
@@ -2298,9 +2486,14 @@ def run_benchmark_evidence(
     self_overhead = evaluate_candidate_self_overhead(
         private_runs, repeatability=private_repeatability, host_stable=stable
     )
-    manifest = _artifact_manifest_reference(
-        output_root, source_artifacts + common_artifacts + private_artifacts
+    report_path = output_root / "benchmark-evidence.json"
+    artifacts = _unique_artifacts(
+        source_artifacts
+        + common_artifacts
+        + private_artifacts
+        + [report_path, Path(f"{report_path}.sha256")]
     )
+    manifest = _artifact_manifest_declaration(output_root, artifacts)
     report = assemble_benchmark_report(
         run_id=run_id,
         output_root=output_root,
@@ -2318,8 +2511,8 @@ def run_benchmark_evidence(
         commands=commands,
         artifact_manifest=manifest,
     )
-    report_path = output_root / "benchmark-evidence.json"
     write_hashed_json(report_path, report)
+    _artifact_manifest_reference(output_root, artifacts, manifest)
     validate_benchmark_evidence(
         report_path,
         output_root=output_root,

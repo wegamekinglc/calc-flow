@@ -110,16 +110,31 @@ impl OrdinarySinkBinding {
         })
     }
 
-    fn sample_delivery_once(&mut self) -> M2SinkDelivery {
-        self.delivery
-            .get_or_insert_with(|| match &self.sink {
-                SinkImplementation::Ordinary(sink) => {
-                    let _declared = sink.delivery_capability();
-                    M2SinkDelivery::ProcessLocalOrdered
-                }
-                SinkImplementation::Transactional(_) => M2SinkDelivery::Transactional,
-            })
-            .clone()
+    fn sample_delivery_once(&mut self, field: &str) -> Result<M2SinkDelivery> {
+        if let Some(delivery) = &self.delivery {
+            return Ok(delivery.clone());
+        }
+        let SinkImplementation::Ordinary(sink) = &self.sink else {
+            return Err(CalcFlowError::Internal {
+                message: "transactional sink binding omitted its delivery capability".into(),
+            });
+        };
+        let declared = sink.delivery_capability();
+        if declared != M2SinkDelivery::ProcessLocalOrdered {
+            let claim = match declared {
+                M2SinkDelivery::ProcessLocalOrdered => unreachable!(),
+                M2SinkDelivery::EpochIdempotent { .. } => "epoch-idempotent",
+                M2SinkDelivery::Transactional => "transactional",
+            };
+            return Err(CalcFlowError::InvalidArgument {
+                field: field.into(),
+                message: format!(
+                    "ordinary sink cannot declare {claim} delivery without the transactional lifecycle"
+                ),
+            });
+        }
+        self.delivery = Some(declared.clone());
+        Ok(declared)
     }
 
     pub(crate) fn delivery(&self) -> M2SinkDelivery {
@@ -540,7 +555,10 @@ fn validate_sink(
             message: "route does not match a compiled external output".into(),
         });
     }
-    named.binding.sample_delivery_once();
+    named.binding.sample_delivery_once(&format!(
+        "sinks.{}.{}.delivery_capability",
+        named.output_id, named.sink_id
+    ))?;
     Ok((
         named.output_id,
         ValidatedOrdinarySink {
@@ -1269,6 +1287,40 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_sink_preflight_rejects_nonordinary_declared_capability() {
+        let opened = Arc::new(AtomicBool::new(false));
+        let capabilities = SourceCapabilities {
+            replayable: true,
+            max_batch_rows: 1,
+            max_batch_bytes: 1,
+        };
+        let requirements = StreamRequirements::default();
+        let error = preflight_error(preflight_spec(
+            union_plan_with(&requirements),
+            vec![
+                named_source("left", capabilities, &opened),
+                named_source("right", capabilities, &opened),
+            ],
+            vec![NamedSinkBinding {
+                output_id: "output".into(),
+                sink_id: "claiming".into(),
+                binding: OrdinarySinkBinding::new(Box::new(ClaimingOrdinarySink {
+                    opened: Arc::clone(&opened),
+                })),
+            }],
+        ));
+
+        assert!(matches!(
+            error,
+            CalcFlowError::InvalidArgument { ref field, ref message }
+                if field == "sinks.output.claiming.delivery_capability"
+                    && message.contains("ordinary sink")
+                    && message.contains("transactional")
+        ));
+        assert!(!opened.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn exactly_once_preflight_rejects_transactional_claim_from_ordinary_sink() {
         let opened = Arc::new(AtomicBool::new(false));
         let capabilities = SourceCapabilities {
@@ -1297,9 +1349,9 @@ mod tests {
         assert!(matches!(
             error,
             CalcFlowError::InvalidArgument { ref field, ref message }
-                if field == "requirements.delivery.output"
-                    && message.contains("sink \"claiming\"")
-                    && message.contains("not transactional")
+                if field == "sinks.output.claiming.delivery_capability"
+                    && message.contains("ordinary sink")
+                    && message.contains("transactional")
         ));
         assert!(!opened.load(Ordering::SeqCst));
     }

@@ -45,8 +45,8 @@ use super::{
         types::LogicalInstant,
     },
     sink_task::{
-        SinkCheckpointAck, SinkCheckpointCommand, SinkCheckpointPort, SinkFailurePhase,
-        SinkFinalizeAck, SinkProgress, SinkTaskInputs, spawn_sink_task,
+        SinkCheckpointAck, SinkCheckpointCommand, SinkCheckpointPort, SinkEpochOwner,
+        SinkFailurePhase, SinkFinalizeAck, SinkProgress, SinkTaskInputs, spawn_sink_task,
     },
     source_task::{
         SourceBinding, SourceProgress, SourceProgressSnapshot,
@@ -275,8 +275,9 @@ impl OpenedCheckpointRuntime {
         point: CheckpointFaultPoint,
         cancellation: &CancellationToken,
     ) -> crate::Result<bool> {
+        let trigger_count = self.faults.trigger_count();
         self.faults.trigger(point, cancellation)?;
-        Ok(cancellation.is_cancelled())
+        Ok(self.faults.trigger_count() != trigger_count && cancellation.is_cancelled())
     }
 }
 
@@ -2545,7 +2546,7 @@ struct LiveCheckpointChannels {
     operator_commands: BTreeMap<String, mpsc::Sender<OperatorCheckpointCommand>>,
     sink_acknowledgement_sender: mpsc::Sender<SinkCheckpointAck>,
     sink_acknowledgements: mpsc::Receiver<SinkCheckpointAck>,
-    sink_finalization_sender: mpsc::Sender<SinkFinalizeAck>,
+    sink_finalization_sender: Option<mpsc::Sender<SinkFinalizeAck>>,
     sink_finalizations: mpsc::Receiver<SinkFinalizeAck>,
     sink_terminal_ready_sender: mpsc::Sender<String>,
     sink_terminal_ready: mpsc::Receiver<String>,
@@ -2603,7 +2604,7 @@ impl LiveCheckpointChannels {
             operator_commands,
             sink_acknowledgement_sender: sink_tx,
             sink_acknowledgements: sink_rx,
-            sink_finalization_sender: finalization_tx,
+            sink_finalization_sender: Some(finalization_tx),
             sink_finalizations: finalization_rx,
             sink_terminal_ready_sender: sink_terminal_tx,
             sink_terminal_ready: sink_terminal_rx,
@@ -2613,6 +2614,16 @@ impl LiveCheckpointChannels {
     }
 
     fn take_sink_port(&mut self, output_id: &str, initial_epoch: Epoch) -> SinkCheckpointPort {
+        let finalizations = if self.sink_command_receivers.len() == 1 {
+            self.sink_finalization_sender
+                .take()
+                .expect("checkpoint wiring retains its finalization sender")
+        } else {
+            self.sink_finalization_sender
+                .as_ref()
+                .expect("checkpoint wiring retains its finalization sender")
+                .clone()
+        };
         SinkCheckpointPort {
             initial_epoch,
             acknowledgements: self.sink_acknowledgement_sender.clone(),
@@ -2620,7 +2631,7 @@ impl LiveCheckpointChannels {
                 .sink_command_receivers
                 .remove(output_id)
                 .expect("checkpoint wiring covers every validated sink output"),
-            finalizations: self.sink_finalization_sender.clone(),
+            finalizations,
             terminal_ready: Some(self.sink_terminal_ready_sender.clone()),
         }
     }
@@ -3004,7 +3015,8 @@ fn opened_connector_bindings(
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "boundary registration receives the already validated job resources and optional checkpoint owner"
+    clippy::too_many_lines,
+    reason = "boundary registration wires the validated sources, sinks, progress, and checkpoint owner"
 )]
 fn register_boundary_tasks(
     runtime: &mut RegisteredRuntime,
@@ -3062,6 +3074,20 @@ fn register_boundary_tasks(
                 .expect("checkpoint runtime retains its bounded task channels")
                 .take_sink_port(&output_id, checkpoint.next_epoch)
         });
+        #[cfg(test)]
+        let sink_commit_fault = checkpoint.as_ref().map(|checkpoint| {
+            let faults = checkpoint.faults.clone();
+            let cancellation = context.cancellation().clone();
+            Arc::new(move || {
+                let trigger_count = faults.trigger_count();
+                faults.trigger(CheckpointFaultPoint::PartialSinkCommit, &cancellation)?;
+                if faults.trigger_count() != trigger_count && cancellation.is_cancelled() {
+                    Err(checkpoint_cancellation_error("partial-sink-commit"))
+                } else {
+                    Ok(())
+                }
+            }) as super::sink_task::SinkCommitFaultHook
+        });
         spawn_sink_task(
             &mut runtime.supervisor,
             SinkTaskInputs {
@@ -3076,6 +3102,9 @@ fn register_boundary_tasks(
                 data_gate: runtime.data_gate.subscribe(),
                 launch_cancel: core.launch_cancel.clone(),
                 checkpoint: sink_checkpoint,
+                epoch_owner: SinkEpochOwner::default(),
+                #[cfg(test)]
+                sink_commit_fault,
             },
         );
         sink_progress.insert(output_id, progress);
@@ -3129,6 +3158,8 @@ struct LiveCheckpointTaskInputs {
 struct EpochManifestAssembly {
     epoch: Option<Epoch>,
     terminal: bool,
+    manifest_durable: bool,
+    deferred_publication_error: Option<CalcFlowError>,
     sources: BTreeMap<String, SourceManifestEntry>,
     operators: BTreeMap<String, OperatorManifestEntry>,
     sink_outputs: BTreeMap<String, BTreeMap<String, SinkManifestEntry>>,
@@ -3151,6 +3182,8 @@ impl EpochManifestAssembly {
         self.sink_outputs.clear();
         self.finalized_sink_outputs.clear();
         self.terminal = terminal;
+        self.manifest_durable = false;
+        self.deferred_publication_error = None;
         Ok(())
     }
 
@@ -3168,6 +3201,7 @@ impl EpochManifestAssembly {
     fn complete(&mut self, epoch: Epoch) -> crate::Result<()> {
         self.expect_epoch(epoch)?;
         self.epoch = None;
+        self.manifest_durable = false;
         Ok(())
     }
 
@@ -3286,7 +3320,7 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
     let result = loop {
         tokio::select! {
             biased;
-            () = cancellation.cancelled() => break Ok(()),
+            () = cancellation.cancelled(), if !assembly.manifest_durable => break Ok(()),
             event = events.recv() => {
                 let Some(event) = event else {
                     break Err(CalcFlowError::Internal {
@@ -3329,7 +3363,8 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
                     Err(error) => break Err(error),
                 }
             }
-            terminal = &mut terminal_sources, if !terminal_sources_observed => {
+            terminal = &mut terminal_sources,
+                if !terminal_sources_observed && !assembly.manifest_durable => {
                 match terminal {
                     Ok(mut cuts) => {
                         if let Err(error) = add_restored_ended_source_cuts(&checkpoint, &mut cuts) {
@@ -3353,7 +3388,7 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
                     break Err(error);
                 }
             }
-            ready = channels.operator_terminal_ready.recv() => {
+            ready = channels.operator_terminal_ready.recv(), if !assembly.manifest_durable => {
                 let Some(ready) = ready else {
                     break Err(checkpoint_channel_closed("operator terminal readiness"));
                 };
@@ -3376,7 +3411,7 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
                     break Err(error);
                 }
             }
-            ready = channels.sink_terminal_ready.recv() => {
+            ready = channels.sink_terminal_ready.recv(), if !assembly.manifest_durable => {
                 let Some(ready) = ready else {
                     break Err(checkpoint_channel_closed("sink terminal readiness"));
                 };
@@ -3399,7 +3434,8 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
                     break Err(error);
                 }
             }
-            acknowledgement = channels.operator_acknowledgements.recv() => {
+            acknowledgement = channels.operator_acknowledgements.recv(),
+                if !assembly.manifest_durable => {
                 let Some(acknowledgement) = acknowledgement else {
                     break Err(checkpoint_channel_closed("operator acknowledgements"));
                 };
@@ -3412,7 +3448,8 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
                     break Err(error);
                 }
             }
-            acknowledgement = channels.sink_acknowledgements.recv() => {
+            acknowledgement = channels.sink_acknowledgements.recv(),
+                if !assembly.manifest_durable => {
                 let Some(acknowledgement) = acknowledgement else {
                     break Err(checkpoint_channel_closed("sink acknowledgements"));
                 };
@@ -3431,8 +3468,12 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
                     break Err(error);
                 }
             }
-            finalization = channels.sink_finalizations.recv() => {
+            finalization = channels.sink_finalizations.recv(),
+                if assembly.finalized_sink_outputs != expected_sinks => {
                 let Some(finalization) = finalization else {
+                    if cancellation.is_cancelled() {
+                        break Ok(());
+                    }
                     break Err(checkpoint_channel_closed("sink finalizations"));
                 };
                 if let Err(error) = accept_sink_finalization(
@@ -3441,13 +3482,6 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
                     &mut assembly,
                     &checkpoint.status,
                 ).await {
-                    break Err(error);
-                }
-                #[cfg(test)]
-                if let Err(error) = checkpoint.inject_fault(
-                    CheckpointFaultPoint::PartialSinkCommit,
-                    &cancellation,
-                ) {
                     break Err(error);
                 }
             }
@@ -3581,7 +3615,11 @@ async fn handle_checkpoint_event(
         CheckpointEvent::Completed(epoch) => {
             #[cfg(test)]
             if checkpoint.inject_fault(CheckpointFaultPoint::CompletedCommit, cancellation)? {
+                assembly.manifest_durable = false;
                 return Ok(false);
+            }
+            if let Some(error) = assembly.deferred_publication_error.take() {
+                return Err(error);
             }
             let terminal = assembly.terminal;
             assembly.complete(epoch)?;
@@ -3646,6 +3684,7 @@ async fn publish_epoch_manifest(
     };
     match publication {
         ManifestPublication::Durable => {
+            assembly.manifest_durable = true;
             coordinator.manifest_durable(epoch).await?;
             notify_sink_manifest_durable(sink_commands, epoch, assembly.terminal).await
         }
@@ -3654,16 +3693,21 @@ async fn publish_epoch_manifest(
             error,
         } => {
             if parent_synced {
+                assembly.manifest_durable = true;
+                if !cancellation.is_cancelled() {
+                    assembly.deferred_publication_error = Some(error);
+                }
                 coordinator.manifest_durable(epoch).await?;
                 notify_sink_manifest_durable(sink_commands, epoch, assembly.terminal).await?;
             } else {
                 notify_sink_preserve(sink_commands, epoch).await?;
+                return if cancellation.is_cancelled() {
+                    Ok(())
+                } else {
+                    Err(error)
+                };
             }
-            if cancellation.is_cancelled() {
-                Ok(())
-            } else {
-                Err(error)
-            }
+            Ok(())
         }
     }
 }
@@ -5137,12 +5181,12 @@ mod tests {
     #[derive(Clone)]
     struct FailOnceRetentionBackend {
         inner: LocalStateBackend,
-        remaining_failures: Arc<AtomicUsize>,
+        failure_armed: Arc<AtomicBool>,
     }
 
     struct FailOnceRetentionLineage {
         inner: Box<dyn StateLineageBackend>,
-        remaining_failures: Arc<AtomicUsize>,
+        failure_armed: Arc<AtomicBool>,
     }
 
     #[async_trait]
@@ -5153,7 +5197,7 @@ mod tests {
         ) -> Result<Box<dyn StateLineageBackend>> {
             Ok(Box::new(FailOnceRetentionLineage {
                 inner: self.inner.open_lineage(key).await?,
-                remaining_failures: Arc::clone(&self.remaining_failures),
+                failure_armed: Arc::clone(&self.failure_armed),
             }))
         }
     }
@@ -5181,13 +5225,7 @@ mod tests {
         }
 
         async fn collect_orphans(&self, retained: &[StateHandle]) -> Result<usize> {
-            if self
-                .remaining_failures
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                    remaining.checked_sub(1)
-                })
-                .is_ok()
-            {
+            if self.failure_armed.swap(false, Ordering::SeqCst) {
                 return Err(CalcFlowError::Internal {
                     message: "injected retention failure".into(),
                 });
@@ -11253,11 +11291,12 @@ mod tests {
     )]
     async fn retention_failure_after_terminal_commit_recovers_the_durable_epoch() {
         let directory = tempfile::tempdir().unwrap();
+        let retention_failure_armed = Arc::new(AtomicBool::new(false));
         let backend = Arc::new(FailOnceRetentionBackend {
             inner: LocalStateBackend::new(directory.path().join("state"))
                 .await
                 .unwrap(),
-            remaining_failures: Arc::new(AtomicUsize::new(1)),
+            failure_armed: Arc::clone(&retention_failure_armed),
         });
         let terminal_plan = || {
             PipelineBuilder::new("checkpoint-retention-fault")
@@ -11293,6 +11332,7 @@ mod tests {
         let log = Arc::new(Mutex::new(Vec::new()));
         let source_closed = Arc::new(AtomicUsize::new(0));
         let sink_closed = Arc::new(AtomicUsize::new(0));
+        let source_gate = Arc::new(Semaphore::new(0));
         let plan = terminal_plan();
         let spec = ContinuousJobSpec {
             context: StreamJobContext::new(
@@ -11305,7 +11345,24 @@ mod tests {
             plan,
             sources: vec![NamedSourceBinding {
                 binding_id: "input".into(),
-                binding: finite_binding(&[7], &source_closed),
+                binding: SourceBinding::new(
+                    Box::new(StressSource {
+                        events: VecDeque::from([
+                            (
+                                Arc::clone(&source_gate),
+                                Some(SourceEvent::Data {
+                                    batch: one_row(7),
+                                    cursor: Cursor::new(vec![1], JsonMap::new()).unwrap(),
+                                }),
+                            ),
+                            (Arc::clone(&source_gate), None),
+                        ]),
+                        closed: Arc::clone(&source_closed),
+                    }),
+                    None,
+                    0,
+                )
+                .unwrap(),
             }],
             sinks: vec![NamedSinkBinding {
                 output_id: "output".into(),
@@ -11323,6 +11380,8 @@ mod tests {
         };
         let mut runner = ContinuousRunner::new();
         let job = runner.start_checkpointed(spec, checkpoint()).await.unwrap();
+        retention_failure_armed.store(true, Ordering::SeqCst);
+        source_gate.add_permits(2);
 
         let failed = tokio::time::timeout(StdDuration::from_secs(1), job.wait())
             .await
