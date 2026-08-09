@@ -336,17 +336,82 @@ Each fault case asserts selected epoch, restored cursor/watermark/idle/end,
 restored window state, visible sink records, duplicate and missing counts,
 temporary artifact reachability, and deterministic terminal error.
 
-Paired benchmarks measure barrier data-path overhead, alignment, state
-checkpoint, manifest publication, restore, and transactional commit. The
-steady-state data path MUST NOT regress by more than 5% without an approved
-exception and noise analysis.
+#### M5-D12-E1 — One-time introduction-only performance baseline amendment
+
+This reviewed amendment applies only to the first M5 introduction PR. Its
+comparison baseline is exactly
+`main@972964413d328dfeabd4597088396bfe4516e5a3`. That baseline does not contain
+the private M5 checkpoint coordinator, production manifest transaction, or
+transactional checkpoint paths, so an M5-private main-to-candidate regression
+percentage is undefined and MUST NOT be fabricated.
+
+The exact-ref `B1 -> C1 -> B2 -> C2` comparison is restricted to the explicitly
+named shared production path `m5/common/stream_channel_data_roundtrip`, which
+measures public `edge_channel` send, reservation, enqueue, receive, and release
+for one immutable data message. This path exists on both refs. Its result MUST
+be reported only as the scoped `shared_edge_result`; it is not evidence for an
+M5-private path or for M5 as a whole. B1/B2 and C1/C2 each use clean ref
+worktrees and fresh release target/evidence roots, and each same-ref executable
+pair MUST be byte-identical.
+
+The exact final candidate MUST separately run optimized `P1` and `P2`
+characterizations from clean candidate worktrees and fresh release
+target/evidence roots for these 12 private scenarios:
+
+1. `m5/private_path/barrier_cut_single_source`;
+2. `m5/private_path/barrier_cut_two_source_fan_out`;
+3. `m5/private_path/pass_through_two_input_alignment`;
+4. `m5/private_path/window_two_input_alignment`;
+5. `m5/private_path/dirty_window_state_stage`;
+6. `m5/private_path/non_empty_manifest_publication`;
+7. `m5/private_path/retained_delta_compacted_base_restore`;
+8. `m5/private_path/single_transactional_sink_commit`;
+9. `m5/private_path/multi_transactional_sink_commit`;
+10. `m5/private_full_path/no_checkpoint`;
+11. `m5/private_full_path/checkpoint_disabled`;
+12. `m5/private_full_path/checkpoint_enabled`.
+
+Every private measurement and the P1/P2 repeatability aggregate are
+`absolute_only`: they report raw samples, median, 95% confidence interval,
+same-ref noise, and host stability, but no pass, regression, no-regression, or
+synthetic main comparison. The P1/P2 executable hashes MUST be byte-identical.
+Comparing candidate checkpoint-enabled with candidate checkpoint-disabled
+measures only candidate self-overhead and MUST be labeled
+`candidate_self_overhead_not_main_regression`.
+
+The evidence has no M5-wide `overall_pass`. A scoped shared-edge decision or
+candidate self-overhead decision cannot satisfy any correctness, coverage,
+CI, review, Codacy, fault, or soak gate. Confidence intervals that cross the
+5% threshold, WSL, virtualization, non-performance CPU/power configuration,
+changed fingerprints, excessive same-ref spread, or other unstable-host
+evidence yield `inconclusive`, never a confident pass.
+
+The report MUST preserve full provenance and an immutable artifact manifest:
+exact commit/tree and merge-base identity, clean status, source-contract and
+dependency hashes, toolchain/machine/environment/build fingerprints, command
+and fresh-root inventory, executable/harness/workload hashes, raw samples,
+hashed JSON sidecars, and a validated manifest covering every evidence
+artifact. After M5 merges, that exact M5 merge SHA becomes the mandatory paired
+baseline for later checkpoint-path changes; M5-D12-E1 cannot be reused.
+
+M5-D12-E1 does not waive the fault matrix, correctness, 90% Rust coverage,
+full CI, review, Copilot, Codacy, exact-head 20-minute soak, or milestone
+firewall gates. Public A6, Python, and Studio surfaces remain closed. The final
+performance and soak artifacts remain pending until they are run against the
+exact final candidate head.
 
 The final implementation head MUST pass a 20-minute soak with two replayable
 sources, union, final-only window, bounded slow transactional test sink,
 periodic checkpoints, retention/compaction, and deterministic process restart.
-Evidence contains the raw commit SHA, 120 one-minute samples, zero missing or
-duplicate records, bounded tasks/queues/state/manifests, and zero resources
-after terminal completion. Any push invalidates earlier soak and CI evidence.
+One parent process launches three distinct OS child generations for global
+sample ranges `0..40`, `40..80`, and `80..120`; continuity between generations
+uses only durable filesystem manifests, state, and sink evidence. Evidence
+contains the raw commit SHA, 120 machine-readable 10-second samples spanning
+exactly 20 minutes, zero missing or duplicate records, bounded
+tasks/queues/state/manifests, and zero resources after terminal completion.
+The 120 samples may be aggregated into 20 one-minute intervals; they are not
+“120 one-minute samples in 20 minutes.” Any push invalidates earlier soak and
+CI evidence.
 
 ## 6. Implementation work packages
 
@@ -492,12 +557,25 @@ after terminal completion. Any push invalidates earlier soak and CI evidence.
 - **AC-43:** the complete fault matrix proves selected epoch, restored state,
   visible output, zero missing/duplicates for the transactional sink, cleanup,
   and deterministic terminal error.
-- **AC-44:** paired benchmarks show no unexplained steady-state regression
-  above 5%.
+- **AC-44:** M5-D12-E1 evidence uses exact baseline
+  `main@972964413d328dfeabd4597088396bfe4516e5a3`; reports only the named common
+  edge path as `shared_edge_result`; characterizes all 12 private paths twice
+  as optimized exact-candidate `absolute_only` P1/P2 runs; labels enabled versus
+  disabled checkpoint cost as candidate-only self-overhead; proves same-ref
+  executable identity, repeatability, noise, host stability, complete
+  provenance, and immutable artifact coverage; and contains no M5-wide
+  `overall_pass` or private main-regression claim. Inconclusive evidence does
+  not satisfy this gate.
 - **AC-45:** full Rust, Python, Studio, frontend, supply-chain, generated-file,
   and diff checks pass on the final implementation head.
-- **AC-46:** the exact-head 20-minute soak records 120 samples, deterministic
-  restart, bounded resources, zero missing/duplicates, and terminal zero.
+- **AC-46:** the exact-head parent process launches exactly three distinct OS
+  child generations with global sample ranges `0..40`, `40..80`, and
+  `80..120`. Only durable filesystem manifests, state, and sink evidence cross
+  generations; no process-local or in-memory state does. The run records 120
+  machine-readable 10-second samples spanning exactly 20 minutes, aggregatable
+  into 20 one-minute intervals, with bounded resources, zero missing or
+  duplicate records, and terminal zero. This repairs the prior inconsistent
+  phrase “120 one-minute samples in 20 minutes.”
 - **AC-47:** all actionable Copilot, Codacy, and CI findings are resolved on the
   same head used for final evidence.
 - **AC-48:** M5 adds no Python, Studio, project-v3, production connector, or

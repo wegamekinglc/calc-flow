@@ -1314,11 +1314,20 @@ partial multi-sink commit 可确定恢复。
 - [ ] fault matrix 断言 selected epoch、cursor/watermark/idle/end、window state、visible
   output、duplicate/missing、artifact cleanup、terminal error。
 - [ ] full Rust/Python/Studio/frontend/supply-chain/generated-file/diff gates 全通过。
-- [ ] paired benchmark 覆盖 steady-state、cut、alignment、state/manifest、restore 与 commit；
-  无未批准且高于 5% 的 regression。
+- [ ] 按 M5-D12-E1 运行 exact-ref evidence：只对 base/candidate 都存在的命名
+  `m5/common/stream_channel_data_roundtrip` 路径执行 `B1 -> C1 -> B2 -> C2` 并仅报告
+  `shared_edge_result`；12 个 M5-private case 在 exact final candidate 上执行 fresh
+  release `P1/P2` `absolute_only` characterization。private path 不制造 main regression，
+  candidate checkpoint enabled/disabled 只报告 self-overhead，不产生 M5-wide
+  `overall_pass`；WSL 或 unstable host 为 `inconclusive`。完整 provenance 与 immutable
+  artifact manifest 必须可独立校验。
 - [ ] exact final head 运行 20 分钟 soak：两 replayable source、union、window、slow
-  transactional test sink、periodic checkpoint、retention/compaction、deterministic restart；
-  记录 raw SHA、120 个一分钟 sample、零重复/零丢失、bounded resource 与 terminal zero。
+  transactional test sink、periodic checkpoint、retention/compaction；一个 parent 顺序启动
+  三个不同 OS child generation，global sample range 为 `0..40`、`40..80`、`80..120`，
+  generation 间只通过 filesystem evidence 连续恢复。记录 raw SHA、覆盖恰好 20 分钟的
+  120 个 10 秒 machine-readable sample（可聚合为 20 个一分钟 interval）、零重复/零丢失、
+  bounded resource 与 terminal zero；这取代不可能同时成立的“20 分钟内 120 个一分钟
+  sample”旧表述。
 - [ ] 所有 Copilot、Codacy、CI 和 review thread 在同一 final remote head 解决；任何 push
   后重跑失效 evidence。
 
