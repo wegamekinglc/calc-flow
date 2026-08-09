@@ -457,6 +457,17 @@ impl MetricsRecorder {
         Ok(())
     }
 
+    pub(crate) fn record_checkpoint_promoted_terminal(&self) -> Result<()> {
+        let mut snapshot = self.0.snapshot.lock();
+        snapshot.checkpoints.terminal_requested = checked_sum(
+            snapshot.checkpoints.terminal_requested,
+            1,
+            "checkpoint",
+            "terminal_requested",
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn record_checkpoint_phase(
         &self,
         phase: CheckpointPhase,

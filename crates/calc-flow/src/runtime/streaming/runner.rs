@@ -567,6 +567,18 @@ impl CheckpointStatusHandle {
         state.started = Some(tokio::time::Instant::now());
     }
 
+    fn promote_terminal(&self, epoch: Epoch) -> crate::Result<()> {
+        let mut state = self.0.lock();
+        if state.snapshot.current_epoch != Some(epoch) {
+            return Err(checkpoint_protocol_error(
+                epoch,
+                "terminal promotion does not match the active checkpoint",
+            ));
+        }
+        state.snapshot.terminal = true;
+        Ok(())
+    }
+
     fn advance(&self, epoch: Epoch, phase: CheckpointPhase) {
         let mut state = self.0.lock();
         if state.snapshot.current_epoch == Some(epoch) {
@@ -3198,6 +3210,12 @@ impl EpochManifestAssembly {
         }
     }
 
+    fn promote_terminal(&mut self, epoch: Epoch) -> crate::Result<()> {
+        self.expect_epoch(epoch)?;
+        self.terminal = true;
+        Ok(())
+    }
+
     fn complete(&mut self, epoch: Epoch) -> crate::Result<()> {
         self.expect_epoch(epoch)?;
         self.epoch = None;
@@ -3550,27 +3568,44 @@ async fn handle_checkpoint_event(
                 let durable = live_progress
                     .terminal_checkpoint_cut(epoch, &cuts, cancellation)
                     .await?;
-                for command in operator_commands.values() {
-                    command
-                        .send(OperatorCheckpointCommand::Terminal(epoch))
-                        .await
-                        .map_err(|_| checkpoint_channel_closed("operator commands"))?;
-                }
-                for command in sink_commands.values() {
-                    command
-                        .send(SinkCheckpointCommand::Terminal(epoch))
-                        .await
-                        .map_err(|_| checkpoint_channel_closed("sink commands"))?;
-                }
+                notify_terminal_checkpoint(operator_commands, sink_commands, epoch).await?;
                 durable
             } else {
                 let mut durable_cuts =
                     pause_checkpoint_sources(sources, epoch, cancellation).await?;
-                add_restored_ended_source_cuts(checkpoint, &mut durable_cuts)?;
-                let durable = match live_progress
-                    .checkpoint_cut(epoch, &durable_cuts, cancellation)
-                    .await
-                {
+                if let Err(error) = add_restored_ended_source_cuts(checkpoint, &mut durable_cuts) {
+                    abort_checkpoint_sources(sources, epoch);
+                    return Err(error);
+                }
+                let promote_terminal = source_cuts_are_terminal(&durable_cuts);
+                let durable_result = if promote_terminal {
+                    let promotion = checkpoint
+                        .status
+                        .promote_terminal(epoch)
+                        .and_then(|()| assembly.promote_terminal(epoch))
+                        .and_then(|()| metrics.record_checkpoint_promoted_terminal());
+                    if let Err(error) = promotion {
+                        abort_checkpoint_sources(sources, epoch);
+                        return Err(error);
+                    }
+                    *terminal_request_active = true;
+                    match live_progress
+                        .terminal_checkpoint_cut(epoch, &durable_cuts, cancellation)
+                        .await
+                    {
+                        Ok(durable) => {
+                            notify_terminal_checkpoint(operator_commands, sink_commands, epoch)
+                                .await
+                                .map(|()| durable)
+                        }
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    live_progress
+                        .checkpoint_cut(epoch, &durable_cuts, cancellation)
+                        .await
+                };
+                let durable = match durable_result {
                     Ok(durable) => durable,
                     Err(error) => {
                         abort_checkpoint_sources(sources, epoch);
@@ -3648,6 +3683,32 @@ async fn handle_checkpoint_event(
         }
     }
     Ok(false)
+}
+
+fn source_cuts_are_terminal(
+    cuts: &BTreeMap<super::progress::BindingIdentity, DurableSourceCut>,
+) -> bool {
+    !cuts.is_empty() && cuts.values().all(|cut| cut.ended)
+}
+
+async fn notify_terminal_checkpoint(
+    operator_commands: &BTreeMap<String, mpsc::Sender<OperatorCheckpointCommand>>,
+    sink_commands: &BTreeMap<String, mpsc::Sender<SinkCheckpointCommand>>,
+    epoch: Epoch,
+) -> crate::Result<()> {
+    for command in operator_commands.values() {
+        command
+            .send(OperatorCheckpointCommand::Terminal(epoch))
+            .await
+            .map_err(|_| checkpoint_channel_closed("operator commands"))?;
+    }
+    for command in sink_commands.values() {
+        command
+            .send(SinkCheckpointCommand::Terminal(epoch))
+            .await
+            .map_err(|_| checkpoint_channel_closed("sink commands"))?;
+    }
+    Ok(())
 }
 
 async fn publish_epoch_manifest(
@@ -4515,7 +4576,7 @@ mod tests {
         LaunchId, RunnerCore, RunnerDiagnostics, RunnerRegistryState, RunnerShutdownObserver,
         RuntimeFailure, RuntimeTaskProgress, TerminalCause, classify_failure_state,
         finish_running_report, maybe_request_terminal_checkpoint, notify_sink_manifest_durable,
-        settle_durable_manifest,
+        settle_durable_manifest, source_cuts_are_terminal,
     };
     use crate::{
         Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken,
@@ -4537,6 +4598,7 @@ mod tests {
                 TransactionalStreamSink, ValidatedOrdinarySink,
             },
             metrics::MetricsRecorder,
+            progress::DurableSourceCut,
             sink_task::SinkCheckpointCommand,
             source_task::{Cursor, SourceBinding, SourceCapabilities, SourceEvent, StreamSource},
             supervisor::{SupervisionReport, TaskId},
@@ -11266,6 +11328,39 @@ mod tests {
 
         cancellation.cancel();
         task.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn periodic_cut_after_all_sources_end_is_terminal() {
+        let cut = |ended| DurableSourceCut {
+            cursor: None,
+            next_sequence: 1,
+            ended,
+        };
+        let all_ended = BTreeMap::from([
+            (
+                crate::runtime::streaming::progress::BindingIdentity::new("left").unwrap(),
+                cut(true),
+            ),
+            (
+                crate::runtime::streaming::progress::BindingIdentity::new("right").unwrap(),
+                cut(true),
+            ),
+        ]);
+        let one_live = BTreeMap::from([
+            (
+                crate::runtime::streaming::progress::BindingIdentity::new("left").unwrap(),
+                cut(true),
+            ),
+            (
+                crate::runtime::streaming::progress::BindingIdentity::new("right").unwrap(),
+                cut(false),
+            ),
+        ]);
+
+        assert!(source_cuts_are_terminal(&all_ended));
+        assert!(!source_cuts_are_terminal(&one_live));
+        assert!(!source_cuts_are_terminal(&BTreeMap::new()));
     }
 
     #[tokio::test]
