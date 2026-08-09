@@ -185,10 +185,11 @@ Python package is not a second engine.
 - Micro-batch and streaming runners deliver sinks before committing
   checkpoints. Delivery is at least once, and failed delivery restores owned
   in-memory state.
-- The crate-private M2 runtime skeleton consumes `StreamExecutionPlan` values
-  with bounded source/operator/sink tasks. It does not replace the public v2
-  runners; public source-driven integration remains a separately reviewed
-  post-M5 change.
+- The crate-private source-driven runtime consumes `StreamExecutionPlan`
+  values with bounded source/operator/sink tasks, job-scoped event-time
+  progress, tumbling/hopping window aggregation, and immutable local state
+  segments. It does not replace the public v2 runners; public source-driven
+  integration and durable restart remain separately reviewed work.
 
 The canonical architecture is described in
 [docs/introduction.md](docs/introduction.md).

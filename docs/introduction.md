@@ -137,6 +137,13 @@ model. Its `expression`, `sql`, `external`, `table_matmul`, and `connect`
 methods return new builders. `compile()` serializes the strict project and
 asks the Rust `Runtime` to validate and compile it.
 
+Rust stream graphs can also contain `UnionOperator` and
+`WindowAggregateOperator`. A `WindowSpec` declares fixed UTC tumbling or
+hopping geometry, event-time and grouping columns, and ordered count, sum,
+minimum, maximum, or average aggregates. Window nodes are rejected by
+`compile_batch()` and accepted by `compile_stream()` after geometry, schema,
+aggregate, overlap, and output-name validation.
+
 `table_matmul` creates a provider-backed `table_matmul@1` external node with
 the required mixed-kind inputs `table` (table) and `weights` (array), and the
 array output `output`. It selects ordered numeric table columns and multiplies
@@ -285,14 +292,25 @@ see the same batch again: delivery is at least once.
 the pipeline name/fingerprint, source cursor/sequence, node-keyed state, and
 creation time. One runner has an exclusive lease on a stateful plan.
 
-The crate also contains the complete M2 continuous-runtime skeleton:
-whole-job preflight, bounded source/operator/sink tasks, a private runner/job/
-reaper lifecycle, deterministic status and metrics, panic containment, and
-bounded launch cleanup. Those types remain crate-private. They do not expose a
-continuous runner or public watermark/checkpoint interface, and they do not
-change the existing public v2 `MicroBatchRunner` or `StreamingRunner`, which
-still submit formed `Batch` values only. Public source-driven runner
-integration is a separately reviewed post-M5 change.
+The crate also contains a source-driven continuous runtime with whole-job
+preflight, bounded source/operator/sink tasks, job-scoped event-time progress,
+window execution, a private runner/job/reaper lifecycle, deterministic status
+and metrics, panic containment, and bounded launch cleanup. Its progress
+driver owns watermark generation, idle/reactivation handling, deterministic
+timer ordering, and multi-ingress progress. These runtime types remain
+crate-private. They do not expose a continuous runner or public
+watermark/checkpoint interface, and they do not change the existing public v2
+`MicroBatchRunner` or `StreamingRunner`, which still submit formed `Batch`
+values only.
+
+The Rust state surface is public and data-only. `StateBackend` opens an
+exclusive `StateLineageBackend`; `LocalStateBackend` stages, validates,
+publishes, loads, and collects immutable checksum-addressed segments.
+`CheckpointManifest` is the strict bounded v3 manifest for source, operator,
+sink, watermark, and segment state. Window snapshots use retained Arrow IPC
+segments and deterministic compaction. The private continuous runtime does not
+yet coordinate barriers or select this manifest during durable restart, so
+public source-driven integration and restart recovery remain unavailable.
 
 Every private runtime edge uses the public two-field `EdgeBudget`. For
 `EdgeBudget::new(R, B)`, at most `R` envelopes, `R` rows, and `B` bytes may be

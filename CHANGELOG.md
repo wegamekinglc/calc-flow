@@ -5,6 +5,21 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-08: Add the public v3 state and window surface: strict bounded
+  checkpoint manifests, lineage-exclusive `StateBackend` sessions,
+  immutable checksum-verified `LocalStateBackend` segments, deterministic
+  compaction, and the stream-only `WindowAggregateOperator` with fixed UTC
+  tumbling/hopping windows, ordered aggregates, late-assignment accounting,
+  deterministic close output, and incremental Arrow IPC snapshots. The
+  source-driven runtime remains crate-private, and barrier coordination,
+  durable restart, Python bindings, and Studio contracts remain unchanged.
+
+- 2026-08-08: Add crate-private job-scoped stream progress coordination with
+  deterministic source policies, watermark aggregation, idle/reactivation,
+  timer ordering, completion receipts, progress snapshots, and replayable
+  traces. This capability prepares continuous execution without changing the
+  public v2 runners or adding a Python or Studio surface.
+
 - 2026-08-06: Complete the crate-private M2 continuous-runtime skeleton with
   whole-job preflight, bounded source/operator/sink tasks, stable supervision,
   private runner/job/reaper lifecycle, deterministic metrics, stress coverage,

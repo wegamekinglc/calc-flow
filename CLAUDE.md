@@ -171,9 +171,10 @@ The frontend talks to the backend over the `/api/v2` REST contract only.
 - The stream message and context types (`StreamMessage`, `EventTime`, `Epoch`,
   `StreamJobContext`) do not expand those public boundaries or expose a runner
   control API; control messages are constructed only through crate-private
-  constructors. The crate-private M2 runtime consumes `StreamExecutionPlan`
-  with whole-job preflight, bounded source/operator/sink tasks, private
-  runner/job/reaper ownership, and deterministic metrics; existing public v2
+  constructors. The crate-private source-driven runtime consumes
+  `StreamExecutionPlan` with whole-job preflight, bounded
+  source/operator/sink tasks, job-scoped event-time progress, private
+  runner/job/reaper ownership, and deterministic metrics. Existing public v2
   runners remain unchanged. The full contract is documented in the [stream
   message envelope](docs/runtime-envelope.md).
 - Apache DataFusion 54 is the sole table engine. Table operations accept one
@@ -186,8 +187,9 @@ The frontend talks to the backend over the `/api/v2` REST contract only.
   schema. `OperatorMetadata` owns shared graph metadata; custom finite and
   continuous operators implement `BatchOperator` and `StreamOperator`
   respectively. `ExpressionOperator` and `SqlOperator` implement both;
-  `UnionOperator` is stream-only. External operators resolve through
-  lifecycle-specific factories in `ProviderRegistry`.
+  `UnionOperator` and `WindowAggregateOperator` are stream-only. External
+  operators resolve through lifecycle-specific factories in
+  `ProviderRegistry`.
 - `PipelineBuilder` consumes immutable graph-building steps. `compile_batch()`
   and `compile_stream()` validate endpoints, kinds, schemas, one-writer inputs,
   UDFs, cycles, deterministic topology, inputs/outputs, and fingerprint.
@@ -197,6 +199,10 @@ The frontend talks to the backend over the `/api/v2` REST contract only.
 - `MicroBatchRunner` and `StreamingRunner` deliver sinks before committing
   checkpoints, giving at-least-once delivery. `FileProjectStore` and
   `FileCheckpointStore` write bounded documents atomically under hashed names.
+- `StateBackend` opens lineage-exclusive state sessions.
+  `LocalStateBackend` publishes immutable, checksum-verified segments, while
+  `CheckpointManifest` is the strict v3 state-manifest contract. The private
+  continuous runtime does not yet use that manifest for durable restart.
 - The canonical project format is a strict data-only `ProjectDocument` with
   `format_version: 2`. The Rust `ProjectSpec`, generated JSON Schema, Python
   `ProjectDocument`, FastAPI request models, and generated TypeScript contract
