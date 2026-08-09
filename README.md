@@ -187,9 +187,13 @@ Python package is not a second engine.
   in-memory state.
 - The crate-private source-driven runtime consumes `StreamExecutionPlan`
   values with bounded source/operator/sink tasks, job-scoped event-time
-  progress, tumbling/hopping window aggregation, and immutable local state
-  segments. It does not replace the public v2 runners; public source-driven
-  integration and durable restart remain separately reviewed work.
+  progress, and tumbling/hopping window aggregation. It does not replace the
+  public v2 runners and does not yet wire `LocalStateBackend` or
+  `CheckpointManifest` into continuous execution.
+- `LocalStateBackend` and `CheckpointManifest` are public state primitives
+  available independently of that runtime. Barrier-to-manifest coordination,
+  durable continuous restart, and a public source-driven runner remain
+  separately reviewed work.
 
 The canonical architecture is described in
 [docs/introduction.md](docs/introduction.md).
