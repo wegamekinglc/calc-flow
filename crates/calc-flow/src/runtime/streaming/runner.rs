@@ -210,6 +210,10 @@ pub(crate) struct CheckpointStartedTestGate {
 
 #[cfg(test)]
 impl CheckpointStartedTestGate {
+    pub(crate) fn has_entered(&self) -> bool {
+        self.entered.load(Ordering::Acquire)
+    }
+
     pub(crate) async fn wait_until_entered(&self) {
         while !self.entered.load(Ordering::Acquire) {
             let changed = self.entered_changed.notified();

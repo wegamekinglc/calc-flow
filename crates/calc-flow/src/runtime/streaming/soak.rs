@@ -6299,7 +6299,7 @@ async fn private_benchmark_smoke_runs_twelve_honest_cases() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[allow(
     clippy::too_many_lines,
     reason = "the late periodic race proves one epoch across live completion and terminal restart"
@@ -6320,7 +6320,7 @@ async fn late_periodic_cut_promotes_the_same_epoch_to_terminal() {
     let gate = CheckpointStartedTestGate::default();
     let config = StreamRuntimeConfig {
         checkpoint_interval: Duration::from_millis(1),
-        checkpoint_timeout: Duration::from_secs(1),
+        checkpoint_timeout: Duration::from_secs(10),
         retained_epochs: 2,
         ..StreamRuntimeConfig::default()
     };
@@ -6331,7 +6331,7 @@ async fn late_periodic_cut_promotes_the_same_epoch_to_terminal() {
         &source_closed,
         &sink_closed,
         &sink_writes,
-        Duration::from_millis(10),
+        Duration::from_secs(1),
         false,
         CancellationToken::new(),
         true,
@@ -6346,20 +6346,28 @@ async fn late_periodic_cut_promotes_the_same_epoch_to_terminal() {
     let mut runner = ContinuousRunner::new();
     let job = runner.start_checkpointed(spec, checkpoint).await.unwrap();
 
-    tokio::time::timeout(Duration::from_secs(1), gate.wait_until_entered())
-        .await
-        .expect("the periodic checkpoint did not reach its Started boundary");
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let status = job.status();
-            if status.sources.len() == 2 && status.sources.values().all(|source| source.ended) {
-                break;
-            }
-            tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    for _ in 0..5 {
+        if gate.has_entered() {
+            break;
         }
-    })
-    .await
-    .expect("finite sources did not end while the periodic cut was paused");
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        gate.has_entered(),
+        "periodic Started boundary was not reached"
+    );
+    let started = job.status();
+    let started_checkpoint = started.checkpoint.as_ref().unwrap();
+    assert_eq!(started_checkpoint.current_epoch, Some(Epoch::INITIAL));
+    assert!(!started_checkpoint.terminal);
+    assert!(!started.sources.values().all(|source| source.ended));
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+    }
+    assert!(job.status().sources.values().all(|source| source.ended));
     gate.release();
 
     let outcome = tokio::time::timeout(Duration::from_secs(5), job.wait())
@@ -6434,6 +6442,14 @@ async fn late_periodic_cut_promotes_the_same_epoch_to_terminal() {
     assert_eq!(source_closed.load(Ordering::SeqCst), 2);
     assert_eq!(sink_closed.load(Ordering::SeqCst), 4);
     assert_eq!(checkpoint_manifest_documents(&manifest_root).await.len(), 1);
+    assert_eq!(
+        read_checkpoint_matrix_visible(&sink_root)
+            .await
+            .values()
+            .map(Vec::len)
+            .sum::<usize>(),
+        4,
+    );
     drop(restart_job);
     restart_runner.shutdown().await.unwrap();
     assert_eq!(restart_runner.registry_counts(), (0, 0));
