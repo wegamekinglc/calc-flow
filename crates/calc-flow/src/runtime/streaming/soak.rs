@@ -1271,20 +1271,13 @@ impl CheckpointMatrixSink {
             .join(format!("prepared-{:020}.json", epoch.as_u64()))
     }
 
-    fn visible_path(&self) -> PathBuf {
-        self.root.join("visible.json")
+    fn visible_epoch_path(&self, epoch: Epoch) -> PathBuf {
+        self.root
+            .join(format!("visible-{:020}.json", epoch.as_u64()))
     }
 
-    async fn read_visible_epochs(&self) -> Result<BTreeMap<String, Vec<String>>> {
-        match tokio::fs::read(self.visible_path()).await {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| CalcFlowError::Internal {
-                message: format!("checkpoint matrix visible state is invalid: {error}"),
-            }),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
-            Err(error) => Err(CalcFlowError::Internal {
-                message: format!("checkpoint matrix visible state read failed: {error}"),
-            }),
-        }
+    async fn read_visible_records(&self) -> Result<Vec<String>> {
+        read_checkpoint_matrix_sink_visible(&self.root).await
     }
 
     async fn prepared_records(&self, epoch: Epoch) -> Result<Vec<String>> {
@@ -1337,25 +1330,42 @@ impl CheckpointMatrixSink {
                 message: format!("sink {:?} prepared artifact identity changed", self.sink_id),
             });
         }
-        let mut visible = self.read_visible_epochs().await?;
-        let epoch_key = epoch.as_u64().to_string();
-        if let std::collections::btree_map::Entry::Vacant(entry) = visible.entry(epoch_key) {
-            let records = self.prepared_records(epoch).await?;
-            entry.insert(records);
-            let bytes = serde_json::to_vec(&visible).map_err(|error| CalcFlowError::Internal {
-                message: format!("checkpoint matrix visible state encode failed: {error}"),
-            })?;
-            let temporary = self.root.join(".visible.tmp");
-            tokio::fs::write(&temporary, bytes)
-                .await
-                .map_err(|error| CalcFlowError::Internal {
-                    message: format!("checkpoint matrix visible state write failed: {error}"),
+        let visible_path = self.visible_epoch_path(epoch);
+        match tokio::fs::read(&visible_path).await {
+            Ok(bytes) => {
+                serde_json::from_slice::<Vec<String>>(&bytes).map_err(|error| {
+                    CalcFlowError::Internal {
+                        message: format!(
+                            "checkpoint matrix visible epoch state is invalid: {error}"
+                        ),
+                    }
                 })?;
-            tokio::fs::rename(&temporary, self.visible_path())
-                .await
-                .map_err(|error| CalcFlowError::Internal {
-                    message: format!("checkpoint matrix visible state rename failed: {error}"),
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let records = self.prepared_records(epoch).await?;
+                let bytes =
+                    serde_json::to_vec(&records).map_err(|error| CalcFlowError::Internal {
+                        message: format!("checkpoint matrix visible state encode failed: {error}"),
+                    })?;
+                let temporary = self
+                    .root
+                    .join(format!(".visible-{:020}.tmp", epoch.as_u64()));
+                tokio::fs::write(&temporary, bytes).await.map_err(|error| {
+                    CalcFlowError::Internal {
+                        message: format!("checkpoint matrix visible state write failed: {error}"),
+                    }
                 })?;
+                tokio::fs::rename(&temporary, &visible_path)
+                    .await
+                    .map_err(|error| CalcFlowError::Internal {
+                        message: format!("checkpoint matrix visible state rename failed: {error}"),
+                    })?;
+            }
+            Err(error) => {
+                return Err(CalcFlowError::Internal {
+                    message: format!("checkpoint matrix visible state read failed: {error}"),
+                });
+            }
         }
         match tokio::fs::remove_file(self.prepared_path(epoch)).await {
             Ok(()) => {}
@@ -2989,13 +2999,7 @@ impl PrivateSinkCommitFixture {
         }
         let mut visible = 0;
         for (sink, _) in &self.sinks {
-            visible += sink
-                .read_visible_epochs()
-                .await
-                .unwrap()
-                .values()
-                .map(Vec::len)
-                .sum::<usize>();
+            visible += sink.read_visible_records().await.unwrap().len();
         }
         assert_eq!(visible, sink_count);
         visible
@@ -3207,16 +3211,54 @@ impl PrivateFullRunnerFixture {
 async fn read_checkpoint_matrix_visible(root: &Path) -> BTreeMap<String, Vec<String>> {
     let mut visible = BTreeMap::new();
     for sink_id in ["sink-a", "sink-b"] {
-        let path = root.join(sink_id).join("visible.json");
-        let epochs: BTreeMap<String, Vec<String>> = serde_json::from_slice(
-            &tokio::fs::read(&path)
+        let sink_root = root.join(sink_id);
+        visible.insert(
+            sink_id.into(),
+            read_checkpoint_matrix_sink_visible(&sink_root)
                 .await
-                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display())),
-        )
-        .unwrap();
-        visible.insert(sink_id.into(), epochs.into_values().flatten().collect());
+                .unwrap(),
+        );
     }
     visible
+}
+
+async fn read_checkpoint_matrix_sink_visible(root: &Path) -> Result<Vec<String>> {
+    let mut paths = Vec::new();
+    let mut entries = match tokio::fs::read_dir(root).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(CalcFlowError::Internal {
+                message: format!("checkpoint matrix visible directory read failed: {error}"),
+            });
+        }
+    };
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| CalcFlowError::Internal {
+            message: format!("checkpoint matrix visible entry read failed: {error}"),
+        })?
+    {
+        if is_canonical_checkpoint_sink_output(&entry.path()) {
+            paths.push(entry.path());
+        }
+    }
+    paths.sort();
+    let mut records = Vec::new();
+    for path in paths {
+        let bytes = tokio::fs::read(&path)
+            .await
+            .map_err(|error| CalcFlowError::Internal {
+                message: format!("checkpoint matrix visible epoch read failed: {error}"),
+            })?;
+        let mut epoch_records: Vec<String> =
+            serde_json::from_slice(&bytes).map_err(|error| CalcFlowError::Internal {
+                message: format!("checkpoint matrix visible epoch is invalid: {error}"),
+            })?;
+        records.append(&mut epoch_records);
+    }
+    Ok(records)
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -3282,6 +3324,27 @@ fn is_canonical_checkpoint_manifest(path: &Path) -> bool {
     epoch.len() == 20 && epoch.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+fn is_canonical_checkpoint_sink_output(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(epoch) = name
+        .strip_prefix("visible-")
+        .and_then(|name| name.strip_suffix(".json"))
+    else {
+        return false;
+    };
+    epoch.len() == 20 && epoch.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn checkpoint_matrix_sink_has_visible(root: &Path) -> bool {
+    std::fs::read_dir(root).is_ok_and(|entries| {
+        entries
+            .filter_map(std::result::Result::ok)
+            .any(|entry| is_canonical_checkpoint_sink_output(&entry.path()))
+    })
+}
+
 fn inspect_checkpoint_temporary_artifacts(
     state_root: &Path,
     manifest_root: &Path,
@@ -3290,12 +3353,14 @@ fn inspect_checkpoint_temporary_artifacts(
     CheckpointTemporaryArtifacts {
         state: count_checkpoint_artifacts(&state_root.join("staging"), |_| false),
         manifests: count_checkpoint_artifacts(manifest_root, is_canonical_checkpoint_manifest),
-        sink_a: count_checkpoint_artifacts(&sink_root.join("sink-a"), |path| {
-            path.file_name().and_then(|name| name.to_str()) == Some("visible.json")
-        }),
-        sink_b: count_checkpoint_artifacts(&sink_root.join("sink-b"), |path| {
-            path.file_name().and_then(|name| name.to_str()) == Some("visible.json")
-        }),
+        sink_a: count_checkpoint_artifacts(
+            &sink_root.join("sink-a"),
+            is_canonical_checkpoint_sink_output,
+        ),
+        sink_b: count_checkpoint_artifacts(
+            &sink_root.join("sink-b"),
+            is_canonical_checkpoint_sink_output,
+        ),
     }
 }
 
@@ -3424,7 +3489,7 @@ async fn run_checkpoint_restart_fault_case(
         .collect::<BTreeSet<_>>();
     let committed_sinks_before_restart = ["sink-a", "sink-b"]
         .into_iter()
-        .filter(|sink_id| sink_root.join(sink_id).join("visible.json").exists())
+        .filter(|sink_id| checkpoint_matrix_sink_has_visible(&sink_root.join(sink_id)))
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
 
@@ -5223,6 +5288,16 @@ async fn run_checkpoint_restart_linux_soak() {
                 );
             }
         };
+    let evidence_root = directory.keep();
+    println!(
+        "{}",
+        json!({
+            "schema": "calc-flow.m5-checkpoint-soak-evidence-root.v1",
+            "type": "calc_flow_m5_checkpoint_soak_evidence_root",
+            "commit": &commit,
+            "path": &evidence_root,
+        })
+    );
     let report = &evidence.report;
     assert_eq!(report.restarts, 2);
     assert_eq!(report.generation_process_ids.len(), 3);
@@ -7202,7 +7277,7 @@ fn temporary_artifact_oracle_covers_state_manifest_and_both_sinks() {
     .unwrap();
     std::fs::write(manifest_root.join(".tmp-manifest"), b"temporary manifest").unwrap();
     std::fs::write(
-        sink_root.join("sink-a/visible.json"),
+        sink_root.join("sink-a/visible-00000000000000000001.json"),
         b"durable sink output",
     )
     .unwrap();
@@ -7221,5 +7296,36 @@ fn temporary_artifact_oracle_covers_state_manifest_and_both_sinks() {
             sink_a: 1,
             sink_b: 1,
         }
+    );
+}
+
+#[tokio::test]
+async fn checkpoint_matrix_sink_commits_bounded_epoch_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("sink-a");
+    let mut sink = CheckpointMatrixSink {
+        sink_id: "sink-a",
+        root: root.clone(),
+        epoch: None,
+        pending: Vec::new(),
+        written_records: Arc::new(AtomicUsize::new(0)),
+        closed: Arc::new(AtomicUsize::new(0)),
+        write_delay: Duration::ZERO,
+    };
+    sink.open().await.unwrap();
+    let epochs = [Epoch::INITIAL, Epoch::INITIAL.next().unwrap()];
+    for (epoch, record) in epochs.into_iter().zip(["first", "second"]) {
+        sink.begin_epoch(epoch).await.unwrap();
+        sink.pending.push(record.into());
+        let state = sink.pre_commit(epoch).await.unwrap();
+        sink.commit(epoch, &state).await.unwrap();
+    }
+
+    assert!(!root.join("visible.json").exists());
+    assert!(root.join("visible-00000000000000000001.json").exists());
+    assert!(root.join("visible-00000000000000000002.json").exists());
+    assert_eq!(
+        read_checkpoint_matrix_visible(directory.path()).await["sink-a"],
+        ["first", "second"]
     );
 }
