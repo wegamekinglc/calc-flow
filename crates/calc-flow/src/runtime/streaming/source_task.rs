@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use futures::FutureExt;
 use parking_lot::Mutex;
 use serde_json::Value;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Notify, mpsc, watch};
 
 use super::{
     EdgeSender, EnvelopeCost, StreamJobContext, StreamMessage,
@@ -20,7 +20,9 @@ use super::{
     },
     supervisor::{TaskFailureSignal, TaskId, TaskSupervisor, panic_message},
 };
-use crate::{Batch, BatchMetadata, CalcFlowError, EventTime, JsonMap, Result, canonical_json};
+use crate::{
+    Batch, BatchMetadata, CalcFlowError, Epoch, EventTime, JsonMap, Result, canonical_json,
+};
 
 const MAX_CURSOR_ORDER_BYTES: usize = 16 * 1024;
 
@@ -59,6 +61,13 @@ impl Cursor {
 
     pub(crate) fn order(&self) -> &[u8] {
         &self.order
+    }
+
+    pub(crate) fn manifest_entry(&self) -> crate::CursorManifestEntry {
+        crate::CursorManifestEntry {
+            order: hex::encode(&self.order),
+            payload: self.payload.clone(),
+        }
     }
 }
 
@@ -138,6 +147,7 @@ pub(crate) struct SourceBinding {
     capabilities: Option<SourceCapabilities>,
     resume_cursor: Option<Cursor>,
     next_sequence: u64,
+    restored_ended: bool,
     open_began: bool,
     watermark_policy: WatermarkPolicy,
     prepared_progress: Option<PreparedSourceBinding>,
@@ -160,6 +170,7 @@ impl SourceBinding {
             capabilities: None,
             resume_cursor,
             next_sequence,
+            restored_ended: false,
             open_began: false,
             watermark_policy: WatermarkPolicy::default(),
             prepared_progress: None,
@@ -186,6 +197,11 @@ impl SourceBinding {
         *self
             .capabilities
             .get_or_insert_with(|| self.source.capabilities())
+    }
+
+    pub(crate) fn sampled_capabilities(&self) -> SourceCapabilities {
+        self.capabilities
+            .expect("validated source bindings sampled capabilities")
     }
 
     pub(crate) fn progress_spec(&self, binding_id: &str) -> Result<SourceBindingSpec> {
@@ -218,6 +234,33 @@ impl SourceBinding {
         self.prepared_progress = Some(prepared);
     }
 
+    pub(crate) fn install_durable_progress(
+        &mut self,
+        restored: &super::progress::RestoredSourceProgress,
+    ) -> Result<()> {
+        self.resume_cursor = restored
+            .cursor
+            .as_ref()
+            .map(|cursor| {
+                let order =
+                    hex::decode(&cursor.order).map_err(|_| CalcFlowError::CheckpointMismatch {
+                        message: "durable source cursor order is not lowercase hexadecimal".into(),
+                    })?;
+                if hex::encode(&order) != cursor.order {
+                    return Err(CalcFlowError::CheckpointMismatch {
+                        message:
+                            "durable source cursor order is not canonical lowercase hexadecimal"
+                                .into(),
+                    });
+                }
+                Cursor::new(order, cursor.payload.clone())
+            })
+            .transpose()?;
+        self.next_sequence = restored.next_sequence;
+        self.restored_ended = restored.ended;
+        Ok(())
+    }
+
     pub(crate) async fn open(&mut self) -> Result<()> {
         self.open_began = true;
         self.source.open(self.resume_cursor.clone()).await
@@ -237,6 +280,29 @@ pub(crate) struct SourceProgressSnapshot {
     pub(crate) ended: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SourceCheckpointCut {
+    pub(crate) cursor: Option<Cursor>,
+    pub(crate) next_sequence: Option<u64>,
+    pub(crate) ended: bool,
+}
+
+impl SourceCheckpointCut {
+    pub(crate) fn durable(&self, binding_id: &str) -> Result<super::progress::DurableSourceCut> {
+        Ok(super::progress::DurableSourceCut {
+            cursor: self.cursor.as_ref().map(Cursor::manifest_entry),
+            next_sequence: self
+                .next_sequence
+                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                    message: format!(
+                        "source {binding_id:?} has no representable next sequence at checkpoint cut"
+                    ),
+                })?,
+            ended: self.ended,
+        })
+    }
+}
+
 /// Separates volatile observed progress from checkpoint-durable progress.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SourceAcceptState {
@@ -248,6 +314,9 @@ pub(crate) enum SourceAcceptState {
 
 struct SourceAcceptance {
     state: Mutex<SourceAcceptState>,
+    checkpoint_epoch: Mutex<Option<Epoch>>,
+    checkpoint_changed: Notify,
+    processing: tokio::sync::Mutex<()>,
     drain: crate::CancellationToken,
     pump_closed: AtomicBool,
     pump_operation_failed: AtomicBool,
@@ -267,6 +336,9 @@ impl SourceAcceptance {
     fn new() -> Self {
         Self {
             state: Mutex::new(SourceAcceptState::Polling),
+            checkpoint_epoch: Mutex::new(None),
+            checkpoint_changed: Notify::new(),
+            processing: tokio::sync::Mutex::new(()),
             drain: crate::CancellationToken::new(),
             pump_closed: AtomicBool::new(false),
             pump_operation_failed: AtomicBool::new(false),
@@ -306,6 +378,10 @@ impl SourceAcceptance {
     }
 
     fn commit_slot(&self) -> bool {
+        let checkpoint_epoch = self.checkpoint_epoch.lock();
+        if checkpoint_epoch.is_some() {
+            return false;
+        }
         let mut state = self.state.lock();
         match *state {
             SourceAcceptState::Polling => {
@@ -320,6 +396,10 @@ impl SourceAcceptance {
 
     #[cfg(test)]
     fn commit_event_slot(&self, event: &SourceEvent) -> bool {
+        let checkpoint_epoch = self.checkpoint_epoch.lock();
+        if checkpoint_epoch.is_some() {
+            return false;
+        }
         let mut state = self.state.lock();
         if !matches!(*state, SourceAcceptState::Polling) {
             return false;
@@ -348,6 +428,112 @@ impl SourceAcceptance {
         };
     }
 
+    fn request_checkpoint_pause(&self, epoch: Epoch) -> Result<()> {
+        let mut active = self.checkpoint_epoch.lock();
+        match *active {
+            None => *active = Some(epoch),
+            Some(current) if current == epoch => {}
+            Some(current) => {
+                return Err(CalcFlowError::CheckpointMismatch {
+                    message: format!(
+                        "source checkpoint epoch {} overlaps active epoch {}",
+                        epoch.as_u64(),
+                        current.as_u64()
+                    ),
+                });
+            }
+        }
+        self.checkpoint_changed.notify_waiters();
+        Ok(())
+    }
+
+    fn finish_checkpoint(&self, epoch: Epoch) -> Result<()> {
+        let mut active = self.checkpoint_epoch.lock();
+        match *active {
+            Some(current) if current == epoch => *active = None,
+            Some(current) => {
+                return Err(CalcFlowError::CheckpointMismatch {
+                    message: format!(
+                        "source checkpoint epoch {} cannot finish active epoch {}",
+                        epoch.as_u64(),
+                        current.as_u64()
+                    ),
+                });
+            }
+            None => {
+                return Err(CalcFlowError::CheckpointMismatch {
+                    message: format!("source checkpoint epoch {} is not active", epoch.as_u64()),
+                });
+            }
+        }
+        drop(active);
+        self.checkpoint_changed.notify_waiters();
+        Ok(())
+    }
+
+    async fn wait_to_commit_slot(
+        &self,
+        cancellation: &crate::CancellationToken,
+        launch_cancel: &crate::CancellationToken,
+    ) -> PumpSlotCommit {
+        self.wait_to_commit(|| self.commit_slot(), cancellation, launch_cancel)
+            .await
+    }
+
+    #[cfg(test)]
+    async fn wait_to_commit_event_slot(
+        &self,
+        event: &SourceEvent,
+        cancellation: &crate::CancellationToken,
+        launch_cancel: &crate::CancellationToken,
+    ) -> PumpSlotCommit {
+        self.wait_to_commit(
+            || self.commit_event_slot(event),
+            cancellation,
+            launch_cancel,
+        )
+        .await
+    }
+
+    #[cfg(not(test))]
+    async fn wait_to_commit_event_slot(
+        &self,
+        _event: &SourceEvent,
+        cancellation: &crate::CancellationToken,
+        launch_cancel: &crate::CancellationToken,
+    ) -> PumpSlotCommit {
+        self.wait_to_commit(|| self.commit_slot(), cancellation, launch_cancel)
+            .await
+    }
+
+    async fn wait_to_commit(
+        &self,
+        mut commit: impl FnMut() -> bool,
+        cancellation: &crate::CancellationToken,
+        launch_cancel: &crate::CancellationToken,
+    ) -> PumpSlotCommit {
+        loop {
+            let changed = self.checkpoint_changed.notified();
+            if commit() {
+                return PumpSlotCommit::Committed;
+            }
+            if self.is_draining() {
+                return PumpSlotCommit::Draining;
+            }
+            tokio::select! {
+                biased;
+                () = launch_cancel.cancelled() => return PumpSlotCommit::Cancelled,
+                () = cancellation.cancelled() => return PumpSlotCommit::Cancelled,
+                () = self.drain.cancelled() => return PumpSlotCommit::Draining,
+                () = changed => {}
+            }
+        }
+    }
+
+    fn notify_progressed(&self) {
+        self.checkpoint_changed.notify_waiters();
+    }
+
     fn is_draining(&self) -> bool {
         matches!(*self.state.lock(), SourceAcceptState::Draining { .. })
     }
@@ -366,6 +552,7 @@ impl SourceAcceptance {
 
     fn mark_closed(&self) {
         *self.state.lock() = SourceAcceptState::Closed;
+        self.checkpoint_changed.notify_waiters();
     }
 }
 
@@ -395,6 +582,90 @@ impl SourceProgress {
         self.snapshot.lock().clone()
     }
 
+    pub(crate) async fn pause_for_checkpoint(
+        &self,
+        epoch: Epoch,
+        cancellation: &crate::CancellationToken,
+    ) -> Result<SourceCheckpointCut> {
+        if !self.snapshot.lock().replayable {
+            return Err(CalcFlowError::CheckpointMismatch {
+                message: "source cannot report an exact replayable checkpoint cut".into(),
+            });
+        }
+        self.acceptance.request_checkpoint_pause(epoch)?;
+        loop {
+            let progressed = self.acceptance.checkpoint_changed.notified();
+            let acceptance = Arc::clone(&self.acceptance);
+            let processing = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => {
+                    let _ = self.acceptance.finish_checkpoint(epoch);
+                    return Err(source_checkpoint_cancelled());
+                }
+                processing = acceptance.processing.lock() => processing,
+            };
+            let settled = !matches!(*self.acceptance.state.lock(), SourceAcceptState::Slotted);
+            if settled {
+                let snapshot = self.snapshot.lock().clone();
+                drop(processing);
+                return Ok(SourceCheckpointCut {
+                    cursor: snapshot.latest_observed_cursor.or(snapshot.durable_cursor),
+                    next_sequence: snapshot.next_sequence,
+                    ended: snapshot.ended,
+                });
+            }
+            drop(processing);
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => {
+                    let _ = self.acceptance.finish_checkpoint(epoch);
+                    return Err(source_checkpoint_cancelled());
+                }
+                () = progressed => {}
+            }
+        }
+    }
+
+    pub(crate) async fn wait_for_terminal_cut(
+        &self,
+        cancellation: &crate::CancellationToken,
+    ) -> Result<SourceCheckpointCut> {
+        loop {
+            let changed = self.acceptance.checkpoint_changed.notified();
+            let snapshot = self.snapshot.lock().clone();
+            if snapshot.ended {
+                return Ok(SourceCheckpointCut {
+                    cursor: snapshot.latest_observed_cursor.or(snapshot.durable_cursor),
+                    next_sequence: snapshot.next_sequence,
+                    ended: true,
+                });
+            }
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(source_checkpoint_cancelled()),
+                () = changed => {}
+            }
+        }
+    }
+
+    pub(crate) fn commit_checkpoint(&self, epoch: Epoch) -> Result<()> {
+        let mut active = self.acceptance.checkpoint_epoch.lock();
+        validate_active_source_checkpoint(*active, epoch)?;
+        let mut snapshot = self.snapshot.lock();
+        if let Some(cursor) = snapshot.latest_observed_cursor.clone() {
+            snapshot.durable_cursor = Some(cursor);
+        }
+        *active = None;
+        drop(snapshot);
+        drop(active);
+        self.acceptance.checkpoint_changed.notify_waiters();
+        Ok(())
+    }
+
+    pub(crate) fn abort_checkpoint(&self, epoch: Epoch) -> Result<()> {
+        self.acceptance.finish_checkpoint(epoch)
+    }
+
     pub(crate) fn request_drain(&self) {
         self.acceptance.request_drain();
     }
@@ -414,6 +685,28 @@ impl SourceProgress {
     }
 }
 
+fn validate_active_source_checkpoint(active: Option<Epoch>, epoch: Epoch) -> Result<()> {
+    match active {
+        Some(current) if current == epoch => Ok(()),
+        Some(current) => Err(CalcFlowError::CheckpointMismatch {
+            message: format!(
+                "source checkpoint epoch {} cannot finish active epoch {}",
+                epoch.as_u64(),
+                current.as_u64()
+            ),
+        }),
+        None => Err(CalcFlowError::CheckpointMismatch {
+            message: format!("source checkpoint epoch {} is not active", epoch.as_u64()),
+        }),
+    }
+}
+
+fn source_checkpoint_cancelled() -> CalcFlowError {
+    CalcFlowError::Cancelled {
+        run_id: "source-checkpoint".into(),
+    }
+}
+
 enum PumpEvent {
     Event(SourceEvent),
     End,
@@ -423,6 +716,12 @@ enum PumpCompletion {
     Cancelled,
     Draining,
     Ended,
+}
+
+enum PumpSlotCommit {
+    Committed,
+    Cancelled,
+    Draining,
 }
 
 struct SourceTaskInputs {
@@ -699,6 +998,7 @@ fn spawn_validated_source_tasks(
         capabilities: _,
         resume_cursor,
         next_sequence,
+        restored_ended,
         open_began,
         watermark_policy: _,
         prepared_progress: _,
@@ -724,7 +1024,7 @@ fn spawn_validated_source_tasks(
             latest_observed_cursor: None,
             durable_cursor: resume_cursor.clone(),
             next_sequence: Some(next_sequence),
-            ended: false,
+            ended: restored_ended,
         })),
         acceptance: Arc::clone(&acceptance),
     };
@@ -849,8 +1149,12 @@ async fn run_source_pump(
             if close_failed {
                 return Err(source_close_task_failed(&binding_id));
             }
-            if !acceptance.commit_slot() {
-                return Ok(());
+            match acceptance
+                .wait_to_commit_slot(&cancellation, &launch_cancel)
+                .await
+            {
+                PumpSlotCommit::Committed => {}
+                PumpSlotCommit::Cancelled | PumpSlotCommit::Draining => return Ok(()),
             }
             tokio::select! {
                 biased;
@@ -1030,14 +1334,14 @@ async fn poll_source_events(
         let Some(event) = event else {
             return Ok(PumpCompletion::Ended);
         };
-        #[cfg(test)]
-        let committed = acceptance.commit_event_slot(&event);
-        #[cfg(not(test))]
-        let committed = acceptance.commit_slot();
-        if !committed {
-            return Ok(PumpCompletion::Draining);
+        match acceptance
+            .wait_to_commit_event_slot(&event, cancellation, launch_cancel)
+            .await
+        {
+            PumpSlotCommit::Committed => permit.send(PumpEvent::Event(event)),
+            PumpSlotCommit::Cancelled => return Ok(PumpCompletion::Cancelled),
+            PumpSlotCommit::Draining => return Ok(PumpCompletion::Draining),
         }
-        permit.send(PumpEvent::Event(event));
     }
 }
 
@@ -1076,8 +1380,13 @@ async fn run_source_task_loop(inputs: &mut SourceTaskInputs) -> Result<()> {
             PumpReceive::Closed => return handle_closed_pump(inputs).await,
             PumpReceive::Event(event) => event,
         };
+        let acceptance = Arc::clone(&inputs.acceptance);
+        let processing = acceptance.processing.lock().await;
         inputs.acceptance.dequeue_slot();
-        if process_pump_event(inputs, event, &mut order).await? == SourceLoopStep::Complete {
+        let step = process_pump_event(inputs, event, &mut order).await;
+        drop(processing);
+        acceptance.notify_progressed();
+        if step? == SourceLoopStep::Complete {
             return Ok(());
         }
     }
@@ -1417,7 +1726,7 @@ mod tests {
         spawn_source_tasks_gated_with_metrics, take_live_progress_binding,
     };
     use crate::{
-        Batch, BatchMetadata, CalcFlowError, CancellationToken, EdgeBudget, EdgeReceiver,
+        Batch, BatchMetadata, CalcFlowError, CancellationToken, EdgeBudget, EdgeReceiver, Epoch,
         EventTime, ExternalPayload, JsonMap, Result, StreamJobContext, StreamMessage,
         StreamMessageKind, edge_channel,
         runtime::streaming::{
@@ -1661,6 +1970,68 @@ mod tests {
                 max_batch_bytes: 1,
             }
         }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_pause_gates_admission_and_promotes_only_the_cut_cursor() {
+        let cancellation = CancellationToken::new();
+        let mut supervisor = TaskSupervisor::new(cancellation.clone());
+        let state = ControlledNextState::new(false);
+        let binding = SourceBinding::new(
+            Box::new(ControlledSource(Arc::clone(&state))),
+            Some(cursor(0)),
+            7,
+        )
+        .unwrap();
+        let (sender, mut receiver) =
+            edge_channel("source->checkpoint", EdgeBudget::default()).unwrap();
+        let progress = spawn_source_tasks(
+            &mut supervisor,
+            &context(cancellation.clone()),
+            "input",
+            binding,
+            vec![sender],
+        )
+        .unwrap();
+
+        while state.next_calls.load(Ordering::Acquire) != 1 {
+            tokio::task::yield_now().await;
+        }
+        state.release(Some(SourceEvent::Data {
+            batch: batch(1),
+            cursor: cursor(1),
+        }));
+        let before_cut = receiver.recv().await.unwrap().unwrap();
+        assert_eq!(before_cut.as_data().unwrap().metadata().sequence(), 7);
+        while progress.snapshot().latest_observed_cursor != Some(cursor(1))
+            || state.next_calls.load(Ordering::Acquire) != 2
+        {
+            tokio::task::yield_now().await;
+        }
+
+        let cut = progress
+            .pause_for_checkpoint(Epoch::INITIAL, &cancellation)
+            .await
+            .unwrap();
+        assert_eq!(cut.cursor, Some(cursor(1)));
+        assert_eq!(cut.next_sequence, Some(8));
+        assert!(!cut.ended);
+
+        state.release(Some(SourceEvent::Data {
+            batch: batch(2),
+            cursor: cursor(2),
+        }));
+        let mut after_cut = Box::pin(receiver.recv());
+        assert_pending(&mut after_cut).await;
+        assert_eq!(progress.snapshot().durable_cursor, Some(cursor(0)));
+
+        progress.commit_checkpoint(Epoch::INITIAL).unwrap();
+        let after_cut = after_cut.await.unwrap().unwrap();
+        assert_eq!(after_cut.as_data().unwrap().metadata().sequence(), 8);
+        assert_eq!(progress.snapshot().durable_cursor, Some(cursor(1)));
+
+        supervisor.cancel();
+        assert!(supervisor.join_all().await.errors.is_empty());
     }
 
     impl StepSource {

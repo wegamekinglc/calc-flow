@@ -143,6 +143,11 @@ impl TerminalArbiter {
                         .then_some(TerminalDecision::ExplicitCancel)
                 })
                 .or_else(|| {
+                    cancellation
+                        .is_cancelled()
+                        .then_some(TerminalDecision::ExplicitCancel)
+                })
+                .or_else(|| {
                     state
                         .deadline_exceeded
                         .then_some(TerminalDecision::DeadlineExceeded)
@@ -466,6 +471,17 @@ mod tests {
         );
         assert!(observation.graceful_shutdown);
         assert!(cancellation.is_cancelled());
+    }
+
+    #[test]
+    fn terminal_arbiter_classifies_external_token_cancellation_as_explicit() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let observation = TerminalArbiter::default().observe_and_commit(&cancellation);
+
+        assert_eq!(observation.terminal, Some(TerminalDecision::ExplicitCancel));
+        assert!(!observation.graceful_shutdown);
     }
 
     #[tokio::test]

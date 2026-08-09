@@ -8,6 +8,18 @@ mod backend;
 mod local;
 mod manifest;
 mod segment;
+mod transaction;
+
+#[cfg(test)]
+pub(crate) use transaction::ManifestTransactionFaultPoint;
+#[allow(
+    unused_imports,
+    reason = "M5 state transaction types are consumed by the private checkpoint runtime"
+)]
+pub(crate) use transaction::{
+    ManifestPublication, ManifestTransaction, PreparedEpochManifest, PreparedManifestIdentity,
+    SelectedManifest, StagedOperatorState,
+};
 
 pub(crate) use segment::{
     SegmentDescriptor, SegmentKind, StateInventory, StateOperation, fold_state_segments,

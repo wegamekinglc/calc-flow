@@ -327,6 +327,52 @@ async fn checkpointed_close_transition_and_output_sequence_survive_restore() {
 }
 
 #[tokio::test]
+async fn every_input_batch_boundary_restores_the_same_final_window_result() {
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "window", None);
+    let rows = [(1, 2), (2, 3), (3, 5), (4, 7)];
+
+    for boundary in 0..=rows.len() {
+        let mut before_restart = operator();
+        let mut ignored = EdgeCollector::new(before_restart.output_ports().to_vec());
+        for &(event_time, value) in &rows[..boundary] {
+            before_restart
+                .process_data(
+                    "input",
+                    input_batch(vec![event_time], vec!["a"], vec![value]),
+                    &context,
+                    &mut ignored,
+                )
+                .await
+                .unwrap();
+        }
+        let snapshot = before_restart.checkpoint(Epoch::INITIAL).unwrap();
+
+        let mut restored = operator();
+        restored.restore(&snapshot).unwrap();
+        for &(event_time, value) in &rows[boundary..] {
+            restored
+                .process_data(
+                    "input",
+                    input_batch(vec![event_time], vec!["a"], vec![value]),
+                    &context,
+                    &mut ignored,
+                )
+                .await
+                .unwrap();
+        }
+        let mut output = EdgeCollector::new(restored.output_ports().to_vec());
+        restored.on_end(&context, &mut output).await.unwrap();
+
+        assert_eq!(
+            first_output_sum(&mut output),
+            (0, 17),
+            "boundary {boundary}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn invalid_restore_has_no_side_effect_and_repeated_restore_is_idempotent() {
     let job = job();
     let context = StreamOperatorContext::new(&job, "window", None);

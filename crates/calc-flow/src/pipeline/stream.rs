@@ -148,10 +148,17 @@ pub(crate) enum CompiledStreamOperator {
     Window(crate::WindowAggregateOperator),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OperatorCheckpointCapability {
+    DeterministicRestore,
+    Unproven,
+}
+
 /// A directly owned compiled node ready to move into one runtime task.
 pub(crate) struct RuntimeStreamNode {
     pub(crate) node_id: String,
     pub(crate) operator: CompiledStreamOperator,
+    pub(crate) checkpoint_capability: OperatorCheckpointCapability,
     pub(crate) input_ports: BTreeMap<String, Port>,
     pub(crate) output_ports: BTreeMap<String, Port>,
     pub(crate) ingress_edges: BTreeMap<String, String>,
@@ -489,10 +496,12 @@ fn build_runtime_nodes(
                         .map(|edge_ids| (port.clone(), edge_ids))
                 })
                 .collect();
+            let checkpoint_capability = definition.checkpoint_capability;
             RuntimeStreamNode {
                 node_id: node_id.clone(),
                 operator: CompiledStreamOperator::convert(definition, table)
                     .expect("stream-capable nodes were validated before conversion"),
+                checkpoint_capability,
                 input_ports,
                 output_ports,
                 ingress_edges,

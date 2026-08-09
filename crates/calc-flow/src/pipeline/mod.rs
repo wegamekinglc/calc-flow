@@ -21,8 +21,8 @@ pub(crate) use compile::{
     CompiledNode, NodeDefinition, TablePlanResources, build_nodes, compile_graph,
 };
 pub(crate) use stream::{
-    CompiledStreamOperator, RuntimeSinkRoute, RuntimeSourceRoute, RuntimeStreamNode,
-    StreamRuntimePlanParts,
+    CompiledStreamOperator, OperatorCheckpointCapability, RuntimeProducer, RuntimeSinkRoute,
+    RuntimeSourceRoute, RuntimeStreamNode, StreamRuntimePlanParts,
 };
 
 use std::collections::BTreeMap;
@@ -169,10 +169,41 @@ impl PipelineBuilder {
     ///
     /// Returns [`CalcFlowError::Compile`] when `node_id` is empty or already
     /// exists.
-    pub fn add_node<O>(mut self, node_id: &str, operator: O) -> Result<Self>
+    pub fn add_node<O>(self, node_id: &str, operator: O) -> Result<Self>
     where
         O: Into<NodeOperator>,
     {
+        let operator = operator.into();
+        let checkpoint_capability = match &operator {
+            NodeOperator::Expression(_)
+            | NodeOperator::Sql(_)
+            | NodeOperator::Union(_)
+            | NodeOperator::Window(_) => OperatorCheckpointCapability::DeterministicRestore,
+            NodeOperator::Batch(_) | NodeOperator::Stream(_) => {
+                OperatorCheckpointCapability::Unproven
+            }
+        };
+        self.add_node_with_capability(node_id, operator, checkpoint_capability)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn add_checkpoint_capable_node<O>(self, node_id: &str, operator: O) -> Result<Self>
+    where
+        O: Into<NodeOperator>,
+    {
+        self.add_node_with_capability(
+            node_id,
+            operator.into(),
+            OperatorCheckpointCapability::DeterministicRestore,
+        )
+    }
+
+    fn add_node_with_capability(
+        mut self,
+        node_id: &str,
+        operator: NodeOperator,
+        checkpoint_capability: OperatorCheckpointCapability,
+    ) -> Result<Self> {
         if node_id.is_empty() {
             return Err(CalcFlowError::Compile {
                 message: "node ID must not be empty".into(),
@@ -187,7 +218,8 @@ impl PipelineBuilder {
             node_id.into(),
             NodeDefinition {
                 node_id: node_id.into(),
-                operator: operator.into(),
+                operator,
+                checkpoint_capability,
             },
         );
         Ok(self)

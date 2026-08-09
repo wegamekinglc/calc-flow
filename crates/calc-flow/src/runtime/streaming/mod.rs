@@ -10,6 +10,11 @@
 //! `max_bytes`.
 
 mod channel;
+#[allow(
+    dead_code,
+    reason = "M5 checkpoint coordination remains crate-private until the post-M5 A6 gate"
+)]
+mod checkpoint;
 mod context;
 #[allow(
     dead_code,

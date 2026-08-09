@@ -1,5 +1,6 @@
 pub(super) mod aggregate;
 mod driver;
+mod durable;
 mod generated;
 pub(super) mod prepare;
 mod snapshot;
@@ -8,6 +9,13 @@ mod trace;
 pub(super) mod types;
 
 pub(crate) use driver::{LiveProgressCoordinator, RawIngressEvent, spawn_live_progress_task};
+#[allow(
+    unused_imports,
+    reason = "M5 durable progress is consumed by private checkpoint recovery"
+)]
+pub(crate) use durable::{
+    DurableProgressRestore, DurableSourceCut, RestoredSourceProgress, restore_durable_progress,
+};
 pub(crate) use prepare::BindingIdentity;
 pub(crate) use status::{LiveProgressEvidence, LiveProgressStatusHandle};
 pub(crate) use trace::RawUpstreamPosition;

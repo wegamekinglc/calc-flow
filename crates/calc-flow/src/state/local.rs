@@ -90,6 +90,14 @@ impl StateBackend for LocalStateBackend {
                 return Err(error);
             }
         };
+        let cleanup_root = Arc::clone(&self.root);
+        let cleanup_hash = lineage_hash.clone();
+        if let Err(error) =
+            worker(move || discard_abandoned_staging(&cleanup_root.path, &cleanup_hash)).await
+        {
+            self.root.process_leases.lock().remove(&lineage_hash);
+            return Err(error);
+        }
         Ok(Box::new(LocalStateLineageBackend {
             root: Arc::clone(&self.root),
             lineage_hash,
@@ -174,18 +182,14 @@ impl StateLineageBackend for LocalStateLineageBackend {
 
     async fn collect_orphans(&self, retained: &[StateHandle]) -> Result<usize> {
         let mut retained_paths = BTreeSet::new();
-        let mut latest_epoch = None;
         for handle in retained {
             self.managed_paths(handle)?;
             retained_paths.insert(handle.relative_path().into());
-            latest_epoch =
-                Some(latest_epoch.map_or(handle.epoch(), |epoch: Epoch| epoch.max(handle.epoch())));
         }
         let root = self.root.path.clone();
         let lineage_hash = self.lineage_hash.clone();
         let _guard = self.publication.lock().await;
-        worker(move || collect_unreachable(&root, &lineage_hash, &retained_paths, latest_epoch))
-            .await
+        worker(move || collect_unreachable(&root, &lineage_hash, &retained_paths)).await
     }
 }
 
@@ -571,6 +575,49 @@ fn prepare_staging_directories(
     Ok(())
 }
 
+fn discard_abandoned_staging(root: &Path, lineage_hash: &str) -> Result<()> {
+    validate_directory(root)?;
+    let staging_root = ensure_child_directory(root, "staging")?;
+    let lineage_root = staging_root.join(lineage_hash);
+    match std::fs::symlink_metadata(&lineage_root) {
+        Ok(_) => remove_managed_staging_tree(&lineage_root)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(io_error(&lineage_root, source)),
+    }
+    sync_directory(&staging_root)
+}
+
+fn remove_managed_staging_tree(directory: &Path) -> Result<()> {
+    validate_managed_entry(directory, true, "staging directory")?;
+    let mut entries = std::fs::read_dir(directory)
+        .map_err(|source| io_error(directory, source))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|source| io_error(directory, source))?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let path = entry.path();
+        let metadata =
+            std::fs::symlink_metadata(&path).map_err(|source| io_error(&path, source))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format_error(format!(
+                "staging entry {} is a symbolic link",
+                path.display()
+            )));
+        }
+        if metadata.is_dir() {
+            remove_managed_staging_tree(&path)?;
+        } else if metadata.is_file() {
+            std::fs::remove_file(&path).map_err(|source| io_error(&path, source))?;
+        } else {
+            return Err(format_error(format!(
+                "staging entry {} is not a regular file or directory",
+                path.display()
+            )));
+        }
+    }
+    std::fs::remove_dir(directory).map_err(|source| io_error(directory, source))
+}
+
 fn prepare_committed_directories(root: &Path, lineage: &str, operator: &str) -> Result<()> {
     let committed = ensure_child_directory(root, "committed")?;
     let committed_lineage = ensure_child_directory(&committed, lineage)?;
@@ -652,9 +699,8 @@ fn collect_unreachable(
     root: &Path,
     lineage_hash: &str,
     retained_paths: &BTreeSet<String>,
-    latest_epoch: Option<Epoch>,
 ) -> Result<usize> {
-    collect_unreachable_with(root, lineage_hash, retained_paths, latest_epoch, |path| {
+    collect_unreachable_with(root, lineage_hash, retained_paths, |path| {
         std::fs::remove_file(path)
     })
 }
@@ -663,7 +709,6 @@ fn collect_unreachable_with(
     root: &Path,
     lineage_hash: &str,
     retained_paths: &BTreeSet<String>,
-    latest_epoch: Option<Epoch>,
     mut remove_file: impl FnMut(&Path) -> std::io::Result<()>,
 ) -> Result<usize> {
     validate_directory(root)?;
@@ -673,7 +718,7 @@ fn collect_unreachable_with(
     }
 
     let (deletions, sync_directories) =
-        collect_deletion_candidates(&lineage_root, lineage_hash, retained_paths, latest_epoch)?;
+        collect_deletion_candidates(&lineage_root, lineage_hash, retained_paths)?;
     remove_unreachable_files(&deletions, &mut remove_file)?;
     synchronize_compacted_directories(&lineage_root, &deletions, sync_directories)?;
     Ok(deletions.len())
@@ -683,7 +728,6 @@ fn collect_deletion_candidates(
     lineage_root: &Path,
     lineage_hash: &str,
     retained_paths: &BTreeSet<String>,
-    latest_epoch: Option<Epoch>,
 ) -> Result<(Vec<PathBuf>, BTreeSet<PathBuf>)> {
     let mut deletions = Vec::new();
     let mut sync_directories = BTreeSet::new();
@@ -694,7 +738,6 @@ fn collect_deletion_candidates(
             &operator_entry.map_err(|source| io_error(lineage_root, source))?,
             lineage_hash,
             retained_paths,
-            latest_epoch,
             &mut deletions,
             &mut sync_directories,
         )?;
@@ -721,7 +764,6 @@ fn collect_operator_deletions(
     operator_entry: &std::fs::DirEntry,
     lineage_hash: &str,
     retained_paths: &BTreeSet<String>,
-    latest_epoch: Option<Epoch>,
     deletions: &mut Vec<PathBuf>,
     sync_directories: &mut BTreeSet<PathBuf>,
 ) -> Result<()> {
@@ -732,13 +774,7 @@ fn collect_operator_deletions(
         std::fs::read_dir(&operator_path).map_err(|source| io_error(&operator_path, source))?
     {
         let segment_entry = segment_entry.map_err(|source| io_error(&operator_path, source))?;
-        if should_delete_segment(
-            &segment_entry,
-            lineage_hash,
-            &operator_name,
-            retained_paths,
-            latest_epoch,
-        )? {
+        if should_delete_segment(&segment_entry, lineage_hash, &operator_name, retained_paths)? {
             deletions.push(segment_entry.path());
             sync_directories.insert(operator_path.clone());
         }
@@ -751,7 +787,6 @@ fn should_delete_segment(
     lineage_hash: &str,
     operator_name: &str,
     retained_paths: &BTreeSet<String>,
-    latest_epoch: Option<Epoch>,
 ) -> Result<bool> {
     let segment_path = segment_entry.path();
     validate_managed_entry(&segment_path, false, "committed segment entry")?;
@@ -759,10 +794,9 @@ fn should_delete_segment(
         .file_name()
         .into_string()
         .map_err(|_| format_error("committed segment name is not UTF-8".into()))?;
-    let epoch = parse_segment_file_name(&file_name)?;
+    parse_segment_file_name(&file_name)?;
     let relative = format!("committed/{lineage_hash}/{operator_name}/{file_name}");
-    let is_newer = latest_epoch.is_none_or(|latest| epoch > latest);
-    Ok(!retained_paths.contains(&relative) && !is_newer)
+    Ok(!retained_paths.contains(&relative))
 }
 
 fn validate_managed_entry(path: &Path, expect_directory: bool, label: &str) -> Result<()> {
@@ -1054,7 +1088,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn orphan_collection_removes_old_unreachable_and_preserves_retained_and_newer() {
+    async fn orphan_collection_removes_every_unreachable_committed_segment() {
         let directory = TempDir::new().unwrap();
         let key = StateLineageKey::new("orders", PIPELINE_FINGERPRINT).unwrap();
         let backend = LocalStateBackend::new(directory.path()).await.unwrap();
@@ -1079,7 +1113,7 @@ mod tests {
                 .collect_orphans(&[handles[1].0.clone()])
                 .await
                 .unwrap(),
-            1
+            2
         );
         assert!(matches!(
             lineage.load_segment(&handles[0].0).await,
@@ -1089,9 +1123,37 @@ mod tests {
             lineage.load_segment(&handles[1].0).await.unwrap(),
             handles[1].1
         );
+        assert!(matches!(
+            lineage.load_segment(&handles[2].0).await,
+            Err(crate::CalcFlowError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn reopening_lineage_discards_abandoned_staging_segments() {
+        let directory = TempDir::new().unwrap();
+        let key = StateLineageKey::new("orders", PIPELINE_FINGERPRINT).unwrap();
+        let backend = LocalStateBackend::new(directory.path()).await.unwrap();
+        let lineage = backend.open_lineage(&key).await.unwrap();
+        let epoch = Epoch::new(3).unwrap();
+        let abandoned = state_handle(&key, epoch, "delta-0003", b"abandoned");
+        lineage
+            .stage_segment(&abandoned, b"abandoned")
+            .await
+            .unwrap();
+        drop(lineage);
+
+        let restarted = backend.open_lineage(&key).await.unwrap();
+        let replacement = state_handle(&key, epoch, "delta-0003", b"replacement");
+        restarted
+            .stage_segment(&replacement, b"replacement")
+            .await
+            .unwrap();
+        restarted.validate_segment(&replacement).await.unwrap();
+        restarted.publish_segment(&replacement).await.unwrap();
         assert_eq!(
-            lineage.load_segment(&handles[2].0).await.unwrap(),
-            handles[2].1
+            restarted.load_segment(&replacement).await.unwrap(),
+            b"replacement"
         );
     }
 
@@ -1155,20 +1217,15 @@ mod tests {
         }
         let mut attempts = Vec::new();
 
-        let error = collect_unreachable_with(
-            directory.path(),
-            &lineage,
-            &BTreeSet::new(),
-            Some(Epoch::INITIAL),
-            |path| {
+        let error =
+            collect_unreachable_with(directory.path(), &lineage, &BTreeSet::new(), |path| {
                 attempts.push(path.to_path_buf());
                 Err(std::io::Error::new(
                     ErrorKind::PermissionDenied,
                     "injected delete failure",
                 ))
-            },
-        )
-        .unwrap_err();
+            })
+            .unwrap_err();
 
         assert_eq!(attempts.len(), 1);
         assert!(matches!(error, crate::CalcFlowError::Io { .. }));

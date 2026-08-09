@@ -16,12 +16,13 @@ use sha2::{Digest, Sha256};
 use crate::{
     CalcFlowError, DataFusionConfig, Edge, NodeOperator, PipelineBuilder, Port, PortEndpoint,
     Result, UdfCatalogEntry, UdfKind, UdfReference, UdfRegistrySnapshot, canonical_json,
-    validate_selected_udfs,
+    pipeline::OperatorCheckpointCapability, validate_selected_udfs,
 };
 
 pub(crate) struct NodeDefinition {
     pub(crate) node_id: String,
     pub(crate) operator: NodeOperator,
+    pub(crate) checkpoint_capability: OperatorCheckpointCapability,
 }
 
 pub(crate) struct CompiledNode<O> {
