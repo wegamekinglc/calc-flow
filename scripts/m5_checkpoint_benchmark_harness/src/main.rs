@@ -20,6 +20,7 @@ const ITERATIONS_PER_SAMPLE: usize = 20_000;
 const SOURCE_COMMIT: &str = env!("CALC_FLOW_M5_SOURCE_COMMIT");
 const SOURCE_TREE: &str = env!("CALC_FLOW_M5_SOURCE_TREE");
 const EXPECTED_HARNESS_SHA256: &str = env!("CALC_FLOW_M5_HARNESS_SHA256");
+const EXPECTED_EXECUTABLE: &str = env!("CALC_FLOW_M5_COMMON_EXECUTABLE");
 const RUN_LABEL: &str = env!("CALC_FLOW_M5_RUN_LABEL");
 const WORKLOAD_CONTRACT: &str = "edge_channel;rows=128;budget_rows=1024;budget_bytes=1048576;warmup=5000;iterations_per_sample=20000;samples=30";
 
@@ -129,9 +130,9 @@ fn create_report(path: &Path, bytes: &[u8]) {
     File::open(parent).unwrap().sync_all().unwrap();
 }
 
-fn validate_executable_identity(declared: &Path, invoked: &Path) -> Result<PathBuf, &'static str> {
-    if declared != invoked {
-        return Err("invoked benchmark executable does not match the declared identity");
+fn validate_executable_identity(declared: &Path, expected: &Path) -> Result<PathBuf, &'static str> {
+    if declared != expected {
+        return Err("declared benchmark executable does not match the build identity");
     }
     Ok(declared.to_path_buf())
 }
@@ -140,10 +141,8 @@ fn executable_identity() -> PathBuf {
     let declared = PathBuf::from(std::env::var_os("CALC_FLOW_M5_COMMON_EXECUTABLE").unwrap())
         .canonicalize()
         .unwrap();
-    let invoked = PathBuf::from(std::env::args_os().next().unwrap())
-        .canonicalize()
-        .unwrap();
-    validate_executable_identity(&declared, &invoked).unwrap()
+    let expected = PathBuf::from(EXPECTED_EXECUTABLE);
+    validate_executable_identity(&declared, &expected).unwrap()
 }
 
 fn main() {
@@ -221,7 +220,7 @@ mod tests {
     use super::validate_executable_identity;
 
     #[test]
-    fn executable_identity_rejects_a_different_invoked_path() {
+    fn executable_identity_rejects_a_different_declared_path() {
         let error = validate_executable_identity(
             Path::new("/trusted/common-benchmark"),
             Path::new("/replaced/common-benchmark"),
@@ -230,7 +229,7 @@ mod tests {
 
         assert_eq!(
             error,
-            "invoked benchmark executable does not match the declared identity"
+            "declared benchmark executable does not match the build identity"
         );
     }
 }

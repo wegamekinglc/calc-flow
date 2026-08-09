@@ -113,7 +113,7 @@ class CommonDecisionTests(unittest.TestCase):
             cwd=benchmark.SCRIPT_ROOT.parent,
         )
         self.assertRegex(version, r"^cargo \d")
-        for executable in ("/tmp/cargo", "cargo-nightly", "sh"):
+        for executable in ("/untrusted/cargo", "cargo-nightly", "sh"):
             with (
                 self.subTest(executable=executable),
                 self.assertRaisesRegex(ValueError, "cargo executable"),
@@ -132,10 +132,23 @@ class CommonHarnessSourceTests(unittest.TestCase):
         self.assertIn("assert_eq!(harness_hash(), EXPECTED_HARNESS_SHA256)", source)
         self.assertIn("edge_channel", source)
         self.assertIn(benchmark.COMMON_CASE, source)
-        self.assertIn("CALC_FLOW_M5_COMMON_EXECUTABLE", source)
+        self.assertIn('env!("CALC_FLOW_M5_COMMON_EXECUTABLE")', source)
         self.assertNotIn("current_exe", source)
+        self.assertNotIn("args_os", source)
         self.assertNotIn("checkpoint", source.lower())
         self.assertIn('calc-flow = { path = "../../../../crates/calc-flow" }', manifest)
+
+    def test_trusted_subprocess_calls_have_exact_scanner_justification(self) -> None:
+        source = benchmark.__file__
+        lines = Path(source).read_text(encoding="utf-8").splitlines()
+        calls = [line for line in lines if "subprocess.run(" in line]
+
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            self.assertIn(
+                "# nosemgrep: python.lang.security.audit.dangerous-subprocess-use",
+                call,
+            )
 
     def test_materialized_harness_bytes_are_identical_for_every_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

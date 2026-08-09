@@ -501,8 +501,8 @@ def _run_command(
         merged_environment.update(environment)
     argv = command.argv()
     print(f"+ (cd {shlex.quote(str(cwd))} && {shlex.join(argv)})", flush=True)
-    # nosemgrep: python.lang.security.audit.dangerous-subprocess-use
-    result = subprocess.run(  # nosec B603 - executable is resolved from the allowlist
+    # TrustedCommand accepts only a validated absolute executable and structured argv.
+    result = subprocess.run(  # noqa: E501  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use
         # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args  # noqa: E501
         argv,
         cwd=cwd,
@@ -573,8 +573,8 @@ def _optional_command(command: Sequence[str]) -> str:
             executable=_trusted_system_executable(requested[0]),
             arguments=requested[1:],
         )
-        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use
-        result = subprocess.run(  # nosec B603 - fixed optional diagnostic command
+        # The complete diagnostic command is selected from the fixed allowlist.
+        result = subprocess.run(  # noqa: E501  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use
             # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args  # noqa: E501
             trusted.argv(),
             check=False,
@@ -779,11 +779,16 @@ def _run_common_matrix(
         dependency_graph_sha256 = _canonical_hash(
             _normalized_dependency_graph(metadata)
         )
+        executable = plan.target_dir / "release" / "calc-flow-m5-common-benchmark"
+        if sys.platform == "win32":
+            executable = executable.with_suffix(".exe")
+        executable = executable.resolve()
         build_environment = {
             "CALC_FLOW_M5_RUN_LABEL": plan.label,
             "CALC_FLOW_M5_SOURCE_COMMIT": plan.snapshot.commit,
             "CALC_FLOW_M5_SOURCE_TREE": plan.snapshot.tree,
             "CALC_FLOW_M5_HARNESS_SHA256": harness_sha256,
+            "CALC_FLOW_M5_COMMON_EXECUTABLE": str(executable),
             "CARGO_TARGET_DIR": str(plan.target_dir),
         }
         build_command = TrustedCommand(cargo, ("build", "--release", "--locked"))
@@ -792,10 +797,6 @@ def _run_common_matrix(
             cwd=plan.harness_root,
             environment=build_environment,
         )
-        executable = plan.target_dir / "release" / "calc-flow-m5-common-benchmark"
-        if sys.platform == "win32":
-            executable = executable.with_suffix(".exe")
-        executable = executable.resolve()
         if not executable.is_file():
             raise ValueError(f"common benchmark executable is missing: {executable}")
         run_environment = {
