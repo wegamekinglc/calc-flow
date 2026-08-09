@@ -14,7 +14,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
-use criterion::Criterion;
+use criterion::{BatchSize, Criterion};
 use datafusion::arrow::{
     array::{Int64Array, StringArray, TimestampMicrosecondArray},
     datatypes::{DataType, Field, Schema, TimeUnit},
@@ -104,15 +104,20 @@ const CHECKPOINT_SOAK_PROCESS_SCHEMA: &str = "calc-flow.m5-checkpoint-soak-proce
 const CHECKPOINT_SOAK_PLAN_SCHEMA: &str = "calc-flow.m5-checkpoint-soak-plan.v1";
 const CHECKPOINT_SOAK_GENERATIONS: usize = 3;
 const CHECKPOINT_SOAK_REPORT_LIMIT: u64 = 1 << 20;
-const CHECKPOINT_BENCHMARK_COMMAND: &str = "CARGO_TARGET_DIR=<fresh-candidate-target> CALC_FLOW_M5_CHECKPOINT_BENCHMARK=1 CALC_FLOW_M5_CHECKPOINT_BENCHMARK_RUN_ID=<unique-run-id> CALC_FLOW_M5_PRIVATE_SOURCE_COMMIT=<candidate-commit> CALC_FLOW_M5_PRIVATE_SOURCE_TREE=<candidate-tree> cargo test -p calc-flow --lib runtime::streaming::soak::private_m5_epoch_checkpoint_absolute_benchmark -- --ignored --exact --nocapture";
-const M5_PRIVATE_BENCHMARK_CASES: [&str; 7] = [
-    "m5/private_path/barrier_cut_fan_out",
-    "m5/private_path/two_input_alignment",
+const CHECKPOINT_BENCHMARK_COMMAND: &str = "CARGO_TARGET_DIR=<fresh-candidate-target> CARGO_INCREMENTAL=0 CALC_FLOW_M5_CHECKPOINT_BENCHMARK=1 CALC_FLOW_M5_CHECKPOINT_BENCHMARK_RUN_ID=<unique-run-id> CALC_FLOW_M5_PRIVATE_SOURCE_COMMIT=<candidate-commit> CALC_FLOW_M5_PRIVATE_SOURCE_TREE=<candidate-tree> cargo test --release -p calc-flow --lib runtime::streaming::soak::private_m5_epoch_checkpoint_absolute_benchmark -- --ignored --exact --nocapture";
+const M5_PRIVATE_BENCHMARK_CASES: [&str; 12] = [
+    "m5/private_path/barrier_cut_single_source",
+    "m5/private_path/barrier_cut_two_source_fan_out",
+    "m5/private_path/pass_through_two_input_alignment",
+    "m5/private_path/window_two_input_alignment",
     "m5/private_path/dirty_window_state_stage",
-    "m5/private_path/production_manifest_publication",
-    "m5/private_path/cold_restore",
-    "m5/private_path/transactional_sink_commit",
-    "m5/private_full_path/periodic_checkpoint_restart",
+    "m5/private_path/non_empty_manifest_publication",
+    "m5/private_path/retained_delta_compacted_base_restore",
+    "m5/private_path/single_transactional_sink_commit",
+    "m5/private_path/multi_transactional_sink_commit",
+    "m5/private_full_path/no_checkpoint",
+    "m5/private_full_path/checkpoint_disabled",
+    "m5/private_full_path/checkpoint_enabled",
 ];
 const CHECKPOINT_BENCHMARK_SAMPLE_SIZE: usize = 10;
 const CHECKPOINT_BENCHMARK_WARM_UP: Duration = Duration::from_secs(1);
@@ -1872,16 +1877,16 @@ fn strict_command_output(program: &str, arguments: &[&str]) -> Result<String> {
 fn private_benchmark_harness_hash() -> String {
     sha256_bytes(
         &serde_json::to_vec(&json!({
-            "version": 2,
+            "version": 3,
             "cases": M5_PRIVATE_BENCHMARK_CASES,
             "private_paths": [
                 "LiveProgressCoordinator::checkpoint_cut",
-                "OperatorBarrierAlignment",
+                "async OperatorBarrierAlignment pass-through/window",
                 "ManifestTransaction::stage_operator_state",
                 "ManifestTransaction::publish",
-                "ManifestTransaction::select_latest/load_operator_state",
-                "TransactionalStreamSink::commit",
-                "ContinuousRunner::start_checkpointed/restart",
+                "WindowAggregateOperator::restore compacted base plus deltas",
+                "single/multi TransactionalStreamSink::commit",
+                "ContinuousRunner no-checkpoint/terminal-only/periodic",
             ],
             "topology": {
                 "sources": 2,
@@ -1900,6 +1905,15 @@ fn private_benchmark_config_hash() -> String {
                 "sample_size": CHECKPOINT_BENCHMARK_SAMPLE_SIZE,
                 "warm_up_millis": CHECKPOINT_BENCHMARK_WARM_UP.as_millis(),
                 "measurement_millis": CHECKPOINT_BENCHMARK_MEASUREMENT.as_millis(),
+            },
+            "workload": {
+                "case_count": M5_PRIVATE_BENCHMARK_CASES.len(),
+                "barrier_sources": [1, 2],
+                "barrier_fan_out": [1, 2],
+                "restore_epochs": 35,
+                "transactional_sink_counts": [1, 2],
+                "full_runner_source_count": 2,
+                "full_runner_sink_count": 2,
             },
         }))
         .unwrap(),
@@ -2268,7 +2282,7 @@ fn private_checkpoint_benchmark_metadata(
             "sources": 2,
             "operators": ["union", "final_window", "two_forward_branches"],
             "sinks": 2,
-            "checkpoint": "periodic durable epoch followed by deterministic process restart",
+            "checkpoint_modes": ["none", "terminal_only", "periodic"],
         },
     })
 }
@@ -2443,18 +2457,25 @@ fn private_benchmark_source(binding_id: &str) -> SourceBindingSpec {
     }
 }
 
-#[allow(
-    clippy::similar_names,
-    reason = "the four symmetric fan-out endpoints retain their topology identity"
-)]
-async fn run_private_barrier_cut_fan_out_benchmark_case() -> usize {
+struct PrivateBarrierCutFixture {
+    coordinator: LiveProgressCoordinator,
+    cuts: BTreeMap<BindingIdentity, DurableSourceCut>,
+    receivers: Vec<crate::EdgeReceiver>,
+    cancellation: CancellationToken,
+}
+
+fn prepare_private_barrier_cut_benchmark(
+    source_ids: &[&str],
+    fan_out: usize,
+) -> PrivateBarrierCutFixture {
+    let sources = source_ids
+        .iter()
+        .map(|source_id| private_benchmark_source(source_id))
+        .collect::<Vec<_>>();
     let prepared = Arc::new(
         prepare_stream_job(
             "m5-private-barrier-cut",
-            &[
-                private_benchmark_source("left"),
-                private_benchmark_source("right"),
-            ],
+            &sources,
             StreamProgressRuntimeConfig::default(),
         )
         .unwrap(),
@@ -2463,64 +2484,146 @@ async fn run_private_barrier_cut_fan_out_benchmark_case() -> usize {
         max_rows: 4,
         max_bytes: 1 << 20,
     };
-    let (left_a, left_primary_receiver) = crate::edge_channel("left-a", budget).unwrap();
-    let (left_b, left_secondary_receiver) = crate::edge_channel("left-b", budget).unwrap();
-    let (right_a, right_primary_receiver) = crate::edge_channel("right-a", budget).unwrap();
-    let (right_b, right_secondary_receiver) = crate::edge_channel("right-b", budget).unwrap();
+    let mut receivers = Vec::new();
+    let outputs = source_ids
+        .iter()
+        .map(|source_id| {
+            let senders = (0..fan_out)
+                .map(|branch| {
+                    let edge_id = format!("{source_id}-{branch}");
+                    let (sender, receiver) = crate::edge_channel(edge_id, budget).unwrap();
+                    receivers.push(receiver);
+                    sender
+                })
+                .collect::<Vec<_>>();
+            ((*source_id).into(), senders)
+        })
+        .collect();
     let cancellation = CancellationToken::new();
-    let coordinator = LiveProgressCoordinator::new(
-        &prepared,
-        BTreeMap::from([
-            ("left".into(), vec![left_a, left_b]),
-            ("right".into(), vec![right_a, right_b]),
-        ]),
-        cancellation.clone(),
-    )
-    .unwrap();
-    coordinator
-        .checkpoint_cut(
-            Epoch::INITIAL,
-            &BTreeMap::from([
-                (
-                    BindingIdentity::new("left").unwrap(),
-                    DurableSourceCut {
-                        cursor: Some(CursorManifestEntry {
-                            order: "01".into(),
-                            payload: BTreeMap::new(),
-                        }),
-                        next_sequence: 0,
-                        ended: false,
-                    },
-                ),
-                (
-                    BindingIdentity::new("right").unwrap(),
-                    DurableSourceCut {
-                        cursor: Some(CursorManifestEntry {
-                            order: "02".into(),
-                            payload: BTreeMap::new(),
-                        }),
-                        next_sequence: 0,
-                        ended: false,
-                    },
-                ),
-            ]),
-            &cancellation,
-        )
-        .await
-        .unwrap();
-    let mut receivers = [
-        left_primary_receiver,
-        left_secondary_receiver,
-        right_primary_receiver,
-        right_secondary_receiver,
-    ];
-    let mut barriers = 0;
-    for receiver in &mut receivers {
-        let message = receiver.recv().await.unwrap().unwrap();
-        assert_eq!(message.as_barrier(), Some(Epoch::INITIAL));
-        barriers += 1;
+    let coordinator =
+        LiveProgressCoordinator::new(&prepared, outputs, cancellation.clone()).unwrap();
+    let cuts = source_ids
+        .iter()
+        .enumerate()
+        .map(|(index, source_id)| {
+            (
+                BindingIdentity::new(*source_id).unwrap(),
+                DurableSourceCut {
+                    cursor: Some(CursorManifestEntry {
+                        order: format!("{:02x}", index + 1),
+                        payload: BTreeMap::new(),
+                    }),
+                    next_sequence: 0,
+                    ended: false,
+                },
+            )
+        })
+        .collect();
+    PrivateBarrierCutFixture {
+        coordinator,
+        cuts,
+        receivers,
+        cancellation,
     }
-    barriers
+}
+
+impl PrivateBarrierCutFixture {
+    async fn measure(mut self) -> usize {
+        self.coordinator
+            .checkpoint_cut(Epoch::INITIAL, &self.cuts, &self.cancellation)
+            .await
+            .unwrap();
+        let mut barriers = 0;
+        for receiver in &mut self.receivers {
+            let message = receiver.recv().await.unwrap().unwrap();
+            assert_eq!(message.as_barrier(), Some(Epoch::INITIAL));
+            barriers += 1;
+        }
+        barriers
+    }
+}
+
+struct PrivateWindowAlignmentOperator {
+    inputs: [Port; 2],
+    outputs: [Port; 1],
+    window: WindowAggregateOperator,
+}
+
+impl PrivateWindowAlignmentOperator {
+    fn new() -> Self {
+        let window = checkpoint_matrix_window();
+        let fields = soak_schema()
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        Self {
+            inputs: [
+                Port::new("left", BatchKind::Table, true, Some(fields.clone())).unwrap(),
+                Port::new("right", BatchKind::Table, true, Some(fields)).unwrap(),
+            ],
+            outputs: [window.output_ports()[0].clone()],
+            window,
+        }
+    }
+}
+
+impl OperatorMetadata for PrivateWindowAlignmentOperator {
+    fn name(&self) -> &'static str {
+        "private-window-alignment"
+    }
+
+    fn input_ports(&self) -> &[Port] {
+        &self.inputs
+    }
+
+    fn output_ports(&self) -> &[Port] {
+        &self.outputs
+    }
+
+    fn configuration(&self) -> JsonMap {
+        self.window.configuration()
+    }
+}
+
+#[async_trait]
+impl StreamOperator for PrivateWindowAlignmentOperator {
+    async fn process_data(
+        &mut self,
+        _ingress: &str,
+        batch: Batch,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        self.window
+            .process_data("input", batch, context, output)
+            .await
+    }
+
+    async fn on_watermark(
+        &mut self,
+        watermark: EventTime,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        self.window.on_watermark(watermark, context, output).await
+    }
+
+    async fn on_end(
+        &mut self,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        self.window.on_end(context, output).await
+    }
+
+    fn checkpoint(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
+        self.window.checkpoint(epoch)
+    }
+
+    fn restore(&mut self, snapshot: &OperatorStateSnapshot) -> Result<()> {
+        self.window.restore(snapshot)
+    }
 }
 
 fn private_benchmark_identity(operator_ids: BTreeSet<String>) -> PreparedManifestIdentity {
@@ -2578,140 +2681,418 @@ async fn private_benchmark_transaction(
     (directory, transaction, identity)
 }
 
-async fn run_private_dirty_window_state_stage_benchmark_case() -> usize {
-    let (_directory, transaction, _identity) =
+#[derive(Default)]
+struct PrivateDiscardCollector {
+    batches: usize,
+}
+
+#[async_trait]
+impl StreamCollector for PrivateDiscardCollector {
+    async fn emit(&mut self, _port: &str, _batch: Batch) -> Result<()> {
+        self.batches += 1;
+        Ok(())
+    }
+}
+
+async fn private_dirty_window_snapshot(epoch: Epoch) -> OperatorStateSnapshot {
+    let mut window = checkpoint_matrix_window();
+    let job = StreamJobContext::new(
+        31_000,
+        PRIVATE_BENCHMARK_PIPELINE_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "window", None);
+    let mut output = PrivateDiscardCollector::default();
+    for (source_id, sequence) in [("left", 0), ("right", 0)] {
+        window
+            .process_data(
+                "input",
+                checkpoint_restart_soak_batch(source_id, sequence).unwrap(),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+    }
+    let snapshot = window.checkpoint(epoch).unwrap();
+    assert!(!snapshot.inline_metadata.is_empty());
+    assert!(!snapshot.segments.is_empty());
+    snapshot
+}
+
+fn private_benchmark_union() -> UnionOperator {
+    let fields = soak_schema()
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    UnionOperator::new(
+        "private-alignment-union",
+        vec![
+            Port::new("left", BatchKind::Table, true, Some(fields.clone())).unwrap(),
+            Port::new("right", BatchKind::Table, true, Some(fields)).unwrap(),
+        ],
+    )
+    .unwrap()
+}
+
+#[derive(Clone, Copy)]
+enum PrivateAlignmentKind {
+    PassThrough,
+    Window,
+}
+
+struct PrivateAlignmentFixture {
+    _directory: Option<tempfile::TempDir>,
+    inner: super::operator_task::tests::BenchmarkAlignmentFixture,
+    kind: PrivateAlignmentKind,
+}
+
+async fn prepare_private_alignment_benchmark(
+    kind: PrivateAlignmentKind,
+) -> PrivateAlignmentFixture {
+    let batches = [
+        checkpoint_restart_soak_batch("left", 0).unwrap(),
+        checkpoint_restart_soak_batch("right", 0).unwrap(),
+        checkpoint_restart_soak_batch("left", 1).unwrap(),
+    ];
+    let (directory, transaction, operator): (_, _, Box<dyn StreamOperator>) = match kind {
+        PrivateAlignmentKind::PassThrough => (None, None, Box::new(private_benchmark_union())),
+        PrivateAlignmentKind::Window => {
+            let (directory, transaction, _identity) =
+                private_benchmark_transaction(BTreeSet::from(["window".into()])).await;
+            (
+                Some(directory),
+                Some(Arc::new(transaction)),
+                Box::new(PrivateWindowAlignmentOperator::new()),
+            )
+        }
+    };
+    let inner = super::operator_task::tests::prepare_benchmark_alignment_fixture(
+        operator,
+        transaction,
+        batches,
+    )
+    .await;
+    PrivateAlignmentFixture {
+        _directory: directory,
+        inner,
+        kind,
+    }
+}
+
+impl PrivateAlignmentFixture {
+    async fn measure(self) -> usize {
+        let report = self.inner.measure().await.unwrap();
+        assert_eq!(report.barriers, 1);
+        match self.kind {
+            PrivateAlignmentKind::PassThrough => {
+                assert_eq!(report.data_before_barrier, 2);
+                assert_eq!(report.state_segments, 0);
+            }
+            PrivateAlignmentKind::Window => {
+                assert_eq!(report.data_before_barrier, 0);
+                assert!(report.state_segments > 0);
+            }
+        }
+        report.barriers + report.state_segments
+    }
+}
+
+struct PrivateStateStageFixture {
+    _directory: tempfile::TempDir,
+    transaction: ManifestTransaction,
+    snapshot: OperatorStateSnapshot,
+}
+
+async fn prepare_private_state_stage_benchmark() -> PrivateStateStageFixture {
+    let (directory, transaction, _identity) =
         private_benchmark_transaction(BTreeSet::from(["window".into()])).await;
-    transaction
-        .stage_operator_state(
-            "window",
-            Epoch::INITIAL,
-            OperatorStateSnapshot {
-                inline_metadata: BTreeMap::new(),
-                segments: BTreeMap::from([("delta".into(), b"dirty-window-state".to_vec())]),
-            },
-        )
-        .await
-        .unwrap()
-        .segments
-        .len()
+    let snapshot = private_dirty_window_snapshot(Epoch::INITIAL).await;
+    PrivateStateStageFixture {
+        _directory: directory,
+        transaction,
+        snapshot,
+    }
 }
 
-async fn run_private_manifest_publication_benchmark_case() -> usize {
-    let (directory, transaction, _identity) = private_benchmark_transaction(BTreeSet::new()).await;
-    transaction
-        .publish(PreparedEpochManifest {
-            manifest: private_benchmark_manifest(Epoch::INITIAL, BTreeMap::new()),
-            staged_segments: BTreeMap::new(),
-        })
-        .await
-        .unwrap();
-    checkpoint_manifest_count(&directory.path().join("manifests"))
+impl PrivateStateStageFixture {
+    async fn measure(self) -> usize {
+        self.transaction
+            .stage_operator_state("window", Epoch::INITIAL, self.snapshot)
+            .await
+            .unwrap()
+            .segments
+            .len()
+    }
 }
 
-async fn run_private_cold_restore_benchmark_case() -> usize {
-    let (_directory, transaction, identity) =
+struct PrivateManifestPublicationFixture {
+    directory: tempfile::TempDir,
+    transaction: ManifestTransaction,
+    prepared: PreparedEpochManifest,
+}
+
+async fn prepare_private_manifest_publication_benchmark() -> PrivateManifestPublicationFixture {
+    let (directory, transaction, _identity) =
         private_benchmark_transaction(BTreeSet::from(["window".into()])).await;
     let staged = transaction
         .stage_operator_state(
             "window",
             Epoch::INITIAL,
-            OperatorStateSnapshot {
-                inline_metadata: BTreeMap::new(),
-                segments: BTreeMap::from([("delta".into(), b"restored-window-state".to_vec())]),
-            },
+            private_dirty_window_snapshot(Epoch::INITIAL).await,
         )
         .await
         .unwrap();
-    transaction
-        .publish(PreparedEpochManifest {
-            manifest: private_benchmark_manifest(
-                Epoch::INITIAL,
-                BTreeMap::from([(
-                    "window".into(),
-                    OperatorManifestEntry {
-                        progress: BTreeMap::new(),
-                        inline_metadata: staged.inline_metadata,
-                        segments: staged.segments,
-                    },
-                )]),
-            ),
-            staged_segments: BTreeMap::new(),
-        })
-        .await
-        .unwrap();
-    let selected = transaction.select_latest(&identity).await.unwrap().unwrap();
-    transaction
-        .load_operator_state(
-            "window",
-            selected.manifest.epoch(),
-            &selected.manifest.operators()["window"],
-        )
-        .await
-        .unwrap()
-        .segments
-        .len()
+    let prepared = PreparedEpochManifest {
+        manifest: private_benchmark_manifest(
+            Epoch::INITIAL,
+            BTreeMap::from([(
+                "window".into(),
+                OperatorManifestEntry {
+                    progress: BTreeMap::new(),
+                    inline_metadata: staged.inline_metadata,
+                    segments: staged.segments,
+                },
+            )]),
+        ),
+        staged_segments: BTreeMap::new(),
+    };
+    PrivateManifestPublicationFixture {
+        directory,
+        transaction,
+        prepared,
+    }
 }
 
-async fn run_private_transactional_sink_commit_benchmark_case() -> usize {
-    let directory = tempfile::tempdir().unwrap();
-    let mut sink = CheckpointMatrixSink {
-        sink_id: "sink-a",
-        root: directory.path().join("sink-a"),
-        epoch: None,
-        pending: Vec::new(),
-        written_records: Arc::new(AtomicUsize::new(0)),
-        closed: Arc::new(AtomicUsize::new(0)),
-        write_delay: Duration::ZERO,
-    };
-    sink.open().await.unwrap();
-    sink.begin_epoch(Epoch::INITIAL).await.unwrap();
-    sink.pending.push("sink-a|0|1|left|1".into());
-    let state = sink.pre_commit(Epoch::INITIAL).await.unwrap();
-    sink.commit(Epoch::INITIAL, &state).await.unwrap();
-    sink.read_visible_epochs()
-        .await
+impl PrivateManifestPublicationFixture {
+    async fn measure(self) -> usize {
+        self.transaction.publish(self.prepared).await.unwrap();
+        let manifest_path = self.directory.path().join("manifests");
+        let bytes = std::fs::read_dir(&manifest_path)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .find(|entry| is_canonical_checkpoint_manifest(&entry.path()))
+            .map(|entry| std::fs::read(entry.path()).unwrap())
+            .unwrap();
+        assert!(bytes.len() > 2);
+        checkpoint_manifest_count(&manifest_path)
+    }
+}
+
+struct PrivateRestoreFixture {
+    snapshot: OperatorStateSnapshot,
+    window: WindowAggregateOperator,
+}
+
+async fn prepare_private_retained_restore_benchmark() -> PrivateRestoreFixture {
+    let mut window = checkpoint_matrix_window();
+    let job = StreamJobContext::new(
+        31_001,
+        PRIVATE_BENCHMARK_PIPELINE_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "window", None);
+    let mut output = PrivateDiscardCollector::default();
+    let mut retained_bytes = BTreeMap::new();
+    let mut final_snapshot = None;
+    for raw_epoch in 1..=35 {
+        let epoch = Epoch::new(raw_epoch).unwrap();
+        window
+            .process_data(
+                "input",
+                checkpoint_restart_soak_batch("left", raw_epoch).unwrap(),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        let snapshot = window.checkpoint(epoch).unwrap();
+        retained_bytes.extend(snapshot.segments.clone());
+        final_snapshot = Some(snapshot);
+    }
+    let mut snapshot = final_snapshot.unwrap();
+    let retained_ids = snapshot.inline_metadata["segment_inventory"]
+        .as_array()
         .unwrap()
-        .values()
-        .map(Vec::len)
-        .sum()
+        .iter()
+        .map(|descriptor| {
+            descriptor["handle"]["segment_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect::<BTreeSet<_>>();
+    retained_bytes.retain(|segment_id, _| retained_ids.contains(segment_id));
+    snapshot.segments = retained_bytes;
+    PrivateRestoreFixture {
+        snapshot,
+        window: checkpoint_matrix_window(),
+    }
+}
+
+impl PrivateRestoreFixture {
+    fn measure(mut self) -> usize {
+        let kinds = self.snapshot.inline_metadata["segment_inventory"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|descriptor| descriptor["kind"].as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(kinds, BTreeSet::from(["base", "delta"]));
+        self.window.restore(&self.snapshot).unwrap();
+        self.snapshot.segments.len()
+    }
+}
+
+struct PrivateSinkCommitFixture {
+    _directory: tempfile::TempDir,
+    sinks: Vec<(CheckpointMatrixSink, JsonMap)>,
+}
+
+async fn prepare_private_sink_commit_benchmark(sink_count: usize) -> PrivateSinkCommitFixture {
+    let directory = tempfile::tempdir().unwrap();
+    let mut sinks = Vec::new();
+    for index in 0..sink_count {
+        let sink_id = if index == 0 { "sink-a" } else { "sink-b" };
+        let mut sink = CheckpointMatrixSink {
+            sink_id,
+            root: directory.path().join(sink_id),
+            epoch: None,
+            pending: Vec::new(),
+            written_records: Arc::new(AtomicUsize::new(0)),
+            closed: Arc::new(AtomicUsize::new(0)),
+            write_delay: Duration::ZERO,
+        };
+        sink.open().await.unwrap();
+        sink.begin_epoch(Epoch::INITIAL).await.unwrap();
+        sink.pending.push(format!("{sink_id}|0|1|left|1"));
+        let state = sink.pre_commit(Epoch::INITIAL).await.unwrap();
+        sinks.push((sink, state));
+    }
+    PrivateSinkCommitFixture {
+        _directory: directory,
+        sinks,
+    }
+}
+
+impl PrivateSinkCommitFixture {
+    async fn measure(mut self) -> usize {
+        let sink_count = self.sinks.len();
+        for (sink, state) in &mut self.sinks {
+            sink.commit(Epoch::INITIAL, state).await.unwrap();
+        }
+        let mut visible = 0;
+        for (sink, _) in &self.sinks {
+            visible += sink
+                .read_visible_epochs()
+                .await
+                .unwrap()
+                .values()
+                .map(Vec::len)
+                .sum::<usize>();
+        }
+        assert_eq!(visible, sink_count);
+        visible
+    }
 }
 
 async fn run_private_checkpoint_path_benchmark_smoke() -> BTreeMap<&'static str, usize> {
     BTreeMap::from([
         (
-            "m5/private_path/barrier_cut_fan_out",
-            run_private_barrier_cut_fan_out_benchmark_case().await,
+            M5_PRIVATE_BENCHMARK_CASES[0],
+            prepare_private_barrier_cut_benchmark(&["source"], 1)
+                .measure()
+                .await,
         ),
         (
-            "m5/private_path/two_input_alignment",
-            super::operator_task::benchmark_two_input_alignment().unwrap(),
+            M5_PRIVATE_BENCHMARK_CASES[1],
+            prepare_private_barrier_cut_benchmark(&["left", "right"], 2)
+                .measure()
+                .await,
         ),
         (
-            "m5/private_path/dirty_window_state_stage",
-            run_private_dirty_window_state_stage_benchmark_case().await,
+            M5_PRIVATE_BENCHMARK_CASES[2],
+            prepare_private_alignment_benchmark(PrivateAlignmentKind::PassThrough)
+                .await
+                .measure()
+                .await,
         ),
         (
-            "m5/private_path/production_manifest_publication",
-            run_private_manifest_publication_benchmark_case().await,
+            M5_PRIVATE_BENCHMARK_CASES[3],
+            prepare_private_alignment_benchmark(PrivateAlignmentKind::Window)
+                .await
+                .measure()
+                .await,
         ),
         (
-            "m5/private_path/cold_restore",
-            run_private_cold_restore_benchmark_case().await,
+            M5_PRIVATE_BENCHMARK_CASES[4],
+            prepare_private_state_stage_benchmark()
+                .await
+                .measure()
+                .await,
         ),
         (
-            "m5/private_path/transactional_sink_commit",
-            run_private_transactional_sink_commit_benchmark_case().await,
+            M5_PRIVATE_BENCHMARK_CASES[5],
+            prepare_private_manifest_publication_benchmark()
+                .await
+                .measure()
+                .await,
+        ),
+        (
+            M5_PRIVATE_BENCHMARK_CASES[6],
+            prepare_private_retained_restore_benchmark().await.measure(),
+        ),
+        (
+            M5_PRIVATE_BENCHMARK_CASES[7],
+            prepare_private_sink_commit_benchmark(1)
+                .await
+                .measure()
+                .await,
+        ),
+        (
+            M5_PRIVATE_BENCHMARK_CASES[8],
+            prepare_private_sink_commit_benchmark(2)
+                .await
+                .measure()
+                .await,
         ),
     ])
 }
 
-async fn run_private_no_checkpoint_benchmark_case() -> PrivateCheckpointBenchmarkReport {
+#[derive(Clone, Copy)]
+enum PrivateFullRunnerMode {
+    NoCheckpoint,
+    CheckpointDisabled,
+    CheckpointEnabled,
+}
+
+struct PrivateFullRunnerFixture {
+    directory: tempfile::TempDir,
+    sink_root: PathBuf,
+    source_closed: Arc<AtomicUsize>,
+    sink_closed: Arc<AtomicUsize>,
+    sink_writes: Arc<AtomicUsize>,
+    runner: ContinuousRunner,
+    spec: Option<ContinuousJobSpec>,
+    checkpoint: Option<CheckpointRuntimeSpec>,
+    mode: PrivateFullRunnerMode,
+}
+
+async fn prepare_private_full_runner_benchmark(
+    mode: PrivateFullRunnerMode,
+) -> PrivateFullRunnerFixture {
     let directory = tempfile::tempdir().unwrap();
     let sink_root = directory.path().join("sinks");
     let source_opens = Arc::new(Mutex::new(Vec::new()));
     let source_closed = Arc::new(AtomicUsize::new(0));
     let sink_closed = Arc::new(AtomicUsize::new(0));
     let sink_writes = Arc::new(AtomicUsize::new(0));
+    let checkpointed = !matches!(mode, PrivateFullRunnerMode::NoCheckpoint);
     let spec = checkpoint_matrix_spec(
         30_000,
         &sink_root,
@@ -2719,137 +3100,101 @@ async fn run_private_no_checkpoint_benchmark_case() -> PrivateCheckpointBenchmar
         &source_closed,
         &sink_closed,
         &sink_writes,
-        Duration::ZERO,
+        if matches!(mode, PrivateFullRunnerMode::CheckpointEnabled) {
+            Duration::from_millis(5)
+        } else {
+            Duration::ZERO
+        },
         CancellationToken::new(),
-        false,
+        checkpointed,
     );
-    let mut runner = ContinuousRunner::new();
-    let job = runner.start(spec).await.unwrap();
-    let outcome = tokio::time::timeout(Duration::from_secs(5), job.wait())
-        .await
-        .expect("private no-checkpoint benchmark case hung");
-    assert_eq!(outcome.state, ContinuousJobState::Completed);
-    drop(job);
-    runner.shutdown().await.unwrap();
-    assert_eq!(runner.registry_counts(), (0, 0));
-    assert_eq!(source_closed.load(Ordering::SeqCst), 2);
-    assert_eq!(sink_closed.load(Ordering::SeqCst), 2);
-    PrivateCheckpointBenchmarkReport {
-        completed_jobs: 1,
-        failed_jobs: 0,
-        visible_records: sink_writes.load(Ordering::SeqCst),
-        manifest_count: checkpoint_manifest_count(&directory.path().join("manifests")),
-        restored_epoch: None,
+    let checkpoint = if checkpointed {
+        let backend = Arc::new(
+            LocalStateBackend::new(directory.path().join("state"))
+                .await
+                .unwrap(),
+        );
+        Some(
+            CheckpointRuntimeSpec::new(
+                backend,
+                directory.path().join("manifests"),
+                StreamRuntimeConfig {
+                    checkpoint_interval: if matches!(mode, PrivateFullRunnerMode::CheckpointEnabled)
+                    {
+                        Duration::from_millis(1)
+                    } else {
+                        Duration::from_secs(3_600)
+                    },
+                    checkpoint_timeout: Duration::from_secs(5),
+                    retained_epochs: 2,
+                    ..StreamRuntimeConfig::default()
+                },
+            )
+            .unwrap(),
+        )
+    } else {
+        None
+    };
+    PrivateFullRunnerFixture {
+        directory,
+        sink_root,
+        source_closed,
+        sink_closed,
+        sink_writes,
+        runner: ContinuousRunner::new(),
+        spec: Some(spec),
+        checkpoint,
+        mode,
     }
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "the private benchmark measures one complete checkpoint and cold-restart lifecycle"
-)]
-async fn run_private_checkpoint_restart_benchmark_case() -> PrivateCheckpointBenchmarkReport {
-    let directory = tempfile::tempdir().unwrap();
-    let state_root = directory.path().join("state");
-    let manifest_root = directory.path().join("manifests");
-    let sink_root = directory.path().join("sinks");
-    let backend = Arc::new(LocalStateBackend::new(&state_root).await.unwrap());
-    let sink_writes = Arc::new(AtomicUsize::new(0));
-
-    let first_source_opens = Arc::new(Mutex::new(Vec::new()));
-    let first_source_closed = Arc::new(AtomicUsize::new(0));
-    let first_sink_closed = Arc::new(AtomicUsize::new(0));
-    let first_spec = checkpoint_matrix_spec(
-        30_001,
-        &sink_root,
-        &first_source_opens,
-        &first_source_closed,
-        &first_sink_closed,
-        &sink_writes,
-        Duration::from_millis(5),
-        CancellationToken::new(),
-        true,
-    );
-    let first_checkpoint = CheckpointRuntimeSpec::new(
-        backend.clone(),
-        &manifest_root,
-        StreamRuntimeConfig {
-            checkpoint_interval: Duration::from_millis(1),
-            checkpoint_timeout: Duration::from_secs(5),
-            retained_epochs: 2,
-            ..StreamRuntimeConfig::default()
-        },
-    )
-    .unwrap()
-    .with_fault(
-        CheckpointFaultPoint::CompletedCommit,
-        CheckpointFaultMode::Restart,
-    );
-    let mut first_runner = ContinuousRunner::new();
-    let first_job = first_runner
-        .start_checkpointed(first_spec, first_checkpoint)
-        .await
-        .unwrap();
-    let first_outcome = tokio::time::timeout(Duration::from_secs(5), first_job.wait())
-        .await
-        .expect("private checkpoint benchmark pre-restart case hung");
-    assert_eq!(first_outcome.state, ContinuousJobState::Failed);
-    drop(first_job);
-    first_runner.shutdown().await.unwrap();
-    assert_eq!(first_runner.registry_counts(), (0, 0));
-
-    let restart_source_opens = Arc::new(Mutex::new(Vec::new()));
-    let restart_source_closed = Arc::new(AtomicUsize::new(0));
-    let restart_sink_closed = Arc::new(AtomicUsize::new(0));
-    let restart_spec = checkpoint_matrix_spec(
-        30_002,
-        &sink_root,
-        &restart_source_opens,
-        &restart_source_closed,
-        &restart_sink_closed,
-        &sink_writes,
-        Duration::ZERO,
-        CancellationToken::new(),
-        true,
-    );
-    let restart_checkpoint = CheckpointRuntimeSpec::new(
-        backend,
-        &manifest_root,
-        StreamRuntimeConfig {
-            checkpoint_interval: Duration::from_secs(3_600),
-            checkpoint_timeout: Duration::from_secs(5),
-            retained_epochs: 2,
-            ..StreamRuntimeConfig::default()
-        },
-    )
-    .unwrap();
-    let mut restart_runner = ContinuousRunner::new();
-    let restart_job = restart_runner
-        .start_checkpointed(restart_spec, restart_checkpoint)
-        .await
-        .unwrap();
-    let restart_outcome = tokio::time::timeout(Duration::from_secs(5), restart_job.wait())
-        .await
-        .expect("private checkpoint benchmark restart case hung");
-    assert_eq!(restart_outcome.state, ContinuousJobState::Completed);
-    let restored_epoch = restart_job
-        .status()
-        .checkpoint
-        .and_then(|checkpoint| checkpoint.last_completed_epoch);
-    drop(restart_job);
-    restart_runner.shutdown().await.unwrap();
-    assert_eq!(restart_runner.registry_counts(), (0, 0));
-    let visible_records = read_checkpoint_matrix_visible(&sink_root)
-        .await
-        .values()
-        .map(Vec::len)
-        .sum();
-
-    PrivateCheckpointBenchmarkReport {
-        completed_jobs: 1,
-        failed_jobs: 1,
-        visible_records,
-        manifest_count: checkpoint_manifest_count(&manifest_root),
-        restored_epoch,
+impl PrivateFullRunnerFixture {
+    async fn measure(mut self) -> PrivateCheckpointBenchmarkReport {
+        let spec = self.spec.take().unwrap();
+        let job = if let Some(checkpoint) = self.checkpoint.take() {
+            self.runner
+                .start_checkpointed(spec, checkpoint)
+                .await
+                .unwrap()
+        } else {
+            self.runner.start(spec).await.unwrap()
+        };
+        let outcome = tokio::time::timeout(Duration::from_secs(5), job.wait())
+            .await
+            .expect("private full-runner benchmark case hung");
+        assert_eq!(outcome.state, ContinuousJobState::Completed);
+        let restored_epoch = job
+            .status()
+            .checkpoint
+            .and_then(|checkpoint| checkpoint.last_completed_epoch);
+        drop(job);
+        self.runner.shutdown().await.unwrap();
+        assert_eq!(self.runner.registry_counts(), (0, 0));
+        assert_eq!(self.source_closed.load(Ordering::SeqCst), 2);
+        assert_eq!(self.sink_closed.load(Ordering::SeqCst), 2);
+        let manifest_count = checkpoint_manifest_count(&self.directory.path().join("manifests"));
+        let visible_records = if matches!(self.mode, PrivateFullRunnerMode::NoCheckpoint) {
+            self.sink_writes.load(Ordering::SeqCst)
+        } else {
+            read_checkpoint_matrix_visible(&self.sink_root)
+                .await
+                .values()
+                .map(Vec::len)
+                .sum()
+        };
+        assert_eq!(visible_records, 4);
+        match self.mode {
+            PrivateFullRunnerMode::NoCheckpoint => assert_eq!(manifest_count, 0),
+            PrivateFullRunnerMode::CheckpointDisabled => assert_eq!(manifest_count, 1),
+            PrivateFullRunnerMode::CheckpointEnabled => assert!(manifest_count >= 2),
+        }
+        PrivateCheckpointBenchmarkReport {
+            completed_jobs: 1,
+            failed_jobs: 0,
+            visible_records,
+            manifest_count,
+            restored_epoch,
+        }
     }
 }
 
@@ -5583,31 +5928,41 @@ async fn checkpoint_manifest_scan_skips_entry_removed_after_enumeration() {
 }
 
 #[tokio::test]
-async fn private_full_path_benchmark_smoke_runs_baseline_and_restart_cases() {
+async fn private_benchmark_smoke_runs_twelve_honest_cases() {
     let private_paths = run_private_checkpoint_path_benchmark_smoke().await;
     assert_eq!(
         private_paths,
         BTreeMap::from([
-            ("m5/private_path/barrier_cut_fan_out", 4),
-            ("m5/private_path/two_input_alignment", 2),
-            ("m5/private_path/dirty_window_state_stage", 1),
-            ("m5/private_path/production_manifest_publication", 1),
-            ("m5/private_path/cold_restore", 1),
-            ("m5/private_path/transactional_sink_commit", 1),
+            ("m5/private_path/barrier_cut_single_source", 1),
+            ("m5/private_path/barrier_cut_two_source_fan_out", 4),
+            ("m5/private_path/pass_through_two_input_alignment", 1),
+            ("m5/private_path/window_two_input_alignment", 3),
+            ("m5/private_path/dirty_window_state_stage", 2),
+            ("m5/private_path/non_empty_manifest_publication", 1),
+            ("m5/private_path/retained_delta_compacted_base_restore", 3),
+            ("m5/private_path/single_transactional_sink_commit", 1),
+            ("m5/private_path/multi_transactional_sink_commit", 2),
         ])
     );
 
-    let baseline = run_private_no_checkpoint_benchmark_case().await;
-    assert_eq!(baseline.completed_jobs, 1);
-    assert_eq!(baseline.visible_records, 4);
-    assert_eq!(baseline.manifest_count, 0);
-
-    let checkpoint = run_private_checkpoint_restart_benchmark_case().await;
-    assert_eq!(checkpoint.completed_jobs, 1);
-    assert_eq!(checkpoint.failed_jobs, 1);
-    assert_eq!(checkpoint.visible_records, 4);
-    assert!(checkpoint.manifest_count >= 2);
-    assert!(checkpoint.restored_epoch.is_some());
+    for (mode, expected_manifests) in [
+        (PrivateFullRunnerMode::NoCheckpoint, 0),
+        (PrivateFullRunnerMode::CheckpointDisabled, 1),
+        (PrivateFullRunnerMode::CheckpointEnabled, 2),
+    ] {
+        let report = prepare_private_full_runner_benchmark(mode)
+            .await
+            .measure()
+            .await;
+        assert_eq!(report.completed_jobs, 1);
+        assert_eq!(report.failed_jobs, 0);
+        assert_eq!(report.visible_records, 4);
+        if expected_manifests == 2 {
+            assert!(report.manifest_count >= expected_manifests);
+        } else {
+            assert_eq!(report.manifest_count, expected_manifests);
+        }
+    }
 }
 
 #[test]
@@ -5655,7 +6010,7 @@ fn private_benchmark_rejects_missing_or_stale_embedded_source_identity() {
 }
 
 #[test]
-fn private_benchmark_metadata_reports_seven_absolute_only_m5_cases() {
+fn private_benchmark_metadata_reports_honest_absolute_only_m5_cases() {
     let candidate = PrivateBenchmarkProvenance {
         commit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
         tree: "2222222222222222222222222222222222222222".into(),
@@ -5686,13 +6041,18 @@ fn private_benchmark_metadata_reports_seven_absolute_only_m5_cases() {
     assert_eq!(
         metadata["absolute_cases"],
         json!([
-            "m5/private_path/barrier_cut_fan_out",
-            "m5/private_path/two_input_alignment",
+            "m5/private_path/barrier_cut_single_source",
+            "m5/private_path/barrier_cut_two_source_fan_out",
+            "m5/private_path/pass_through_two_input_alignment",
+            "m5/private_path/window_two_input_alignment",
             "m5/private_path/dirty_window_state_stage",
-            "m5/private_path/production_manifest_publication",
-            "m5/private_path/cold_restore",
-            "m5/private_path/transactional_sink_commit",
-            "m5/private_full_path/periodic_checkpoint_restart",
+            "m5/private_path/non_empty_manifest_publication",
+            "m5/private_path/retained_delta_compacted_base_restore",
+            "m5/private_path/single_transactional_sink_commit",
+            "m5/private_path/multi_transactional_sink_commit",
+            "m5/private_full_path/no_checkpoint",
+            "m5/private_full_path/checkpoint_disabled",
+            "m5/private_full_path/checkpoint_enabled",
         ])
     );
     assert_eq!(metadata["comparison"], "none");
@@ -5712,8 +6072,38 @@ fn private_benchmark_metadata_reports_seven_absolute_only_m5_cases() {
             .contains("CALC_FLOW_M5_PRIVATE_SOURCE_TREE=<candidate-tree>")
     );
     assert_eq!(metadata["provenance"]["tree"], candidate.tree);
-    assert_eq!(metadata["measurements"].as_array().unwrap().len(), 7);
+    assert_eq!(metadata["measurements"].as_array().unwrap().len(), 12);
     assert_eq!(metadata["overall_result"], "absolute_only");
+}
+
+#[test]
+fn private_benchmark_contract_uses_honest_cases_and_batched_setup() {
+    assert_eq!(
+        M5_PRIVATE_BENCHMARK_CASES.as_slice(),
+        [
+            "m5/private_path/barrier_cut_single_source",
+            "m5/private_path/barrier_cut_two_source_fan_out",
+            "m5/private_path/pass_through_two_input_alignment",
+            "m5/private_path/window_two_input_alignment",
+            "m5/private_path/dirty_window_state_stage",
+            "m5/private_path/non_empty_manifest_publication",
+            "m5/private_path/retained_delta_compacted_base_restore",
+            "m5/private_path/single_transactional_sink_commit",
+            "m5/private_path/multi_transactional_sink_commit",
+            "m5/private_full_path/no_checkpoint",
+            "m5/private_full_path/checkpoint_disabled",
+            "m5/private_full_path/checkpoint_enabled",
+        ]
+    );
+    let source = include_str!("soak.rs");
+    assert_eq!(
+        source
+            .lines()
+            .filter(|line| line.trim_start().starts_with("bencher.iter_batched("))
+            .count(),
+        12
+    );
+    assert!(source.contains("BatchSize::SmallInput"));
 }
 
 #[test]
@@ -5873,38 +6263,109 @@ fn private_m5_epoch_checkpoint_absolute_benchmark() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
 
     criterion.bench_function(M5_PRIVATE_BENCHMARK_CASES[0], |bencher| {
-        bencher
-            .iter(|| black_box(runtime.block_on(run_private_barrier_cut_fan_out_benchmark_case())));
+        bencher.iter_batched(
+            || prepare_private_barrier_cut_benchmark(&["source"], 1),
+            |fixture| black_box(runtime.block_on(fixture.measure())),
+            BatchSize::SmallInput,
+        );
     });
     criterion.bench_function(M5_PRIVATE_BENCHMARK_CASES[1], |bencher| {
-        bencher.iter(|| black_box(super::operator_task::benchmark_two_input_alignment().unwrap()));
+        bencher.iter_batched(
+            || prepare_private_barrier_cut_benchmark(&["left", "right"], 2),
+            |fixture| black_box(runtime.block_on(fixture.measure())),
+            BatchSize::SmallInput,
+        );
     });
     criterion.bench_function(M5_PRIVATE_BENCHMARK_CASES[2], |bencher| {
-        bencher.iter(|| {
-            black_box(runtime.block_on(run_private_dirty_window_state_stage_benchmark_case()))
-        });
+        bencher.iter_batched(
+            || {
+                runtime.block_on(prepare_private_alignment_benchmark(
+                    PrivateAlignmentKind::PassThrough,
+                ))
+            },
+            |fixture| black_box(runtime.block_on(fixture.measure())),
+            BatchSize::SmallInput,
+        );
     });
     criterion.bench_function(M5_PRIVATE_BENCHMARK_CASES[3], |bencher| {
-        bencher.iter(|| {
-            black_box(runtime.block_on(run_private_manifest_publication_benchmark_case()))
-        });
+        bencher.iter_batched(
+            || {
+                runtime.block_on(prepare_private_alignment_benchmark(
+                    PrivateAlignmentKind::Window,
+                ))
+            },
+            |fixture| black_box(runtime.block_on(fixture.measure())),
+            BatchSize::SmallInput,
+        );
     });
     criterion.bench_function(M5_PRIVATE_BENCHMARK_CASES[4], |bencher| {
-        bencher.iter(|| black_box(runtime.block_on(run_private_cold_restore_benchmark_case())));
+        bencher.iter_batched(
+            || runtime.block_on(prepare_private_state_stage_benchmark()),
+            |fixture| black_box(runtime.block_on(fixture.measure())),
+            BatchSize::SmallInput,
+        );
     });
     criterion.bench_function(M5_PRIVATE_BENCHMARK_CASES[5], |bencher| {
-        bencher.iter(|| {
-            black_box(runtime.block_on(run_private_transactional_sink_commit_benchmark_case()))
-        });
+        bencher.iter_batched(
+            || runtime.block_on(prepare_private_manifest_publication_benchmark()),
+            |fixture| black_box(runtime.block_on(fixture.measure())),
+            BatchSize::SmallInput,
+        );
     });
-    criterion.bench_function(
-        "m5/private_full_path/periodic_checkpoint_restart",
-        |bencher| {
-            bencher.iter(|| {
-                black_box(runtime.block_on(run_private_checkpoint_restart_benchmark_case()))
-            });
-        },
-    );
+    criterion.bench_function(M5_PRIVATE_BENCHMARK_CASES[6], |bencher| {
+        bencher.iter_batched(
+            || runtime.block_on(prepare_private_retained_restore_benchmark()),
+            |fixture| black_box(fixture.measure()),
+            BatchSize::SmallInput,
+        );
+    });
+    criterion.bench_function(M5_PRIVATE_BENCHMARK_CASES[7], |bencher| {
+        bencher.iter_batched(
+            || runtime.block_on(prepare_private_sink_commit_benchmark(1)),
+            |fixture| black_box(runtime.block_on(fixture.measure())),
+            BatchSize::SmallInput,
+        );
+    });
+    criterion.bench_function(M5_PRIVATE_BENCHMARK_CASES[8], |bencher| {
+        bencher.iter_batched(
+            || runtime.block_on(prepare_private_sink_commit_benchmark(2)),
+            |fixture| black_box(runtime.block_on(fixture.measure())),
+            BatchSize::SmallInput,
+        );
+    });
+    criterion.bench_function(M5_PRIVATE_BENCHMARK_CASES[9], |bencher| {
+        bencher.iter_batched(
+            || {
+                runtime.block_on(prepare_private_full_runner_benchmark(
+                    PrivateFullRunnerMode::NoCheckpoint,
+                ))
+            },
+            |fixture| black_box(runtime.block_on(fixture.measure())),
+            BatchSize::SmallInput,
+        );
+    });
+    criterion.bench_function(M5_PRIVATE_BENCHMARK_CASES[10], |bencher| {
+        bencher.iter_batched(
+            || {
+                runtime.block_on(prepare_private_full_runner_benchmark(
+                    PrivateFullRunnerMode::CheckpointDisabled,
+                ))
+            },
+            |fixture| black_box(runtime.block_on(fixture.measure())),
+            BatchSize::SmallInput,
+        );
+    });
+    criterion.bench_function(M5_PRIVATE_BENCHMARK_CASES[11], |bencher| {
+        bencher.iter_batched(
+            || {
+                runtime.block_on(prepare_private_full_runner_benchmark(
+                    PrivateFullRunnerMode::CheckpointEnabled,
+                ))
+            },
+            |fixture| black_box(runtime.block_on(fixture.measure())),
+            BatchSize::SmallInput,
+        );
+    });
     criterion.final_summary();
 
     let measurements = M5_PRIVATE_BENCHMARK_CASES
