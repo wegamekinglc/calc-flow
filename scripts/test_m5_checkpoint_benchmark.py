@@ -199,6 +199,17 @@ class CommonDecisionTests(unittest.TestCase):
 
 
 class CommonHarnessSourceTests(unittest.TestCase):
+    def test_common_source_fingerprint_is_limited_to_the_shared_edge_path(
+        self,
+    ) -> None:
+        self.assertEqual(
+            benchmark.COMMON_SOURCE_FILES,
+            (
+                Path("crates/calc-flow/src/runtime/streaming/channel.rs"),
+                Path("crates/calc-flow/src/runtime/streaming/message.rs"),
+            ),
+        )
+
     def test_common_harness_is_frozen_public_no_checkpoint_workload(self) -> None:
         source = benchmark.COMMON_HARNESS_SOURCE.read_text(encoding="utf-8")
         manifest = benchmark.COMMON_HARNESS_MANIFEST.read_text(encoding="utf-8")
@@ -646,6 +657,51 @@ class OrchestrationPlanTests(unittest.TestCase):
         self.assertNotIn("CALC_FLOW_M5_COMMON_EXECUTABLE", build)
         self.assertEqual(run["CALC_FLOW_M5_RUN_LABEL"], "B1")
         self.assertEqual(run["CALC_FLOW_M5_COMMON_EXECUTABLE_SHA256"], "d" * 64)
+
+    def test_distinct_ref_build_environments_can_yield_a_scoped_verdict(
+        self,
+    ) -> None:
+        root = Path("/evidence")
+        baseline = benchmark.RefSnapshot(
+            role="baseline",
+            commit="a" * 40,
+            tree="b" * 40,
+            worktree=root / "worktrees" / "baseline",
+        )
+        candidate = benchmark.RefSnapshot(
+            role="candidate",
+            commit="c" * 40,
+            tree="d" * 40,
+            worktree=root / "worktrees" / "candidate",
+        )
+        plans = benchmark.build_run_plan(root, baseline, candidate)
+        environments = [
+            benchmark.common_build_environment(plan, "e" * 64) for plan in plans
+        ]
+        self.assertNotEqual(
+            environments[0]["CALC_FLOW_M5_SOURCE_COMMIT"],
+            environments[1]["CALC_FLOW_M5_SOURCE_COMMIT"],
+        )
+        environment_hashes = [
+            benchmark._canonical_hash(
+                benchmark._normalized_build_environment(environment)
+            )
+            for environment in environments
+        ]
+        self.assertEqual(len(set(environment_hashes)), 1)
+
+        runs = [
+            _run("B1", 100.0, 99.9, 100.1),
+            _run("C1", 103.0, 102.9, 103.1),
+            _run("B2", 100.2, 100.1, 100.3),
+            _run("C2", 103.1, 103.0, 103.2),
+        ]
+        for run, environment_hash in zip(runs, environment_hashes, strict=True):
+            run["build_environment_sha256"] = environment_hash
+        result = benchmark.evaluate_common_case(runs)
+
+        self.assertEqual(result["incompatible_cross_ref_fingerprints"], [])
+        self.assertEqual(result["decision"], "pass")
 
     def test_private_command_is_locked_release_and_nonincremental(self) -> None:
         cargo = Path(shutil.which("cargo") or "")

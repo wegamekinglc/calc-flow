@@ -3685,8 +3685,7 @@ async fn publish_epoch_manifest(
     match publication {
         ManifestPublication::Durable => {
             assembly.manifest_durable = true;
-            coordinator.manifest_durable(epoch).await?;
-            notify_sink_manifest_durable(sink_commands, epoch, assembly.terminal).await
+            settle_durable_manifest(coordinator, sink_commands, epoch, assembly.terminal).await
         }
         ManifestPublication::Installed {
             parent_synced,
@@ -3697,8 +3696,8 @@ async fn publish_epoch_manifest(
                 if !cancellation.is_cancelled() {
                     assembly.deferred_publication_error = Some(error);
                 }
-                coordinator.manifest_durable(epoch).await?;
-                notify_sink_manifest_durable(sink_commands, epoch, assembly.terminal).await?;
+                settle_durable_manifest(coordinator, sink_commands, epoch, assembly.terminal)
+                    .await?;
             } else {
                 notify_sink_preserve(sink_commands, epoch).await?;
                 return if cancellation.is_cancelled() {
@@ -3710,6 +3709,16 @@ async fn publish_epoch_manifest(
             Ok(())
         }
     }
+}
+
+async fn settle_durable_manifest(
+    coordinator: &CheckpointCoordinatorHandle,
+    sink_commands: &BTreeMap<String, mpsc::Sender<SinkCheckpointCommand>>,
+    epoch: Epoch,
+    terminal: bool,
+) -> crate::Result<()> {
+    notify_sink_manifest_durable(sink_commands, epoch, terminal).await?;
+    coordinator.manifest_durable(epoch).await
 }
 
 async fn retain_completed_epoch(
@@ -4483,6 +4492,7 @@ mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet, VecDeque},
         future::Future as _,
+        path::Path,
         sync::{
             Arc,
             atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -4499,12 +4509,13 @@ mod tests {
     use tokio::sync::{Notify, Semaphore, mpsc};
 
     use super::{
-        ABANDONED_RUNNER_WARNING, CheckpointFailureCategory, CheckpointPhase,
-        CheckpointRuntimeSpec, ContinuousJobState, ContinuousRunner, DriverCompletion,
-        DriverOwnership, FailureOrigin as RuntimeFailureOrigin, JobCore, LaunchId, RunnerCore,
-        RunnerDiagnostics, RunnerRegistryState, RunnerShutdownObserver, RuntimeFailure,
-        RuntimeTaskProgress, TerminalCause, classify_failure_state, finish_running_report,
-        maybe_request_terminal_checkpoint, notify_sink_manifest_durable,
+        ABANDONED_RUNNER_WARNING, CheckpointCoordinatorHandle, CheckpointFailureCategory,
+        CheckpointPhase, CheckpointRuntimeSpec, ContinuousJobState, ContinuousRunner,
+        DriverCompletion, DriverOwnership, FailureOrigin as RuntimeFailureOrigin, JobCore,
+        LaunchId, RunnerCore, RunnerDiagnostics, RunnerRegistryState, RunnerShutdownObserver,
+        RuntimeFailure, RuntimeTaskProgress, TerminalCause, classify_failure_state,
+        finish_running_report, maybe_request_terminal_checkpoint, notify_sink_manifest_durable,
+        settle_durable_manifest,
     };
     use crate::{
         Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken,
@@ -6765,6 +6776,140 @@ mod tests {
                 crate::Epoch::INITIAL
             ))
         ));
+    }
+
+    fn durable_notification_manifest() -> crate::CheckpointManifest {
+        crate::CheckpointManifest::new(CheckpointManifestFields {
+            pipeline_name: "durable-notification-order".into(),
+            pipeline_fingerprint:
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            runtime_config_hash: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                .into(),
+            epoch: crate::Epoch::INITIAL,
+            created_at: chrono::Utc.with_ymd_and_hms(2026, 8, 10, 8, 0, 0).unwrap(),
+            recovery_status: RecoveryStatus::Final,
+            sources: BTreeMap::new(),
+            operators: BTreeMap::new(),
+            sinks: BTreeMap::from([(
+                "sink".into(),
+                SinkManifestEntry {
+                    delivery: SinkDeliveryManifest::Transactional,
+                    pre_commit: Some(BTreeMap::from([(
+                        "prepared".into(),
+                        serde_json::json!(true),
+                    )])),
+                },
+            )]),
+        })
+        .unwrap()
+    }
+
+    async fn install_durable_notification_manifest(root: &Path) -> crate::CheckpointManifest {
+        let manifest = durable_notification_manifest();
+        let backend = LocalStateBackend::new(root.join("state")).await.unwrap();
+        let key = StateLineageKey::new(manifest.pipeline_name(), manifest.pipeline_fingerprint())
+            .unwrap();
+        let lineage = backend.open_lineage(&key).await.unwrap();
+        let transaction = crate::state::ManifestTransaction::open(
+            Arc::from(lineage),
+            &key,
+            root.join("manifests"),
+            2,
+        )
+        .await
+        .unwrap();
+        transaction
+            .publish(crate::state::PreparedEpochManifest {
+                manifest: manifest.clone(),
+                staged_segments: BTreeMap::new(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            root.join("manifests/manifest-00000000000000000001.json")
+                .exists()
+        );
+        manifest
+    }
+
+    async fn stopped_manifest_coordinator(timed_out: bool) -> CheckpointCoordinatorHandle {
+        let cancellation = CancellationToken::new();
+        let timeout = if timed_out {
+            StdDuration::from_millis(1)
+        } else {
+            StdDuration::from_secs(1)
+        };
+        let (coordinator, mut events, task) = spawn_checkpoint_coordinator(
+            ParticipantSet {
+                sources: BTreeSet::from(["source".into()]),
+                operators: BTreeSet::from(["operator".into()]),
+                sinks: BTreeSet::from(["output".into()]),
+            },
+            crate::Epoch::INITIAL,
+            4,
+            timeout,
+            cancellation.clone(),
+        )
+        .unwrap();
+        if timed_out {
+            coordinator
+                .request(CheckpointRequest::Periodic)
+                .await
+                .unwrap();
+            assert!(matches!(
+                events.recv().await,
+                Some(CheckpointEvent::Started(crate::Epoch::INITIAL))
+            ));
+            task.await.unwrap().unwrap_err();
+        } else {
+            cancellation.cancel();
+            task.await.unwrap().unwrap();
+        }
+        coordinator
+    }
+
+    async fn assert_durable_notification_precedes_failed_bookkeeping(
+        coordinator: &CheckpointCoordinatorHandle,
+    ) {
+        let (sink_sender, mut sink_receiver) = mpsc::channel(1);
+        let error = settle_durable_manifest(
+            coordinator,
+            &BTreeMap::from([("output".into(), sink_sender)]),
+            crate::Epoch::INITIAL,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, CalcFlowError::Internal { .. }));
+        assert!(matches!(
+            sink_receiver.try_recv(),
+            Ok(SinkCheckpointCommand::ManifestDurable(
+                crate::Epoch::INITIAL
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn installed_manifest_notifies_sinks_before_failed_bookkeeping_and_recovers_forward() {
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = install_durable_notification_manifest(directory.path()).await;
+        for timed_out in [false, true] {
+            let coordinator = stopped_manifest_coordinator(timed_out).await;
+            assert_durable_notification_precedes_failed_bookkeeping(&coordinator).await;
+        }
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut sinks = vec![ValidatedOrdinarySink {
+            sink_id: "sink".into(),
+            binding: OrdinarySinkBinding::new_transactional(Box::new(RecoveryProbeSink {
+                log: Arc::clone(&log),
+                closed: Arc::new(AtomicUsize::new(0)),
+            })),
+        }];
+        crate::runtime::streaming::sink_task::recover_transactional_sinks(&mut sinks, &manifest)
+            .await
+            .unwrap();
+        assert_eq!(&*log.lock(), &["sink-recover:1"]);
     }
 
     #[tokio::test]

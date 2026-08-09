@@ -9,7 +9,7 @@ use tokio::sync::oneshot;
 
 use crate::{
     Batch, CalcFlowError, Epoch, EventTime, Result, SourceManifestEntry,
-    SourceWatermarkManifestState, runtime::streaming::source_task::decode_canonical_cursor_order,
+    SourceWatermarkManifestState, runtime::streaming::source_task::Cursor,
 };
 
 use super::{
@@ -912,7 +912,7 @@ impl<C: DriverLogicalClock> StreamProgressDriver<C> {
                 );
             }
             let last_committed = source.cursor.as_ref().map(|cursor| {
-                decode_canonical_cursor_order(&cursor.order).map(|order| {
+                Cursor::decode_manifest_order(&cursor.order).map(|order| {
                     RawUpstreamPosition::Exact {
                         delivery_replay_cursor: order,
                         control_frontier: source.next_sequence.to_be_bytes().to_vec(),
@@ -3455,7 +3455,7 @@ mod tests {
     #[test]
     fn durable_driver_restore_rejects_noncanonical_cursor_hex() {
         let prepared = prepared(&[source_provided("left")]);
-        for order in ["0", "00FF"] {
+        for order in ["", "0", "00FF"] {
             let restored = DurableProgressRestore {
                 origin: LogicalInstant::ZERO,
                 sources: BTreeMap::from([(

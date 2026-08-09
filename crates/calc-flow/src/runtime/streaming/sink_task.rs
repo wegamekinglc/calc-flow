@@ -669,7 +669,7 @@ async fn finalize_if_terminal_mode(
     if terminal == expected_terminal {
         finalize_checkpoint(inputs, epoch, prepared, task_id, terminal).await
     } else {
-        fail_checkpoint_command(inputs, epoch, prepared, task_id).await
+        fail_preserved_checkpoint_command(inputs, epoch)
     }
 }
 
@@ -710,6 +710,19 @@ async fn fail_checkpoint_command(
     }
 }
 
+fn fail_preserved_checkpoint_command(inputs: &SinkTaskInputs, epoch: Epoch) -> SinkLoopStep {
+    SinkLoopStep::CheckpointFailed {
+        sink_id: inputs.output_id.clone(),
+        error: CalcFlowError::CheckpointMismatch {
+            message: format!(
+                "sink output {:?} received an out-of-phase durable command for epoch {}",
+                inputs.output_id,
+                epoch.as_u64()
+            ),
+        },
+    }
+}
+
 async fn finalize_checkpoint(
     inputs: &mut SinkTaskInputs,
     epoch: Epoch,
@@ -717,50 +730,100 @@ async fn finalize_checkpoint(
     task_id: TaskId,
     terminal: bool,
 ) -> SinkLoopStep {
-    match commit_all(inputs, epoch, prepared, task_id).await {
-        Ok(()) => {}
-        Err((sink_id, error)) => {
-            if inputs.context.job().cancellation().is_cancelled()
-                && matches!(&error, CalcFlowError::Cancelled { .. })
-            {
-                return SinkLoopStep::Cancelled;
-            }
-            return SinkLoopStep::CheckpointFailed { sink_id, error };
-        }
+    if let Err(step) = commit_checkpoint_sinks(inputs, epoch, prepared, task_id).await {
+        return step;
     }
-    let finalization = SinkFinalizeAck {
-        output_id: inputs.output_id.clone(),
-        epoch,
-    };
-    let checkpoint = inputs
-        .checkpoint
-        .as_mut()
-        .expect("checkpoint-enabled sink retains its port");
-    let cancellation = inputs.context.job().cancellation().clone();
-    let sent = match checkpoint.finalizations.try_send(finalization) {
-        Ok(()) => true,
-        Err(mpsc::error::TrySendError::Full(finalization)) => tokio::select! {
-            biased;
-            () = cancellation.cancelled() => false,
-            result = checkpoint.finalizations.send(finalization) => result.is_ok(),
-        },
-        Err(mpsc::error::TrySendError::Closed(_)) => false,
-    };
-    if !sent {
-        if cancellation.is_cancelled() && checkpoint.finalizations.is_closed() {
-            return SinkLoopStep::Cancelled;
-        }
-        return SinkLoopStep::CheckpointFailed {
-            sink_id: inputs.output_id.clone(),
-            error: checkpoint_channel_closed(&inputs.output_id),
-        };
+    if let Err(step) = send_checkpoint_finalization(inputs, epoch).await {
+        return step;
     }
     if terminal {
         return SinkLoopStep::Complete;
     }
-    if cancellation.is_cancelled() {
+    if inputs.context.job().cancellation().is_cancelled() {
         return SinkLoopStep::Cancelled;
     }
+    begin_next_checkpoint(inputs, epoch, task_id).await
+}
+
+async fn commit_checkpoint_sinks(
+    inputs: &mut SinkTaskInputs,
+    epoch: Epoch,
+    prepared: &BTreeMap<String, SinkManifestEntry>,
+    task_id: TaskId,
+) -> std::result::Result<(), SinkLoopStep> {
+    commit_all(inputs, epoch, prepared, task_id)
+        .await
+        .map_err(|(sink_id, error)| {
+            if inputs.context.job().cancellation().is_cancelled()
+                && matches!(&error, CalcFlowError::Cancelled { .. })
+            {
+                SinkLoopStep::Cancelled
+            } else {
+                SinkLoopStep::CheckpointFailed { sink_id, error }
+            }
+        })
+}
+
+async fn send_checkpoint_finalization(
+    inputs: &mut SinkTaskInputs,
+    epoch: Epoch,
+) -> std::result::Result<(), SinkLoopStep> {
+    let output_id = inputs.output_id.clone();
+    let finalization = SinkFinalizeAck {
+        output_id: output_id.clone(),
+        epoch,
+    };
+    let cancellation = inputs.context.job().cancellation().clone();
+    let checkpoint = inputs
+        .checkpoint
+        .as_mut()
+        .expect("checkpoint-enabled sink retains its port");
+    if send_finalization(&checkpoint.finalizations, finalization, &cancellation).await {
+        return Ok(());
+    }
+    Err(finalization_send_failure(
+        output_id,
+        &cancellation,
+        checkpoint.finalizations.is_closed(),
+    ))
+}
+
+async fn send_finalization(
+    finalizations: &mpsc::Sender<SinkFinalizeAck>,
+    finalization: SinkFinalizeAck,
+    cancellation: &CancellationToken,
+) -> bool {
+    match finalizations.try_send(finalization) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Full(finalization)) => tokio::select! {
+            biased;
+            () = cancellation.cancelled() => false,
+            result = finalizations.send(finalization) => result.is_ok(),
+        },
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+    }
+}
+
+fn finalization_send_failure(
+    output_id: String,
+    cancellation: &CancellationToken,
+    channel_closed: bool,
+) -> SinkLoopStep {
+    if cancellation.is_cancelled() && channel_closed {
+        SinkLoopStep::Cancelled
+    } else {
+        SinkLoopStep::CheckpointFailed {
+            error: checkpoint_channel_closed(&output_id),
+            sink_id: output_id,
+        }
+    }
+}
+
+async fn begin_next_checkpoint(
+    inputs: &mut SinkTaskInputs,
+    epoch: Epoch,
+    task_id: TaskId,
+) -> SinkLoopStep {
     let next_epoch = match epoch.next() {
         Ok(epoch) => epoch,
         Err(error) => {
@@ -770,6 +833,10 @@ async fn finalize_checkpoint(
             };
         }
     };
+    let checkpoint = inputs
+        .checkpoint
+        .as_mut()
+        .expect("checkpoint-enabled sink retains its port");
     checkpoint.initial_epoch = next_epoch;
     inputs.epoch_owner.begin(next_epoch);
     match begin_checkpoint_epoch(inputs, task_id).await {
@@ -1664,6 +1731,101 @@ mod tests {
         assert_eq!(report.errors.len(), 1);
         assert!(log.lock().contains(&"tx:abort:1".into()));
         assert!(!log.lock().iter().any(|entry| entry.contains(":commit:")));
+    }
+
+    #[tokio::test]
+    async fn wrong_terminal_durable_commands_preserve_prepared_epochs_without_abort() {
+        let nonterminal_log = Arc::new(Mutex::new(Vec::new()));
+        let nonterminal_closes = Arc::new(AtomicUsize::new(0));
+        let (ack_tx, mut ack_rx) = mpsc::channel(1);
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let (finalize_tx, mut finalize_rx) = mpsc::channel(1);
+        let mut nonterminal = harness_with_checkpoint(
+            vec![validated_transactional_sink(
+                "tx",
+                &nonterminal_log,
+                &nonterminal_closes,
+            )],
+            Some(SinkCheckpointPort {
+                initial_epoch: crate::Epoch::INITIAL,
+                acknowledgements: ack_tx,
+                commands: command_rx,
+                finalizations: finalize_tx,
+                terminal_ready: None,
+            }),
+        );
+        nonterminal.data.send(true).unwrap();
+        nonterminal
+            .sender
+            .send(StreamMessage::barrier(crate::Epoch::INITIAL))
+            .await
+            .unwrap();
+        ack_rx.recv().await.unwrap();
+        command_tx
+            .send(SinkCheckpointCommand::TerminalManifestDurable(
+                crate::Epoch::INITIAL,
+            ))
+            .await
+            .unwrap();
+
+        let report = nonterminal.supervisor.join_all().await;
+        assert_eq!(report.errors.len(), 1);
+        assert!(finalize_rx.recv().await.is_none());
+        assert!(
+            !nonterminal_log
+                .lock()
+                .iter()
+                .any(|entry| entry.contains(":abort:") || entry.contains(":commit:"))
+        );
+
+        let terminal_log = Arc::new(Mutex::new(Vec::new()));
+        let terminal_closes = Arc::new(AtomicUsize::new(0));
+        let (ack_tx, mut ack_rx) = mpsc::channel(1);
+        let (command_tx, command_rx) = mpsc::channel(2);
+        let (finalize_tx, mut finalize_rx) = mpsc::channel(1);
+        let (terminal_ready_tx, mut terminal_ready_rx) = mpsc::channel(1);
+        let mut terminal = harness_with_checkpoint(
+            vec![validated_transactional_sink(
+                "tx",
+                &terminal_log,
+                &terminal_closes,
+            )],
+            Some(SinkCheckpointPort {
+                initial_epoch: crate::Epoch::INITIAL,
+                acknowledgements: ack_tx,
+                commands: command_rx,
+                finalizations: finalize_tx,
+                terminal_ready: Some(terminal_ready_tx),
+            }),
+        );
+        terminal.data.send(true).unwrap();
+        terminal
+            .sender
+            .send(StreamMessage::end_of_input())
+            .await
+            .unwrap();
+        assert_eq!(terminal_ready_rx.recv().await.as_deref(), Some("output"));
+        command_tx
+            .send(SinkCheckpointCommand::Terminal(crate::Epoch::INITIAL))
+            .await
+            .unwrap();
+        ack_rx.recv().await.unwrap();
+        command_tx
+            .send(SinkCheckpointCommand::ManifestDurable(
+                crate::Epoch::INITIAL,
+            ))
+            .await
+            .unwrap();
+
+        let report = terminal.supervisor.join_all().await;
+        assert_eq!(report.errors.len(), 1);
+        assert!(finalize_rx.recv().await.is_none());
+        assert!(
+            !terminal_log
+                .lock()
+                .iter()
+                .any(|entry| entry.contains(":abort:") || entry.contains(":commit:"))
+        );
     }
 
     #[tokio::test]

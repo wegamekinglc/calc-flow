@@ -56,7 +56,10 @@ SOURCE_CONTRACT_FILES = (
     Path("crates/calc-flow/src/runtime/streaming/operator_task.rs"),
     Path("crates/calc-flow/src/runtime/streaming/soak.rs"),
 )
-COMMON_SOURCE_FILES = (Path("crates/calc-flow/src/runtime/streaming/operator_task.rs"),)
+COMMON_SOURCE_FILES = (
+    Path("crates/calc-flow/src/runtime/streaming/channel.rs"),
+    Path("crates/calc-flow/src/runtime/streaming/message.rs"),
+)
 COMMON_CROSS_REF_FINGERPRINT_FIELDS = (
     "shared_source_sha256",
     "source_cargo_lock_sha256",
@@ -329,6 +332,18 @@ def validate_artifact_manifest(
 ) -> dict[str, object]:
     canonical_root = root.resolve()
     payload = load_hashed_json(manifest)
+    artifacts = _artifact_manifest_entries(payload, canonical_root)
+    observed_paths = _validated_artifact_inventory(artifacts, canonical_root)
+    if expected_artifacts is not None:
+        _validate_expected_artifact_inventory(
+            observed_paths, canonical_root, expected_artifacts
+        )
+    return payload
+
+
+def _artifact_manifest_entries(
+    payload: dict[str, object], canonical_root: Path
+) -> list[object]:
     if payload.get("schema") != "calc-flow.m5-checkpoint-artifact-manifest.v1":
         raise ValueError("benchmark artifact manifest schema is invalid")
     if payload.get("root") != str(canonical_root):
@@ -338,6 +353,12 @@ def validate_artifact_manifest(
     artifacts = payload.get("artifacts")
     if not isinstance(artifacts, list):
         raise ValueError("benchmark artifact manifest entries are missing")
+    return artifacts
+
+
+def _validated_artifact_inventory(
+    artifacts: Sequence[object], canonical_root: Path
+) -> list[str]:
     observed_paths = [
         _validate_artifact_entry(entry, canonical_root) for entry in artifacts
     ]
@@ -349,14 +370,20 @@ def validate_artifact_manifest(
         raise ValueError(
             "benchmark artifact manifest contains an excluded self artifact"
         )
-    if expected_artifacts is not None:
-        expected_paths = sorted(
-            _artifact_relative_path(canonical_root, artifact)
-            for artifact in expected_artifacts
-        )
-        if observed_paths != expected_paths:
-            raise ValueError("benchmark artifact manifest inventory is not exact")
-    return payload
+    return observed_paths
+
+
+def _validate_expected_artifact_inventory(
+    observed_paths: Sequence[str],
+    canonical_root: Path,
+    expected_artifacts: Sequence[Path],
+) -> None:
+    expected_paths = sorted(
+        _artifact_relative_path(canonical_root, artifact)
+        for artifact in expected_artifacts
+    )
+    if list(observed_paths) != expected_paths:
+        raise ValueError("benchmark artifact manifest inventory is not exact")
 
 
 def _artifact_relative_path(canonical_root: Path, artifact: Path) -> str:
@@ -1027,36 +1054,10 @@ def evaluate_candidate_self_overhead(
     ratio_intervals = {}
     pacing = {}
     for report in reports:
-        measurements = _private_measurement_details(report)
-        disabled = measurements["m5/private_full_path/checkpoint_disabled"]
-        enabled = measurements["m5/private_full_path/checkpoint_enabled"]
-        if (
-            disabled["sample_count"] != enabled["sample_count"]
-            or disabled["confidence_level"] != enabled["confidence_level"]
-        ):
-            raise ValueError("candidate self-overhead cases require identical pacing")
-        label = str(report["label"])
-        deltas[label] = _regression_percent(
-            float(disabled["median_ns"]), float(enabled["median_ns"])
-        )
-        disabled_interval = disabled["median_confidence_interval_ns"]
-        enabled_interval = enabled["median_confidence_interval_ns"]
-        if not isinstance(disabled_interval, list) or not isinstance(
-            enabled_interval, list
-        ):
-            raise ValueError("candidate self-overhead confidence interval is invalid")
-        ratio_intervals[label] = [
-            _regression_percent(
-                float(disabled_interval[1]), float(enabled_interval[0])
-            ),
-            _regression_percent(
-                float(disabled_interval[0]), float(enabled_interval[1])
-            ),
-        ]
-        pacing[label] = {
-            "sample_count": disabled["sample_count"],
-            "confidence_level": disabled["confidence_level"],
-        }
+        label, delta, interval, run_pacing = _private_self_overhead_run(report)
+        deltas[label] = delta
+        ratio_intervals[label] = interval
+        pacing[label] = run_pacing
     noise = _finite_nonnegative(
         repeatability.get("maximum_same_ref_spread_percent"),
         "private repeatability spread",
@@ -1081,6 +1082,47 @@ def evaluate_candidate_self_overhead(
     }
 
 
+def _private_self_overhead_run(
+    report: dict[str, object],
+) -> tuple[str, float, list[float], dict[str, object]]:
+    measurements = _private_measurement_details(report)
+    disabled = measurements["m5/private_full_path/checkpoint_disabled"]
+    enabled = measurements["m5/private_full_path/checkpoint_enabled"]
+    _validate_private_pacing(disabled, enabled)
+    disabled_interval = disabled["median_confidence_interval_ns"]
+    enabled_interval = enabled["median_confidence_interval_ns"]
+    if not isinstance(disabled_interval, list) or not isinstance(
+        enabled_interval, list
+    ):
+        raise ValueError("candidate self-overhead confidence interval is invalid")
+    return (
+        str(report["label"]),
+        _regression_percent(float(disabled["median_ns"]), float(enabled["median_ns"])),
+        [
+            _regression_percent(
+                float(disabled_interval[1]), float(enabled_interval[0])
+            ),
+            _regression_percent(
+                float(disabled_interval[0]), float(enabled_interval[1])
+            ),
+        ],
+        {
+            "sample_count": disabled["sample_count"],
+            "confidence_level": disabled["confidence_level"],
+        },
+    )
+
+
+def _validate_private_pacing(
+    disabled: dict[str, object], enabled: dict[str, object]
+) -> None:
+    if (
+        disabled["sample_count"] != enabled["sample_count"]
+        or disabled["confidence_level"] != enabled["confidence_level"]
+    ):
+        raise ValueError("candidate self-overhead cases require identical pacing")
+
+
 def _self_overhead_decision(
     deltas: Sequence[float],
     intervals: Sequence[Sequence[float]],
@@ -1090,22 +1132,36 @@ def _self_overhead_decision(
 ) -> str:
     if not stable:
         return "inconclusive"
-    if any(
+    if _any_interval_crosses_threshold(intervals):
+        return "inconclusive"
+    if _all_intervals_below_threshold(intervals):
+        return "pass"
+    if _self_overhead_regresses(deltas, intervals, noise):
+        return "regression"
+    return "inconclusive"
+
+
+def _any_interval_crosses_threshold(intervals: Sequence[Sequence[float]]) -> bool:
+    return any(
         float(interval[0]) <= REGRESSION_THRESHOLD_PERCENT < float(interval[1])
         for interval in intervals
-    ):
-        return "inconclusive"
-    if all(
+    )
+
+
+def _all_intervals_below_threshold(intervals: Sequence[Sequence[float]]) -> bool:
+    return all(
         float(interval[1]) <= REGRESSION_THRESHOLD_PERCENT for interval in intervals
-    ):
-        return "pass"
-    if (
+    )
+
+
+def _self_overhead_regresses(
+    deltas: Sequence[float], intervals: Sequence[Sequence[float]], noise: float
+) -> bool:
+    return (
         all(float(interval[0]) > REGRESSION_THRESHOLD_PERCENT for interval in intervals)
         and all(delta > REGRESSION_THRESHOLD_PERCENT for delta in deltas)
         and min(deltas) > 2.0 * noise
-    ):
-        return "regression"
-    return "inconclusive"
+    )
 
 
 def _private_measurement_details(
@@ -1774,7 +1830,13 @@ def _normalized_build_environment(environment: dict[str, str]) -> dict[str, obje
     return {
         key: value
         for key, value in environment.items()
-        if key not in {"CARGO_TARGET_DIR", "CARGO_ENCODED_RUSTFLAGS"}
+        if key
+        not in {
+            "CALC_FLOW_M5_SOURCE_COMMIT",
+            "CALC_FLOW_M5_SOURCE_TREE",
+            "CARGO_ENCODED_RUSTFLAGS",
+            "CARGO_TARGET_DIR",
+        }
     } | {"cargo_encoded_rustflags": remap_destinations}
 
 

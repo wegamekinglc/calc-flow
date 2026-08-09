@@ -69,24 +69,31 @@ impl Cursor {
             payload: self.payload.clone(),
         }
     }
+
+    pub(crate) fn from_manifest_entry(entry: &crate::CursorManifestEntry) -> Result<Self> {
+        Self::new(
+            Self::decode_manifest_order(&entry.order)?,
+            entry.payload.clone(),
+        )
+    }
+
+    pub(crate) fn decode_manifest_order(order: &str) -> Result<Vec<u8>> {
+        if order.is_empty() || order.len() % 2 != 0 || !order.bytes().all(is_lowercase_hex_digit) {
+            return Err(invalid_manifest_cursor_order());
+        }
+        hex::decode(order).map_err(|_| invalid_manifest_cursor_order())
+    }
 }
 
-pub(crate) fn decode_canonical_cursor_order(order: &str) -> Result<Vec<u8>> {
-    if order.len() % 2 != 0
-        || order
-            .bytes()
-            .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
-    {
-        return Err(CalcFlowError::CheckpointMismatch {
-            message:
-                "durable source cursor order is not canonical lowercase even-length hexadecimal"
-                    .into(),
-        });
-    }
-    hex::decode(order).map_err(|_| CalcFlowError::CheckpointMismatch {
+fn is_lowercase_hex_digit(byte: u8) -> bool {
+    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+}
+
+fn invalid_manifest_cursor_order() -> CalcFlowError {
+    CalcFlowError::CheckpointMismatch {
         message: "durable source cursor order is not canonical lowercase even-length hexadecimal"
             .into(),
-    })
+    }
 }
 
 /// Events a connector source can return; barriers remain runtime-only.
@@ -259,10 +266,7 @@ impl SourceBinding {
         self.resume_cursor = restored
             .cursor
             .as_ref()
-            .map(|cursor| {
-                let order = decode_canonical_cursor_order(&cursor.order)?;
-                Cursor::new(order, cursor.payload.clone())
-            })
+            .map(Cursor::from_manifest_entry)
             .transpose()?;
         self.next_sequence = restored.next_sequence;
         self.restored_ended = restored.ended;
@@ -1730,9 +1734,8 @@ mod tests {
     use super::{
         AcceptedSequenceRecorder, Cursor, SourceAcceptState, SourceAcceptance, SourceBinding,
         SourceCapabilities, SourceEvent, SourceProgressSnapshot, SourcePumpInputs, StreamSource,
-        data_upstream_position, decode_canonical_cursor_order, end_upstream_position,
-        run_source_pump, spawn_source_tasks, spawn_source_tasks_gated_with_metrics,
-        take_live_progress_binding,
+        data_upstream_position, end_upstream_position, run_source_pump, spawn_source_tasks,
+        spawn_source_tasks_gated_with_metrics, take_live_progress_binding,
     };
     use crate::{
         Batch, BatchMetadata, CalcFlowError, CancellationToken, EdgeBudget, EdgeReceiver, Epoch,
@@ -1750,10 +1753,10 @@ mod tests {
 
     #[test]
     fn durable_cursor_order_decoder_requires_even_lowercase_hex() {
-        assert_eq!(decode_canonical_cursor_order("00ff").unwrap(), [0, 255]);
-        for invalid in ["0", "00FF", "0g"] {
+        assert_eq!(Cursor::decode_manifest_order("00ff").unwrap(), [0, 255]);
+        for invalid in ["", "0", "00FF", "0g"] {
             assert!(matches!(
-                decode_canonical_cursor_order(invalid),
+                Cursor::decode_manifest_order(invalid),
                 Err(CalcFlowError::CheckpointMismatch { message })
                     if message.contains("canonical lowercase even-length hexadecimal")
             ));
