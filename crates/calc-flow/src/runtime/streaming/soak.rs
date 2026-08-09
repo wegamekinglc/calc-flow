@@ -2,9 +2,9 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{File, OpenOptions},
     hint::black_box,
-    io::Write as _,
+    io::{Read as _, Write as _},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -21,7 +21,7 @@ use datafusion::arrow::{
     record_batch::RecordBatch,
 };
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -97,6 +97,13 @@ const CHECKPOINT_RSS_COMPARISON_RANGES: [[usize; 2]; 2] = [
 ];
 const MAX_CHECKPOINT_SOAK_STATE_BYTES: u64 = 64 * 1_024 * 1_024;
 const CHECKPOINT_SOAK_COMMAND: &str = "CALC_FLOW_M5_CHECKPOINT_SOAK=1 cargo test -p calc-flow --lib runtime::streaming::soak::twenty_minute_epoch_checkpoint_restart -- --ignored --exact --nocapture";
+const CHECKPOINT_SOAK_CHILD_ENV: &str = "CALC_FLOW_M5_CHECKPOINT_SOAK_CHILD_PLAN";
+const CHECKPOINT_SOAK_CHILD_TEST: &str =
+    "runtime::streaming::soak::checkpoint_restart_soak_generation_child_process";
+const CHECKPOINT_SOAK_PROCESS_SCHEMA: &str = "calc-flow.m5-checkpoint-soak-process.v1";
+const CHECKPOINT_SOAK_PLAN_SCHEMA: &str = "calc-flow.m5-checkpoint-soak-plan.v1";
+const CHECKPOINT_SOAK_GENERATIONS: usize = 3;
+const CHECKPOINT_SOAK_REPORT_LIMIT: u64 = 1 << 20;
 const CHECKPOINT_BENCHMARK_COMMAND: &str = "CARGO_TARGET_DIR=<fresh-candidate-target> CALC_FLOW_M5_CHECKPOINT_BENCHMARK=1 CALC_FLOW_M5_CHECKPOINT_BENCHMARK_RUN_ID=<unique-run-id> CALC_FLOW_M5_PRIVATE_SOURCE_COMMIT=<candidate-commit> CALC_FLOW_M5_PRIVATE_SOURCE_TREE=<candidate-tree> cargo test -p calc-flow --lib runtime::streaming::soak::private_m5_epoch_checkpoint_absolute_benchmark -- --ignored --exact --nocapture";
 const M5_PRIVATE_BENCHMARK_CASES: [&str; 7] = [
     "m5/private_path/barrier_cut_fan_out",
@@ -534,7 +541,7 @@ impl OrdinaryStreamSink for SlowSoakSink {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 struct RssSample {
     elapsed_seconds: f64,
     rss_kib: u64,
@@ -3168,6 +3175,8 @@ async fn run_checkpoint_restart_fault_case(
 
 struct CheckpointRestartSoakReport {
     restarts: usize,
+    generation_process_ids: Vec<u32>,
+    generation_exit_codes: Vec<i32>,
     completed_epochs: u64,
     compacted_window_epochs: usize,
     maximum_manifest_count: usize,
@@ -3182,6 +3191,96 @@ struct CheckpointRestartSoakReport {
     terminal_registries: (usize, usize),
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CheckpointSoakProcessMode {
+    Smoke,
+    Standard,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointSoakProcessPlan {
+    schema: String,
+    commit: String,
+    executable_sha256: String,
+    run_root: PathBuf,
+    parent_pid: u32,
+    generation: usize,
+    sample_start: usize,
+    sample_end: usize,
+    checkpoint_interval_millis: u64,
+    checkpoint_timeout_millis: u64,
+    target_checkpoints: u64,
+    sink_write_delay_millis: u64,
+    retained_epochs: usize,
+    final_generation: bool,
+    mode: CheckpointSoakProcessMode,
+    config_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointSoakProcessSample {
+    index: usize,
+    elapsed_seconds: f64,
+    rss_kib: u64,
+    task_count: usize,
+    maximum_queue_depth: usize,
+    maximum_charged_rows: usize,
+    maximum_charged_bytes: usize,
+    completed_checkpoints: u64,
+    failed_checkpoints: u64,
+    manifest_count: usize,
+    state_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointSoakProcessReport {
+    schema: String,
+    commit: String,
+    executable_sha256: String,
+    config_hash: String,
+    run_root: PathBuf,
+    parent_pid: u32,
+    pid: u32,
+    generation: usize,
+    sample_start: usize,
+    sample_end: usize,
+    restored_epoch: Option<u64>,
+    restored_cursor_orders: BTreeMap<String, Option<String>>,
+    terminal_epoch: u64,
+    terminal_cursor_orders: BTreeMap<String, String>,
+    restored_window_state: bool,
+    restored_watermarks: bool,
+    restored_progress: bool,
+    samples: Vec<CheckpointSoakProcessSample>,
+    compacted_epochs: Vec<u64>,
+    maximum_manifest_count: usize,
+    maximum_state_bytes: u64,
+    completed_checkpoints: u64,
+    failed_checkpoints: u64,
+    source_open_events: usize,
+    source_close_events: usize,
+    sink_close_events: usize,
+    terminal_cause: String,
+    terminal_tasks: usize,
+    terminal_charged_edges: usize,
+    terminal_registries: (usize, usize),
+    source_records: usize,
+    output_records: usize,
+    duplicate_records: usize,
+    missing_records: usize,
+    temporary_artifacts: usize,
+}
+
+struct CheckpointSoakProcessEvidence {
+    report: CheckpointRestartSoakReport,
+    processes: Vec<CheckpointSoakProcessReport>,
+    rss_samples: Vec<RssSample>,
+}
+
 fn checkpoint_restart_soak_metadata(commit: &str, kernel: &str, rustc: &str) -> serde_json::Value {
     json!({
         "schema": "calc-flow.m5-checkpoint-soak.v1",
@@ -3190,6 +3289,10 @@ fn checkpoint_restart_soak_metadata(commit: &str, kernel: &str, rustc: &str) -> 
         "sample_count": CHECKPOINT_SOAK_SAMPLE_COUNT,
         "cadence_seconds": CHECKPOINT_SOAK_CADENCE.as_secs(),
         "restart_sample_indices": CHECKPOINT_SOAK_RESTART_SAMPLES,
+        "restart_kind": "os_process",
+        "process_generations": CHECKPOINT_SOAK_GENERATIONS,
+        "process_sample_ranges": [[0, 40], [40, 80], [80, 120]],
+        "child_report_schema": CHECKPOINT_SOAK_PROCESS_SCHEMA,
         "source_count": 2,
         "transactional_sink_count": 2,
         "retained_epochs": 2,
@@ -3207,6 +3310,266 @@ fn checkpoint_restart_soak_metadata(commit: &str, kernel: &str, rustc: &str) -> 
         },
         "command": CHECKPOINT_SOAK_COMMAND,
     })
+}
+
+fn checkpoint_soak_process_error(message: impl Into<String>) -> CalcFlowError {
+    CalcFlowError::InvalidArgument {
+        field: "checkpoint_restart_soak_process".into(),
+        message: message.into(),
+    }
+}
+
+fn checkpoint_soak_test_executable() -> Result<PathBuf> {
+    let executable = std::env::current_exe().map_err(|source| CalcFlowError::Io {
+        path: "current checkpoint soak test executable".into(),
+        source,
+    })?;
+    let executable = executable
+        .canonicalize()
+        .map_err(|source| CalcFlowError::Io {
+            path: executable.display().to_string(),
+            source,
+        })?;
+    let metadata = std::fs::symlink_metadata(&executable).map_err(|source| CalcFlowError::Io {
+        path: executable.display().to_string(),
+        source,
+    })?;
+    if !executable.is_absolute() || metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(checkpoint_soak_process_error(
+            "test executable must resolve to an absolute regular file",
+        ));
+    }
+    Ok(executable)
+}
+
+fn checkpoint_soak_file_sha256(path: &Path) -> Result<String> {
+    let mut file = File::open(path).map_err(|source| CalcFlowError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 16 * 1_024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|source| CalcFlowError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn checkpoint_soak_plan_hash(plan: &CheckpointSoakProcessPlan) -> String {
+    sha256_bytes(
+        &serde_json::to_vec(&json!({
+            "schema": plan.schema,
+            "commit": plan.commit,
+            "executable_sha256": plan.executable_sha256,
+            "run_root": plan.run_root,
+            "parent_pid": plan.parent_pid,
+            "generation": plan.generation,
+            "sample_start": plan.sample_start,
+            "sample_end": plan.sample_end,
+            "checkpoint_interval_millis": plan.checkpoint_interval_millis,
+            "checkpoint_timeout_millis": plan.checkpoint_timeout_millis,
+            "target_checkpoints": plan.target_checkpoints,
+            "sink_write_delay_millis": plan.sink_write_delay_millis,
+            "retained_epochs": plan.retained_epochs,
+            "final_generation": plan.final_generation,
+            "mode": plan.mode,
+        }))
+        .unwrap(),
+    )
+}
+
+fn checkpoint_soak_process_plans(
+    run_root: &Path,
+    commit: &str,
+    executable_sha256: &str,
+    mode: CheckpointSoakProcessMode,
+) -> Vec<CheckpointSoakProcessPlan> {
+    let ranges = match mode {
+        CheckpointSoakProcessMode::Smoke => [0..0, 0..0, 0..0],
+        CheckpointSoakProcessMode::Standard => [0..40, 40..80, 80..120],
+    };
+    ranges
+        .into_iter()
+        .enumerate()
+        .map(|(generation, samples)| {
+            let mut plan = CheckpointSoakProcessPlan {
+                schema: CHECKPOINT_SOAK_PLAN_SCHEMA.into(),
+                commit: commit.into(),
+                executable_sha256: executable_sha256.into(),
+                run_root: run_root.to_path_buf(),
+                parent_pid: std::process::id(),
+                generation,
+                sample_start: samples.start,
+                sample_end: samples.end,
+                checkpoint_interval_millis: match mode {
+                    CheckpointSoakProcessMode::Smoke => 50,
+                    CheckpointSoakProcessMode::Standard => 5_000,
+                },
+                checkpoint_timeout_millis: 10_000,
+                target_checkpoints: match mode {
+                    CheckpointSoakProcessMode::Smoke => 12,
+                    CheckpointSoakProcessMode::Standard => 0,
+                },
+                sink_write_delay_millis: match mode {
+                    CheckpointSoakProcessMode::Smoke => 0,
+                    CheckpointSoakProcessMode::Standard => 20,
+                },
+                retained_epochs: 2,
+                final_generation: generation + 1 == CHECKPOINT_SOAK_GENERATIONS,
+                mode,
+                config_hash: String::new(),
+            };
+            plan.config_hash = checkpoint_soak_plan_hash(&plan);
+            plan
+        })
+        .collect()
+}
+
+fn checkpoint_soak_plan_path(plan: &CheckpointSoakProcessPlan) -> PathBuf {
+    plan.run_root
+        .join("evidence")
+        .join("plans")
+        .join(format!("generation-{}.json", plan.generation))
+}
+
+fn checkpoint_soak_report_path(plan: &CheckpointSoakProcessPlan) -> PathBuf {
+    plan.run_root
+        .join("evidence")
+        .join("reports")
+        .join(format!("generation-{}.json", plan.generation))
+}
+
+fn write_checkpoint_soak_document<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        checkpoint_soak_process_error("checkpoint soak document has no parent directory")
+    })?;
+    std::fs::create_dir_all(parent).map_err(|source| CalcFlowError::Io {
+        path: parent.display().to_string(),
+        source,
+    })?;
+    if path.exists() {
+        return Err(CalcFlowError::Conflict {
+            resource: "checkpoint soak evidence".into(),
+            key: path.display().to_string(),
+        });
+    }
+    let bytes = serde_json::to_vec(value).map_err(|error| CalcFlowError::Internal {
+        message: format!("checkpoint soak document encoding failed: {error}"),
+    })?;
+    let temporary = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(|source| CalcFlowError::Io {
+            path: temporary.display().to_string(),
+            source,
+        })?;
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|source| CalcFlowError::Io {
+            path: temporary.display().to_string(),
+            source,
+        })?;
+    std::fs::rename(&temporary, path).map_err(|source| CalcFlowError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    sync_checkpoint_soak_directory(parent)
+}
+
+#[cfg(unix)]
+fn sync_checkpoint_soak_directory(path: &Path) -> Result<()> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| CalcFlowError::Io {
+            path: path.display().to_string(),
+            source,
+        })
+}
+
+#[cfg(not(unix))]
+fn sync_checkpoint_soak_directory(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn read_checkpoint_soak_document<T>(path: &Path) -> Result<T>
+where
+    T: DeserializeOwned + Serialize,
+{
+    let metadata = std::fs::symlink_metadata(path).map_err(|source| CalcFlowError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > CHECKPOINT_SOAK_REPORT_LIMIT
+    {
+        return Err(checkpoint_soak_process_error(format!(
+            "checkpoint soak document {} is not a bounded regular file",
+            path.display()
+        )));
+    }
+    let bytes = std::fs::read(path).map_err(|source| CalcFlowError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let value: T = serde_json::from_slice(&bytes).map_err(|error| {
+        checkpoint_soak_process_error(format!(
+            "checkpoint soak document {} is malformed: {error}",
+            path.display()
+        ))
+    })?;
+    if serde_json::to_vec(&value).unwrap() != bytes {
+        return Err(checkpoint_soak_process_error(format!(
+            "checkpoint soak document {} is not canonical",
+            path.display()
+        )));
+    }
+    Ok(value)
+}
+
+fn validate_checkpoint_soak_plan(plan: &CheckpointSoakProcessPlan) -> Result<()> {
+    let expected_ranges = match plan.mode {
+        CheckpointSoakProcessMode::Smoke => [0..0, 0..0, 0..0],
+        CheckpointSoakProcessMode::Standard => [0..40, 40..80, 80..120],
+    };
+    let expected = expected_ranges.get(plan.generation).ok_or_else(|| {
+        checkpoint_soak_process_error("checkpoint soak generation is out of range")
+    })?;
+    let root = plan
+        .run_root
+        .canonicalize()
+        .map_err(|source| CalcFlowError::Io {
+            path: plan.run_root.display().to_string(),
+            source,
+        })?;
+    let executable = checkpoint_soak_test_executable()?;
+    let current_commit = strict_command_output("git", &["rev-parse", "HEAD"])?;
+    if plan.schema != CHECKPOINT_SOAK_PLAN_SCHEMA
+        || plan.run_root != root
+        || plan.commit != current_commit
+        || plan.executable_sha256 != checkpoint_soak_file_sha256(&executable)?
+        || plan.parent_pid == 0
+        || plan.parent_pid == std::process::id()
+        || plan.sample_start != expected.start
+        || plan.sample_end != expected.end
+        || plan.retained_epochs != 2
+        || plan.final_generation != (plan.generation + 1 == CHECKPOINT_SOAK_GENERATIONS)
+        || plan.config_hash != checkpoint_soak_plan_hash(plan)
+    {
+        return Err(checkpoint_soak_process_error(
+            "checkpoint soak child plan identity or schedule is invalid",
+        ));
+    }
+    Ok(())
 }
 
 #[allow(
@@ -3267,9 +3630,196 @@ async fn wait_for_completed_checkpoints(job: &ContinuousJob, expected: u64) {
     );
 }
 
+fn checkpoint_soak_manifest_cursors(
+    manifest: &crate::CheckpointManifest,
+) -> BTreeMap<String, String> {
+    manifest
+        .sources()
+        .iter()
+        .map(|(source_id, entry)| {
+            (
+                source_id.clone(),
+                entry.cursor.as_ref().unwrap().order.clone(),
+            )
+        })
+        .collect()
+}
+
+fn checkpoint_soak_open_cursors(
+    opened_with: &SourceOpenHistory,
+) -> BTreeMap<String, Option<String>> {
+    opened_with
+        .lock()
+        .iter()
+        .map(|(source_id, cursor)| (source_id.clone(), cursor.as_ref().map(hex::encode)))
+        .collect()
+}
+
+fn checkpoint_soak_restore_evidence(
+    selected: Option<&crate::CheckpointManifest>,
+) -> (bool, bool, bool) {
+    let Some(manifest) = selected else {
+        return (false, false, false);
+    };
+    let window = manifest.operators().get("window");
+    let window_state = window.is_some_and(|entry| !entry.segments.is_empty());
+    let watermarks = window.is_some_and(|entry| {
+        !entry.progress.is_empty()
+            && entry
+                .progress
+                .values()
+                .all(|progress| progress.watermark.is_some())
+    });
+    let progress = manifest.sources().values().all(|entry| {
+        entry.cursor.is_some()
+            && entry.sequence > 0
+            && matches!(
+                entry.watermark_policy,
+                SourceWatermarkManifestState::SourceProvided {
+                    last_emitted_micros: Some(_),
+                    ..
+                }
+            )
+    });
+    (window_state, watermarks, progress)
+}
+
+#[cfg(target_os = "linux")]
+async fn checkpoint_soak_process_rss_kib() -> Result<u64> {
+    let process_status = tokio::fs::read_to_string("/proc/self/status")
+        .await
+        .map_err(|source| CalcFlowError::Io {
+            path: "/proc/self/status".into(),
+            source,
+        })?;
+    parse_vm_rss_kib(&process_status)
+        .ok_or_else(|| checkpoint_soak_process_error("Linux checkpoint soak status omitted VmRSS"))
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn checkpoint_soak_process_rss_kib() -> Result<u64> {
+    Err(checkpoint_soak_process_error(
+        "standard checkpoint soak RSS evidence requires Linux",
+    ))
+}
+
+async fn checkpoint_soak_process_sample(
+    job: &ContinuousJob,
+    state_root: &Path,
+    manifest_root: &Path,
+    index: usize,
+) -> Result<CheckpointSoakProcessSample> {
+    let status = job.status();
+    if status.state != ContinuousJobState::Running || status.metrics.checkpoints.failed != 0 {
+        return Err(checkpoint_soak_process_error(format!(
+            "checkpoint soak child terminated before sample {index}"
+        )));
+    }
+    assert_edge_budgets(&status);
+    let maximum_queue_depth = status
+        .edges
+        .values()
+        .map(|edge| edge.queue_depth)
+        .max()
+        .unwrap_or(0);
+    let maximum_charged_rows = status
+        .edges
+        .values()
+        .map(|edge| edge.charged_rows)
+        .max()
+        .unwrap_or(0);
+    let maximum_charged_bytes = status
+        .edges
+        .values()
+        .map(|edge| edge.charged_bytes)
+        .max()
+        .unwrap_or(0);
+    Ok(CheckpointSoakProcessSample {
+        index,
+        elapsed_seconds: elapsed_at_sample(index),
+        rss_kib: checkpoint_soak_process_rss_kib().await?,
+        task_count: status.tasks.len(),
+        maximum_queue_depth,
+        maximum_charged_rows,
+        maximum_charged_bytes,
+        completed_checkpoints: status.metrics.checkpoints.completed,
+        failed_checkpoints: status.metrics.checkpoints.failed,
+        manifest_count: checkpoint_manifest_documents(manifest_root).await.len(),
+        state_bytes: directory_regular_file_bytes(state_root).await,
+    })
+}
+
+struct CheckpointSoakTerminalEvidence {
+    cause: &'static str,
+    completed_checkpoints: u64,
+    failed_checkpoints: u64,
+    terminal_tasks: usize,
+    terminal_charged_edges: usize,
+    terminal_registries: (usize, usize),
+}
+
+async fn settle_checkpoint_soak_process(
+    mut runner: ContinuousRunner,
+    job: ContinuousJob,
+    stop: &AtomicUsize,
+    final_generation: bool,
+) -> Result<CheckpointSoakTerminalEvidence> {
+    let outcome = if final_generation {
+        stop.store(1, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(20), job.wait())
+            .await
+            .map_err(|_| checkpoint_soak_process_error("terminal checkpoint timed out"))?
+    } else {
+        job.cancel().await
+    };
+    let expected_state = if final_generation {
+        ContinuousJobState::Completed
+    } else {
+        ContinuousJobState::Cancelled
+    };
+    let expected_cause = if final_generation {
+        TerminalCause::NaturalEnd
+    } else {
+        TerminalCause::ExplicitCancel
+    };
+    if outcome.state != expected_state || outcome.cause != expected_cause {
+        return Err(checkpoint_soak_process_error(format!(
+            "checkpoint soak child terminated unexpectedly: {outcome:?}"
+        )));
+    }
+    let status = job.status();
+    let terminal_tasks = status.tasks.len();
+    let terminal_charged_edges = status
+        .edges
+        .values()
+        .filter(|edge| edge.queue_depth != 0 || edge.charged_rows != 0 || edge.charged_bytes != 0)
+        .count();
+    let completed_checkpoints = status.metrics.checkpoints.completed;
+    let failed_checkpoints = status.metrics.checkpoints.failed;
+    drop(job);
+    runner.shutdown().await?;
+    let terminal_registries = runner.registry_counts();
+    Ok(CheckpointSoakTerminalEvidence {
+        cause: if final_generation {
+            "natural_end"
+        } else {
+            "explicit_cancel"
+        },
+        completed_checkpoints,
+        failed_checkpoints,
+        terminal_tasks,
+        terminal_charged_edges,
+        terminal_registries,
+    })
+}
+
 async fn checkpoint_manifest_documents(root: &Path) -> Vec<crate::CheckpointManifest> {
     let mut manifests = Vec::new();
-    let mut entries = tokio::fs::read_dir(root).await.unwrap();
+    let mut entries = match tokio::fs::read_dir(root).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return manifests,
+        Err(error) => panic!("checkpoint soak could not scan manifests: {error}"),
+    };
     while let Some(entry) = entries.next_entry().await.unwrap() {
         let name = entry.file_name();
         if name.to_string_lossy().starts_with("manifest-") {
@@ -3289,6 +3839,570 @@ async fn read_checkpoint_manifest_document(path: &Path) -> Option<crate::Checkpo
         Err(error) => panic!("checkpoint soak could not read manifest: {error}"),
     };
     Some(crate::CheckpointManifest::from_bytes(&bytes).unwrap())
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one child owns its independent runtime, durable restore, samples, and terminal report"
+)]
+async fn run_checkpoint_soak_child(
+    plan: &CheckpointSoakProcessPlan,
+) -> Result<CheckpointSoakProcessReport> {
+    validate_checkpoint_soak_plan(plan)?;
+    let state_root = plan.run_root.join("state");
+    let manifest_root = plan.run_root.join("manifests");
+    let sink_root = plan.run_root.join("sinks");
+    let before = checkpoint_manifest_documents(&manifest_root).await;
+    let selected = before.last();
+    let restored_epoch = selected.map(|manifest| manifest.epoch().as_u64());
+    let restored_cursor_orders = selected.map_or_else(
+        || BTreeMap::from([("left".into(), None), ("right".into(), None)]),
+        |manifest| {
+            checkpoint_soak_manifest_cursors(manifest)
+                .into_iter()
+                .map(|(source_id, order)| (source_id, Some(order)))
+                .collect()
+        },
+    );
+    let (restored_window_state, restored_watermarks, restored_progress) =
+        checkpoint_soak_restore_evidence(selected);
+    let backend = Arc::new(LocalStateBackend::new(&state_root).await?);
+    let stop = Arc::new(AtomicUsize::new(0));
+    let opened_with = Arc::new(Mutex::new(Vec::new()));
+    let source_closed = Arc::new(AtomicUsize::new(0));
+    let sink_closed = Arc::new(AtomicUsize::new(0));
+    let config = StreamRuntimeConfig {
+        checkpoint_interval: Duration::from_millis(plan.checkpoint_interval_millis),
+        checkpoint_timeout: Duration::from_millis(plan.checkpoint_timeout_millis),
+        retained_epochs: plan.retained_epochs,
+        ..StreamRuntimeConfig::default()
+    };
+    let (runner, job) = start_checkpoint_restart_generation(
+        50_000 + u64::try_from(plan.generation).unwrap(),
+        backend,
+        &manifest_root,
+        &sink_root,
+        &stop,
+        &opened_with,
+        &source_closed,
+        &sink_closed,
+        config,
+        Duration::from_millis(plan.sink_write_delay_millis),
+    )
+    .await;
+    let initial_status = job.status();
+    if initial_status.tasks.is_empty()
+        || checkpoint_soak_open_cursors(&opened_with) != restored_cursor_orders
+    {
+        return Err(checkpoint_soak_process_error(
+            "checkpoint soak child did not restore the durable source cursors",
+        ));
+    }
+    assert_edge_budgets(&initial_status);
+
+    let mut samples = Vec::with_capacity(plan.sample_end - plan.sample_start);
+    if plan.mode == CheckpointSoakProcessMode::Smoke {
+        wait_for_completed_checkpoints(&job, plan.target_checkpoints).await;
+    } else {
+        let started = tokio::time::Instant::now();
+        for (local_index, index) in (plan.sample_start..plan.sample_end).enumerate() {
+            let sample_number = u32::try_from(local_index + 1).unwrap();
+            tokio::time::sleep_until(started + CHECKPOINT_SOAK_CADENCE * sample_number).await;
+            samples.push(
+                checkpoint_soak_process_sample(&job, &state_root, &manifest_root, index).await?,
+            );
+        }
+    }
+    let before_terminal = job.status();
+    let steady_task_count = initial_status.tasks.len();
+    if before_terminal.tasks.len() != steady_task_count
+        || before_terminal.metrics.checkpoints.failed != 0
+    {
+        return Err(checkpoint_soak_process_error(
+            "checkpoint soak child task or checkpoint metrics drifted",
+        ));
+    }
+    let terminal =
+        settle_checkpoint_soak_process(runner, job, &stop, plan.final_generation).await?;
+    let manifests = checkpoint_manifest_documents(&manifest_root).await;
+    let selected_terminal = manifests.last().ok_or_else(|| {
+        checkpoint_soak_process_error("checkpoint soak child published no terminal manifest")
+    })?;
+    let terminal_cursor_orders = checkpoint_soak_manifest_cursors(selected_terminal);
+    let compacted_epochs = manifests
+        .iter()
+        .filter(|manifest| manifest_has_compacted_window(manifest))
+        .map(|manifest| manifest.epoch().as_u64())
+        .collect::<Vec<_>>();
+    let maximum_manifest_count = samples
+        .iter()
+        .map(|sample| sample.manifest_count)
+        .max()
+        .unwrap_or(0)
+        .max(manifests.len());
+    let maximum_state_bytes = samples
+        .iter()
+        .map(|sample| sample.state_bytes)
+        .max()
+        .unwrap_or(0)
+        .max(directory_regular_file_bytes(&state_root).await);
+    let visible = read_checkpoint_matrix_visible(&sink_root).await;
+    let observed = visible.values().flatten().cloned().collect::<Vec<_>>();
+    let unique = observed.iter().cloned().collect::<BTreeSet<_>>();
+    let expected = checkpoint_soak_expected_records(selected_terminal);
+    Ok(CheckpointSoakProcessReport {
+        schema: CHECKPOINT_SOAK_PROCESS_SCHEMA.into(),
+        commit: plan.commit.clone(),
+        executable_sha256: plan.executable_sha256.clone(),
+        config_hash: plan.config_hash.clone(),
+        run_root: plan.run_root.clone(),
+        parent_pid: plan.parent_pid,
+        pid: std::process::id(),
+        generation: plan.generation,
+        sample_start: plan.sample_start,
+        sample_end: plan.sample_end,
+        restored_epoch,
+        restored_cursor_orders,
+        terminal_epoch: selected_terminal.epoch().as_u64(),
+        terminal_cursor_orders,
+        restored_window_state,
+        restored_watermarks,
+        restored_progress,
+        samples,
+        compacted_epochs,
+        maximum_manifest_count,
+        maximum_state_bytes,
+        completed_checkpoints: terminal.completed_checkpoints,
+        failed_checkpoints: terminal.failed_checkpoints,
+        source_open_events: opened_with.lock().len(),
+        source_close_events: source_closed.load(Ordering::SeqCst),
+        sink_close_events: sink_closed.load(Ordering::SeqCst),
+        terminal_cause: terminal.cause.into(),
+        terminal_tasks: terminal.terminal_tasks,
+        terminal_charged_edges: terminal.terminal_charged_edges,
+        terminal_registries: terminal.terminal_registries,
+        source_records: expected.len() / 2,
+        output_records: observed.len(),
+        duplicate_records: observed.len().saturating_sub(unique.len()),
+        missing_records: expected.difference(&unique).count(),
+        temporary_artifacts: checkpoint_matrix_temporary_artifacts(
+            &state_root,
+            &manifest_root,
+            &sink_root,
+        ),
+    })
+}
+
+fn checkpoint_soak_cursor_order(value: &str) -> Result<u64> {
+    let bytes = hex::decode(value).map_err(|error| {
+        checkpoint_soak_process_error(format!("checkpoint soak cursor is not hex: {error}"))
+    })?;
+    let order: [u8; 8] = bytes.try_into().map_err(|_| {
+        checkpoint_soak_process_error("checkpoint soak cursor is not an exact u64 order")
+    })?;
+    Ok(u64::from_be_bytes(order))
+}
+
+fn validate_checkpoint_soak_samples(
+    plan: &CheckpointSoakProcessPlan,
+    report: &CheckpointSoakProcessReport,
+) -> Result<()> {
+    let expected = (plan.sample_start..plan.sample_end).collect::<Vec<_>>();
+    let observed = report
+        .samples
+        .iter()
+        .map(|sample| sample.index)
+        .collect::<Vec<_>>();
+    if observed != expected
+        || report.samples.iter().any(|sample| {
+            !sample.elapsed_seconds.is_finite()
+                || sample.elapsed_seconds.to_bits() != elapsed_at_sample(sample.index).to_bits()
+                || sample.rss_kib == 0
+                || sample.task_count == 0
+                || sample.failed_checkpoints != 0
+                || sample.manifest_count > 3
+                || sample.state_bytes > MAX_CHECKPOINT_SOAK_STATE_BYTES
+        })
+    {
+        return Err(checkpoint_soak_process_error(
+            "checkpoint soak child sample schedule or bounds are invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_checkpoint_soak_advance(report: &CheckpointSoakProcessReport) -> Result<()> {
+    let expected_sources = BTreeSet::from(["left", "right"]);
+    let restored_sources = report
+        .restored_cursor_orders
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let terminal_sources = report
+        .terminal_cursor_orders
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if restored_sources != expected_sources || terminal_sources != expected_sources {
+        return Err(checkpoint_soak_process_error(
+            "checkpoint soak child source identity set is invalid",
+        ));
+    }
+    for source_id in expected_sources {
+        let terminal = checkpoint_soak_cursor_order(&report.terminal_cursor_orders[source_id])?;
+        match &report.restored_cursor_orders[source_id] {
+            Some(restored) if terminal <= checkpoint_soak_cursor_order(restored)? => {
+                return Err(checkpoint_soak_process_error(format!(
+                    "checkpoint soak child did not advance source {source_id:?}"
+                )));
+            }
+            None if report.generation != 0 || terminal == 0 => {
+                return Err(checkpoint_soak_process_error(format!(
+                    "checkpoint soak child has invalid initial cursor for {source_id:?}"
+                )));
+            }
+            _ => {}
+        }
+    }
+    if report
+        .restored_epoch
+        .is_some_and(|restored| report.terminal_epoch <= restored)
+        || report.restored_epoch.is_none() && report.terminal_epoch == 0
+    {
+        return Err(checkpoint_soak_process_error(
+            "checkpoint soak child did not advance the durable epoch",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_checkpoint_soak_report(
+    plan: &CheckpointSoakProcessPlan,
+    report: &CheckpointSoakProcessReport,
+    exit_code: i32,
+) -> Result<()> {
+    let expected_cause = if plan.final_generation {
+        "natural_end"
+    } else {
+        "explicit_cancel"
+    };
+    if exit_code != 0
+        || report.schema != CHECKPOINT_SOAK_PROCESS_SCHEMA
+        || report.commit != plan.commit
+        || report.executable_sha256 != plan.executable_sha256
+        || report.config_hash != plan.config_hash
+        || report.run_root != plan.run_root
+        || report.parent_pid != plan.parent_pid
+        || report.pid == 0
+        || report.pid == plan.parent_pid
+        || report.generation != plan.generation
+        || report.sample_start != plan.sample_start
+        || report.sample_end != plan.sample_end
+        || report.terminal_cause != expected_cause
+        || report.source_open_events != 2
+        || report.source_close_events != 2
+        || report.sink_close_events != 2
+        || report.failed_checkpoints != 0
+        || report.maximum_manifest_count > 3
+        || report.maximum_state_bytes > MAX_CHECKPOINT_SOAK_STATE_BYTES
+        || report.terminal_tasks != 0
+        || report.terminal_charged_edges != 0
+        || report.terminal_registries != (0, 0)
+        || report.temporary_artifacts != 0
+    {
+        return Err(checkpoint_soak_process_error(
+            "checkpoint soak child report identity, exit, or terminal bounds are invalid",
+        ));
+    }
+    if plan.generation == 0 {
+        if report.restored_epoch.is_some()
+            || report.restored_cursor_orders.values().any(Option::is_some)
+        {
+            return Err(checkpoint_soak_process_error(
+                "initial checkpoint soak child unexpectedly restored in-memory continuity",
+            ));
+        }
+    } else if report.restored_epoch.is_none()
+        || report.restored_cursor_orders.values().any(Option::is_none)
+        || !report.restored_window_state
+        || !report.restored_watermarks
+        || !report.restored_progress
+    {
+        return Err(checkpoint_soak_process_error(
+            "restarted checkpoint soak child lacks durable restore evidence",
+        ));
+    }
+    validate_checkpoint_soak_samples(plan, report)?;
+    validate_checkpoint_soak_advance(report)
+}
+
+fn checkpoint_soak_log_excerpt(path: &Path) -> String {
+    std::fs::read(path).map_or_else(
+        |error| format!("unavailable: {error}"),
+        |bytes| {
+            let start = bytes.len().saturating_sub(8 * 1_024);
+            String::from_utf8_lossy(&bytes[start..]).into_owned()
+        },
+    )
+}
+
+fn run_checkpoint_soak_process_blocking(
+    executable: &Path,
+    plan_path: &Path,
+    stdout_path: &Path,
+    stderr_path: &Path,
+    timeout: Duration,
+) -> Result<i32> {
+    let stdout = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(stdout_path)
+        .map_err(|source| CalcFlowError::Io {
+            path: stdout_path.display().to_string(),
+            source,
+        })?;
+    let stderr = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(stderr_path)
+        .map_err(|source| CalcFlowError::Io {
+            path: stderr_path.display().to_string(),
+            source,
+        })?;
+    let mut child = Command::new(executable)
+        .arg(CHECKPOINT_SOAK_CHILD_TEST)
+        .arg("--exact")
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env(CHECKPOINT_SOAK_CHILD_ENV, plan_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .map_err(|source| CalcFlowError::Io {
+            path: executable.display().to_string(),
+            source,
+        })?;
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().map_err(|source| CalcFlowError::Io {
+            path: executable.display().to_string(),
+            source,
+        })? {
+            return status.code().ok_or_else(|| {
+                checkpoint_soak_process_error("checkpoint soak child exited without a status code")
+            });
+        }
+        if started.elapsed() >= timeout {
+            child.kill().map_err(|source| CalcFlowError::Io {
+                path: executable.display().to_string(),
+                source,
+            })?;
+            let _ = child.wait();
+            return Err(checkpoint_soak_process_error(format!(
+                "checkpoint soak child exceeded {timeout:?}"
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+async fn spawn_checkpoint_soak_process(
+    executable: &Path,
+    plan: &CheckpointSoakProcessPlan,
+) -> Result<(i32, CheckpointSoakProcessReport)> {
+    let plan_path = checkpoint_soak_plan_path(plan);
+    write_checkpoint_soak_document(&plan_path, plan)?;
+    let log_root = plan.run_root.join("evidence").join("logs");
+    std::fs::create_dir_all(&log_root).map_err(|source| CalcFlowError::Io {
+        path: log_root.display().to_string(),
+        source,
+    })?;
+    let stdout_path = log_root.join(format!("generation-{}.stdout", plan.generation));
+    let stderr_path = log_root.join(format!("generation-{}.stderr", plan.generation));
+    let timeout = match plan.mode {
+        CheckpointSoakProcessMode::Smoke => Duration::from_secs(60),
+        CheckpointSoakProcessMode::Standard => {
+            let samples = u64::try_from(plan.sample_end - plan.sample_start).unwrap();
+            CHECKPOINT_SOAK_CADENCE * u32::try_from(samples).unwrap() + Duration::from_secs(60)
+        }
+    };
+    let executable = executable.to_path_buf();
+    let blocking_plan = plan_path.clone();
+    let blocking_stdout = stdout_path.clone();
+    let blocking_stderr = stderr_path.clone();
+    let exit_code = tokio::task::spawn_blocking(move || {
+        run_checkpoint_soak_process_blocking(
+            &executable,
+            &blocking_plan,
+            &blocking_stdout,
+            &blocking_stderr,
+            timeout,
+        )
+    })
+    .await
+    .map_err(|error| CalcFlowError::Internal {
+        message: format!("checkpoint soak child owner task failed: {error}"),
+    })??;
+    if exit_code != 0 {
+        return Err(checkpoint_soak_process_error(format!(
+            "checkpoint soak child generation {} exited {exit_code}; stderr: {}",
+            plan.generation,
+            checkpoint_soak_log_excerpt(&stderr_path)
+        )));
+    }
+    let report = read_checkpoint_soak_document(&checkpoint_soak_report_path(plan))?;
+    validate_checkpoint_soak_report(plan, &report, exit_code)?;
+    Ok((exit_code, report))
+}
+
+fn validate_checkpoint_soak_process_set(
+    plans: &[CheckpointSoakProcessPlan],
+    reports: &[CheckpointSoakProcessReport],
+    exit_codes: &[i32],
+) -> Result<()> {
+    if plans.len() != CHECKPOINT_SOAK_GENERATIONS
+        || reports.len() != plans.len()
+        || exit_codes.len() != plans.len()
+    {
+        return Err(checkpoint_soak_process_error(
+            "checkpoint soak process set is incomplete",
+        ));
+    }
+    let pids = reports
+        .iter()
+        .map(|report| report.pid)
+        .collect::<BTreeSet<_>>();
+    if pids.len() != CHECKPOINT_SOAK_GENERATIONS {
+        return Err(checkpoint_soak_process_error(
+            "checkpoint soak process IDs are not distinct",
+        ));
+    }
+    for ((plan, report), exit_code) in plans.iter().zip(reports).zip(exit_codes) {
+        validate_checkpoint_soak_report(plan, report, *exit_code)?;
+    }
+    for pair in reports.windows(2) {
+        let previous = &pair[0];
+        let restarted = &pair[1];
+        let previous_cursors = previous
+            .terminal_cursor_orders
+            .iter()
+            .map(|(source_id, order)| (source_id.clone(), Some(order.clone())))
+            .collect::<BTreeMap<_, _>>();
+        if restarted.restored_epoch != Some(previous.terminal_epoch)
+            || restarted.restored_cursor_orders != previous_cursors
+        {
+            return Err(checkpoint_soak_process_error(
+                "checkpoint soak child did not continue from prior filesystem evidence",
+            ));
+        }
+    }
+    let observed_samples = reports
+        .iter()
+        .flat_map(|report| report.samples.iter().map(|sample| sample.index))
+        .collect::<Vec<_>>();
+    let expected_samples = match plans[0].mode {
+        CheckpointSoakProcessMode::Smoke => Vec::new(),
+        CheckpointSoakProcessMode::Standard => (0..CHECKPOINT_SOAK_SAMPLE_COUNT).collect(),
+    };
+    if observed_samples != expected_samples {
+        return Err(checkpoint_soak_process_error(
+            "checkpoint soak process samples contain a gap or duplicate",
+        ));
+    }
+    let final_report = reports.last().unwrap();
+    if final_report.duplicate_records != 0 || final_report.missing_records != 0 {
+        return Err(checkpoint_soak_process_error(
+            "checkpoint soak transactional output is not exactly once",
+        ));
+    }
+    Ok(())
+}
+
+fn aggregate_checkpoint_soak_processes(
+    reports: Vec<CheckpointSoakProcessReport>,
+    exit_codes: Vec<i32>,
+) -> CheckpointSoakProcessEvidence {
+    let final_report = reports.last().unwrap();
+    let compacted_epochs = reports
+        .iter()
+        .flat_map(|report| report.compacted_epochs.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let rss_samples = reports
+        .iter()
+        .flat_map(|report| {
+            report.samples.iter().map(|sample| RssSample {
+                elapsed_seconds: sample.elapsed_seconds,
+                rss_kib: sample.rss_kib,
+            })
+        })
+        .collect();
+    let report = CheckpointRestartSoakReport {
+        restarts: reports.len().saturating_sub(1),
+        generation_process_ids: reports.iter().map(|report| report.pid).collect(),
+        generation_exit_codes: exit_codes,
+        completed_epochs: final_report.terminal_epoch,
+        compacted_window_epochs: compacted_epochs.len(),
+        maximum_manifest_count: reports
+            .iter()
+            .map(|report| report.maximum_manifest_count)
+            .max()
+            .unwrap_or(0),
+        maximum_state_bytes: reports
+            .iter()
+            .map(|report| report.maximum_state_bytes)
+            .max()
+            .unwrap_or(0),
+        source_records: final_report.source_records,
+        output_records: final_report.output_records,
+        duplicate_records: final_report.duplicate_records,
+        missing_records: final_report.missing_records,
+        temporary_artifacts: reports
+            .iter()
+            .map(|report| report.temporary_artifacts)
+            .sum(),
+        terminal_tasks: reports.iter().map(|report| report.terminal_tasks).sum(),
+        terminal_charged_edges: reports
+            .iter()
+            .map(|report| report.terminal_charged_edges)
+            .sum(),
+        terminal_registries: reports.iter().fold((0, 0), |total, report| {
+            (
+                total.0 + report.terminal_registries.0,
+                total.1 + report.terminal_registries.1,
+            )
+        }),
+    };
+    CheckpointSoakProcessEvidence {
+        report,
+        processes: reports,
+        rss_samples,
+    }
+}
+
+async fn run_checkpoint_soak_processes(
+    run_root: &Path,
+    mode: CheckpointSoakProcessMode,
+) -> Result<CheckpointSoakProcessEvidence> {
+    let run_root = run_root
+        .canonicalize()
+        .map_err(|source| CalcFlowError::Io {
+            path: run_root.display().to_string(),
+            source,
+        })?;
+    let executable = checkpoint_soak_test_executable()?;
+    let executable_sha256 = checkpoint_soak_file_sha256(&executable)?;
+    let commit = strict_command_output("git", &["rev-parse", "HEAD"])?;
+    let plans = checkpoint_soak_process_plans(&run_root, &commit, &executable_sha256, mode);
+    let mut reports = Vec::with_capacity(plans.len());
+    let mut exit_codes = Vec::with_capacity(plans.len());
+    for plan in &plans {
+        let (exit_code, report) = spawn_checkpoint_soak_process(&executable, plan).await?;
+        exit_codes.push(exit_code);
+        reports.push(report);
+    }
+    validate_checkpoint_soak_process_set(&plans, &reports, &exit_codes)?;
+    Ok(aggregate_checkpoint_soak_processes(reports, exit_codes))
 }
 
 fn manifest_has_compacted_window(manifest: &crate::CheckpointManifest) -> bool {
@@ -3357,188 +4471,102 @@ fn checkpoint_soak_expected_records(manifest: &crate::CheckpointManifest) -> BTr
         .collect()
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the final oracle receives explicit durable roots and observed resource maxima"
-)]
-async fn finish_checkpoint_restart_soak(
-    mut runner: ContinuousRunner,
-    job: ContinuousJob,
-    stop: &AtomicUsize,
-    state_root: &Path,
-    manifest_root: &Path,
-    sink_root: &Path,
-    maximum_manifest_count: usize,
-    maximum_state_bytes: u64,
-    compacted_epochs: &BTreeSet<Epoch>,
-) -> CheckpointRestartSoakReport {
-    stop.store(1, Ordering::SeqCst);
-    let outcome = tokio::time::timeout(Duration::from_secs(10), job.wait())
-        .await
-        .expect("checkpoint soak terminal epoch timed out");
-    assert_eq!(outcome.state, ContinuousJobState::Completed);
-    assert_eq!(outcome.cause, TerminalCause::NaturalEnd);
-    let terminal_status = job.status();
-    let terminal_tasks = terminal_status.tasks.len();
-    let terminal_charged_edges = terminal_status
-        .edges
-        .values()
-        .filter(|edge| edge.queue_depth != 0 || edge.charged_rows != 0 || edge.charged_bytes != 0)
-        .count();
-    drop(job);
-    runner.shutdown().await.unwrap();
-    let terminal_registries = runner.registry_counts();
-    let manifests = checkpoint_manifest_documents(manifest_root).await;
-    let terminal = manifests.last().unwrap();
-    let visible = read_checkpoint_matrix_visible(sink_root).await;
-    let observed = visible.values().flatten().cloned().collect::<Vec<_>>();
-    let unique = observed.iter().cloned().collect::<BTreeSet<_>>();
-    let expected = checkpoint_soak_expected_records(terminal);
-    let source_records = expected.len() / 2;
-    CheckpointRestartSoakReport {
-        restarts: 2,
-        completed_epochs: terminal.epoch().as_u64(),
-        compacted_window_epochs: compacted_epochs.len(),
-        maximum_manifest_count: maximum_manifest_count.max(manifests.len()),
-        maximum_state_bytes,
-        source_records,
-        output_records: observed.len(),
-        duplicate_records: observed.len().saturating_sub(unique.len()),
-        missing_records: expected.difference(&unique).count(),
-        temporary_artifacts: checkpoint_matrix_temporary_artifacts(
-            state_root,
-            manifest_root,
-            sink_root,
-        ),
-        terminal_tasks,
-        terminal_charged_edges,
-        terminal_registries,
-    }
-}
-
-async fn cancel_checkpoint_restart_generation(mut runner: ContinuousRunner, job: ContinuousJob) {
-    let outcome = job.cancel().await;
-    assert_eq!(outcome.state, ContinuousJobState::Cancelled);
-    assert!(job.status().tasks.is_empty());
-    drop(job);
-    runner.shutdown().await.unwrap();
-    assert_eq!(runner.registry_counts(), (0, 0));
-}
-
 async fn run_checkpoint_restart_soak_smoke() -> CheckpointRestartSoakReport {
     let directory = tempfile::tempdir().unwrap();
-    let state_root = directory.path().join("state");
-    let manifest_root = directory.path().join("manifests");
-    let sink_root = directory.path().join("sinks");
-    let backend = Arc::new(LocalStateBackend::new(&state_root).await.unwrap());
-    let stop = Arc::new(AtomicUsize::new(0));
-    let opened_with = Arc::new(Mutex::new(Vec::new()));
-    let source_closed = Arc::new(AtomicUsize::new(0));
-    let sink_closed = Arc::new(AtomicUsize::new(0));
-    let config = StreamRuntimeConfig {
-        checkpoint_interval: Duration::from_millis(250),
-        checkpoint_timeout: Duration::from_secs(5),
-        retained_epochs: 2,
-        ..StreamRuntimeConfig::default()
-    };
-    let mut maximum_manifest_count = 0;
-    let mut maximum_state_bytes = 0;
-    let mut compacted_epochs = BTreeSet::new();
-
-    for generation in 0..2 {
-        let (runner, job) = start_checkpoint_restart_generation(
-            30_000 + generation,
-            Arc::clone(&backend),
-            &manifest_root,
-            &sink_root,
-            &stop,
-            &opened_with,
-            &source_closed,
-            &sink_closed,
-            config,
-            Duration::ZERO,
-        )
-        .await;
-        wait_for_completed_checkpoints(&job, 12).await;
-        let manifests = checkpoint_manifest_documents(&manifest_root).await;
-        maximum_manifest_count = maximum_manifest_count.max(manifests.len());
-        maximum_state_bytes =
-            maximum_state_bytes.max(directory_regular_file_bytes(&state_root).await);
-        compacted_epochs.extend(
-            manifests
-                .iter()
-                .filter(|manifest| manifest_has_compacted_window(manifest))
-                .map(crate::CheckpointManifest::epoch),
-        );
-        cancel_checkpoint_restart_generation(runner, job).await;
-    }
-
-    let (runner, job) = start_checkpoint_restart_generation(
-        30_002,
-        backend,
-        &manifest_root,
-        &sink_root,
-        &stop,
-        &opened_with,
-        &source_closed,
-        &sink_closed,
-        config,
-        Duration::ZERO,
-    )
-    .await;
-    wait_for_completed_checkpoints(&job, 12).await;
-    let manifests = checkpoint_manifest_documents(&manifest_root).await;
-    maximum_manifest_count = maximum_manifest_count.max(manifests.len());
-    maximum_state_bytes = maximum_state_bytes.max(directory_regular_file_bytes(&state_root).await);
-    compacted_epochs.extend(
-        manifests
-            .iter()
-            .filter(|manifest| manifest_has_compacted_window(manifest))
-            .map(crate::CheckpointManifest::epoch),
-    );
-    let report = finish_checkpoint_restart_soak(
-        runner,
-        job,
-        &stop,
-        &state_root,
-        &manifest_root,
-        &sink_root,
-        maximum_manifest_count,
-        maximum_state_bytes,
-        &compacted_epochs,
-    )
-    .await;
-    let opens = opened_with.lock();
-    assert_eq!(opens.len(), 6);
-    assert!(opens[..2].iter().all(|(_, cursor)| cursor.is_none()));
-    assert!(opens[2..].iter().all(|(_, cursor)| cursor.is_some()));
-    assert_eq!(source_closed.load(Ordering::SeqCst), 6);
-    assert_eq!(sink_closed.load(Ordering::SeqCst), 6);
-    report
+    run_checkpoint_soak_processes(directory.path(), CheckpointSoakProcessMode::Smoke)
+        .await
+        .unwrap()
+        .report
 }
 
 #[cfg(target_os = "linux")]
-#[allow(
-    clippy::too_many_lines,
-    reason = "the ignored checkpoint soak keeps sampling, restarts, and its final oracle together"
-)]
+fn checkpoint_soak_sample_max(
+    evidence: &CheckpointSoakProcessEvidence,
+    select: impl Fn(&CheckpointSoakProcessSample) -> usize,
+) -> usize {
+    evidence
+        .processes
+        .iter()
+        .flat_map(|process| process.samples.iter().map(&select))
+        .max()
+        .unwrap_or(0)
+}
+
+#[cfg(target_os = "linux")]
+fn checkpoint_soak_process_summary(
+    commit: &str,
+    evidence: &CheckpointSoakProcessEvidence,
+    rss_gate: RssGate,
+) -> serde_json::Value {
+    let report = &evidence.report;
+    json!({
+        "schema": "calc-flow.m5-checkpoint-soak.v1",
+        "type": "calc_flow_m5_checkpoint_soak_summary",
+        "commit": commit,
+        "target_duration_seconds": 1_200,
+        "sample_count": evidence.rss_samples.len(),
+        "restart_sample_indices": CHECKPOINT_SOAK_RESTART_SAMPLES,
+        "restarts": report.restarts,
+        "processes": evidence.processes.iter().map(|process| json!({
+            "generation": process.generation,
+            "pid": process.pid,
+            "exit_code": report.generation_exit_codes[process.generation],
+            "sample_range": [process.sample_start, process.sample_end],
+            "restored_epoch": process.restored_epoch,
+            "terminal_epoch": process.terminal_epoch,
+            "config_hash": process.config_hash,
+        })).collect::<Vec<_>>(),
+        "completed_epochs": report.completed_epochs,
+        "compacted_window_epochs": report.compacted_window_epochs,
+        "resource_bounds": {
+            "maximum_task_count": checkpoint_soak_sample_max(evidence, |sample| sample.task_count),
+            "maximum_queue_depth": checkpoint_soak_sample_max(
+                evidence,
+                |sample| sample.maximum_queue_depth,
+            ),
+            "maximum_charged_rows": checkpoint_soak_sample_max(
+                evidence,
+                |sample| sample.maximum_charged_rows,
+            ),
+            "maximum_charged_bytes": checkpoint_soak_sample_max(
+                evidence,
+                |sample| sample.maximum_charged_bytes,
+            ),
+            "maximum_manifest_count": report.maximum_manifest_count,
+            "maximum_state_bytes": report.maximum_state_bytes,
+            "state_bytes_limit": MAX_CHECKPOINT_SOAK_STATE_BYTES,
+        },
+        "conservation": {
+            "source_records": report.source_records,
+            "output_records": report.output_records,
+            "duplicate_records": report.duplicate_records,
+            "missing_records": report.missing_records,
+        },
+        "rss": {
+            "slope_mib_per_hour": rss_gate.slope_mib_per_hour,
+            "comparison_sample_ranges": CHECKPOINT_RSS_COMPARISON_RANGES,
+            "slope_sample_range": CHECKPOINT_RSS_COMPARISON_RANGES[1],
+            "first_aligned_five_minute_median_kib": rss_gate.first_median_kib,
+            "final_aligned_five_minute_median_kib": rss_gate.final_median_kib,
+            "passed": rss_gate.passed,
+        },
+        "temporary_artifacts": report.temporary_artifacts,
+        "terminal_tasks": report.terminal_tasks,
+        "terminal_charged_edges": report.terminal_charged_edges,
+        "terminal_registries": report.terminal_registries,
+        "source_open_events": evidence.processes.iter()
+            .map(|process| process.source_open_events).sum::<usize>(),
+        "source_close_events": evidence.processes.iter()
+            .map(|process| process.source_close_events).sum::<usize>(),
+        "sink_close_events": evidence.processes.iter()
+            .map(|process| process.sink_close_events).sum::<usize>(),
+    })
+}
+
+#[cfg(target_os = "linux")]
 async fn run_checkpoint_restart_linux_soak() {
     let directory = tempfile::tempdir().unwrap();
-    let state_root = directory.path().join("state");
-    let manifest_root = directory.path().join("manifests");
-    let sink_root = directory.path().join("sinks");
-    let backend = Arc::new(LocalStateBackend::new(&state_root).await.unwrap());
-    let stop = Arc::new(AtomicUsize::new(0));
-    let opened_with = Arc::new(Mutex::new(Vec::new()));
-    let source_closed = Arc::new(AtomicUsize::new(0));
-    let sink_closed = Arc::new(AtomicUsize::new(0));
-    let config = StreamRuntimeConfig {
-        checkpoint_interval: Duration::from_secs(5),
-        checkpoint_timeout: Duration::from_secs(10),
-        retained_epochs: 2,
-        ..StreamRuntimeConfig::default()
-    };
-    let commit = command_output("git", &["rev-parse", "HEAD"]);
+    let commit = strict_command_output("git", &["rev-parse", "HEAD"]).unwrap();
     println!(
         "{}",
         checkpoint_restart_soak_metadata(
@@ -3547,168 +4575,14 @@ async fn run_checkpoint_restart_linux_soak() {
             &command_output("rustc", &["--version"]),
         )
     );
-    let (mut runner, mut job) = start_checkpoint_restart_generation(
-        40_000,
-        Arc::clone(&backend),
-        &manifest_root,
-        &sink_root,
-        &stop,
-        &opened_with,
-        &source_closed,
-        &sink_closed,
-        config,
-        Duration::from_millis(20),
-    )
-    .await;
-    let initial_status = job.status();
-    let steady_task_count = initial_status.tasks.len();
-    assert!(
-        steady_task_count > 0,
-        "checkpoint soak task registry is empty"
-    );
-    assert_edge_budgets(&initial_status);
-    let started = tokio::time::Instant::now();
-    let mut rss_samples = Vec::with_capacity(CHECKPOINT_SOAK_SAMPLE_COUNT);
-    let mut maximum_manifest_count = 0;
-    let mut maximum_state_bytes = 0;
-    let mut maximum_task_count = steady_task_count;
-    let mut maximum_queue_depth = 0;
-    let mut maximum_charged_rows = 0;
-    let mut maximum_charged_bytes = 0;
-    let mut compacted_epochs = BTreeSet::new();
-    for index in 0..CHECKPOINT_SOAK_SAMPLE_COUNT {
-        let elapsed_seconds = wait_for_sample_deadline(started, index).await;
-        let process_status = tokio::fs::read_to_string("/proc/self/status")
+    let evidence =
+        run_checkpoint_soak_processes(directory.path(), CheckpointSoakProcessMode::Standard)
             .await
-            .expect("Linux checkpoint soak could not read /proc/self/status");
-        let rss_kib = parse_vm_rss_kib(&process_status).expect("Linux status omitted VmRSS");
-        rss_samples.push(RssSample {
-            elapsed_seconds,
-            rss_kib,
-        });
-        let manifests = checkpoint_manifest_documents(&manifest_root).await;
-        assert!(
-            manifests.len() <= 3,
-            "checkpoint soak exceeded retained plus in-flight manifest bound"
-        );
-        maximum_manifest_count = maximum_manifest_count.max(manifests.len());
-        let state_bytes = directory_regular_file_bytes(&state_root).await;
-        assert!(
-            state_bytes <= MAX_CHECKPOINT_SOAK_STATE_BYTES,
-            "checkpoint soak exceeded its state byte bound"
-        );
-        maximum_state_bytes = maximum_state_bytes.max(state_bytes);
-        compacted_epochs.extend(
-            manifests
-                .iter()
-                .filter(|manifest| manifest_has_compacted_window(manifest))
-                .map(crate::CheckpointManifest::epoch),
-        );
-        let status = job.status();
-        assert_eq!(status.state, ContinuousJobState::Running);
-        assert_eq!(status.tasks.len(), steady_task_count);
-        assert_eq!(status.metrics.checkpoints.failed, 0);
-        assert_edge_budgets(&status);
-        maximum_task_count = maximum_task_count.max(status.tasks.len());
-        maximum_queue_depth = maximum_queue_depth.max(
-            status
-                .edges
-                .values()
-                .map(|edge| edge.queue_depth)
-                .max()
-                .unwrap_or(0),
-        );
-        maximum_charged_rows = maximum_charged_rows.max(
-            status
-                .edges
-                .values()
-                .map(|edge| edge.charged_rows)
-                .max()
-                .unwrap_or(0),
-        );
-        maximum_charged_bytes = maximum_charged_bytes.max(
-            status
-                .edges
-                .values()
-                .map(|edge| edge.charged_bytes)
-                .max()
-                .unwrap_or(0),
-        );
-        let queues = status
-            .edges
-            .iter()
-            .map(|(edge_id, edge)| {
-                json!({
-                    "edge_id": edge_id,
-                    "queue_depth": edge.queue_depth,
-                    "charged_rows": edge.charged_rows,
-                    "charged_bytes": edge.charged_bytes,
-                    "high_water_depth": edge.high_water_depth,
-                })
-            })
-            .collect::<Vec<_>>();
-        println!(
-            "{}",
-            json!({
-                "type": "calc_flow_m5_checkpoint_soak_sample",
-                "index": index,
-                "elapsed_seconds": elapsed_seconds,
-                "vmrss_kib": rss_kib,
-                "task_count": status.tasks.len(),
-                "queues": queues,
-                "checkpoint": {
-                    "last_completed_epoch": status.checkpoint.as_ref()
-                        .and_then(|checkpoint| checkpoint.last_completed_epoch)
-                        .map(Epoch::as_u64),
-                    "completed": status.metrics.checkpoints.completed,
-                    "failed": status.metrics.checkpoints.failed,
-                },
-                "manifest_count": manifests.len(),
-                "state_bytes": state_bytes,
-            })
-        );
-        if CHECKPOINT_SOAK_RESTART_SAMPLES.contains(&index) {
-            let outcome = job.cancel().await;
-            assert_eq!(outcome.state, ContinuousJobState::Cancelled);
-            drop(job);
-            runner.shutdown().await.unwrap();
-            assert_eq!(runner.registry_counts(), (0, 0));
-            let generation = CHECKPOINT_SOAK_RESTART_SAMPLES
-                .iter()
-                .position(|sample| *sample == index)
-                .unwrap()
-                + 1;
-            (runner, job) = start_checkpoint_restart_generation(
-                40_000 + u64::try_from(generation).unwrap(),
-                Arc::clone(&backend),
-                &manifest_root,
-                &sink_root,
-                &stop,
-                &opened_with,
-                &source_closed,
-                &sink_closed,
-                config,
-                Duration::from_millis(20),
-            )
-            .await;
-            let restarted_status = job.status();
-            assert_eq!(restarted_status.tasks.len(), steady_task_count);
-            assert_edge_budgets(&restarted_status);
-        }
-    }
-    let report = finish_checkpoint_restart_soak(
-        runner,
-        job,
-        &stop,
-        &state_root,
-        &manifest_root,
-        &sink_root,
-        maximum_manifest_count,
-        maximum_state_bytes,
-        &compacted_epochs,
-    )
-    .await;
+            .unwrap();
+    let report = &evidence.report;
     assert_eq!(report.restarts, 2);
+    assert_eq!(report.generation_process_ids.len(), 3);
+    assert!(report.generation_exit_codes.iter().all(|code| *code == 0));
     assert!(report.compacted_window_epochs > 0);
     assert!(report.maximum_manifest_count <= 3);
     assert_eq!(report.duplicate_records, 0);
@@ -3717,8 +4591,8 @@ async fn run_checkpoint_restart_linux_soak() {
     assert_eq!(report.terminal_tasks, 0);
     assert_eq!(report.terminal_charged_edges, 0);
     assert_eq!(report.terminal_registries, (0, 0));
-    assert_eq!(observed_timeline_issue(&rss_samples), None);
-    let rss_gate = evaluate_checkpoint_restart_rss_gate(&rss_samples)
+    assert_eq!(observed_timeline_issue(&evidence.rss_samples), None);
+    let rss_gate = evaluate_checkpoint_restart_rss_gate(&evidence.rss_samples)
         .expect("checkpoint soak RSS samples incomplete");
     assert!(
         rss_gate.passed,
@@ -3726,47 +4600,7 @@ async fn run_checkpoint_restart_linux_soak() {
     );
     println!(
         "{}",
-        json!({
-            "schema": "calc-flow.m5-checkpoint-soak.v1",
-            "type": "calc_flow_m5_checkpoint_soak_summary",
-            "commit": commit,
-            "target_duration_seconds": 1_200,
-            "sample_count": rss_samples.len(),
-            "restart_sample_indices": CHECKPOINT_SOAK_RESTART_SAMPLES,
-            "restarts": report.restarts,
-            "completed_epochs": report.completed_epochs,
-            "compacted_window_epochs": report.compacted_window_epochs,
-            "resource_bounds": {
-                "maximum_task_count": maximum_task_count,
-                "maximum_queue_depth": maximum_queue_depth,
-                "maximum_charged_rows": maximum_charged_rows,
-                "maximum_charged_bytes": maximum_charged_bytes,
-                "maximum_manifest_count": report.maximum_manifest_count,
-                "maximum_state_bytes": report.maximum_state_bytes,
-                "state_bytes_limit": MAX_CHECKPOINT_SOAK_STATE_BYTES,
-            },
-            "conservation": {
-                "source_records": report.source_records,
-                "output_records": report.output_records,
-                "duplicate_records": report.duplicate_records,
-                "missing_records": report.missing_records,
-            },
-            "rss": {
-                "slope_mib_per_hour": rss_gate.slope_mib_per_hour,
-                "comparison_sample_ranges": CHECKPOINT_RSS_COMPARISON_RANGES,
-                "slope_sample_range": CHECKPOINT_RSS_COMPARISON_RANGES[1],
-                "first_aligned_five_minute_median_kib": rss_gate.first_median_kib,
-                "final_aligned_five_minute_median_kib": rss_gate.final_median_kib,
-                "passed": rss_gate.passed,
-            },
-            "temporary_artifacts": report.temporary_artifacts,
-            "terminal_tasks": report.terminal_tasks,
-            "terminal_charged_edges": report.terminal_charged_edges,
-            "terminal_registries": report.terminal_registries,
-            "source_open_events": opened_with.lock().len(),
-            "source_close_events": source_closed.load(Ordering::SeqCst),
-            "sink_close_events": sink_closed.load(Ordering::SeqCst),
-        })
+        checkpoint_soak_process_summary(&commit, &evidence, rss_gate)
     );
 }
 
@@ -4489,11 +5323,194 @@ fn soak_zero_cost_count_is_derived_from_the_accepted_oracle() {
     assert_eq!(zero_cost_batch_counts(&accepted), (3, 9));
 }
 
+fn checkpoint_soak_process_report_fixture(
+    plan: &CheckpointSoakProcessPlan,
+    pid: u32,
+) -> CheckpointSoakProcessReport {
+    let restored_order = u64::try_from(plan.generation).unwrap() * 10;
+    let terminal_order = restored_order + 10;
+    let restored_cursor_orders = ["left", "right"]
+        .into_iter()
+        .map(|source_id| {
+            (
+                source_id.into(),
+                (plan.generation > 0).then(|| hex::encode(restored_order.to_be_bytes())),
+            )
+        })
+        .collect();
+    let terminal_cursor_orders = ["left", "right"]
+        .into_iter()
+        .map(|source_id| (source_id.into(), hex::encode(terminal_order.to_be_bytes())))
+        .collect();
+    let samples = (plan.sample_start..plan.sample_end)
+        .map(|index| CheckpointSoakProcessSample {
+            index,
+            elapsed_seconds: elapsed_at_sample(index),
+            rss_kib: 100_000,
+            task_count: 8,
+            maximum_queue_depth: 1,
+            maximum_charged_rows: 1,
+            maximum_charged_bytes: 1,
+            completed_checkpoints: 1,
+            failed_checkpoints: 0,
+            manifest_count: 2,
+            state_bytes: 1,
+        })
+        .collect();
+    CheckpointSoakProcessReport {
+        schema: CHECKPOINT_SOAK_PROCESS_SCHEMA.into(),
+        commit: plan.commit.clone(),
+        executable_sha256: plan.executable_sha256.clone(),
+        config_hash: plan.config_hash.clone(),
+        run_root: plan.run_root.clone(),
+        parent_pid: plan.parent_pid,
+        pid,
+        generation: plan.generation,
+        sample_start: plan.sample_start,
+        sample_end: plan.sample_end,
+        restored_epoch: (plan.generation > 0).then_some(restored_order),
+        restored_cursor_orders,
+        terminal_epoch: terminal_order,
+        terminal_cursor_orders,
+        restored_window_state: plan.generation > 0,
+        restored_watermarks: plan.generation > 0,
+        restored_progress: plan.generation > 0,
+        samples,
+        compacted_epochs: vec![terminal_order],
+        maximum_manifest_count: 2,
+        maximum_state_bytes: 1,
+        completed_checkpoints: 1,
+        failed_checkpoints: 0,
+        source_open_events: 2,
+        source_close_events: 2,
+        sink_close_events: 2,
+        terminal_cause: if plan.final_generation {
+            "natural_end".into()
+        } else {
+            "explicit_cancel".into()
+        },
+        terminal_tasks: 0,
+        terminal_charged_edges: 0,
+        terminal_registries: (0, 0),
+        source_records: 20,
+        output_records: 40,
+        duplicate_records: 0,
+        missing_records: 0,
+        temporary_artifacts: 0,
+    }
+}
+
+#[test]
+fn checkpoint_restart_process_evidence_fails_closed() {
+    let directory = tempfile::tempdir().unwrap();
+    let plans = checkpoint_soak_process_plans(
+        directory.path(),
+        &"a".repeat(40),
+        &"b".repeat(64),
+        CheckpointSoakProcessMode::Standard,
+    );
+    let reports = plans
+        .iter()
+        .enumerate()
+        .map(|(generation, plan)| {
+            checkpoint_soak_process_report_fixture(
+                plan,
+                10_000 + u32::try_from(generation).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let exits = vec![0; CHECKPOINT_SOAK_GENERATIONS];
+    validate_checkpoint_soak_process_set(&plans, &reports, &exits).unwrap();
+
+    let mut repeated_pid = reports.clone();
+    repeated_pid[1].pid = repeated_pid[0].pid;
+    assert!(matches!(
+        validate_checkpoint_soak_process_set(&plans, &repeated_pid, &exits),
+        Err(CalcFlowError::InvalidArgument { message, .. })
+            if message.contains("not distinct")
+    ));
+    let mut bad_exit = exits.clone();
+    bad_exit[1] = 9;
+    assert!(validate_checkpoint_soak_process_set(&plans, &reports, &bad_exit).is_err());
+
+    let mut wrong_identity = reports.clone();
+    wrong_identity[1].config_hash = "c".repeat(64);
+    assert!(validate_checkpoint_soak_process_set(&plans, &wrong_identity, &exits).is_err());
+    let mut wrong_head = reports.clone();
+    wrong_head[1].commit = "d".repeat(40);
+    assert!(validate_checkpoint_soak_process_set(&plans, &wrong_head, &exits).is_err());
+    let mut wrong_root = reports.clone();
+    wrong_root[1].run_root.push("different-root");
+    assert!(validate_checkpoint_soak_process_set(&plans, &wrong_root, &exits).is_err());
+    let mut wrong_generation = reports.clone();
+    wrong_generation[1].generation = 2;
+    assert!(validate_checkpoint_soak_process_set(&plans, &wrong_generation, &exits).is_err());
+    let mut in_memory_only = reports.clone();
+    in_memory_only[1].restored_epoch = None;
+    assert!(validate_checkpoint_soak_process_set(&plans, &in_memory_only, &exits).is_err());
+
+    let mut sample_gap = reports.clone();
+    sample_gap[1].samples.remove(0);
+    assert!(validate_checkpoint_soak_process_set(&plans, &sample_gap, &exits).is_err());
+    let mut sample_duplicate = reports.clone();
+    let duplicate = sample_duplicate[0].samples[39].clone();
+    sample_duplicate[1].samples.insert(0, duplicate);
+    assert!(validate_checkpoint_soak_process_set(&plans, &sample_duplicate, &exits).is_err());
+}
+
+#[test]
+fn checkpoint_restart_process_document_rejects_missing_and_malformed_reports() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing.json");
+    let missing_result: Result<CheckpointSoakProcessReport> =
+        read_checkpoint_soak_document(&missing);
+    assert!(missing_result.is_err());
+
+    let malformed = directory.path().join("malformed.json");
+    std::fs::write(&malformed, b"{not-json}").unwrap();
+    let malformed_result: Result<CheckpointSoakProcessReport> =
+        read_checkpoint_soak_document(&malformed);
+    assert!(matches!(
+        malformed_result,
+        Err(CalcFlowError::InvalidArgument { message, .. })
+            if message.contains("malformed")
+    ));
+}
+
+#[tokio::test]
+async fn checkpoint_restart_soak_generation_child_process() {
+    let Some(plan_path) = std::env::var_os(CHECKPOINT_SOAK_CHILD_ENV).map(PathBuf::from) else {
+        return;
+    };
+    let plan: CheckpointSoakProcessPlan = read_checkpoint_soak_document(&plan_path).unwrap();
+    let report = run_checkpoint_soak_child(&plan).await.unwrap();
+    write_checkpoint_soak_document(&checkpoint_soak_report_path(&plan), &report).unwrap();
+}
+
 #[tokio::test]
 async fn checkpoint_restart_soak_smoke_exercises_retention_and_compaction() {
     let report = run_checkpoint_restart_soak_smoke().await;
 
     assert_eq!(report.restarts, 2);
+    assert_eq!(report.generation_process_ids.len(), 3);
+    assert_eq!(report.generation_exit_codes, [0, 0, 0]);
+    assert_eq!(
+        report
+            .generation_process_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len(),
+        3,
+        "every restart generation must run in a distinct OS process"
+    );
+    assert!(
+        report
+            .generation_process_ids
+            .iter()
+            .all(|pid| *pid != std::process::id()),
+        "the parent test process must not execute a soak generation"
+    );
     assert!(report.completed_epochs >= 12);
     assert!(report.compacted_window_epochs > 0);
     assert!(report.maximum_manifest_count <= 3);
@@ -4515,6 +5532,16 @@ fn checkpoint_restart_soak_contract_is_exact_and_machine_readable() {
     assert_eq!(metadata["sample_count"], 120);
     assert_eq!(metadata["cadence_seconds"], 10);
     assert_eq!(metadata["restart_sample_indices"], json!([39, 79]));
+    assert_eq!(metadata["restart_kind"], "os_process");
+    assert_eq!(metadata["process_generations"], 3);
+    assert_eq!(
+        metadata["process_sample_ranges"],
+        json!([[0, 40], [40, 80], [80, 120]])
+    );
+    assert_eq!(
+        metadata["child_report_schema"],
+        CHECKPOINT_SOAK_PROCESS_SCHEMA
+    );
     assert_eq!(metadata["source_count"], 2);
     assert_eq!(metadata["transactional_sink_count"], 2);
     assert_eq!(metadata["retained_epochs"], 2);
