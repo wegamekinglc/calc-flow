@@ -1004,6 +1004,16 @@ fn checkpoint_matrix_batch(source_id: &str) -> Result<Batch> {
     )
 }
 
+fn checkpoint_matrix_cursor_order(source_id: &str) -> Vec<u8> {
+    match source_id {
+        "left" => 41_u64,
+        "right" => 73_u64,
+        _ => panic!("unexpected checkpoint matrix source {source_id:?}"),
+    }
+    .to_be_bytes()
+    .to_vec()
+}
+
 #[async_trait]
 impl StreamSource for CheckpointMatrixSource {
     async fn open(&mut self, cursor: Option<Cursor>) -> Result<()> {
@@ -1040,7 +1050,10 @@ impl StreamSource for CheckpointMatrixSource {
             self.pending_watermark = true;
             return Ok(Some(SourceEvent::Data {
                 batch: checkpoint_matrix_batch(self.source_id)?,
-                cursor: Cursor::new(0_u64.to_be_bytes().to_vec(), JsonMap::new())?,
+                cursor: Cursor::new(
+                    checkpoint_matrix_cursor_order(self.source_id),
+                    JsonMap::new(),
+                )?,
             }));
         }
         self.ended = true;
@@ -4935,7 +4948,14 @@ async fn checkpoint_restart_fault_matrix_preserves_exactly_once_window_output() 
                 "prepared-artifact preservation mismatch at {point:?}/{mode:?}"
             );
             assert_eq!(report.restored_epoch, Some(Epoch::INITIAL));
-            assert_eq!(report.restored_cursor_orders.len(), 2);
+            assert_eq!(
+                report.restored_cursor_orders,
+                BTreeMap::from([
+                    ("left".into(), 41_u64.to_be_bytes().to_vec()),
+                    ("right".into(), 73_u64.to_be_bytes().to_vec()),
+                ]),
+                "restored source cursor mismatch at {point:?}/{mode:?}"
+            );
             assert!(report.sources_ended);
             assert!(report.watermarks_restored);
             assert!(report.window_state_restored);

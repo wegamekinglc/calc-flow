@@ -5101,6 +5101,27 @@ mod tests {
         closed: Arc<AtomicUsize>,
     }
 
+    #[derive(Default)]
+    struct MixedDeliveryTransactionalState {
+        committed_epochs: BTreeSet<u64>,
+        visible: Vec<(String, u64)>,
+    }
+
+    #[derive(Default)]
+    struct MixedDeliveryProbes {
+        source_closed: Arc<AtomicUsize>,
+        transactional_closed: Arc<AtomicUsize>,
+        ordinary_closed: Arc<AtomicUsize>,
+        transactional: Arc<Mutex<MixedDeliveryTransactionalState>>,
+        ordinary_writes: Arc<Mutex<Vec<(String, String, u64)>>>,
+    }
+
+    struct MixedDeliveryTransactionalSink {
+        pending: Vec<(String, u64)>,
+        state: Arc<Mutex<MixedDeliveryTransactionalState>>,
+        closed: Arc<AtomicUsize>,
+    }
+
     struct CountingPendingSource {
         events: VecDeque<SourceEvent>,
         polls: Arc<AtomicUsize>,
@@ -5989,6 +6010,74 @@ mod tests {
         }
     }
 
+    fn mixed_delivery_records(state: &JsonMap) -> Result<Vec<(String, u64)>> {
+        serde_json::from_value(state.get("records").cloned().ok_or_else(|| {
+            CalcFlowError::CheckpointMismatch {
+                message: "mixed-delivery pre-commit records are missing".into(),
+            }
+        })?)
+        .map_err(|error| CalcFlowError::CheckpointMismatch {
+            message: format!("mixed-delivery pre-commit records are invalid: {error}"),
+        })
+    }
+
+    #[async_trait]
+    impl TransactionalStreamSink for MixedDeliveryTransactionalSink {
+        async fn open(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn begin_epoch(&mut self, _epoch: crate::Epoch) -> Result<()> {
+            self.pending.clear();
+            Ok(())
+        }
+
+        async fn write(&mut self, batch: &Batch) -> Result<()> {
+            self.pending.push((
+                batch.metadata().source().into(),
+                batch.metadata().sequence(),
+            ));
+            Ok(())
+        }
+
+        async fn pre_commit(&mut self, _epoch: crate::Epoch) -> Result<JsonMap> {
+            Ok(BTreeMap::from([(
+                "records".into(),
+                serde_json::json!(self.pending),
+            )]))
+        }
+
+        async fn commit(&mut self, epoch: crate::Epoch, state: &JsonMap) -> Result<()> {
+            let records = mixed_delivery_records(state)?;
+            let mut durable = self.state.lock();
+            if durable.committed_epochs.insert(epoch.as_u64()) {
+                durable.visible.extend(records);
+            }
+            Ok(())
+        }
+
+        async fn abort(&mut self, _epoch: crate::Epoch, _state: Option<&JsonMap>) -> Result<()> {
+            self.pending.clear();
+            Ok(())
+        }
+
+        async fn recover(&mut self, manifest: &crate::CheckpointManifest) -> Result<()> {
+            let state = manifest
+                .sinks()
+                .get("transactional")
+                .and_then(|entry| entry.pre_commit.clone())
+                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                    message: "mixed-delivery transactional recovery state is missing".into(),
+                })?;
+            self.commit(manifest.epoch(), &state).await
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            self.closed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     fn one_row(value: i64) -> Batch {
         let record = RecordBatch::try_from_iter(vec![(
             "value",
@@ -6005,6 +6094,95 @@ mod tests {
         )])
         .unwrap();
         Batch::table(vec![record], BatchMetadata::default()).unwrap()
+    }
+
+    fn mixed_delivery_fault_spec(job_id: u64, probes: &MixedDeliveryProbes) -> ContinuousJobSpec {
+        let plan = PipelineBuilder::new("checkpoint-mixed-delivery-fault")
+            .unwrap()
+            .add_checkpoint_capable_node(
+                "root",
+                Box::new(StressForwardOperator::new(None)) as Box<dyn StreamOperator>,
+            )
+            .unwrap()
+            .add_checkpoint_capable_node(
+                "exact",
+                Box::new(StressForwardOperator::new(None)) as Box<dyn StreamOperator>,
+            )
+            .unwrap()
+            .add_checkpoint_capable_node(
+                "ordinary",
+                Box::new(StressForwardOperator::new(None)) as Box<dyn StreamOperator>,
+            )
+            .unwrap()
+            .connect(Edge::new(
+                PortEndpoint::new("root", "output").unwrap(),
+                PortEndpoint::new("exact", "input").unwrap(),
+            ))
+            .unwrap()
+            .connect(Edge::new(
+                PortEndpoint::new("root", "output").unwrap(),
+                PortEndpoint::new("ordinary", "input").unwrap(),
+            ))
+            .unwrap()
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements {
+                    delivery: BTreeMap::from([(
+                        "exact.output".into(),
+                        crate::DeliveryGuarantee::ExactlyOnce,
+                    )]),
+                },
+            )
+            .unwrap();
+        ContinuousJobSpec {
+            context: StreamJobContext::new(
+                job_id,
+                plan.fingerprint(),
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            ),
+            plan,
+            sources: vec![NamedSourceBinding {
+                binding_id: "input".into(),
+                binding: finite_binding(&[1], &probes.source_closed),
+            }],
+            sinks: vec![
+                NamedSinkBinding {
+                    output_id: "exact.output".into(),
+                    sink_id: "transactional".into(),
+                    binding: OrdinarySinkBinding::new_transactional(Box::new(
+                        MixedDeliveryTransactionalSink {
+                            pending: Vec::new(),
+                            state: Arc::clone(&probes.transactional),
+                            closed: Arc::clone(&probes.transactional_closed),
+                        },
+                    )),
+                },
+                NamedSinkBinding {
+                    output_id: "ordinary.output".into(),
+                    sink_id: "ordinary".into(),
+                    binding: OrdinarySinkBinding::new(Box::new(OrderedRecordingSink {
+                        id: "ordinary".into(),
+                        writes: Arc::clone(&probes.ordinary_writes),
+                        closed: Arc::clone(&probes.ordinary_closed),
+                    })),
+                },
+            ],
+            edge_budget: EdgeBudget {
+                max_rows: 1,
+                max_bytes: 1 << 20,
+            },
+            delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+        }
+    }
+
+    fn assert_terminal_checkpoint_resources_released(job: &super::ContinuousJob) {
+        let status = job.status();
+        assert!(status.tasks.is_empty());
+        assert!(status.edges.values().all(|edge| {
+            edge.queue_depth == 0 && edge.charged_rows == 0 && edge.charged_bytes == 0
+        }));
     }
 
     fn finite_binding(values: &[i64], closed: &Arc<AtomicUsize>) -> SourceBinding {
@@ -10490,6 +10668,105 @@ mod tests {
         assert!(manifest.sinks()["ordinary"].pre_commit.is_none());
         drop(job);
         runner.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the mixed-delivery restart proof owns both job generations and their lifecycle assertions"
+    )]
+    async fn mixed_delivery_restart_preserves_exactly_once_and_exposes_ordinary_replay() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Arc::new(
+            LocalStateBackend::new(directory.path().join("state"))
+                .await
+                .unwrap(),
+        );
+        let manifest_root = directory.path().join("manifests");
+        let probes = MixedDeliveryProbes::default();
+        let checkpoint = || {
+            CheckpointRuntimeSpec::new(
+                backend.clone(),
+                &manifest_root,
+                StreamRuntimeConfig {
+                    checkpoint_interval: StdDuration::from_secs(3_600),
+                    ..StreamRuntimeConfig::default()
+                },
+            )
+            .unwrap()
+        };
+
+        let mut first_runner = ContinuousRunner::new();
+        let first_job = first_runner
+            .start_checkpointed(
+                mixed_delivery_fault_spec(910, &probes),
+                checkpoint().with_fault(
+                    super::CheckpointFaultPoint::ManifestWrite,
+                    super::CheckpointFaultMode::Restart,
+                ),
+            )
+            .await
+            .unwrap();
+        let first_outcome = tokio::time::timeout(StdDuration::from_secs(5), first_job.wait())
+            .await
+            .expect("mixed-delivery manifest-write fault hung");
+
+        assert_eq!(first_outcome.state, ContinuousJobState::Failed);
+        assert!(first_outcome.errors.iter().any(|failure| {
+            matches!(
+                &failure.error,
+                CalcFlowError::Internal { message }
+                    if message == "injected checkpoint restart at ManifestWrite"
+            )
+        }));
+        assert_eq!(
+            &*probes.ordinary_writes.lock(),
+            &[("ordinary".into(), "input".into(), 0)]
+        );
+        assert!(probes.transactional.lock().visible.is_empty());
+        assert!(
+            !manifest_root
+                .join("manifest-00000000000000000001.json")
+                .exists()
+        );
+        assert_terminal_checkpoint_resources_released(&first_job);
+        drop(first_job);
+        first_runner.shutdown().await.unwrap();
+        assert_eq!(first_runner.registry_counts(), (0, 0));
+        assert_eq!(probes.source_closed.load(Ordering::SeqCst), 1);
+        assert_eq!(probes.transactional_closed.load(Ordering::SeqCst), 1);
+        assert_eq!(probes.ordinary_closed.load(Ordering::SeqCst), 1);
+
+        let mut restart_runner = ContinuousRunner::new();
+        let restart_job = restart_runner
+            .start_checkpointed(mixed_delivery_fault_spec(911, &probes), checkpoint())
+            .await
+            .unwrap();
+        let restart_outcome = tokio::time::timeout(StdDuration::from_secs(5), restart_job.wait())
+            .await
+            .expect("mixed-delivery restart hung");
+
+        assert_eq!(
+            restart_outcome.state,
+            ContinuousJobState::Completed,
+            "{restart_outcome:?}"
+        );
+        let ordinary_at_least_once_boundary = ("ordinary".into(), "input".into(), 0);
+        assert_eq!(
+            &*probes.ordinary_writes.lock(),
+            &[
+                ordinary_at_least_once_boundary.clone(),
+                ordinary_at_least_once_boundary,
+            ]
+        );
+        assert_eq!(&probes.transactional.lock().visible, &[("input".into(), 0)]);
+        assert_eq!(probes.source_closed.load(Ordering::SeqCst), 2);
+        assert_eq!(probes.transactional_closed.load(Ordering::SeqCst), 2);
+        assert_eq!(probes.ordinary_closed.load(Ordering::SeqCst), 2);
+        assert_terminal_checkpoint_resources_released(&restart_job);
+        drop(restart_job);
+        restart_runner.shutdown().await.unwrap();
+        assert_eq!(restart_runner.registry_counts(), (0, 0));
     }
 
     #[tokio::test]
