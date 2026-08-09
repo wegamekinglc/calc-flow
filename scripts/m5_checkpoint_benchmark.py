@@ -59,17 +59,15 @@ class CommonRunPlan:
 
 
 @dataclass(frozen=True, slots=True)
-class TrustedCommand:
+class TrustedCargoCommand:
     executable: Path
     arguments: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if not self.executable.is_absolute() or not self.executable.is_file():
-            raise ValueError(
-                "trusted command executable must be an absolute regular file"
-            )
+        if self.executable != _trusted_system_executable("cargo"):
+            raise ValueError("trusted cargo executable does not match the fixed tool")
         if any("\0" in argument for argument in self.arguments):
-            raise ValueError("trusted command argument contains NUL")
+            raise ValueError("trusted cargo argument contains NUL")
 
     def argv(self) -> list[str]:
         return [str(self.executable), *self.arguments]
@@ -564,8 +562,8 @@ def _validated_cargo_executable(cargo: str) -> str:
     return str(_trusted_system_executable(cargo))
 
 
-def _run_command(
-    command: TrustedCommand,
+def _run_cargo_command(
+    command: TrustedCargoCommand,
     *,
     cwd: Path,
     environment: dict[str, str] | None = None,
@@ -573,35 +571,56 @@ def _run_command(
     merged_environment = dict(os.environ)
     if environment is not None:
         merged_environment.update(environment)
-    argv = command.argv()
-    print(f"+ (cd {shlex.quote(str(cwd))} && {shlex.join(argv)})", flush=True)
-    # TrustedCommand accepts only a validated absolute executable and structured argv.
-    result = subprocess.run(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use  # nosec B603  # noqa: E501
-        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args  # noqa: E501
-        argv,
+    displayed_argv = command.argv()
+    print(
+        f"+ (cd {shlex.quote(str(cwd))} && {shlex.join(displayed_argv)})",
+        flush=True,
+    )
+    # The literal argv selects Cargo; executable pins the validated absolute shim.
+    result = subprocess.run(  # nosec B603
+        ["cargo", *command.arguments],
+        executable=str(command.executable),
+        shell=False,
         cwd=cwd,
         env=merged_environment,
         check=False,
         capture_output=True,
         text=True,
     )
+    return _completed_stdout(result, displayed_argv)
+
+
+def _completed_stdout(
+    result: subprocess.CompletedProcess[str], displayed_argv: Sequence[str]
+) -> str:
     if result.returncode != 0:
         if result.stdout:
             print(result.stdout, file=sys.stderr)
         if result.stderr:
             print(result.stderr, file=sys.stderr)
-        raise RuntimeError(
-            f"command failed with status {result.returncode}: {shlex.join(argv)}"
-        )
+        command = shlex.join(displayed_argv)
+        raise RuntimeError(f"command failed with status {result.returncode}: {command}")
     return result.stdout.strip()
 
 
 def _git(repository: Path, arguments: Sequence[str]) -> str:
-    command = TrustedCommand(
-        executable=_trusted_system_executable("git"),
-        arguments=tuple(arguments),
+    executable = _trusted_system_executable("git")
+    displayed_argv = [str(executable), *arguments]
+    print(
+        f"+ (cd {shlex.quote(str(repository))} && {shlex.join(displayed_argv)})",
+        flush=True,
     )
-    return _run_command(command, cwd=repository)
+    # The literal argv selects Git; executable pins the validated absolute binary.
+    result = subprocess.run(  # nosec B603
+        ["git", *arguments],
+        executable=str(executable),
+        shell=False,
+        cwd=repository,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return _completed_stdout(result, displayed_argv)
 
 
 def _canonical_hash(value: object) -> str:
@@ -633,29 +652,59 @@ def private_build_identity_hash(provenance: dict[str, object]) -> str:
 
 def _optional_command(command: Sequence[str]) -> str:
     requested = tuple(command)
-    allowed = {
-        ("cargo", "-Vv"),
-        ("lscpu",),
-        ("powerprofilesctl", "get"),
-        ("rustc", "-vV"),
-        ("systemd-detect-virt",),
-    }
-    if requested not in allowed:
-        return "unavailable: command is not allowlisted"
     try:
-        trusted = TrustedCommand(
-            executable=_trusted_system_executable(requested[0]),
-            arguments=requested[1:],
-        )
-        # The complete diagnostic command is selected from the fixed allowlist.
-        result = subprocess.run(  # noqa: E501  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use
-            # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args  # noqa: E501
-            trusted.argv(),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+        if requested == ("cargo", "-Vv"):
+            result = subprocess.run(  # nosec B603
+                ["cargo", "-Vv"],
+                executable=str(_trusted_system_executable("cargo")),
+                shell=False,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        elif requested == ("lscpu",):
+            result = subprocess.run(  # nosec B603
+                ["lscpu"],
+                executable=str(_trusted_system_executable("lscpu")),
+                shell=False,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        elif requested == ("powerprofilesctl", "get"):
+            result = subprocess.run(  # nosec B603
+                ["powerprofilesctl", "get"],
+                executable=str(_trusted_system_executable("powerprofilesctl")),
+                shell=False,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        elif requested == ("rustc", "-vV"):
+            result = subprocess.run(  # nosec B603
+                ["rustc", "-vV"],
+                executable=str(_trusted_system_executable("rustc")),
+                shell=False,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        elif requested == ("systemd-detect-virt",):
+            result = subprocess.run(  # nosec B603
+                ["systemd-detect-virt"],
+                executable=str(_trusted_system_executable("systemd-detect-virt")),
+                shell=False,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        else:
+            return "unavailable: command is not allowlisted"
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         return f"unavailable: {error}"
     output = (result.stdout or result.stderr).strip()
@@ -835,17 +884,21 @@ def _run_common_matrix(
         materialize_common_harness(plan.harness_root)
         lock_path = plan.harness_root / "Cargo.lock"
         if common_lock is None:
-            lock_command = TrustedCommand(cargo, ("generate-lockfile", "--offline"))
-            _run_command(lock_command, cwd=plan.harness_root)
+            lock_command = TrustedCargoCommand(
+                cargo, ("generate-lockfile", "--offline")
+            )
+            _run_cargo_command(lock_command, cwd=plan.harness_root)
             commands.append({"label": plan.label, "command": lock_command.argv()})
             common_lock = lock_path.read_bytes()
         else:
             lock_path.write_bytes(common_lock)
         harness_lock_sha256 = sha256_file(lock_path)
-        metadata_command = TrustedCommand(
+        metadata_command = TrustedCargoCommand(
             cargo, ("metadata", "--locked", "--format-version", "1")
         )
-        metadata = json.loads(_run_command(metadata_command, cwd=plan.harness_root))
+        metadata = json.loads(
+            _run_cargo_command(metadata_command, cwd=plan.harness_root)
+        )
         if not isinstance(metadata, dict):
             raise ValueError("cargo metadata output is invalid")
         metadata_path = plan.evidence_root / "cargo-metadata.json"
@@ -865,8 +918,8 @@ def _run_common_matrix(
             "CALC_FLOW_M5_COMMON_EXECUTABLE": str(executable),
             "CARGO_TARGET_DIR": str(plan.target_dir),
         }
-        build_command = TrustedCommand(cargo, ("build", "--release", "--locked"))
-        _run_command(
+        build_command = TrustedCargoCommand(cargo, ("build", "--release", "--locked"))
+        _run_cargo_command(
             build_command,
             cwd=plan.harness_root,
             environment=build_environment,
@@ -878,7 +931,7 @@ def _run_common_matrix(
             "CALC_FLOW_M5_COMMON_OUTPUT": str(plan.report_path.resolve()),
             "CALC_FLOW_M5_COMMON_EXECUTABLE": str(executable),
         }
-        run_command = TrustedCommand(
+        run_command = TrustedCargoCommand(
             cargo,
             (
                 "run",
@@ -889,7 +942,7 @@ def _run_common_matrix(
                 "calc-flow-m5-common-benchmark",
             ),
         )
-        _run_command(
+        _run_cargo_command(
             run_command,
             cwd=plan.harness_root,
             environment=run_environment,
@@ -1090,7 +1143,7 @@ def _run_private_absolute(
     target_root = candidate.worktree / "target" / "m5-private-absolute" / run_id
     if target_root.exists():
         raise FileExistsError(f"private benchmark target exists: {target_root}")
-    command = TrustedCommand(
+    command = TrustedCargoCommand(
         cargo,
         (
             "test",
@@ -1109,7 +1162,7 @@ def _run_private_absolute(
         run_id=run_id,
         target_root=target_root,
     )
-    _run_command(command, cwd=candidate.worktree, environment=environment)
+    _run_cargo_command(command, cwd=candidate.worktree, environment=environment)
     report_path = (
         target_root / "m5-checkpoint-benchmark" / f"{candidate.commit}-{run_id}.json"
     )

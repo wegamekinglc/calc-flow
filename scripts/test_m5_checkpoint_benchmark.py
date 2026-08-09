@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import math
 import shutil
 import tempfile
@@ -108,8 +109,8 @@ class CommonDecisionTests(unittest.TestCase):
         resolved = Path(benchmark._validated_cargo_executable("cargo"))
         self.assertEqual(resolved, Path(shutil.which("cargo") or ""))
         self.assertTrue(resolved.is_file())
-        version = benchmark._run_command(
-            benchmark.TrustedCommand(resolved, ("--version",)),
+        version = benchmark._run_cargo_command(
+            benchmark.TrustedCargoCommand(resolved, ("--version",)),
             cwd=benchmark.SCRIPT_ROOT.parent,
         )
         self.assertRegex(version, r"^cargo \d")
@@ -138,17 +139,46 @@ class CommonHarnessSourceTests(unittest.TestCase):
         self.assertNotIn("checkpoint", source.lower())
         self.assertIn('calc-flow = { path = "../../../../crates/calc-flow" }', manifest)
 
-    def test_trusted_subprocess_calls_have_exact_scanner_justification(self) -> None:
-        source = benchmark.__file__
-        lines = Path(source).read_text(encoding="utf-8").splitlines()
-        calls = [line for line in lines if "subprocess.run(" in line]
+    def test_trusted_subprocess_calls_use_literal_argv_and_executable_override(
+        self,
+    ) -> None:
+        source = Path(benchmark.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "subprocess"
+            and node.func.attr == "run"
+        ]
 
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 7)
         for call in calls:
+            self.assertTrue(call.args)
+            self.assertIsInstance(call.args[0], ast.List)
+            first = call.args[0].elts[0]
+            self.assertIsInstance(first, ast.Constant)
             self.assertIn(
-                "# nosemgrep: python.lang.security.audit.dangerous-subprocess-use",
-                call,
+                first.value,
+                {
+                    "cargo",
+                    "git",
+                    "lscpu",
+                    "powerprofilesctl",
+                    "rustc",
+                    "systemd-detect-virt",
+                },
             )
+            keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+            self.assertIn("executable", keywords)
+            self.assertIsInstance(keywords.get("shell"), ast.Constant)
+            self.assertIs(keywords["shell"].value, False)
+
+    def test_trusted_cargo_command_rejects_an_executable_override(self) -> None:
+        with self.assertRaisesRegex(ValueError, "trusted cargo executable"):
+            benchmark.TrustedCargoCommand(Path("/untrusted/cargo"), ("--version",))
 
     def test_materialized_harness_bytes_are_identical_for_every_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
