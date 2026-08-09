@@ -223,8 +223,31 @@ fn reset_and_acknowledge(
     inputs: &mut OperatorTaskInputs,
     task_id: TaskId,
 ) -> Result<Option<OperatorInputProgress>> {
+    let preparation_result = reset_operator(inputs, task_id).and_then(|()| match &inputs.restore {
+        Some(restore) => OperatorInputProgress::restore(inputs.ingresses.keys(), &restore.progress),
+        None => Ok(OperatorInputProgress::new(inputs.ingresses.keys())),
+    });
+    let (acknowledgement_result, input_progress) = match preparation_result {
+        Ok(input_progress) => (Ok(()), Some(input_progress)),
+        Err(error) => (Err(error), None),
+    };
+    restore_ingress_completion(inputs, input_progress.is_some());
+    let dropped_message = dropped_ack_message(inputs, input_progress.is_some());
+    inputs
+        .entry_ack
+        .send(OperatorEntryAck {
+            node_id: inputs.node_id.clone(),
+            result: acknowledgement_result,
+        })
+        .map_err(|_| CalcFlowError::Internal {
+            message: dropped_message,
+        })?;
+    Ok(input_progress)
+}
+
+fn reset_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Result<()> {
     let restore_snapshot = inputs.restore.as_ref().map(|restore| &restore.snapshot);
-    let lifecycle_result = match catch_unwind(AssertUnwindSafe(|| {
+    match catch_unwind(AssertUnwindSafe(|| {
         inputs.operator.reset()?;
         if let Some(snapshot) = restore_snapshot {
             inputs.operator.restore(snapshot)?;
@@ -236,25 +259,23 @@ fn reset_and_acknowledge(
             task_id: task_id.as_u64(),
             message: panic_message(payload.as_ref()),
         }),
-    };
-    let preparation_result = lifecycle_result.and_then(|()| match &inputs.restore {
-        Some(restore) => OperatorInputProgress::restore(inputs.ingresses.keys(), &restore.progress),
-        None => Ok(OperatorInputProgress::new(inputs.ingresses.keys())),
-    });
-    let (acknowledgement_result, input_progress) = match preparation_result {
-        Ok(input_progress) => (Ok(()), Some(input_progress)),
-        Err(error) => (Err(error), None),
-    };
-    let succeeded = input_progress.is_some();
-    if succeeded && let Some(restore) = &inputs.restore {
-        for (ingress_name, ingress) in &mut inputs.ingresses {
-            ingress.saw_explicit_eof = matches!(
-                restore.progress[ingress_name].state,
-                ManifestIngressState::Ended
-            );
-        }
     }
-    let dropped_message = if succeeded {
+}
+
+fn restore_ingress_completion(inputs: &mut OperatorTaskInputs, succeeded: bool) {
+    let Some(restore) = inputs.restore.as_ref().filter(|_| succeeded) else {
+        return;
+    };
+    for (ingress_name, ingress) in &mut inputs.ingresses {
+        ingress.saw_explicit_eof = matches!(
+            restore.progress[ingress_name].state,
+            ManifestIngressState::Ended
+        );
+    }
+}
+
+fn dropped_ack_message(inputs: &OperatorTaskInputs, succeeded: bool) -> String {
+    if succeeded {
         format!(
             "operator {:?} entry acknowledgement was dropped",
             inputs.node_id
@@ -264,17 +285,7 @@ fn reset_and_acknowledge(
             "operator {:?} failed reset after its acknowledgement was dropped",
             inputs.node_id
         )
-    };
-    inputs
-        .entry_ack
-        .send(OperatorEntryAck {
-            node_id: inputs.node_id.clone(),
-            result: acknowledgement_result,
-        })
-        .map_err(|_| CalcFlowError::Internal {
-            message: dropped_message,
-        })?;
-    Ok(input_progress)
+    }
 }
 
 fn normalize_cancelled_result(inputs: &OperatorTaskInputs, result: Result<()>) -> Result<()> {
@@ -597,21 +608,39 @@ pub(super) fn benchmark_two_input_alignment() -> Result<usize> {
     ]);
     let epoch = Epoch::INITIAL;
     let mut alignment = OperatorBarrierAlignment::with_expected_epoch(Some(epoch));
-    if !alignment.accept("benchmark", "left", epoch)?
-        || !alignment.is_blocked("left")
-        || alignment.ready(&ingresses)
-    {
-        return Err(CalcFlowError::Internal {
-            message: "private benchmark did not observe partial alignment".into(),
-        });
-    }
-    if !alignment.accept("benchmark", "right", epoch)? || !alignment.ready(&ingresses) {
-        return Err(CalcFlowError::Internal {
-            message: "private benchmark did not observe complete alignment".into(),
-        });
-    }
+    benchmark_alignment_check(
+        alignment.accept("benchmark", "left", epoch)?,
+        "private benchmark did not observe partial alignment",
+    )?;
+    benchmark_alignment_check(
+        alignment.is_blocked("left"),
+        "private benchmark did not observe partial alignment",
+    )?;
+    benchmark_alignment_check(
+        !alignment.ready(&ingresses),
+        "private benchmark did not observe partial alignment",
+    )?;
+    benchmark_alignment_check(
+        alignment.accept("benchmark", "right", epoch)?,
+        "private benchmark did not observe complete alignment",
+    )?;
+    benchmark_alignment_check(
+        alignment.ready(&ingresses),
+        "private benchmark did not observe complete alignment",
+    )?;
     alignment.complete(epoch, epoch.next()?);
     Ok(2)
+}
+
+#[cfg(test)]
+fn benchmark_alignment_check(condition: bool, message: &str) -> Result<()> {
+    if condition {
+        Ok(())
+    } else {
+        Err(CalcFlowError::Internal {
+            message: message.into(),
+        })
+    }
 }
 
 async fn dispatch_barrier(

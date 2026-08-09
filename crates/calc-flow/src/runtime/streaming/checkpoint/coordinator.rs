@@ -181,62 +181,107 @@ async fn run_coordinator(
     events: mpsc::Sender<CheckpointEvent>,
     cancellation: CancellationToken,
 ) -> Result<()> {
-    let mut in_flight = None;
     loop {
-        if in_flight.is_none() {
-            let request = tokio::select! {
-                biased;
-                () = cancellation.cancelled() => return Ok(()),
-                request = requests.recv() => request.ok_or_else(coordinator_closed)?,
+        let Some(request) = receive_request(&mut requests, &cancellation).await? else {
+            return Ok(());
+        };
+        let (mut state, following_epoch) = begin_epoch(request, next_epoch, timeout)?;
+        next_epoch = following_epoch;
+        send_event(
+            &events,
+            CheckpointEvent::Started(state.epoch),
+            &cancellation,
+        )
+        .await?;
+        loop {
+            let Some(command) =
+                receive_command(&mut commands, &state, &events, &cancellation).await?
+            else {
+                return Ok(());
             };
-            let allocated = next_epoch;
-            next_epoch = next_epoch.next()?;
-            in_flight = Some(EpochState {
-                request,
-                epoch: allocated,
-                phase: CheckpointPhase::Requested,
-                deadline: Instant::now() + timeout,
-                source_acks: BTreeMap::new(),
-                operator_acks: BTreeMap::new(),
-                sink_precommits: BTreeMap::new(),
-                sink_commits: BTreeMap::new(),
-            });
-            send_event(&events, CheckpointEvent::Started(allocated), &cancellation).await?;
-            continue;
+            if apply_or_fail_protocol(&mut state, &expected, command, &events, &cancellation)
+                .await?
+            {
+                break;
+            }
         }
+    }
+}
 
-        let state = in_flight.as_mut().expect("in-flight state was checked");
-        let command = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Ok(()),
-            () = tokio::time::sleep_until(state.deadline) => {
-                let epoch = state.epoch;
-                let failure = CheckpointEvent::Failed(epoch, "timeout".into());
-                send_event(&events, failure, &cancellation).await?;
-                cancellation.cancel();
-                return Err(CalcFlowError::Internal {
-                    message: format!("checkpoint epoch {} timed out", epoch.as_u64()),
-                });
-            }
-            command = commands.recv() => command.ok_or_else(coordinator_closed)?,
-        };
-        let completed = match apply_command(state, &expected, command, &events, &cancellation).await
-        {
-            Ok(completed) => completed,
-            Err(error) => {
-                let epoch = state.epoch;
-                send_event(
-                    &events,
-                    CheckpointEvent::Failed(epoch, "protocol".into()),
-                    &cancellation,
-                )
-                .await?;
-                cancellation.cancel();
-                return Err(error);
-            }
-        };
-        if completed {
-            in_flight = None;
+async fn receive_request(
+    requests: &mut mpsc::Receiver<CheckpointRequest>,
+    cancellation: &CancellationToken,
+) -> Result<Option<CheckpointRequest>> {
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Ok(None),
+        request = requests.recv() => request.map(Some).ok_or_else(coordinator_closed),
+    }
+}
+
+fn begin_epoch(
+    request: CheckpointRequest,
+    epoch: Epoch,
+    timeout: Duration,
+) -> Result<(EpochState, Epoch)> {
+    let next_epoch = epoch.next()?;
+    Ok((
+        EpochState {
+            request,
+            epoch,
+            phase: CheckpointPhase::Requested,
+            deadline: Instant::now() + timeout,
+            source_acks: BTreeMap::new(),
+            operator_acks: BTreeMap::new(),
+            sink_precommits: BTreeMap::new(),
+            sink_commits: BTreeMap::new(),
+        },
+        next_epoch,
+    ))
+}
+
+async fn receive_command(
+    commands: &mut mpsc::Receiver<CoordinatorCommand>,
+    state: &EpochState,
+    events: &mpsc::Sender<CheckpointEvent>,
+    cancellation: &CancellationToken,
+) -> Result<Option<CoordinatorCommand>> {
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Ok(None),
+        () = tokio::time::sleep_until(state.deadline) => {
+            send_event(
+                events,
+                CheckpointEvent::Failed(state.epoch, "timeout".into()),
+                cancellation,
+            ).await?;
+            cancellation.cancel();
+            Err(CalcFlowError::Internal {
+                message: format!("checkpoint epoch {} timed out", state.epoch.as_u64()),
+            })
+        }
+        command = commands.recv() => command.map(Some).ok_or_else(coordinator_closed),
+    }
+}
+
+async fn apply_or_fail_protocol(
+    state: &mut EpochState,
+    expected: &ParticipantSet,
+    command: CoordinatorCommand,
+    events: &mpsc::Sender<CheckpointEvent>,
+    cancellation: &CancellationToken,
+) -> Result<bool> {
+    match apply_command(state, expected, command, events, cancellation).await {
+        Ok(completed) => Ok(completed),
+        Err(error) => {
+            send_event(
+                events,
+                CheckpointEvent::Failed(state.epoch, "protocol".into()),
+                cancellation,
+            )
+            .await?;
+            cancellation.cancel();
+            Err(error)
         }
     }
 }
@@ -283,10 +328,7 @@ fn validate_ack(state: &EpochState, expected: &ParticipantSet, ack: &CheckpointA
             "acknowledgement epoch does not match",
         ));
     }
-    if ack.canonical_digest.is_empty()
-        || ack.canonical_digest.len() > 64 * 1024
-        || ack.canonical_digest.contains('\0')
-    {
+    if !valid_ack_digest(&ack.canonical_digest) {
         return Err(protocol_error(
             state.epoch,
             "acknowledgement digest is not bounded",
@@ -298,29 +340,40 @@ fn validate_ack(state: &EpochState, expected: &ParticipantSet, ack: &CheckpointA
             "sink commit acknowledgement precedes manifest durability",
         ));
     }
-    let known = match ack.kind {
-        AckKind::Source => expected.sources.contains(&ack.participant_id),
-        AckKind::Operator => expected.operators.contains(&ack.participant_id),
-        AckKind::SinkPrecommit | AckKind::SinkCommit => {
-            expected.sinks.contains(&ack.participant_id)
-        }
-    };
-    if !known {
-        let kind = match ack.kind {
-            AckKind::Source => "source",
-            AckKind::Operator => "operator",
-            AckKind::SinkPrecommit => "sink precommit",
-            AckKind::SinkCommit => "sink commit",
-        };
+    if !is_expected_participant(expected, ack) {
         return Err(protocol_error(
             state.epoch,
             &format!(
-                "{kind} acknowledgement participant {:?} is foreign",
+                "{} acknowledgement participant {:?} is foreign",
+                ack_kind_name(ack.kind),
                 ack.participant_id
             ),
         ));
     }
     Ok(())
+}
+
+fn valid_ack_digest(digest: &str) -> bool {
+    !digest.is_empty() && digest.len() <= 64 * 1024 && !digest.contains('\0')
+}
+
+fn is_expected_participant(expected: &ParticipantSet, ack: &CheckpointAck) -> bool {
+    match ack.kind {
+        AckKind::Source => expected.sources.contains(&ack.participant_id),
+        AckKind::Operator => expected.operators.contains(&ack.participant_id),
+        AckKind::SinkPrecommit | AckKind::SinkCommit => {
+            expected.sinks.contains(&ack.participant_id)
+        }
+    }
+}
+
+const fn ack_kind_name(kind: AckKind) -> &'static str {
+    match kind {
+        AckKind::Source => "source",
+        AckKind::Operator => "operator",
+        AckKind::SinkPrecommit => "sink precommit",
+        AckKind::SinkCommit => "sink commit",
+    }
 }
 
 fn is_identical_duplicate(state: &EpochState, ack: &CheckpointAck) -> Result<bool> {
@@ -361,18 +414,17 @@ async fn advance_after_ack(
     cancellation: &CancellationToken,
 ) -> Result<bool> {
     loop {
-        let next = match state.phase {
-            CheckpointPhase::Requested if state.source_acks.len() == expected.sources.len() => {
-                Some(CheckpointPhase::SourcesCut)
+        match next_advancement(state, expected) {
+            CheckpointAdvancement::Phase(next) => {
+                state.phase = next;
+                send_event(
+                    events,
+                    CheckpointEvent::PhaseAdvanced(state.epoch, next),
+                    cancellation,
+                )
+                .await?;
             }
-            CheckpointPhase::SourcesCut
-                if state.operator_acks.len() == expected.operators.len() =>
-            {
-                Some(CheckpointPhase::OperatorsSnapshotted)
-            }
-            CheckpointPhase::OperatorsSnapshotted
-                if state.sink_precommits.len() == expected.sinks.len() =>
-            {
+            CheckpointAdvancement::ReadyToPublish => {
                 state.phase = CheckpointPhase::SinksPrecommitted;
                 send_event(
                     events,
@@ -382,9 +434,7 @@ async fn advance_after_ack(
                 .await?;
                 return Ok(false);
             }
-            CheckpointPhase::ManifestDurable
-                if state.sink_commits.len() == expected.sinks.len() =>
-            {
+            CheckpointAdvancement::Completed => {
                 state.phase = CheckpointPhase::Completed;
                 send_event(
                     events,
@@ -394,18 +444,35 @@ async fn advance_after_ack(
                 .await?;
                 return Ok(true);
             }
-            _ => None,
-        };
-        let Some(next) = next else {
-            return Ok(false);
-        };
-        state.phase = next;
-        send_event(
-            events,
-            CheckpointEvent::PhaseAdvanced(state.epoch, next),
-            cancellation,
-        )
-        .await?;
+            CheckpointAdvancement::Pending => return Ok(false),
+        }
+    }
+}
+
+enum CheckpointAdvancement {
+    Phase(CheckpointPhase),
+    ReadyToPublish,
+    Completed,
+    Pending,
+}
+
+fn next_advancement(state: &EpochState, expected: &ParticipantSet) -> CheckpointAdvancement {
+    match state.phase {
+        CheckpointPhase::Requested if state.source_acks.len() == expected.sources.len() => {
+            CheckpointAdvancement::Phase(CheckpointPhase::SourcesCut)
+        }
+        CheckpointPhase::SourcesCut if state.operator_acks.len() == expected.operators.len() => {
+            CheckpointAdvancement::Phase(CheckpointPhase::OperatorsSnapshotted)
+        }
+        CheckpointPhase::OperatorsSnapshotted
+            if state.sink_precommits.len() == expected.sinks.len() =>
+        {
+            CheckpointAdvancement::ReadyToPublish
+        }
+        CheckpointPhase::ManifestDurable if state.sink_commits.len() == expected.sinks.len() => {
+            CheckpointAdvancement::Completed
+        }
+        _ => CheckpointAdvancement::Pending,
     }
 }
 

@@ -568,18 +568,21 @@ async fn apply_checkpoint_command(
     task_id: TaskId,
     terminal: bool,
 ) -> SinkLoopStep {
+    let Some(command) = command else {
+        abort_all(inputs, epoch, prepared, task_id).await;
+        return SinkLoopStep::Cancelled;
+    };
+    if sink_command_epoch(&command) != epoch {
+        return fail_checkpoint_command(inputs, epoch, prepared, task_id).await;
+    }
     match command {
-        Some(SinkCheckpointCommand::ManifestDurable(command_epoch))
-            if command_epoch == epoch && !terminal =>
-        {
-            finalize_checkpoint(inputs, epoch, prepared, task_id, false).await
+        SinkCheckpointCommand::ManifestDurable(_) => {
+            finalize_if_terminal_mode(inputs, epoch, prepared, task_id, terminal, false).await
         }
-        Some(SinkCheckpointCommand::TerminalManifestDurable(command_epoch))
-            if command_epoch == epoch && terminal =>
-        {
-            finalize_checkpoint(inputs, epoch, prepared, task_id, true).await
+        SinkCheckpointCommand::TerminalManifestDurable(_) => {
+            finalize_if_terminal_mode(inputs, epoch, prepared, task_id, terminal, true).await
         }
-        Some(SinkCheckpointCommand::Abort(command_epoch)) if command_epoch == epoch => {
+        SinkCheckpointCommand::Abort(_) => {
             abort_all(inputs, epoch, prepared, task_id).await;
             SinkLoopStep::CheckpointFailed {
                 sink_id: inputs.output_id.clone(),
@@ -588,29 +591,61 @@ async fn apply_checkpoint_command(
                 },
             }
         }
-        Some(SinkCheckpointCommand::Preserve(command_epoch)) if command_epoch == epoch => {
-            if terminal {
-                SinkLoopStep::Complete
-            } else {
-                SinkLoopStep::Cancelled
-            }
+        SinkCheckpointCommand::Preserve(_) => preserve_checkpoint(terminal),
+        SinkCheckpointCommand::Terminal(_) => {
+            fail_checkpoint_command(inputs, epoch, prepared, task_id).await
         }
-        Some(_) => {
-            abort_all(inputs, epoch, prepared, task_id).await;
-            SinkLoopStep::CheckpointFailed {
-                sink_id: inputs.output_id.clone(),
-                error: CalcFlowError::CheckpointMismatch {
-                    message: format!(
-                        "sink output {:?} received an out-of-phase command",
-                        inputs.output_id
-                    ),
-                },
-            }
-        }
-        None => {
-            abort_all(inputs, epoch, prepared, task_id).await;
-            SinkLoopStep::Cancelled
-        }
+    }
+}
+
+async fn finalize_if_terminal_mode(
+    inputs: &mut SinkTaskInputs,
+    epoch: Epoch,
+    prepared: &BTreeMap<String, SinkManifestEntry>,
+    task_id: TaskId,
+    terminal: bool,
+    expected_terminal: bool,
+) -> SinkLoopStep {
+    if terminal == expected_terminal {
+        finalize_checkpoint(inputs, epoch, prepared, task_id, terminal).await
+    } else {
+        fail_checkpoint_command(inputs, epoch, prepared, task_id).await
+    }
+}
+
+fn preserve_checkpoint(terminal: bool) -> SinkLoopStep {
+    if terminal {
+        SinkLoopStep::Complete
+    } else {
+        SinkLoopStep::Cancelled
+    }
+}
+
+const fn sink_command_epoch(command: &SinkCheckpointCommand) -> Epoch {
+    match command {
+        SinkCheckpointCommand::ManifestDurable(epoch)
+        | SinkCheckpointCommand::Preserve(epoch)
+        | SinkCheckpointCommand::Terminal(epoch)
+        | SinkCheckpointCommand::TerminalManifestDurable(epoch)
+        | SinkCheckpointCommand::Abort(epoch) => *epoch,
+    }
+}
+
+async fn fail_checkpoint_command(
+    inputs: &mut SinkTaskInputs,
+    epoch: Epoch,
+    prepared: &BTreeMap<String, SinkManifestEntry>,
+    task_id: TaskId,
+) -> SinkLoopStep {
+    abort_all(inputs, epoch, prepared, task_id).await;
+    SinkLoopStep::CheckpointFailed {
+        sink_id: inputs.output_id.clone(),
+        error: CalcFlowError::CheckpointMismatch {
+            message: format!(
+                "sink output {:?} received an out-of-phase command",
+                inputs.output_id
+            ),
+        },
     }
 }
 
@@ -827,37 +862,47 @@ pub(crate) async fn recover_transactional_sinks(
                 ),
             }
         })?;
-        let expected_delivery = sink.binding.delivery().into_manifest();
-        if entry.delivery != expected_delivery {
-            return Err(CalcFlowError::CheckpointMismatch {
-                message: format!(
-                    "checkpoint manifest sink {:?} delivery evidence does not match the prepared binding",
-                    sink.sink_id
-                ),
-            });
-        }
-        if matches!(expected_delivery, SinkDeliveryManifest::Ordinary) {
-            if entry.pre_commit.is_some() {
-                return Err(CalcFlowError::CheckpointMismatch {
-                    message: format!(
-                        "checkpoint manifest ordinary sink {:?} carries transactional state",
-                        sink.sink_id
-                    ),
-                });
-            }
+        if !validate_recovery_entry(sink, entry)? {
             continue;
-        }
-        if entry.pre_commit.is_none() {
-            return Err(CalcFlowError::CheckpointMismatch {
-                message: format!(
-                    "checkpoint manifest sink {:?} is not a prepared transaction",
-                    sink.sink_id
-                ),
-            });
         }
         sink.binding.recover(manifest).await?;
     }
     Ok(())
+}
+
+fn validate_recovery_entry(
+    sink: &ValidatedOrdinarySink,
+    entry: &SinkManifestEntry,
+) -> Result<bool> {
+    let expected_delivery = sink.binding.delivery().into_manifest();
+    if entry.delivery != expected_delivery {
+        return Err(CalcFlowError::CheckpointMismatch {
+            message: format!(
+                "checkpoint manifest sink {:?} delivery evidence does not match the prepared binding",
+                sink.sink_id
+            ),
+        });
+    }
+    if matches!(expected_delivery, SinkDeliveryManifest::Ordinary) {
+        if entry.pre_commit.is_some() {
+            return Err(CalcFlowError::CheckpointMismatch {
+                message: format!(
+                    "checkpoint manifest ordinary sink {:?} carries transactional state",
+                    sink.sink_id
+                ),
+            });
+        }
+        return Ok(false);
+    }
+    if entry.pre_commit.is_none() {
+        return Err(CalcFlowError::CheckpointMismatch {
+            message: format!(
+                "checkpoint manifest sink {:?} is not a prepared transaction",
+                sink.sink_id
+            ),
+        });
+    }
+    Ok(true)
 }
 
 async fn close_all(inputs: &mut SinkTaskInputs, failure_signal: &TaskFailureSignal) -> bool {

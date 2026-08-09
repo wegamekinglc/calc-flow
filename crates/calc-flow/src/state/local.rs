@@ -595,27 +595,29 @@ fn remove_managed_staging_tree(directory: &Path) -> Result<()> {
         .map_err(|source| io_error(directory, source))?;
     entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
-        let path = entry.path();
-        let metadata =
-            std::fs::symlink_metadata(&path).map_err(|source| io_error(&path, source))?;
-        if metadata.file_type().is_symlink() {
-            return Err(format_error(format!(
-                "staging entry {} is a symbolic link",
-                path.display()
-            )));
-        }
-        if metadata.is_dir() {
-            remove_managed_staging_tree(&path)?;
-        } else if metadata.is_file() {
-            std::fs::remove_file(&path).map_err(|source| io_error(&path, source))?;
-        } else {
-            return Err(format_error(format!(
-                "staging entry {} is not a regular file or directory",
-                path.display()
-            )));
-        }
+        remove_managed_staging_entry(&entry.path())?;
     }
     std::fs::remove_dir(directory).map_err(|source| io_error(directory, source))
+}
+
+fn remove_managed_staging_entry(path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format_error(format!(
+            "staging entry {} is a symbolic link",
+            path.display()
+        )));
+    }
+    if metadata.is_dir() {
+        remove_managed_staging_tree(path)
+    } else if metadata.is_file() {
+        std::fs::remove_file(path).map_err(|source| io_error(path, source))
+    } else {
+        Err(format_error(format!(
+            "staging entry {} is not a regular file or directory",
+            path.display()
+        )))
+    }
 }
 
 fn prepare_committed_directories(root: &Path, lineage: &str, operator: &str) -> Result<()> {
