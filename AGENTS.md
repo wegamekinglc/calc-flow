@@ -157,18 +157,20 @@ dashes span the full column width, including cell spaces.
   wrapping an immutable `Batch` is publicly constructable; control messages are
   created through crate-private constructors, so the public boundaries do not
   expand and there is no public runner control API. The crate-private
-  continuous runtime consumes `StreamExecutionPlan` with whole-job preflight,
-  bounded source/operator/sink tasks, aligned epoch checkpoints, manifest-last
-  recovery, per-output delivery proof, private runner/job/reaper ownership,
-  and deterministic metrics; existing public v2 runners remain unchanged. See
+  source-driven continuous runtime consumes `StreamExecutionPlan` with
+  whole-job preflight, bounded source/operator/sink tasks, job-scoped
+  event-time progress, aligned epoch checkpoints, manifest-last recovery,
+  per-output delivery proof, private runner/job/reaper ownership, and
+  deterministic metrics. Existing public v2 runners remain unchanged. See
   `docs/runtime-envelope.md`.
 - `Port` declares name, `BatchKind`, required flag, and optional exact Arrow
   schema.
 - `OperatorMetadata` owns shared graph metadata. `BatchOperator` and
   `StreamOperator` split finite processing from continuous processing and
-  checkpoint lifecycle. Built-ins are `ExpressionOperator`, `SqlOperator`,
-  and the stream-only `UnionOperator`; external operators resolve through
-  lifecycle-specific factories in `ProviderRegistry`.
+  checkpoint lifecycle. `ExpressionOperator` and `SqlOperator` implement both
+  lifecycles; `UnionOperator` and `WindowAggregateOperator` are stream-only.
+  External operators resolve through lifecycle-specific factories in
+  `ProviderRegistry`.
 - `PipelineBuilder` consumes immutable graph-building steps.
   `compile_batch()` and `compile_stream()` validate endpoints, kinds, schemas,
   one-writer inputs, UDFs, cycles, deterministic topology, inputs/outputs, and
@@ -181,6 +183,10 @@ dashes span the full column width, including cell spaces.
   only `UdfReference` values.
 - `Source`, `Sink`, `MicroBatchRunner`, and `StreamingRunner` provide
   at-least-once delivery. Checkpoints commit only after all sinks succeed.
+- `StateBackend` opens lineage-exclusive state sessions.
+  `LocalStateBackend` publishes immutable, checksum-verified segments, while
+  `CheckpointManifest` is the strict v3 state-manifest contract. The private
+  continuous runtime does not yet use that manifest for durable restart.
 - `FileProjectStore` and `FileCheckpointStore` write bounded documents
   atomically under hashed names.
 

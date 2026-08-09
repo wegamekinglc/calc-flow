@@ -137,6 +137,13 @@ model. Its `expression`, `sql`, `external`, `table_matmul`, and `connect`
 methods return new builders. `compile()` serializes the strict project and
 asks the Rust `Runtime` to validate and compile it.
 
+Rust stream graphs can also contain `UnionOperator` and
+`WindowAggregateOperator`. A `WindowSpec` declares fixed UTC tumbling or
+hopping geometry, event-time and grouping columns, and ordered count, sum,
+minimum, maximum, or average aggregates. Window nodes are rejected by
+`compile_batch()` and accepted by `compile_stream()` after geometry, schema,
+aggregate, overlap, and output-name validation.
+
 `table_matmul` creates a provider-backed `table_matmul@1` external node with
 the required mixed-kind inputs `table` (table) and `weights` (array), and the
 array output `output`. It selects ordered numeric table columns and multiplies
@@ -285,13 +292,25 @@ see the same batch again: delivery is at least once.
 the pipeline name/fingerprint, source cursor/sequence, node-keyed state, and
 creation time. One runner has an exclusive lease on a stateful plan.
 
-The crate also contains a complete private continuous runtime: whole-job
-preflight, bounded source/operator/sink tasks, progress coordination, aligned
-epoch checkpoints, manifest-last publication, operator-state restore,
-transactional sink completion, terminal checkpoints, deterministic status and
-metrics, and owner-settled cancellation. Exactly-once capability is proved per
-requested output across its reachable sources, operators, edges, and sinks;
-other checkpointed outputs may remain at least once. These types remain
+The crate also contains a source-driven continuous runtime with whole-job
+preflight, bounded source/operator/sink tasks, job-scoped event-time progress,
+window execution, aligned epoch checkpoints, manifest-last publication,
+operator-state restore, transactional sink completion, terminal checkpoints,
+a private runner/job/reaper lifecycle, deterministic status and metrics, panic
+containment, bounded launch cleanup, and owner-settled cancellation. Its
+progress driver owns watermark generation, idle/reactivation handling,
+deterministic timer ordering, and multi-ingress progress. Exactly-once
+capability is proved per requested output across its reachable sources,
+operators, edges, and sinks; other checkpointed outputs may remain at least
+once.
+
+The Rust state surface is public and data-only. `StateBackend` opens an
+exclusive `StateLineageBackend`; `LocalStateBackend` stages, validates,
+publishes, loads, and collects immutable checksum-addressed segments.
+`CheckpointManifest` is the strict bounded v3 manifest for source, operator,
+sink, watermark, and segment state. Window snapshots use retained Arrow IPC
+segments and deterministic compaction. The private runtime uses that manifest
+as its durable checkpoint and recovery truth. These runtime types remain
 crate-private. They expose no public watermark/checkpoint control and do not
 change the public v2 `MicroBatchRunner` or `StreamingRunner`, project and
 checkpoint formats, Python binding, or Studio routes. Public source-driven

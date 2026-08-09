@@ -13,8 +13,8 @@ below.
 - **[Introduction](introduction.md)** — architecture, data contract, graph
   compilation, table execution, optional array providers, and recovery
 - **[Stream message envelope](runtime-envelope.md)** — the v3 stream message
-  contract: typed messages, event time, and epochs, the operator emission
-  boundary, and current delivery guarantees
+  contract: typed messages, event-time progress, windows, state manifests and
+  backends, the operator emission boundary, and current delivery guarantees
 - **[Getting started](getting-started.md)** — published-package and
   from-source installation, Studio startup, and an install smoke test
 - **[Python API guide](python-api.md)** — `PipelineBuilder`, batches, UDFs,

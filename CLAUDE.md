@@ -171,13 +171,13 @@ The frontend talks to the backend over the `/api/v2` REST contract only.
 - The stream message and context types (`StreamMessage`, `EventTime`, `Epoch`,
   `StreamJobContext`) do not expand those public boundaries or expose a runner
   control API; control messages are constructed only through crate-private
-  constructors. The crate-private continuous runtime consumes
+  constructors. The crate-private source-driven continuous runtime consumes
   `StreamExecutionPlan` with whole-job preflight, bounded
-  source/operator/sink tasks, aligned epoch checkpoints, manifest-last
-  recovery, per-output delivery proof, private runner/job/reaper ownership,
-  and deterministic metrics; existing public v2 runners remain unchanged. The
-  full contract is documented in the [stream message
-  envelope](docs/runtime-envelope.md).
+  source/operator/sink tasks, job-scoped event-time progress, aligned epoch
+  checkpoints, manifest-last recovery, per-output delivery proof, private
+  runner/job/reaper ownership, and deterministic metrics. Existing public v2
+  runners remain unchanged. The full contract is documented in the [stream
+  message envelope](docs/runtime-envelope.md).
 - Apache DataFusion 54 is the sole table engine. Table operations accept one
   expression/projection/filter node or one read-only `SELECT`/CTE SQL node.
   DDL, DML, utility statements, multiple statements, and table backend
@@ -188,8 +188,9 @@ The frontend talks to the backend over the `/api/v2` REST contract only.
   schema. `OperatorMetadata` owns shared graph metadata; custom finite and
   continuous operators implement `BatchOperator` and `StreamOperator`
   respectively. `ExpressionOperator` and `SqlOperator` implement both;
-  `UnionOperator` is stream-only. External operators resolve through
-  lifecycle-specific factories in `ProviderRegistry`.
+  `UnionOperator` and `WindowAggregateOperator` are stream-only. External
+  operators resolve through lifecycle-specific factories in
+  `ProviderRegistry`.
 - `PipelineBuilder` consumes immutable graph-building steps. `compile_batch()`
   and `compile_stream()` validate endpoints, kinds, schemas, one-writer inputs,
   UDFs, cycles, deterministic topology, inputs/outputs, and fingerprint.

@@ -14,13 +14,14 @@ The implementation lives in `crates/calc-flow/src/runtime/streaming/` (the
 message, bounded channel, job and task contexts, whole-job preflight, source,
 operator, and sink tasks, the job-scoped progress driver, checkpoint
 coordinator, supervisor, private runner/job/reaper, metrics, and soak),
-`crates/calc-flow/src/state/` (the v3 manifest, local state backend, and
+`crates/calc-flow/src/state/` (the v3 manifest, segments, state backends, and
 production manifest transaction), `crates/calc-flow/src/time/` (event time and
 epoch),
 `crates/calc-flow/src/operator/stream.rs` (the operator traits and public
-in-memory collector), and `crates/calc-flow/src/pipeline/stream.rs` (the
-compiled stream plan). The frozen semantics behind the contract are recorded
-in the [continuous streaming runtime
+in-memory collector), `crates/calc-flow/src/operator/window.rs` (window
+declarations and execution), and `crates/calc-flow/src/pipeline/stream.rs`
+(the compiled stream plan). The frozen semantics behind the contract are
+recorded in the [continuous streaming runtime
 specification](../.codex/artifacts/specs/continuous-streaming-runtime.md),
 cited below as S and D items. The implemented private M5 checkpoint delta is
 defined by the [epoch checkpoint
@@ -213,7 +214,7 @@ watermark, barrier, idle, and end-of-input forwarding is runtime-owned.
 benchmarks, and callers that invoke an operator directly. It validates against
 the supplied output ports and stores data messages in per-port FIFO outboxes;
 `drain(port)` empties one outbox, while an unknown port drains to empty. It is
-not the collector used by the production continuous runtime.
+not the collector used by the private continuous operator-task runtime.
 
 The crate-private operator task instead constructs a
 `ChannelStreamCollector` for each handler call. It performs the same
@@ -237,10 +238,10 @@ queue teardown. A blocked send owns no reservation. An oversized data message
 fails before enqueue, a closed receiver wakes blocked senders, and each fan-out
 edge is charged independently even though immutable payload buffers are
 shared. The default `Block` path therefore propagates a slow consumer through
-sink, operator, source task, prefetch slot, and source pump. This is the narrow
-continuous-runtime revision of S10.1 and S10.5: S10.2 row/byte accounting,
-S10.3 oversize and pre-open validation, S10.4 policy behavior, FIFO, close
-wakeup, no-lost-wakeup, and one-producer ownership remain unchanged.
+sink, operator, source task, prefetch slot, and source pump. This is the
+current implementation of S10.1 and S10.5; S10.2 row/byte accounting, S10.3
+oversize and pre-open validation, S10.4 policy behavior, FIFO, close wakeup,
+no-lost-wakeup, and one-producer ownership remain unchanged.
 
 ## Stream plan compilation
 
@@ -255,16 +256,17 @@ compile time, before any source opens:
   exactly-once delivery.
 
 Stream graphs compose unary expression nodes, single-input SQL nodes,
-explicit stream providers, and `UnionOperator`, whose two or more input
-ports share one kind, one required flag, and one exact schema, or are all
-schema-less.
+explicit stream providers, `UnionOperator`, and `WindowAggregateOperator`.
+A union's two or more input ports share one kind, one required flag, and one
+exact schema, or are all schema-less.
 
 The compiled plan records the deterministic topology, stable edge IDs, the
 source and sink binding slots (external input and output names in
 deterministic order), the semantic fingerprint, and the per-output delivery
-requirements. It never executes directly. The crate-private continuous runner
-consumes it into owned runtime nodes, internal edges, and synthesized bounded
-source and sink boundary edges. Pure array graphs need no table engine:
+requirements. It never executes directly. The crate-private source-driven
+continuous runner consumes it into owned runtime nodes, internal edges, and
+synthesized bounded source and sink boundary edges. Pure array graphs need no
+table engine:
 `requires_datafusion` reports whether any node needs a DataFusion session.
 
 `StreamRequirements` records the requested `DeliveryGuarantee` per graph
@@ -289,7 +291,7 @@ Two hashes describe the plan (NFR-5):
   interval, a 600-second checkpoint timeout, 10,000 envelopes, 10,000 rows and
   64 MiB per edge, and two retained epochs.
 
-## Current internal continuous runtime
+## Current internal source-driven continuous runtime
 
 The crate-private runtime can run a bounded source-to-operator-to-sink job with
 or without the private M5 checkpoint owner. It is a complete internal vertical
@@ -346,9 +348,10 @@ ingresses without weakening per-ingress FIFO, validates data emissions before
 the first send, fans out over real bounded edges, and owns one lazy
 operator-scoped DataFusion runtime when table work requires it. Aggregate
 watermarks call `on_watermark` before runtime forwarding; aggregate idle and
-all-ingress end are runtime-owned. `on_end` runs exactly once after every
-ingress observes explicit end-of-input. A closed channel without an earlier
-explicit end is a failure, not synthetic EOF.
+all-ingress end are runtime-owned. Multi-ingress watermark and idle handling
+uses the progress driver's minimum and idle-epoch semantics. `on_end` runs
+exactly once after every ingress observes explicit end-of-input. A closed
+channel without an earlier explicit end is a failure, not synthetic EOF.
 
 In a checkpoint-enabled job, an operator removes only barrier-arrived
 ingresses from receive selection; their post-barrier traffic remains in the
@@ -361,12 +364,14 @@ and snapshot/stage failure forwards no barrier.
 
 One sink task owns each graph output and writes each batch to its configured
 sinks in stable order. The third sink does not see a batch when the second sink
-fails. A checkpointed at-least-once output may use ordinary sinks: the manifest
-records `Ordinary` with no pre-commit metadata, and restart does not call a
-transactional recovery hook. This preserves the allowed replay-and-duplicate
-boundary. Transactional and unbounded epoch-idempotent sinks instead begin the
-epoch, pre-commit bounded canonical metadata after the barrier, and commit only
-after the manifest is durable.
+fails. Natural completion and graceful shutdown drain the accepted prefix;
+explicit cancellation makes no drain promise. A checkpointed at-least-once
+output may use ordinary sinks: the manifest records `Ordinary` with no
+pre-commit metadata, and restart does not call a transactional recovery hook.
+This preserves the allowed replay-and-duplicate boundary. Transactional and
+unbounded epoch-idempotent sinks instead begin the epoch, pre-commit bounded
+canonical metadata after the barrier, and commit only after the manifest is
+durable.
 
 The checkpoint coordinator owns one bounded FIFO and at most one active epoch.
 Its checked phases are `Requested`, `SourcesCut`, `OperatorsSnapshotted`,
@@ -425,6 +430,13 @@ ownership to the reaper, and a later start or runner shutdown joins it. Task
 failure wins over explicit cancel, which wins over deadline expiry; concurrent
 and repeated observers receive one immutable outcome.
 
+Private source, operator, and sink tasks, the task supervisor, and runner
+connector-open/close paths create operational
+`CalcFlowError::TaskPanicked` values with a stable task ID. Together these
+boundaries cover connector `open`, `next`, `write`, and `close` panics plus
+operator and uncaught task panics. Captured panic text is valid UTF-8 and at
+most 1,024 bytes; non-string payloads become `non-string panic payload`.
+
 Source, operator, sink, progress, checkpoint, filesystem, and connector work
 remain owner-settled under cancellation: the owner waits for in-flight state
 and manifest operations before reporting terminal completion. A failed or
@@ -456,7 +468,11 @@ CALC_FLOW_STREAM_SOAK=1 cargo test -p calc-flow --lib runtime::streaming::soak::
 Every continuous-streaming soak uses exactly 1,200 measured seconds, a
 ten-second cadence, and 120 Linux RSS samples. The opt-in M5 checkpoint soak is
 described under the M5 boundary below. These harness contracts do not claim
-that final exact-head soak evidence has already been run.
+that final exact-head soak evidence has already been run. The non-checkpoint
+soak uses a 30-sample/300-second warm-up and also verifies slot pressure from
+zero-cost batches, accepted-to-both-sinks conservation, graceful drain,
+connector closure, and final task, queue, live, and reaper convergence. Both
+harnesses remain opt-in and do not expand the public API.
 
 ## Delivery guarantees in the current runtime
 
@@ -532,16 +548,17 @@ Non-goals:
   kinds and typed business values only; row payloads, metadata, and
   attributes never appear (I4).
 
-## M3 progress implementation boundary
+## Progress implementation boundary
 
-M3 prepares each source policy during whole-job preflight, then routes raw
-source data/control through one job-scoped progress driver. That driver alone
-owns the logical clock, binding/local/global ordering, finite inbox fences,
-timer heap, idle epochs, aggregate progress, completion receipts, and the
-lossless admission/drain/terminal/settlement execution trace. Multi-ingress
-progress uses the minimum watermark of known active inputs; idle and ended
-inputs are excluded, data and legal watermarks reactivate before processing,
-and all-ended emits one plain `EndOfInput` without a sentinel watermark.
+The runtime prepares each source policy during whole-job preflight, then
+routes raw source data/control through one job-scoped progress driver. That
+driver alone owns the logical clock, binding/local/global ordering, finite
+inbox fences, timer heap, idle epochs, aggregate progress, completion receipts,
+and the lossless admission/drain/terminal/settlement execution trace.
+Multi-ingress progress uses the minimum watermark of known active inputs; idle
+and ended inputs are excluded. Data and legal watermarks reactivate before
+processing, and all-ended emits one plain `EndOfInput` without a sentinel
+watermark.
 
 The crate-private transient snapshot captures the exact prepared/config,
 upstream cursor/control, trace, gate/fence, allocator, aggregate, and timer
@@ -553,17 +570,18 @@ only bounded semantic source and operator progress into manifest entries and
 reconstructs fresh process-local trace, receipt, and timer coordinates during
 recovery.
 
-M3 forwards old/equal/new event-time rows unchanged. It neither classifies nor
-drops late rows and exposes no late-row runtime metric.
+The progress driver forwards old/equal/new event-time rows unchanged. It
+neither classifies nor drops late rows and exposes no late-row runtime metric.
 
-## M4 state and window implementation boundary
+## State and window implementation boundary
 
-M4 adds a public, data-only `WindowSpec` for fixed UTC tumbling and hopping
-windows and the stream-only `WindowAggregateOperator`. The compiler validates
-geometry, overlap, exact event-time/group types, aggregate combinations,
-output names, state layout, and deterministic configuration fingerprints
-before source open. Supported aggregates are `count`, `sum`, `min`, `max`,
-and `avg` over the explicit first-version type matrix; decimal, session,
+The public Rust surface includes a data-only `WindowSpec` for fixed UTC
+tumbling and hopping windows and the stream-only `WindowAggregateOperator`.
+The compiler validates geometry, overlap, exact event-time/group types,
+aggregate combinations, output names, state layout, and deterministic
+configuration fingerprints before source open. Supported aggregates are
+`count`, `sum`, `min`, `max`, and `avg` over the explicit first-version type
+matrix; decimal, session,
 early-trigger, allowed-lateness, update, and retract forms remain unavailable.
 
 Execution owns incremental accumulators in deterministic

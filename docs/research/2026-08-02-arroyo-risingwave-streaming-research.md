@@ -72,9 +72,9 @@ actor 调度会偏离 Calc-Flow 的嵌入式定位。
 
 对应实现入口：
 
-- [`pipeline.rs`](../../crates/calc-flow/src/pipeline.rs)
+- [`pipeline.rs`](https://github.com/wegamekinglc/calc-flow/blob/cb2321e139d3905f746f7242c7cec313b93c8661/crates/calc-flow/src/pipeline.rs)
 - [`runtime/micro_batch.rs`](../../crates/calc-flow/src/runtime/micro_batch.rs)
-- [`runtime/streaming.rs`](../../crates/calc-flow/src/runtime/streaming.rs)
+- [`runtime/streaming.rs`](https://github.com/wegamekinglc/calc-flow/blob/cb2321e139d3905f746f7242c7cec313b93c8661/crates/calc-flow/src/runtime/streaming.rs)
 - [`checkpoint.rs`](../../crates/calc-flow/src/checkpoint.rs)
 - [`io.rs`](../../crates/calc-flow/src/io.rs)
 
@@ -336,23 +336,23 @@ event-time temporal table 语义。
 
 ## 7. 三者架构对比
 
-| 维度               | Calc-Flow 当前                         | Arroyo                                  | RisingWave                                      |
-| ------------------ | -------------------------------------- | --------------------------------------- | ----------------------------------------------- |
-| 产品定位           | 单机嵌入式 batch/micro-batch 引擎      | 分布式流式 pipeline 引擎                | 分布式流式数据库                                |
-| 用户主抽象         | Builder DAG 与一次执行                 | SQL/逻辑 dataflow 与持续 job            | 物化视图与可查询关系                            |
-| 数据载体           | Arrow `Batch` 或 external payload      | Arrow `RecordBatch`                     | 列式 `StreamChunk` + changelog op                |
-| 执行生命周期       | 每次调用按拓扑顺序执行                 | 长生命周期 subtask                     | 长生命周期 actor                               |
-| 节点间队列         | 无                                     | 有，异步 push 与逻辑容量背压            | 有，actor message channel                       |
-| 时间语义           | 无公开事件时间语义                     | event time watermark + idle             | watermark + epoch                               |
-| 窗口               | 无                                     | tumbling/sliding/session 等             | TUMBLE/HOP/session 等                           |
-| 更新与撤回         | 无 changelog                           | 依查询/算子能力                         | insert/delete/update changelog                  |
-| 状态后端           | 节点 JSON snapshot                     | 内存状态 + 对象存储增量 Parquet         | Hummock LSM on object storage                   |
-| checkpoint         | sink 成功后提交整图 JSON               | 对齐 barrier + epoch checkpoint         | barrier + epoch + Hummock version               |
-| 外部交付保证       | at-least-once                          | sink-specific，可达 exactly-once        | sink-specific，可达 exactly-once                |
-| 并行与部署         | 单进程，节点顺序执行                   | 多 worker/subtask，支持 Kubernetes      | 多节点 actor/vnode，存算分离                    |
-| connector          | 用户实现 trait，无内置生态             | registry 驱动，内置多类 connector       | 丰富 connector 与原生 CDC                       |
-| serving            | 返回 terminal batch / Studio 预览      | 主要 push 到 sink                       | PG 协议直接查询物化结果                         |
-| 与 Calc-Flow 关系  | 本体                                   | 运行时设计最接近                        | 状态、epoch 与 materialization 思想最有参考价值 |
+| 维度              | Calc-Flow 当前                    | Arroyo                             | RisingWave                                      |
+| ----------------- | --------------------------------- | ---------------------------------- | ----------------------------------------------- |
+| 产品定位          | 单机嵌入式 batch/micro-batch 引擎 | 分布式流式 pipeline 引擎           | 分布式流式数据库                                |
+| 用户主抽象        | Builder DAG 与一次执行            | SQL/逻辑 dataflow 与持续 job       | 物化视图与可查询关系                            |
+| 数据载体          | Arrow `Batch` 或 external payload | Arrow `RecordBatch`                | 列式 `StreamChunk` + changelog op               |
+| 执行生命周期      | 每次调用按拓扑顺序执行            | 长生命周期 subtask                 | 长生命周期 actor                                |
+| 节点间队列        | 无                                | 有，异步 push 与逻辑容量背压       | 有，actor message channel                       |
+| 时间语义          | 无公开事件时间语义                | event time watermark + idle        | watermark + epoch                               |
+| 窗口              | 无                                | tumbling/sliding/session 等        | TUMBLE/HOP/session 等                           |
+| 更新与撤回        | 无 changelog                      | 依查询/算子能力                    | insert/delete/update changelog                  |
+| 状态后端          | 节点 JSON snapshot                | 内存状态 + 对象存储增量 Parquet    | Hummock LSM on object storage                   |
+| checkpoint        | sink 成功后提交整图 JSON          | 对齐 barrier + epoch checkpoint    | barrier + epoch + Hummock version               |
+| 外部交付保证      | at-least-once                     | sink-specific，可达 exactly-once   | sink-specific，可达 exactly-once                |
+| 并行与部署        | 单进程，节点顺序执行              | 多 worker/subtask，支持 Kubernetes | 多节点 actor/vnode，存算分离                    |
+| connector         | 用户实现 trait，无内置生态        | registry 驱动，内置多类 connector  | 丰富 connector 与原生 CDC                       |
+| serving           | 返回 terminal batch / Studio 预览 | 主要 push 到 sink                  | PG 协议直接查询物化结果                         |
+| 与 Calc-Flow 关系 | 本体                              | 运行时设计最接近                   | 状态、epoch 与 materialization 思想最有参考价值 |
 
 ## 8. Calc-Flow 最终架构建议
 
@@ -632,13 +632,13 @@ engineer-weeks，正好落在 11 至 16 个月区间内。两份文档的排期�
 
 ## 10. 自研还是采用现成系统
 
-| 需求                                                                   | 推荐选择                                           |
-| ---------------------------------------------------------------------- | -------------------------------------------------- |
-| 嵌入 Python/本地进程，复用 Calc-Flow DAG、数组 provider 和 Studio      | 演进 Calc-Flow continuous runtime                  |
-| 分布式 Arrow/DataFusion pipeline、SQL-first、外部 sink 为主            | 优先评估 Arroyo                                    |
-| 多租户 SQL、物化视图、可查询 serving、大状态、原生 CDC、集群 HA        | 优先评估 RisingWave                                |
-| 近期只需 Kafka/CDC 到可查询表                                           | 不应等待 Calc-Flow 自研 connector 与状态系统       |
-| 量化本地数据流、Python UDF/JAX 边界、轻量部署                           | Calc-Flow 有明确差异化价值                         |
+| 需求                                                              | 推荐选择                                     |
+| ----------------------------------------------------------------- | -------------------------------------------- |
+| 嵌入 Python/本地进程，复用 Calc-Flow DAG、数组 provider 和 Studio | 演进 Calc-Flow continuous runtime            |
+| 分布式 Arrow/DataFusion pipeline、SQL-first、外部 sink 为主       | 优先评估 Arroyo                              |
+| 多租户 SQL、物化视图、可查询 serving、大状态、原生 CDC、集群 HA   | 优先评估 RisingWave                          |
+| 近期只需 Kafka/CDC 到可查询表                                     | 不应等待 Calc-Flow 自研 connector 与状态系统 |
+| 量化本地数据流、Python UDF/JAX 边界、轻量部署                     | Calc-Flow 有明确差异化价值                   |
 
 Calc-Flow 的建设理由应来自嵌入式、Python/Arrow/array 混合工作负载和可视化
 编排，而不是追赶分布式流数据库的功能清单。
@@ -698,10 +698,10 @@ Calc-Flow 的建设理由应来自嵌入式、Python/Arrow/array 混合工作负
 
 - [`docs/introduction.md`](../introduction.md)
 - [`docs/runtime-envelope.md`](../runtime-envelope.md)
-- [`crates/calc-flow/src/pipeline.rs`](../../crates/calc-flow/src/pipeline.rs)
-- [`crates/calc-flow/src/runtime/streaming.rs`](../../crates/calc-flow/src/runtime/streaming.rs)
+- [`crates/calc-flow/src/pipeline.rs`](https://github.com/wegamekinglc/calc-flow/blob/cb2321e139d3905f746f7242c7cec313b93c8661/crates/calc-flow/src/pipeline.rs)
+- [`crates/calc-flow/src/runtime/streaming.rs`](https://github.com/wegamekinglc/calc-flow/blob/cb2321e139d3905f746f7242c7cec313b93c8661/crates/calc-flow/src/runtime/streaming.rs)
 - [`crates/calc-flow/src/runtime/micro_batch.rs`](../../crates/calc-flow/src/runtime/micro_batch.rs)
-- [`crates/calc-flow/src/runtime/envelope.rs`](../../crates/calc-flow/src/runtime/envelope.rs)
-- [`crates/calc-flow/src/pipeline/control.rs`](../../crates/calc-flow/src/pipeline/control.rs)
+- [`crates/calc-flow/src/runtime/envelope.rs`](https://github.com/wegamekinglc/calc-flow/blob/cb2321e139d3905f746f7242c7cec313b93c8661/crates/calc-flow/src/runtime/envelope.rs)
+- [`crates/calc-flow/src/pipeline/control.rs`](https://github.com/wegamekinglc/calc-flow/blob/cb2321e139d3905f746f7242c7cec313b93c8661/crates/calc-flow/src/pipeline/control.rs)
 - [`crates/calc-flow/src/checkpoint.rs`](../../crates/calc-flow/src/checkpoint.rs)
 - [`crates/calc-flow/src/io.rs`](../../crates/calc-flow/src/io.rs)
