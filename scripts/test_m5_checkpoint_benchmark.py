@@ -10,6 +10,24 @@ from pathlib import Path
 from scripts import m5_checkpoint_benchmark as benchmark
 
 
+def _is_subprocess_run(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "subprocess"
+        and node.func.attr == "run"
+    )
+
+
+def _subprocess_run_calls(source: str) -> list[ast.Call]:
+    return [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call) and _is_subprocess_run(node)
+    ]
+
+
 def _run(
     label: str,
     median: float,
@@ -143,16 +161,7 @@ class CommonHarnessSourceTests(unittest.TestCase):
         self,
     ) -> None:
         source = Path(benchmark.__file__).read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        calls = [
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "subprocess"
-            and node.func.attr == "run"
-        ]
+        calls = _subprocess_run_calls(source)
 
         self.assertEqual(len(calls), 7)
         for call in calls:

@@ -577,7 +577,7 @@ def _run_cargo_command(
         flush=True,
     )
     # The literal argv selects Cargo; executable pins the validated absolute shim.
-    result = subprocess.run(  # nosec B603
+    result = subprocess.run(  # nosec B603, B607 - validated absolute Cargo executable
         ["cargo", *command.arguments],
         executable=str(command.executable),
         shell=False,
@@ -650,63 +650,69 @@ def private_build_identity_hash(provenance: dict[str, object]) -> str:
     )
 
 
+def _optional_command_result(
+    requested: tuple[str, ...],
+) -> subprocess.CompletedProcess[str] | None:
+    if requested == ("cargo", "-Vv"):
+        return subprocess.run(  # nosec B603
+            ["cargo", "-Vv"],
+            executable=str(_trusted_system_executable("cargo")),
+            shell=False,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    if requested == ("lscpu",):
+        return subprocess.run(  # nosec B603
+            ["lscpu"],
+            executable=str(_trusted_system_executable("lscpu")),
+            shell=False,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    if requested == ("powerprofilesctl", "get"):
+        return subprocess.run(  # nosec B603
+            ["powerprofilesctl", "get"],
+            executable=str(_trusted_system_executable("powerprofilesctl")),
+            shell=False,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    if requested == ("rustc", "-vV"):
+        return subprocess.run(  # nosec B603
+            ["rustc", "-vV"],
+            executable=str(_trusted_system_executable("rustc")),
+            shell=False,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    if requested == ("systemd-detect-virt",):
+        return subprocess.run(  # nosec B603
+            ["systemd-detect-virt"],
+            executable=str(_trusted_system_executable("systemd-detect-virt")),
+            shell=False,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    return None
+
+
 def _optional_command(command: Sequence[str]) -> str:
-    requested = tuple(command)
     try:
-        if requested == ("cargo", "-Vv"):
-            result = subprocess.run(  # nosec B603
-                ["cargo", "-Vv"],
-                executable=str(_trusted_system_executable("cargo")),
-                shell=False,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        elif requested == ("lscpu",):
-            result = subprocess.run(  # nosec B603
-                ["lscpu"],
-                executable=str(_trusted_system_executable("lscpu")),
-                shell=False,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        elif requested == ("powerprofilesctl", "get"):
-            result = subprocess.run(  # nosec B603
-                ["powerprofilesctl", "get"],
-                executable=str(_trusted_system_executable("powerprofilesctl")),
-                shell=False,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        elif requested == ("rustc", "-vV"):
-            result = subprocess.run(  # nosec B603
-                ["rustc", "-vV"],
-                executable=str(_trusted_system_executable("rustc")),
-                shell=False,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        elif requested == ("systemd-detect-virt",):
-            result = subprocess.run(  # nosec B603
-                ["systemd-detect-virt"],
-                executable=str(_trusted_system_executable("systemd-detect-virt")),
-                shell=False,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        else:
-            return "unavailable: command is not allowlisted"
+        result = _optional_command_result(tuple(command))
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         return f"unavailable: {error}"
+    if result is None:
+        return "unavailable: command is not allowlisted"
     output = (result.stdout or result.stderr).strip()
     return output if result.returncode == 0 else f"unavailable: {output}"
 
