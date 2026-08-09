@@ -2378,6 +2378,17 @@ async fn open_checkpoint_runtime(
         cancellation,
     )
     .await?;
+    let selected = transaction
+        .select_latest_cancellable(&identity, cancellation)
+        .await?;
+    let startup_orphans_removed = transaction
+        .retain_cancellable(
+            &identity,
+            selected.as_ref().map(|selected| &selected.manifest),
+            cancellation,
+        )
+        .await?
+        .removed_orphan_segments;
     #[cfg(test)]
     let transaction = {
         let faults = spec.faults.clone();
@@ -2404,17 +2415,6 @@ async fn open_checkpoint_runtime(
         }))
     };
     let transaction = Arc::new(transaction);
-    let selected = transaction
-        .select_latest_cancellable(&identity, cancellation)
-        .await?;
-    let startup_orphans_removed = if selected.is_some() {
-        transaction
-            .retain_cancellable(&identity, None, cancellation)
-            .await?
-            .removed_orphan_segments
-    } else {
-        0
-    };
     let next_epoch = selected
         .as_ref()
         .map_or(Epoch::INITIAL, |selected| selected.next_epoch);
@@ -4451,6 +4451,7 @@ mod tests {
     use chrono::TimeZone;
     use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
     use parking_lot::Mutex;
+    use sha2::{Digest as _, Sha256};
     use tokio::sync::{Notify, Semaphore, mpsc};
 
     use super::{
@@ -6438,6 +6439,33 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert_eq!(counter.load(Ordering::SeqCst), expected);
+    }
+
+    fn local_state_handle(
+        key: &StateLineageKey,
+        operator_id: &str,
+        epoch: crate::Epoch,
+        segment_id: &str,
+        bytes: &[u8],
+    ) -> StateHandle {
+        let digest = |value: &[u8]| hex::encode(Sha256::digest(value));
+        let lineage_hash =
+            digest(format!("{}\0{}", key.pipeline_name(), key.pipeline_fingerprint()).as_bytes());
+        let operator_hash = digest(operator_id.as_bytes());
+        let segment_hash = digest(segment_id.as_bytes());
+        let relative_path = format!(
+            "committed/{lineage_hash}/{operator_hash}/{}-{segment_hash}.segment",
+            epoch.as_u64()
+        );
+        StateHandle::new(
+            operator_id,
+            epoch,
+            segment_id,
+            &relative_path,
+            u64::try_from(bytes.len()).unwrap(),
+            &digest(bytes),
+        )
+        .unwrap()
     }
 
     fn forward_spec(
@@ -10208,6 +10236,160 @@ mod tests {
         assert_eq!(source_closed.load(Ordering::SeqCst), 1);
         assert_eq!(sink_closed.load(Ordering::SeqCst), 1);
         assert!(directory.path().join("manifests").is_dir());
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the no-manifest recovery oracle owns the orphan, retry, and lifecycle assertions"
+    )]
+    async fn checkpointed_runner_cleans_pre_manifest_state_before_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Arc::new(
+            LocalStateBackend::new(directory.path().join("state"))
+                .await
+                .unwrap(),
+        );
+        let plan = PipelineBuilder::new("checkpoint-pre-manifest-cleanup")
+            .unwrap()
+            .add_checkpoint_capable_node(
+                "node",
+                Box::new(StressForwardOperator::new(None)) as Box<dyn StreamOperator>,
+            )
+            .unwrap()
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements {
+                    delivery: BTreeMap::from([(
+                        "output".into(),
+                        crate::DeliveryGuarantee::ExactlyOnce,
+                    )]),
+                },
+            )
+            .unwrap();
+        let lineage_key = StateLineageKey::new(plan.name(), plan.fingerprint()).unwrap();
+        let orphan_bytes = b"published-before-manifest";
+        let abandoned_bytes = b"staged-before-manifest";
+        let retry_bytes = b"retry-at-same-coordinate";
+        let orphan = local_state_handle(
+            &lineage_key,
+            "node",
+            crate::Epoch::INITIAL,
+            "published",
+            orphan_bytes,
+        );
+        let orphan_retry = local_state_handle(
+            &lineage_key,
+            "node",
+            crate::Epoch::INITIAL,
+            "published",
+            retry_bytes,
+        );
+        let abandoned = local_state_handle(
+            &lineage_key,
+            "node",
+            crate::Epoch::INITIAL,
+            "staged",
+            abandoned_bytes,
+        );
+        let abandoned_retry = local_state_handle(
+            &lineage_key,
+            "node",
+            crate::Epoch::INITIAL,
+            "staged",
+            retry_bytes,
+        );
+        {
+            let lineage = backend.open_lineage(&lineage_key).await.unwrap();
+            lineage.stage_segment(&orphan, orphan_bytes).await.unwrap();
+            lineage.validate_segment(&orphan).await.unwrap();
+            lineage.publish_segment(&orphan).await.unwrap();
+            lineage
+                .stage_segment(&abandoned, abandoned_bytes)
+                .await
+                .unwrap();
+        }
+        let source_polls = Arc::new(AtomicUsize::new(0));
+        let source_closed = Arc::new(AtomicUsize::new(0));
+        let sink_opened = Arc::new(AtomicUsize::new(0));
+        let sink_closed = Arc::new(AtomicUsize::new(0));
+        let spec = ContinuousJobSpec {
+            context: StreamJobContext::new(
+                902,
+                plan.fingerprint(),
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            ),
+            plan,
+            sources: vec![NamedSourceBinding {
+                binding_id: "input".into(),
+                binding: counting_pending_binding(0, &source_polls, &source_closed),
+            }],
+            sinks: vec![NamedSinkBinding {
+                output_id: "output".into(),
+                sink_id: "sink".into(),
+                binding: OrdinarySinkBinding::new_transactional(Box::new(CheckpointProbeSink {
+                    opened: Arc::clone(&sink_opened),
+                    closed: Arc::clone(&sink_closed),
+                })),
+            }],
+            edge_budget: EdgeBudget {
+                max_rows: 1,
+                max_bytes: 1 << 20,
+            },
+            delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+        };
+        let checkpoint = CheckpointRuntimeSpec::new(
+            backend.clone(),
+            directory.path().join("manifests"),
+            StreamRuntimeConfig {
+                checkpoint_interval: StdDuration::from_secs(3_600),
+                ..StreamRuntimeConfig::default()
+            },
+        )
+        .unwrap();
+        let mut runner = ContinuousRunner::new();
+
+        let job = runner.start_checkpointed(spec, checkpoint).await.unwrap();
+
+        wait_for_counter(&source_polls, 1).await;
+        assert_eq!(job.status().metrics.checkpoints.orphan_segments_removed, 1);
+        assert_eq!(job.status().checkpoint.unwrap().last_completed_epoch, None);
+        let outcome = job.cancel().await;
+        assert_eq!(outcome.state, ContinuousJobState::Cancelled);
+        drop(job);
+        runner.shutdown().await.unwrap();
+        assert_eq!(runner.registry_counts(), (0, 0));
+        assert_eq!(source_closed.load(Ordering::SeqCst), 1);
+        assert_eq!(sink_opened.load(Ordering::SeqCst), 1);
+        assert_eq!(sink_closed.load(Ordering::SeqCst), 1);
+
+        let lineage = backend.open_lineage(&lineage_key).await.unwrap();
+        assert!(matches!(
+            lineage.load_segment(&orphan).await,
+            Err(CalcFlowError::NotFound { .. })
+        ));
+        lineage
+            .stage_segment(&orphan_retry, retry_bytes)
+            .await
+            .unwrap();
+        lineage.validate_segment(&orphan_retry).await.unwrap();
+        lineage.publish_segment(&orphan_retry).await.unwrap();
+        lineage
+            .stage_segment(&abandoned_retry, retry_bytes)
+            .await
+            .unwrap();
+        lineage.validate_segment(&abandoned_retry).await.unwrap();
+        lineage.publish_segment(&abandoned_retry).await.unwrap();
+        assert_eq!(
+            lineage.load_segment(&orphan_retry).await.unwrap(),
+            retry_bytes
+        );
+        assert_eq!(
+            lineage.load_segment(&abandoned_retry).await.unwrap(),
+            retry_bytes
+        );
     }
 
     #[tokio::test]
