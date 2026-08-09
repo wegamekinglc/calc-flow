@@ -4460,35 +4460,89 @@ fn validate_checkpoint_soak_samples(
         .iter()
         .map(|sample| sample.index)
         .collect::<Vec<_>>();
+    if observed != expected {
+        return Err(checkpoint_soak_process_error(format!(
+            "checkpoint soak child sample indices are invalid: observed {observed:?}, expected {expected:?}"
+        )));
+    }
     let cadence_micros = u64::try_from(CHECKPOINT_SOAK_CADENCE.as_micros()).unwrap();
     let tolerance_micros = u64::try_from(CHECKPOINT_SOAK_CADENCE_TOLERANCE.as_micros()).unwrap();
-    let invalid_sample = report
+    if let Some(issue) = report
         .samples
         .iter()
         .enumerate()
-        .any(|(local_index, sample)| {
-            let target = cadence_micros * u64::try_from(local_index + 1).unwrap();
-            let Some(observed) = sample
-                .elapsed_micros
-                .checked_sub(report.generation_started_micros)
-            else {
-                return true;
-            };
-            observed < target - tolerance_micros
-                || observed > target + tolerance_micros
-                || sample.elapsed_micros > report.generation_finished_micros
-                || sample.rss_kib == 0
-                || sample.task_count == 0
-                || sample.failed_checkpoints != 0
-                || sample.manifest_count > 3
-                || sample.state_bytes > MAX_CHECKPOINT_SOAK_STATE_BYTES
-        });
-    if observed != expected || invalid_sample {
-        return Err(checkpoint_soak_process_error(
-            "checkpoint soak child sample schedule or bounds are invalid",
-        ));
+        .find_map(|(local_index, sample)| {
+            checkpoint_soak_sample_issue(
+                report,
+                local_index,
+                sample,
+                cadence_micros,
+                tolerance_micros,
+            )
+        })
+    {
+        return Err(checkpoint_soak_process_error(issue));
     }
     Ok(())
+}
+
+fn checkpoint_soak_sample_issue(
+    report: &CheckpointSoakProcessReport,
+    local_index: usize,
+    sample: &CheckpointSoakProcessSample,
+    cadence_micros: u64,
+    tolerance_micros: u64,
+) -> Option<String> {
+    let target = cadence_micros * u64::try_from(local_index + 1).unwrap();
+    let Some(observed) = sample
+        .elapsed_micros
+        .checked_sub(report.generation_started_micros)
+    else {
+        return Some(format!(
+            "checkpoint soak generation {} sample {} precedes its generation",
+            report.generation, sample.index
+        ));
+    };
+    if observed < target - tolerance_micros || observed > target + tolerance_micros {
+        return Some(format!(
+            "checkpoint soak generation {} sample {} elapsed {observed}us outside target {target}us +/-{tolerance_micros}us",
+            report.generation, sample.index
+        ));
+    }
+    if sample.elapsed_micros > report.generation_finished_micros {
+        return Some(format!(
+            "checkpoint soak sample {local_index} finishes after its generation"
+        ));
+    }
+    if sample.rss_kib == 0 {
+        return Some(format!(
+            "checkpoint soak sample {local_index} has no RSS evidence"
+        ));
+    }
+    if sample.task_count == 0 {
+        return Some(format!(
+            "checkpoint soak sample {local_index} has no live tasks"
+        ));
+    }
+    if sample.failed_checkpoints != 0 {
+        return Some(format!(
+            "checkpoint soak sample {local_index} records {} failed checkpoints",
+            sample.failed_checkpoints
+        ));
+    }
+    if sample.manifest_count > 3 {
+        return Some(format!(
+            "checkpoint soak sample {local_index} records {} manifests",
+            sample.manifest_count
+        ));
+    }
+    if sample.state_bytes > MAX_CHECKPOINT_SOAK_STATE_BYTES {
+        return Some(format!(
+            "checkpoint soak sample {local_index} records {} state bytes above {}",
+            sample.state_bytes, MAX_CHECKPOINT_SOAK_STATE_BYTES
+        ));
+    }
+    None
 }
 
 fn validate_checkpoint_soak_advance(report: &CheckpointSoakProcessReport) -> Result<()> {
@@ -5127,8 +5181,24 @@ fn checkpoint_soak_process_summary(
 }
 
 #[cfg(target_os = "linux")]
+fn checkpoint_soak_evidence_directory() -> tempfile::TempDir {
+    let target_root = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || {
+            PathBuf::from(strict_command_output("git", &["rev-parse", "--show-toplevel"]).unwrap())
+                .join("target")
+        },
+        PathBuf::from,
+    );
+    std::fs::create_dir_all(&target_root).unwrap();
+    tempfile::Builder::new()
+        .prefix("m5-checkpoint-soak-")
+        .tempdir_in(target_root)
+        .unwrap()
+}
+
+#[cfg(target_os = "linux")]
 async fn run_checkpoint_restart_linux_soak() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = checkpoint_soak_evidence_directory();
     let commit = strict_command_output("git", &["rev-parse", "HEAD"]).unwrap();
     println!(
         "{}",
@@ -5139,9 +5209,18 @@ async fn run_checkpoint_restart_linux_soak() {
         )
     );
     let evidence =
-        run_checkpoint_soak_processes(directory.path(), CheckpointSoakProcessMode::Standard)
+        match run_checkpoint_soak_processes(directory.path(), CheckpointSoakProcessMode::Standard)
             .await
-            .unwrap();
+        {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                let retained = directory.keep();
+                panic!(
+                    "checkpoint soak evidence retained at {}: {error}",
+                    retained.display()
+                );
+            }
+        };
     let report = &evidence.report;
     assert_eq!(report.restarts, 2);
     assert_eq!(report.generation_process_ids.len(), 3);
@@ -6080,7 +6159,9 @@ fn checkpoint_restart_process_evidence_fails_closed() {
             &parent_timings,
         ),
         Err(CalcFlowError::InvalidArgument { message, .. })
-            if message.contains("sample schedule")
+            if message.contains(
+                "generation 0 sample 5 elapsed 62000000us outside target 60000000us +/-1000000us"
+            )
     ));
 
     let mut unbounded_gap_reports = reports.clone();
