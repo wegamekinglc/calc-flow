@@ -129,13 +129,30 @@ fn create_report(path: &Path, bytes: &[u8]) {
     File::open(parent).unwrap().sync_all().unwrap();
 }
 
+fn validate_executable_identity(declared: &Path, invoked: &Path) -> Result<PathBuf, &'static str> {
+    if declared != invoked {
+        return Err("invoked benchmark executable does not match the declared identity");
+    }
+    Ok(declared.to_path_buf())
+}
+
+fn executable_identity() -> PathBuf {
+    let declared = PathBuf::from(std::env::var_os("CALC_FLOW_M5_COMMON_EXECUTABLE").unwrap())
+        .canonicalize()
+        .unwrap();
+    let invoked = PathBuf::from(std::env::args_os().next().unwrap())
+        .canonicalize()
+        .unwrap();
+    validate_executable_identity(&declared, &invoked).unwrap()
+}
+
 fn main() {
     assert_eq!(git(&["rev-parse", "HEAD"]), SOURCE_COMMIT);
     assert_eq!(git(&["rev-parse", "HEAD^{tree}"]), SOURCE_TREE);
     assert_eq!(harness_hash(), EXPECTED_HARNESS_SHA256);
     assert!(["B1", "C1", "B2", "C2"].contains(&RUN_LABEL));
     let output = PathBuf::from(std::env::var_os("CALC_FLOW_M5_COMMON_OUTPUT").unwrap());
-    let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let executable = executable_identity();
     let executable_sha256 = sha256(std::fs::read(&executable).unwrap());
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let budget = EdgeBudget {
@@ -195,4 +212,25 @@ fn main() {
         },
     });
     create_report(&output, &serde_json::to_vec_pretty(&report).unwrap());
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::validate_executable_identity;
+
+    #[test]
+    fn executable_identity_rejects_a_different_invoked_path() {
+        let error = validate_executable_identity(
+            Path::new("/trusted/common-benchmark"),
+            Path::new("/replaced/common-benchmark"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "invoked benchmark executable does not match the declared identity"
+        );
+    }
 }

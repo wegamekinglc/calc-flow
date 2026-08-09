@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -95,6 +96,30 @@ class CommonDecisionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ordered"):
             benchmark.evaluate_common_case(invalid)
 
+    def test_pairing_rejects_unvalidated_confidence_interval_shape(self) -> None:
+        baseline = _run("B1", 100.0, 99.9, 100.1)
+        candidate = _run("C1", 103.0, 102.9, 103.1)
+        baseline["median_confidence_interval_ns"] = (99.9, 100.1)
+
+        with self.assertRaisesRegex(ValueError, "confidence interval"):
+            benchmark._pairing(baseline, candidate)
+
+    def test_cargo_executable_is_fixed(self) -> None:
+        resolved = Path(benchmark._validated_cargo_executable("cargo"))
+        self.assertEqual(resolved, Path(shutil.which("cargo") or ""))
+        self.assertTrue(resolved.is_file())
+        version = benchmark._run_command(
+            benchmark.TrustedCommand(resolved, ("--version",)),
+            cwd=benchmark.SCRIPT_ROOT.parent,
+        )
+        self.assertRegex(version, r"^cargo \d")
+        for executable in ("/tmp/cargo", "cargo-nightly", "sh"):
+            with (
+                self.subTest(executable=executable),
+                self.assertRaisesRegex(ValueError, "cargo executable"),
+            ):
+                benchmark._validated_cargo_executable(executable)
+
 
 class CommonHarnessSourceTests(unittest.TestCase):
     def test_common_harness_is_frozen_public_no_checkpoint_workload(self) -> None:
@@ -107,6 +132,8 @@ class CommonHarnessSourceTests(unittest.TestCase):
         self.assertIn("assert_eq!(harness_hash(), EXPECTED_HARNESS_SHA256)", source)
         self.assertIn("edge_channel", source)
         self.assertIn(benchmark.COMMON_CASE, source)
+        self.assertIn("CALC_FLOW_M5_COMMON_EXECUTABLE", source)
+        self.assertNotIn("current_exe", source)
         self.assertNotIn("checkpoint", source.lower())
         self.assertIn('calc-flow = { path = "../../../../crates/calc-flow" }', manifest)
 
@@ -322,7 +349,7 @@ class PrivateAbsoluteReportTests(unittest.TestCase):
             )
             payload = benchmark.load_hashed_json(report)
             provenance = payload["provenance"]
-            assert isinstance(provenance, dict)
+            self.assertIsInstance(provenance, dict)
             provenance["build_identity_hash"] = "f" * 64
             forged = root / "forged-identity.json"
             benchmark.write_hashed_json(forged, payload)

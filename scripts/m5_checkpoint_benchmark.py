@@ -8,7 +8,7 @@ import os
 import platform
 import shlex
 import shutil
-import subprocess
+import subprocess  # nosec B404 - fixed allowlisted executables only
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -56,6 +56,23 @@ class CommonRunPlan:
     target_dir: Path
     evidence_root: Path
     report_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedCommand:
+    executable: Path
+    arguments: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.executable.is_absolute() or not self.executable.is_file():
+            raise ValueError(
+                "trusted command executable must be an absolute regular file"
+            )
+        if any("\0" in argument for argument in self.arguments):
+            raise ValueError("trusted command argument contains NUL")
+
+    def argv(self) -> list[str]:
+        return [str(self.executable), *self.arguments]
 
 
 def build_run_plan(
@@ -368,8 +385,10 @@ def _pairing(
     candidate_median = float(candidate["median_ns"])
     baseline_interval = baseline["median_confidence_interval_ns"]
     candidate_interval = candidate["median_confidence_interval_ns"]
-    assert isinstance(baseline_interval, list)
-    assert isinstance(candidate_interval, list)
+    if not isinstance(baseline_interval, list) or not isinstance(
+        candidate_interval, list
+    ):
+        raise ValueError("validated common benchmark confidence interval is invalid")
     lower = _regression_percent(
         float(baseline_interval[1]), float(candidate_interval[0])
     )
@@ -444,8 +463,35 @@ def evaluate_common_case(runs: Sequence[dict[str, object]]) -> dict[str, object]
     }
 
 
+def _trusted_system_executable(name: str) -> Path:
+    if name not in {
+        "cargo",
+        "git",
+        "lscpu",
+        "powerprofilesctl",
+        "rustc",
+        "systemd-detect-virt",
+    }:
+        raise ValueError(f"executable is not allowlisted: {name}")
+    discovered = shutil.which(name)
+    if discovered is None:
+        raise FileNotFoundError(f"required executable is unavailable: {name}")
+    executable = Path(discovered)
+    if not executable.is_absolute():
+        raise ValueError(f"trusted executable path is not absolute: {name}")
+    if not executable.is_file():
+        raise ValueError(f"trusted executable is not a regular file: {name}")
+    return executable
+
+
+def _validated_cargo_executable(cargo: str) -> str:
+    if cargo != "cargo":
+        raise ValueError("cargo executable must be the fixed 'cargo' tool")
+    return str(_trusted_system_executable(cargo))
+
+
 def _run_command(
-    command: Sequence[str],
+    command: TrustedCommand,
     *,
     cwd: Path,
     environment: dict[str, str] | None = None,
@@ -453,9 +499,12 @@ def _run_command(
     merged_environment = dict(os.environ)
     if environment is not None:
         merged_environment.update(environment)
-    print(f"+ (cd {shlex.quote(str(cwd))} && {shlex.join(command)})", flush=True)
-    result = subprocess.run(
-        command,
+    argv = command.argv()
+    print(f"+ (cd {shlex.quote(str(cwd))} && {shlex.join(argv)})", flush=True)
+    # nosemgrep: python.lang.security.audit.dangerous-subprocess-use
+    result = subprocess.run(  # nosec B603 - executable is resolved from the allowlist
+        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args  # noqa: E501
+        argv,
         cwd=cwd,
         env=merged_environment,
         check=False,
@@ -468,13 +517,17 @@ def _run_command(
         if result.stderr:
             print(result.stderr, file=sys.stderr)
         raise RuntimeError(
-            f"command failed with status {result.returncode}: {shlex.join(command)}"
+            f"command failed with status {result.returncode}: {shlex.join(argv)}"
         )
     return result.stdout.strip()
 
 
 def _git(repository: Path, arguments: Sequence[str]) -> str:
-    return _run_command(["git", *arguments], cwd=repository)
+    command = TrustedCommand(
+        executable=_trusted_system_executable("git"),
+        arguments=tuple(arguments),
+    )
+    return _run_command(command, cwd=repository)
 
 
 def _canonical_hash(value: object) -> str:
@@ -505,15 +558,31 @@ def private_build_identity_hash(provenance: dict[str, object]) -> str:
 
 
 def _optional_command(command: Sequence[str]) -> str:
+    requested = tuple(command)
+    allowed = {
+        ("cargo", "-Vv"),
+        ("lscpu",),
+        ("powerprofilesctl", "get"),
+        ("rustc", "-vV"),
+        ("systemd-detect-virt",),
+    }
+    if requested not in allowed:
+        return "unavailable: command is not allowlisted"
     try:
-        result = subprocess.run(
-            command,
+        trusted = TrustedCommand(
+            executable=_trusted_system_executable(requested[0]),
+            arguments=requested[1:],
+        )
+        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use
+        result = subprocess.run(  # nosec B603 - fixed optional diagnostic command
+            # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args  # noqa: E501
+            trusted.argv(),
             check=False,
             capture_output=True,
             text=True,
             timeout=10,
         )
-    except (OSError, subprocess.TimeoutExpired) as error:
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         return f"unavailable: {error}"
     output = (result.stdout or result.stderr).strip()
     return output if result.returncode == 0 else f"unavailable: {output}"
@@ -613,7 +682,10 @@ def _normalized_dependency_graph(metadata: dict[str, object]) -> dict[str, objec
 def _resolve_ref(
     repository: Path, role: str, reference: str, worktree: Path
 ) -> RefSnapshot:
-    commit = _git(repository, ["rev-parse", f"{reference}^{{commit}}"])
+    commit = _git(
+        repository,
+        ["rev-parse", "--verify", "--end-of-options", f"{reference}^{{commit}}"],
+    )
     tree = _git(repository, ["rev-parse", f"{commit}^{{tree}}"])
     _full_git_oid(commit, f"{role} commit")
     _full_git_oid(tree, f"{role} tree")
@@ -644,20 +716,19 @@ def _prepare_ref_worktrees(
     validate_reference_contract(baseline.commit, candidate.commit, merge_base)
     output_root.mkdir(parents=True)
     worktrees.mkdir()
-    _run_command(
-        ["git", "worktree", "add", "--detach", str(baseline.worktree), baseline.commit],
-        cwd=repository,
+    _git(
+        repository,
+        ["worktree", "add", "--detach", str(baseline.worktree), baseline.commit],
     )
-    _run_command(
+    _git(
+        repository,
         [
-            "git",
             "worktree",
             "add",
             "--detach",
             str(candidate.worktree),
             candidate.commit,
         ],
-        cwd=repository,
     )
     for snapshot in (baseline, candidate):
         if _git(snapshot.worktree, ["rev-parse", "HEAD"]) != snapshot.commit:
@@ -675,7 +746,7 @@ def _run_common_matrix(
     output_root: Path,
     baseline: RefSnapshot,
     candidate: RefSnapshot,
-    cargo: str,
+    cargo: Path,
     context: dict[str, object],
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     harness_sha256 = hash_harness_files(COMMON_HARNESS_ROOT)
@@ -690,14 +761,16 @@ def _run_common_matrix(
         materialize_common_harness(plan.harness_root)
         lock_path = plan.harness_root / "Cargo.lock"
         if common_lock is None:
-            lock_command = [cargo, "generate-lockfile", "--offline"]
+            lock_command = TrustedCommand(cargo, ("generate-lockfile", "--offline"))
             _run_command(lock_command, cwd=plan.harness_root)
-            commands.append({"label": plan.label, "command": lock_command})
+            commands.append({"label": plan.label, "command": lock_command.argv()})
             common_lock = lock_path.read_bytes()
         else:
             lock_path.write_bytes(common_lock)
         harness_lock_sha256 = sha256_file(lock_path)
-        metadata_command = [cargo, "metadata", "--locked", "--format-version", "1"]
+        metadata_command = TrustedCommand(
+            cargo, ("metadata", "--locked", "--format-version", "1")
+        )
         metadata = json.loads(_run_command(metadata_command, cwd=plan.harness_root))
         if not isinstance(metadata, dict):
             raise ValueError("cargo metadata output is invalid")
@@ -713,7 +786,7 @@ def _run_common_matrix(
             "CALC_FLOW_M5_HARNESS_SHA256": harness_sha256,
             "CARGO_TARGET_DIR": str(plan.target_dir),
         }
-        build_command = [cargo, "build", "--release", "--locked"]
+        build_command = TrustedCommand(cargo, ("build", "--release", "--locked"))
         _run_command(
             build_command,
             cwd=plan.harness_root,
@@ -728,9 +801,24 @@ def _run_common_matrix(
         run_environment = {
             **build_environment,
             "CALC_FLOW_M5_COMMON_OUTPUT": str(plan.report_path.resolve()),
+            "CALC_FLOW_M5_COMMON_EXECUTABLE": str(executable),
         }
-        run_command = [str(executable)]
-        _run_command(run_command, cwd=plan.cwd, environment=run_environment)
+        run_command = TrustedCommand(
+            cargo,
+            (
+                "run",
+                "--release",
+                "--locked",
+                "--quiet",
+                "--bin",
+                "calc-flow-m5-common-benchmark",
+            ),
+        )
+        _run_command(
+            run_command,
+            cwd=plan.harness_root,
+            environment=run_environment,
+        )
         validated = validate_common_run_report(
             plan.report_path,
             label=plan.label,
@@ -759,13 +847,17 @@ def _run_common_matrix(
         runs.append(run)
         commands.extend(
             [
-                {"label": plan.label, "command": metadata_command},
+                {"label": plan.label, "command": metadata_command.argv()},
                 {
                     "label": plan.label,
-                    "command": build_command,
+                    "command": build_command.argv(),
                     "environment": build_environment,
                 },
-                {"label": plan.label, "command": run_command, "cwd": str(plan.cwd)},
+                {
+                    "label": plan.label,
+                    "command": run_command.argv(),
+                    "cwd": str(plan.harness_root),
+                },
             ]
         )
     validate_matrix_provenance(
@@ -908,24 +1000,26 @@ def private_run_environment(
 def _run_private_absolute(
     output_root: Path,
     candidate: RefSnapshot,
-    cargo: str,
+    cargo: Path,
     run_id: str,
 ) -> tuple[dict[str, object], dict[str, object]]:
     target_root = candidate.worktree / "target" / "m5-private-absolute" / run_id
     if target_root.exists():
         raise FileExistsError(f"private benchmark target exists: {target_root}")
-    command = [
+    command = TrustedCommand(
         cargo,
-        "test",
-        "-p",
-        "calc-flow",
-        "--lib",
-        PRIVATE_TEST,
-        "--",
-        "--ignored",
-        "--exact",
-        "--nocapture",
-    ]
+        (
+            "test",
+            "-p",
+            "calc-flow",
+            "--lib",
+            PRIVATE_TEST,
+            "--",
+            "--ignored",
+            "--exact",
+            "--nocapture",
+        ),
+    )
     environment = private_run_environment(
         candidate,
         run_id=run_id,
@@ -942,7 +1036,7 @@ def _run_private_absolute(
     )
     reference = report_path.relative_to(output_root, walk_up=True)
     report["artifact_path"] = str(reference)
-    return report, {"command": command, "environment": environment}
+    return report, {"command": command.argv(), "environment": environment}
 
 
 def _valid_run_id(run_id: str) -> bool:
@@ -961,6 +1055,7 @@ def run_benchmark_evidence(
     cargo: str,
 ) -> tuple[Path, str]:
     repository = repository.resolve()
+    cargo_executable = Path(_validated_cargo_executable(cargo))
     if not _valid_run_id(run_id):
         raise ValueError("run ID must contain only ASCII letters, digits, '-' or '_'")
     output_root = repository / "target" / "m5-checkpoint-benchmark-evidence" / run_id
@@ -974,11 +1069,11 @@ def run_benchmark_evidence(
     )
     context = _execution_context()
     common_runs, commands = _run_common_matrix(
-        output_root, baseline, candidate, cargo, context
+        output_root, baseline, candidate, cargo_executable, context
     )
     common_decision = evaluate_common_case(common_runs)
     private_report, private_command = _run_private_absolute(
-        output_root, candidate, cargo, run_id
+        output_root, candidate, cargo_executable, run_id
     )
     commands.append(private_command)
     overall_result = common_decision["decision"]
@@ -1025,9 +1120,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(arguments: Sequence[str] | None = None) -> int:
     options = _parser().parse_args(arguments)
-    repository = Path(
-        _run_command(["git", "rev-parse", "--show-toplevel"], cwd=Path.cwd())
-    )
+    repository = Path(_git(Path.cwd(), ["rev-parse", "--show-toplevel"]))
     report, result = run_benchmark_evidence(
         repository,
         baseline_reference=options.baseline,
