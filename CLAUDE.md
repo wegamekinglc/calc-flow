@@ -171,11 +171,13 @@ The frontend talks to the backend over the `/api/v2` REST contract only.
 - The stream message and context types (`StreamMessage`, `EventTime`, `Epoch`,
   `StreamJobContext`) do not expand those public boundaries or expose a runner
   control API; control messages are constructed only through crate-private
-  constructors. The crate-private M2 runtime consumes `StreamExecutionPlan`
-  with whole-job preflight, bounded source/operator/sink tasks, private
-  runner/job/reaper ownership, and deterministic metrics; existing public v2
-  runners remain unchanged. The full contract is documented in the [stream
-  message envelope](docs/runtime-envelope.md).
+  constructors. The crate-private continuous runtime consumes
+  `StreamExecutionPlan` with whole-job preflight, bounded
+  source/operator/sink tasks, aligned epoch checkpoints, manifest-last
+  recovery, per-output delivery proof, private runner/job/reaper ownership,
+  and deterministic metrics; existing public v2 runners remain unchanged. The
+  full contract is documented in the [stream message
+  envelope](docs/runtime-envelope.md).
 - Apache DataFusion 54 is the sole table engine. Table operations accept one
   expression/projection/filter node or one read-only `SELECT`/CTE SQL node.
   DDL, DML, utility statements, multiple statements, and table backend

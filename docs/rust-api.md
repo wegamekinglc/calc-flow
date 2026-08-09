@@ -170,27 +170,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Stream compilation and the M2 runtime
+## Stream compilation and the private continuous runtime
 
 `PipelineBuilder::compile_stream` produces an immutable
 `StreamExecutionPlan`. The plan records stable edges, source and sink binding
 slots, stream requirements, and the semantic fingerprint, but it does not
 execute directly through a public source-driven runner.
 
-The crate-private M2 runtime consumes that plan after a whole-job preflight.
-It runs one task per source, compiled operator, and graph output; preserves
-per-ingress FIFO; forwards unary watermark/idle controls through the runtime;
-rejects unsupported multi-ingress controls and barriers before output; and
-converges source, operator, sink, queue, reservation, driver, and reaper state
-on every terminal path. Launch failure and cancellation close all resources
-whose lifecycle began, in stable order, with an independent five-second bound
-per resource. Cleanup failures and panics remain typed secondary diagnostics
-and do not replace the primary outcome.
+The crate-private continuous runtime consumes that plan after a whole-job
+preflight. It runs bounded source, operator, and sink tasks; preserves
+per-ingress FIFO; coordinates multi-ingress progress; and optionally owns an
+aligned epoch-checkpoint lifecycle. Its checkpoint path cuts live sources,
+stages operator state, publishes one manifest-last durable truth, finalizes
+transactional sinks, restores mixed ended/live jobs, and creates a terminal
+checkpoint without forwarding a post-end barrier. Exactly-once compatibility
+is proved for each requested graph output before lifecycle work; checkpointed
+ordinary-sink outputs remain at least once. Launch failure and cancellation
+settle source, operator, sink, queue, progress, state, checkpoint transaction,
+and reaper ownership. Cleanup failures and panics remain typed secondary
+diagnostics and do not replace the primary outcome.
 
 This runtime is not exported. The existing public v2 `StreamingRunner` and
-`MicroBatchRunner` retain their signatures and formed-batch behavior. Public
-source-driven runner integration remains a separately reviewed post-M5 change.
-The sole public API item added by M2 is the non-exhaustive
+`MicroBatchRunner` retain their signatures and formed-batch behavior. No public
+source-driven runner integration is present.
+
+The private checkpoint work adds no public API. The sole public API item added
+by the earlier runtime skeleton is the non-exhaustive
 `CalcFlowError::TaskPanicked { task_id, message }` variant.
 
 `edge_channel` retains its public signature and `EdgeBudget` retains the fields

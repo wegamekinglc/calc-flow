@@ -285,14 +285,17 @@ see the same batch again: delivery is at least once.
 the pipeline name/fingerprint, source cursor/sequence, node-keyed state, and
 creation time. One runner has an exclusive lease on a stateful plan.
 
-The crate also contains the complete M2 continuous-runtime skeleton:
-whole-job preflight, bounded source/operator/sink tasks, a private runner/job/
-reaper lifecycle, deterministic status and metrics, panic containment, and
-bounded launch cleanup. Those types remain crate-private. They do not expose a
-continuous runner or public watermark/checkpoint interface, and they do not
-change the existing public v2 `MicroBatchRunner` or `StreamingRunner`, which
-still submit formed `Batch` values only. Public source-driven runner
-integration is a separately reviewed post-M5 change.
+The crate also contains a complete private continuous runtime: whole-job
+preflight, bounded source/operator/sink tasks, progress coordination, aligned
+epoch checkpoints, manifest-last publication, operator-state restore,
+transactional sink completion, terminal checkpoints, deterministic status and
+metrics, and owner-settled cancellation. Exactly-once capability is proved per
+requested output across its reachable sources, operators, edges, and sinks;
+other checkpointed outputs may remain at least once. These types remain
+crate-private. They expose no public watermark/checkpoint control and do not
+change the public v2 `MicroBatchRunner` or `StreamingRunner`, project and
+checkpoint formats, Python binding, or Studio routes. Public source-driven
+runner integration is not part of the current surface.
 
 Every private runtime edge uses the public two-field `EdgeBudget`. For
 `EdgeBudget::new(R, B)`, at most `R` envelopes, `R` rows, and `B` bytes may be

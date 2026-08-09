@@ -156,10 +156,11 @@ dashes span the full column width, including cell spaces.
   and `Epoch` values under `crates/calc-flow/src/time/`. Only the data variant
   wrapping an immutable `Batch` is publicly constructable; control messages are
   created through crate-private constructors, so the public boundaries do not
-  expand and there is no public runner control API. The crate-private M2
-  runtime consumes `StreamExecutionPlan` with whole-job preflight, bounded
-  source/operator/sink tasks, private runner/job/reaper ownership, and
-  deterministic metrics; existing public v2 runners remain unchanged. See
+  expand and there is no public runner control API. The crate-private
+  continuous runtime consumes `StreamExecutionPlan` with whole-job preflight,
+  bounded source/operator/sink tasks, aligned epoch checkpoints, manifest-last
+  recovery, per-output delivery proof, private runner/job/reaper ownership,
+  and deterministic metrics; existing public v2 runners remain unchanged. See
   `docs/runtime-envelope.md`.
 - `Port` declares name, `BatchKind`, required flag, and optional exact Arrow
   schema.
