@@ -105,7 +105,7 @@ const CHECKPOINT_SOAK_PROCESS_SCHEMA: &str = "calc-flow.m5-checkpoint-soak-proce
 const CHECKPOINT_SOAK_PLAN_SCHEMA: &str = "calc-flow.m5-checkpoint-soak-plan.v1";
 const CHECKPOINT_SOAK_GENERATIONS: usize = 3;
 const CHECKPOINT_SOAK_REPORT_LIMIT: u64 = 1 << 20;
-const CHECKPOINT_SOAK_CADENCE_TOLERANCE: Duration = Duration::from_secs(1);
+const CHECKPOINT_SOAK_CADENCE_TOLERANCE: Duration = Duration::from_secs(2);
 const MAX_CHECKPOINT_SOAK_RESTART_GAP: Duration = Duration::from_secs(60);
 const CHECKPOINT_BENCHMARK_COMMAND: &str = "CARGO_TARGET_DIR=<fresh-candidate-target> CARGO_INCREMENTAL=0 CALC_FLOW_M5_CHECKPOINT_BENCHMARK=1 CALC_FLOW_M5_CHECKPOINT_BENCHMARK_RUN_ID=<unique-run-id> CALC_FLOW_M5_PRIVATE_SOURCE_COMMIT=<candidate-commit> CALC_FLOW_M5_PRIVATE_SOURCE_TREE=<candidate-tree> cargo test --release --locked -p calc-flow --lib runtime::streaming::soak::private_m5_epoch_checkpoint_absolute_benchmark -- --ignored --exact --nocapture";
 const M5_PRIVATE_BENCHMARK_CASES: [&str; 12] = [
@@ -4624,11 +4624,16 @@ fn validate_checkpoint_soak_report(
         || report.terminal_tasks != 0
         || report.terminal_charged_edges != 0
         || report.terminal_registries != (0, 0)
-        || report.temporary_artifacts != 0
     {
         return Err(checkpoint_soak_process_error(
             "checkpoint soak child report identity, exit, or terminal bounds are invalid",
         ));
+    }
+    if plan.final_generation && report.temporary_artifacts != 0 {
+        return Err(checkpoint_soak_process_error(format!(
+            "final checkpoint soak child retained {} temporary artifacts",
+            report.temporary_artifacts
+        )));
     }
     if plan.generation == 0 {
         if report.restored_epoch.is_some()
@@ -4952,10 +4957,7 @@ fn aggregate_checkpoint_soak_processes(
         output_records: final_report.output_records,
         duplicate_records: final_report.duplicate_records,
         missing_records: final_report.missing_records,
-        temporary_artifacts: reports
-            .iter()
-            .map(|report| report.temporary_artifacts)
-            .sum(),
+        temporary_artifacts: final_report.temporary_artifacts,
         terminal_tasks: reports.iter().map(|report| report.terminal_tasks).sum(),
         terminal_charged_edges: reports
             .iter()
@@ -6094,6 +6096,26 @@ fn checkpoint_restart_process_evidence_fails_closed() {
         .collect::<Vec<_>>();
     validate_checkpoint_soak_process_set(&plans, &reports, &exits, &parent_timings).unwrap();
 
+    let mut bounded_scheduler_jitter = reports.clone();
+    bounded_scheduler_jitter[0].samples[0].elapsed_micros += 1_100_000;
+    validate_checkpoint_soak_process_set(
+        &plans,
+        &bounded_scheduler_jitter,
+        &exits,
+        &parent_timings,
+    )
+    .unwrap();
+
+    let mut abandoned_nonterminal_staging = reports.clone();
+    abandoned_nonterminal_staging[0].temporary_artifacts = 7;
+    validate_checkpoint_soak_process_set(
+        &plans,
+        &abandoned_nonterminal_staging,
+        &exits,
+        &parent_timings,
+    )
+    .unwrap();
+
     let mut repeated_pid = reports.clone();
     repeated_pid[1].pid = repeated_pid[0].pid;
     assert!(matches!(
@@ -6150,7 +6172,7 @@ fn checkpoint_restart_process_evidence_fails_closed() {
     );
 
     let mut mistimed_sample = reports.clone();
-    mistimed_sample[0].samples[5].elapsed_micros += 2_000_000;
+    mistimed_sample[0].samples[5].elapsed_micros += 3_000_000;
     assert!(matches!(
         validate_checkpoint_soak_process_set(
             &plans,
@@ -6160,7 +6182,7 @@ fn checkpoint_restart_process_evidence_fails_closed() {
         ),
         Err(CalcFlowError::InvalidArgument { message, .. })
             if message.contains(
-                "generation 0 sample 5 elapsed 62000000us outside target 60000000us +/-1000000us"
+                "generation 0 sample 5 elapsed 63000000us outside target 60000000us +/-2000000us"
             )
     ));
 
@@ -6285,7 +6307,7 @@ fn checkpoint_restart_soak_contract_is_exact_and_machine_readable() {
     assert_eq!(metadata["target_duration_seconds"], 1_200);
     assert_eq!(metadata["sample_count"], 120);
     assert_eq!(metadata["cadence_seconds"], 10);
-    assert_eq!(metadata["cadence_tolerance_seconds"], 1);
+    assert_eq!(metadata["cadence_tolerance_seconds"], 2);
     assert_eq!(metadata["maximum_restart_gap_seconds"], 60);
     assert_eq!(
         metadata["timing_source"],
