@@ -86,7 +86,7 @@ impl Cursor {
 }
 
 fn is_lowercase_hex_digit(byte: u8) -> bool {
-    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+    byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
 }
 
 fn invalid_manifest_cursor_order() -> CalcFlowError {
