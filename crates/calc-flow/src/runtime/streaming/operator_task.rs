@@ -639,7 +639,7 @@ fn benchmark_partial_alignment(
         "private benchmark did not observe partial alignment",
     )?;
     benchmark_alignment_check(
-        !alignment.ready(&ingresses),
+        !alignment.ready(ingresses),
         "private benchmark did not observe partial alignment",
     )?;
     Ok(())
@@ -656,7 +656,7 @@ fn benchmark_complete_alignment(
         "private benchmark did not observe complete alignment",
     )?;
     benchmark_alignment_check(
-        alignment.ready(&ingresses),
+        alignment.ready(ingresses),
         "private benchmark did not observe complete alignment",
     )?;
     Ok(())

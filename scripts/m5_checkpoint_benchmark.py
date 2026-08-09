@@ -611,7 +611,7 @@ def _git(repository: Path, arguments: Sequence[str]) -> str:
         flush=True,
     )
     # The literal argv selects Git; executable pins the validated absolute binary.
-    result = subprocess.run(  # nosec B603
+    result = subprocess.run(  # nosec B603, B607 - validated absolute Git executable
         ["git", *arguments],
         executable=str(executable),
         shell=False,
@@ -654,7 +654,7 @@ def _optional_command_result(
     requested: tuple[str, ...],
 ) -> subprocess.CompletedProcess[str] | None:
     if requested == ("cargo", "-Vv"):
-        return subprocess.run(  # nosec B603
+        return subprocess.run(  # nosec B603, B607 - validated absolute Cargo executable
             ["cargo", "-Vv"],
             executable=str(_trusted_system_executable("cargo")),
             shell=False,
