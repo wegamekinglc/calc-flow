@@ -190,20 +190,9 @@ impl ManifestTransaction {
         cancellation: &CancellationToken,
         #[cfg(test)] operation_hook: Option<ManifestOperationHook>,
     ) -> Result<Self> {
-        if retained_epochs == 0 {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "retained_epochs".into(),
-                message: "must be positive".into(),
-            });
-        }
+        validate_retained_epochs(retained_epochs)?;
         let requested = manifest_root.as_ref().to_owned();
-        owner_settled(cancellation, "manifest-open-create", async {
-            tokio::fs::create_dir_all(&requested)
-                .await
-                .map_err(|source| io_error(&requested, source))
-        })
-        .await?;
-        let checked = requested.clone();
+        create_manifest_root(&requested, cancellation).await?;
         #[cfg(test)]
         if let Some(hook) = operation_hook {
             owner_settled(
@@ -213,18 +202,7 @@ impl ManifestTransaction {
             )
             .await?;
         }
-        owner_settled(
-            cancellation,
-            "manifest-open-validate",
-            worker(move || validate_directory(&checked)),
-        )
-        .await?;
-        let manifest_root = owner_settled(cancellation, "manifest-open-canonicalize", async {
-            tokio::fs::canonicalize(&requested)
-                .await
-                .map_err(|source| io_error(&requested, source))
-        })
-        .await?;
+        let manifest_root = validate_and_canonicalize_root(requested, cancellation).await?;
         Ok(Self {
             lineage,
             lineage_hash: digest(
@@ -298,30 +276,12 @@ impl ManifestTransaction {
         #[cfg(test)]
         self.settle_operation_hook(ManifestOperationPoint::Publish, cancellation)
             .await?;
-        for (handle, bytes) in &prepared.staged_segments {
-            owner_settled(
-                cancellation,
-                "manifest-publish-stage",
-                self.lineage.stage_segment(handle, bytes),
-            )
+        self.stage_prepared_segments(&prepared.staged_segments, cancellation)
             .await?;
-        }
-        for handle in prepared.staged_segments.keys() {
-            owner_settled(
-                cancellation,
-                "manifest-publish-validate",
-                self.lineage.validate_segment(handle),
-            )
+        self.validate_prepared_segments(&prepared.staged_segments, cancellation)
             .await?;
-        }
-        for handle in prepared.staged_segments.keys() {
-            owner_settled(
-                cancellation,
-                "manifest-publish-segment",
-                self.lineage.publish_segment(handle),
-            )
+        self.publish_prepared_segments(&prepared.staged_segments, cancellation)
             .await?;
-        }
         owner_settled(
             cancellation,
             "manifest-publish-segment-read",
@@ -352,6 +312,54 @@ impl ManifestTransaction {
             }),
         )
         .await
+    }
+
+    async fn stage_prepared_segments(
+        &self,
+        segments: &BTreeMap<StateHandle, Vec<u8>>,
+        cancellation: &CancellationToken,
+    ) -> Result<()> {
+        for (handle, bytes) in segments {
+            owner_settled(
+                cancellation,
+                "manifest-publish-stage",
+                self.lineage.stage_segment(handle, bytes),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn validate_prepared_segments(
+        &self,
+        segments: &BTreeMap<StateHandle, Vec<u8>>,
+        cancellation: &CancellationToken,
+    ) -> Result<()> {
+        for handle in segments.keys() {
+            owner_settled(
+                cancellation,
+                "manifest-publish-validate",
+                self.lineage.validate_segment(handle),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn publish_prepared_segments(
+        &self,
+        segments: &BTreeMap<StateHandle, Vec<u8>>,
+        cancellation: &CancellationToken,
+    ) -> Result<()> {
+        for handle in segments.keys() {
+            owner_settled(
+                cancellation,
+                "manifest-publish-segment",
+                self.lineage.publish_segment(handle),
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn stage_operator_state(
@@ -387,69 +395,25 @@ impl ManifestTransaction {
         let mut staged = Vec::with_capacity(snapshot.segments.len());
         let mut unpublished = Vec::with_capacity(snapshot.segments.len());
         for (segment_id, bytes) in snapshot.segments {
-            let segment_hash = digest(&segment_id);
-            let relative_path = format!(
-                "committed/{}/{operator_hash}/{}-{segment_hash}.segment",
-                self.lineage_hash,
-                epoch.as_u64()
-            );
-            let handle = StateHandle::new(
-                operator_id,
-                epoch,
-                &segment_id,
-                &relative_path,
-                u64::try_from(bytes.len()).map_err(|_| CalcFlowError::InvalidArgument {
-                    field: format!("operators.{operator_id}.segments.{segment_id}"),
-                    message: "segment byte length does not fit u64".into(),
-                })?,
-                &digest(&bytes),
-            )?;
-            match owner_settled(
-                cancellation,
-                "state-stage-existing-read",
-                self.lineage.load_segment(&handle),
-            )
-            .await
-            {
-                Ok(committed) if committed == bytes => {
-                    staged.push(handle);
-                    continue;
-                }
-                Ok(_) => {
-                    return Err(CalcFlowError::CheckpointMismatch {
-                        message: format!(
-                            "operator {operator_id:?} committed segment {segment_id:?} changed bytes"
-                        ),
-                    });
-                }
-                Err(CalcFlowError::NotFound { .. }) => {}
-                Err(error) => return Err(error),
+            let (handle, needs_publication) = self
+                .stage_operator_segment(
+                    operator_id,
+                    epoch,
+                    &operator_hash,
+                    segment_id,
+                    bytes,
+                    cancellation,
+                )
+                .await?;
+            if needs_publication {
+                unpublished.push(handle.clone());
             }
-            owner_settled(
-                cancellation,
-                "state-stage-write",
-                self.lineage.stage_segment(&handle, &bytes),
-            )
-            .await?;
-            unpublished.push(handle.clone());
             staged.push(handle);
         }
-        for handle in &unpublished {
-            owner_settled(
-                cancellation,
-                "state-stage-validate",
-                self.lineage.validate_segment(handle),
-            )
+        self.validate_staged_segments(&unpublished, cancellation)
             .await?;
-        }
-        for handle in &unpublished {
-            owner_settled(
-                cancellation,
-                "state-stage-publish",
-                self.lineage.publish_segment(handle),
-            )
+        self.publish_staged_segments(&unpublished, cancellation)
             .await?;
-        }
         #[cfg(test)]
         if !staged.is_empty() {
             self.inject_fault(ManifestTransactionFaultPoint::StateStage)?;
@@ -458,6 +422,90 @@ impl ManifestTransaction {
             inline_metadata: snapshot.inline_metadata,
             segments: staged,
         })
+    }
+
+    async fn stage_operator_segment(
+        &self,
+        operator_id: &str,
+        epoch: Epoch,
+        operator_hash: &str,
+        segment_id: String,
+        bytes: Vec<u8>,
+        cancellation: &CancellationToken,
+    ) -> Result<(StateHandle, bool)> {
+        let segment_hash = digest(&segment_id);
+        let relative_path = format!(
+            "committed/{}/{operator_hash}/{}-{segment_hash}.segment",
+            self.lineage_hash,
+            epoch.as_u64()
+        );
+        let handle = StateHandle::new(
+            operator_id,
+            epoch,
+            &segment_id,
+            &relative_path,
+            u64::try_from(bytes.len()).map_err(|_| CalcFlowError::InvalidArgument {
+                field: format!("operators.{operator_id}.segments.{segment_id}"),
+                message: "segment byte length does not fit u64".into(),
+            })?,
+            &digest(&bytes),
+        )?;
+        match owner_settled(
+            cancellation,
+            "state-stage-existing-read",
+            self.lineage.load_segment(&handle),
+        )
+        .await
+        {
+            Ok(committed) if committed == bytes => Ok((handle, false)),
+            Ok(_) => Err(CalcFlowError::CheckpointMismatch {
+                message: format!(
+                    "operator {operator_id:?} committed segment {segment_id:?} changed bytes"
+                ),
+            }),
+            Err(CalcFlowError::NotFound { .. }) => {
+                owner_settled(
+                    cancellation,
+                    "state-stage-write",
+                    self.lineage.stage_segment(&handle, &bytes),
+                )
+                .await?;
+                Ok((handle, true))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn validate_staged_segments(
+        &self,
+        handles: &[StateHandle],
+        cancellation: &CancellationToken,
+    ) -> Result<()> {
+        for handle in handles {
+            owner_settled(
+                cancellation,
+                "state-stage-validate",
+                self.lineage.validate_segment(handle),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn publish_staged_segments(
+        &self,
+        handles: &[StateHandle],
+        cancellation: &CancellationToken,
+    ) -> Result<()> {
+        for handle in handles {
+            owner_settled(
+                cancellation,
+                "state-stage-publish",
+                self.lineage.publish_segment(handle),
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn load_operator_state(
@@ -533,43 +581,13 @@ impl ManifestTransaction {
         self.settle_operation_hook(ManifestOperationPoint::Select, cancellation)
             .await?;
         let root = self.manifest_root.clone();
-        let candidates = owner_settled(
-            cancellation,
-            "manifest-select-list",
-            worker(move || list_manifest_candidates(&root)),
-        )
-        .await?;
+        let candidates = manifest_candidates(root, "manifest-select-list", cancellation).await?;
         let mut latest = None;
         for candidate in candidates {
-            let bytes = owner_settled(cancellation, "manifest-select-read", async {
-                tokio::fs::read(&candidate.path)
-                    .await
-                    .map_err(|source| io_error(&candidate.path, source))
-            })
-            .await?;
-            let manifest = owner_settled(
-                cancellation,
-                "manifest-select-decode",
-                worker(move || CheckpointManifest::from_bytes(&bytes)),
-            )
-            .await?;
-            if manifest.epoch() != candidate.epoch {
-                return Err(CalcFlowError::CheckpointMismatch {
-                    message: format!(
-                        "manifest file epoch {} does not match document epoch {}",
-                        candidate.epoch.as_u64(),
-                        manifest.epoch().as_u64()
-                    ),
-                });
-            }
+            let manifest = self
+                .load_candidate_manifest(&candidate, identity, "manifest-select", cancellation)
+                .await?;
             let expectation = identity.expectation(candidate.epoch);
-            manifest.validate(&expectation)?;
-            owner_settled(
-                cancellation,
-                "manifest-select-segments",
-                validate_manifest_segments(self.lineage.as_ref(), &manifest),
-            )
-            .await?;
             latest = Some(SelectedManifest {
                 validation: ManifestValidation {
                     runtime_config_changed: manifest.runtime_config_changed(&expectation),
@@ -604,42 +622,12 @@ impl ManifestTransaction {
         self.settle_operation_hook(ManifestOperationPoint::Retain, cancellation)
             .await?;
         let root = self.manifest_root.clone();
-        let candidates = owner_settled(
-            cancellation,
-            "manifest-retain-list",
-            worker(move || list_manifest_candidates(&root)),
-        )
-        .await?;
+        let candidates = manifest_candidates(root, "manifest-retain-list", cancellation).await?;
         let mut manifests = Vec::with_capacity(candidates.len());
         for candidate in candidates {
-            let bytes = owner_settled(cancellation, "manifest-retain-read", async {
-                tokio::fs::read(&candidate.path)
-                    .await
-                    .map_err(|source| io_error(&candidate.path, source))
-            })
-            .await?;
-            let manifest = owner_settled(
-                cancellation,
-                "manifest-retain-decode",
-                worker(move || CheckpointManifest::from_bytes(&bytes)),
-            )
-            .await?;
-            if manifest.epoch() != candidate.epoch {
-                return Err(CalcFlowError::CheckpointMismatch {
-                    message: format!(
-                        "manifest file epoch {} does not match document epoch {}",
-                        candidate.epoch.as_u64(),
-                        manifest.epoch().as_u64()
-                    ),
-                });
-            }
-            manifest.validate(&identity.expectation(candidate.epoch))?;
-            owner_settled(
-                cancellation,
-                "manifest-retain-segments",
-                validate_manifest_segments(self.lineage.as_ref(), &manifest),
-            )
-            .await?;
+            let manifest = self
+                .load_candidate_manifest(&candidate, identity, "manifest-retain", cancellation)
+                .await?;
             manifests.push((candidate, manifest));
         }
 
@@ -679,9 +667,108 @@ impl ManifestTransaction {
         })
     }
 
+    async fn load_candidate_manifest(
+        &self,
+        candidate: &ManifestCandidate,
+        identity: &PreparedManifestIdentity,
+        operation: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<CheckpointManifest> {
+        let bytes = owner_settled(cancellation, &format!("{operation}-read"), async {
+            tokio::fs::read(&candidate.path)
+                .await
+                .map_err(|source| io_error(&candidate.path, source))
+        })
+        .await?;
+        let manifest = owner_settled(
+            cancellation,
+            &format!("{operation}-decode"),
+            worker(move || CheckpointManifest::from_bytes(&bytes)),
+        )
+        .await?;
+        validate_candidate_epoch(candidate, &manifest)?;
+        manifest.validate(&identity.expectation(candidate.epoch))?;
+        owner_settled(
+            cancellation,
+            &format!("{operation}-segments"),
+            validate_manifest_segments(self.lineage.as_ref(), &manifest),
+        )
+        .await?;
+        Ok(manifest)
+    }
+
     #[cfg(test)]
     fn manifest_path(&self, epoch: Epoch) -> PathBuf {
         manifest_path(&self.manifest_root, epoch)
+    }
+}
+
+fn validate_retained_epochs(retained_epochs: usize) -> Result<()> {
+    if retained_epochs == 0 {
+        Err(CalcFlowError::InvalidArgument {
+            field: "retained_epochs".into(),
+            message: "must be positive".into(),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+async fn create_manifest_root(requested: &Path, cancellation: &CancellationToken) -> Result<()> {
+    owner_settled(cancellation, "manifest-open-create", async {
+        tokio::fs::create_dir_all(requested)
+            .await
+            .map_err(|source| io_error(requested, source))
+    })
+    .await
+}
+
+async fn validate_and_canonicalize_root(
+    requested: PathBuf,
+    cancellation: &CancellationToken,
+) -> Result<PathBuf> {
+    let checked = requested.clone();
+    owner_settled(
+        cancellation,
+        "manifest-open-validate",
+        worker(move || validate_directory(&checked)),
+    )
+    .await?;
+    owner_settled(cancellation, "manifest-open-canonicalize", async {
+        tokio::fs::canonicalize(&requested)
+            .await
+            .map_err(|source| io_error(&requested, source))
+    })
+    .await
+}
+
+async fn manifest_candidates(
+    root: PathBuf,
+    operation: &str,
+    cancellation: &CancellationToken,
+) -> Result<Vec<ManifestCandidate>> {
+    owner_settled(
+        cancellation,
+        operation,
+        worker(move || list_manifest_candidates(&root)),
+    )
+    .await
+}
+
+fn validate_candidate_epoch(
+    candidate: &ManifestCandidate,
+    manifest: &CheckpointManifest,
+) -> Result<()> {
+    if manifest.epoch() == candidate.epoch {
+        Ok(())
+    } else {
+        Err(CalcFlowError::CheckpointMismatch {
+            message: format!(
+                "manifest file epoch {} does not match document epoch {}",
+                candidate.epoch.as_u64(),
+                manifest.epoch().as_u64()
+            ),
+        })
     }
 }
 
@@ -719,37 +806,56 @@ fn list_manifest_candidates(root: &Path) -> Result<Vec<ManifestCandidate>> {
     let mut entry_count = 0_usize;
     for entry in std::fs::read_dir(root).map_err(|source| io_error(root, source))? {
         let entry = entry.map_err(|source| io_error(root, source))?;
-        entry_count = entry_count.checked_add(1).ok_or_else(|| {
-            format_error("manifest directory entry count overflowed usize".into())
-        })?;
-        if entry_count > MAX_MANIFEST_ENTRIES {
-            return Err(format_error(format!(
-                "manifest directory entry count exceeds {MAX_MANIFEST_ENTRIES}"
-            )));
+        entry_count = bounded_manifest_entry_count(entry_count)?;
+        match classify_manifest_entry(&entry)? {
+            ManifestDirectoryEntry::Candidate(candidate) => candidates.push(candidate),
+            ManifestDirectoryEntry::Temporary(path) => temporaries.push(path),
         }
-        let path = entry.path();
-        let metadata =
-            std::fs::symlink_metadata(&path).map_err(|source| io_error(&path, source))?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(format_error(format!(
-                "manifest entry {} is not a regular file",
-                path.display()
-            )));
-        }
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| format_error("manifest file name is not UTF-8".into()))?;
-        if name.starts_with(".tmp") {
-            temporaries.push(path);
-            continue;
-        }
-        let epoch = parse_manifest_name(&name)?;
-        candidates.push(ManifestCandidate { epoch, path });
     }
     remove_manifest_temporaries(root, &temporaries)?;
     candidates.sort_by_key(|candidate| candidate.epoch);
     Ok(candidates)
+}
+
+enum ManifestDirectoryEntry {
+    Candidate(ManifestCandidate),
+    Temporary(PathBuf),
+}
+
+fn bounded_manifest_entry_count(current: usize) -> Result<usize> {
+    let count = current
+        .checked_add(1)
+        .ok_or_else(|| format_error("manifest directory entry count overflowed usize".into()))?;
+    if count > MAX_MANIFEST_ENTRIES {
+        Err(format_error(format!(
+            "manifest directory entry count exceeds {MAX_MANIFEST_ENTRIES}"
+        )))
+    } else {
+        Ok(count)
+    }
+}
+
+fn classify_manifest_entry(entry: &std::fs::DirEntry) -> Result<ManifestDirectoryEntry> {
+    let path = entry.path();
+    let metadata = std::fs::symlink_metadata(&path).map_err(|source| io_error(&path, source))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format_error(format!(
+            "manifest entry {} is not a regular file",
+            path.display()
+        )));
+    }
+    let name = entry
+        .file_name()
+        .into_string()
+        .map_err(|_| format_error("manifest file name is not UTF-8".into()))?;
+    if name.starts_with(".tmp") {
+        Ok(ManifestDirectoryEntry::Temporary(path))
+    } else {
+        Ok(ManifestDirectoryEntry::Candidate(ManifestCandidate {
+            epoch: parse_manifest_name(&name)?,
+            path,
+        }))
+    }
 }
 
 fn parse_manifest_name(name: &str) -> Result<Epoch> {
@@ -774,55 +880,19 @@ fn publish_manifest(
 ) -> Result<ManifestPublication> {
     validate_directory(root)?;
     let destination = manifest_path(root, epoch);
-    if let Ok(metadata) = std::fs::symlink_metadata(&destination) {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(format_error(format!(
-                "manifest entry {} is not a regular file",
-                destination.display()
-            )));
-        }
-        let existing =
-            std::fs::read(&destination).map_err(|source| io_error(&destination, source))?;
-        if existing == bytes {
-            return Ok(ManifestPublication::Durable);
-        }
-        return Err(CalcFlowError::Conflict {
-            resource: "checkpoint manifest".into(),
-            key: epoch.as_u64().to_string(),
-        });
+    if let Some(publication) = existing_manifest_publication(&destination, epoch, bytes)? {
+        return Ok(publication);
     }
     let mut parent_synced = false;
     let publication = catch_unwind(AssertUnwindSafe(|| {
-        let mut temporary =
-            tempfile::NamedTempFile::new_in(root).map_err(|source| io_error(root, source))?;
-        temporary
-            .write_all(bytes)
-            .map_err(|source| io_error(temporary.path(), source))?;
-        temporary
-            .flush()
-            .map_err(|source| io_error(temporary.path(), source))?;
-        temporary
-            .as_file()
-            .sync_all()
-            .map_err(|source| io_error(temporary.path(), source))?;
-        #[cfg(test)]
-        if let Some(hook) = fault_hook {
-            hook(ManifestTransactionFaultPoint::ManifestWrite)?;
-        }
-        temporary
-            .persist_noclobber(&destination)
-            .map_err(|error| io_error(&destination, error.error))?;
-        #[cfg(test)]
-        if let Some(hook) = fault_hook {
-            hook(ManifestTransactionFaultPoint::ManifestRename)?;
-        }
-        sync_directory(root)?;
-        parent_synced = true;
-        #[cfg(test)]
-        if let Some(hook) = fault_hook {
-            hook(ManifestTransactionFaultPoint::ManifestParentSync)?;
-        }
-        Ok(())
+        install_manifest(
+            root,
+            &destination,
+            bytes,
+            &mut parent_synced,
+            #[cfg(test)]
+            fault_hook,
+        )
     }));
     match publication {
         Ok(Ok(())) => Ok(ManifestPublication::Durable),
@@ -839,6 +909,70 @@ fn publish_manifest(
             },
         ),
     }
+}
+
+fn existing_manifest_publication(
+    destination: &Path,
+    epoch: Epoch,
+    bytes: &[u8],
+) -> Result<Option<ManifestPublication>> {
+    let Ok(metadata) = std::fs::symlink_metadata(destination) else {
+        return Ok(None);
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format_error(format!(
+            "manifest entry {} is not a regular file",
+            destination.display()
+        )));
+    }
+    let existing = std::fs::read(destination).map_err(|source| io_error(destination, source))?;
+    if existing == bytes {
+        Ok(Some(ManifestPublication::Durable))
+    } else {
+        Err(CalcFlowError::Conflict {
+            resource: "checkpoint manifest".into(),
+            key: epoch.as_u64().to_string(),
+        })
+    }
+}
+
+fn install_manifest(
+    root: &Path,
+    destination: &Path,
+    bytes: &[u8],
+    parent_synced: &mut bool,
+    #[cfg(test)] fault_hook: Option<&ManifestTransactionFaultHook>,
+) -> Result<()> {
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(root).map_err(|source| io_error(root, source))?;
+    temporary
+        .write_all(bytes)
+        .map_err(|source| io_error(temporary.path(), source))?;
+    temporary
+        .flush()
+        .map_err(|source| io_error(temporary.path(), source))?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|source| io_error(temporary.path(), source))?;
+    #[cfg(test)]
+    if let Some(hook) = fault_hook {
+        hook(ManifestTransactionFaultPoint::ManifestWrite)?;
+    }
+    temporary
+        .persist_noclobber(destination)
+        .map_err(|error| io_error(destination, error.error))?;
+    #[cfg(test)]
+    if let Some(hook) = fault_hook {
+        hook(ManifestTransactionFaultPoint::ManifestRename)?;
+    }
+    sync_directory(root)?;
+    *parent_synced = true;
+    #[cfg(test)]
+    if let Some(hook) = fault_hook {
+        hook(ManifestTransactionFaultPoint::ManifestParentSync)?;
+    }
+    Ok(())
 }
 
 fn classify_failed_publication(
@@ -872,24 +1006,7 @@ fn panic_payload_message(payload: &(dyn Any + Send)) -> &str {
 fn remove_manifest_files(root: &Path, removals: &[PathBuf]) -> Result<()> {
     validate_directory(root)?;
     for path in removals {
-        if path.parent() != Some(root) {
-            return Err(format_error(
-                "manifest removal escaped the managed root".into(),
-            ));
-        }
-        let metadata = std::fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(format_error(format!(
-                "manifest entry {} is not a regular file",
-                path.display()
-            )));
-        }
-        parse_manifest_name(
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| format_error("manifest file name is not UTF-8".into()))?,
-        )?;
-        std::fs::remove_file(path).map_err(|source| io_error(path, source))?;
+        remove_manifest_file(root, path)?;
     }
     if !removals.is_empty() {
         sync_directory(root)?;
@@ -897,36 +1014,61 @@ fn remove_manifest_files(root: &Path, removals: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
+fn remove_manifest_file(root: &Path, path: &Path) -> Result<()> {
+    if path.parent() != Some(root) {
+        return Err(format_error(
+            "manifest removal escaped the managed root".into(),
+        ));
+    }
+    validate_manifest_regular_file(path, "manifest entry")?;
+    parse_manifest_name(
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format_error("manifest file name is not UTF-8".into()))?,
+    )?;
+    std::fs::remove_file(path).map_err(|source| io_error(path, source))
+}
+
 fn remove_manifest_temporaries(root: &Path, temporaries: &[PathBuf]) -> Result<()> {
     validate_directory(root)?;
     for path in temporaries {
-        if path.parent() != Some(root) {
-            return Err(format_error(
-                "manifest temporary removal escaped the managed root".into(),
-            ));
-        }
-        let metadata = std::fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(format_error(format!(
-                "manifest temporary {} is not a regular file",
-                path.display()
-            )));
-        }
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| format_error("manifest temporary name is not UTF-8".into()))?;
-        if !name.starts_with(".tmp") {
-            return Err(format_error(format!(
-                "unexpected manifest temporary file {name:?}"
-            )));
-        }
-        std::fs::remove_file(path).map_err(|source| io_error(path, source))?;
+        remove_manifest_temporary(root, path)?;
     }
     if !temporaries.is_empty() {
         sync_directory(root)?;
     }
     Ok(())
+}
+
+fn remove_manifest_temporary(root: &Path, path: &Path) -> Result<()> {
+    if path.parent() != Some(root) {
+        return Err(format_error(
+            "manifest temporary removal escaped the managed root".into(),
+        ));
+    }
+    validate_manifest_regular_file(path, "manifest temporary")?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format_error("manifest temporary name is not UTF-8".into()))?;
+    if !name.starts_with(".tmp") {
+        return Err(format_error(format!(
+            "unexpected manifest temporary file {name:?}"
+        )));
+    }
+    std::fs::remove_file(path).map_err(|source| io_error(path, source))
+}
+
+fn validate_manifest_regular_file(path: &Path, label: &str) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        Err(format_error(format!(
+            "{label} {} is not a regular file",
+            path.display()
+        )))
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_directory(path: &Path) -> Result<()> {
