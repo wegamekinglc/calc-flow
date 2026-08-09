@@ -1655,6 +1655,68 @@ pub(super) mod tests {
         pub(crate) barriers: usize,
     }
 
+    async fn send_benchmark_alignment_inputs(
+        harness: &mut Harness,
+        batches: [Batch; 3],
+        epoch: crate::Epoch,
+    ) -> Result<()> {
+        let [left_before, right_before, left_after] = batches;
+        let left = harness.inputs.get_mut("left").unwrap();
+        left.send(StreamMessage::data(left_before)).await?;
+        left.send(StreamMessage::barrier(epoch)).await?;
+        left.send(StreamMessage::data(left_after)).await?;
+        tokio::task::yield_now().await;
+        let right = harness.inputs.get_mut("right").unwrap();
+        right.send(StreamMessage::data(right_before)).await?;
+        right.send(StreamMessage::barrier(epoch)).await
+    }
+
+    async fn receive_benchmark_alignment_ack(
+        checkpoint: &mut mpsc::Receiver<OperatorCheckpointAck>,
+    ) -> Result<OperatorCheckpointAck> {
+        checkpoint
+            .recv()
+            .await
+            .ok_or_else(|| CalcFlowError::Internal {
+                message: "benchmark alignment omitted its checkpoint acknowledgement".into(),
+            })
+    }
+
+    async fn collect_benchmark_alignment_output(
+        output: &mut crate::EdgeReceiver,
+        epoch: crate::Epoch,
+    ) -> Result<(usize, usize)> {
+        let mut data_before_barrier = 0;
+        let mut barriers = 0;
+        loop {
+            let message = output
+                .recv()
+                .await?
+                .ok_or_else(|| CalcFlowError::Internal {
+                    message: "benchmark alignment output closed before its barrier".into(),
+                })?;
+            if message.as_barrier() == Some(epoch) {
+                barriers += 1;
+                break;
+            }
+            if message.as_data().is_some() {
+                data_before_barrier += 1;
+            }
+        }
+        Ok((data_before_barrier, barriers))
+    }
+
+    async fn finish_benchmark_alignment_harness(harness: &mut Harness) -> Result<()> {
+        harness.cancellation.cancel();
+        let report = harness.supervisor.join_all().await;
+        if let Some(failure) = report.errors.first() {
+            return Err(CalcFlowError::Internal {
+                message: format!("benchmark alignment task failed: {}", failure.error),
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) async fn prepare_benchmark_alignment_fixture(
         operator: Box<dyn StreamOperator>,
         transaction: Option<Arc<crate::state::ManifestTransaction>>,
@@ -1686,47 +1748,11 @@ pub(super) mod tests {
     impl BenchmarkAlignmentFixture {
         pub(crate) async fn measure(mut self) -> Result<BenchmarkAlignmentReport> {
             let epoch = crate::Epoch::INITIAL;
-            let [left_before, right_before, left_after] = self.batches;
-            let left = self.harness.inputs.get_mut("left").unwrap();
-            left.send(StreamMessage::data(left_before)).await?;
-            left.send(StreamMessage::barrier(epoch)).await?;
-            left.send(StreamMessage::data(left_after)).await?;
-            tokio::task::yield_now().await;
-            let right = self.harness.inputs.get_mut("right").unwrap();
-            right.send(StreamMessage::data(right_before)).await?;
-            right.send(StreamMessage::barrier(epoch)).await?;
-
-            let acknowledgement =
-                self.checkpoint
-                    .recv()
-                    .await
-                    .ok_or_else(|| CalcFlowError::Internal {
-                        message: "benchmark alignment omitted its checkpoint acknowledgement"
-                            .into(),
-                    })?;
-            let mut data_before_barrier = 0;
-            let mut barriers = 0;
-            loop {
-                let message = self.harness.outputs[0].recv().await?.ok_or_else(|| {
-                    CalcFlowError::Internal {
-                        message: "benchmark alignment output closed before its barrier".into(),
-                    }
-                })?;
-                if message.as_barrier() == Some(epoch) {
-                    barriers += 1;
-                    break;
-                }
-                if message.as_data().is_some() {
-                    data_before_barrier += 1;
-                }
-            }
-            self.harness.cancellation.cancel();
-            let report = self.harness.supervisor.join_all().await;
-            if let Some(failure) = report.errors.first() {
-                return Err(CalcFlowError::Internal {
-                    message: format!("benchmark alignment task failed: {}", failure.error),
-                });
-            }
+            send_benchmark_alignment_inputs(&mut self.harness, self.batches, epoch).await?;
+            let acknowledgement = receive_benchmark_alignment_ack(&mut self.checkpoint).await?;
+            let (data_before_barrier, barriers) =
+                collect_benchmark_alignment_output(&mut self.harness.outputs[0], epoch).await?;
+            finish_benchmark_alignment_harness(&mut self.harness).await?;
             Ok(BenchmarkAlignmentReport {
                 data_before_barrier,
                 state_segments: acknowledgement.state.segments.len(),

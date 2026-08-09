@@ -756,42 +756,16 @@ def _pairing(
 def evaluate_common_case(
     runs: Sequence[dict[str, object]], *, host_stable: bool = True
 ) -> dict[str, object]:
-    if len(runs) != len(RUN_ORDER):
-        raise ValueError("common benchmark requires exactly B1, C1, B2, C2")
-    validated = [
-        _validated_run(run, label) for run, label in zip(runs, RUN_ORDER, strict=True)
-    ]
-    baseline_runs = [validated[0], validated[2]]
-    candidate_runs = [validated[1], validated[3]]
-    baseline_medians = [float(run["median_ns"]) for run in baseline_runs]
-    candidate_medians = [float(run["median_ns"]) for run in candidate_runs]
-    baseline_minimum = min(baseline_medians)
-    candidate_minimum = min(candidate_medians)
-    candidate_min_regression = _regression_percent(baseline_minimum, candidate_minimum)
-    baseline_spread = _regression_percent(min(baseline_medians), max(baseline_medians))
-    candidate_spread = _regression_percent(
-        min(candidate_medians), max(candidate_medians)
-    )
-    same_ref_spread = max(baseline_spread, candidate_spread)
+    validated = _validated_common_runs(runs)
+    statistics = _common_case_statistics(validated)
     pairings = [
         _pairing(validated[0], validated[1]),
         _pairing(validated[2], validated[3]),
     ]
-    sustained = all(
-        float(pairing["regression_percent"]) > REGRESSION_THRESHOLD_PERCENT
-        for pairing in pairings
-    )
+    sustained, confidently_above, confidently_below = _common_pairing_evidence(pairings)
+    candidate_min_regression = statistics["candidate_min_regression_percent"]
+    same_ref_spread = statistics["maximum_same_ref_spread_percent"]
     exceeds_noise = candidate_min_regression > 2.0 * same_ref_spread
-    confidently_above = all(
-        float(pairing["regression_confidence_interval_percent"][0])
-        > REGRESSION_THRESHOLD_PERCENT
-        for pairing in pairings
-    )
-    confidently_below = all(
-        float(pairing["regression_confidence_interval_percent"][1])
-        <= REGRESSION_THRESHOLD_PERCENT
-        for pairing in pairings
-    )
     decision = _common_decision(
         candidate_min_regression,
         exceeds_noise=exceeds_noise,
@@ -804,18 +778,66 @@ def evaluate_common_case(
     return {
         "case": COMMON_CASE,
         "threshold_percent": REGRESSION_THRESHOLD_PERCENT,
-        "baseline_min_median_ns": baseline_minimum,
-        "candidate_min_median_ns": candidate_minimum,
-        "candidate_min_regression_percent": candidate_min_regression,
-        "baseline_same_ref_spread_percent": baseline_spread,
-        "candidate_same_ref_spread_percent": candidate_spread,
-        "maximum_same_ref_spread_percent": same_ref_spread,
+        **statistics,
         "exceeds_twice_baseline_spread": exceeds_noise,
         "sustained_in_both_pairings": sustained,
         "pairings": pairings,
         "host_stable": host_stable,
         "decision": decision,
     }
+
+
+def _validated_common_runs(
+    runs: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    if len(runs) != len(RUN_ORDER):
+        raise ValueError("common benchmark requires exactly B1, C1, B2, C2")
+    return [
+        _validated_run(run, label) for run, label in zip(runs, RUN_ORDER, strict=True)
+    ]
+
+
+def _common_case_statistics(
+    runs: Sequence[dict[str, object]],
+) -> dict[str, float]:
+    baseline_medians = [float(runs[index]["median_ns"]) for index in (0, 2)]
+    candidate_medians = [float(runs[index]["median_ns"]) for index in (1, 3)]
+    baseline_minimum = min(baseline_medians)
+    candidate_minimum = min(candidate_medians)
+    baseline_spread = _regression_percent(min(baseline_medians), max(baseline_medians))
+    candidate_spread = _regression_percent(
+        min(candidate_medians), max(candidate_medians)
+    )
+    return {
+        "baseline_min_median_ns": baseline_minimum,
+        "candidate_min_median_ns": candidate_minimum,
+        "candidate_min_regression_percent": _regression_percent(
+            baseline_minimum, candidate_minimum
+        ),
+        "baseline_same_ref_spread_percent": baseline_spread,
+        "candidate_same_ref_spread_percent": candidate_spread,
+        "maximum_same_ref_spread_percent": max(baseline_spread, candidate_spread),
+    }
+
+
+def _common_pairing_evidence(
+    pairings: Sequence[dict[str, object]],
+) -> tuple[bool, bool, bool]:
+    sustained = all(
+        float(pairing["regression_percent"]) > REGRESSION_THRESHOLD_PERCENT
+        for pairing in pairings
+    )
+    confidently_above = all(
+        float(pairing["regression_confidence_interval_percent"][0])
+        > REGRESSION_THRESHOLD_PERCENT
+        for pairing in pairings
+    )
+    confidently_below = all(
+        float(pairing["regression_confidence_interval_percent"][1])
+        <= REGRESSION_THRESHOLD_PERCENT
+        for pairing in pairings
+    )
+    return sustained, confidently_above, confidently_below
 
 
 def _common_decision(
@@ -841,6 +863,24 @@ def _common_decision(
 def evaluate_private_repeats(
     reports: Sequence[dict[str, object]], *, host_stable: bool
 ) -> dict[str, object]:
+    executable_sha256, measurements = _validated_private_repeat_inputs(reports)
+    cases = _private_repeat_case_rows(measurements)
+    maximum_spread = max(float(case["same_ref_spread_percent"]) for case in cases)
+    stable = host_stable and maximum_spread <= MAX_PRIVATE_REPEAT_SPREAD_PERCENT
+    return {
+        "decision": "absolute_only",
+        "evidence_quality": "stable" if stable else "inconclusive",
+        "host_stable": host_stable,
+        "maximum_same_ref_spread_percent": maximum_spread,
+        "spread_limit_percent": MAX_PRIVATE_REPEAT_SPREAD_PERCENT,
+        "executable_sha256": executable_sha256,
+        "cases": cases,
+    }
+
+
+def _validated_private_repeat_inputs(
+    reports: Sequence[dict[str, object]],
+) -> tuple[str, list[dict[str, float]]]:
     if len(reports) != 2 or tuple(report.get("label") for report in reports) != (
         PRIVATE_RUN_ORDER
     ):
@@ -848,7 +888,14 @@ def evaluate_private_repeats(
     executable_hashes = {_private_executable_hash(report) for report in reports}
     if len(executable_hashes) != 1:
         raise ValueError("same-ref private executables must be byte-identical")
-    measurements = [_private_medians(report) for report in reports]
+    return next(iter(executable_hashes)), [
+        _private_medians(report) for report in reports
+    ]
+
+
+def _private_repeat_case_rows(
+    measurements: Sequence[dict[str, float]],
+) -> list[dict[str, object]]:
     cases = []
     for case in M5_ABSOLUTE_CASES:
         first = measurements[0][case]
@@ -862,17 +909,7 @@ def evaluate_private_repeats(
                 "decision": "absolute_only",
             }
         )
-    maximum_spread = max(float(case["same_ref_spread_percent"]) for case in cases)
-    stable = host_stable and maximum_spread <= MAX_PRIVATE_REPEAT_SPREAD_PERCENT
-    return {
-        "decision": "absolute_only",
-        "evidence_quality": "stable" if stable else "inconclusive",
-        "host_stable": host_stable,
-        "maximum_same_ref_spread_percent": maximum_spread,
-        "spread_limit_percent": MAX_PRIVATE_REPEAT_SPREAD_PERCENT,
-        "executable_sha256": next(iter(executable_hashes)),
-        "cases": cases,
-    }
+    return cases
 
 
 def _private_executable_hash(report: dict[str, object]) -> str:
@@ -1185,36 +1222,56 @@ def _execution_context() -> dict[str, object]:
 def host_stability(
     before: dict[str, object], after: dict[str, object]
 ) -> dict[str, object]:
-    reasons = []
-    for field in ("toolchain_sha256", "machine_sha256", "environment_sha256"):
-        if before.get(field) != after.get(field):
-            reasons.append(f"{field} changed during the benchmark matrix")
-    machine = before.get("machine")
-    if not isinstance(machine, dict):
-        reasons.append("machine fingerprint is missing")
-    else:
-        if machine.get("wsl") is True:
-            reasons.append("WSL host cannot yield a confident pass")
-        virtualization = str(machine.get("virtualization", ""))
-        if (
-            virtualization
-            and virtualization != "none"
-            and not virtualization.startswith("unavailable:")
-        ):
-            reasons.append(f"virtualized host reported {virtualization!r}")
-        governors = machine.get("governors")
-        if not isinstance(governors, dict) or not governors:
-            reasons.append("CPU governor evidence is unavailable")
-        elif set(governors.values()) != {"performance"}:
-            reasons.append("CPU governors are not uniformly performance")
-        if machine.get("power_profile") != "performance":
-            reasons.append("power profile is not performance")
+    reasons = _context_drift_reasons(before, after)
+    reasons.extend(_machine_stability_reasons(before.get("machine")))
     return {
         "stable": not reasons,
         "reasons": reasons,
         "before_hash": _canonical_hash(before),
         "after_hash": _canonical_hash(after),
     }
+
+
+def _context_drift_reasons(
+    before: dict[str, object], after: dict[str, object]
+) -> list[str]:
+    reasons = []
+    for field in ("toolchain_sha256", "machine_sha256", "environment_sha256"):
+        if before.get(field) != after.get(field):
+            reasons.append(f"{field} changed during the benchmark matrix")
+    return reasons
+
+
+def _machine_stability_reasons(machine: object) -> list[str]:
+    if not isinstance(machine, dict):
+        return ["machine fingerprint is missing"]
+    reasons = (
+        ["WSL host cannot yield a confident pass"] if machine.get("wsl") is True else []
+    )
+    reasons.extend(_virtualization_stability_reasons(machine))
+    reasons.extend(_governor_stability_reasons(machine.get("governors")))
+    if machine.get("power_profile") != "performance":
+        reasons.append("power profile is not performance")
+    return reasons
+
+
+def _virtualization_stability_reasons(machine: dict[str, object]) -> list[str]:
+    virtualization = str(machine.get("virtualization", ""))
+    if (
+        virtualization
+        and virtualization != "none"
+        and not virtualization.startswith("unavailable:")
+    ):
+        return [f"virtualized host reported {virtualization!r}"]
+    return []
+
+
+def _governor_stability_reasons(governors: object) -> list[str]:
+    if not isinstance(governors, dict) or not governors:
+        return ["CPU governor evidence is unavailable"]
+    if set(governors.values()) != {"performance"}:
+        return ["CPU governors are not uniformly performance"]
+    return []
 
 
 def validate_execution_context(context: dict[str, object]) -> None:
@@ -1827,26 +1884,42 @@ def _private_report_artifacts(
     report: dict[str, object],
     target_root: Path,
 ) -> list[Path]:
+    executable, measurements = _private_report_inventory(report)
+    artifacts = [report_path, Path(f"{report_path}.sha256"), executable]
+    for measurement in measurements:
+        artifacts.extend(_private_measurement_artifacts(measurement, target_root))
+    return artifacts
+
+
+def _private_report_inventory(
+    report: dict[str, object],
+) -> tuple[Path, list[object]]:
     provenance = report.get("provenance")
     measurements = report.get("measurements")
     if not isinstance(provenance, dict) or not isinstance(measurements, list):
         raise ValueError("private report artifact inventory is incomplete")
-    executable = Path(str(provenance.get("executable")))
-    artifacts = [report_path, Path(f"{report_path}.sha256"), executable]
-    for measurement in measurements:
-        if not isinstance(measurement, dict):
-            raise ValueError("private report measurement artifact is invalid")
-        references = measurement.get("artifacts")
-        if not isinstance(references, dict):
-            raise ValueError("private report measurement artifacts are missing")
-        for name in ("sample", "estimates"):
-            artifact = references.get(name)
-            if not isinstance(artifact, dict) or not isinstance(
-                artifact.get("path"), str
-            ):
-                raise ValueError(f"private {name} artifact path is missing")
-            artifacts.append(target_root / str(artifact["path"]))
-    return artifacts
+    return Path(str(provenance.get("executable"))), measurements
+
+
+def _private_measurement_artifacts(
+    measurement: object, target_root: Path
+) -> list[Path]:
+    if not isinstance(measurement, dict):
+        raise ValueError("private report measurement artifact is invalid")
+    references = measurement.get("artifacts")
+    if not isinstance(references, dict):
+        raise ValueError("private report measurement artifacts are missing")
+    return [
+        target_root / _private_artifact_path(references, name)
+        for name in ("sample", "estimates")
+    ]
+
+
+def _private_artifact_path(references: dict[str, object], name: str) -> str:
+    artifact = references.get(name)
+    if not isinstance(artifact, dict) or not isinstance(artifact.get("path"), str):
+        raise ValueError(f"private {name} artifact path is missing")
+    return str(artifact["path"])
 
 
 def _valid_run_id(run_id: str) -> bool:
@@ -2044,14 +2117,7 @@ def _validate_recorded_decisions(
     *,
     stable: bool,
 ) -> None:
-    shared = report.get("shared_edge_result")
-    private = report.get("m5_private_absolute")
-    if not isinstance(shared, dict) or not isinstance(private, dict):
-        raise ValueError("benchmark scoped results are missing")
-    common_runs = shared.get("runs")
-    private_runs = private.get("runs")
-    if not isinstance(common_runs, list) or not isinstance(private_runs, list):
-        raise ValueError("benchmark run evidence is missing")
+    shared, private, common_runs, private_runs = _recorded_run_evidence(report)
     _validate_run_roots(output_root, common_runs, private_runs)
     _validate_private_matrix_provenance(private_runs, candidate)
     validate_matrix_provenance(
@@ -2061,9 +2127,46 @@ def _validate_recorded_decisions(
         candidate_commit=candidate.commit,
         candidate_tree=candidate.tree,
     )
+    _validate_shared_edge_decision(shared, common_runs, stable=stable)
+    _validate_private_decisions(private, private_runs, stable=stable)
+
+
+def _recorded_run_evidence(
+    report: dict[str, object],
+) -> tuple[
+    dict[str, object],
+    dict[str, object],
+    list[dict[str, object]],
+    list[dict[str, object]],
+]:
+    shared = report.get("shared_edge_result")
+    private = report.get("m5_private_absolute")
+    if not isinstance(shared, dict) or not isinstance(private, dict):
+        raise ValueError("benchmark scoped results are missing")
+    common_runs = shared.get("runs")
+    private_runs = private.get("runs")
+    if not isinstance(common_runs, list) or not isinstance(private_runs, list):
+        raise ValueError("benchmark run evidence is missing")
+    return shared, private, common_runs, private_runs
+
+
+def _validate_shared_edge_decision(
+    shared: dict[str, object],
+    common_runs: Sequence[dict[str, object]],
+    *,
+    stable: bool,
+) -> None:
     expected_shared = evaluate_common_case(common_runs, host_stable=stable)
     if any(shared.get(key) != value for key, value in expected_shared.items()):
         raise ValueError("shared edge decision does not match run evidence")
+
+
+def _validate_private_decisions(
+    private: dict[str, object],
+    private_runs: Sequence[dict[str, object]],
+    *,
+    stable: bool,
+) -> None:
     repeatability = evaluate_private_repeats(private_runs, host_stable=stable)
     if private.get("repeatability") != repeatability:
         raise ValueError("private repeatability does not match run evidence")
@@ -2096,19 +2199,31 @@ def _validate_run_roots(
 def _validate_private_matrix_provenance(
     runs: Sequence[dict[str, object]], candidate: RefSnapshot
 ) -> None:
+    _validate_private_run_order(runs)
+    for run in runs:
+        _validate_private_run_identity(run, candidate)
+    _validate_private_shared_hashes(runs)
+
+
+def _validate_private_run_order(runs: Sequence[dict[str, object]]) -> None:
     if len(runs) != 2 or tuple(run.get("label") for run in runs) != PRIVATE_RUN_ORDER:
         raise ValueError(f"private benchmark run order must be {PRIVATE_RUN_ORDER}")
-    for run in runs:
-        provenance = run.get("provenance")
-        if (
-            run.get("commit") != candidate.commit
-            or not isinstance(provenance, dict)
-            or provenance.get("tree") != candidate.tree
-            or run.get("git_status_short") != ""
-        ):
-            raise ValueError(
-                "private benchmark run does not match its clean candidate ref"
-            )
+
+
+def _validate_private_run_identity(
+    run: dict[str, object], candidate: RefSnapshot
+) -> None:
+    provenance = run.get("provenance")
+    if (
+        run.get("commit") != candidate.commit
+        or not isinstance(provenance, dict)
+        or provenance.get("tree") != candidate.tree
+        or run.get("git_status_short") != ""
+    ):
+        raise ValueError("private benchmark run does not match its clean candidate ref")
+
+
+def _validate_private_shared_hashes(runs: Sequence[dict[str, object]]) -> None:
     for field in (
         "source_cargo_lock_sha256",
         "dependency_graph_sha256",
