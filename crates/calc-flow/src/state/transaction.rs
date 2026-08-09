@@ -276,6 +276,14 @@ impl ManifestTransaction {
         #[cfg(test)]
         self.settle_operation_hook(ManifestOperationPoint::Publish, cancellation)
             .await?;
+        self.publish_locked(prepared, cancellation).await
+    }
+
+    async fn publish_locked(
+        &self,
+        prepared: PreparedEpochManifest,
+        cancellation: &CancellationToken,
+    ) -> Result<ManifestPublication> {
         self.stage_prepared_segments(&prepared.staged_segments, cancellation)
             .await?;
         self.validate_prepared_segments(&prepared.staged_segments, cancellation)
@@ -391,10 +399,45 @@ impl ManifestTransaction {
         #[cfg(test)]
         self.settle_operation_hook(ManifestOperationPoint::Stage, cancellation)
             .await?;
+        self.stage_operator_state_locked(operator_id, epoch, snapshot, cancellation)
+            .await
+    }
+
+    async fn stage_operator_state_locked(
+        &self,
+        operator_id: &str,
+        epoch: Epoch,
+        snapshot: OperatorStateSnapshot,
+        cancellation: &CancellationToken,
+    ) -> Result<StagedOperatorState> {
+        let (staged, unpublished) = self
+            .collect_staged_operator_segments(operator_id, epoch, &snapshot.segments, cancellation)
+            .await?;
+        self.validate_staged_segments(&unpublished, cancellation)
+            .await?;
+        self.publish_staged_segments(&unpublished, cancellation)
+            .await?;
+        #[cfg(test)]
+        if !staged.is_empty() {
+            self.inject_fault(ManifestTransactionFaultPoint::StateStage)?;
+        }
+        Ok(StagedOperatorState {
+            inline_metadata: snapshot.inline_metadata,
+            segments: staged,
+        })
+    }
+
+    async fn collect_staged_operator_segments(
+        &self,
+        operator_id: &str,
+        epoch: Epoch,
+        segments: &BTreeMap<String, Vec<u8>>,
+        cancellation: &CancellationToken,
+    ) -> Result<(Vec<StateHandle>, Vec<StateHandle>)> {
         let operator_hash = digest(operator_id);
-        let mut staged = Vec::with_capacity(snapshot.segments.len());
-        let mut unpublished = Vec::with_capacity(snapshot.segments.len());
-        for (segment_id, bytes) in snapshot.segments {
+        let mut staged = Vec::with_capacity(segments.len());
+        let mut unpublished = Vec::with_capacity(segments.len());
+        for (segment_id, bytes) in segments {
             let (handle, needs_publication) = self
                 .stage_operator_segment(
                     operator_id,
@@ -410,18 +453,7 @@ impl ManifestTransaction {
             }
             staged.push(handle);
         }
-        self.validate_staged_segments(&unpublished, cancellation)
-            .await?;
-        self.publish_staged_segments(&unpublished, cancellation)
-            .await?;
-        #[cfg(test)]
-        if !staged.is_empty() {
-            self.inject_fault(ManifestTransactionFaultPoint::StateStage)?;
-        }
-        Ok(StagedOperatorState {
-            inline_metadata: snapshot.inline_metadata,
-            segments: staged,
-        })
+        Ok((staged, unpublished))
     }
 
     async fn stage_operator_segment(
@@ -429,11 +461,11 @@ impl ManifestTransaction {
         operator_id: &str,
         epoch: Epoch,
         operator_hash: &str,
-        segment_id: String,
-        bytes: Vec<u8>,
+        segment_id: &str,
+        bytes: &[u8],
         cancellation: &CancellationToken,
     ) -> Result<(StateHandle, bool)> {
-        let segment_hash = digest(&segment_id);
+        let segment_hash = digest(segment_id);
         let relative_path = format!(
             "committed/{}/{operator_hash}/{}-{segment_hash}.segment",
             self.lineage_hash,
@@ -442,13 +474,13 @@ impl ManifestTransaction {
         let handle = StateHandle::new(
             operator_id,
             epoch,
-            &segment_id,
+            segment_id,
             &relative_path,
             u64::try_from(bytes.len()).map_err(|_| CalcFlowError::InvalidArgument {
                 field: format!("operators.{operator_id}.segments.{segment_id}"),
                 message: "segment byte length does not fit u64".into(),
             })?,
-            &digest(&bytes),
+            &digest(bytes),
         )?;
         match owner_settled(
             cancellation,
@@ -467,7 +499,7 @@ impl ManifestTransaction {
                 owner_settled(
                     cancellation,
                     "state-stage-write",
-                    self.lineage.stage_segment(&handle, &bytes),
+                    self.lineage.stage_segment(&handle, bytes),
                 )
                 .await?;
                 Ok((handle, true))
@@ -621,29 +653,26 @@ impl ManifestTransaction {
         #[cfg(test)]
         self.settle_operation_hook(ManifestOperationPoint::Retain, cancellation)
             .await?;
+        self.retain_locked(identity, in_flight, cancellation).await
+    }
+
+    async fn retain_locked(
+        &self,
+        identity: &PreparedManifestIdentity,
+        in_flight: Option<&CheckpointManifest>,
+        cancellation: &CancellationToken,
+    ) -> Result<RetentionReport> {
         let root = self.manifest_root.clone();
         let candidates = manifest_candidates(root, "manifest-retain-list", cancellation).await?;
-        let mut manifests = Vec::with_capacity(candidates.len());
-        for candidate in candidates {
-            let manifest = self
-                .load_candidate_manifest(&candidate, identity, "manifest-retain", cancellation)
-                .await?;
-            manifests.push((candidate, manifest));
-        }
-
-        let removed_manifests = manifests.len().saturating_sub(self.retained_epochs);
-        let retained = &manifests[removed_manifests..];
-        let mut retained_handles = BTreeSet::new();
-        for (_, manifest) in retained {
-            collect_manifest_handles(manifest, &mut retained_handles);
-        }
-        if let Some(manifest) = in_flight {
-            collect_manifest_handles(manifest, &mut retained_handles);
-        }
-        let removals = manifests[..removed_manifests]
-            .iter()
-            .map(|(candidate, _)| candidate.path.clone())
-            .collect::<Vec<_>>();
+        let manifests = self
+            .load_retention_manifests(candidates, identity, cancellation)
+            .await?;
+        let RetentionPlan {
+            retained_manifests,
+            removed_manifests,
+            retained_handles,
+            removals,
+        } = retention_plan(&manifests, self.retained_epochs, in_flight);
         let root = self.manifest_root.clone();
         owner_settled(
             cancellation,
@@ -651,7 +680,6 @@ impl ManifestTransaction {
             worker(move || remove_manifest_files(&root, &removals)),
         )
         .await?;
-        let retained_handles = retained_handles.into_iter().collect::<Vec<_>>();
         #[cfg(test)]
         self.inject_fault(ManifestTransactionFaultPoint::Compaction)?;
         let removed_orphan_segments = owner_settled(
@@ -661,10 +689,26 @@ impl ManifestTransaction {
         )
         .await?;
         Ok(RetentionReport {
-            retained_manifests: retained.len(),
+            retained_manifests,
             removed_manifests,
             removed_orphan_segments,
         })
+    }
+
+    async fn load_retention_manifests(
+        &self,
+        candidates: Vec<ManifestCandidate>,
+        identity: &PreparedManifestIdentity,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<(ManifestCandidate, CheckpointManifest)>> {
+        let mut manifests = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let manifest = self
+                .load_candidate_manifest(&candidate, identity, "manifest-retain", cancellation)
+                .await?;
+            manifests.push((candidate, manifest));
+        }
+        Ok(manifests)
     }
 
     async fn load_candidate_manifest(
@@ -700,6 +744,39 @@ impl ManifestTransaction {
     #[cfg(test)]
     fn manifest_path(&self, epoch: Epoch) -> PathBuf {
         manifest_path(&self.manifest_root, epoch)
+    }
+}
+
+struct RetentionPlan {
+    retained_manifests: usize,
+    removed_manifests: usize,
+    retained_handles: Vec<StateHandle>,
+    removals: Vec<PathBuf>,
+}
+
+fn retention_plan(
+    manifests: &[(ManifestCandidate, CheckpointManifest)],
+    retained_epochs: usize,
+    in_flight: Option<&CheckpointManifest>,
+) -> RetentionPlan {
+    let removed_manifests = manifests.len().saturating_sub(retained_epochs);
+    let retained = &manifests[removed_manifests..];
+    let mut retained_handles = BTreeSet::new();
+    for (_, manifest) in retained {
+        collect_manifest_handles(manifest, &mut retained_handles);
+    }
+    if let Some(manifest) = in_flight {
+        collect_manifest_handles(manifest, &mut retained_handles);
+    }
+    let removals = manifests[..removed_manifests]
+        .iter()
+        .map(|(candidate, _)| candidate.path.clone())
+        .collect();
+    RetentionPlan {
+        retained_manifests: retained.len(),
+        removed_manifests,
+        retained_handles: retained_handles.into_iter().collect(),
+        removals,
     }
 }
 
@@ -801,6 +878,13 @@ fn collect_manifest_handles(manifest: &CheckpointManifest, retained: &mut BTreeS
 
 fn list_manifest_candidates(root: &Path) -> Result<Vec<ManifestCandidate>> {
     validate_directory(root)?;
+    let (mut candidates, temporaries) = collect_manifest_entries(root)?;
+    remove_manifest_temporaries(root, &temporaries)?;
+    candidates.sort_by_key(|candidate| candidate.epoch);
+    Ok(candidates)
+}
+
+fn collect_manifest_entries(root: &Path) -> Result<(Vec<ManifestCandidate>, Vec<PathBuf>)> {
     let mut candidates = Vec::new();
     let mut temporaries = Vec::new();
     let mut entry_count = 0_usize;
@@ -812,9 +896,7 @@ fn list_manifest_candidates(root: &Path) -> Result<Vec<ManifestCandidate>> {
             ManifestDirectoryEntry::Temporary(path) => temporaries.push(path),
         }
     }
-    remove_manifest_temporaries(root, &temporaries)?;
-    candidates.sort_by_key(|candidate| candidate.epoch);
-    Ok(candidates)
+    Ok((candidates, temporaries))
 }
 
 enum ManifestDirectoryEntry {
@@ -943,6 +1025,31 @@ fn install_manifest(
     parent_synced: &mut bool,
     #[cfg(test)] fault_hook: Option<&ManifestTransactionFaultHook>,
 ) -> Result<()> {
+    let temporary = write_manifest_temporary(
+        root,
+        bytes,
+        #[cfg(test)]
+        fault_hook,
+    )?;
+    persist_manifest_temporary(
+        temporary,
+        destination,
+        #[cfg(test)]
+        fault_hook,
+    )?;
+    sync_manifest_root(
+        root,
+        parent_synced,
+        #[cfg(test)]
+        fault_hook,
+    )
+}
+
+fn write_manifest_temporary(
+    root: &Path,
+    bytes: &[u8],
+    #[cfg(test)] fault_hook: Option<&ManifestTransactionFaultHook>,
+) -> Result<tempfile::NamedTempFile> {
     let mut temporary =
         tempfile::NamedTempFile::new_in(root).map_err(|source| io_error(root, source))?;
     temporary
@@ -959,6 +1066,14 @@ fn install_manifest(
     if let Some(hook) = fault_hook {
         hook(ManifestTransactionFaultPoint::ManifestWrite)?;
     }
+    Ok(temporary)
+}
+
+fn persist_manifest_temporary(
+    temporary: tempfile::NamedTempFile,
+    destination: &Path,
+    #[cfg(test)] fault_hook: Option<&ManifestTransactionFaultHook>,
+) -> Result<()> {
     temporary
         .persist_noclobber(destination)
         .map_err(|error| io_error(destination, error.error))?;
@@ -966,6 +1081,14 @@ fn install_manifest(
     if let Some(hook) = fault_hook {
         hook(ManifestTransactionFaultPoint::ManifestRename)?;
     }
+    Ok(())
+}
+
+fn sync_manifest_root(
+    root: &Path,
+    parent_synced: &mut bool,
+    #[cfg(test)] fault_hook: Option<&ManifestTransactionFaultHook>,
+) -> Result<()> {
     sync_directory(root)?;
     *parent_synced = true;
     #[cfg(test)]

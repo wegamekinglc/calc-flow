@@ -596,6 +596,19 @@ impl OperatorBarrierAlignment {
 
 #[cfg(test)]
 pub(super) fn benchmark_two_input_alignment() -> Result<usize> {
+    let (ingresses, mut alignment, epoch) = benchmark_alignment_fixture()?;
+    benchmark_partial_alignment(&mut alignment, &ingresses, epoch)?;
+    benchmark_complete_alignment(&mut alignment, &ingresses, epoch)?;
+    alignment.complete(epoch, epoch.next()?);
+    Ok(2)
+}
+
+#[cfg(test)]
+fn benchmark_alignment_fixture() -> Result<(
+    BTreeMap<String, OperatorIngress>,
+    OperatorBarrierAlignment,
+    Epoch,
+)> {
     let budget = EdgeBudget {
         max_rows: 1,
         max_bytes: 1 << 20,
@@ -607,7 +620,16 @@ pub(super) fn benchmark_two_input_alignment() -> Result<usize> {
         ("right".into(), OperatorIngress::new("right".into(), right)),
     ]);
     let epoch = Epoch::INITIAL;
-    let mut alignment = OperatorBarrierAlignment::with_expected_epoch(Some(epoch));
+    let alignment = OperatorBarrierAlignment::with_expected_epoch(Some(epoch));
+    Ok((ingresses, alignment, epoch))
+}
+
+#[cfg(test)]
+fn benchmark_partial_alignment(
+    alignment: &mut OperatorBarrierAlignment,
+    ingresses: &BTreeMap<String, OperatorIngress>,
+    epoch: Epoch,
+) -> Result<()> {
     benchmark_alignment_check(
         alignment.accept("benchmark", "left", epoch)?,
         "private benchmark did not observe partial alignment",
@@ -620,6 +642,15 @@ pub(super) fn benchmark_two_input_alignment() -> Result<usize> {
         !alignment.ready(&ingresses),
         "private benchmark did not observe partial alignment",
     )?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn benchmark_complete_alignment(
+    alignment: &mut OperatorBarrierAlignment,
+    ingresses: &BTreeMap<String, OperatorIngress>,
+    epoch: Epoch,
+) -> Result<()> {
     benchmark_alignment_check(
         alignment.accept("benchmark", "right", epoch)?,
         "private benchmark did not observe complete alignment",
@@ -628,8 +659,7 @@ pub(super) fn benchmark_two_input_alignment() -> Result<usize> {
         alignment.ready(&ingresses),
         "private benchmark did not observe complete alignment",
     )?;
-    alignment.complete(epoch, epoch.next()?);
-    Ok(2)
+    Ok(())
 }
 
 #[cfg(test)]

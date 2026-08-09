@@ -576,7 +576,7 @@ def _run_command(
     argv = command.argv()
     print(f"+ (cd {shlex.quote(str(cwd))} && {shlex.join(argv)})", flush=True)
     # TrustedCommand accepts only a validated absolute executable and structured argv.
-    result = subprocess.run(  # noqa: E501  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use
+    result = subprocess.run(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use  # nosec B603  # noqa: E501
         # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args  # noqa: E501
         argv,
         cwd=cwd,
