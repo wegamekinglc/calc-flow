@@ -77,10 +77,10 @@ asynchronous and accepts only `Batch` values.
 ### Engine boundary
 
 `ExpressionOperator` and `SqlOperator` are built-in operators. Each implements
-both `BatchOperator` and `StreamOperator`; `UnionOperator` is stream-only. Add
-them through `PipelineBuilder::add_node`, which accepts a `NodeOperator`
-conversion from a boxed built-in, custom batch operator, or custom stream
-operator.
+both `BatchOperator` and `StreamOperator`; `UnionOperator` and
+`WindowAggregateOperator` are stream-only. Add them through
+`PipelineBuilder::add_node`, which accepts a `NodeOperator` conversion from a
+boxed built-in, custom batch operator, or custom stream operator.
 
 Every operator implements `OperatorMetadata`. Custom finite operators implement
 `BatchOperator`, whose `BatchOperatorContext` carries the run-scoped context;
@@ -170,27 +170,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Stream compilation and the M2 runtime
+## Stream compilation and the continuous runtime
 
 `PipelineBuilder::compile_stream` produces an immutable
 `StreamExecutionPlan`. The plan records stable edges, source and sink binding
 slots, stream requirements, and the semantic fingerprint, but it does not
 execute directly through a public source-driven runner.
 
-The crate-private M2 runtime consumes that plan after a whole-job preflight.
-It runs one task per source, compiled operator, and graph output; preserves
-per-ingress FIFO; forwards unary watermark/idle controls through the runtime;
-rejects unsupported multi-ingress controls and barriers before output; and
-converges source, operator, sink, queue, reservation, driver, and reaper state
-on every terminal path. Launch failure and cancellation close all resources
-whose lifecycle began, in stable order, with an independent five-second bound
-per resource. Cleanup failures and panics remain typed secondary diagnostics
-and do not replace the primary outcome.
+The crate-private source-driven runtime consumes that plan after a whole-job
+preflight. It runs one task per source, compiled operator, and graph output;
+preserves per-ingress FIFO; routes source control through a job-scoped progress
+driver; and converges source, operator, sink, queue, reservation, driver, and
+reaper state on every terminal path. The progress driver owns watermark
+generation, idle/reactivation, deterministic timers, and multi-ingress
+progress. Launch failure and cancellation close all resources whose lifecycle
+began, in stable order, with an independent five-second bound per resource.
+Cleanup failures and panics remain typed secondary diagnostics and do not
+replace the primary outcome.
+
+`WindowSpec` declares fixed UTC tumbling or hopping windows and ordered
+aggregates. `WindowAggregateOperator` is stream-only: it updates incremental
+state, classifies late row-window assignments against the current input
+watermark, emits closed windows in deterministic order, and snapshots retained
+Arrow IPC deltas. `StateBackend` opens an exclusive lineage session;
+`LocalStateBackend` provides immutable checksum-verified segment publication.
+`CheckpointManifest` is the strict bounded v3 state-manifest contract. Barrier
+coordination and durable manifest selection are not yet wired into the running
+job.
 
 This runtime is not exported. The existing public v2 `StreamingRunner` and
 `MicroBatchRunner` retain their signatures and formed-batch behavior. Public
-source-driven runner integration remains a separately reviewed post-M5 change.
-The sole public API item added by M2 is the non-exhaustive
+source-driven runner integration and durable restart are not available.
+Private task panics surface through the non-exhaustive
 `CalcFlowError::TaskPanicked { task_id, message }` variant.
 
 `edge_channel` retains its public signature and `EdgeBudget` retains the fields
@@ -287,9 +298,9 @@ schema with
 Public operations return `calc_flow::Result<T>`. `CalcFlowError` preserves
 invalid arguments/documents, compilation errors, execution/provider failures,
 checkpoint errors, I/O paths, cancellation, closed stream edges, and supervised
-task panics. Private M2 panic capture keeps `TaskPanicked.message` valid UTF-8
-and at most 1,024 bytes including its ellipsis; non-string panic payloads use a
-fixed message.
+task panics. Private runtime panic capture keeps `TaskPanicked.message` valid
+UTF-8 and at most 1,024 bytes including its ellipsis; non-string panic payloads
+use a fixed message.
 
 `ExecutionOptions` carries cancellation/deadline controls. Operators receive a
 `RunContext` and must check cancellation at safe work boundaries.
