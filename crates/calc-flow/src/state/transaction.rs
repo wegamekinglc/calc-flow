@@ -1724,6 +1724,59 @@ mod tests {
         );
     }
 
+    async fn run_cancellable_manifest_operation(
+        transaction: Arc<ManifestTransaction>,
+        point: ManifestOperationPoint,
+        cancellation: crate::CancellationToken,
+    ) -> crate::Result<()> {
+        match point {
+            ManifestOperationPoint::Open => unreachable!("open is tested separately"),
+            ManifestOperationPoint::Stage => transaction
+                .stage_operator_state_cancellable(
+                    "window",
+                    Epoch::INITIAL,
+                    OperatorStateSnapshot {
+                        inline_metadata: BTreeMap::new(),
+                        segments: BTreeMap::new(),
+                    },
+                    &cancellation,
+                )
+                .await
+                .map(|_| ()),
+            ManifestOperationPoint::Load => transaction
+                .load_operator_state_cancellable(
+                    "window",
+                    Epoch::INITIAL,
+                    &OperatorManifestEntry {
+                        progress: BTreeMap::new(),
+                        inline_metadata: BTreeMap::new(),
+                        segments: Vec::new(),
+                    },
+                    &cancellation,
+                )
+                .await
+                .map(|_| ()),
+            ManifestOperationPoint::Select => transaction
+                .select_latest_cancellable(&identity(), &cancellation)
+                .await
+                .map(|_| ()),
+            ManifestOperationPoint::Publish => transaction
+                .publish_cancellable(
+                    PreparedEpochManifest {
+                        manifest: manifest(Epoch::INITIAL),
+                        staged_segments: BTreeMap::new(),
+                    },
+                    &cancellation,
+                )
+                .await
+                .map(|_| ()),
+            ManifestOperationPoint::Retain => transaction
+                .retain_cancellable(&identity(), None, &cancellation)
+                .await
+                .map(|_| ()),
+        }
+    }
+
     #[tokio::test]
     async fn cancellation_settles_every_owned_transaction_operation_before_returning() {
         for point in [
@@ -1758,58 +1811,11 @@ mod tests {
                     })),
             );
             let cancellation = crate::CancellationToken::new();
-            let operation = {
-                let transaction = Arc::clone(&transaction);
-                let cancellation = cancellation.clone();
-                tokio::spawn(async move {
-                    match point {
-                        ManifestOperationPoint::Open => unreachable!("open is tested separately"),
-                        ManifestOperationPoint::Stage => transaction
-                            .stage_operator_state_cancellable(
-                                "window",
-                                Epoch::INITIAL,
-                                OperatorStateSnapshot {
-                                    inline_metadata: BTreeMap::new(),
-                                    segments: BTreeMap::new(),
-                                },
-                                &cancellation,
-                            )
-                            .await
-                            .map(|_| ()),
-                        ManifestOperationPoint::Load => transaction
-                            .load_operator_state_cancellable(
-                                "window",
-                                Epoch::INITIAL,
-                                &OperatorManifestEntry {
-                                    progress: BTreeMap::new(),
-                                    inline_metadata: BTreeMap::new(),
-                                    segments: Vec::new(),
-                                },
-                                &cancellation,
-                            )
-                            .await
-                            .map(|_| ()),
-                        ManifestOperationPoint::Select => transaction
-                            .select_latest_cancellable(&identity(), &cancellation)
-                            .await
-                            .map(|_| ()),
-                        ManifestOperationPoint::Publish => transaction
-                            .publish_cancellable(
-                                PreparedEpochManifest {
-                                    manifest: manifest(Epoch::INITIAL),
-                                    staged_segments: BTreeMap::new(),
-                                },
-                                &cancellation,
-                            )
-                            .await
-                            .map(|_| ()),
-                        ManifestOperationPoint::Retain => transaction
-                            .retain_cancellable(&identity(), None, &cancellation)
-                            .await
-                            .map(|_| ()),
-                    }
-                })
-            };
+            let operation = tokio::spawn(run_cancellable_manifest_operation(
+                Arc::clone(&transaction),
+                point,
+                cancellation.clone(),
+            ));
             tokio::task::spawn_blocking(move || entered_rx.recv().unwrap())
                 .await
                 .unwrap();

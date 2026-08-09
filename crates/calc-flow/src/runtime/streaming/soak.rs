@@ -1306,9 +1306,9 @@ impl CheckpointMatrixSink {
         }
         let mut visible = self.read_visible_epochs().await?;
         let epoch_key = epoch.as_u64().to_string();
-        if !visible.contains_key(&epoch_key) {
+        if let std::collections::btree_map::Entry::Vacant(entry) = visible.entry(epoch_key) {
             let records = self.prepared_records(epoch).await?;
-            visible.insert(epoch_key, records);
+            entry.insert(records);
             let bytes = serde_json::to_vec(&visible).map_err(|error| CalcFlowError::Internal {
                 message: format!("checkpoint matrix visible state encode failed: {error}"),
             })?;
@@ -1982,7 +1982,7 @@ fn median(values: &mut [f64]) -> f64 {
     values.sort_by(f64::total_cmp);
     let middle = values.len() / 2;
     if values.len().is_multiple_of(2) {
-        (values[middle - 1] + values[middle]) / 2.0
+        values[middle - 1].midpoint(values[middle])
     } else {
         values[middle]
     }
@@ -2006,6 +2006,33 @@ fn bootstrap_median_confidence_interval(samples: &[f64]) -> [f64; 2] {
     }
     medians.sort_by(f64::total_cmp);
     [medians[RESAMPLES / 40], medians[RESAMPLES * 39 / 40]]
+}
+
+fn private_benchmark_criterion_summary(
+    estimates: &serde_json::Value,
+) -> Result<(f64, [f64; 2], f64)> {
+    let median =
+        finite_positive_measurement(&estimates["median"]["point_estimate"], "Criterion median")?;
+    let lower = finite_positive_measurement(
+        &estimates["median"]["confidence_interval"]["lower_bound"],
+        "Criterion lower confidence bound",
+    )?;
+    let upper = finite_positive_measurement(
+        &estimates["median"]["confidence_interval"]["upper_bound"],
+        "Criterion upper confidence bound",
+    )?;
+    let confidence_level = estimates["median"]["confidence_interval"]["confidence_level"]
+        .as_f64()
+        .filter(|value| value.to_bits() == 0.95_f64.to_bits())
+        .ok_or_else(|| CalcFlowError::Internal {
+            message: "private benchmark Criterion confidence level must be exactly 0.95".into(),
+        })?;
+    if lower > median || median > upper {
+        return Err(CalcFlowError::Internal {
+            message: "private benchmark Criterion confidence interval is not ordered".into(),
+        });
+    }
+    Ok((median, [lower, upper], confidence_level))
 }
 
 fn private_benchmark_absolute_measurement(
@@ -2034,27 +2061,8 @@ fn private_benchmark_absolute_measurement(
                 estimates_path.display()
             ),
         })?;
-    let criterion_median =
-        finite_positive_measurement(&estimates["median"]["point_estimate"], "Criterion median")?;
-    let criterion_lower = finite_positive_measurement(
-        &estimates["median"]["confidence_interval"]["lower_bound"],
-        "Criterion lower confidence bound",
-    )?;
-    let criterion_upper = finite_positive_measurement(
-        &estimates["median"]["confidence_interval"]["upper_bound"],
-        "Criterion upper confidence bound",
-    )?;
-    let confidence_level = estimates["median"]["confidence_interval"]["confidence_level"]
-        .as_f64()
-        .filter(|value| value.to_bits() == 0.95_f64.to_bits())
-        .ok_or_else(|| CalcFlowError::Internal {
-            message: "private benchmark Criterion confidence level must be exactly 0.95".into(),
-        })?;
-    if criterion_lower > criterion_median || criterion_median > criterion_upper {
-        return Err(CalcFlowError::Internal {
-            message: "private benchmark Criterion confidence interval is not ordered".into(),
-        });
-    }
+    let (criterion_median, [criterion_lower, criterion_upper], confidence_level) =
+        private_benchmark_criterion_summary(&estimates)?;
     let sample: serde_json::Value =
         serde_json::from_slice(&sample_bytes).map_err(|error| CalcFlowError::Internal {
             message: format!(
