@@ -199,11 +199,6 @@ The frontend talks to the backend over the `/api/v2` REST contract only.
 - `MicroBatchRunner` and `StreamingRunner` deliver sinks before committing
   checkpoints, giving at-least-once delivery. `FileProjectStore` and
   `FileCheckpointStore` write bounded documents atomically under hashed names.
-- State sessions opened through `StateBackend` are exclusive to one lineage.
-  `LocalStateBackend` publishes immutable segments with checksum verification,
-  while `CheckpointManifest` defines the strict v3 state-manifest contract.
-  The private continuous runtime does not yet wire that manifest into durable
-  restart.
 - The canonical project format is a strict data-only `ProjectDocument` with
   `format_version: 2`. The Rust `ProjectSpec`, generated JSON Schema, Python
   `ProjectDocument`, FastAPI request models, and generated TypeScript contract
