@@ -147,22 +147,29 @@ def write_hashed_json(path: Path, payload: dict[str, object]) -> None:
 
 def load_hashed_json(path: Path) -> dict[str, object]:
     digest_path = Path(f"{path}.sha256")
-    if path.is_symlink() or not path.is_file():
-        raise ValueError(f"benchmark report must be a regular file: {path}")
-    if digest_path.is_symlink() or not digest_path.is_file():
-        raise ValueError(f"benchmark digest must be a regular file: {digest_path}")
+    _require_regular_file(path, "report")
+    _require_regular_file(digest_path, "digest")
     bytes_ = path.read_bytes()
     expected = digest_path.read_text(encoding="utf-8").strip()
-    if (
-        len(expected) != 64
-        or any(character not in "0123456789abcdef" for character in expected)
-        or hashlib.sha256(bytes_).hexdigest() != expected
-    ):
+    if not _matches_sha256(bytes_, expected):
         raise ValueError(f"benchmark report hash does not match: {path}")
     value = json.loads(bytes_)
     if not isinstance(value, dict):
         raise ValueError(f"benchmark report must be an object: {path}")
     return value
+
+
+def _require_regular_file(path: Path, kind: str) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"benchmark {kind} must be a regular file: {path}")
+
+
+def _matches_sha256(bytes_: bytes, expected: str) -> bool:
+    return (
+        len(expected) == 64
+        and all(character in "0123456789abcdef" for character in expected)
+        and hashlib.sha256(bytes_).hexdigest() == expected
+    )
 
 
 def _median(values: Sequence[float]) -> float:
@@ -218,6 +225,19 @@ def validate_common_run_report(
     harness_sha256: str,
 ) -> dict[str, object]:
     report = load_hashed_json(path)
+    _validate_common_run_identity(report, commit, tree, harness_sha256)
+    validated = _validated_run(report, label)
+    _validate_common_samples(report, validated)
+    _validate_reported_executable(report, "common benchmark", None)
+    return {
+        **validated,
+        "report_sha256": sha256_file(path),
+    }
+
+
+def _validate_common_run_identity(
+    report: dict[str, object], commit: str, tree: str, harness_sha256: str
+) -> None:
     if report.get("schema") != "calc-flow.m5-common-benchmark-run.v1":
         raise ValueError("common benchmark run schema is invalid")
     if report.get("source_commit") != commit or report.get("source_tree") != tree:
@@ -227,7 +247,11 @@ def validate_common_run_report(
     if report.get("harness_sha256") != harness_sha256:
         raise ValueError("common benchmark harness hash does not match frozen bytes")
     _full_sha256(report.get("workload_sha256"), "workload hash")
-    validated = _validated_run(report, label)
+
+
+def _validate_common_samples(
+    report: dict[str, object], validated: dict[str, object]
+) -> None:
     samples = report.get("raw_samples_ns")
     if not isinstance(samples, list):
         raise ValueError("common benchmark raw samples are missing")
@@ -240,23 +264,28 @@ def validate_common_run_report(
         raise ValueError(
             "common benchmark reported statistics do not match recomputed raw data"
         )
+
+
+def _validate_reported_executable(
+    report: dict[str, object], label: str, target_root: Path | None
+) -> Path:
     executable_value = report.get("executable")
     if not isinstance(executable_value, str):
-        raise ValueError("common benchmark executable path is missing")
+        raise ValueError(f"{label} executable path is missing")
     executable = Path(executable_value)
     if (
         not executable.is_absolute()
         or executable.is_symlink()
         or not executable.is_file()
     ):
-        raise ValueError("common benchmark executable path is invalid")
+        raise ValueError(f"{label} executable path is invalid")
+    canonical = executable.resolve()
+    if target_root is not None and not canonical.is_relative_to(target_root.resolve()):
+        raise ValueError(f"{label} executable escapes its target root")
     executable_hash = _full_sha256(report.get("executable_sha256"), "executable hash")
-    if sha256_file(executable) != executable_hash:
-        raise ValueError("common benchmark executable hash does not match")
-    return {
-        **validated,
-        "report_sha256": sha256_file(path),
-    }
+    if sha256_file(canonical) != executable_hash:
+        raise ValueError(f"{label} executable hash does not match")
+    return canonical
 
 
 def _full_git_oid(value: object, field: str) -> str:
@@ -304,20 +333,34 @@ def validate_matrix_provenance(
         (baseline_commit, baseline_tree),
         (candidate_commit, candidate_tree),
     )
-    for run, (commit, tree) in zip(runs, expected_refs, strict=True):
-        if run.get("source_commit") != commit or run.get("source_tree") != tree:
-            raise ValueError("common benchmark run does not match its declared ref")
-        if run.get("git_status_short") != "":
-            raise ValueError("common benchmark worktree was not clean")
-    for field, description in [
+    for run, expected in zip(runs, expected_refs, strict=True):
+        _validate_matrix_run_ref(run, expected)
+    _validate_distinct_run_fields(runs)
+    _validate_shared_run_hashes(runs)
+    _validate_distinct_executable_hashes(runs)
+
+
+def _validate_matrix_run_ref(run: dict[str, object], expected: tuple[str, str]) -> None:
+    commit, tree = expected
+    if run.get("source_commit") != commit or run.get("source_tree") != tree:
+        raise ValueError("common benchmark run does not match its declared ref")
+    if run.get("git_status_short") != "":
+        raise ValueError("common benchmark worktree was not clean")
+
+
+def _validate_distinct_run_fields(runs: Sequence[dict[str, object]]) -> None:
+    for field, description in (
         ("target_dir", "fresh target"),
         ("evidence_root", "fresh evidence root"),
         ("executable", "distinct executable path"),
-    ]:
+    ):
         values = [str(run.get(field)) for run in runs]
         if len(set(values)) != len(values):
             raise ValueError(f"every run requires a {description}")
-    for field in [
+
+
+def _validate_shared_run_hashes(runs: Sequence[dict[str, object]]) -> None:
+    for field in (
         "harness_sha256",
         "workload_sha256",
         "source_cargo_lock_sha256",
@@ -326,8 +369,11 @@ def validate_matrix_provenance(
         "toolchain_sha256",
         "machine_sha256",
         "environment_sha256",
-    ]:
+    ):
         _full_sha256(_one_value(runs, field), field)
+
+
+def _validate_distinct_executable_hashes(runs: Sequence[dict[str, object]]) -> None:
     baseline_executables = {
         _full_sha256(runs[index].get("executable_sha256"), "baseline executable hash")
         for index in (0, 2)
@@ -350,28 +396,40 @@ def _finite_positive(value: object, field: str) -> float:
 
 
 def _validated_run(run: dict[str, object], expected_label: str) -> dict[str, object]:
+    _validate_run_identity(run, expected_label)
+    confidence_level = _finite_positive(run.get("confidence_level"), "confidence level")
+    if confidence_level != 0.95:
+        raise ValueError("common benchmark confidence level must be exactly 0.95")
+    median = _finite_positive(run.get("median_ns"), "median")
+    lower, upper = _validated_interval(
+        run.get("median_confidence_interval_ns"), median, "common benchmark"
+    )
+    return {
+        **run,
+        "median_ns": median,
+        "median_confidence_interval_ns": [lower, upper],
+    }
+
+
+def _validate_run_identity(run: dict[str, object], expected_label: str) -> None:
     if run.get("label") != expected_label:
         raise ValueError(f"common benchmark run order must be {RUN_ORDER}")
     if run.get("case") != COMMON_CASE:
         raise ValueError("common benchmark case is incorrect")
     if run.get("sample_count") != COMMON_SAMPLE_COUNT:
         raise ValueError(f"common benchmark requires {COMMON_SAMPLE_COUNT} samples")
-    confidence_level = _finite_positive(run.get("confidence_level"), "confidence level")
-    if confidence_level != 0.95:
-        raise ValueError("common benchmark confidence level must be exactly 0.95")
-    median = _finite_positive(run.get("median_ns"), "median")
-    interval = run.get("median_confidence_interval_ns")
+
+
+def _validated_interval(
+    interval: object, median: float, label: str
+) -> tuple[float, float]:
     if not isinstance(interval, list) or len(interval) != 2:
-        raise ValueError("common benchmark confidence interval is invalid")
-    lower = _finite_positive(interval[0], "lower confidence bound")
-    upper = _finite_positive(interval[1], "upper confidence bound")
+        raise ValueError(f"{label} confidence interval is invalid")
+    lower = _finite_positive(interval[0], f"{label} lower confidence bound")
+    upper = _finite_positive(interval[1], f"{label} upper confidence bound")
     if lower > median or median > upper:
-        raise ValueError("common benchmark confidence interval is not ordered")
-    return {
-        **run,
-        "median_ns": median,
-        "median_confidence_interval_ns": [lower, upper],
-    }
+        raise ValueError(f"{label} confidence interval is not ordered")
+    return lower, upper
 
 
 def _regression_percent(baseline: float, candidate: float) -> float:
@@ -438,17 +496,13 @@ def evaluate_common_case(runs: Sequence[dict[str, object]]) -> dict[str, object]
         <= REGRESSION_THRESHOLD_PERCENT
         for pairing in pairings
     )
-    if (
-        candidate_min_regression > REGRESSION_THRESHOLD_PERCENT
-        and exceeds_noise
-        and sustained
-        and confidently_above
-    ):
-        decision = "regression"
-    elif candidate_min_regression <= REGRESSION_THRESHOLD_PERCENT and confidently_below:
-        decision = "pass"
-    else:
-        decision = "inconclusive"
+    decision = _common_decision(
+        candidate_min_regression,
+        exceeds_noise=exceeds_noise,
+        sustained=sustained,
+        confidently_above=confidently_above,
+        confidently_below=confidently_below,
+    )
     return {
         "case": COMMON_CASE,
         "threshold_percent": REGRESSION_THRESHOLD_PERCENT,
@@ -461,6 +515,26 @@ def evaluate_common_case(runs: Sequence[dict[str, object]]) -> dict[str, object]
         "pairings": pairings,
         "decision": decision,
     }
+
+
+def _common_decision(
+    candidate_min_regression: float,
+    *,
+    exceeds_noise: bool,
+    sustained: bool,
+    confidently_above: bool,
+    confidently_below: bool,
+) -> str:
+    if (
+        candidate_min_regression > REGRESSION_THRESHOLD_PERCENT
+        and exceeds_noise
+        and sustained
+        and confidently_above
+    ):
+        return "regression"
+    if candidate_min_regression <= REGRESSION_THRESHOLD_PERCENT and confidently_below:
+        return "pass"
+    return "inconclusive"
 
 
 def _trusted_system_executable(name: str) -> Path:
@@ -901,6 +975,15 @@ def validate_private_absolute_report(
     candidate: RefSnapshot,
 ) -> dict[str, object]:
     report = load_hashed_json(path)
+    _validate_private_report_header(report, candidate)
+    _validate_private_provenance(report, target_root, candidate)
+    _validate_private_measurements(report, target_root)
+    return {**report, "report_sha256": sha256_file(path)}
+
+
+def _validate_private_report_header(
+    report: dict[str, object], candidate: RefSnapshot
+) -> None:
     if report.get("schema") != "calc-flow.m5-checkpoint-absolute-benchmark.v1":
         raise ValueError("private absolute report schema is invalid")
     if report.get("commit") != candidate.commit:
@@ -912,6 +995,11 @@ def validate_private_absolute_report(
         raise ValueError("private absolute report makes a comparative claim")
     if report.get("absolute_cases") != list(M5_ABSOLUTE_CASES):
         raise ValueError("private absolute report case set is invalid")
+
+
+def _validate_private_provenance(
+    report: dict[str, object], target_root: Path, candidate: RefSnapshot
+) -> None:
     provenance = report.get("provenance")
     if not isinstance(provenance, dict):
         raise ValueError("private absolute provenance is missing")
@@ -927,60 +1015,55 @@ def validate_private_absolute_report(
     )
     if reported_build_identity != private_build_identity_hash(provenance):
         raise ValueError("private absolute build identity is invalid")
-    executable_value = provenance.get("executable")
-    if not isinstance(executable_value, str):
-        raise ValueError("private absolute executable path is missing")
-    executable = Path(executable_value)
-    if (
-        not executable.is_absolute()
-        or executable.is_symlink()
-        or not executable.is_file()
-    ):
-        raise ValueError("private absolute executable path is invalid")
-    canonical_target = target_root.resolve()
-    canonical_executable = executable.resolve()
-    if not canonical_executable.is_relative_to(canonical_target):
-        raise ValueError("private absolute executable escapes its target root")
-    expected_executable_hash = _full_sha256(
-        provenance.get("executable_sha256"), "private executable hash"
-    )
-    if sha256_file(canonical_executable) != expected_executable_hash:
-        raise ValueError("private absolute executable hash does not match")
+    _validate_reported_executable(provenance, "private absolute", target_root)
+
+
+def _validate_private_measurements(
+    report: dict[str, object], target_root: Path
+) -> None:
     measurements = report.get("measurements")
     if not isinstance(measurements, list) or len(measurements) != len(
         M5_ABSOLUTE_CASES
     ):
         raise ValueError("private absolute measurements are incomplete")
     for measurement, case in zip(measurements, M5_ABSOLUTE_CASES, strict=True):
-        if not isinstance(measurement, dict) or measurement.get("case") != case:
-            raise ValueError("private absolute measurement order is invalid")
-        if (
-            measurement.get("comparison") != "none"
-            or measurement.get("decision") != "absolute_only"
-        ):
-            raise ValueError("private absolute measurement makes a comparative claim")
-        if "baseline_median_ns" in measurement or "regression_percent" in measurement:
-            raise ValueError("private absolute measurement contains a fake baseline")
-        if measurement.get("sample_count") != PRIVATE_SAMPLE_COUNT:
-            raise ValueError("private absolute sample count is invalid")
-        if measurement.get("confidence_level") != 0.95:
-            raise ValueError("private absolute confidence level is invalid")
-        median = _finite_positive(measurement.get("median_ns"), "private median")
-        confidence = measurement.get("median_confidence_interval_ns")
-        if not isinstance(confidence, list) or len(confidence) != 2:
-            raise ValueError("private absolute confidence interval is invalid")
-        lower = _finite_positive(confidence[0], "private lower confidence bound")
-        upper = _finite_positive(confidence[1], "private upper confidence bound")
-        if lower > median or median > upper:
-            raise ValueError("private absolute confidence interval is not ordered")
-        artifacts = measurement.get("artifacts")
-        if not isinstance(artifacts, dict) or set(artifacts) != {"sample", "estimates"}:
-            raise ValueError("private absolute artifacts are incomplete")
-        for name in ("sample", "estimates"):
-            _validate_absolute_artifact(
-                artifacts.get(name), name=name, target_root=target_root
-            )
-    return {**report, "report_sha256": sha256_file(path)}
+        _validate_private_measurement(measurement, case, target_root)
+
+
+def _validate_private_measurement(
+    measurement: object, case: str, target_root: Path
+) -> None:
+    if not isinstance(measurement, dict) or measurement.get("case") != case:
+        raise ValueError("private absolute measurement order is invalid")
+    _validate_private_measurement_claim(measurement)
+    if measurement.get("sample_count") != PRIVATE_SAMPLE_COUNT:
+        raise ValueError("private absolute sample count is invalid")
+    if measurement.get("confidence_level") != 0.95:
+        raise ValueError("private absolute confidence level is invalid")
+    median = _finite_positive(measurement.get("median_ns"), "private median")
+    _validated_interval(
+        measurement.get("median_confidence_interval_ns"), median, "private absolute"
+    )
+    _validate_private_artifacts(measurement.get("artifacts"), target_root)
+
+
+def _validate_private_measurement_claim(measurement: dict[str, object]) -> None:
+    if (
+        measurement.get("comparison") != "none"
+        or measurement.get("decision") != "absolute_only"
+    ):
+        raise ValueError("private absolute measurement makes a comparative claim")
+    if "baseline_median_ns" in measurement or "regression_percent" in measurement:
+        raise ValueError("private absolute measurement contains a fake baseline")
+
+
+def _validate_private_artifacts(artifacts: object, target_root: Path) -> None:
+    if not isinstance(artifacts, dict) or set(artifacts) != {"sample", "estimates"}:
+        raise ValueError("private absolute artifacts are incomplete")
+    for name in ("sample", "estimates"):
+        _validate_absolute_artifact(
+            artifacts.get(name), name=name, target_root=target_root
+        )
 
 
 def private_run_environment(
