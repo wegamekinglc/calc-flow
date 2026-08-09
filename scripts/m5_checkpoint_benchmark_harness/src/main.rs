@@ -20,8 +20,6 @@ const ITERATIONS_PER_SAMPLE: usize = 20_000;
 const SOURCE_COMMIT: &str = env!("CALC_FLOW_M5_SOURCE_COMMIT");
 const SOURCE_TREE: &str = env!("CALC_FLOW_M5_SOURCE_TREE");
 const EXPECTED_HARNESS_SHA256: &str = env!("CALC_FLOW_M5_HARNESS_SHA256");
-const EXPECTED_EXECUTABLE: &str = env!("CALC_FLOW_M5_COMMON_EXECUTABLE");
-const RUN_LABEL: &str = env!("CALC_FLOW_M5_RUN_LABEL");
 const WORKLOAD_CONTRACT: &str = "edge_channel;rows=128;budget_rows=1024;budget_bytes=1048576;warmup=5000;iterations_per_sample=20000;samples=30";
 
 #[derive(Debug)]
@@ -110,29 +108,40 @@ fn harness_hash() -> String {
 fn create_report(path: &Path, bytes: &[u8]) {
     assert!(path.is_absolute(), "output path must be absolute");
     let parent = path.parent().unwrap();
-    let mut report = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(path)
-        .unwrap();
-    report.write_all(bytes).unwrap();
-    report.sync_all().unwrap();
+    publish_new(path, bytes);
     let digest_path = PathBuf::from(format!("{}.sha256", path.display()));
-    let mut digest = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(digest_path)
-        .unwrap();
-    digest
-        .write_all(format!("{}\n", sha256(bytes)).as_bytes())
-        .unwrap();
-    digest.sync_all().unwrap();
+    publish_new(&digest_path, format!("{}\n", sha256(bytes)).as_bytes());
     File::open(parent).unwrap().sync_all().unwrap();
 }
 
-fn validate_executable_identity(declared: &Path, expected: &Path) -> Result<PathBuf, &'static str> {
-    if declared != expected {
-        return Err("declared benchmark executable does not match the build identity");
+fn publish_new(path: &Path, bytes: &[u8]) {
+    let temporary = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        path.file_name().unwrap().to_string_lossy(),
+        std::process::id()
+    ));
+    let mut stream = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .unwrap();
+    stream.write_all(bytes).unwrap();
+    stream.sync_all().unwrap();
+    drop(stream);
+    std::fs::hard_link(&temporary, path).unwrap();
+    std::fs::remove_file(temporary).unwrap();
+}
+
+fn validate_executable_identity(
+    declared: &Path,
+    expected_sha256: &str,
+) -> Result<PathBuf, &'static str> {
+    if !declared.is_absolute() || declared.is_symlink() || !declared.is_file() {
+        return Err("declared benchmark executable is not an absolute regular file");
+    }
+    let bytes = std::fs::read(declared).map_err(|_| "benchmark executable is unreadable")?;
+    if sha256(bytes) != expected_sha256 {
+        return Err("declared benchmark executable does not match the runtime identity");
     }
     Ok(declared.to_path_buf())
 }
@@ -141,15 +150,20 @@ fn executable_identity() -> PathBuf {
     let declared = PathBuf::from(std::env::var_os("CALC_FLOW_M5_COMMON_EXECUTABLE").unwrap())
         .canonicalize()
         .unwrap();
-    let expected = PathBuf::from(EXPECTED_EXECUTABLE);
-    validate_executable_identity(&declared, &expected).unwrap()
+    let expected_sha256 = std::env::var_os("CALC_FLOW_M5_COMMON_EXECUTABLE_SHA256")
+        .and_then(|digest| digest.into_string().ok())
+        .unwrap();
+    validate_executable_identity(&declared, &expected_sha256).unwrap()
 }
 
 fn main() {
     assert_eq!(git(&["rev-parse", "HEAD"]), SOURCE_COMMIT);
     assert_eq!(git(&["rev-parse", "HEAD^{tree}"]), SOURCE_TREE);
     assert_eq!(harness_hash(), EXPECTED_HARNESS_SHA256);
-    assert!(["B1", "C1", "B2", "C2"].contains(&RUN_LABEL));
+    let run_label = std::env::var_os("CALC_FLOW_M5_RUN_LABEL")
+        .and_then(|label| label.into_string().ok())
+        .unwrap();
+    assert!(["B1", "C1", "B2", "C2"].contains(&run_label.as_str()));
     let output = PathBuf::from(std::env::var_os("CALC_FLOW_M5_COMMON_OUTPUT").unwrap());
     let executable = executable_identity();
     let executable_sha256 = sha256(std::fs::read(&executable).unwrap());
@@ -190,7 +204,7 @@ fn main() {
     assert!(confidence[0] <= median && median <= confidence[1]);
     let report = json!({
         "schema": "calc-flow.m5-common-benchmark-run.v1",
-        "label": RUN_LABEL,
+        "label": run_label,
         "case": CASE,
         "source_commit": SOURCE_COMMIT,
         "source_tree": SOURCE_TREE,
@@ -220,16 +234,13 @@ mod tests {
     use super::validate_executable_identity;
 
     #[test]
-    fn executable_identity_rejects_a_different_declared_path() {
-        let error = validate_executable_identity(
-            Path::new("/trusted/common-benchmark"),
-            Path::new("/replaced/common-benchmark"),
-        )
-        .unwrap_err();
+    fn executable_identity_rejects_a_non_file_path() {
+        let error =
+            validate_executable_identity(Path::new("relative"), &"0".repeat(64)).unwrap_err();
 
         assert_eq!(
             error,
-            "declared benchmark executable does not match the build identity"
+            "declared benchmark executable is not an absolute regular file"
         );
     }
 }

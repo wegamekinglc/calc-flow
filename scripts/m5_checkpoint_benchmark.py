@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess  # nosec B404 - fixed allowlisted executables only
 import sys
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,15 +20,22 @@ COMMON_SAMPLE_COUNT = 30
 PRIVATE_SAMPLE_COUNT = 10
 REGRESSION_THRESHOLD_PERCENT = 5.0
 RUN_ORDER = ("B1", "C1", "B2", "C2")
+PRIVATE_RUN_ORDER = ("P1", "P2")
+MAX_PRIVATE_REPEAT_SPREAD_PERCENT = 10.0
 PRIVATE_BUILD_IDENTITY_SCHEMA = "calc-flow.m5-private-build-identity.v1"
 M5_ABSOLUTE_CASES = (
-    "m5/private_path/barrier_cut_fan_out",
-    "m5/private_path/two_input_alignment",
+    "m5/private_path/barrier_cut_single_source",
+    "m5/private_path/barrier_cut_two_source_fan_out",
+    "m5/private_path/pass_through_two_input_alignment",
+    "m5/private_path/window_two_input_alignment",
     "m5/private_path/dirty_window_state_stage",
-    "m5/private_path/production_manifest_publication",
-    "m5/private_path/cold_restore",
-    "m5/private_path/transactional_sink_commit",
-    "m5/private_full_path/periodic_checkpoint_restart",
+    "m5/private_path/non_empty_manifest_publication",
+    "m5/private_path/retained_delta_compacted_base_restore",
+    "m5/private_path/single_transactional_sink_commit",
+    "m5/private_path/multi_transactional_sink_commit",
+    "m5/private_full_path/no_checkpoint",
+    "m5/private_full_path/checkpoint_disabled",
+    "m5/private_full_path/checkpoint_enabled",
 )
 PRIVATE_TEST = (
     "runtime::streaming::soak::private_m5_epoch_checkpoint_absolute_benchmark"
@@ -37,6 +45,15 @@ COMMON_HARNESS_ROOT = SCRIPT_ROOT / "m5_checkpoint_benchmark_harness"
 COMMON_HARNESS_SOURCE = COMMON_HARNESS_ROOT / "src" / "main.rs"
 COMMON_HARNESS_MANIFEST = COMMON_HARNESS_ROOT / "Cargo.toml"
 COMMON_HARNESS_FILES = (Path("Cargo.toml"), Path("src/main.rs"))
+SOURCE_CONTRACT_FILES = (
+    Path("Cargo.toml"),
+    Path("Cargo.lock"),
+    Path("scripts/m5_checkpoint_benchmark.py"),
+    Path("scripts/m5_checkpoint_benchmark_harness/Cargo.toml"),
+    Path("scripts/m5_checkpoint_benchmark_harness/src/main.rs"),
+    Path("crates/calc-flow/src/runtime/streaming/operator_task.rs"),
+    Path("crates/calc-flow/src/runtime/streaming/soak.rs"),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +73,15 @@ class CommonRunPlan:
     target_dir: Path
     evidence_root: Path
     report_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class PrivateRunPlan:
+    label: str
+    candidate: RefSnapshot
+    workspace: Path
+    target_dir: Path
+    evidence_root: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +123,82 @@ def build_run_plan(
     return result
 
 
+def build_private_run_plan(
+    output_root: Path, candidate: RefSnapshot
+) -> list[PrivateRunPlan]:
+    return [
+        PrivateRunPlan(
+            label=label,
+            candidate=candidate,
+            workspace=output_root / "worktrees" / f"private-{label}",
+            target_dir=(
+                output_root
+                / "worktrees"
+                / f"private-{label}"
+                / "target"
+                / "m5-private-absolute"
+            ),
+            evidence_root=output_root / "private-runs" / label,
+        )
+        for label in PRIVATE_RUN_ORDER
+    ]
+
+
+def _reproducible_build_environment(
+    workspace: Path, *, harness_root: Path | None = None
+) -> dict[str, str]:
+    remaps = []
+    if harness_root is not None:
+        remaps.append(
+            f"--remap-path-prefix={harness_root.resolve()}=/calc-flow/harness"
+        )
+    remaps.append(f"--remap-path-prefix={workspace.resolve()}=/calc-flow/source")
+    return {
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "1",
+        "CARGO_PROFILE_RELEASE_DEBUG": "0",
+        "CARGO_PROFILE_RELEASE_INCREMENTAL": "false",
+        "CARGO_ENCODED_RUSTFLAGS": "\x1f".join(remaps),
+        "SOURCE_DATE_EPOCH": "0",
+    }
+
+
+def common_build_environment(
+    plan: CommonRunPlan, harness_sha256: str
+) -> dict[str, str]:
+    return {
+        **_reproducible_build_environment(
+            plan.snapshot.worktree, harness_root=plan.harness_root
+        ),
+        "CALC_FLOW_M5_SOURCE_COMMIT": plan.snapshot.commit,
+        "CALC_FLOW_M5_SOURCE_TREE": plan.snapshot.tree,
+        "CALC_FLOW_M5_HARNESS_SHA256": harness_sha256,
+        "CARGO_TARGET_DIR": str(plan.target_dir),
+    }
+
+
+def common_run_environment(
+    plan: CommonRunPlan,
+    build_environment: dict[str, str],
+    *,
+    executable_sha256: str,
+) -> dict[str, str]:
+    return {
+        **build_environment,
+        "CALC_FLOW_M5_RUN_LABEL": plan.label,
+        "CALC_FLOW_M5_COMMON_OUTPUT": str(plan.report_path.resolve()),
+        "CALC_FLOW_M5_COMMON_EXECUTABLE": str(_common_executable(plan).resolve()),
+        "CALC_FLOW_M5_COMMON_EXECUTABLE_SHA256": _full_sha256(
+            executable_sha256, "common executable hash"
+        ),
+    }
+
+
+def _common_executable(plan: CommonRunPlan) -> Path:
+    executable = plan.target_dir / "release" / "calc-flow-m5-common-benchmark"
+    return executable.with_suffix(".exe") if sys.platform == "win32" else executable
+
+
 def hash_harness_files(root: Path) -> str:
     digest = hashlib.sha256()
     for relative in COMMON_HARNESS_FILES:
@@ -128,19 +230,30 @@ def write_hashed_json(path: Path, payload: dict[str, object]) -> None:
     digest_path = Path(f"{path}.sha256")
     if path.exists() or digest_path.exists():
         raise FileExistsError(f"immutable benchmark artifact already exists: {path}")
-    with path.open("xb") as report:
-        report.write(bytes_)
-        report.flush()
-        os.fsync(report.fileno())
-    with digest_path.open("x", encoding="utf-8") as digest:
-        digest.write(f"{hashlib.sha256(bytes_).hexdigest()}\n")
-        digest.flush()
-        os.fsync(digest.fileno())
+    _atomic_create(path, bytes_)
+    _atomic_create(
+        digest_path, f"{hashlib.sha256(bytes_).hexdigest()}\n".encode("ascii")
+    )
     directory = os.open(path.parent, os.O_RDONLY)
     try:
         os.fsync(directory)
     finally:
         os.close(directory)
+
+
+def _atomic_create(path: Path, bytes_: bytes) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(bytes_)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def load_hashed_json(path: Path) -> dict[str, object]:
@@ -157,9 +270,164 @@ def load_hashed_json(path: Path) -> dict[str, object]:
     return value
 
 
+def write_artifact_manifest(root: Path, artifacts: Sequence[Path]) -> Path:
+    canonical_root = root.resolve()
+    entries = []
+    seen = set()
+    for artifact in artifacts:
+        _require_regular_file(artifact, "artifact")
+        canonical = artifact.resolve()
+        if not canonical.is_relative_to(canonical_root):
+            raise ValueError(f"benchmark artifact escapes evidence root: {artifact}")
+        relative = canonical.relative_to(canonical_root)
+        if relative in seen:
+            raise ValueError(f"benchmark artifact is repeated: {relative}")
+        seen.add(relative)
+        entries.append(
+            {
+                "path": relative.as_posix(),
+                "size": canonical.stat().st_size,
+                "sha256": sha256_file(canonical),
+            }
+        )
+    entries.sort(key=lambda entry: str(entry["path"]))
+    manifest = root / "artifact-manifest.json"
+    write_hashed_json(
+        manifest,
+        {
+            "schema": "calc-flow.m5-checkpoint-artifact-manifest.v1",
+            "root": str(canonical_root),
+            "artifacts": entries,
+        },
+    )
+    return manifest
+
+
+def validate_artifact_manifest(root: Path, manifest: Path) -> dict[str, object]:
+    canonical_root = root.resolve()
+    payload = load_hashed_json(manifest)
+    if payload.get("schema") != "calc-flow.m5-checkpoint-artifact-manifest.v1":
+        raise ValueError("benchmark artifact manifest schema is invalid")
+    if payload.get("root") != str(canonical_root):
+        raise ValueError("benchmark artifact manifest root is invalid")
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise ValueError("benchmark artifact manifest entries are missing")
+    observed_paths = [
+        _validate_artifact_entry(entry, canonical_root) for entry in artifacts
+    ]
+    if observed_paths != sorted(observed_paths) or len(observed_paths) != len(
+        set(observed_paths)
+    ):
+        raise ValueError("benchmark artifact manifest order is invalid")
+    return payload
+
+
+def _validate_artifact_entry(entry: object, canonical_root: Path) -> str:
+    if not isinstance(entry, dict):
+        raise ValueError("benchmark artifact manifest entry is invalid")
+    relative_value = entry.get("path")
+    if not isinstance(relative_value, str):
+        raise ValueError("benchmark artifact path is invalid")
+    relative = Path(relative_value)
+    if relative.is_absolute() or relative.as_posix() != relative_value:
+        raise ValueError("benchmark artifact path is not canonical")
+    artifact = canonical_root / relative
+    _require_regular_file(artifact, "artifact")
+    canonical = artifact.resolve()
+    if not canonical.is_relative_to(canonical_root):
+        raise ValueError("benchmark artifact path escapes evidence root")
+    expected = _full_sha256(entry.get("sha256"), "artifact hash")
+    if sha256_file(canonical) != expected:
+        raise ValueError(f"benchmark artifact hash does not match: {relative}")
+    if entry.get("size") != canonical.stat().st_size:
+        raise ValueError(f"benchmark artifact size does not match: {relative}")
+    return relative_value
+
+
+def build_source_contract(
+    baseline: RefSnapshot,
+    candidate: RefSnapshot,
+    *,
+    source_files: Sequence[Path] = SOURCE_CONTRACT_FILES,
+) -> dict[str, object]:
+    files = _source_file_entries(candidate.worktree, source_files)
+    return {
+        "schema": "calc-flow.m5-checkpoint-source-contract.v1",
+        "baseline": {
+            "commit": baseline.commit,
+            "tree": baseline.tree,
+            "cargo_lock_sha256": sha256_file(baseline.worktree / "Cargo.lock"),
+        },
+        "candidate": {
+            "commit": candidate.commit,
+            "tree": candidate.tree,
+            "cargo_lock_sha256": sha256_file(candidate.worktree / "Cargo.lock"),
+        },
+        "source_files": files,
+        "source_files_sha256": _canonical_hash(files),
+        "workload_contract_sha256": _canonical_hash(
+            {
+                "common_case": COMMON_CASE,
+                "common_samples": COMMON_SAMPLE_COUNT,
+                "private_cases": M5_ABSOLUTE_CASES,
+                "private_samples": PRIVATE_SAMPLE_COUNT,
+                "threshold_percent": REGRESSION_THRESHOLD_PERCENT,
+            }
+        ),
+    }
+
+
+def validate_source_contract(
+    contract: dict[str, object],
+    baseline: RefSnapshot,
+    candidate: RefSnapshot,
+    *,
+    source_files: Sequence[Path] = SOURCE_CONTRACT_FILES,
+) -> None:
+    expected = build_source_contract(baseline, candidate, source_files=source_files)
+    if contract != expected:
+        raise ValueError("benchmark source bytes or ref identity do not match")
+
+
+def _source_file_entries(
+    worktree: Path, source_files: Sequence[Path]
+) -> list[dict[str, object]]:
+    entries = []
+    canonical_root = worktree.resolve()
+    for relative in source_files:
+        if relative.is_absolute() or relative.as_posix().startswith("../"):
+            raise ValueError("benchmark source path is not canonical")
+        path = canonical_root / relative
+        _require_regular_file(path, "source")
+        canonical = path.resolve()
+        if not canonical.is_relative_to(canonical_root):
+            raise ValueError("benchmark source path escapes its worktree")
+        entries.append(
+            {
+                "path": relative.as_posix(),
+                "size": canonical.stat().st_size,
+                "sha256": sha256_file(canonical),
+            }
+        )
+    return entries
+
+
 def _require_regular_file(path: Path, kind: str) -> None:
     if path.is_symlink() or not path.is_file():
         raise ValueError(f"benchmark {kind} must be a regular file: {path}")
+
+
+def validate_rooted_directory(root: Path, path: Path, label: str) -> Path:
+    if path.is_symlink():
+        raise ValueError(f"benchmark {label} directory is a symbolic link")
+    if not path.is_dir():
+        raise ValueError(f"benchmark {label} directory is missing")
+    canonical_root = root.resolve()
+    canonical = path.resolve()
+    if not canonical.is_relative_to(canonical_root):
+        raise ValueError(f"benchmark {label} directory escapes evidence root")
+    return canonical
 
 
 def _matches_sha256(bytes_: bytes, expected: str) -> bool:
@@ -335,7 +603,7 @@ def validate_matrix_provenance(
         _validate_matrix_run_ref(run, expected)
     _validate_distinct_run_fields(runs)
     _validate_shared_run_hashes(runs)
-    _validate_distinct_executable_hashes(runs)
+    _validate_reproducible_executable_hashes(runs)
 
 
 def _validate_matrix_run_ref(run: dict[str, object], expected: tuple[str, str]) -> None:
@@ -361,17 +629,30 @@ def _validate_shared_run_hashes(runs: Sequence[dict[str, object]]) -> None:
     for field in (
         "harness_sha256",
         "workload_sha256",
-        "source_cargo_lock_sha256",
         "harness_cargo_lock_sha256",
-        "dependency_graph_sha256",
         "toolchain_sha256",
         "machine_sha256",
         "environment_sha256",
     ):
         _full_sha256(_one_value(runs, field), field)
+    for field in (
+        "source_cargo_lock_sha256",
+        "dependency_graph_sha256",
+        "build_environment_sha256",
+    ):
+        _validate_same_ref_hash(runs, field)
 
 
-def _validate_distinct_executable_hashes(runs: Sequence[dict[str, object]]) -> None:
+def _validate_same_ref_hash(runs: Sequence[dict[str, object]], field: str) -> None:
+    baseline = {_full_sha256(runs[index].get(field), field) for index in (0, 2)}
+    candidate = {_full_sha256(runs[index].get(field), field) for index in (1, 3)}
+    if len(baseline) != 1 or len(candidate) != 1:
+        raise ValueError(f"same-ref common benchmark {field} differs")
+
+
+def _validate_reproducible_executable_hashes(
+    runs: Sequence[dict[str, object]],
+) -> None:
     baseline_executables = {
         _full_sha256(runs[index].get("executable_sha256"), "baseline executable hash")
         for index in (0, 2)
@@ -380,6 +661,8 @@ def _validate_distinct_executable_hashes(runs: Sequence[dict[str, object]]) -> N
         _full_sha256(runs[index].get("executable_sha256"), "candidate executable hash")
         for index in (1, 3)
     }
+    if len(baseline_executables) != 1 or len(candidate_executables) != 1:
+        raise ValueError("same-ref benchmark executables must be byte-identical")
     if baseline_executables & candidate_executables:
         raise ValueError("baseline and candidate require distinct executable hashes")
 
@@ -390,6 +673,15 @@ def _finite_positive(value: object, field: str) -> float:
     result = float(value)
     if not math.isfinite(result) or result <= 0.0:
         raise ValueError(f"{field} must be finite and positive")
+    return result
+
+
+def _finite_nonnegative(value: object, field: str) -> float:
+    if not isinstance(value, int | float):
+        raise ValueError(f"{field} must be numeric")
+    result = float(value)
+    if not math.isfinite(result) or result < 0.0:
+        raise ValueError(f"{field} must be finite and nonnegative")
     return result
 
 
@@ -461,7 +753,9 @@ def _pairing(
     }
 
 
-def evaluate_common_case(runs: Sequence[dict[str, object]]) -> dict[str, object]:
+def evaluate_common_case(
+    runs: Sequence[dict[str, object]], *, host_stable: bool = True
+) -> dict[str, object]:
     if len(runs) != len(RUN_ORDER):
         raise ValueError("common benchmark requires exactly B1, C1, B2, C2")
     validated = [
@@ -475,6 +769,10 @@ def evaluate_common_case(runs: Sequence[dict[str, object]]) -> dict[str, object]
     candidate_minimum = min(candidate_medians)
     candidate_min_regression = _regression_percent(baseline_minimum, candidate_minimum)
     baseline_spread = _regression_percent(min(baseline_medians), max(baseline_medians))
+    candidate_spread = _regression_percent(
+        min(candidate_medians), max(candidate_medians)
+    )
+    same_ref_spread = max(baseline_spread, candidate_spread)
     pairings = [
         _pairing(validated[0], validated[1]),
         _pairing(validated[2], validated[3]),
@@ -483,7 +781,7 @@ def evaluate_common_case(runs: Sequence[dict[str, object]]) -> dict[str, object]
         float(pairing["regression_percent"]) > REGRESSION_THRESHOLD_PERCENT
         for pairing in pairings
     )
-    exceeds_noise = candidate_min_regression > 2.0 * baseline_spread
+    exceeds_noise = candidate_min_regression > 2.0 * same_ref_spread
     confidently_above = all(
         float(pairing["regression_confidence_interval_percent"][0])
         > REGRESSION_THRESHOLD_PERCENT
@@ -501,6 +799,8 @@ def evaluate_common_case(runs: Sequence[dict[str, object]]) -> dict[str, object]
         confidently_above=confidently_above,
         confidently_below=confidently_below,
     )
+    if not host_stable:
+        decision = "inconclusive"
     return {
         "case": COMMON_CASE,
         "threshold_percent": REGRESSION_THRESHOLD_PERCENT,
@@ -508,9 +808,12 @@ def evaluate_common_case(runs: Sequence[dict[str, object]]) -> dict[str, object]
         "candidate_min_median_ns": candidate_minimum,
         "candidate_min_regression_percent": candidate_min_regression,
         "baseline_same_ref_spread_percent": baseline_spread,
+        "candidate_same_ref_spread_percent": candidate_spread,
+        "maximum_same_ref_spread_percent": same_ref_spread,
         "exceeds_twice_baseline_spread": exceeds_noise,
         "sustained_in_both_pairings": sustained,
         "pairings": pairings,
+        "host_stable": host_stable,
         "decision": decision,
     }
 
@@ -532,6 +835,116 @@ def _common_decision(
         return "regression"
     if candidate_min_regression <= REGRESSION_THRESHOLD_PERCENT and confidently_below:
         return "pass"
+    return "inconclusive"
+
+
+def evaluate_private_repeats(
+    reports: Sequence[dict[str, object]], *, host_stable: bool
+) -> dict[str, object]:
+    if len(reports) != 2 or tuple(report.get("label") for report in reports) != (
+        PRIVATE_RUN_ORDER
+    ):
+        raise ValueError(f"private benchmark run order must be {PRIVATE_RUN_ORDER}")
+    executable_hashes = {_private_executable_hash(report) for report in reports}
+    if len(executable_hashes) != 1:
+        raise ValueError("same-ref private executables must be byte-identical")
+    measurements = [_private_medians(report) for report in reports]
+    cases = []
+    for case in M5_ABSOLUTE_CASES:
+        first = measurements[0][case]
+        second = measurements[1][case]
+        spread = _regression_percent(min(first, second), max(first, second))
+        cases.append(
+            {
+                "case": case,
+                "run_medians_ns": {"P1": first, "P2": second},
+                "same_ref_spread_percent": spread,
+                "decision": "absolute_only",
+            }
+        )
+    maximum_spread = max(float(case["same_ref_spread_percent"]) for case in cases)
+    stable = host_stable and maximum_spread <= MAX_PRIVATE_REPEAT_SPREAD_PERCENT
+    return {
+        "decision": "absolute_only",
+        "evidence_quality": "stable" if stable else "inconclusive",
+        "host_stable": host_stable,
+        "maximum_same_ref_spread_percent": maximum_spread,
+        "spread_limit_percent": MAX_PRIVATE_REPEAT_SPREAD_PERCENT,
+        "executable_sha256": next(iter(executable_hashes)),
+        "cases": cases,
+    }
+
+
+def _private_executable_hash(report: dict[str, object]) -> str:
+    provenance = report.get("provenance")
+    if not isinstance(provenance, dict):
+        raise ValueError("private repeat provenance is missing")
+    return _full_sha256(
+        provenance.get("executable_sha256"), "private repeat executable hash"
+    )
+
+
+def _private_medians(report: dict[str, object]) -> dict[str, float]:
+    measurements = report.get("measurements")
+    if not isinstance(measurements, list) or len(measurements) != len(
+        M5_ABSOLUTE_CASES
+    ):
+        raise ValueError("private repeat measurements are incomplete")
+    result = {}
+    for measurement, case in zip(measurements, M5_ABSOLUTE_CASES, strict=True):
+        if not isinstance(measurement, dict) or measurement.get("case") != case:
+            raise ValueError("private repeat measurement order is invalid")
+        result[case] = _finite_positive(
+            measurement.get("median_ns"), f"private repeat {case} median"
+        )
+    return result
+
+
+def evaluate_candidate_self_overhead(
+    reports: Sequence[dict[str, object]],
+    *,
+    repeatability: dict[str, object],
+    host_stable: bool,
+) -> dict[str, object]:
+    if len(reports) != 2 or tuple(report.get("label") for report in reports) != (
+        PRIVATE_RUN_ORDER
+    ):
+        raise ValueError(f"private benchmark run order must be {PRIVATE_RUN_ORDER}")
+    deltas = {}
+    for report in reports:
+        medians = _private_medians(report)
+        disabled = medians["m5/private_full_path/checkpoint_disabled"]
+        enabled = medians["m5/private_full_path/checkpoint_enabled"]
+        deltas[str(report["label"])] = _regression_percent(disabled, enabled)
+    noise = _finite_nonnegative(
+        repeatability.get("maximum_same_ref_spread_percent"),
+        "private repeatability spread",
+    )
+    stable = host_stable and repeatability.get("evidence_quality") == "stable"
+    decision = _self_overhead_decision(tuple(deltas.values()), noise, stable=stable)
+    return {
+        "scope": "candidate_self_overhead_not_main_regression",
+        "comparison": "candidate_checkpoint_enabled_vs_disabled_same_ref",
+        "threshold_percent": REGRESSION_THRESHOLD_PERCENT,
+        "run_overhead_percent": deltas,
+        "maximum_same_ref_noise_percent": noise,
+        "host_stable": host_stable,
+        "decision": decision,
+    }
+
+
+def _self_overhead_decision(
+    deltas: Sequence[float], noise: float, *, stable: bool
+) -> str:
+    if not stable:
+        return "inconclusive"
+    if all(delta <= REGRESSION_THRESHOLD_PERCENT for delta in deltas):
+        return "pass"
+    if (
+        all(delta > REGRESSION_THRESHOLD_PERCENT for delta in deltas)
+        and min(deltas) > 2.0 * noise
+    ):
+        return "regression"
     return "inconclusive"
 
 
@@ -664,7 +1077,7 @@ def _optional_command_result(
             timeout=10,
         )
     if requested == ("lscpu",):
-        return subprocess.run(  # nosec B603
+        return subprocess.run(  # nosec B603, B607 - validated absolute lscpu executable
             ["lscpu"],
             executable=str(_trusted_system_executable("lscpu")),
             shell=False,
@@ -674,7 +1087,7 @@ def _optional_command_result(
             timeout=10,
         )
     if requested == ("powerprofilesctl", "get"):
-        return subprocess.run(  # nosec B603
+        return subprocess.run(  # nosec B603, B607 - validated absolute powerprofilesctl executable
             ["powerprofilesctl", "get"],
             executable=str(_trusted_system_executable("powerprofilesctl")),
             shell=False,
@@ -684,7 +1097,7 @@ def _optional_command_result(
             timeout=10,
         )
     if requested == ("rustc", "-vV"):
-        return subprocess.run(  # nosec B603
+        return subprocess.run(  # nosec B603, B607 - validated absolute rustc executable
             ["rustc", "-vV"],
             executable=str(_trusted_system_executable("rustc")),
             shell=False,
@@ -694,7 +1107,7 @@ def _optional_command_result(
             timeout=10,
         )
     if requested == ("systemd-detect-virt",):
-        return subprocess.run(  # nosec B603
+        return subprocess.run(  # nosec B603, B607 - validated absolute systemd executable
             ["systemd-detect-virt"],
             executable=str(_trusted_system_executable("systemd-detect-virt")),
             shell=False,
@@ -743,6 +1156,10 @@ def _execution_context() -> dict[str, object]:
         "virtualization": _optional_command(["systemd-detect-virt"]),
         "power_profile": _optional_command(["powerprofilesctl", "get"]),
         "governors": governors,
+        "wsl": (
+            "microsoft" in platform.release().lower()
+            or bool(os.environ.get("WSL_INTEROP"))
+        ),
     }
     relevant_environment = {
         name: os.environ.get(name, "")
@@ -750,6 +1167,7 @@ def _execution_context() -> dict[str, object]:
             "CARGO_BUILD_TARGET",
             "CARGO_PROFILE_RELEASE_CODEGEN_UNITS",
             "CARGO_PROFILE_RELEASE_LTO",
+            "CARGO_ENCODED_RUSTFLAGS",
             "LD_LIBRARY_PATH",
             "RUSTFLAGS",
         )
@@ -762,6 +1180,53 @@ def _execution_context() -> dict[str, object]:
         "environment": relevant_environment,
         "environment_sha256": _canonical_hash(relevant_environment),
     }
+
+
+def host_stability(
+    before: dict[str, object], after: dict[str, object]
+) -> dict[str, object]:
+    reasons = []
+    for field in ("toolchain_sha256", "machine_sha256", "environment_sha256"):
+        if before.get(field) != after.get(field):
+            reasons.append(f"{field} changed during the benchmark matrix")
+    machine = before.get("machine")
+    if not isinstance(machine, dict):
+        reasons.append("machine fingerprint is missing")
+    else:
+        if machine.get("wsl") is True:
+            reasons.append("WSL host cannot yield a confident pass")
+        virtualization = str(machine.get("virtualization", ""))
+        if (
+            virtualization
+            and virtualization != "none"
+            and not virtualization.startswith("unavailable:")
+        ):
+            reasons.append(f"virtualized host reported {virtualization!r}")
+        governors = machine.get("governors")
+        if not isinstance(governors, dict) or not governors:
+            reasons.append("CPU governor evidence is unavailable")
+        elif set(governors.values()) != {"performance"}:
+            reasons.append("CPU governors are not uniformly performance")
+        if machine.get("power_profile") != "performance":
+            reasons.append("power profile is not performance")
+    return {
+        "stable": not reasons,
+        "reasons": reasons,
+        "before_hash": _canonical_hash(before),
+        "after_hash": _canonical_hash(after),
+    }
+
+
+def validate_execution_context(context: dict[str, object]) -> None:
+    for name in ("toolchain", "machine", "environment"):
+        value = context.get(name)
+        if not isinstance(value, dict):
+            raise ValueError(f"benchmark {name} fingerprint is missing")
+        expected = _full_sha256(
+            context.get(f"{name}_sha256"), f"{name} fingerprint hash"
+        )
+        if _canonical_hash(value) != expected:
+            raise ValueError(f"benchmark {name} fingerprint does not match")
 
 
 def _normalized_dependency_graph(metadata: dict[str, object]) -> dict[str, object]:
@@ -871,17 +1336,47 @@ def _prepare_ref_worktrees(
     return baseline, candidate, merge_base
 
 
+def _prepare_private_worktrees(
+    repository: Path,
+    plans: Sequence[PrivateRunPlan],
+) -> None:
+    for plan in plans:
+        if plan.workspace.exists() or plan.evidence_root.exists():
+            raise FileExistsError(f"private benchmark run root exists: {plan.label}")
+        _git(
+            repository,
+            [
+                "worktree",
+                "add",
+                "--detach",
+                str(plan.workspace),
+                plan.candidate.commit,
+            ],
+        )
+        if _git(plan.workspace, ["rev-parse", "HEAD"]) != plan.candidate.commit:
+            raise ValueError(f"private {plan.label} worktree ref does not match")
+        if _git(plan.workspace, ["rev-parse", "HEAD^{tree}"]) != plan.candidate.tree:
+            raise ValueError(f"private {plan.label} worktree tree does not match")
+        if _git(
+            plan.workspace,
+            ["status", "--porcelain=v1", "--untracked-files=all"],
+        ):
+            raise ValueError(f"private {plan.label} worktree is not clean")
+        plan.evidence_root.mkdir(parents=True)
+
+
 def _run_common_matrix(
     output_root: Path,
     baseline: RefSnapshot,
     candidate: RefSnapshot,
     cargo: Path,
     context: dict[str, object],
-) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+) -> tuple[list[dict[str, object]], list[dict[str, object]], list[Path]]:
     harness_sha256 = hash_harness_files(COMMON_HARNESS_ROOT)
     common_lock: bytes | None = None
     commands = []
     runs = []
+    artifacts = []
     for plan in build_run_plan(output_root, baseline, candidate):
         if plan.harness_root.parent.exists() or plan.evidence_root.exists():
             raise FileExistsError(f"common benchmark run root exists: {plan.label}")
@@ -912,18 +1407,8 @@ def _run_common_matrix(
         dependency_graph_sha256 = _canonical_hash(
             _normalized_dependency_graph(metadata)
         )
-        executable = plan.target_dir / "release" / "calc-flow-m5-common-benchmark"
-        if sys.platform == "win32":
-            executable = executable.with_suffix(".exe")
-        executable = executable.resolve()
-        build_environment = {
-            "CALC_FLOW_M5_RUN_LABEL": plan.label,
-            "CALC_FLOW_M5_SOURCE_COMMIT": plan.snapshot.commit,
-            "CALC_FLOW_M5_SOURCE_TREE": plan.snapshot.tree,
-            "CALC_FLOW_M5_HARNESS_SHA256": harness_sha256,
-            "CALC_FLOW_M5_COMMON_EXECUTABLE": str(executable),
-            "CARGO_TARGET_DIR": str(plan.target_dir),
-        }
+        executable = _common_executable(plan).resolve()
+        build_environment = common_build_environment(plan, harness_sha256)
         build_command = TrustedCargoCommand(cargo, ("build", "--release", "--locked"))
         _run_cargo_command(
             build_command,
@@ -932,11 +1417,12 @@ def _run_common_matrix(
         )
         if not executable.is_file():
             raise ValueError(f"common benchmark executable is missing: {executable}")
-        run_environment = {
-            **build_environment,
-            "CALC_FLOW_M5_COMMON_OUTPUT": str(plan.report_path.resolve()),
-            "CALC_FLOW_M5_COMMON_EXECUTABLE": str(executable),
-        }
+        executable_sha256 = sha256_file(executable)
+        run_environment = common_run_environment(
+            plan,
+            build_environment,
+            executable_sha256=executable_sha256,
+        )
         run_command = TrustedCargoCommand(
             cargo,
             (
@@ -963,6 +1449,7 @@ def _run_common_matrix(
         source_lock = plan.snapshot.worktree / "Cargo.lock"
         run = {
             **validated,
+            "artifact_path": str(plan.report_path.relative_to(output_root)),
             "target_dir": str(plan.target_dir.resolve()),
             "evidence_root": str(plan.evidence_root.resolve()),
             "source_cargo_lock_sha256": sha256_file(source_lock),
@@ -973,12 +1460,57 @@ def _run_common_matrix(
             "toolchain_sha256": context["toolchain_sha256"],
             "machine_sha256": context["machine_sha256"],
             "environment_sha256": context["environment_sha256"],
+            "build_environment_sha256": _canonical_hash(
+                _normalized_build_environment(build_environment)
+            ),
             "git_status_short": _git(
                 plan.snapshot.worktree,
                 ["status", "--porcelain=v1", "--untracked-files=all"],
             ),
         }
+        run_evidence_path = plan.evidence_root / "run-evidence.json"
+        write_hashed_json(
+            run_evidence_path,
+            {
+                "schema": "calc-flow.m5-common-run-evidence.v1",
+                "label": plan.label,
+                "source_commit": plan.snapshot.commit,
+                "source_tree": plan.snapshot.tree,
+                "workspace": str(plan.snapshot.worktree.resolve()),
+                "harness_root": str(plan.harness_root.resolve()),
+                "target_dir": str(plan.target_dir.resolve()),
+                "evidence_root": str(plan.evidence_root.resolve()),
+                "report_path": str(plan.report_path.relative_to(output_root)),
+                "report_sha256": validated["report_sha256"],
+                "executable_sha256": executable_sha256,
+                "source_cargo_lock_sha256": run["source_cargo_lock_sha256"],
+                "harness_cargo_lock_sha256": harness_lock_sha256,
+                "dependency_graph_sha256": dependency_graph_sha256,
+                "build_environment": build_environment,
+                "build_environment_sha256": run["build_environment_sha256"],
+                "run_environment": run_environment,
+                "commands": {
+                    "metadata": metadata_command.argv(),
+                    "build": build_command.argv(),
+                    "run": run_command.argv(),
+                },
+                "git_status_short": run["git_status_short"],
+            },
+        )
         runs.append(run)
+        artifacts.extend(
+            [
+                plan.report_path,
+                Path(f"{plan.report_path}.sha256"),
+                executable,
+                lock_path,
+                metadata_path,
+                Path(f"{metadata_path}.sha256"),
+                run_evidence_path,
+                Path(f"{run_evidence_path}.sha256"),
+                source_lock,
+            ]
+        )
         commands.extend(
             [
                 {"label": plan.label, "command": metadata_command.argv()},
@@ -991,6 +1523,7 @@ def _run_common_matrix(
                     "label": plan.label,
                     "command": run_command.argv(),
                     "cwd": str(plan.harness_root),
+                    "environment": run_environment,
                 },
             ]
         )
@@ -1001,7 +1534,22 @@ def _run_common_matrix(
         candidate_commit=candidate.commit,
         candidate_tree=candidate.tree,
     )
-    return runs, commands
+    return runs, commands, artifacts
+
+
+def _normalized_build_environment(environment: dict[str, str]) -> dict[str, object]:
+    encoded = environment.get("CARGO_ENCODED_RUSTFLAGS", "")
+    remap_destinations = []
+    for flag in encoded.split("\x1f"):
+        if flag.startswith("--remap-path-prefix=") and "=" in flag:
+            remap_destinations.append(flag.rsplit("=", maxsplit=1)[1])
+        elif flag:
+            remap_destinations.append(flag)
+    return {
+        key: value
+        for key, value in environment.items()
+        if key not in {"CARGO_TARGET_DIR", "CARGO_ENCODED_RUSTFLAGS"}
+    } | {"cargo_encoded_rustflags": remap_destinations}
 
 
 def _validate_absolute_artifact(
@@ -1130,8 +1678,10 @@ def private_run_environment(
     *,
     run_id: str,
     target_root: Path,
+    workspace: Path | None = None,
 ) -> dict[str, str]:
     return {
+        **_reproducible_build_environment(workspace or candidate.worktree),
         "CALC_FLOW_M5_CHECKPOINT_BENCHMARK": "1",
         "CALC_FLOW_M5_CHECKPOINT_BENCHMARK_RUN_ID": run_id,
         "CALC_FLOW_M5_PRIVATE_SOURCE_COMMIT": candidate.commit,
@@ -1140,19 +1690,13 @@ def private_run_environment(
     }
 
 
-def _run_private_absolute(
-    output_root: Path,
-    candidate: RefSnapshot,
-    cargo: Path,
-    run_id: str,
-) -> tuple[dict[str, object], dict[str, object]]:
-    target_root = candidate.worktree / "target" / "m5-private-absolute" / run_id
-    if target_root.exists():
-        raise FileExistsError(f"private benchmark target exists: {target_root}")
-    command = TrustedCargoCommand(
+def private_benchmark_command(cargo: Path) -> TrustedCargoCommand:
+    return TrustedCargoCommand(
         cargo,
         (
             "test",
+            "--release",
+            "--locked",
             "-p",
             "calc-flow",
             "--lib",
@@ -1163,23 +1707,146 @@ def _run_private_absolute(
             "--nocapture",
         ),
     )
+
+
+def _run_private_absolute(
+    output_root: Path,
+    plan: PrivateRunPlan,
+    cargo: Path,
+    run_id: str,
+    context: dict[str, object],
+) -> tuple[dict[str, object], dict[str, object], list[Path]]:
+    if plan.target_dir.exists():
+        raise FileExistsError(f"private benchmark target exists: {plan.target_dir}")
+    command = private_benchmark_command(cargo)
+    private_run_id = f"{run_id}-{plan.label}"
     environment = private_run_environment(
-        candidate,
-        run_id=run_id,
-        target_root=target_root,
+        plan.candidate,
+        run_id=private_run_id,
+        target_root=plan.target_dir,
+        workspace=plan.workspace,
     )
-    _run_cargo_command(command, cwd=candidate.worktree, environment=environment)
+    metadata_command = TrustedCargoCommand(
+        cargo, ("metadata", "--locked", "--format-version", "1")
+    )
+    metadata = json.loads(_run_cargo_command(metadata_command, cwd=plan.workspace))
+    if not isinstance(metadata, dict):
+        raise ValueError("private cargo metadata output is invalid")
+    metadata_path = plan.evidence_root / "cargo-metadata.json"
+    write_hashed_json(metadata_path, metadata)
+    dependency_graph_sha256 = _canonical_hash(_normalized_dependency_graph(metadata))
+    _run_cargo_command(command, cwd=plan.workspace, environment=environment)
     report_path = (
-        target_root / "m5-checkpoint-benchmark" / f"{candidate.commit}-{run_id}.json"
+        plan.target_dir
+        / "m5-checkpoint-benchmark"
+        / f"{plan.candidate.commit}-{private_run_id}.json"
+    )
+    candidate = RefSnapshot(
+        role=plan.candidate.role,
+        commit=plan.candidate.commit,
+        tree=plan.candidate.tree,
+        worktree=plan.workspace,
     )
     report = validate_private_absolute_report(
         report_path,
-        target_root=target_root,
+        target_root=plan.target_dir,
         candidate=candidate,
     )
-    reference = report_path.relative_to(output_root, walk_up=True)
+    reference = report_path.relative_to(output_root)
+    report["label"] = plan.label
     report["artifact_path"] = str(reference)
-    return report, {"command": command.argv(), "environment": environment}
+    report.update(
+        {
+            "workspace": str(plan.workspace.resolve()),
+            "target_dir": str(plan.target_dir.resolve()),
+            "evidence_root": str(plan.evidence_root.resolve()),
+            "source_cargo_lock_sha256": sha256_file(plan.workspace / "Cargo.lock"),
+            "dependency_graph_sha256": dependency_graph_sha256,
+            "toolchain_sha256": context["toolchain_sha256"],
+            "machine_sha256": context["machine_sha256"],
+            "environment_sha256": context["environment_sha256"],
+            "build_environment_sha256": _canonical_hash(
+                _normalized_build_environment(
+                    _reproducible_build_environment(plan.workspace)
+                )
+            ),
+            "git_status_short": _git(
+                plan.workspace,
+                ["status", "--porcelain=v1", "--untracked-files=all"],
+            ),
+        }
+    )
+    run_evidence_path = plan.evidence_root / "run-evidence.json"
+    run_evidence = {
+        "schema": "calc-flow.m5-private-run-evidence.v1",
+        "label": plan.label,
+        "source_commit": plan.candidate.commit,
+        "source_tree": plan.candidate.tree,
+        "workspace": str(plan.workspace.resolve()),
+        "target_dir": str(plan.target_dir.resolve()),
+        "evidence_root": str(plan.evidence_root.resolve()),
+        "report_path": str(reference),
+        "report_sha256": report["report_sha256"],
+        "source_cargo_lock_sha256": report["source_cargo_lock_sha256"],
+        "dependency_graph_sha256": dependency_graph_sha256,
+        "toolchain_sha256": report["toolchain_sha256"],
+        "machine_sha256": report["machine_sha256"],
+        "environment_sha256": report["environment_sha256"],
+        "build_environment_sha256": report["build_environment_sha256"],
+        "dependency_metadata_path": str(metadata_path.relative_to(output_root)),
+        "dependency_metadata_sha256": sha256_file(metadata_path),
+        "command": command.argv(),
+        "environment": environment,
+        "git_status_short": report["git_status_short"],
+    }
+    write_hashed_json(run_evidence_path, run_evidence)
+    artifacts = _private_report_artifacts(report_path, report, plan.target_dir)
+    artifacts.extend(
+        [
+            metadata_path,
+            Path(f"{metadata_path}.sha256"),
+            run_evidence_path,
+            Path(f"{run_evidence_path}.sha256"),
+            plan.workspace / "Cargo.lock",
+        ]
+    )
+    return (
+        report,
+        {
+            "label": plan.label,
+            "command": command.argv(),
+            "environment": environment,
+            "cwd": str(plan.workspace),
+        },
+        artifacts,
+    )
+
+
+def _private_report_artifacts(
+    report_path: Path,
+    report: dict[str, object],
+    target_root: Path,
+) -> list[Path]:
+    provenance = report.get("provenance")
+    measurements = report.get("measurements")
+    if not isinstance(provenance, dict) or not isinstance(measurements, list):
+        raise ValueError("private report artifact inventory is incomplete")
+    executable = Path(str(provenance.get("executable")))
+    artifacts = [report_path, Path(f"{report_path}.sha256"), executable]
+    for measurement in measurements:
+        if not isinstance(measurement, dict):
+            raise ValueError("private report measurement artifact is invalid")
+        references = measurement.get("artifacts")
+        if not isinstance(references, dict):
+            raise ValueError("private report measurement artifacts are missing")
+        for name in ("sample", "estimates"):
+            artifact = references.get(name)
+            if not isinstance(artifact, dict) or not isinstance(
+                artifact.get("path"), str
+            ):
+                raise ValueError(f"private {name} artifact path is missing")
+            artifacts.append(target_root / str(artifact["path"]))
+    return artifacts
 
 
 def _valid_run_id(run_id: str) -> bool:
@@ -1187,6 +1854,292 @@ def _valid_run_id(run_id: str) -> bool:
         character.isascii() and (character.isalnum() or character in "-_")
         for character in run_id
     )
+
+
+def assemble_benchmark_report(
+    *,
+    run_id: str,
+    output_root: Path,
+    baseline: dict[str, object],
+    candidate: dict[str, object],
+    merge_base: str,
+    common_runs: Sequence[dict[str, object]],
+    shared_edge_result: dict[str, object],
+    private_runs: Sequence[dict[str, object]],
+    private_repeatability: dict[str, object],
+    candidate_self_overhead: dict[str, object],
+    host: dict[str, object],
+    contexts: dict[str, object],
+    source_contract: dict[str, object],
+    commands: Sequence[dict[str, object]],
+    artifact_manifest: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "schema": "calc-flow.m5-checkpoint-benchmark-evidence.v2",
+        "scope": "benchmark_evidence_only_not_m5_acceptance",
+        "run_id": run_id,
+        "evidence_root": str(output_root.resolve()),
+        "baseline": baseline,
+        "candidate": candidate,
+        "merge_base": merge_base,
+        "common_run_order": list(RUN_ORDER),
+        "private_run_order": list(PRIVATE_RUN_ORDER),
+        "shared_edge_result": {
+            **shared_edge_result,
+            "scope": "shared_edge_result",
+            "harness_source": (
+                "frozen public edge-channel data roundtrip compiled on both refs"
+            ),
+            "runs": list(common_runs),
+        },
+        "m5_private_absolute": {
+            "decision": "absolute_only",
+            "runs": list(private_runs),
+            "repeatability": private_repeatability,
+            "candidate_self_overhead": candidate_self_overhead,
+        },
+        "host_stability": host,
+        "execution_context": contexts,
+        "source_contract": source_contract,
+        "commands": list(commands),
+        "artifact_manifest": artifact_manifest,
+    }
+
+
+def _run_private_matrix(
+    repository: Path,
+    output_root: Path,
+    candidate: RefSnapshot,
+    cargo: Path,
+    run_id: str,
+    context: dict[str, object],
+) -> tuple[list[dict[str, object]], list[dict[str, object]], list[Path]]:
+    plans = build_private_run_plan(output_root, candidate)
+    _prepare_private_worktrees(repository, plans)
+    reports = []
+    commands = []
+    artifacts = []
+    for plan in plans:
+        report, command, run_artifacts = _run_private_absolute(
+            output_root, plan, cargo, run_id, context
+        )
+        reports.append(report)
+        commands.append(command)
+        artifacts.extend(run_artifacts)
+    return reports, commands, artifacts
+
+
+def _benchmark_evidence_status(
+    shared_edge: dict[str, object],
+    private_repeatability: dict[str, object],
+    self_overhead: dict[str, object],
+    host: dict[str, object],
+) -> str:
+    decisions = (shared_edge.get("decision"), self_overhead.get("decision"))
+    if "regression" in decisions:
+        return "regression"
+    if (
+        host.get("stable") is not True
+        or private_repeatability.get("evidence_quality") != "stable"
+        or "inconclusive" in decisions
+    ):
+        return "inconclusive"
+    return "pass"
+
+
+def _unique_artifacts(artifacts: Sequence[Path]) -> list[Path]:
+    result = []
+    seen = set()
+    for artifact in artifacts:
+        canonical = artifact.resolve()
+        if canonical not in seen:
+            seen.add(canonical)
+            result.append(artifact)
+    return result
+
+
+def _source_contract_artifacts(
+    output_root: Path,
+    baseline: RefSnapshot,
+    candidate: RefSnapshot,
+    contract: dict[str, object],
+) -> tuple[Path, list[Path]]:
+    path = output_root / "source-contract.json"
+    write_hashed_json(path, contract)
+    artifacts = [
+        path,
+        Path(f"{path}.sha256"),
+        baseline.worktree / "Cargo.lock",
+        *(candidate.worktree / relative for relative in SOURCE_CONTRACT_FILES),
+    ]
+    return path, artifacts
+
+
+def _artifact_manifest_reference(
+    output_root: Path, artifacts: Sequence[Path]
+) -> dict[str, object]:
+    path = write_artifact_manifest(output_root, _unique_artifacts(artifacts))
+    validate_artifact_manifest(output_root, path)
+    digest_path = Path(f"{path}.sha256")
+    return {
+        "path": str(path.relative_to(output_root)),
+        "sha256": sha256_file(path),
+        "digest_sha256": sha256_file(digest_path),
+    }
+
+
+def validate_benchmark_evidence(
+    path: Path,
+    *,
+    output_root: Path,
+    baseline: RefSnapshot,
+    candidate: RefSnapshot,
+) -> dict[str, object]:
+    report = load_hashed_json(path)
+    if report.get("schema") != "calc-flow.m5-checkpoint-benchmark-evidence.v2":
+        raise ValueError("benchmark evidence schema is invalid")
+    if report.get("evidence_root") != str(output_root.resolve()):
+        raise ValueError("benchmark evidence root does not match")
+    if report.get("baseline") != {"commit": baseline.commit, "tree": baseline.tree}:
+        raise ValueError("benchmark baseline identity does not match")
+    if report.get("candidate") != {"commit": candidate.commit, "tree": candidate.tree}:
+        raise ValueError("benchmark candidate identity does not match")
+    source_contract = report.get("source_contract")
+    if not isinstance(source_contract, dict):
+        raise ValueError("benchmark source contract is missing")
+    validate_source_contract(source_contract, baseline, candidate)
+    recorded_source = load_hashed_json(output_root / "source-contract.json")
+    if recorded_source != source_contract:
+        raise ValueError("recorded benchmark source contract does not match")
+    contexts = _validated_context_pair(report)
+    host = host_stability(contexts["before"], contexts["after"])
+    if report.get("host_stability") != host:
+        raise ValueError("benchmark host stability decision does not match")
+    _validate_recorded_decisions(
+        report, output_root, baseline, candidate, stable=host["stable"] is True
+    )
+    _validate_outer_manifest_reference(report, output_root)
+    return report
+
+
+def _validated_context_pair(report: dict[str, object]) -> dict[str, dict[str, object]]:
+    contexts = report.get("execution_context")
+    if not isinstance(contexts, dict):
+        raise ValueError("benchmark execution context is missing")
+    result = {}
+    for label in ("before", "after"):
+        context = contexts.get(label)
+        if not isinstance(context, dict):
+            raise ValueError(f"benchmark {label} context is missing")
+        validate_execution_context(context)
+        result[label] = context
+    return result
+
+
+def _validate_recorded_decisions(
+    report: dict[str, object],
+    output_root: Path,
+    baseline: RefSnapshot,
+    candidate: RefSnapshot,
+    *,
+    stable: bool,
+) -> None:
+    shared = report.get("shared_edge_result")
+    private = report.get("m5_private_absolute")
+    if not isinstance(shared, dict) or not isinstance(private, dict):
+        raise ValueError("benchmark scoped results are missing")
+    common_runs = shared.get("runs")
+    private_runs = private.get("runs")
+    if not isinstance(common_runs, list) or not isinstance(private_runs, list):
+        raise ValueError("benchmark run evidence is missing")
+    _validate_run_roots(output_root, common_runs, private_runs)
+    _validate_private_matrix_provenance(private_runs, candidate)
+    validate_matrix_provenance(
+        common_runs,
+        baseline_commit=baseline.commit,
+        baseline_tree=baseline.tree,
+        candidate_commit=candidate.commit,
+        candidate_tree=candidate.tree,
+    )
+    expected_shared = evaluate_common_case(common_runs, host_stable=stable)
+    if any(shared.get(key) != value for key, value in expected_shared.items()):
+        raise ValueError("shared edge decision does not match run evidence")
+    repeatability = evaluate_private_repeats(private_runs, host_stable=stable)
+    if private.get("repeatability") != repeatability:
+        raise ValueError("private repeatability does not match run evidence")
+    self_overhead = evaluate_candidate_self_overhead(
+        private_runs, repeatability=repeatability, host_stable=stable
+    )
+    if private.get("candidate_self_overhead") != self_overhead:
+        raise ValueError("candidate self-overhead does not match run evidence")
+
+
+def _validate_run_roots(
+    output_root: Path,
+    common_runs: Sequence[dict[str, object]],
+    private_runs: Sequence[dict[str, object]],
+) -> None:
+    for run in common_runs:
+        validate_rooted_directory(
+            output_root, Path(str(run.get("target_dir"))), "target"
+        )
+        validate_rooted_directory(
+            output_root, Path(str(run.get("evidence_root"))), "evidence"
+        )
+    for run in private_runs:
+        for field in ("workspace", "target_dir", "evidence_root"):
+            validate_rooted_directory(
+                output_root, Path(str(run.get(field))), f"private {field}"
+            )
+
+
+def _validate_private_matrix_provenance(
+    runs: Sequence[dict[str, object]], candidate: RefSnapshot
+) -> None:
+    if len(runs) != 2 or tuple(run.get("label") for run in runs) != PRIVATE_RUN_ORDER:
+        raise ValueError(f"private benchmark run order must be {PRIVATE_RUN_ORDER}")
+    for run in runs:
+        provenance = run.get("provenance")
+        if (
+            run.get("commit") != candidate.commit
+            or not isinstance(provenance, dict)
+            or provenance.get("tree") != candidate.tree
+            or run.get("git_status_short") != ""
+        ):
+            raise ValueError(
+                "private benchmark run does not match its clean candidate ref"
+            )
+    for field in (
+        "source_cargo_lock_sha256",
+        "dependency_graph_sha256",
+        "toolchain_sha256",
+        "machine_sha256",
+        "environment_sha256",
+        "build_environment_sha256",
+    ):
+        _full_sha256(_one_value(runs, field), f"private {field}")
+
+
+def _validate_outer_manifest_reference(
+    report: dict[str, object], output_root: Path
+) -> None:
+    reference = report.get("artifact_manifest")
+    if (
+        not isinstance(reference, dict)
+        or reference.get("path") != "artifact-manifest.json"
+    ):
+        raise ValueError("benchmark artifact manifest reference is invalid")
+    manifest = output_root / "artifact-manifest.json"
+    digest = Path(f"{manifest}.sha256")
+    if sha256_file(manifest) != _full_sha256(
+        reference.get("sha256"), "artifact manifest hash"
+    ):
+        raise ValueError("benchmark artifact manifest hash does not match")
+    if sha256_file(digest) != _full_sha256(
+        reference.get("digest_sha256"), "artifact manifest digest hash"
+    ):
+        raise ValueError("benchmark artifact manifest digest does not match")
+    validate_artifact_manifest(output_root, manifest)
 
 
 def run_benchmark_evidence(
@@ -1210,40 +2163,58 @@ def run_benchmark_evidence(
         baseline_reference,
         candidate_reference,
     )
-    context = _execution_context()
-    common_runs, commands = _run_common_matrix(
-        output_root, baseline, candidate, cargo_executable, context
+    source_contract = build_source_contract(baseline, candidate)
+    _, source_artifacts = _source_contract_artifacts(
+        output_root, baseline, candidate, source_contract
     )
-    common_decision = evaluate_common_case(common_runs)
-    private_report, private_command = _run_private_absolute(
-        output_root, candidate, cargo_executable, run_id
+    context_before = _execution_context()
+    common_runs, commands, common_artifacts = _run_common_matrix(
+        output_root, baseline, candidate, cargo_executable, context_before
     )
-    commands.append(private_command)
-    overall_result = common_decision["decision"]
-    report = {
-        "schema": "calc-flow.m5-checkpoint-benchmark-evidence.v1",
-        "run_id": run_id,
-        "baseline": {"commit": baseline.commit, "tree": baseline.tree},
-        "candidate": {"commit": candidate.commit, "tree": candidate.tree},
-        "merge_base": merge_base,
-        "run_order": list(RUN_ORDER),
-        "common_comparison": {
-            "harness_source": (
-                "frozen public edge-channel data roundtrip compiled on both refs"
-            ),
-            "runs": common_runs,
-            "decision": common_decision,
-        },
-        "m5_private_absolute": private_report,
-        "execution_context": context,
-        "commands": commands,
-        "overall_result": overall_result,
-        "overall_pass": overall_result == "pass",
-    }
+    private_runs, private_commands, private_artifacts = _run_private_matrix(
+        repository, output_root, candidate, cargo_executable, run_id, context_before
+    )
+    commands.extend(private_commands)
+    context_after = _execution_context()
+    host = host_stability(context_before, context_after)
+    stable = host["stable"] is True
+    shared_edge = evaluate_common_case(common_runs, host_stable=stable)
+    private_repeatability = evaluate_private_repeats(private_runs, host_stable=stable)
+    self_overhead = evaluate_candidate_self_overhead(
+        private_runs, repeatability=private_repeatability, host_stable=stable
+    )
+    manifest = _artifact_manifest_reference(
+        output_root, source_artifacts + common_artifacts + private_artifacts
+    )
+    report = assemble_benchmark_report(
+        run_id=run_id,
+        output_root=output_root,
+        baseline={"commit": baseline.commit, "tree": baseline.tree},
+        candidate={"commit": candidate.commit, "tree": candidate.tree},
+        merge_base=merge_base,
+        common_runs=common_runs,
+        shared_edge_result=shared_edge,
+        private_runs=private_runs,
+        private_repeatability=private_repeatability,
+        candidate_self_overhead=self_overhead,
+        host=host,
+        contexts={"before": context_before, "after": context_after},
+        source_contract=source_contract,
+        commands=commands,
+        artifact_manifest=manifest,
+    )
     report_path = output_root / "benchmark-evidence.json"
     write_hashed_json(report_path, report)
-    load_hashed_json(report_path)
-    return report_path, str(overall_result)
+    validate_benchmark_evidence(
+        report_path,
+        output_root=output_root,
+        baseline=baseline,
+        candidate=candidate,
+    )
+    status = _benchmark_evidence_status(
+        shared_edge, private_repeatability, self_overhead, host
+    )
+    return report_path, status
 
 
 def _parser() -> argparse.ArgumentParser:

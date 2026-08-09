@@ -98,6 +98,20 @@ class CommonDecisionTests(unittest.TestCase):
         self.assertEqual(crossing["decision"], "inconclusive")
         self.assertEqual(unsustained["decision"], "inconclusive")
 
+    def test_unstable_or_virtualized_host_cannot_yield_a_confident_pass(self) -> None:
+        decision = benchmark.evaluate_common_case(
+            [
+                _run("B1", 100.0, 99.9, 100.1),
+                _run("C1", 101.0, 100.9, 101.1),
+                _run("B2", 100.0, 99.9, 100.1),
+                _run("C2", 101.0, 100.9, 101.1),
+            ],
+            host_stable=False,
+        )
+
+        self.assertEqual(decision["decision"], "inconclusive")
+        self.assertFalse(decision["host_stable"])
+
     def test_common_case_rejects_nonfinite_or_unordered_confidence_data(self) -> None:
         valid = [
             _run("B1", 100.0, 99.9, 100.1),
@@ -151,9 +165,13 @@ class CommonHarnessSourceTests(unittest.TestCase):
         self.assertIn("assert_eq!(harness_hash(), EXPECTED_HARNESS_SHA256)", source)
         self.assertIn("edge_channel", source)
         self.assertIn(benchmark.COMMON_CASE, source)
-        self.assertIn('env!("CALC_FLOW_M5_COMMON_EXECUTABLE")', source)
+        self.assertIn('var_os("CALC_FLOW_M5_RUN_LABEL")', source)
+        self.assertIn('var_os("CALC_FLOW_M5_COMMON_EXECUTABLE_SHA256")', source)
+        self.assertNotIn('env!("CALC_FLOW_M5_RUN_LABEL")', source)
+        self.assertNotIn('env!("CALC_FLOW_M5_COMMON_EXECUTABLE")', source)
         self.assertNotIn("current_exe", source)
         self.assertNotIn("args_os", source)
+        self.assertIn("hard_link", source)
         self.assertNotIn("checkpoint", source.lower())
         self.assertIn('calc-flow = { path = "../../../../crates/calc-flow" }', manifest)
 
@@ -161,6 +179,7 @@ class CommonHarnessSourceTests(unittest.TestCase):
         self,
     ) -> None:
         source = Path(benchmark.__file__).read_text(encoding="utf-8")
+        source_lines = source.splitlines()
         calls = _subprocess_run_calls(source)
 
         self.assertEqual(len(calls), 7)
@@ -184,6 +203,8 @@ class CommonHarnessSourceTests(unittest.TestCase):
             self.assertIn("executable", keywords)
             self.assertIsInstance(keywords.get("shell"), ast.Constant)
             self.assertIs(keywords["shell"].value, False)
+            self.assertIn("nosec", source_lines[call.lineno - 1])
+            self.assertIn("B607", source_lines[call.lineno - 1])
 
     def test_trusted_cargo_command_rejects_an_executable_override(self) -> None:
         with self.assertRaisesRegex(ValueError, "trusted cargo executable"):
@@ -431,6 +452,7 @@ def _provenance_run(label: str) -> dict[str, object]:
         "toolchain_sha256": "8" * 64,
         "machine_sha256": "9" * 64,
         "environment_sha256": "e" * 64,
+        "build_environment_sha256": ("f" if baseline else "0") * 64,
         "git_status_short": "",
     }
 
@@ -448,6 +470,10 @@ class ProvenanceContractTests(unittest.TestCase):
 
     def test_matrix_requires_fresh_roots_and_ref_specific_executables(self) -> None:
         runs = [_provenance_run(label) for label in benchmark.RUN_ORDER]
+        runs[1]["source_cargo_lock_sha256"] = "a" * 64
+        runs[3]["source_cargo_lock_sha256"] = "a" * 64
+        runs[1]["dependency_graph_sha256"] = "b" * 64
+        runs[3]["dependency_graph_sha256"] = "b" * 64
         benchmark.validate_matrix_provenance(
             runs,
             baseline_commit="a" * 40,
@@ -473,6 +499,17 @@ class ProvenanceContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "distinct executable"):
             benchmark.validate_matrix_provenance(
                 same_executable,
+                baseline_commit="a" * 40,
+                baseline_tree="b" * 40,
+                candidate_commit="c" * 40,
+                candidate_tree="d" * 40,
+            )
+
+        mismatched_repeat = [dict(run) for run in runs]
+        mismatched_repeat[2]["executable_sha256"] = "f" * 64
+        with self.assertRaisesRegex(ValueError, "byte-identical"):
+            benchmark.validate_matrix_provenance(
+                mismatched_repeat,
                 baseline_commit="a" * 40,
                 baseline_tree="b" * 40,
                 candidate_commit="c" * 40,
@@ -535,6 +572,278 @@ class OrchestrationPlanTests(unittest.TestCase):
             environment["CALC_FLOW_M5_PRIVATE_SOURCE_TREE"], candidate.tree
         )
         self.assertEqual(environment["CARGO_TARGET_DIR"], str(target))
+        self.assertEqual(environment["CARGO_INCREMENTAL"], "0")
+
+    def test_common_build_identity_excludes_runtime_label_and_path(self) -> None:
+        snapshot = benchmark.RefSnapshot(
+            role="baseline",
+            commit="a" * 40,
+            tree="b" * 40,
+            worktree=Path("/evidence/worktrees/baseline"),
+        )
+        plan = benchmark.build_run_plan(Path("/evidence"), snapshot, snapshot)[0]
+
+        build = benchmark.common_build_environment(plan, "c" * 64)
+        run = benchmark.common_run_environment(
+            plan,
+            build,
+            executable_sha256="d" * 64,
+        )
+
+        self.assertNotIn("CALC_FLOW_M5_RUN_LABEL", build)
+        self.assertNotIn("CALC_FLOW_M5_COMMON_EXECUTABLE", build)
+        self.assertEqual(run["CALC_FLOW_M5_RUN_LABEL"], "B1")
+        self.assertEqual(run["CALC_FLOW_M5_COMMON_EXECUTABLE_SHA256"], "d" * 64)
+
+    def test_private_command_is_locked_release_and_nonincremental(self) -> None:
+        cargo = Path(shutil.which("cargo") or "")
+        command = benchmark.private_benchmark_command(cargo)
+
+        self.assertIn("--release", command.arguments)
+        self.assertIn("--locked", command.arguments)
+        self.assertEqual(command.arguments[0], "test")
+
+    def test_private_plan_uses_two_fresh_release_workspaces_and_roots(self) -> None:
+        candidate = benchmark.RefSnapshot(
+            role="candidate",
+            commit="a" * 40,
+            tree="b" * 40,
+            worktree=Path("/evidence/worktrees/candidate"),
+        )
+
+        plans = benchmark.build_private_run_plan(Path("/evidence"), candidate)
+
+        self.assertEqual([plan.label for plan in plans], ["P1", "P2"])
+        self.assertEqual(len({plan.workspace for plan in plans}), 2)
+        self.assertEqual(len({plan.target_dir for plan in plans}), 2)
+        self.assertEqual(len({plan.evidence_root for plan in plans}), 2)
+        for plan in plans:
+            self.assertNotEqual(plan.workspace, candidate.worktree)
+            self.assertTrue(plan.target_dir.is_relative_to(plan.workspace))
+
+
+class PrivateRepeatDecisionTests(unittest.TestCase):
+    def test_private_repeatability_is_absolute_only_and_noise_aware(self) -> None:
+        reports = []
+        for label, offset in (("P1", 0.0), ("P2", 2.0)):
+            reports.append(
+                {
+                    "label": label,
+                    "measurements": [
+                        {"case": case, "median_ns": 100.0 + index + offset}
+                        for index, case in enumerate(benchmark.M5_ABSOLUTE_CASES)
+                    ],
+                    "provenance": {"executable_sha256": "a" * 64},
+                }
+            )
+
+        stable = benchmark.evaluate_private_repeats(reports, host_stable=True)
+        noisy = benchmark.evaluate_private_repeats(reports, host_stable=False)
+
+        self.assertEqual(stable["decision"], "absolute_only")
+        self.assertEqual(stable["evidence_quality"], "stable")
+        self.assertEqual(noisy["evidence_quality"], "inconclusive")
+        self.assertNotIn("baseline_median_ns", stable)
+
+        identical = [reports[0], {**reports[0], "label": "P2"}]
+        exact_repeatability = benchmark.evaluate_private_repeats(
+            identical, host_stable=True
+        )
+        exact_diagnostic = benchmark.evaluate_candidate_self_overhead(
+            identical,
+            repeatability=exact_repeatability,
+            host_stable=True,
+        )
+        self.assertEqual(exact_diagnostic["decision"], "pass")
+
+    def test_private_repeats_reject_different_binaries_and_large_spread(self) -> None:
+        reports = []
+        for label, scale, executable in (
+            ("P1", 1.0, "a" * 64),
+            ("P2", 1.5, "b" * 64),
+        ):
+            reports.append(
+                {
+                    "label": label,
+                    "measurements": [
+                        {"case": case, "median_ns": (100.0 + index) * scale}
+                        for index, case in enumerate(benchmark.M5_ABSOLUTE_CASES)
+                    ],
+                    "provenance": {"executable_sha256": executable},
+                }
+            )
+
+        with self.assertRaisesRegex(ValueError, "byte-identical"):
+            benchmark.evaluate_private_repeats(reports, host_stable=True)
+        reports[1]["provenance"] = {"executable_sha256": "a" * 64}
+        decision = benchmark.evaluate_private_repeats(reports, host_stable=True)
+        self.assertEqual(decision["evidence_quality"], "inconclusive")
+
+    def test_candidate_checkpoint_self_overhead_is_scoped_and_noise_aware(self) -> None:
+        reports = []
+        for label, disabled, enabled in (
+            ("P1", 100.0, 103.0),
+            ("P2", 101.0, 104.0),
+        ):
+            medians = {
+                case: 100.0 + index
+                for index, case in enumerate(benchmark.M5_ABSOLUTE_CASES)
+            }
+            medians["m5/private_full_path/checkpoint_disabled"] = disabled
+            medians["m5/private_full_path/checkpoint_enabled"] = enabled
+            reports.append(
+                {
+                    "label": label,
+                    "measurements": [
+                        {"case": case, "median_ns": medians[case]}
+                        for case in benchmark.M5_ABSOLUTE_CASES
+                    ],
+                    "provenance": {"executable_sha256": "a" * 64},
+                }
+            )
+        repeatability = benchmark.evaluate_private_repeats(reports, host_stable=True)
+
+        diagnostic = benchmark.evaluate_candidate_self_overhead(
+            reports,
+            repeatability=repeatability,
+            host_stable=True,
+        )
+        unstable = benchmark.evaluate_candidate_self_overhead(
+            reports,
+            repeatability=repeatability,
+            host_stable=False,
+        )
+
+        self.assertEqual(diagnostic["decision"], "pass")
+        self.assertEqual(
+            diagnostic["scope"], "candidate_self_overhead_not_main_regression"
+        )
+        self.assertEqual(unstable["decision"], "inconclusive")
+
+
+class ResultContractTests(unittest.TestCase):
+    def test_result_is_scoped_and_never_claims_overall_m5_acceptance(self) -> None:
+        report = benchmark.assemble_benchmark_report(
+            run_id="run-1",
+            output_root=Path("/evidence/run-1"),
+            baseline={"commit": "a" * 40, "tree": "b" * 40},
+            candidate={"commit": "c" * 40, "tree": "d" * 40},
+            merge_base="a" * 40,
+            common_runs=[],
+            shared_edge_result={"decision": "pass"},
+            private_runs=[],
+            private_repeatability={
+                "decision": "absolute_only",
+                "evidence_quality": "stable",
+            },
+            candidate_self_overhead={"decision": "pass"},
+            host={"stable": True, "reasons": []},
+            contexts={"before": {}, "after": {}},
+            source_contract={"schema": "source"},
+            commands=[],
+            artifact_manifest={"path": "artifact-manifest.json", "sha256": "e" * 64},
+        )
+
+        self.assertEqual(report["shared_edge_result"]["decision"], "pass")
+        self.assertEqual(report["m5_private_absolute"]["decision"], "absolute_only")
+        self.assertEqual(report["scope"], "benchmark_evidence_only_not_m5_acceptance")
+        self.assertNotIn("overall_pass", report)
+        self.assertNotIn("overall_result", report)
+
+    def test_execution_context_is_complete_and_hashed(self) -> None:
+        context = benchmark._execution_context()
+
+        for name in ("toolchain", "machine", "environment"):
+            self.assertIsInstance(context[name], dict)
+            self.assertEqual(
+                context[f"{name}_sha256"], benchmark._canonical_hash(context[name])
+            )
+
+
+class OuterManifestTests(unittest.TestCase):
+    def test_outer_manifest_recomputes_files_and_rejects_tamper(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "P1" / "report.json"
+            second = root / "B1" / "measurement.json"
+            first.parent.mkdir()
+            second.parent.mkdir()
+            first.write_text("private", encoding="utf-8")
+            second.write_text("common", encoding="utf-8")
+
+            manifest = benchmark.write_artifact_manifest(root, [first, second])
+            benchmark.validate_artifact_manifest(root, manifest)
+
+            first.write_text("tampered", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "artifact hash"):
+                benchmark.validate_artifact_manifest(root, manifest)
+
+    def test_hashed_json_is_published_through_an_atomic_create_only_link(self) -> None:
+        source = Path(benchmark.__file__).read_text(encoding="utf-8")
+
+        self.assertIn("os.link", source)
+
+    def test_execution_context_rejects_rehashed_environment_tamper(self) -> None:
+        context = {
+            "toolchain": {"rustc": "rustc 1"},
+            "machine": {"cpu": "fixed"},
+            "environment": {"RUSTFLAGS": ""},
+        }
+        for name in ("toolchain", "machine", "environment"):
+            context[f"{name}_sha256"] = benchmark._canonical_hash(context[name])
+        benchmark.validate_execution_context(context)
+
+        context["environment"] = {"RUSTFLAGS": "tampered"}
+        with self.assertRaisesRegex(ValueError, "environment fingerprint"):
+            benchmark.validate_execution_context(context)
+
+    def test_evidence_root_contract_rejects_escape_and_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "evidence"
+            outside = Path(directory) / "outside"
+            root.mkdir()
+            outside.mkdir()
+            escaped = outside / "run"
+            escaped.mkdir()
+            linked = root / "linked"
+            linked.symlink_to(escaped, target_is_directory=True)
+
+            with self.assertRaisesRegex(ValueError, "escapes evidence root"):
+                benchmark.validate_rooted_directory(root, escaped, "run")
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                benchmark.validate_rooted_directory(root, linked, "run")
+
+    def test_source_contract_recomputes_exact_candidate_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline_root = root / "baseline"
+            candidate_root = root / "candidate"
+            baseline_root.mkdir()
+            candidate_root.mkdir()
+            files = (Path("Cargo.lock"), Path("scripts/workload.py"))
+            for worktree, marker in ((baseline_root, "base"), (candidate_root, "cand")):
+                for relative in files:
+                    path = worktree / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(f"{marker}:{relative}\n", encoding="utf-8")
+            baseline = benchmark.RefSnapshot(
+                "baseline", "a" * 40, "b" * 40, baseline_root
+            )
+            candidate = benchmark.RefSnapshot(
+                "candidate", "c" * 40, "d" * 40, candidate_root
+            )
+            contract = benchmark.build_source_contract(
+                baseline, candidate, source_files=files
+            )
+            benchmark.validate_source_contract(
+                contract, baseline, candidate, source_files=files
+            )
+
+            (candidate_root / files[1]).write_text("tampered\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "source bytes"):
+                benchmark.validate_source_contract(
+                    contract, baseline, candidate, source_files=files
+                )
 
 
 if __name__ == "__main__":

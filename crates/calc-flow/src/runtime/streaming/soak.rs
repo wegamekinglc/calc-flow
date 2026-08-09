@@ -104,7 +104,7 @@ const CHECKPOINT_SOAK_PROCESS_SCHEMA: &str = "calc-flow.m5-checkpoint-soak-proce
 const CHECKPOINT_SOAK_PLAN_SCHEMA: &str = "calc-flow.m5-checkpoint-soak-plan.v1";
 const CHECKPOINT_SOAK_GENERATIONS: usize = 3;
 const CHECKPOINT_SOAK_REPORT_LIMIT: u64 = 1 << 20;
-const CHECKPOINT_BENCHMARK_COMMAND: &str = "CARGO_TARGET_DIR=<fresh-candidate-target> CARGO_INCREMENTAL=0 CALC_FLOW_M5_CHECKPOINT_BENCHMARK=1 CALC_FLOW_M5_CHECKPOINT_BENCHMARK_RUN_ID=<unique-run-id> CALC_FLOW_M5_PRIVATE_SOURCE_COMMIT=<candidate-commit> CALC_FLOW_M5_PRIVATE_SOURCE_TREE=<candidate-tree> cargo test --release -p calc-flow --lib runtime::streaming::soak::private_m5_epoch_checkpoint_absolute_benchmark -- --ignored --exact --nocapture";
+const CHECKPOINT_BENCHMARK_COMMAND: &str = "CARGO_TARGET_DIR=<fresh-candidate-target> CARGO_INCREMENTAL=0 CALC_FLOW_M5_CHECKPOINT_BENCHMARK=1 CALC_FLOW_M5_CHECKPOINT_BENCHMARK_RUN_ID=<unique-run-id> CALC_FLOW_M5_PRIVATE_SOURCE_COMMIT=<candidate-commit> CALC_FLOW_M5_PRIVATE_SOURCE_TREE=<candidate-tree> cargo test --release --locked -p calc-flow --lib runtime::streaming::soak::private_m5_epoch_checkpoint_absolute_benchmark -- --ignored --exact --nocapture";
 const M5_PRIVATE_BENCHMARK_CASES: [&str; 12] = [
     "m5/private_path/barrier_cut_single_source",
     "m5/private_path/barrier_cut_two_source_fan_out",
@@ -1943,6 +1943,18 @@ fn current_private_benchmark_provenance() -> Result<PrivateBenchmarkProvenance> 
         "kernel": command_output("uname", &["-srvmo"]),
         "rustc_host": toolchain.lines().find(|line| line.starts_with("host: ")),
         "rustflags": std::env::var("RUSTFLAGS").unwrap_or_default(),
+        "cargo_encoded_rustflags": std::env::var("CARGO_ENCODED_RUSTFLAGS")
+            .unwrap_or_default()
+            .split('\u{1f}')
+            .map(|flag| {
+                flag.split_once('=')
+                    .filter(|(name, _)| *name == "--remap-path-prefix")
+                    .map_or_else(|| flag.to_owned(), |(name, mapping)| {
+                        let destination = mapping.rsplit_once('=').map_or(mapping, |(_, value)| value);
+                        format!("{name}=<workspace>={destination}")
+                    })
+            })
+            .collect::<Vec<_>>(),
     });
     let environment_hash = sha256_bytes(&serde_json::to_vec(&environment).unwrap());
     let harness_hash = private_benchmark_harness_hash();
@@ -2404,21 +2416,13 @@ fn validate_private_checkpoint_benchmark_report(path: &Path) -> Result<serde_jso
 }
 
 fn private_checkpoint_benchmark_target_root() -> PathBuf {
-    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap();
-    std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-        || workspace_root.join("target"),
-        |configured| {
-            let configured = PathBuf::from(configured);
-            if configured.is_absolute() {
-                configured
-            } else {
-                workspace_root.join(configured)
-            }
-        },
-    )
+    let configured =
+        PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into()));
+    if configured.is_absolute() {
+        configured
+    } else {
+        std::env::current_dir().unwrap().join(configured)
+    }
 }
 
 fn checkpoint_manifest_count(root: &Path) -> usize {
@@ -6059,6 +6063,12 @@ fn private_benchmark_metadata_reports_honest_absolute_only_m5_cases() {
     assert_eq!(metadata["topology"]["sources"], 2);
     assert_eq!(metadata["topology"]["sinks"], 2);
     assert_eq!(metadata["command"], CHECKPOINT_BENCHMARK_COMMAND);
+    assert!(
+        metadata["command"]
+            .as_str()
+            .unwrap()
+            .contains("cargo test --release --locked")
+    );
     assert!(
         metadata["command"]
             .as_str()
