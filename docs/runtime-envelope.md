@@ -378,8 +378,13 @@ Its checked phases are `Requested`, `SourcesCut`, `OperatorsSnapshotted`,
 `SinksPrecommitted`, `ManifestDurable`, `SinksCommitted`, and `Completed`.
 Participant sets come from preflight; byte-identical duplicate acknowledgements
 are idempotent, while missing, foreign, out-of-epoch, or conflicting evidence
-fails the job. Periodic and terminal requests serialize, and timeout never
-skips an epoch.
+fails the job. Periodic, manual, and terminal requests share the FIFO and the
+same checked epoch allocator; accepted manual requests are neither coalesced
+nor removed when their waiter is dropped. Manual completion is reported only
+after the manifest is durable and every sink commit is acknowledged. Timeout
+never skips an epoch. Cancellation before manifest durability fails the active
+and queued requests, while cancellation after durability finishes the sink
+commit attempt or leaves the job in `RecoveryRequired`.
 
 The production `ManifestTransaction` reuses the public v3
 `CheckpointManifest` as the sole durable recovery truth. It serializes segment

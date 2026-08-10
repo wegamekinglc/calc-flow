@@ -27,7 +27,7 @@ use super::{
     channel::edge_channel_with_metrics,
     checkpoint::coordinator::{
         CheckpointAck, CheckpointCoordinatorHandle, CheckpointEvent, CheckpointPhase,
-        CheckpointRequest, ParticipantSet, spawn_checkpoint_coordinator,
+        CheckpointRequest, ManualCheckpointFailure, ParticipantSet, spawn_checkpoint_coordinator,
     },
     job::{
         ContinuousJobSpec, OrdinarySinkBinding, ValidatedContinuousJob, ValidatedOrdinarySink,
@@ -457,6 +457,7 @@ struct JobCoreState {
 struct JobCore {
     launch_id: LaunchId,
     job_id: u64,
+    pipeline_name: String,
     state: Mutex<JobCoreState>,
     terminal_arbiter: TerminalArbiter,
     changed: Notify,
@@ -464,6 +465,9 @@ struct JobCore {
     runner_commands: mpsc::UnboundedSender<RunnerCommand>,
     metrics: MetricsRecorder,
     runtime_status: Mutex<RuntimeStatus>,
+    checkpoint_enabled: bool,
+    manual_checkpoint: Mutex<Option<CheckpointCoordinatorHandle>>,
+    operation_cancel_requested: AtomicBool,
     #[cfg(test)]
     terminal_commit_seam: Mutex<Option<TerminalCommitTestSeam>>,
     #[cfg(test)]
@@ -735,10 +739,13 @@ impl JobCore {
         runner_commands: mpsc::UnboundedSender<RunnerCommand>,
         metrics: MetricsRecorder,
         sink_outputs: BTreeMap<String, String>,
+        checkpoint_enabled: bool,
+        pipeline_name: String,
     ) -> Self {
         Self {
             launch_id,
             job_id,
+            pipeline_name,
             state: Mutex::new(JobCoreState {
                 owner: DriverOwnership::CoreOwned,
                 launch_delivery: LaunchDeliveryState::Provisional,
@@ -756,6 +763,9 @@ impl JobCore {
                 sink_outputs,
                 ..RuntimeStatus::default()
             }),
+            checkpoint_enabled,
+            manual_checkpoint: Mutex::new(None),
+            operation_cancel_requested: AtomicBool::new(false),
             #[cfg(test)]
             terminal_commit_seam: Mutex::new(None),
             #[cfg(test)]
@@ -764,6 +774,8 @@ impl JobCore {
     }
 
     fn request_cancel(&self, reaper_owned: bool) {
+        self.operation_cancel_requested
+            .store(true, Ordering::Release);
         self.terminal_arbiter.request_explicit_cancel();
         let cancel_launch = {
             let mut state = self.state.lock();
@@ -790,6 +802,8 @@ impl JobCore {
     /// ownership. The caller holds the runner registry lock, which is the
     /// linearization point shared with terminal publication.
     fn request_runner_drop_cancel(&self) -> bool {
+        self.operation_cancel_requested
+            .store(true, Ordering::Release);
         self.terminal_arbiter.request_explicit_cancel();
         let mut state = self.state.lock();
         if state.owner == DriverOwnership::Terminal {
@@ -826,6 +840,8 @@ impl JobCore {
     }
 
     fn request_deadline(&self) {
+        self.operation_cancel_requested
+            .store(true, Ordering::Release);
         self.terminal_arbiter.request_deadline();
         let _ = self
             .runner_commands
@@ -1053,6 +1069,30 @@ impl ContinuousJob {
         OutcomeObserver::new(Arc::clone(&self.core))
     }
 
+    pub(crate) async fn trigger_checkpoint(&self) -> crate::Result<Epoch> {
+        if !self.core.checkpoint_enabled {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "runtime.checkpoint".into(),
+                message: "manual checkpoints require a checkpoint runtime".into(),
+            });
+        }
+        let coordinator = loop {
+            let changed = self.core.changed.notified();
+            if let Some(coordinator) = self.core.manual_checkpoint.lock().clone() {
+                break coordinator;
+            }
+            if let Some(outcome) = self.core.state.lock().outcome.clone() {
+                return Err(manual_checkpoint_terminal_error(
+                    self.core.job_id,
+                    &self.core.pipeline_name,
+                    &outcome,
+                ));
+            }
+            changed.await;
+        };
+        coordinator.request_manual().await?.await
+    }
+
     pub(crate) fn shutdown(&self) -> OutcomeObserver {
         self.core.request_shutdown();
         OutcomeObserver::new(Arc::clone(&self.core))
@@ -1061,6 +1101,27 @@ impl ContinuousJob {
     pub(crate) fn cancel(&self) -> OutcomeObserver {
         self.core.request_cancel(false);
         OutcomeObserver::new(Arc::clone(&self.core))
+    }
+}
+
+fn manual_checkpoint_terminal_error(
+    job_id: u64,
+    pipeline_name: &str,
+    outcome: &ContinuousJobOutcome,
+) -> CalcFlowError {
+    match outcome.state {
+        ContinuousJobState::Cancelled => CalcFlowError::Cancelled {
+            run_id: format!("streaming-job-{job_id}"),
+        },
+        ContinuousJobState::RecoveryRequired => CalcFlowError::RecoveryRequired {
+            pipeline_name: pipeline_name.into(),
+            message: "job terminated while the manual checkpoint was pending".into(),
+        },
+        _ => CalcFlowError::Internal {
+            message: format!(
+                "streaming job {job_id} terminated before the manual checkpoint completed"
+            ),
+        },
     }
 }
 
@@ -1428,6 +1489,8 @@ impl ContinuousRunner {
             self.core.commands.clone(),
             metrics,
             sink_outputs,
+            checkpoint.is_some(),
+            validated.plan.name.clone(),
         );
         #[cfg(test)]
         let core = JobCore {
@@ -3194,6 +3257,7 @@ fn register_boundary_tasks(
                 sources: source_progress.clone(),
                 cancellation: context.cancellation().clone(),
                 metrics: core.metrics.clone(),
+                core: Arc::clone(core),
             };
             runtime
                 .supervisor
@@ -3228,6 +3292,31 @@ struct LiveCheckpointTaskInputs {
     sources: BTreeMap<String, SourceProgress>,
     cancellation: CancellationToken,
     metrics: MetricsRecorder,
+    core: Arc<JobCore>,
+}
+
+struct ManualCheckpointRegistration {
+    core: Arc<JobCore>,
+    coordinator: CheckpointCoordinatorHandle,
+}
+
+impl ManualCheckpointRegistration {
+    fn install(core: Arc<JobCore>, coordinator: CheckpointCoordinatorHandle) -> Self {
+        let previous = core.manual_checkpoint.lock().replace(coordinator.clone());
+        debug_assert!(previous.is_none());
+        core.changed.notify_waiters();
+        Self { core, coordinator }
+    }
+}
+
+impl Drop for ManualCheckpointRegistration {
+    fn drop(&mut self) {
+        self.core.manual_checkpoint.lock().take();
+        self.core.changed.notify_waiters();
+        self.coordinator.terminate(ManualCheckpointFailure::Failed {
+            message: "checkpoint task terminated before the queued request ran".into(),
+        });
+    }
 }
 
 #[derive(Default)]
@@ -3356,6 +3445,7 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
         sources,
         cancellation,
         metrics,
+        core,
     } = inputs;
     let participants = ParticipantSet {
         sources: checkpoint.identity.source_ids.clone(),
@@ -3383,6 +3473,8 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
         checkpoint.config.checkpoint_timeout,
         coordinator_cancellation.clone(),
     )?;
+    let _manual_checkpoint =
+        ManualCheckpointRegistration::install(Arc::clone(&core), coordinator.clone());
     let mut interval = tokio::time::interval(checkpoint.config.checkpoint_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     interval.tick().await;
@@ -3575,7 +3667,44 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
             }
         }
     };
-    coordinator_cancellation.cancel();
+    let sink_commit_incomplete =
+        assembly.manifest_durable && assembly.finalized_sink_outputs != expected_sinks;
+    let result = match result {
+        Err(error) if sink_commit_incomplete => Err(CalcFlowError::RecoveryRequired {
+            pipeline_name: checkpoint.identity.pipeline_name.clone(),
+            message: format!(
+                "checkpoint manifest is durable but sink commit did not complete: {error}"
+            ),
+        }),
+        Ok(()) if sink_commit_incomplete => Err(CalcFlowError::RecoveryRequired {
+            pipeline_name: checkpoint.identity.pipeline_name.clone(),
+            message: "checkpoint manifest is durable but sink commit completion was not observed"
+                .into(),
+        }),
+        result => result,
+    };
+    let manual_failure = match &result {
+        _ if core.operation_cancel_requested.load(Ordering::Acquire)
+            && !assembly.manifest_durable =>
+        {
+            ManualCheckpointFailure::Cancelled
+        }
+        Err(CalcFlowError::RecoveryRequired {
+            pipeline_name,
+            message,
+        }) => ManualCheckpointFailure::RecoveryRequired {
+            pipeline_name: pipeline_name.clone(),
+            message: message.clone(),
+        },
+        Err(error) => ManualCheckpointFailure::Failed {
+            message: error.to_string(),
+        },
+        Ok(()) if cancellation.is_cancelled() => ManualCheckpointFailure::Cancelled,
+        Ok(()) => ManualCheckpointFailure::Failed {
+            message: "checkpoint job completed before the queued request ran".into(),
+        },
+    };
+    coordinator.terminate(manual_failure);
     drop(coordinator);
     let result = match (result, coordinator_task.await) {
         (Err(error), _) => Err(error),
@@ -4328,7 +4457,11 @@ fn finish_running_report(
             TerminalCause::NaturalEnd
         }),
     };
+    let recovery_required = errors
+        .iter()
+        .any(|failure| matches!(&failure.error, CalcFlowError::RecoveryRequired { .. }));
     let state = match cause {
+        _ if recovery_required => ContinuousJobState::RecoveryRequired,
         TerminalCause::NaturalEnd | TerminalCause::GracefulShutdown => {
             ContinuousJobState::Completed
         }
@@ -5532,6 +5665,20 @@ mod tests {
         closed: Arc<AtomicUsize>,
     }
 
+    struct FailOnceCommitSink {
+        fail_commit: Arc<AtomicBool>,
+        log: Arc<Mutex<Vec<String>>>,
+        closed: Arc<AtomicUsize>,
+    }
+
+    struct BlockingCommitSink {
+        commit_entered: Arc<AtomicBool>,
+        commit_changed: Arc<Notify>,
+        commit_release: Arc<Semaphore>,
+        log: Arc<Mutex<Vec<String>>>,
+        closed: Arc<AtomicUsize>,
+    }
+
     #[async_trait]
     impl TransactionalStreamSink for PeriodicCheckpointSink {
         async fn open(&mut self) -> Result<()> {
@@ -5561,6 +5708,130 @@ mod tests {
         }
 
         async fn commit(&mut self, epoch: crate::Epoch, _state: &JsonMap) -> Result<()> {
+            self.log
+                .lock()
+                .push(format!("sink-commit:{}", epoch.as_u64()));
+            Ok(())
+        }
+
+        async fn abort(&mut self, epoch: crate::Epoch, _state: Option<&JsonMap>) -> Result<()> {
+            self.log
+                .lock()
+                .push(format!("sink-abort:{}", epoch.as_u64()));
+            Ok(())
+        }
+
+        async fn recover(&mut self, manifest: &crate::CheckpointManifest) -> Result<()> {
+            self.log
+                .lock()
+                .push(format!("sink-recover:{}", manifest.epoch().as_u64()));
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            self.closed.fetch_add(1, Ordering::SeqCst);
+            self.log.lock().push("sink-close".into());
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl TransactionalStreamSink for FailOnceCommitSink {
+        async fn open(&mut self) -> Result<()> {
+            self.log.lock().push("sink-open".into());
+            Ok(())
+        }
+
+        async fn begin_epoch(&mut self, epoch: crate::Epoch) -> Result<()> {
+            self.log
+                .lock()
+                .push(format!("sink-begin:{}", epoch.as_u64()));
+            Ok(())
+        }
+
+        async fn write(&mut self, _batch: &Batch) -> Result<()> {
+            Ok(())
+        }
+
+        async fn pre_commit(&mut self, epoch: crate::Epoch) -> Result<JsonMap> {
+            self.log
+                .lock()
+                .push(format!("sink-precommit:{}", epoch.as_u64()));
+            Ok(BTreeMap::from([(
+                "epoch".into(),
+                serde_json::json!(epoch.as_u64()),
+            )]))
+        }
+
+        async fn commit(&mut self, epoch: crate::Epoch, _state: &JsonMap) -> Result<()> {
+            self.log
+                .lock()
+                .push(format!("sink-commit:{}", epoch.as_u64()));
+            if self.fail_commit.swap(false, Ordering::SeqCst) {
+                return Err(CalcFlowError::Internal {
+                    message: "injected post-manifest commit failure".into(),
+                });
+            }
+            Ok(())
+        }
+
+        async fn abort(&mut self, epoch: crate::Epoch, _state: Option<&JsonMap>) -> Result<()> {
+            self.log
+                .lock()
+                .push(format!("sink-abort:{}", epoch.as_u64()));
+            Ok(())
+        }
+
+        async fn recover(&mut self, manifest: &crate::CheckpointManifest) -> Result<()> {
+            self.log
+                .lock()
+                .push(format!("sink-recover:{}", manifest.epoch().as_u64()));
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            self.closed.fetch_add(1, Ordering::SeqCst);
+            self.log.lock().push("sink-close".into());
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl TransactionalStreamSink for BlockingCommitSink {
+        async fn open(&mut self) -> Result<()> {
+            self.log.lock().push("sink-open".into());
+            Ok(())
+        }
+
+        async fn begin_epoch(&mut self, epoch: crate::Epoch) -> Result<()> {
+            self.log
+                .lock()
+                .push(format!("sink-begin:{}", epoch.as_u64()));
+            Ok(())
+        }
+
+        async fn write(&mut self, _batch: &Batch) -> Result<()> {
+            Ok(())
+        }
+
+        async fn pre_commit(&mut self, epoch: crate::Epoch) -> Result<JsonMap> {
+            self.log
+                .lock()
+                .push(format!("sink-precommit:{}", epoch.as_u64()));
+            Ok(BTreeMap::from([(
+                "epoch".into(),
+                serde_json::json!(epoch.as_u64()),
+            )]))
+        }
+
+        async fn commit(&mut self, epoch: crate::Epoch, _state: &JsonMap) -> Result<()> {
+            self.commit_entered.store(true, Ordering::Release);
+            self.commit_changed.notify_waiters();
+            self.commit_release
+                .acquire()
+                .await
+                .expect("test commit gate remains open")
+                .forget();
             self.log
                 .lock()
                 .push(format!("sink-commit:{}", epoch.as_u64()));
@@ -6409,6 +6680,56 @@ mod tests {
             0,
         )
         .unwrap()
+    }
+
+    fn pending_checkpoint_spec(
+        pipeline_name: &str,
+        job_id: u64,
+        source_polls: &Arc<AtomicUsize>,
+        source_closed: &Arc<AtomicUsize>,
+        sink: Box<dyn TransactionalStreamSink>,
+    ) -> ContinuousJobSpec {
+        let plan = PipelineBuilder::new(pipeline_name)
+            .unwrap()
+            .add_checkpoint_capable_node(
+                "node",
+                Box::new(StressForwardOperator::new(None)) as Box<dyn StreamOperator>,
+            )
+            .unwrap()
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements {
+                    delivery: BTreeMap::from([(
+                        "output".into(),
+                        crate::DeliveryGuarantee::ExactlyOnce,
+                    )]),
+                },
+            )
+            .unwrap();
+        ContinuousJobSpec {
+            context: StreamJobContext::new(
+                job_id,
+                plan.fingerprint(),
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            ),
+            plan,
+            sources: vec![NamedSourceBinding {
+                binding_id: "input".into(),
+                binding: counting_pending_binding(0, source_polls, source_closed),
+            }],
+            sinks: vec![NamedSinkBinding {
+                output_id: "output".into(),
+                sink_id: "sink".into(),
+                binding: OrdinarySinkBinding::new_transactional(sink),
+            }],
+            edge_budget: EdgeBudget {
+                max_rows: 1,
+                max_bytes: 1 << 20,
+            },
+            delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+        }
     }
 
     fn union_plan() -> crate::StreamExecutionPlan {
@@ -8010,6 +8331,8 @@ mod tests {
             commands,
             MetricsRecorder::default(),
             BTreeMap::new(),
+            false,
+            "test".into(),
         );
         core.terminal_arbiter.request_deadline();
         core.terminal_arbiter.request_explicit_cancel();
@@ -11020,6 +11343,679 @@ mod tests {
         runner.shutdown().await.unwrap();
         assert_eq!(source_closed.load(Ordering::SeqCst), 1);
         assert_eq!(sink_closed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn manual_checkpoint_returns_only_after_durable_manifest_and_sink_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Arc::new(
+            LocalStateBackend::new(directory.path().join("state"))
+                .await
+                .unwrap(),
+        );
+        let plan = PipelineBuilder::new("checkpoint-manual")
+            .unwrap()
+            .add_checkpoint_capable_node(
+                "node",
+                Box::new(StressForwardOperator::new(None)) as Box<dyn StreamOperator>,
+            )
+            .unwrap()
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements {
+                    delivery: BTreeMap::from([(
+                        "output".into(),
+                        crate::DeliveryGuarantee::ExactlyOnce,
+                    )]),
+                },
+            )
+            .unwrap();
+        let source_polls = Arc::new(AtomicUsize::new(0));
+        let source_closed = Arc::new(AtomicUsize::new(0));
+        let sink_closed = Arc::new(AtomicUsize::new(0));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let spec = ContinuousJobSpec {
+            context: StreamJobContext::new(
+                913,
+                plan.fingerprint(),
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            ),
+            plan,
+            sources: vec![NamedSourceBinding {
+                binding_id: "input".into(),
+                binding: counting_pending_binding(0, &source_polls, &source_closed),
+            }],
+            sinks: vec![NamedSinkBinding {
+                output_id: "output".into(),
+                sink_id: "sink".into(),
+                binding: OrdinarySinkBinding::new_transactional(Box::new(PeriodicCheckpointSink {
+                    log: Arc::clone(&log),
+                    closed: Arc::clone(&sink_closed),
+                })),
+            }],
+            edge_budget: EdgeBudget {
+                max_rows: 1,
+                max_bytes: 1 << 20,
+            },
+            delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+        };
+        let checkpoint = CheckpointRuntimeSpec::new(
+            backend,
+            directory.path().join("manifests"),
+            StreamRuntimeConfig {
+                checkpoint_interval: StdDuration::from_secs(3_600),
+                checkpoint_timeout: StdDuration::from_secs(10),
+                ..StreamRuntimeConfig::default()
+            },
+        )
+        .unwrap();
+        let mut runner = ContinuousRunner::new();
+        let job = runner.start_checkpointed(spec, checkpoint).await.unwrap();
+        wait_for_counter(&source_polls, 1).await;
+
+        let epoch = tokio::time::timeout(StdDuration::from_secs(5), job.trigger_checkpoint())
+            .await
+            .expect("manual checkpoint should not hang")
+            .unwrap();
+
+        assert_eq!(epoch, crate::Epoch::INITIAL);
+        assert!(
+            directory
+                .path()
+                .join("manifests/manifest-00000000000000000001.json")
+                .is_file()
+        );
+        assert_eq!(
+            &*log.lock(),
+            &[
+                "sink-open",
+                "sink-begin:1",
+                "sink-precommit:1",
+                "sink-commit:1",
+                "sink-begin:2",
+            ]
+        );
+
+        assert_eq!(job.cancel().await.state, ContinuousJobState::Cancelled);
+        drop(job);
+        runner.shutdown().await.unwrap();
+        assert_eq!(source_closed.load(Ordering::SeqCst), 1);
+        assert_eq!(sink_closed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "post-manifest recovery and the next manual epoch are one restart contract"
+    )]
+    async fn post_manifest_manual_commit_failure_requires_recovery_and_continues_epoch() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Arc::new(
+            LocalStateBackend::new(directory.path().join("state"))
+                .await
+                .unwrap(),
+        );
+        let manifest_root = directory.path().join("manifests");
+        let fail_commit = Arc::new(AtomicBool::new(true));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let plan = || {
+            PipelineBuilder::new("checkpoint-manual-recovery")
+                .unwrap()
+                .add_checkpoint_capable_node(
+                    "node",
+                    Box::new(StressForwardOperator::new(None)) as Box<dyn StreamOperator>,
+                )
+                .unwrap()
+                .compile_stream(
+                    &UdfRegistry::new().snapshot(),
+                    &StreamRequirements {
+                        delivery: BTreeMap::from([(
+                            "output".into(),
+                            crate::DeliveryGuarantee::ExactlyOnce,
+                        )]),
+                    },
+                )
+                .unwrap()
+        };
+        let checkpoint = || {
+            CheckpointRuntimeSpec::new(
+                backend.clone(),
+                &manifest_root,
+                StreamRuntimeConfig {
+                    checkpoint_interval: StdDuration::from_secs(3_600),
+                    checkpoint_timeout: StdDuration::from_secs(10),
+                    ..StreamRuntimeConfig::default()
+                },
+            )
+            .unwrap()
+        };
+        let spec = |job_id, source_polls: &Arc<AtomicUsize>, source_closed, sink_closed| {
+            let plan = plan();
+            ContinuousJobSpec {
+                context: StreamJobContext::new(
+                    job_id,
+                    plan.fingerprint(),
+                    JsonMap::new(),
+                    None,
+                    CancellationToken::new(),
+                ),
+                plan,
+                sources: vec![NamedSourceBinding {
+                    binding_id: "input".into(),
+                    binding: counting_pending_binding(0, source_polls, &source_closed),
+                }],
+                sinks: vec![NamedSinkBinding {
+                    output_id: "output".into(),
+                    sink_id: "sink".into(),
+                    binding: OrdinarySinkBinding::new_transactional(Box::new(FailOnceCommitSink {
+                        fail_commit: Arc::clone(&fail_commit),
+                        log: Arc::clone(&log),
+                        closed: sink_closed,
+                    })),
+                }],
+                edge_budget: EdgeBudget {
+                    max_rows: 1,
+                    max_bytes: 1 << 20,
+                },
+                delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            }
+        };
+        let first_source_polls = Arc::new(AtomicUsize::new(0));
+        let first_source_closed = Arc::new(AtomicUsize::new(0));
+        let first_sink_closed = Arc::new(AtomicUsize::new(0));
+        let mut first_runner = ContinuousRunner::new();
+        let first_job = first_runner
+            .start_checkpointed(
+                spec(
+                    914,
+                    &first_source_polls,
+                    Arc::clone(&first_source_closed),
+                    Arc::clone(&first_sink_closed),
+                ),
+                checkpoint(),
+            )
+            .await
+            .unwrap();
+        wait_for_counter(&first_source_polls, 1).await;
+
+        let (manual, failed) = tokio::time::timeout(StdDuration::from_secs(5), async {
+            tokio::join!(first_job.trigger_checkpoint(), first_job.wait())
+        })
+        .await
+        .expect("post-manifest commit failure should converge");
+
+        assert!(
+            matches!(&manual, Err(CalcFlowError::RecoveryRequired { .. })),
+            "unexpected manual result: {manual:?}"
+        );
+        assert_eq!(failed.state, ContinuousJobState::RecoveryRequired);
+        assert!(
+            manifest_root
+                .join("manifest-00000000000000000001.json")
+                .is_file()
+        );
+        assert!(!log.lock().iter().any(|entry| entry == "sink-abort:1"));
+        drop(first_job);
+        first_runner.shutdown().await.unwrap();
+        assert_eq!(first_runner.registry_counts(), (0, 0));
+        assert_eq!(first_source_closed.load(Ordering::SeqCst), 1);
+        assert_eq!(first_sink_closed.load(Ordering::SeqCst), 1);
+
+        let restart_source_polls = Arc::new(AtomicUsize::new(0));
+        let restart_source_closed = Arc::new(AtomicUsize::new(0));
+        let restart_sink_closed = Arc::new(AtomicUsize::new(0));
+        let mut restart_runner = ContinuousRunner::new();
+        let restart_job = restart_runner
+            .start_checkpointed(
+                spec(
+                    915,
+                    &restart_source_polls,
+                    Arc::clone(&restart_source_closed),
+                    Arc::clone(&restart_sink_closed),
+                ),
+                checkpoint(),
+            )
+            .await
+            .unwrap();
+        wait_for_counter(&restart_source_polls, 1).await;
+
+        let restarted_epoch =
+            tokio::time::timeout(StdDuration::from_secs(5), restart_job.trigger_checkpoint())
+                .await
+                .expect("restart manual checkpoint should not hang")
+                .unwrap();
+
+        assert_eq!(restarted_epoch, crate::Epoch::new(2).unwrap());
+        assert!(log.lock().iter().any(|entry| entry == "sink-recover:1"));
+        assert!(log.lock().iter().any(|entry| entry == "sink-commit:2"));
+        assert_eq!(
+            restart_job.cancel().await.state,
+            ContinuousJobState::Cancelled
+        );
+        drop(restart_job);
+        restart_runner.shutdown().await.unwrap();
+        assert_eq!(restart_runner.registry_counts(), (0, 0));
+        assert_eq!(restart_source_closed.load(Ordering::SeqCst), 1);
+        assert_eq!(restart_sink_closed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cancel_fails_inflight_and_queued_manual_requests_without_leaks() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Arc::new(
+            LocalStateBackend::new(directory.path().join("state"))
+                .await
+                .unwrap(),
+        );
+        let source_polls = Arc::new(AtomicUsize::new(0));
+        let source_closed = Arc::new(AtomicUsize::new(0));
+        let sink_closed = Arc::new(AtomicUsize::new(0));
+        let gate = super::CheckpointStartedTestGate::default();
+        let checkpoint = CheckpointRuntimeSpec::new(
+            backend,
+            directory.path().join("manifests"),
+            StreamRuntimeConfig {
+                checkpoint_interval: StdDuration::from_secs(3_600),
+                checkpoint_timeout: StdDuration::from_secs(10),
+                ..StreamRuntimeConfig::default()
+            },
+        )
+        .unwrap()
+        .with_started_gate(gate.clone());
+        let spec = pending_checkpoint_spec(
+            "checkpoint-manual-cancel",
+            916,
+            &source_polls,
+            &source_closed,
+            Box::new(CheckpointProbeSink {
+                opened: Arc::new(AtomicUsize::new(0)),
+                closed: Arc::clone(&sink_closed),
+            }),
+        );
+        let mut runner = ContinuousRunner::new();
+        let job = Arc::new(runner.start_checkpointed(spec, checkpoint).await.unwrap());
+        wait_for_counter(&source_polls, 1).await;
+        let inflight = tokio::spawn({
+            let job = Arc::clone(&job);
+            async move { job.trigger_checkpoint().await }
+        });
+        gate.wait_until_entered().await;
+        let coordinator = job
+            .core
+            .manual_checkpoint
+            .lock()
+            .clone()
+            .expect("checkpoint task registered its manual queue");
+        let queued = coordinator.request_manual().await.unwrap();
+
+        let cancelled = job.cancel();
+        gate.release();
+        let outcome = cancelled.await;
+        let inflight = inflight.await.unwrap();
+
+        assert!(matches!(inflight, Err(CalcFlowError::Cancelled { .. })));
+        assert!(matches!(queued.await, Err(CalcFlowError::Cancelled { .. })));
+        assert_eq!(outcome.state, ContinuousJobState::Cancelled);
+        assert_terminal_checkpoint_resources_released(&job);
+        drop(job);
+        runner.shutdown().await.unwrap();
+        assert_eq!(runner.registry_counts(), (0, 0));
+        assert_eq!(source_closed.load(Ordering::SeqCst), 1);
+        assert_eq!(sink_closed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn dropped_manual_future_keeps_accepted_request_in_fifo() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Arc::new(
+            LocalStateBackend::new(directory.path().join("state"))
+                .await
+                .unwrap(),
+        );
+        let source_polls = Arc::new(AtomicUsize::new(0));
+        let source_closed = Arc::new(AtomicUsize::new(0));
+        let sink_closed = Arc::new(AtomicUsize::new(0));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let gate = super::CheckpointStartedTestGate::default();
+        let spec = pending_checkpoint_spec(
+            "checkpoint-manual-drop",
+            920,
+            &source_polls,
+            &source_closed,
+            Box::new(PeriodicCheckpointSink {
+                log: Arc::clone(&log),
+                closed: Arc::clone(&sink_closed),
+            }),
+        );
+        let checkpoint = CheckpointRuntimeSpec::new(
+            backend,
+            directory.path().join("manifests"),
+            StreamRuntimeConfig {
+                checkpoint_interval: StdDuration::from_secs(3_600),
+                checkpoint_timeout: StdDuration::from_secs(10),
+                ..StreamRuntimeConfig::default()
+            },
+        )
+        .unwrap()
+        .with_started_gate(gate.clone());
+        let mut runner = ContinuousRunner::new();
+        let job = Arc::new(runner.start_checkpointed(spec, checkpoint).await.unwrap());
+        wait_for_counter(&source_polls, 1).await;
+        let dropped = tokio::spawn({
+            let job = Arc::clone(&job);
+            async move { job.trigger_checkpoint().await }
+        });
+        gate.wait_until_entered().await;
+
+        dropped.abort();
+        assert!(dropped.await.unwrap_err().is_cancelled());
+        gate.release();
+        tokio::time::timeout(StdDuration::from_secs(5), async {
+            loop {
+                if log.lock().iter().any(|entry| entry == "sink-begin:2") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropped waiter must not cancel its accepted checkpoint");
+
+        assert_eq!(
+            job.trigger_checkpoint().await.unwrap(),
+            crate::Epoch::new(2).unwrap()
+        );
+        assert!(log.lock().iter().any(|entry| entry == "sink-commit:1"));
+        assert!(log.lock().iter().any(|entry| entry == "sink-commit:2"));
+        assert_eq!(job.cancel().await.state, ContinuousJobState::Cancelled);
+        assert_terminal_checkpoint_resources_released(&job);
+        drop(job);
+        runner.shutdown().await.unwrap();
+        assert_eq!(runner.registry_counts(), (0, 0));
+        assert_eq!(source_closed.load(Ordering::SeqCst), 1);
+        assert_eq!(sink_closed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cancel_after_manifest_durability_finishes_commit_before_manual_success() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Arc::new(
+            LocalStateBackend::new(directory.path().join("state"))
+                .await
+                .unwrap(),
+        );
+        let source_polls = Arc::new(AtomicUsize::new(0));
+        let source_closed = Arc::new(AtomicUsize::new(0));
+        let sink_closed = Arc::new(AtomicUsize::new(0));
+        let commit_entered = Arc::new(AtomicBool::new(false));
+        let commit_changed = Arc::new(Notify::new());
+        let commit_release = Arc::new(Semaphore::new(0));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let spec = pending_checkpoint_spec(
+            "checkpoint-manual-durable-cancel",
+            917,
+            &source_polls,
+            &source_closed,
+            Box::new(BlockingCommitSink {
+                commit_entered: Arc::clone(&commit_entered),
+                commit_changed: Arc::clone(&commit_changed),
+                commit_release: Arc::clone(&commit_release),
+                log: Arc::clone(&log),
+                closed: Arc::clone(&sink_closed),
+            }),
+        );
+        let checkpoint = CheckpointRuntimeSpec::new(
+            backend,
+            directory.path().join("manifests"),
+            StreamRuntimeConfig {
+                checkpoint_interval: StdDuration::from_secs(3_600),
+                checkpoint_timeout: StdDuration::from_secs(10),
+                ..StreamRuntimeConfig::default()
+            },
+        )
+        .unwrap();
+        let mut runner = ContinuousRunner::new();
+        let job = Arc::new(runner.start_checkpointed(spec, checkpoint).await.unwrap());
+        wait_for_counter(&source_polls, 1).await;
+        let manual = tokio::spawn({
+            let job = Arc::clone(&job);
+            async move { job.trigger_checkpoint().await }
+        });
+        while !commit_entered.load(Ordering::Acquire) {
+            let changed = commit_changed.notified();
+            if commit_entered.load(Ordering::Acquire) {
+                break;
+            }
+            changed.await;
+        }
+
+        let cancelled = job.cancel();
+        loop {
+            if job.core.state.lock().selected_cause == Some(TerminalCause::ExplicitCancel) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        commit_release.add_permits(1);
+        let (manual, outcome) = tokio::join!(manual, cancelled);
+
+        assert_eq!(manual.unwrap().unwrap(), crate::Epoch::INITIAL);
+        assert_eq!(outcome.state, ContinuousJobState::Cancelled);
+        assert!(log.lock().iter().any(|entry| entry == "sink-commit:1"));
+        assert!(!log.lock().iter().any(|entry| entry == "sink-abort:1"));
+        assert_terminal_checkpoint_resources_released(&job);
+        drop(job);
+        runner.shutdown().await.unwrap();
+        assert_eq!(runner.registry_counts(), (0, 0));
+        assert_eq!(source_closed.load(Ordering::SeqCst), 1);
+        assert_eq!(sink_closed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_inflight_and_queued_manual_requests_before_completion() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Arc::new(
+            LocalStateBackend::new(directory.path().join("state"))
+                .await
+                .unwrap(),
+        );
+        let source_polls = Arc::new(AtomicUsize::new(0));
+        let source_closed = Arc::new(AtomicUsize::new(0));
+        let sink_closed = Arc::new(AtomicUsize::new(0));
+        let gate = super::CheckpointStartedTestGate::default();
+        let spec = pending_checkpoint_spec(
+            "checkpoint-manual-shutdown",
+            918,
+            &source_polls,
+            &source_closed,
+            Box::new(CheckpointProbeSink {
+                opened: Arc::new(AtomicUsize::new(0)),
+                closed: Arc::clone(&sink_closed),
+            }),
+        );
+        let checkpoint = CheckpointRuntimeSpec::new(
+            backend,
+            directory.path().join("manifests"),
+            StreamRuntimeConfig {
+                checkpoint_interval: StdDuration::from_secs(3_600),
+                checkpoint_timeout: StdDuration::from_secs(10),
+                ..StreamRuntimeConfig::default()
+            },
+        )
+        .unwrap()
+        .with_started_gate(gate.clone());
+        let mut runner = ContinuousRunner::new();
+        let job = Arc::new(runner.start_checkpointed(spec, checkpoint).await.unwrap());
+        wait_for_counter(&source_polls, 1).await;
+        let inflight = tokio::spawn({
+            let job = Arc::clone(&job);
+            async move { job.trigger_checkpoint().await }
+        });
+        gate.wait_until_entered().await;
+        let coordinator = job
+            .core
+            .manual_checkpoint
+            .lock()
+            .clone()
+            .expect("checkpoint task registered its manual queue");
+        let queued = coordinator.request_manual().await.unwrap();
+
+        let shutdown = job.shutdown();
+        gate.release();
+        let (inflight, queued, outcome) = tokio::join!(inflight, queued, shutdown);
+
+        assert_eq!(inflight.unwrap().unwrap(), crate::Epoch::INITIAL);
+        assert_eq!(queued.unwrap(), crate::Epoch::new(2).unwrap());
+        assert_eq!(outcome.state, ContinuousJobState::Completed);
+        assert_eq!(outcome.cause, TerminalCause::GracefulShutdown);
+        assert!(
+            directory
+                .path()
+                .join("manifests/manifest-00000000000000000001.json")
+                .is_file()
+        );
+        assert!(
+            directory
+                .path()
+                .join("manifests/manifest-00000000000000000002.json")
+                .is_file()
+        );
+        assert_terminal_checkpoint_resources_released(&job);
+        drop(job);
+        runner.shutdown().await.unwrap();
+        assert_eq!(runner.registry_counts(), (0, 0));
+        assert_eq!(source_closed.load(Ordering::SeqCst), 1);
+        assert_eq!(sink_closed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn manual_request_queued_during_periodic_checkpoint_receives_next_epoch() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Arc::new(
+            LocalStateBackend::new(directory.path().join("state"))
+                .await
+                .unwrap(),
+        );
+        let source_polls = Arc::new(AtomicUsize::new(0));
+        let source_closed = Arc::new(AtomicUsize::new(0));
+        let sink_closed = Arc::new(AtomicUsize::new(0));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let gate = super::CheckpointStartedTestGate::default();
+        let spec = pending_checkpoint_spec(
+            "checkpoint-periodic-manual-race",
+            919,
+            &source_polls,
+            &source_closed,
+            Box::new(PeriodicCheckpointSink {
+                log: Arc::clone(&log),
+                closed: Arc::clone(&sink_closed),
+            }),
+        );
+        let checkpoint = CheckpointRuntimeSpec::new(
+            backend,
+            directory.path().join("manifests"),
+            StreamRuntimeConfig {
+                checkpoint_interval: StdDuration::from_millis(10),
+                checkpoint_timeout: StdDuration::from_secs(10),
+                ..StreamRuntimeConfig::default()
+            },
+        )
+        .unwrap()
+        .with_started_gate(gate.clone());
+        let mut runner = ContinuousRunner::new();
+        let job = runner.start_checkpointed(spec, checkpoint).await.unwrap();
+        wait_for_counter(&source_polls, 1).await;
+
+        tokio::time::advance(StdDuration::from_millis(10)).await;
+        gate.wait_until_entered().await;
+        let coordinator = job
+            .core
+            .manual_checkpoint
+            .lock()
+            .clone()
+            .expect("checkpoint task registered its manual queue");
+        let manual = coordinator.request_manual().await.unwrap();
+        gate.release();
+
+        assert_eq!(manual.await.unwrap(), crate::Epoch::new(2).unwrap());
+        assert!(log.lock().iter().any(|entry| entry == "sink-commit:1"));
+        assert!(log.lock().iter().any(|entry| entry == "sink-commit:2"));
+        assert_eq!(job.cancel().await.state, ContinuousJobState::Cancelled);
+        drop(job);
+        runner.shutdown().await.unwrap();
+        assert_eq!(runner.registry_counts(), (0, 0));
+        assert_eq!(source_closed.load(Ordering::SeqCst), 1);
+        assert_eq!(sink_closed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn manual_checkpoint_faults_before_durability_fail_without_manifest_or_leaks() {
+        for (name, point) in [
+            ("barrier", super::CheckpointFaultPoint::SourceCut),
+            ("precommit", super::CheckpointFaultPoint::SinkPreCommit),
+            ("manifest", super::CheckpointFaultPoint::ManifestWrite),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let backend = Arc::new(
+                LocalStateBackend::new(directory.path().join("state"))
+                    .await
+                    .unwrap(),
+            );
+            let source_polls = Arc::new(AtomicUsize::new(0));
+            let source_closed = Arc::new(AtomicUsize::new(0));
+            let sink_closed = Arc::new(AtomicUsize::new(0));
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let spec = pending_checkpoint_spec(
+                &format!("checkpoint-manual-{name}-fault"),
+                930,
+                &source_polls,
+                &source_closed,
+                Box::new(PeriodicCheckpointSink {
+                    log: Arc::clone(&log),
+                    closed: Arc::clone(&sink_closed),
+                }),
+            );
+            let checkpoint = CheckpointRuntimeSpec::new(
+                backend,
+                directory.path().join("manifests"),
+                StreamRuntimeConfig {
+                    checkpoint_interval: StdDuration::from_secs(3_600),
+                    checkpoint_timeout: StdDuration::from_secs(10),
+                    ..StreamRuntimeConfig::default()
+                },
+            )
+            .unwrap()
+            .with_fault(point, super::CheckpointFaultMode::Io);
+            let mut runner = ContinuousRunner::new();
+            let job = runner.start_checkpointed(spec, checkpoint).await.unwrap();
+            wait_for_counter(&source_polls, 1).await;
+
+            let (manual, outcome) = tokio::time::timeout(StdDuration::from_secs(5), async {
+                tokio::join!(job.trigger_checkpoint(), job.wait())
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{name} fault did not converge: {error}"));
+
+            assert!(
+                matches!(&manual, Err(CalcFlowError::Internal { .. })),
+                "unexpected {name} manual result: {manual:?}"
+            );
+            assert_eq!(outcome.state, ContinuousJobState::Failed, "{name}");
+            assert!(
+                !directory
+                    .path()
+                    .join("manifests/manifest-00000000000000000001.json")
+                    .exists(),
+                "{name} fault published a manifest"
+            );
+            drop(job);
+            runner.shutdown().await.unwrap();
+            assert_eq!(runner.registry_counts(), (0, 0), "{name}");
+            assert_eq!(source_closed.load(Ordering::SeqCst), 1, "{name}");
+            assert_eq!(sink_closed.load(Ordering::SeqCst), 1, "{name}");
+        }
     }
 
     #[tokio::test]
