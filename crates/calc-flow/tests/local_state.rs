@@ -146,7 +146,7 @@ async fn state_larger_than_ten_mib_round_trips_outside_the_manifest() {
 }
 
 #[tokio::test]
-async fn collection_removes_old_orphans_and_preserves_retained_and_newer_segments() {
+async fn collection_removes_every_unreachable_segment_and_preserves_retained_state() {
     let directory = TempDir::new().unwrap();
     let backend = LocalStateBackend::new(directory.path()).await.unwrap();
     let key = lineage_key("orders");
@@ -167,10 +167,13 @@ async fn collection_removes_old_orphans_and_preserves_retained_and_newer_segment
 
     assert_eq!(
         lineage.collect_orphans(&[retained.clone()]).await.unwrap(),
-        1
+        2
     );
     assert_eq!(lineage.load_segment(&retained).await.unwrap(), b"retained");
-    assert_eq!(lineage.load_segment(&newer).await.unwrap(), b"newer");
+    assert!(matches!(
+        lineage.load_segment(&newer).await,
+        Err(CalcFlowError::NotFound { .. })
+    ));
     assert!(matches!(
         lineage.load_segment(&orphan).await,
         Err(CalcFlowError::NotFound { .. })

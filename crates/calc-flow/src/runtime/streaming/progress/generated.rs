@@ -30,6 +30,21 @@ impl GeneratedWatermarkState {
         }
     }
 
+    pub(crate) fn restore(
+        event_time: ResolvedEventTimeColumn,
+        max_out_of_orderness: Duration,
+        max_observed: Option<EventTime>,
+        last_emitted: Option<EventTime>,
+    ) -> Self {
+        Self {
+            event_time,
+            max_out_of_orderness,
+            max_observed_nanos: max_observed
+                .map(|observed| i128::from(observed.as_micros()) * 1_000),
+            last_emitted,
+        }
+    }
+
     pub(crate) fn observe_batch(&mut self, batch: &Batch, binding: &str) -> Result<()> {
         let event_time_path = format!("sources.{binding}.watermark_policy.event_time_column");
         let table = batch

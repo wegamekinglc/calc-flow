@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Arc,
     time::Duration,
 };
@@ -7,10 +7,14 @@ use std::{
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
 
-use crate::{Batch, CalcFlowError, EventTime, Result};
+use crate::{
+    Batch, CalcFlowError, Epoch, EventTime, Result, SourceManifestEntry,
+    SourceWatermarkManifestState, runtime::streaming::source_task::Cursor,
+};
 
 use super::{
-    aggregate::{AggregateInput, MultiInputProgress, ProgressEmission},
+    aggregate::{AggregateInput, IngressActivity, MultiInputProgress, ProgressEmission},
+    durable::{DurableProgressRestore, DurableSourceCut},
     generated::{GeneratedWatermarkState, next_phase_deadline},
     prepare::{
         BindingIdentity, BindingOrdinal, NormalizedWatermarkMode, PreparedSourceBinding,
@@ -48,6 +52,326 @@ pub(crate) enum RawIngressEvent {
     ConnectorWatermark(EventTime),
     ConnectorIdle,
     EndOfInput,
+}
+
+#[cfg(test)]
+mod checkpoint_cut_tests {
+    use std::{collections::BTreeMap, sync::Arc};
+
+    use datafusion::arrow::{
+        array::{ArrayRef, Int64Array, TimestampMicrosecondArray},
+        datatypes::{DataType, Field, Schema, TimeUnit},
+        record_batch::RecordBatch,
+    };
+
+    use super::{DurableSourceCut, LiveProgressCoordinator, RawIngressEvent};
+    use crate::runtime::streaming::progress::prepare::{
+        BindingIdentity, DeclaredSchema, NativeWatermarkCapability, ReplayPositioningCapability,
+        SourceBindingSpec, SourceDescriptor, StreamProgressRuntimeConfig, WatermarkPolicy,
+        prepare_stream_job,
+    };
+    use crate::runtime::streaming::progress::trace::RawUpstreamPosition;
+    use crate::{
+        Batch, BatchMetadata, CancellationToken, CursorManifestEntry, EdgeBudget, Epoch,
+        SourceWatermarkManifestState, StreamMessageKind, edge_channel,
+    };
+
+    fn binding(value: &str) -> BindingIdentity {
+        BindingIdentity::new(value).unwrap()
+    }
+
+    fn source(value: &str) -> SourceBindingSpec {
+        SourceBindingSpec {
+            descriptor: SourceDescriptor::new(
+                binding(value),
+                DeclaredSchema::DynamicOrUnknown,
+                NativeWatermarkCapability::NeverEmits,
+                ReplayPositioningCapability::ExactPauseReportAndSeek,
+                None,
+            ),
+            watermark_policy: WatermarkPolicy::Disabled { idle_timeout: None },
+        }
+    }
+
+    fn generated_source(value: &str) -> SourceBindingSpec {
+        SourceBindingSpec {
+            descriptor: SourceDescriptor::new(
+                binding(value),
+                DeclaredSchema::Known(Arc::new(Schema::new(vec![Field::new(
+                    "at",
+                    DataType::Timestamp(TimeUnit::Microsecond, None),
+                    true,
+                )]))),
+                NativeWatermarkCapability::NeverEmits,
+                ReplayPositioningCapability::ExactPauseReportAndSeek,
+                None,
+            ),
+            watermark_policy: WatermarkPolicy::BoundedOutOfOrderness {
+                event_time_column: Arc::from("at"),
+                max_out_of_orderness: std::time::Duration::from_micros(1),
+                emit_interval: std::time::Duration::from_secs(5),
+                idle_timeout: None,
+            },
+        }
+    }
+
+    fn batch(sequence: u64) -> Batch {
+        Batch::table(
+            vec![
+                RecordBatch::try_from_iter(vec![(
+                    "value",
+                    Arc::new(Int64Array::from(vec![1])) as _,
+                )])
+                .unwrap(),
+            ],
+            BatchMetadata::new("left", sequence, BTreeMap::new()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn timestamp_batch(sequence: u64, event_time: i64) -> Batch {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "at",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        )]));
+        Batch::table(
+            vec![
+                RecordBatch::try_new(
+                    schema,
+                    vec![Arc::new(TimestampMicrosecondArray::from(vec![event_time])) as ArrayRef],
+                )
+                .unwrap(),
+            ],
+            BatchMetadata::new("left", sequence, BTreeMap::new()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn exact(value: u8) -> RawUpstreamPosition {
+        RawUpstreamPosition::Exact {
+            delivery_replay_cursor: vec![value],
+            control_frontier: vec![value],
+        }
+    }
+
+    #[tokio::test]
+    async fn progress_owner_serializes_the_cut_and_skips_ended_routes() {
+        let prepared = Arc::new(
+            prepare_stream_job(
+                "compiled",
+                &[source("left"), source("right")],
+                StreamProgressRuntimeConfig::default(),
+            )
+            .unwrap(),
+        );
+        let budget = EdgeBudget {
+            max_rows: 8,
+            max_bytes: 1 << 20,
+        };
+        let (left_sender, mut left_receiver) = edge_channel("left", budget).unwrap();
+        let (right_sender, right_receiver) = edge_channel("right", budget).unwrap();
+        let cancellation = CancellationToken::new();
+        let coordinator = LiveProgressCoordinator::new(
+            &prepared,
+            BTreeMap::from([
+                ("left".into(), vec![left_sender]),
+                ("right".into(), vec![right_sender]),
+            ]),
+            cancellation.clone(),
+        )
+        .unwrap();
+        coordinator
+            .submit(binding("left"), RawIngressEvent::Data(batch(7)), exact(1))
+            .await
+            .unwrap();
+        coordinator
+            .submit(binding("right"), RawIngressEvent::EndOfInput, exact(2))
+            .await
+            .unwrap();
+
+        let durable = coordinator
+            .checkpoint_cut(
+                Epoch::INITIAL,
+                &BTreeMap::from([
+                    (
+                        binding("left"),
+                        DurableSourceCut {
+                            cursor: Some(CursorManifestEntry {
+                                order: "01".into(),
+                                payload: BTreeMap::new(),
+                            }),
+                            next_sequence: 8,
+                            ended: false,
+                        },
+                    ),
+                    (
+                        binding("right"),
+                        DurableSourceCut {
+                            cursor: Some(CursorManifestEntry {
+                                order: "02".into(),
+                                payload: BTreeMap::new(),
+                            }),
+                            next_sequence: 1,
+                            ended: true,
+                        },
+                    ),
+                ]),
+                &cancellation,
+            )
+            .await
+            .unwrap();
+        assert_eq!(durable["left"].sequence, 8);
+        assert!(!durable["left"].ended);
+        assert_eq!(
+            durable["left"].watermark_policy,
+            SourceWatermarkManifestState::Disabled { idle: false }
+        );
+        assert_eq!(durable["right"].sequence, 1);
+        assert!(durable["right"].ended);
+        coordinator
+            .submit(binding("left"), RawIngressEvent::Data(batch(8)), exact(3))
+            .await
+            .unwrap();
+
+        let before_cut = left_receiver.recv().await.unwrap().unwrap();
+        assert_eq!(before_cut.kind(), StreamMessageKind::Data);
+        assert_eq!(before_cut.as_data().unwrap().metadata().sequence(), 7);
+        assert_eq!(
+            left_receiver.recv().await.unwrap().unwrap().as_barrier(),
+            Some(Epoch::INITIAL)
+        );
+        let after_cut = left_receiver.recv().await.unwrap().unwrap();
+        assert_eq!(after_cut.kind(), StreamMessageKind::Data);
+        assert_eq!(after_cut.as_data().unwrap().metadata().sequence(), 8);
+        assert_eq!(right_receiver.metrics().queue_depth, 0);
+    }
+
+    #[tokio::test]
+    async fn idle_live_source_participates_in_the_checkpoint_cut() {
+        let prepared = Arc::new(
+            prepare_stream_job(
+                "compiled",
+                &[source("idle")],
+                StreamProgressRuntimeConfig::default(),
+            )
+            .unwrap(),
+        );
+        let (sender, mut receiver) = edge_channel(
+            "idle",
+            EdgeBudget {
+                max_rows: 8,
+                max_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
+        let cancellation = CancellationToken::new();
+        let coordinator = LiveProgressCoordinator::new(
+            &prepared,
+            BTreeMap::from([("idle".into(), vec![sender])]),
+            cancellation.clone(),
+        )
+        .unwrap();
+        coordinator
+            .submit(binding("idle"), RawIngressEvent::ConnectorIdle, exact(1))
+            .await
+            .unwrap();
+
+        let durable = coordinator
+            .checkpoint_cut(
+                Epoch::INITIAL,
+                &BTreeMap::from([(
+                    binding("idle"),
+                    DurableSourceCut {
+                        cursor: None,
+                        next_sequence: 0,
+                        ended: false,
+                    },
+                )]),
+                &cancellation,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            receiver.recv().await.unwrap().unwrap().kind(),
+            StreamMessageKind::Idle
+        );
+        assert_eq!(
+            receiver.recv().await.unwrap().unwrap().as_barrier(),
+            Some(Epoch::INITIAL)
+        );
+        assert_eq!(
+            durable["idle"].watermark_policy,
+            SourceWatermarkManifestState::Disabled { idle: true }
+        );
+        assert!(!durable["idle"].ended);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ready_progress_timer_is_drained_before_the_checkpoint_barrier() {
+        let prepared = Arc::new(
+            prepare_stream_job(
+                "compiled",
+                &[generated_source("timed")],
+                StreamProgressRuntimeConfig::default(),
+            )
+            .unwrap(),
+        );
+        let (sender, mut receiver) = edge_channel(
+            "timed",
+            EdgeBudget {
+                max_rows: 8,
+                max_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
+        let cancellation = CancellationToken::new();
+        let coordinator = LiveProgressCoordinator::new(
+            &prepared,
+            BTreeMap::from([("timed".into(), vec![sender])]),
+            cancellation.clone(),
+        )
+        .unwrap();
+        coordinator
+            .submit(
+                binding("timed"),
+                RawIngressEvent::Data(timestamp_batch(0, 10)),
+                exact(1),
+            )
+            .await
+            .unwrap();
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+
+        coordinator
+            .checkpoint_cut(
+                Epoch::INITIAL,
+                &BTreeMap::from([(
+                    binding("timed"),
+                    DurableSourceCut {
+                        cursor: None,
+                        next_sequence: 1,
+                        ended: false,
+                    },
+                )]),
+                &cancellation,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            receiver.recv().await.unwrap().unwrap().kind(),
+            StreamMessageKind::Data
+        );
+        assert_eq!(
+            receiver.recv().await.unwrap().unwrap().kind(),
+            StreamMessageKind::Watermark
+        );
+        assert_eq!(
+            receiver.recv().await.unwrap().unwrap().as_barrier(),
+            Some(Epoch::INITIAL)
+        );
+    }
 }
 
 impl RawIngressEvent {
@@ -530,6 +854,103 @@ impl<C: DriverLogicalClock> StreamProgressDriver<C> {
         request: ProgressReplayRequest,
     ) -> Result<(Self, RawIngressSender)> {
         Self::with_trace(prepared_job, clock, TraceController::replay(request))
+    }
+
+    pub(crate) fn restore_durable(
+        prepared_job: &Arc<PreparedStreamJob>,
+        clock: C,
+        restored: &DurableProgressRestore,
+    ) -> Result<(Self, RawIngressSender)> {
+        let (mut driver, sender) =
+            Self::with_trace(Arc::clone(prepared_job), clock, TraceController::record())?;
+        let mut activities = Vec::with_capacity(prepared_job.bindings.len());
+        for prepared in prepared_job.bindings.iter() {
+            let source = restored
+                .sources
+                .get(prepared.identity.as_str())
+                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                    message: format!(
+                        "durable progress is missing source {:?}",
+                        prepared.identity.as_str()
+                    ),
+                })?;
+            let activity = if source.ended {
+                IngressActivity::Ended {
+                    final_watermark: source.last_watermark,
+                }
+            } else if source.idle {
+                IngressActivity::Idle {
+                    watermark: source.last_watermark,
+                }
+            } else {
+                IngressActivity::Active {
+                    watermark: source.last_watermark,
+                }
+            };
+            activities.push((prepared.ordinal, activity));
+            let binding = driver
+                .state
+                .bindings
+                .get_mut(&prepared.ordinal)
+                .expect("prepared durable source has driver state");
+            binding.last_source_watermark = source.last_watermark;
+            binding.ended = source.ended;
+            if let (
+                Some(generated),
+                NormalizedWatermarkMode::Generated {
+                    event_time,
+                    max_out_of_orderness,
+                    ..
+                },
+            ) = (&mut binding.generated, &prepared.normalized_watermark)
+            {
+                *generated = GeneratedWatermarkState::restore(
+                    event_time.clone(),
+                    *max_out_of_orderness,
+                    source.observed_max,
+                    source.last_watermark,
+                );
+            }
+            let last_committed = source.cursor.as_ref().map(|cursor| {
+                Cursor::decode_manifest_order(&cursor.order).map(|order| {
+                    RawUpstreamPosition::Exact {
+                        delivery_replay_cursor: order,
+                        control_frontier: source.next_sequence.to_be_bytes().to_vec(),
+                    }
+                })
+            });
+            driver
+                .admission
+                .lock()
+                .bindings
+                .get_mut(&prepared.ordinal)
+                .expect("prepared durable source has admission state")
+                .last_committed_upstream = last_committed.transpose()?;
+            if let Some(deadline) = source.watermark_deadline {
+                arm_timer(
+                    &mut driver.state,
+                    prepared.ordinal,
+                    TimerKind::Watermark,
+                    deadline,
+                )?;
+            }
+            if let Some(deadline) = source.idle_deadline {
+                arm_timer(
+                    &mut driver.state,
+                    prepared.ordinal,
+                    TimerKind::Idle,
+                    deadline,
+                )?;
+            }
+        }
+        driver.state.aggregate = MultiInputProgress::restore(activities);
+        driver.state.clock = driver.clock.coordinate();
+        driver.phase = if driver.state.aggregate.terminal() {
+            DriverPhase::Terminal
+        } else {
+            DriverPhase::RunningQuiescent
+        };
+        Ok((driver, sender))
     }
 
     #[allow(
@@ -2466,13 +2887,50 @@ pub(crate) struct LiveProgressCoordinator(Arc<LiveProgressInner>);
 
 impl LiveProgressCoordinator {
     pub(crate) fn new(
-        prepared: Arc<PreparedStreamJob>,
-        mut outputs_by_binding: BTreeMap<String, Vec<super::super::EdgeSender>>,
+        prepared: &Arc<PreparedStreamJob>,
+        outputs_by_binding: BTreeMap<String, Vec<super::super::EdgeSender>>,
         cancellation: crate::CancellationToken,
     ) -> Result<Self> {
         let mut trace = [0_u8; 32];
         trace.copy_from_slice(&prepared.fingerprint.as_bytes());
         let clock = RuntimeLogicalClock::new(trace);
+        let (mut driver, sender) = StreamProgressDriver::new(Arc::clone(prepared), clock)?;
+        driver.start_running()?;
+        Self::from_driver(
+            prepared.as_ref(),
+            outputs_by_binding,
+            cancellation,
+            driver,
+            sender,
+        )
+    }
+
+    pub(crate) fn new_restored(
+        prepared: &Arc<PreparedStreamJob>,
+        outputs_by_binding: BTreeMap<String, Vec<super::super::EdgeSender>>,
+        cancellation: crate::CancellationToken,
+        restored: &DurableProgressRestore,
+    ) -> Result<Self> {
+        let mut trace = [0_u8; 32];
+        trace.copy_from_slice(&prepared.fingerprint.as_bytes());
+        let clock = RuntimeLogicalClock::new(trace);
+        let (driver, sender) = StreamProgressDriver::restore_durable(prepared, clock, restored)?;
+        Self::from_driver(
+            prepared.as_ref(),
+            outputs_by_binding,
+            cancellation,
+            driver,
+            sender,
+        )
+    }
+
+    fn from_driver(
+        prepared: &PreparedStreamJob,
+        mut outputs_by_binding: BTreeMap<String, Vec<super::super::EdgeSender>>,
+        cancellation: crate::CancellationToken,
+        driver: StreamProgressDriver<RuntimeLogicalClock>,
+        sender: RawIngressSender,
+    ) -> Result<Self> {
         let mut outputs = BTreeMap::new();
         for binding in prepared.bindings.iter() {
             let binding_outputs = outputs_by_binding
@@ -2490,8 +2948,6 @@ impl LiveProgressCoordinator {
                 message: "runtime source routes contain an unprepared progress binding".into(),
             });
         }
-        let (mut driver, sender) = StreamProgressDriver::new(prepared, clock)?;
-        driver.start_running()?;
         let status = LiveProgressStatusHandle::new(driver.status());
         Ok(Self(Arc::new(LiveProgressInner {
             sender,
@@ -2542,6 +2998,95 @@ impl LiveProgressCoordinator {
             .status
             .observe_settlement_latency(settlement_started.elapsed());
         settlement
+    }
+
+    pub(crate) async fn checkpoint_cut(
+        &self,
+        epoch: Epoch,
+        source_cuts: &BTreeMap<BindingIdentity, DurableSourceCut>,
+        cancellation: &crate::CancellationToken,
+    ) -> Result<BTreeMap<String, SourceManifestEntry>> {
+        let _drive = self.0.drive_serial.lock().await;
+        self.drive_ready(cancellation).await?;
+        let (live_ordinals, durable) = {
+            let driver = self.0.driver.lock().await;
+            if driver.unsettled_receipts() != 0 || driver.has_ready() {
+                return Err(CalcFlowError::Internal {
+                    message: format!(
+                        "checkpoint epoch {} reached an unsettled progress cut",
+                        epoch.as_u64()
+                    ),
+                });
+            }
+            let expected = driver
+                .state
+                .bindings
+                .values()
+                .map(|state| state.prepared.identity.clone())
+                .collect::<BTreeSet<_>>();
+            if source_cuts.keys().cloned().collect::<BTreeSet<_>>() != expected {
+                return Err(CalcFlowError::CheckpointMismatch {
+                    message: "checkpoint source cut IDs do not match progress state".into(),
+                });
+            }
+            let durable = durable_source_manifest_entries(&driver, source_cuts)?;
+            let live = driver
+                .state
+                .bindings
+                .iter()
+                .filter(|(_, state)| !state.ended)
+                .map(|(ordinal, _)| *ordinal)
+                .collect::<Vec<_>>();
+            (live, durable)
+        };
+        let mut outputs = self.0.outputs.lock().await;
+        for ordinal in live_ordinals {
+            send_progress_fanout(
+                outputs
+                    .get_mut(&ordinal)
+                    .expect("prepared progress binding has a runtime route"),
+                super::super::StreamMessage::barrier(epoch),
+                cancellation,
+            )
+            .await?;
+        }
+        Ok(durable)
+    }
+
+    pub(crate) async fn terminal_checkpoint_cut(
+        &self,
+        epoch: Epoch,
+        source_cuts: &BTreeMap<BindingIdentity, DurableSourceCut>,
+        cancellation: &crate::CancellationToken,
+    ) -> Result<BTreeMap<String, SourceManifestEntry>> {
+        let _drive = self.0.drive_serial.lock().await;
+        self.drive_ready(cancellation).await?;
+        let driver = self.0.driver.lock().await;
+        if driver.unsettled_receipts() != 0 || driver.has_ready() {
+            return Err(CalcFlowError::Internal {
+                message: format!(
+                    "terminal checkpoint epoch {} reached an unsettled progress cut",
+                    epoch.as_u64()
+                ),
+            });
+        }
+        if driver.state.bindings.values().any(|state| !state.ended) {
+            return Err(CalcFlowError::CheckpointMismatch {
+                message: "terminal checkpoint requires every source progress binding to end".into(),
+            });
+        }
+        let expected = driver
+            .state
+            .bindings
+            .values()
+            .map(|state| state.prepared.identity.clone())
+            .collect::<BTreeSet<_>>();
+        if source_cuts.keys().cloned().collect::<BTreeSet<_>>() != expected {
+            return Err(CalcFlowError::CheckpointMismatch {
+                message: "terminal checkpoint source cut IDs do not match progress state".into(),
+            });
+        }
+        durable_source_manifest_entries(&driver, source_cuts)
     }
 
     async fn drive_ready(&self, cancellation: &crate::CancellationToken) -> Result<()> {
@@ -2654,6 +3199,78 @@ impl LiveProgressCoordinator {
     }
 }
 
+fn durable_source_manifest_entries<C: DriverLogicalClock>(
+    driver: &StreamProgressDriver<C>,
+    source_cuts: &BTreeMap<BindingIdentity, DurableSourceCut>,
+) -> Result<BTreeMap<String, SourceManifestEntry>> {
+    driver
+        .state
+        .bindings
+        .values()
+        .map(|state| {
+            let id = state.prepared.identity.as_str();
+            let cut = &source_cuts[&state.prepared.identity];
+            let activity = driver
+                .state
+                .aggregate
+                .activity(state.prepared.ordinal)
+                .expect("aggregate and source progress share prepared ordinals");
+            let ended = matches!(activity, IngressActivity::Ended { .. });
+            if cut.ended != ended || state.ended != ended {
+                return Err(CalcFlowError::CheckpointMismatch {
+                    message: format!(
+                        "checkpoint source terminal cut for {id:?} does not match progress state"
+                    ),
+                });
+            }
+            let idle = matches!(activity, IngressActivity::Idle { .. });
+            let watermark_policy = match &state.prepared.normalized_watermark {
+                NormalizedWatermarkMode::SourceProvided { .. } => {
+                    SourceWatermarkManifestState::SourceProvided {
+                        last_emitted_micros: state.last_source_watermark,
+                        idle,
+                    }
+                }
+                NormalizedWatermarkMode::Generated { .. } => {
+                    let generated = state
+                        .generated
+                        .as_ref()
+                        .expect("generated watermark policy has runtime state");
+                    SourceWatermarkManifestState::BoundedOutOfOrderness {
+                        observed_max_micros: generated
+                            .max_observed_nanos()
+                            .map(event_time_from_nanos)
+                            .transpose()?,
+                        last_emitted_micros: generated.last_emitted(),
+                        idle,
+                    }
+                }
+                NormalizedWatermarkMode::Disabled { .. } => {
+                    SourceWatermarkManifestState::Disabled { idle }
+                }
+            };
+            Ok((
+                id.to_owned(),
+                SourceManifestEntry {
+                    cursor: cut.cursor.clone(),
+                    identity_hash: state.prepared.identity_hash(),
+                    sequence: cut.next_sequence,
+                    ended,
+                    watermark_policy,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn event_time_from_nanos(nanos: i128) -> Result<EventTime> {
+    i64::try_from(nanos.div_euclid(1_000))
+        .map(EventTime::from_micros)
+        .map_err(|_| CalcFlowError::CheckpointMismatch {
+            message: "generated watermark observed maximum exceeds the durable range".into(),
+        })
+}
+
 async fn send_progress_fanout(
     outputs: &mut [super::super::EdgeSender],
     message: super::super::StreamMessage,
@@ -2705,7 +3322,7 @@ fn phase_error_marker(binding: BindingIdentity) -> DriverPhaseError {
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroUsize, sync::Arc, time::Duration};
+    use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc, time::Duration};
 
     use datafusion::arrow::{
         array::{ArrayRef, Int64Array, TimestampMicrosecondArray},
@@ -2717,6 +3334,7 @@ mod tests {
     use super::{DriverEmission, ManualClock, RawIngressEvent, StreamProgressDriver};
     use crate::runtime::streaming::progress::{
         aggregate::ProgressEmissionKind,
+        durable::{DurableProgressRestore, RestoredSourceProgress},
         prepare::{
             BindingIdentity, DeclaredSchema, FenceSelectionPolicy, NativeWatermarkCapability,
             ReplayPositioningCapability, SourceBindingSpec, SourceDescriptor,
@@ -2730,7 +3348,7 @@ mod tests {
             CheckedSemanticAllocator, DriverFailurePhase, LogicalInstant, ReadyClass, TimerKind,
         },
     };
-    use crate::{Batch, BatchMetadata, EventTime};
+    use crate::{Batch, BatchMetadata, CursorManifestEntry, EventTime, JsonMap};
 
     #[derive(Debug, Eq, PartialEq)]
     struct RecordedSeedArtifact {
@@ -2832,6 +3450,49 @@ mod tests {
             BatchMetadata::default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn durable_driver_restore_rejects_noncanonical_cursor_hex() {
+        let prepared = prepared(&[source_provided("left")]);
+        for order in ["", "0", "00FF"] {
+            let restored = DurableProgressRestore {
+                origin: LogicalInstant::ZERO,
+                sources: BTreeMap::from([(
+                    "left".into(),
+                    RestoredSourceProgress {
+                        cursor: Some(CursorManifestEntry {
+                            order: order.into(),
+                            payload: JsonMap::new(),
+                        }),
+                        next_sequence: 1,
+                        ended: false,
+                        idle: false,
+                        observed_max: None,
+                        last_watermark: None,
+                        watermark_deadline: None,
+                        idle_deadline: None,
+                    },
+                )]),
+                next_receipt_sequence: 0,
+                trace_records: 0,
+            };
+
+            let error = match StreamProgressDriver::restore_durable(
+                &prepared,
+                ManualClock::new(LogicalInstant::ZERO),
+                &restored,
+            ) {
+                Ok(_) => panic!("noncanonical durable cursor unexpectedly restored"),
+                Err(error) => error,
+            };
+
+            assert!(matches!(
+                error,
+                crate::CalcFlowError::CheckpointMismatch { message }
+                    if message.contains("canonical lowercase even-length hexadecimal")
+            ));
+        }
     }
 
     fn timestamp_batch(value: i64) -> Batch {

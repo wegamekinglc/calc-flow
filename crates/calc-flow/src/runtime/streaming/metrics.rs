@@ -15,6 +15,7 @@ use parking_lot::Mutex;
 
 use super::{
     ChannelMetrics, EnvelopeCost, StreamMessage,
+    checkpoint::coordinator::CheckpointPhase,
     runner::{ContinuousJobState, FailureOrigin, RuntimeFailure, TerminalCause},
 };
 use crate::{CalcFlowError, EdgeBudget, Result};
@@ -84,12 +85,31 @@ pub(crate) struct SinkMetrics {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CheckpointMetrics {
+    pub(crate) requested: u64,
+    pub(crate) completed: u64,
+    pub(crate) failed: u64,
+    pub(crate) terminal_requested: u64,
+    pub(crate) terminal_completed: u64,
+    pub(crate) terminal_failed: u64,
+    pub(crate) phase_duration: BTreeMap<CheckpointPhase, Duration>,
+    pub(crate) total_duration: Duration,
+    pub(crate) alignment_duration: Duration,
+    pub(crate) state_bytes: u64,
+    pub(crate) manifest_bytes: u64,
+    pub(crate) restore_duration: Duration,
+    pub(crate) sink_commit_retries: u64,
+    pub(crate) orphan_segments_removed: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct M2MetricsSnapshot {
     pub(crate) job: JobMetrics,
     pub(crate) edges: BTreeMap<String, EdgeRuntimeMetrics>,
     pub(crate) sources: BTreeMap<String, SourceMetrics>,
     pub(crate) nodes: BTreeMap<String, OperatorMetrics>,
     pub(crate) sinks: BTreeMap<String, SinkMetrics>,
+    pub(crate) checkpoints: CheckpointMetrics,
 }
 
 pub(crate) trait MetricsClock: Send + Sync {
@@ -200,6 +220,7 @@ impl MetricsRecorder {
                 .into_iter()
                 .map(|id| (id, SinkMetrics::default()))
                 .collect(),
+            checkpoints: CheckpointMetrics::default(),
         };
         Self(Arc::new(MetricsInner {
             snapshot: Mutex::new(snapshot),
@@ -418,6 +439,169 @@ impl MetricsRecorder {
         }
     }
 
+    pub(crate) fn record_checkpoint_requested(&self, terminal: bool) -> Result<()> {
+        let mut snapshot = self.0.snapshot.lock();
+        let requested = checked_sum(snapshot.checkpoints.requested, 1, "checkpoint", "requested")?;
+        let terminal_requested = if terminal {
+            checked_sum(
+                snapshot.checkpoints.terminal_requested,
+                1,
+                "checkpoint",
+                "terminal_requested",
+            )?
+        } else {
+            snapshot.checkpoints.terminal_requested
+        };
+        snapshot.checkpoints.requested = requested;
+        snapshot.checkpoints.terminal_requested = terminal_requested;
+        Ok(())
+    }
+
+    pub(crate) fn record_checkpoint_promoted_terminal(&self) -> Result<()> {
+        let mut snapshot = self.0.snapshot.lock();
+        snapshot.checkpoints.terminal_requested = checked_sum(
+            snapshot.checkpoints.terminal_requested,
+            1,
+            "checkpoint",
+            "terminal_requested",
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn record_checkpoint_phase(
+        &self,
+        phase: CheckpointPhase,
+        elapsed: Duration,
+    ) -> Result<()> {
+        let mut snapshot = self.0.snapshot.lock();
+        let previous = snapshot
+            .checkpoints
+            .phase_duration
+            .get(&phase)
+            .copied()
+            .unwrap_or_default();
+        let duration = checked_duration(previous, elapsed, "phase_duration")?;
+        let alignment_duration = if phase == CheckpointPhase::SourcesCut {
+            checked_duration(
+                snapshot.checkpoints.alignment_duration,
+                elapsed,
+                "alignment_duration",
+            )?
+        } else {
+            snapshot.checkpoints.alignment_duration
+        };
+        snapshot.checkpoints.phase_duration.insert(phase, duration);
+        snapshot.checkpoints.alignment_duration = alignment_duration;
+        Ok(())
+    }
+
+    pub(crate) fn record_checkpoint_manifest(
+        &self,
+        state_bytes: u64,
+        manifest_bytes: u64,
+    ) -> Result<()> {
+        let mut snapshot = self.0.snapshot.lock();
+        let next_state = checked_sum(
+            snapshot.checkpoints.state_bytes,
+            state_bytes,
+            "checkpoint",
+            "state_bytes",
+        )?;
+        let next_manifest = checked_sum(
+            snapshot.checkpoints.manifest_bytes,
+            manifest_bytes,
+            "checkpoint",
+            "manifest_bytes",
+        )?;
+        snapshot.checkpoints.state_bytes = next_state;
+        snapshot.checkpoints.manifest_bytes = next_manifest;
+        Ok(())
+    }
+
+    pub(crate) fn record_checkpoint_completed(
+        &self,
+        terminal: bool,
+        elapsed: Duration,
+    ) -> Result<()> {
+        let mut snapshot = self.0.snapshot.lock();
+        let completed = checked_sum(snapshot.checkpoints.completed, 1, "checkpoint", "completed")?;
+        let terminal_completed = if terminal {
+            checked_sum(
+                snapshot.checkpoints.terminal_completed,
+                1,
+                "checkpoint",
+                "terminal_completed",
+            )?
+        } else {
+            snapshot.checkpoints.terminal_completed
+        };
+        let duration = checked_duration(
+            snapshot.checkpoints.total_duration,
+            elapsed,
+            "total_duration",
+        )?;
+        snapshot.checkpoints.completed = completed;
+        snapshot.checkpoints.terminal_completed = terminal_completed;
+        snapshot.checkpoints.total_duration = duration;
+        Ok(())
+    }
+
+    pub(crate) fn record_checkpoint_failed(&self, terminal: bool) -> Result<()> {
+        let mut snapshot = self.0.snapshot.lock();
+        let failed = checked_sum(snapshot.checkpoints.failed, 1, "checkpoint", "failed")?;
+        let terminal_failed = if terminal {
+            checked_sum(
+                snapshot.checkpoints.terminal_failed,
+                1,
+                "checkpoint",
+                "terminal_failed",
+            )?
+        } else {
+            snapshot.checkpoints.terminal_failed
+        };
+        snapshot.checkpoints.failed = failed;
+        snapshot.checkpoints.terminal_failed = terminal_failed;
+        Ok(())
+    }
+
+    pub(crate) fn record_checkpoint_restore(
+        &self,
+        elapsed: Duration,
+        sink_commit_retries: usize,
+    ) -> Result<()> {
+        let retries = u64::try_from(sink_commit_retries)
+            .map_err(|_| metrics_error("checkpoint", "sink_commit_retries", "counter overflow"))?;
+        let mut snapshot = self.0.snapshot.lock();
+        let restore_duration = checked_duration(
+            snapshot.checkpoints.restore_duration,
+            elapsed,
+            "restore_duration",
+        )?;
+        let retries = checked_sum(
+            snapshot.checkpoints.sink_commit_retries,
+            retries,
+            "checkpoint",
+            "sink_commit_retries",
+        )?;
+        snapshot.checkpoints.restore_duration = restore_duration;
+        snapshot.checkpoints.sink_commit_retries = retries;
+        Ok(())
+    }
+
+    pub(crate) fn record_checkpoint_orphan_cleanup(&self, removed: usize) -> Result<()> {
+        let removed = u64::try_from(removed).map_err(|_| {
+            metrics_error("checkpoint", "orphan_segments_removed", "counter overflow")
+        })?;
+        let mut snapshot = self.0.snapshot.lock();
+        snapshot.checkpoints.orphan_segments_removed = checked_sum(
+            snapshot.checkpoints.orphan_segments_removed,
+            removed,
+            "checkpoint",
+            "orphan_segments_removed",
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn record_reaper_join(&self) -> Result<()> {
         let mut snapshot = self.0.snapshot.lock();
         let result = checked_inc(&mut snapshot.job.reaper_joins, "job", "reaper_joins");
@@ -480,7 +664,8 @@ impl MetricsRecorder {
                 }
                 FailureOrigin::SinkOpen { output_id, sink_id }
                 | FailureOrigin::SinkClose { output_id, sink_id }
-                | FailureOrigin::SinkWrite { output_id, sink_id } => attempt_sink_error(
+                | FailureOrigin::SinkWrite { output_id, sink_id }
+                | FailureOrigin::SinkCheckpoint { output_id, sink_id } => attempt_sink_error(
                     &mut snapshot.sinks,
                     &sink_metric_id(output_id, sink_id),
                     &mut first_overflow,
@@ -816,6 +1001,12 @@ fn checked_sum(value: u64, add: u64, component_id: &str, counter: &'static str) 
     value
         .checked_add(add)
         .ok_or_else(|| metrics_error(component_id, counter, "counter overflow"))
+}
+
+fn checked_duration(value: Duration, add: Duration, counter: &'static str) -> Result<Duration> {
+    value
+        .checked_add(add)
+        .ok_or_else(|| metrics_error("checkpoint", counter, "counter overflow"))
 }
 
 fn attempt_source_error(

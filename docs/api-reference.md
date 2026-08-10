@@ -64,9 +64,10 @@ The `calc_flow` crate re-exports its supported public types from
 `compile_project` produces a `BatchExecutionPlan`. `compile_batch` and
 `compile_stream` are the Rust graph-compilation entry points. A
 `StreamExecutionPlan` is consumed only by the crate-private source-driven
-runtime; it is not accepted by a public source-driven runner. The public v2
-`MicroBatchRunner` and `StreamingRunner` remain unchanged. Public source-driven
-integration and durable restart are not available.
+continuous runtime, including its optional epoch-checkpoint owner; it is not
+accepted by a public source-driven runner. The public v2 `MicroBatchRunner`
+and `StreamingRunner` remain the current public runners. No public A6
+source-driven integration is present.
 
 `EdgeBudget::new(R, B)` keeps its two-field public shape and caps queued
 envelopes and charged rows independently at `R`, plus charged bytes at `B`.
@@ -306,7 +307,7 @@ storage preserve their more specific categories.
 runtime task panic. Internally captured panic text is valid UTF-8 and at most
 1,024 bytes including the ellipsis. Python maps an unexpected native panic
 through its existing `ExecutionError` category; the private source-driven
-runtime adds no Python API.
+continuous runtime adds no Python API.
 
 ## Version and compatibility
 

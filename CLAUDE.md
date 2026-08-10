@@ -171,9 +171,10 @@ The frontend talks to the backend over the `/api/v2` REST contract only.
 - The stream message and context types (`StreamMessage`, `EventTime`, `Epoch`,
   `StreamJobContext`) do not expand those public boundaries or expose a runner
   control API; control messages are constructed only through crate-private
-  constructors. The crate-private source-driven runtime consumes
+  constructors. The crate-private source-driven continuous runtime consumes
   `StreamExecutionPlan` with whole-job preflight, bounded
-  source/operator/sink tasks, job-scoped event-time progress, private
+  source/operator/sink tasks, job-scoped event-time progress, aligned epoch
+  checkpoints, manifest-last recovery, per-output delivery proof, private
   runner/job/reaper ownership, and deterministic metrics. Existing public v2
   runners remain unchanged. The full contract is documented in the [stream
   message envelope](docs/runtime-envelope.md).

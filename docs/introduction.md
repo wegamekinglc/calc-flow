@@ -294,23 +294,27 @@ creation time. One runner has an exclusive lease on a stateful plan.
 
 The crate also contains a source-driven continuous runtime with whole-job
 preflight, bounded source/operator/sink tasks, job-scoped event-time progress,
-window execution, a private runner/job/reaper lifecycle, deterministic status
-and metrics, panic containment, and bounded launch cleanup. Its progress
-driver owns watermark generation, idle/reactivation handling, deterministic
-timer ordering, and multi-ingress progress. These runtime types remain
-crate-private. They do not expose a continuous runner or public
-watermark/checkpoint interface, and they do not change the existing public v2
-`MicroBatchRunner` or `StreamingRunner`, which still submit formed `Batch`
-values only.
+window execution, aligned epoch checkpoints, manifest-last publication,
+operator-state restore, transactional sink completion, terminal checkpoints,
+a private runner/job/reaper lifecycle, deterministic status and metrics, panic
+containment, bounded launch cleanup, and owner-settled cancellation. Its
+progress driver owns watermark generation, idle/reactivation handling,
+deterministic timer ordering, and multi-ingress progress. Exactly-once
+capability is proved per requested output across its reachable sources,
+operators, edges, and sinks; other checkpointed outputs may remain at least
+once.
 
 The Rust state surface is public and data-only. `StateBackend` opens an
 exclusive `StateLineageBackend`; `LocalStateBackend` stages, validates,
 publishes, loads, and collects immutable checksum-addressed segments.
 `CheckpointManifest` is the strict bounded v3 manifest for source, operator,
 sink, watermark, and segment state. Window snapshots use retained Arrow IPC
-segments and deterministic compaction. The private continuous runtime does not
-yet coordinate barriers or select this manifest during durable restart, so
-public source-driven integration and restart recovery remain unavailable.
+segments and deterministic compaction. The private runtime uses that manifest
+as its durable checkpoint and recovery truth. These runtime types remain
+crate-private. They expose no public watermark/checkpoint control and do not
+change the public v2 `MicroBatchRunner` or `StreamingRunner`, project and
+checkpoint formats, Python binding, or Studio routes. Public source-driven
+runner integration is not part of the current surface.
 
 Every private runtime edge uses the public two-field `EdgeBudget`. For
 `EdgeBudget::new(R, B)`, at most `R` envelopes, `R` rows, and `B` bytes may be

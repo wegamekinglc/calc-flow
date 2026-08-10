@@ -87,6 +87,41 @@ impl MultiInputProgress {
         }
     }
 
+    pub(crate) fn restore(
+        activities: impl IntoIterator<Item = (BindingOrdinal, IngressActivity)>,
+    ) -> Self {
+        let ingresses = activities.into_iter().collect::<BTreeMap<_, _>>();
+        let last_emitted_watermark = ingresses
+            .values()
+            .filter_map(|activity| activity.watermark())
+            .max();
+        let terminal = ingresses
+            .values()
+            .all(|activity| matches!(activity, IngressActivity::Ended { .. }));
+        let idle_latched = !terminal
+            && ingresses.values().all(|activity| {
+                matches!(
+                    activity,
+                    IngressActivity::Idle { .. } | IngressActivity::Ended { .. }
+                )
+            });
+        Self {
+            ingresses,
+            last_emitted_watermark,
+            idle_latched,
+            idle_epoch: IdleEpoch(0),
+            terminal,
+            next_global_sequence: CheckedSemanticAllocator::new(
+                0,
+                "runtime.progress.counters.global_sequence",
+            ),
+            next_idle_epoch: CheckedSemanticAllocator::new(
+                1,
+                "runtime.progress.counters.idle_epoch",
+            ),
+        }
+    }
+
     pub(crate) fn evaluate(
         &mut self,
         ordinal: BindingOrdinal,

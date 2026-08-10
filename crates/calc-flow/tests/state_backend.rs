@@ -417,6 +417,27 @@ fn manifest_validates_expected_plan_and_handle_ownership_before_load() {
 }
 
 #[test]
+fn manifest_runtime_configuration_mismatch_is_diagnostic_only() {
+    let manifest = CheckpointManifest::new(manifest_fields()).unwrap();
+    let sources = BTreeSet::from(["source".into()]);
+    let operators = BTreeSet::from(["window".into()]);
+    let sinks = BTreeSet::from(["sink".into()]);
+    let changed_runtime_hash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    let expected = ManifestExpectation {
+        pipeline_name: "orders",
+        pipeline_fingerprint: SHA256,
+        runtime_config_hash: changed_runtime_hash,
+        epoch: Epoch::INITIAL,
+        source_ids: &sources,
+        operator_ids: &operators,
+        sink_ids: &sinks,
+    };
+
+    manifest.validate(&expected).unwrap();
+    assert_ne!(manifest.runtime_config_hash(), changed_runtime_hash);
+}
+
+#[test]
 fn manifest_accepts_older_inventory_handles_and_rejects_future_handles() {
     let mut later_manifest = manifest_fields();
     later_manifest.epoch = Epoch::INITIAL.next().unwrap();

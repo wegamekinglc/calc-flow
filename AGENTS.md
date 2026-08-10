@@ -157,10 +157,12 @@ dashes span the full column width, including cell spaces.
   wrapping an immutable `Batch` is publicly constructable; control messages are
   created through crate-private constructors, so the public boundaries do not
   expand and there is no public runner control API. The crate-private
-  source-driven runtime consumes `StreamExecutionPlan` with whole-job
-  preflight, bounded source/operator/sink tasks, job-scoped event-time progress,
-  private runner/job/reaper ownership, and deterministic metrics. Existing
-  public v2 runners remain unchanged. See `docs/runtime-envelope.md`.
+  source-driven continuous runtime consumes `StreamExecutionPlan` with
+  whole-job preflight, bounded source/operator/sink tasks, job-scoped
+  event-time progress, aligned epoch checkpoints, manifest-last recovery,
+  per-output delivery proof, private runner/job/reaper ownership, and
+  deterministic metrics. Existing public v2 runners remain unchanged. See
+  `docs/runtime-envelope.md`.
 - `Port` declares name, `BatchKind`, required flag, and optional exact Arrow
   schema.
 - `OperatorMetadata` owns shared graph metadata. `BatchOperator` and

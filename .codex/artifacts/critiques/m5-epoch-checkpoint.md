@@ -285,6 +285,39 @@ restart, zero duplicate/missing output, bounded resources, and terminal zero.
 **Verdict.** Resolved. AC-43–AC-47 make merge readiness independently
 checkable.
 
+### F19 — The M5 introduction has no honest private main baseline
+
+**Risk.** The exact introduction base
+`main@972964413d328dfeabd4597088396bfe4516e5a3` lacks the private M5
+checkpoint coordinator, production manifest transaction, and transactional
+checkpoint paths. Treating missing base cases as zero, substituting a test
+double, or reporting candidate absolute time as a private regression would
+manufacture a favorable comparison. Conversely, allowing one shared-path
+comparison to emit an M5-wide pass would overstate what the evidence proves.
+The former phrase “120 one-minute samples in 20 minutes” was also internally
+impossible and obscured the implemented process-restart schedule.
+
+**Resolution.** Specification D12 amendment M5-D12-E1 and API §15 restrict
+`B1 -> C1 -> B2 -> C2` to the named production edge-channel path present on
+both refs and scope its result to `shared_edge_result`. The 12 private M5 cases
+run as exact-final-candidate optimized P1/P2 `absolute_only`
+characterizations, with candidate enabled/disabled cost labeled as
+candidate-only self-overhead. Same-ref executables, repeatability, noise, host
+stability, full provenance, immutable artifact coverage, and inconclusive WSL
+or unstable-host handling are mandatory. There is no M5-wide `overall_pass`,
+and the exact M5 merge SHA becomes the required baseline for later changes.
+
+AC-46 now matches the process contract: one parent launches three distinct OS
+children for global ranges `0..40`, `40..80`, and `80..120`; only filesystem
+evidence crosses generations; and 120 10-second observations span 20 minutes
+and may be aggregated into 20 one-minute intervals. The exception waives none
+of the fault, correctness, coverage, CI, review, Copilot, Codacy, or soak gates,
+does not widen the public A6/Python/Studio firewall, and does not claim the
+final performance or soak runs have occurred.
+
+**Verdict.** Resolved and approved as the one-time M5-D12-E1 introduction
+baseline amendment. Reuse after the M5 merge is prohibited.
+
 ## 4. Decision and acceptance closure
 
 | Decision area                     | Controlling rule | Observable closure                          |
@@ -300,7 +333,7 @@ checkable.
 | capability proof                  | D9               | AC-27–AC-28, AC-35–AC-36                    |
 | recovery ordering                 | D10              | AC-04, AC-08–AC-09, AC-39, AC-41            |
 | bounded lifecycle and diagnostics | D11              | AC-26, AC-41–AC-42                          |
-| fault, benchmark, and soak gates  | D12              | AC-43–AC-47                                 |
+| fault, benchmark, and soak gates  | D12/M5-D12-E1    | AC-43–AC-47                                 |
 | milestone firewall                | Scope/D1/D9      | AC-02, AC-48                                |
 
 Every controlling decision has at least one acceptance criterion and named
@@ -328,9 +361,11 @@ test/evidence placement. No criterion depends on an unapproved public API.
 REVIEWED.**
 
 The delta is specific enough to drive test-first work and closes the known
-current-main contradictions. Approval does not authorize a partial public
-runner or a production connector claim. The final implementation still
-requires the complete exact-head fault, benchmark, CI, review, Codacy, and
-20-minute soak gates.
+current-main contradictions. M5-D12-E1 is approved only for the introduction
+baseline and does not convert scoped or absolute performance evidence into an
+M5-wide pass. Approval does not authorize a partial public runner or a
+production connector claim. The final implementation still requires the
+complete exact-head fault, benchmark, CI, review, Codacy, and 20-minute soak
+gates; those final performance and soak artifacts are not yet claimed here.
 
 **BLOCKS REMAINING: 0**

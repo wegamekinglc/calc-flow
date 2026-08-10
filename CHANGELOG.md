@@ -5,6 +5,16 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-10: Add the crate-private M5 epoch-checkpoint runtime: whole-job and
+  per-output capability preflight, globally aligned source/operator cuts,
+  manifest-last state publication and strict recovery selection,
+  transactional and epoch-idempotent sink completion, mixed ended/live and
+  terminal recovery, retention/orphan cleanup, owner-settled cancellation, and
+  payload-safe checkpoint status and metrics. Add the 48-case fault matrix,
+  scoped M5-D12-E1 benchmark orchestrator, and three-process 20-minute
+  checkpoint/restart soak harness. Existing public v2 runner and checkpoint
+  APIs, project formats, Python binding, and Studio routes remain unchanged.
+
 - 2026-08-08: Add the public v3 state and window surface: strict bounded
   checkpoint manifests, lineage-exclusive `StateBackend` sessions,
   immutable checksum-verified `LocalStateBackend` segments, deterministic

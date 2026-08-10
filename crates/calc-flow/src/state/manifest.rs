@@ -183,7 +183,7 @@ pub struct ManifestExpectation<'a> {
     pub pipeline_name: &'a str,
     /// Expected semantic pipeline fingerprint.
     pub pipeline_fingerprint: &'a str,
-    /// Expected effective runtime-configuration hash.
+    /// Expected effective runtime-configuration hash used only for diagnostics.
     pub runtime_config_hash: &'a str,
     /// Expected checkpoint epoch.
     pub epoch: Epoch,
@@ -294,8 +294,9 @@ impl CheckpointManifest {
     ///
     /// # Errors
     ///
-    /// Returns [`CalcFlowError::CheckpointMismatch`] for an identity, epoch,
-    /// ID-set, or checksum mismatch.
+    /// Returns [`CalcFlowError::CheckpointMismatch`] for a semantic identity,
+    /// epoch, ID-set, or checksum mismatch. A runtime-configuration hash
+    /// difference is diagnostics-only and does not fail validation.
     pub fn validate(&self, expected: &ManifestExpectation<'_>) -> Result<()> {
         self.validate_internal()?;
         self.validate_identity(expected)?;
@@ -312,12 +313,11 @@ impl CheckpointManifest {
             "pipeline fingerprint",
             &self.pipeline_fingerprint,
             expected.pipeline_fingerprint,
-        )?;
-        validate_expected(
-            "runtime configuration hash",
-            &self.runtime_config_hash,
-            expected.runtime_config_hash,
         )
+    }
+
+    pub(crate) fn runtime_config_changed(&self, expected: &ManifestExpectation<'_>) -> bool {
+        self.runtime_config_hash != expected.runtime_config_hash
     }
 
     fn validate_epoch(&self, expected: Epoch) -> Result<()> {

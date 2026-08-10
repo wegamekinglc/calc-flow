@@ -170,7 +170,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Stream compilation and the continuous runtime
+## Stream compilation and the private continuous runtime
 
 `PipelineBuilder::compile_stream` produces an immutable
 `StreamExecutionPlan`. The plan records stable edges, source and sink binding
@@ -183,10 +183,7 @@ preserves per-ingress FIFO; routes source control through a job-scoped progress
 driver; and converges source, operator, sink, queue, reservation, driver, and
 reaper state on every terminal path. The progress driver owns watermark
 generation, idle/reactivation, deterministic timers, and multi-ingress
-progress. Launch failure and cancellation close all resources whose lifecycle
-began, in stable order, with an independent five-second bound per resource.
-Cleanup failures and panics remain typed secondary diagnostics and do not
-replace the primary outcome.
+progress.
 
 `WindowSpec` declares fixed UTC tumbling or hopping windows and ordered
 aggregates. `WindowAggregateOperator` is stream-only: it updates incremental
@@ -195,13 +192,23 @@ watermark, emits closed windows in deterministic order, and snapshots retained
 Arrow IPC deltas. `StateBackend` opens an exclusive lineage session;
 `LocalStateBackend` provides immutable checksum-verified segment publication.
 `CheckpointManifest` is the strict bounded v3 state-manifest contract. Barrier
-coordination and durable manifest selection are not yet wired into the running
-job.
+coordination cuts live sources, aligns operator ingresses, stages operator
+state, and publishes the manifest last as the sole durable recovery truth.
+Transactional sinks commit only after manifest durability. Recovery restores
+mixed ended/live jobs, and terminal checkpoints capture post-`on_end` state
+without forwarding a post-end barrier. Exactly-once compatibility is proved
+for each requested graph output before lifecycle work; checkpointed
+ordinary-sink outputs remain at least once.
+
+Launch failure and cancellation settle source, operator, sink, queue,
+progress, state, checkpoint transaction, and reaper ownership. Cleanup
+failures and panics remain typed secondary diagnostics and do not replace the
+primary outcome.
 
 This runtime is not exported. The existing public v2 `StreamingRunner` and
 `MicroBatchRunner` retain their signatures and formed-batch behavior. Public
-source-driven runner integration and durable restart are not available.
-Private task panics surface through the non-exhaustive
+source-driven runner integration is not available. The private checkpoint
+work adds no public API. Private task panics surface through the non-exhaustive
 `CalcFlowError::TaskPanicked { task_id, message }` variant.
 
 `edge_channel` retains its public signature and `EdgeBudget` retains the fields

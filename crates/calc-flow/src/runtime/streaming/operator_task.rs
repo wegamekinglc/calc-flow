@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
     sync::Arc,
@@ -15,14 +15,14 @@ use super::{
     context::{StreamTaskContext, wait_for_task_gate},
     metrics::MetricsRecorder,
     progress::{
-        aggregate::{AggregateInput, MultiInputProgress, ProgressEmissionKind},
+        aggregate::{AggregateInput, IngressActivity, MultiInputProgress, ProgressEmissionKind},
         prepare::BindingOrdinal,
     },
     supervisor::{TaskId, TaskSupervisor, panic_message},
 };
 use crate::{
-    Batch, CalcFlowError, CancellationToken, EdgeBudget, EventTime, Port, Result, StreamCollector,
-    StreamOperatorContext,
+    Batch, CalcFlowError, CancellationToken, EdgeBudget, Epoch, EventTime, ManifestIngressState,
+    OperatorIngressManifestEntry, Port, Result, StreamCollector, StreamOperatorContext,
     operator::{LateMetricDelta, LateMetricSink, accumulate_late_metrics},
     pipeline::CompiledStreamOperator,
 };
@@ -30,6 +30,36 @@ use crate::{
 pub(crate) struct OperatorEntryAck {
     pub(crate) node_id: String,
     pub(crate) result: Result<()>,
+}
+
+pub(crate) struct OperatorCheckpointAck {
+    pub(crate) node_id: String,
+    pub(crate) epoch: Epoch,
+    pub(crate) state: crate::OperatorManifestEntry,
+}
+
+pub(crate) struct OperatorCheckpointPort {
+    pub(crate) acknowledgements: mpsc::Sender<OperatorCheckpointAck>,
+    pub(crate) transaction: Option<Arc<crate::state::ManifestTransaction>>,
+    pub(crate) terminal: Option<OperatorTerminalPort>,
+    #[cfg(test)]
+    pub(crate) alignment_fault: Option<Arc<dyn Fn() -> Result<()> + Send + Sync>>,
+}
+
+pub(crate) struct OperatorTerminalPort {
+    pub(crate) ready: mpsc::Sender<String>,
+    pub(crate) commands: mpsc::Receiver<OperatorCheckpointCommand>,
+}
+
+pub(crate) enum OperatorCheckpointCommand {
+    Terminal(Epoch),
+}
+
+#[derive(Clone)]
+pub(crate) struct OperatorRestoreState {
+    pub(crate) snapshot: crate::OperatorStateSnapshot,
+    pub(crate) progress: BTreeMap<String, OperatorIngressManifestEntry>,
+    pub(crate) next_epoch: Epoch,
 }
 
 pub(crate) struct OperatorIngress {
@@ -147,6 +177,8 @@ pub(crate) struct OperatorTaskInputs {
     pub(crate) entry_ack: mpsc::UnboundedSender<OperatorEntryAck>,
     pub(crate) data_gate: watch::Receiver<bool>,
     pub(crate) launch_cancel: CancellationToken,
+    pub(crate) checkpoint: Option<OperatorCheckpointPort>,
+    pub(crate) restore: Option<OperatorRestoreState>,
 }
 
 pub(crate) fn spawn_operator_task(
@@ -170,9 +202,9 @@ async fn run_operator_task(mut inputs: OperatorTaskInputs, task_id: TaskId) -> R
     {
         return Ok(());
     }
-    if !reset_and_acknowledge(&mut inputs, task_id)? {
+    let Some(input_progress) = reset_and_acknowledge(&mut inputs, task_id)? else {
         return Ok(());
-    }
+    };
     if !wait_for_task_gate(
         &mut inputs.data_gate,
         &inputs.launch_cancel,
@@ -183,20 +215,67 @@ async fn run_operator_task(mut inputs: OperatorTaskInputs, task_id: TaskId) -> R
     {
         return Ok(());
     }
-    let result = run_operator_loop(&mut inputs).await;
+    let result = run_operator_loop(&mut inputs, input_progress).await;
     normalize_cancelled_result(&inputs, result)
 }
 
-fn reset_and_acknowledge(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Result<bool> {
-    let reset_result = match catch_unwind(AssertUnwindSafe(|| inputs.operator.reset())) {
+fn reset_and_acknowledge(
+    inputs: &mut OperatorTaskInputs,
+    task_id: TaskId,
+) -> Result<Option<OperatorInputProgress>> {
+    let preparation_result = reset_operator(inputs, task_id).and_then(|()| match &inputs.restore {
+        Some(restore) => OperatorInputProgress::restore(inputs.ingresses.keys(), &restore.progress),
+        None => Ok(OperatorInputProgress::new(inputs.ingresses.keys())),
+    });
+    let (acknowledgement_result, input_progress) = match preparation_result {
+        Ok(input_progress) => (Ok(()), Some(input_progress)),
+        Err(error) => (Err(error), None),
+    };
+    restore_ingress_completion(inputs, input_progress.is_some());
+    let dropped_message = dropped_ack_message(inputs, input_progress.is_some());
+    inputs
+        .entry_ack
+        .send(OperatorEntryAck {
+            node_id: inputs.node_id.clone(),
+            result: acknowledgement_result,
+        })
+        .map_err(|_| CalcFlowError::Internal {
+            message: dropped_message,
+        })?;
+    Ok(input_progress)
+}
+
+fn reset_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Result<()> {
+    let restore_snapshot = inputs.restore.as_ref().map(|restore| &restore.snapshot);
+    match catch_unwind(AssertUnwindSafe(|| {
+        inputs.operator.reset()?;
+        if let Some(snapshot) = restore_snapshot {
+            inputs.operator.restore(snapshot)?;
+        }
+        Ok(())
+    })) {
         Ok(result) => result,
         Err(payload) => Err(CalcFlowError::TaskPanicked {
             task_id: task_id.as_u64(),
             message: panic_message(payload.as_ref()),
         }),
+    }
+}
+
+fn restore_ingress_completion(inputs: &mut OperatorTaskInputs, succeeded: bool) {
+    let Some(restore) = inputs.restore.as_ref().filter(|_| succeeded) else {
+        return;
     };
-    let succeeded = reset_result.is_ok();
-    let dropped_message = if succeeded {
+    for (ingress_name, ingress) in &mut inputs.ingresses {
+        ingress.saw_explicit_eof = matches!(
+            restore.progress[ingress_name].state,
+            ManifestIngressState::Ended
+        );
+    }
+}
+
+fn dropped_ack_message(inputs: &OperatorTaskInputs, succeeded: bool) -> String {
+    if succeeded {
         format!(
             "operator {:?} entry acknowledgement was dropped",
             inputs.node_id
@@ -206,17 +285,7 @@ fn reset_and_acknowledge(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Re
             "operator {:?} failed reset after its acknowledgement was dropped",
             inputs.node_id
         )
-    };
-    inputs
-        .entry_ack
-        .send(OperatorEntryAck {
-            node_id: inputs.node_id.clone(),
-            result: reset_result,
-        })
-        .map_err(|_| CalcFlowError::Internal {
-            message: dropped_message,
-        })?;
-    Ok(succeeded)
+    }
 }
 
 fn normalize_cancelled_result(inputs: &OperatorTaskInputs, result: Result<()>) -> Result<()> {
@@ -229,32 +298,47 @@ fn normalize_cancelled_result(inputs: &OperatorTaskInputs, result: Result<()>) -
     }
 }
 
-async fn run_operator_loop(inputs: &mut OperatorTaskInputs) -> Result<()> {
+async fn run_operator_loop(
+    inputs: &mut OperatorTaskInputs,
+    mut input_progress: OperatorInputProgress,
+) -> Result<()> {
     if inputs.ingresses.is_empty() {
         return Err(CalcFlowError::Internal {
             message: format!("operator {:?} has no runtime ingress", inputs.node_id),
         });
     }
-    let mut input_progress = OperatorInputProgress::new(inputs.ingresses.keys());
+    let mut barrier_alignment = OperatorBarrierAlignment::with_expected_epoch(
+        inputs.restore.as_ref().map(|restore| restore.next_epoch),
+    );
     loop {
         if inputs
             .ingresses
             .values()
             .all(|ingress| ingress.saw_explicit_eof)
         {
-            return finish_operator(inputs, input_progress.input_watermark()).await;
+            return finish_operator(inputs, &input_progress).await;
         }
-        let Some((ingress_name, message)) = receive_operator_message(inputs).await? else {
+        let Some((ingress_name, message)) =
+            receive_operator_message(inputs, &barrier_alignment).await?
+        else {
             return Ok(());
         };
-        dispatch_or_cancel(inputs, &ingress_name, message, &mut input_progress).await?;
+        dispatch_or_cancel(
+            inputs,
+            &ingress_name,
+            message,
+            &mut input_progress,
+            &mut barrier_alignment,
+        )
+        .await?;
     }
 }
 
 async fn finish_operator(
     inputs: &mut OperatorTaskInputs,
-    input_watermark: Option<EventTime>,
+    input_progress: &OperatorInputProgress,
 ) -> Result<()> {
+    let input_watermark = input_progress.input_watermark();
     let cancellation = inputs.context.job().cancellation().clone();
     let output_budget = effective_output_budget(&inputs.outputs);
     let late_metrics: Arc<dyn LateMetricSink> = Arc::new(inputs.progress.clone());
@@ -287,16 +371,55 @@ async fn finish_operator(
     )
     .await?;
     inputs.progress.mark_ended();
-    Ok(())
+    complete_terminal_checkpoint(inputs, input_progress).await
+}
+
+async fn complete_terminal_checkpoint(
+    inputs: &mut OperatorTaskInputs,
+    input_progress: &OperatorInputProgress,
+) -> Result<()> {
+    let Some(terminal) = inputs
+        .checkpoint
+        .as_mut()
+        .and_then(|checkpoint| checkpoint.terminal.as_mut())
+    else {
+        return Ok(());
+    };
+    let cancellation = inputs.context.job().cancellation().clone();
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Ok(()),
+        result = terminal.ready.send(inputs.node_id.clone()) => result.map_err(|_| {
+            CalcFlowError::Internal {
+                message: format!("operator {:?} terminal readiness channel closed", inputs.node_id),
+            }
+        })?,
+    }
+    let command = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Ok(()),
+        command = terminal.commands.recv() => command,
+    };
+    let Some(OperatorCheckpointCommand::Terminal(epoch)) = command else {
+        return Err(CalcFlowError::Internal {
+            message: format!(
+                "operator {:?} terminal checkpoint command channel closed",
+                inputs.node_id
+            ),
+        });
+    };
+    let acknowledgement = capture_operator_checkpoint(inputs, input_progress, epoch).await?;
+    send_operator_checkpoint_ack(inputs, acknowledgement).await
 }
 
 async fn receive_operator_message(
     inputs: &mut OperatorTaskInputs,
+    barrier_alignment: &OperatorBarrierAlignment,
 ) -> Result<Option<(String, StreamMessage)>> {
     let received = tokio::select! {
         biased;
         () = inputs.context.job().cancellation().cancelled() => return Ok(None),
-        received = receive_ready(&mut inputs.ingresses) => received?,
+        received = receive_ready(&mut inputs.ingresses, barrier_alignment) => received?,
     };
     let (ingress_name, message) = received;
     match message {
@@ -313,12 +436,18 @@ async fn dispatch_or_cancel(
     ingress_name: &str,
     message: StreamMessage,
     input_progress: &mut OperatorInputProgress,
+    barrier_alignment: &mut OperatorBarrierAlignment,
 ) -> Result<()> {
     let cancellation = inputs.context.job().cancellation().clone();
-    tokio::select! {
+    let result = tokio::select! {
         biased;
-        result = dispatch_message(inputs, ingress_name, message, input_progress) => result,
+        result = dispatch_message(inputs, ingress_name, message, input_progress, barrier_alignment) => result,
         () = cancellation.cancelled() => Ok(()),
+    };
+    if cancellation.is_cancelled() && matches!(result, Err(CalcFlowError::Cancelled { .. })) {
+        Ok(())
+    } else {
+        result
     }
 }
 
@@ -327,10 +456,11 @@ type ReceiveFuture<'a> =
 
 async fn receive_ready(
     ingresses: &mut BTreeMap<String, OperatorIngress>,
+    barrier_alignment: &OperatorBarrierAlignment,
 ) -> Result<(String, Option<StreamMessage>)> {
     let receives = ingresses
         .iter_mut()
-        .filter(|(_, ingress)| !ingress.saw_explicit_eof)
+        .filter(|(name, ingress)| !ingress.saw_explicit_eof && !barrier_alignment.is_blocked(name))
         .map(|(name, ingress)| {
             let name = name.clone();
             Box::pin(async move { (name, ingress.receiver.recv().await) }) as ReceiveFuture<'_>
@@ -345,6 +475,7 @@ async fn dispatch_message(
     ingress_name: &str,
     message: StreamMessage,
     input_progress: &mut OperatorInputProgress,
+    barrier_alignment: &mut OperatorBarrierAlignment,
 ) -> Result<()> {
     match message.kind() {
         StreamMessageKind::Data => {
@@ -366,12 +497,16 @@ async fn dispatch_message(
             let emissions = input_progress.evaluate(ingress_name, AggregateInput::Idle)?;
             dispatch_progress_emissions(inputs, ingress_name, emissions, previous).await
         }
-        StreamMessageKind::Barrier => Err(unsupported_control(
-            inputs,
-            ingress_name,
-            "barrier",
-            "barrier control is unavailable before M5; no downstream control was emitted",
-        )),
+        StreamMessageKind::Barrier => {
+            dispatch_barrier(
+                inputs,
+                ingress_name,
+                message,
+                input_progress,
+                barrier_alignment,
+            )
+            .await
+        }
         StreamMessageKind::EndOfInput => {
             let previous = input_progress.input_watermark();
             let emissions = input_progress.evaluate(ingress_name, AggregateInput::End)?;
@@ -381,8 +516,229 @@ async fn dispatch_message(
                 .get_mut(ingress_name)
                 .expect("selected ingress remains registered")
                 .saw_explicit_eof = true;
-            Ok(())
+            complete_barrier_if_ready(inputs, input_progress, barrier_alignment).await
         }
+    }
+}
+
+#[derive(Default)]
+struct OperatorBarrierAlignment {
+    active_epoch: Option<Epoch>,
+    expected_epoch: Option<Epoch>,
+    completed_epoch: Option<Epoch>,
+    arrived: BTreeSet<String>,
+}
+
+impl OperatorBarrierAlignment {
+    fn with_expected_epoch(expected_epoch: Option<Epoch>) -> Self {
+        Self {
+            expected_epoch,
+            completed_epoch: expected_epoch.and_then(|epoch| {
+                Epoch::new(epoch.as_u64().checked_sub(1).expect("epochs are non-zero"))
+            }),
+            ..Self::default()
+        }
+    }
+
+    fn is_blocked(&self, ingress_name: &str) -> bool {
+        self.arrived.contains(ingress_name)
+    }
+
+    fn accept(&mut self, node_id: &str, ingress_name: &str, epoch: Epoch) -> Result<bool> {
+        if self.completed_epoch == Some(epoch) {
+            return Ok(false);
+        }
+        if self
+            .expected_epoch
+            .is_some_and(|expected| expected != epoch)
+        {
+            return Err(operator_barrier_mismatch(
+                node_id,
+                ingress_name,
+                epoch,
+                "does not match the next expected epoch",
+            ));
+        }
+        if self.active_epoch.is_some_and(|active| active != epoch) {
+            return Err(operator_barrier_mismatch(
+                node_id,
+                ingress_name,
+                epoch,
+                "does not match the active alignment epoch",
+            ));
+        }
+        if !self.arrived.insert(ingress_name.into()) {
+            return Ok(false);
+        }
+        self.active_epoch = Some(epoch);
+        Ok(true)
+    }
+
+    fn ready(&self, ingresses: &BTreeMap<String, OperatorIngress>) -> bool {
+        self.active_epoch.is_some()
+            && ingresses
+                .iter()
+                .all(|(name, ingress)| ingress.saw_explicit_eof || self.arrived.contains(name))
+    }
+
+    const fn active_epoch(&self) -> Option<Epoch> {
+        self.active_epoch
+    }
+
+    fn complete(&mut self, epoch: Epoch, next_epoch: Epoch) {
+        self.active_epoch = None;
+        self.expected_epoch = Some(next_epoch);
+        self.completed_epoch = Some(epoch);
+        self.arrived.clear();
+        debug_assert_ne!(epoch, next_epoch);
+    }
+}
+
+async fn dispatch_barrier(
+    inputs: &mut OperatorTaskInputs,
+    ingress_name: &str,
+    message: StreamMessage,
+    input_progress: &OperatorInputProgress,
+    alignment: &mut OperatorBarrierAlignment,
+) -> Result<()> {
+    if inputs.checkpoint.is_none() {
+        return Err(unsupported_control(
+            inputs,
+            ingress_name,
+            "barrier",
+            "barrier control is unavailable before M5; no downstream control was emitted",
+        ));
+    }
+    let epoch = message
+        .as_barrier()
+        .expect("barrier kind always carries an epoch");
+    if !alignment.accept(&inputs.node_id, ingress_name, epoch)? {
+        return Ok(());
+    }
+    #[cfg(test)]
+    if !alignment.ready(&inputs.ingresses)
+        && let Some(fault) = inputs
+            .checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.alignment_fault.as_ref())
+    {
+        fault()?;
+        if inputs.context.job().cancellation().is_cancelled() {
+            return Ok(());
+        }
+    }
+    complete_barrier_if_ready(inputs, input_progress, alignment).await
+}
+
+async fn complete_barrier_if_ready(
+    inputs: &mut OperatorTaskInputs,
+    input_progress: &OperatorInputProgress,
+    alignment: &mut OperatorBarrierAlignment,
+) -> Result<()> {
+    if !alignment.ready(&inputs.ingresses) {
+        return Ok(());
+    }
+    let epoch = alignment
+        .active_epoch()
+        .expect("ready operator alignment always has an active epoch");
+    let next_epoch = epoch.next()?;
+    let acknowledgement = capture_operator_checkpoint(inputs, input_progress, epoch).await?;
+    send_operator_checkpoint_ack(inputs, acknowledgement).await?;
+    forward_control(
+        &mut inputs.outputs,
+        StreamMessage::barrier(epoch),
+        inputs.context.job(),
+    )
+    .await?;
+    alignment.complete(epoch, next_epoch);
+    Ok(())
+}
+
+async fn capture_operator_checkpoint(
+    inputs: &mut OperatorTaskInputs,
+    input_progress: &OperatorInputProgress,
+    epoch: Epoch,
+) -> Result<OperatorCheckpointAck> {
+    let transaction = inputs
+        .checkpoint
+        .as_ref()
+        .and_then(|checkpoint| checkpoint.transaction.clone());
+    let snapshot = inputs.operator.checkpoint(epoch)?;
+    let staged = match transaction {
+        Some(transaction) => {
+            transaction
+                .stage_operator_state_cancellable(
+                    &inputs.node_id,
+                    epoch,
+                    snapshot,
+                    inputs.context.job().cancellation(),
+                )
+                .await?
+        }
+        None if snapshot.segments.is_empty() => crate::state::StagedOperatorState {
+            inline_metadata: snapshot.inline_metadata,
+            segments: Vec::new(),
+        },
+        None => {
+            return Err(CalcFlowError::Internal {
+                message: format!(
+                    "operator {:?} produced state segments without a state transaction",
+                    inputs.node_id
+                ),
+            });
+        }
+    };
+    Ok(OperatorCheckpointAck {
+        node_id: inputs.node_id.clone(),
+        epoch,
+        state: crate::OperatorManifestEntry {
+            progress: input_progress.manifest_entries()?,
+            inline_metadata: staged.inline_metadata,
+            segments: staged.segments,
+        },
+    })
+}
+
+async fn send_operator_checkpoint_ack(
+    inputs: &OperatorTaskInputs,
+    acknowledgement: OperatorCheckpointAck,
+) -> Result<()> {
+    let acknowledgements = inputs
+        .checkpoint
+        .as_ref()
+        .expect("checkpoint acknowledgement requires its task port")
+        .acknowledgements
+        .clone();
+    tokio::select! {
+        biased;
+        () = inputs.context.job().cancellation().cancelled() => {
+            return Err(CalcFlowError::Cancelled {
+                run_id: inputs.context.job().job_id().to_string(),
+            });
+        }
+        result = acknowledgements.send(acknowledgement) => result.map_err(|_| {
+            CalcFlowError::Internal {
+                message: format!(
+                    "operator {:?} checkpoint acknowledgement channel closed",
+                    inputs.node_id
+                ),
+            }
+        })?,
+    }
+    Ok(())
+}
+
+fn operator_barrier_mismatch(
+    node_id: &str,
+    ingress_name: &str,
+    epoch: Epoch,
+    message: &str,
+) -> CalcFlowError {
+    CalcFlowError::CheckpointMismatch {
+        message: format!(
+            "operator {node_id:?} ingress {ingress_name:?} barrier epoch {} {message}",
+            epoch.as_u64()
+        ),
     }
 }
 
@@ -543,6 +899,48 @@ impl OperatorInputProgress {
         }
     }
 
+    fn restore<'a>(
+        ingresses: impl IntoIterator<Item = &'a String>,
+        persisted: &BTreeMap<String, OperatorIngressManifestEntry>,
+    ) -> Result<Self> {
+        let ordinal_by_ingress = ingresses
+            .into_iter()
+            .enumerate()
+            .map(|(index, ingress)| {
+                (
+                    ingress.clone(),
+                    BindingOrdinal::new(
+                        u64::try_from(index).expect("ingress count fits the binding ordinal"),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        if ordinal_by_ingress.keys().ne(persisted.keys()) {
+            return Err(CalcFlowError::CheckpointMismatch {
+                message: "operator restore ingress set does not match runtime ingresses".into(),
+            });
+        }
+        let activities = ordinal_by_ingress.iter().map(|(ingress, ordinal)| {
+            let entry = &persisted[ingress];
+            let activity = match entry.state {
+                ManifestIngressState::Active => IngressActivity::Active {
+                    watermark: entry.watermark,
+                },
+                ManifestIngressState::Idle => IngressActivity::Idle {
+                    watermark: entry.watermark,
+                },
+                ManifestIngressState::Ended => IngressActivity::Ended {
+                    final_watermark: entry.watermark,
+                },
+            };
+            (*ordinal, activity)
+        });
+        Ok(Self {
+            aggregate: MultiInputProgress::restore(activities),
+            ordinal_by_ingress,
+        })
+    }
+
     fn evaluate(
         &mut self,
         ingress: &str,
@@ -568,6 +966,35 @@ impl OperatorInputProgress {
 
     const fn input_watermark(&self) -> Option<EventTime> {
         self.aggregate.last_emitted_watermark()
+    }
+
+    fn manifest_entries(&self) -> Result<BTreeMap<String, OperatorIngressManifestEntry>> {
+        self.ordinal_by_ingress
+            .iter()
+            .map(|(ingress, ordinal)| {
+                let activity =
+                    self.aggregate
+                        .activity(*ordinal)
+                        .ok_or_else(|| CalcFlowError::Internal {
+                            message: format!(
+                                "operator ingress {ingress:?} is missing aggregate progress"
+                            ),
+                        })?;
+                let (state, watermark) = match activity {
+                    IngressActivity::Active { watermark } => {
+                        (ManifestIngressState::Active, watermark)
+                    }
+                    IngressActivity::Idle { watermark } => (ManifestIngressState::Idle, watermark),
+                    IngressActivity::Ended { final_watermark } => {
+                        (ManifestIngressState::Ended, final_watermark)
+                    }
+                };
+                Ok((
+                    ingress.clone(),
+                    OperatorIngressManifestEntry { state, watermark },
+                ))
+            })
+            .collect()
     }
 }
 
@@ -712,7 +1139,7 @@ fn runtime_routes_error(node_id: &str, port: &str) -> CalcFlowError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::{
         any::Any,
         collections::BTreeMap,
@@ -730,13 +1157,14 @@ mod tests {
     use tokio::sync::{mpsc, watch};
 
     use super::{
-        OperatorEntryAck, OperatorIngress, OperatorProgress, OperatorTaskInputs, run_operator_task,
+        OperatorCheckpointAck, OperatorCheckpointPort, OperatorEntryAck, OperatorIngress,
+        OperatorProgress, OperatorRestoreState, OperatorTaskInputs, run_operator_task,
         send_emission, spawn_operator_task,
     };
     use crate::{
         Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken, EdgeBudget, EventTime,
-        JsonMap, OperatorMetadata, Port, Result, StreamCollector, StreamJobContext, StreamMessage,
-        StreamMessageKind, StreamOperator, StreamOperatorContext,
+        JsonMap, ManifestIngressState, OperatorMetadata, Port, Result, StreamCollector,
+        StreamJobContext, StreamMessage, StreamMessageKind, StreamOperator, StreamOperatorContext,
         pipeline::CompiledStreamOperator,
         runtime::streaming::supervisor::{TaskId, TaskSupervisor},
     };
@@ -806,6 +1234,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum Behavior {
         Forward,
+        Stateful,
         BadPort,
         BadKind,
         EmitThenError,
@@ -893,6 +1322,92 @@ mod tests {
             _output: &mut dyn StreamCollector,
         ) -> Result<()> {
             self.ends.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn checkpoint(&mut self, _epoch: crate::Epoch) -> Result<crate::OperatorStateSnapshot> {
+            if matches!(self.behavior, Behavior::Stateful) {
+                Ok(crate::OperatorStateSnapshot {
+                    inline_metadata: BTreeMap::from([("layout".into(), serde_json::json!(1))]),
+                    segments: BTreeMap::from([("delta-0001".into(), b"state".to_vec())]),
+                })
+            } else {
+                Ok(crate::OperatorStateSnapshot::default())
+            }
+        }
+    }
+
+    struct RestoreProbeOperator {
+        input_ports: Vec<Port>,
+        output_ports: Vec<Port>,
+        restored: Arc<AtomicBool>,
+        observed_watermark: Arc<Mutex<Option<EventTime>>>,
+    }
+
+    impl OperatorMetadata for RestoreProbeOperator {
+        fn name(&self) -> &'static str {
+            "restore-probe"
+        }
+
+        fn input_ports(&self) -> &[Port] {
+            &self.input_ports
+        }
+
+        fn output_ports(&self) -> &[Port] {
+            &self.output_ports
+        }
+
+        fn configuration(&self) -> JsonMap {
+            JsonMap::new()
+        }
+    }
+
+    #[async_trait]
+    impl StreamOperator for RestoreProbeOperator {
+        async fn process_data(
+            &mut self,
+            _ingress: &str,
+            batch: Batch,
+            context: &StreamOperatorContext<'_>,
+            output: &mut dyn StreamCollector,
+        ) -> Result<()> {
+            if !self.restored.load(Ordering::SeqCst) {
+                return Err(CalcFlowError::Operator {
+                    node_id: "node".into(),
+                    message: "data was processed before operator restore".into(),
+                });
+            }
+            *self.observed_watermark.lock() = context.input_watermark();
+            output.emit("output", batch).await
+        }
+
+        async fn on_watermark(
+            &mut self,
+            _watermark: EventTime,
+            _context: &StreamOperatorContext<'_>,
+            _output: &mut dyn StreamCollector,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn on_end(
+            &mut self,
+            _context: &StreamOperatorContext<'_>,
+            _output: &mut dyn StreamCollector,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn restore(&mut self, snapshot: &crate::OperatorStateSnapshot) -> Result<()> {
+            if snapshot.inline_metadata
+                != BTreeMap::from([("restored".into(), serde_json::json!(true))])
+                || !snapshot.segments.is_empty()
+            {
+                return Err(CalcFlowError::Format {
+                    message: "unexpected restore snapshot".into(),
+                });
+            }
+            self.restored.store(true, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -1094,6 +1609,8 @@ mod tests {
                 entry_ack,
                 data_gate,
                 launch_cancel: CancellationToken::new(),
+                checkpoint: None,
+                restore: None,
             },
             TaskId::new(0),
         ));
@@ -1123,6 +1640,125 @@ mod tests {
         ack: mpsc::UnboundedReceiver<OperatorEntryAck>,
         progress: OperatorProgress,
         metrics: super::MetricsRecorder,
+    }
+
+    pub(crate) struct BenchmarkAlignmentFixture {
+        harness: Harness,
+        checkpoint: mpsc::Receiver<OperatorCheckpointAck>,
+        batches: [Batch; 3],
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    pub(crate) struct BenchmarkAlignmentReport {
+        pub(crate) data_before_barrier: usize,
+        pub(crate) state_segments: usize,
+        pub(crate) barriers: usize,
+    }
+
+    async fn send_benchmark_alignment_inputs(
+        harness: &mut Harness,
+        batches: [Batch; 3],
+        epoch: crate::Epoch,
+    ) -> Result<()> {
+        let [left_before, right_before, left_after] = batches;
+        let left = harness.inputs.get_mut("left").unwrap();
+        left.send(StreamMessage::data(left_before)).await?;
+        left.send(StreamMessage::barrier(epoch)).await?;
+        left.send(StreamMessage::data(left_after)).await?;
+        tokio::task::yield_now().await;
+        let right = harness.inputs.get_mut("right").unwrap();
+        right.send(StreamMessage::data(right_before)).await?;
+        right.send(StreamMessage::barrier(epoch)).await
+    }
+
+    async fn receive_benchmark_alignment_ack(
+        checkpoint: &mut mpsc::Receiver<OperatorCheckpointAck>,
+    ) -> Result<OperatorCheckpointAck> {
+        checkpoint
+            .recv()
+            .await
+            .ok_or_else(|| CalcFlowError::Internal {
+                message: "benchmark alignment omitted its checkpoint acknowledgement".into(),
+            })
+    }
+
+    async fn collect_benchmark_alignment_output(
+        output: &mut crate::EdgeReceiver,
+        epoch: crate::Epoch,
+    ) -> Result<(usize, usize)> {
+        let mut data_before_barrier = 0;
+        let mut barriers = 0;
+        loop {
+            let message = output
+                .recv()
+                .await?
+                .ok_or_else(|| CalcFlowError::Internal {
+                    message: "benchmark alignment output closed before its barrier".into(),
+                })?;
+            if message.as_barrier() == Some(epoch) {
+                barriers += 1;
+                break;
+            }
+            if message.as_data().is_some() {
+                data_before_barrier += 1;
+            }
+        }
+        Ok((data_before_barrier, barriers))
+    }
+
+    async fn finish_benchmark_alignment_harness(harness: &mut Harness) -> Result<()> {
+        harness.cancellation.cancel();
+        let report = harness.supervisor.join_all().await;
+        if let Some(failure) = report.errors.first() {
+            return Err(CalcFlowError::Internal {
+                message: format!("benchmark alignment task failed: {}", failure.error),
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn prepare_benchmark_alignment_fixture(
+        operator: Box<dyn StreamOperator>,
+        transaction: Option<Arc<crate::state::ManifestTransaction>>,
+        batches: [Batch; 3],
+    ) -> BenchmarkAlignmentFixture {
+        let output_port = operator.output_ports()[0].clone();
+        let (checkpoint_tx, checkpoint) = mpsc::channel(1);
+        let mut harness = harness_with_operator(
+            &["left", "right"],
+            1,
+            CompiledStreamOperator::External(operator),
+            output_port,
+            Some(OperatorCheckpointPort {
+                acknowledgements: checkpoint_tx,
+                transaction,
+                terminal: None,
+                alignment_fault: None,
+            }),
+            None,
+        );
+        start(&mut harness).await;
+        BenchmarkAlignmentFixture {
+            harness,
+            checkpoint,
+            batches,
+        }
+    }
+
+    impl BenchmarkAlignmentFixture {
+        pub(crate) async fn measure(mut self) -> Result<BenchmarkAlignmentReport> {
+            let epoch = crate::Epoch::INITIAL;
+            send_benchmark_alignment_inputs(&mut self.harness, self.batches, epoch).await?;
+            let acknowledgement = receive_benchmark_alignment_ack(&mut self.checkpoint).await?;
+            let (data_before_barrier, barriers) =
+                collect_benchmark_alignment_output(&mut self.harness.outputs[0], epoch).await?;
+            finish_benchmark_alignment_harness(&mut self.harness).await?;
+            Ok(BenchmarkAlignmentReport {
+                data_before_barrier,
+                state_segments: acknowledgement.state.segments.len(),
+                barriers,
+            })
+        }
     }
 
     #[derive(Debug)]
@@ -1161,6 +1797,8 @@ mod tests {
             branch_count,
             CompiledStreamOperator::External(Box::new(operator)),
             output_port,
+            None,
+            None,
         )
     }
 
@@ -1169,6 +1807,8 @@ mod tests {
         branch_count: usize,
         operator: CompiledStreamOperator,
         output_port: Port,
+        checkpoint: Option<OperatorCheckpointPort>,
+        restore: Option<OperatorRestoreState>,
     ) -> Harness {
         let cancellation = CancellationToken::new();
         let context =
@@ -1244,6 +1884,8 @@ mod tests {
                 entry_ack: ack_tx,
                 data_gate: data_rx,
                 launch_cancel: CancellationToken::new(),
+                checkpoint,
+                restore,
             },
         );
         Harness {
@@ -1404,6 +2046,534 @@ mod tests {
         assert!(harness.progress.snapshot().ended);
     }
 
+    async fn assert_barrier_alignment_order(first: &str, second: &str) {
+        let output_port = Port::new("output", BatchKind::Table, false, None).unwrap();
+        let operator = ProbeOperator {
+            input_ports: ["left", "right"]
+                .into_iter()
+                .map(|name| Port::new(name, BatchKind::Table, true, None).unwrap())
+                .collect(),
+            output_ports: vec![output_port.clone()],
+            behavior: Behavior::Forward,
+            watermarks: Arc::new(AtomicUsize::new(0)),
+            ends: Arc::new(AtomicUsize::new(0)),
+            observed: Arc::new(Mutex::new(Vec::new())),
+        };
+        let (checkpoint_tx, mut checkpoint_rx) = mpsc::channel(1);
+        let mut harness = harness_with_operator(
+            &["left", "right"],
+            1,
+            CompiledStreamOperator::External(Box::new(operator)),
+            output_port,
+            Some(OperatorCheckpointPort {
+                acknowledgements: checkpoint_tx,
+                transaction: None,
+                terminal: None,
+                alignment_fault: None,
+            }),
+            None,
+        );
+        start(&mut harness).await;
+        let epoch = crate::Epoch::INITIAL;
+        let first_source = if first == "left" { "L" } else { "R" };
+        let second_source = if second == "left" { "L" } else { "R" };
+        let first_ingress = harness.inputs.get_mut(first).unwrap();
+        first_ingress
+            .send(StreamMessage::data(batch(first_source, 0)))
+            .await
+            .unwrap();
+        first_ingress
+            .send(StreamMessage::barrier(epoch))
+            .await
+            .unwrap();
+        first_ingress
+            .send(StreamMessage::data(batch(first_source, 1)))
+            .await
+            .unwrap();
+        harness
+            .inputs
+            .get_mut(second)
+            .unwrap()
+            .send(StreamMessage::data(batch(second_source, 0)))
+            .await
+            .unwrap();
+
+        let mut before_cut = BTreeMap::new();
+        for _ in 0..2 {
+            let message = harness.outputs[0].recv().await.unwrap().unwrap();
+            let data = message.as_data().unwrap();
+            before_cut.insert(
+                data.metadata().source().to_owned(),
+                data.metadata().sequence(),
+            );
+        }
+        assert_eq!(
+            before_cut,
+            BTreeMap::from([("L".into(), 0), ("R".into(), 0)])
+        );
+        let mut no_overtake = Box::pin(harness.outputs[0].recv());
+        assert!(matches!(
+            futures::poll!(no_overtake.as_mut()),
+            Poll::Pending
+        ));
+        drop(no_overtake);
+
+        harness
+            .inputs
+            .get_mut(second)
+            .unwrap()
+            .send(StreamMessage::barrier(epoch))
+            .await
+            .unwrap();
+        let acknowledgement = checkpoint_rx.recv().await.unwrap();
+        assert_eq!(acknowledgement.node_id, "node");
+        assert_eq!(acknowledgement.epoch, epoch);
+        assert!(acknowledgement.state.inline_metadata.is_empty());
+        assert!(acknowledgement.state.segments.is_empty());
+        assert_eq!(
+            harness.outputs[0]
+                .recv()
+                .await
+                .unwrap()
+                .unwrap()
+                .as_barrier(),
+            Some(epoch)
+        );
+        let after_cut = harness.outputs[0].recv().await.unwrap().unwrap();
+        assert_eq!(
+            after_cut.as_data().unwrap().metadata().source(),
+            first_source
+        );
+        assert_eq!(after_cut.as_data().unwrap().metadata().sequence(), 1);
+
+        harness.cancellation.cancel();
+        assert!(harness.supervisor.join_all().await.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn barrier_alignment_blocks_only_arrived_ingress_until_snapshot_ack() {
+        assert_barrier_alignment_order("left", "right").await;
+    }
+
+    #[tokio::test]
+    async fn barrier_alignment_is_independent_of_ingress_arrival_order() {
+        assert_barrier_alignment_order("right", "left").await;
+    }
+
+    #[tokio::test]
+    async fn partial_alignment_fault_precedes_snapshot_ack_and_barrier_forwarding() {
+        let output_port = Port::new("output", BatchKind::Table, false, None).unwrap();
+        let operator = ProbeOperator {
+            input_ports: ["left", "right"]
+                .into_iter()
+                .map(|name| Port::new(name, BatchKind::Table, true, None).unwrap())
+                .collect(),
+            output_ports: vec![output_port.clone()],
+            behavior: Behavior::Forward,
+            watermarks: Arc::new(AtomicUsize::new(0)),
+            ends: Arc::new(AtomicUsize::new(0)),
+            observed: Arc::new(Mutex::new(Vec::new())),
+        };
+        let (checkpoint_tx, mut checkpoint_rx) = mpsc::channel(1);
+        let mut harness = harness_with_operator(
+            &["left", "right"],
+            1,
+            CompiledStreamOperator::External(Box::new(operator)),
+            output_port,
+            Some(OperatorCheckpointPort {
+                acknowledgements: checkpoint_tx,
+                transaction: None,
+                terminal: None,
+                alignment_fault: Some(Arc::new(|| {
+                    Err(CalcFlowError::Internal {
+                        message: "partial alignment fault".into(),
+                    })
+                })),
+            }),
+            None,
+        );
+        start(&mut harness).await;
+        harness
+            .inputs
+            .get_mut("left")
+            .unwrap()
+            .send(StreamMessage::barrier(crate::Epoch::INITIAL))
+            .await
+            .unwrap();
+
+        let report = harness.supervisor.join_all().await;
+
+        assert_eq!(report.errors.len(), 1);
+        assert!(
+            report.errors[0]
+                .error
+                .to_string()
+                .contains("partial alignment fault")
+        );
+        assert!(checkpoint_rx.recv().await.is_none());
+        assert!(harness.outputs[0].recv().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn identical_retried_barrier_is_idempotent_after_alignment_completes() {
+        let output_port = Port::new("output", BatchKind::Table, false, None).unwrap();
+        let operator = ProbeOperator {
+            input_ports: ["left", "right"]
+                .into_iter()
+                .map(|name| Port::new(name, BatchKind::Table, true, None).unwrap())
+                .collect(),
+            output_ports: vec![output_port.clone()],
+            behavior: Behavior::Forward,
+            watermarks: Arc::new(AtomicUsize::new(0)),
+            ends: Arc::new(AtomicUsize::new(0)),
+            observed: Arc::new(Mutex::new(Vec::new())),
+        };
+        let (checkpoint_tx, mut checkpoint_rx) = mpsc::channel(1);
+        let mut harness = harness_with_operator(
+            &["left", "right"],
+            1,
+            CompiledStreamOperator::External(Box::new(operator)),
+            output_port,
+            Some(OperatorCheckpointPort {
+                acknowledgements: checkpoint_tx,
+                transaction: None,
+                terminal: None,
+                alignment_fault: None,
+            }),
+            None,
+        );
+        start(&mut harness).await;
+        let epoch = crate::Epoch::INITIAL;
+        let left = harness.inputs.get_mut("left").unwrap();
+        left.send(StreamMessage::barrier(epoch)).await.unwrap();
+        left.send(StreamMessage::barrier(epoch)).await.unwrap();
+        harness
+            .inputs
+            .get_mut("right")
+            .unwrap()
+            .send(StreamMessage::barrier(epoch))
+            .await
+            .unwrap();
+        for ingress in harness.inputs.values_mut() {
+            ingress.send(StreamMessage::end_of_input()).await.unwrap();
+        }
+
+        assert_eq!(checkpoint_rx.recv().await.unwrap().epoch, epoch);
+        assert_eq!(
+            harness.outputs[0]
+                .recv()
+                .await
+                .unwrap()
+                .unwrap()
+                .as_barrier(),
+            Some(epoch)
+        );
+        assert!(harness.supervisor.join_all().await.errors.is_empty());
+        assert!(checkpoint_rx.recv().await.is_none());
+    }
+
+    #[test]
+    fn barrier_alignment_rejects_conflicting_future_and_regressed_epochs() {
+        let initial = crate::Epoch::INITIAL;
+        let next = initial.next().unwrap();
+        let future = next.next().unwrap();
+        let mut active = super::OperatorBarrierAlignment::default();
+        assert!(active.accept("node", "left", initial).unwrap());
+        assert!(active.accept("node", "left", initial).is_ok_and(|new| !new));
+        assert!(matches!(
+            active.accept("node", "right", next),
+            Err(CalcFlowError::CheckpointMismatch { .. })
+        ));
+
+        let mut restored = super::OperatorBarrierAlignment::with_expected_epoch(Some(next));
+        assert!(
+            restored
+                .accept("node", "left", initial)
+                .is_ok_and(|new| !new)
+        );
+        assert!(matches!(
+            restored.accept("node", "left", future),
+            Err(CalcFlowError::CheckpointMismatch { .. })
+        ));
+        let mut later_restore = super::OperatorBarrierAlignment::with_expected_epoch(Some(future));
+        assert!(matches!(
+            later_restore.accept("node", "left", initial),
+            Err(CalcFlowError::CheckpointMismatch { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn end_after_peer_barrier_contributes_the_terminal_ingress_cut() {
+        let output_port = Port::new("output", BatchKind::Table, false, None).unwrap();
+        let operator = ProbeOperator {
+            input_ports: ["left", "right"]
+                .into_iter()
+                .map(|name| Port::new(name, BatchKind::Table, true, None).unwrap())
+                .collect(),
+            output_ports: vec![output_port.clone()],
+            behavior: Behavior::Forward,
+            watermarks: Arc::new(AtomicUsize::new(0)),
+            ends: Arc::new(AtomicUsize::new(0)),
+            observed: Arc::new(Mutex::new(Vec::new())),
+        };
+        let (checkpoint_tx, mut checkpoint_rx) = mpsc::channel(1);
+        let mut harness = harness_with_operator(
+            &["left", "right"],
+            1,
+            CompiledStreamOperator::External(Box::new(operator)),
+            output_port,
+            Some(OperatorCheckpointPort {
+                acknowledgements: checkpoint_tx,
+                transaction: None,
+                terminal: None,
+                alignment_fault: None,
+            }),
+            None,
+        );
+        start(&mut harness).await;
+        let epoch = crate::Epoch::INITIAL;
+        harness
+            .inputs
+            .get_mut("left")
+            .unwrap()
+            .send(StreamMessage::barrier(epoch))
+            .await
+            .unwrap();
+        harness
+            .inputs
+            .get_mut("right")
+            .unwrap()
+            .send(StreamMessage::end_of_input())
+            .await
+            .unwrap();
+
+        let acknowledgement = tokio::time::timeout(Duration::from_secs(1), checkpoint_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(acknowledgement.epoch, epoch);
+        assert_eq!(
+            acknowledgement.state.progress["left"].state,
+            ManifestIngressState::Active
+        );
+        assert_eq!(
+            acknowledgement.state.progress["right"].state,
+            ManifestIngressState::Ended
+        );
+        assert_eq!(
+            harness.outputs[0]
+                .recv()
+                .await
+                .unwrap()
+                .unwrap()
+                .as_barrier(),
+            Some(epoch)
+        );
+
+        harness.cancellation.cancel();
+        assert!(harness.supervisor.join_all().await.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stateful_snapshot_without_transaction_forwards_no_barrier() {
+        let output_port = Port::new("output", BatchKind::Table, false, None).unwrap();
+        let operator = ProbeOperator {
+            input_ports: vec![Port::new("input", BatchKind::Table, true, None).unwrap()],
+            output_ports: vec![output_port.clone()],
+            behavior: Behavior::Stateful,
+            watermarks: Arc::new(AtomicUsize::new(0)),
+            ends: Arc::new(AtomicUsize::new(0)),
+            observed: Arc::new(Mutex::new(Vec::new())),
+        };
+        let (checkpoint_tx, mut checkpoint_rx) = mpsc::channel(1);
+        let mut harness = harness_with_operator(
+            &["input"],
+            1,
+            CompiledStreamOperator::External(Box::new(operator)),
+            output_port,
+            Some(OperatorCheckpointPort {
+                acknowledgements: checkpoint_tx,
+                transaction: None,
+                terminal: None,
+                alignment_fault: None,
+            }),
+            None,
+        );
+        start(&mut harness).await;
+        let sender = harness.inputs.get_mut("input").unwrap();
+        sender
+            .send(StreamMessage::barrier(crate::Epoch::INITIAL))
+            .await
+            .unwrap();
+        sender.send(StreamMessage::end_of_input()).await.unwrap();
+
+        let report = harness.supervisor.join_all().await;
+
+        assert_eq!(report.errors.len(), 1);
+        assert!(
+            report.errors[0]
+                .error
+                .to_string()
+                .contains("state transaction")
+        );
+        assert!(checkpoint_rx.recv().await.is_none());
+        assert!(harness.outputs[0].recv().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn operator_restore_precedes_entry_ack_and_recovers_input_progress() {
+        let output_port = Port::new("output", BatchKind::Table, false, None).unwrap();
+        let restored = Arc::new(AtomicBool::new(false));
+        let observed_watermark = Arc::new(Mutex::new(None));
+        let operator = RestoreProbeOperator {
+            input_ports: vec![Port::new("input", BatchKind::Table, true, None).unwrap()],
+            output_ports: vec![output_port.clone()],
+            restored: Arc::clone(&restored),
+            observed_watermark: Arc::clone(&observed_watermark),
+        };
+        let restore = OperatorRestoreState {
+            snapshot: crate::OperatorStateSnapshot {
+                inline_metadata: BTreeMap::from([("restored".into(), serde_json::json!(true))]),
+                segments: BTreeMap::new(),
+            },
+            progress: BTreeMap::from([(
+                "input".into(),
+                crate::OperatorIngressManifestEntry {
+                    state: ManifestIngressState::Active,
+                    watermark: Some(EventTime::from_micros(9)),
+                },
+            )]),
+            next_epoch: crate::Epoch::INITIAL.next().unwrap(),
+        };
+        let mut harness = harness_with_operator(
+            &["input"],
+            1,
+            CompiledStreamOperator::External(Box::new(operator)),
+            output_port,
+            None,
+            Some(restore),
+        );
+
+        start(&mut harness).await;
+        assert!(restored.load(Ordering::SeqCst));
+        let sender = harness.inputs.get_mut("input").unwrap();
+        sender
+            .send(StreamMessage::data(batch("S", 1)))
+            .await
+            .unwrap();
+        sender.send(StreamMessage::end_of_input()).await.unwrap();
+
+        let report = harness.supervisor.join_all().await;
+        assert!(report.errors.is_empty());
+        assert_eq!(
+            harness.outputs[0]
+                .recv()
+                .await
+                .unwrap()
+                .unwrap()
+                .as_data()
+                .unwrap()
+                .metadata()
+                .sequence(),
+            1
+        );
+        assert_eq!(*observed_watermark.lock(), Some(EventTime::from_micros(9)));
+    }
+
+    #[tokio::test]
+    async fn restored_operator_ignores_the_identical_completed_barrier_epoch() {
+        let output_port = Port::new("output", BatchKind::Table, false, None).unwrap();
+        let operator = ProbeOperator {
+            input_ports: vec![Port::new("input", BatchKind::Table, true, None).unwrap()],
+            output_ports: vec![output_port.clone()],
+            behavior: Behavior::Forward,
+            watermarks: Arc::new(AtomicUsize::new(0)),
+            ends: Arc::new(AtomicUsize::new(0)),
+            observed: Arc::new(Mutex::new(Vec::new())),
+        };
+        let (checkpoint_tx, mut checkpoint_rx) = mpsc::channel(1);
+        let mut harness = harness_with_operator(
+            &["input"],
+            1,
+            CompiledStreamOperator::External(Box::new(operator)),
+            output_port,
+            Some(OperatorCheckpointPort {
+                acknowledgements: checkpoint_tx,
+                transaction: None,
+                terminal: None,
+                alignment_fault: None,
+            }),
+            Some(OperatorRestoreState {
+                snapshot: crate::OperatorStateSnapshot::default(),
+                progress: BTreeMap::from([(
+                    "input".into(),
+                    crate::OperatorIngressManifestEntry {
+                        state: ManifestIngressState::Active,
+                        watermark: None,
+                    },
+                )]),
+                next_epoch: crate::Epoch::INITIAL.next().unwrap(),
+            }),
+        );
+        start(&mut harness).await;
+        let sender = harness.inputs.get_mut("input").unwrap();
+        sender
+            .send(StreamMessage::barrier(crate::Epoch::INITIAL))
+            .await
+            .unwrap();
+        sender.send(StreamMessage::end_of_input()).await.unwrap();
+
+        let report = harness.supervisor.join_all().await;
+
+        assert!(report.errors.is_empty());
+        assert!(checkpoint_rx.recv().await.is_none());
+        assert_eq!(
+            harness.outputs[0].recv().await.unwrap().unwrap().kind(),
+            StreamMessageKind::EndOfInput
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_restored_ingress_set_fails_the_entry_ack_before_data_release() {
+        let output_port = Port::new("output", BatchKind::Table, false, None).unwrap();
+        let operator = ProbeOperator {
+            input_ports: vec![Port::new("input", BatchKind::Table, true, None).unwrap()],
+            output_ports: vec![output_port.clone()],
+            behavior: Behavior::Forward,
+            watermarks: Arc::new(AtomicUsize::new(0)),
+            ends: Arc::new(AtomicUsize::new(0)),
+            observed: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut harness = harness_with_operator(
+            &["input"],
+            1,
+            CompiledStreamOperator::External(Box::new(operator)),
+            output_port,
+            None,
+            Some(OperatorRestoreState {
+                snapshot: crate::OperatorStateSnapshot::default(),
+                progress: BTreeMap::from([(
+                    "other".into(),
+                    crate::OperatorIngressManifestEntry {
+                        state: ManifestIngressState::Active,
+                        watermark: None,
+                    },
+                )]),
+                next_epoch: crate::Epoch::INITIAL.next().unwrap(),
+            }),
+        );
+
+        harness.entry.send(true).unwrap();
+        let acknowledgement = harness.ack.recv().await.unwrap();
+
+        assert!(matches!(
+            acknowledgement.result,
+            Err(CalcFlowError::CheckpointMismatch { .. })
+        ));
+        assert!(harness.supervisor.join_all().await.errors.is_empty());
+        assert!(harness.outputs[0].recv().await.unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn unary_runtime_control_is_fifo_and_handler_precedes_watermark_forwarding() {
         let mut harness = harness(&["input"], 1, Behavior::Forward);
@@ -1499,6 +2669,8 @@ mod tests {
                 1,
                 CompiledStreamOperator::External(Box::new(operator)),
                 output_port,
+                None,
+                None,
             );
             start(&mut harness).await;
             harness
@@ -1619,6 +2791,8 @@ mod tests {
             1,
             CompiledStreamOperator::External(Box::new(schema_probe)),
             schema_port,
+            None,
+            None,
         );
         start(&mut schema).await;
         schema
@@ -1753,7 +2927,8 @@ mod tests {
         for (ingress, operator) in operators {
             assert!(!operator.datafusion_runtime_initialized());
             let output_port = Port::new("output", BatchKind::Table, false, None).unwrap();
-            let mut harness = harness_with_operator(&[ingress], 1, operator, output_port);
+            let mut harness =
+                harness_with_operator(&[ingress], 1, operator, output_port, None, None);
             start(&mut harness).await;
             let sender = harness.inputs.get_mut(ingress).unwrap();
             sender
@@ -1806,7 +2981,7 @@ mod tests {
             observed: Arc::new(Mutex::new(Vec::new())),
         }));
         assert!(!operator.datafusion_runtime_initialized());
-        let mut harness = harness_with_operator(&["input"], 1, operator, output_port);
+        let mut harness = harness_with_operator(&["input"], 1, operator, output_port, None, None);
         start(&mut harness).await;
         let external = Batch::external(
             Arc::new(TestPayload),

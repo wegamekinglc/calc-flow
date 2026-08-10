@@ -516,25 +516,69 @@ possible and explicit gates rather than sleeps.
 
 ## 15. Benchmark and soak interfaces
 
-Criterion pairs compare the same baseline and candidate payloads for:
+### 15.1 M5-D12-E1 introduction-only baseline
 
-- no-checkpoint steady-state data path;
-- barrier cut/fan-out with one and two sources;
-- aligned two-input pass-through and window operators;
-- dirty-window state stage plus manifest publication;
-- cold restore with retained deltas and compacted base state;
-- one and multiple transactional sink commits.
+The first M5 introduction uses exactly
+`main@972964413d328dfeabd4597088396bfe4516e5a3` as its baseline. That ref lacks
+the private M5 checkpoint paths, so private main-to-candidate percentages are
+undefined. The evidence interface MUST reject any synthetic private baseline,
+private pass/regression/no-regression claim, or M5-wide `overall_pass`.
 
-Noise reporting includes raw samples, median, confidence interval, and the
-exact baseline/candidate SHAs. A regression above 5% blocks merge unless an
-approved explanation and follow-up threshold are recorded.
+The only exact-ref comparison is `B1 -> C1 -> B2 -> C2` for
+`m5/common/stream_channel_data_roundtrip`, a frozen public `edge_channel`
+data-message round trip that exists on both refs. It is emitted only under
+`shared_edge_result`. Every run uses a clean ref worktree plus fresh release
+target/evidence root. The B1/B2 executable hashes MUST match byte-for-byte, as
+must C1/C2; the two refs retain their exact commit/tree identities.
 
-The soak command is implemented as a reproducible repository script or
-ignored test with a `--duration 20m` default. It emits machine-readable
-one-minute samples and a final summary containing raw SHA, restart schedule,
-source/output counts, duplicates, missing values, epochs, task/queue/state/
-manifest bounds, and terminal resource counts. Future continuous-streaming
-soaks use the same 20-minute standard unless a later approved plan changes it.
+The exact final candidate separately runs optimized `P1` and `P2` from clean
+candidate worktrees and fresh release target/evidence roots. Each run records
+the canonical 12-case set covering one- and two-source barrier cuts,
+pass-through and window alignment, dirty-state staging, non-empty manifest
+publication, retained-delta/compacted-base restore, one- and multi-sink commit,
+and the no-checkpoint/checkpoint-disabled/checkpoint-enabled full paths. Every
+case and the P1/P2 repeatability aggregate is `absolute_only`, with raw samples,
+median, 95% confidence interval, same-ref noise, and host stability. P1/P2
+executable hashes MUST be byte-identical.
+
+Checkpoint-enabled versus checkpoint-disabled is reported only as
+`candidate_self_overhead_not_main_regression`. The 5% decision boundary is
+scoped to the shared-edge comparison and candidate self-overhead; it never
+becomes a private main comparison or milestone-wide result. A confidence
+interval crossing that boundary, WSL, virtualization, unavailable or
+non-performance CPU/power controls, changed fingerprints, or excessive
+same-ref spread produces `inconclusive`.
+
+The immutable evidence root contains exact commit/tree/merge-base and clean
+status, source-contract and dependency hashes, toolchain/machine/environment/
+build fingerprints, commands and fresh roots, executable/harness/workload
+hashes, raw measurements, hashed JSON sidecars, and a validated artifact
+manifest covering every referenced file. After merge, the exact M5 merge SHA
+is the mandatory paired baseline for later checkpoint-path changes; this
+introduction-only amendment cannot be reused.
+
+### 15.2 Exact-head 20-minute process soak
+
+The ignored soak has one parent owner that sequentially launches exactly three
+distinct OS child generations. Their global sample ranges are `0..40`,
+`40..80`, and `80..120`. Between generations, continuity comes only from
+filesystem manifests, state segments, and sink evidence under the shared run
+root; process-local objects and in-memory runtime state are never transferred.
+
+The standard run emits 120 machine-readable 10-second samples spanning exactly
+1,200 seconds, which can be aggregated into 20 one-minute intervals. This
+repairs the former internally inconsistent wording “120 one-minute samples in
+20 minutes.” Evidence includes the exact candidate SHA and executable hash,
+three distinct child PIDs and zero exit codes, restore cursors/epochs, output
+conservation, checkpoint/compaction progress, task/queue/state/manifest/RSS
+bounds, zero temporary artifacts, and terminal zero ownership.
+
+Neither final benchmark evidence nor the exact-head 20-minute soak is claimed
+complete by this note. M5-D12-E1 does not waive fault, correctness, 90% Rust
+coverage, CI, review, Copilot, Codacy, soak, or milestone-firewall gates.
+Public A6, Python, and Studio surfaces remain closed. Future
+continuous-streaming soaks use the same 20-minute standard unless a later
+approved plan changes it.
 
 ## 16. Implementation commit sequence
 
