@@ -1,13 +1,23 @@
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     fmt,
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
 };
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
+use tokio::sync::Notify;
 
 use super::{
     StreamJobContext,
     progress::{PreparedStreamJob, StreamProgressRuntimeConfig, prepare_stream_job},
+    runner::{
+        ContinuousJob, ContinuousJobOutcome, ContinuousJobState, ContinuousJobStatus,
+        ContinuousRunner,
+    },
     source_task::{
         SourceBinding, SourceCapabilities, SourceDeliveryCapability, validate_source_capabilities,
     },
@@ -225,6 +235,135 @@ pub(crate) struct ContinuousJobSpec {
     pub(crate) sinks: Vec<NamedSinkBinding>,
     pub(crate) edge_budget: EdgeBudget,
     pub(crate) delivery_mode: M2DeliveryMode,
+}
+
+enum OwningJobOwnerState {
+    Running,
+    Terminal(Arc<ContinuousJobOutcome>),
+}
+
+struct OwningJobOwner {
+    state: Mutex<OwningJobOwnerState>,
+    changed: Notify,
+}
+
+impl OwningJobOwner {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(OwningJobOwnerState::Running),
+            changed: Notify::new(),
+        }
+    }
+
+    fn publish(&self, outcome: Arc<ContinuousJobOutcome>) {
+        let mut state = self.state.lock();
+        if matches!(*state, OwningJobOwnerState::Running) {
+            *state = OwningJobOwnerState::Terminal(outcome);
+        }
+        drop(state);
+        self.changed.notify_waiters();
+    }
+
+    async fn wait(self: Arc<Self>) -> Arc<ContinuousJobOutcome> {
+        loop {
+            let changed = self.changed.notified();
+            if let OwningJobOwnerState::Terminal(outcome) = &*self.state.lock() {
+                return Arc::clone(outcome);
+            }
+            changed.await;
+        }
+    }
+
+    #[cfg(test)]
+    fn is_terminal(&self) -> bool {
+        matches!(*self.state.lock(), OwningJobOwnerState::Terminal(_))
+    }
+}
+
+/// Crate-private owning handle for one continuous job and its runner reaper.
+pub(crate) struct OwningContinuousJob {
+    job: ContinuousJob,
+    owner: Arc<OwningJobOwner>,
+    _reaper: tokio::task::JoinHandle<()>,
+}
+
+impl std::fmt::Debug for OwningContinuousJob {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OwningContinuousJob")
+            .field("job_id", &self.id())
+            .field("state", &self.state())
+            .finish_non_exhaustive()
+    }
+}
+
+impl OwningContinuousJob {
+    pub(crate) fn new(job: ContinuousJob, mut runner: ContinuousRunner) -> Self {
+        let owner = Arc::new(OwningJobOwner::new());
+        let observed_owner = Arc::clone(&owner);
+        let terminal = job.wait();
+        let reaper = tokio::spawn(async move {
+            let outcome = terminal.await;
+            let _ = runner.shutdown().await;
+            observed_owner.publish(outcome);
+        });
+        Self {
+            job,
+            owner,
+            _reaper: reaper,
+        }
+    }
+
+    pub(crate) fn id(&self) -> u64 {
+        self.job.id()
+    }
+
+    pub(crate) fn status(&self) -> ContinuousJobStatus {
+        self.job.status()
+    }
+
+    pub(crate) fn state(&self) -> ContinuousJobState {
+        self.job.state()
+    }
+
+    pub(crate) fn wait(&self) -> OwningOutcomeObserver {
+        OwningOutcomeObserver::new(Arc::clone(&self.owner))
+    }
+
+    pub(crate) fn shutdown(&self) -> OwningOutcomeObserver {
+        drop(self.job.shutdown());
+        self.wait()
+    }
+
+    pub(crate) fn cancel(&self) -> OwningOutcomeObserver {
+        drop(self.job.cancel());
+        self.wait()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn owner_settled_for_test(&self) -> bool {
+        self.owner.is_terminal()
+    }
+}
+
+pub(crate) struct OwningOutcomeObserver {
+    inner: Pin<Box<dyn Future<Output = Arc<ContinuousJobOutcome>> + Send>>,
+}
+
+impl OwningOutcomeObserver {
+    fn new(owner: Arc<OwningJobOwner>) -> Self {
+        Self {
+            inner: Box::pin(owner.wait()),
+        }
+    }
+}
+
+impl Future for OwningOutcomeObserver {
+    type Output = Arc<ContinuousJobOutcome>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        self.inner.as_mut().poll(context)
+    }
 }
 
 pub(crate) struct ValidatedOrdinarySink {
