@@ -29,12 +29,28 @@ const MAX_CURSOR_ORDER_BYTES: usize = 16 * 1024;
 /// Source-defined position with a bytewise order key and opaque JSON payload.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Cursor {
+    source_id: Option<BindingIdentity>,
     order: Vec<u8>,
     payload: JsonMap,
 }
 
 impl Cursor {
-    pub(crate) fn new(order: Vec<u8>, payload: JsonMap) -> Result<Self> {
+    pub(crate) fn new(source_id: &str, order: Vec<u8>, payload: JsonMap) -> Result<Self> {
+        let source_id = BindingIdentity::new(source_id).map_err(|error| match error {
+            CalcFlowError::InvalidArgument { message, .. } => CalcFlowError::InvalidArgument {
+                field: "cursor.source_id".into(),
+                message,
+            },
+            error => error,
+        })?;
+        Self::build(Some(source_id), order, payload)
+    }
+
+    pub(crate) fn unbound(order: Vec<u8>, payload: JsonMap) -> Result<Self> {
+        Self::build(None, order, payload)
+    }
+
+    fn build(source_id: Option<BindingIdentity>, order: Vec<u8>, payload: JsonMap) -> Result<Self> {
         if order.is_empty() {
             return Err(CalcFlowError::InvalidArgument {
                 field: "cursor.order".into(),
@@ -52,7 +68,11 @@ impl Cursor {
             field: "cursor.payload".into(),
             message: error.to_string(),
         })?;
-        Ok(Self { order, payload })
+        Ok(Self {
+            source_id,
+            order,
+            payload,
+        })
     }
 
     fn is_after(&self, previous: &Self) -> bool {
@@ -70,11 +90,32 @@ impl Cursor {
         }
     }
 
-    pub(crate) fn from_manifest_entry(entry: &crate::CursorManifestEntry) -> Result<Self> {
+    pub(crate) fn from_manifest_entry(
+        source_id: &str,
+        entry: &crate::CursorManifestEntry,
+    ) -> Result<Self> {
         Self::new(
+            source_id,
             Self::decode_manifest_order(&entry.order)?,
             entry.payload.clone(),
         )
+    }
+
+    fn bind_to(mut self, source_id: &str) -> Result<Self> {
+        let expected = BindingIdentity::new(source_id)?;
+        if let Some(actual) = &self.source_id
+            && actual != &expected
+        {
+            return Err(CalcFlowError::InvalidArgument {
+                field: format!("sources.{source_id}.cursor"),
+                message: format!(
+                    "source {source_id:?} received a foreign cursor owned by {:?}",
+                    actual.as_str()
+                ),
+            });
+        }
+        self.source_id = Some(expected);
+        Ok(self)
     }
 
     pub(crate) fn decode_manifest_order(order: &str) -> Result<Vec<u8>> {
@@ -112,6 +153,13 @@ pub(crate) struct SourceCapabilities {
     pub(crate) max_batch_bytes: usize,
 }
 
+/// Whether the source can discard admitted input before the runtime sees it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SourceDeliveryCapability {
+    Lossless,
+    Lossy,
+}
+
 /// Internal source lifecycle contract for M2 runtime completion.
 #[async_trait]
 pub(crate) trait StreamSource: Send {
@@ -126,6 +174,10 @@ pub(crate) trait StreamSource: Send {
     async fn close(&mut self) -> Result<()>;
 
     fn capabilities(&self) -> SourceCapabilities;
+
+    fn delivery_capability(&self) -> SourceDeliveryCapability {
+        SourceDeliveryCapability::Lossless
+    }
 
     fn declared_schema(&self) -> DeclaredSchema {
         DeclaredSchema::DynamicOrUnknown
@@ -170,6 +222,11 @@ impl AcceptedSequenceRecorder {
 pub(crate) struct SourceBinding {
     source: Box<dyn StreamSource>,
     capabilities: Option<SourceCapabilities>,
+    delivery: Option<SourceDeliveryCapability>,
+    declared_schema: Option<DeclaredSchema>,
+    native_watermarks: Option<NativeWatermarkCapability>,
+    replay_positioning: Option<ReplayPositioningCapability>,
+    existing_toggle_route: Option<ExistingPrivateToggleRoute>,
     resume_cursor: Option<Cursor>,
     next_sequence: u64,
     restored_ended: bool,
@@ -193,6 +250,11 @@ impl SourceBinding {
         Ok(Self {
             source,
             capabilities: None,
+            delivery: None,
+            declared_schema: None,
+            native_watermarks: None,
+            replay_positioning: None,
+            existing_toggle_route: None,
             resume_cursor,
             next_sequence,
             restored_ended: false,
@@ -219,9 +281,23 @@ impl SourceBinding {
     }
 
     pub(crate) fn sample_capabilities_once(&mut self) -> SourceCapabilities {
-        *self
-            .capabilities
-            .get_or_insert_with(|| self.source.capabilities())
+        if let Some(capabilities) = self.capabilities {
+            return capabilities;
+        }
+        let capabilities = self.source.capabilities();
+        self.capabilities = Some(capabilities);
+        self.delivery = Some(self.source.delivery_capability());
+        self.declared_schema = Some(self.source.declared_schema());
+        self.native_watermarks = Some(self.source.native_watermark_capability());
+        self.replay_positioning = Some(self.source.replay_positioning_capability().unwrap_or(
+            if capabilities.replayable {
+                ReplayPositioningCapability::ExactPauseReportAndSeek
+            } else {
+                ReplayPositioningCapability::Unsupported
+            },
+        ));
+        self.existing_toggle_route = self.source.existing_private_watermark_toggle();
+        capabilities
     }
 
     pub(crate) fn sampled_capabilities(&self) -> SourceCapabilities {
@@ -229,27 +305,33 @@ impl SourceBinding {
             .expect("validated source bindings sampled capabilities")
     }
 
+    pub(crate) fn sampled_delivery(&self) -> SourceDeliveryCapability {
+        self.delivery
+            .expect("validated source bindings sampled delivery capability")
+    }
+
+    pub(crate) fn sampled_declared_schema(&self) -> &DeclaredSchema {
+        self.declared_schema
+            .as_ref()
+            .expect("validated source bindings sampled declared schema")
+    }
+
     pub(crate) fn progress_spec(&self, binding_id: &str) -> Result<SourceBindingSpec> {
         let identity = BindingIdentity::new(binding_id)?;
         Ok(SourceBindingSpec {
             descriptor: SourceDescriptor::new(
                 identity,
-                self.source.declared_schema(),
-                self.source.native_watermark_capability(),
-                self.source
-                    .replay_positioning_capability()
-                    .unwrap_or_else(|| {
-                        if self
-                            .capabilities
-                            .expect("progress descriptors are collected after capability sampling")
-                            .replayable
-                        {
-                            ReplayPositioningCapability::ExactPauseReportAndSeek
-                        } else {
-                            ReplayPositioningCapability::Unsupported
-                        }
-                    }),
-                self.source.existing_private_watermark_toggle(),
+                self.sampled_declared_schema().clone(),
+                self.native_watermarks
+                    .expect("validated source bindings sampled watermark capability"),
+                self.replay_positioning
+                    .expect("validated source bindings sampled replay capability"),
+                self.existing_toggle_route.clone(),
+            )
+            .with_delivery_and_bounds(
+                self.sampled_delivery() == SourceDeliveryCapability::Lossless,
+                self.sampled_capabilities().max_batch_rows,
+                self.sampled_capabilities().max_batch_bytes,
             ),
             watermark_policy: self.watermark_policy.clone(),
         })
@@ -259,14 +341,15 @@ impl SourceBinding {
         self.prepared_progress = Some(prepared);
     }
 
-    pub(crate) fn install_durable_progress(
+    pub(crate) fn restore(
         &mut self,
+        binding_id: &str,
         restored: &super::progress::RestoredSourceProgress,
     ) -> Result<()> {
         self.resume_cursor = restored
             .cursor
             .as_ref()
-            .map(Cursor::from_manifest_entry)
+            .map(|entry| Cursor::from_manifest_entry(binding_id, entry))
             .transpose()?;
         self.next_sequence = restored.next_sequence;
         self.restored_ended = restored.ended;
@@ -276,6 +359,15 @@ impl SourceBinding {
     pub(crate) async fn open(&mut self) -> Result<()> {
         self.open_began = true;
         self.source.open(self.resume_cursor.clone()).await
+    }
+
+    pub(crate) fn bind_resume_cursor(&mut self, binding_id: &str) -> Result<()> {
+        self.resume_cursor = self
+            .resume_cursor
+            .take()
+            .map(|cursor| cursor.bind_to(binding_id))
+            .transpose()?;
+        Ok(())
     }
 
     pub(crate) async fn close(&mut self) -> Result<()> {
@@ -594,7 +686,7 @@ impl SourceProgress {
         self.snapshot.lock().clone()
     }
 
-    pub(crate) async fn pause_for_checkpoint(
+    pub(crate) async fn barrier(
         &self,
         epoch: Epoch,
         cancellation: &crate::CancellationToken,
@@ -889,6 +981,7 @@ fn spawn_source_tasks_gated_with_optional_progress(
 ) -> Result<SourceProgress> {
     let source_context = context.for_source(binding_id)?;
     let binding_id = source_context.scope_id().to_owned();
+    binding.bind_resume_cursor(&binding_id)?;
     if live_progress.is_none() {
         validate_source_outputs(&binding_id, &outputs)?;
     }
@@ -1008,6 +1101,11 @@ fn spawn_validated_source_tasks(
     let SourceBinding {
         source,
         capabilities: _,
+        delivery: _,
+        declared_schema: _,
+        native_watermarks: _,
+        replay_positioning: _,
+        existing_toggle_route: _,
         resume_cursor,
         next_sequence,
         restored_ended,
@@ -1290,7 +1388,7 @@ enum NextSourceEvent {
     Complete(PumpCompletion),
 }
 
-async fn next_source_event(
+async fn read_source_event(
     source: &mut Box<dyn StreamSource>,
     cancellation: &crate::CancellationToken,
     launch_cancel: &crate::CancellationToken,
@@ -1337,7 +1435,7 @@ async fn poll_source_events(
         };
         metrics.record_source_poll(binding_id)?;
         let event =
-            match next_source_event(source, cancellation, launch_cancel, acceptance, task_id)
+            match read_source_event(source, cancellation, launch_cancel, acceptance, task_id)
                 .await?
             {
                 NextSourceEvent::Event(event) => event,
@@ -1444,7 +1542,7 @@ async fn handle_closed_pump(inputs: &mut SourceTaskInputs) -> Result<()> {
             ),
         });
     }
-    finish_source_input(inputs).await
+    on_source_end(inputs).await
 }
 
 async fn process_pump_event(
@@ -1483,7 +1581,7 @@ async fn process_pump_event(
                 SourceLoopStep::Complete
             })
         }
-        PumpEvent::End => finish_source_input(inputs)
+        PumpEvent::End => on_source_end(inputs)
             .await
             .map(|()| SourceLoopStep::Complete),
     }
@@ -1495,6 +1593,7 @@ async fn process_source_data(
     cursor: Cursor,
     order: &mut SourceOrderState,
 ) -> Result<SourceLoopStep> {
+    let cursor = cursor.bind_to(&inputs.binding_id)?;
     validate_source_cursor(&inputs.binding_id, order.last_cursor.as_ref(), &cursor)?;
     let (sequence, message, cost) =
         sequenced_source_message(&inputs.binding_id, order.next_sequence, &batch)?;
@@ -1631,7 +1730,7 @@ async fn process_source_watermark(
     })
 }
 
-async fn finish_source_input(inputs: &mut SourceTaskInputs) -> Result<()> {
+async fn on_source_end(inputs: &mut SourceTaskInputs) -> Result<()> {
     if let Some(progress) = &inputs.live_progress {
         let snapshot = inputs.progress.snapshot.lock().clone();
         progress
@@ -1733,9 +1832,10 @@ mod tests {
 
     use super::{
         AcceptedSequenceRecorder, Cursor, SourceAcceptState, SourceAcceptance, SourceBinding,
-        SourceCapabilities, SourceEvent, SourceProgressSnapshot, SourcePumpInputs, StreamSource,
-        data_upstream_position, end_upstream_position, run_source_pump, spawn_source_tasks,
-        spawn_source_tasks_gated_with_metrics, take_live_progress_binding,
+        SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceProgressSnapshot,
+        SourcePumpInputs, StreamSource, data_upstream_position, end_upstream_position,
+        run_source_pump, spawn_source_tasks, spawn_source_tasks_gated_with_metrics,
+        take_live_progress_binding,
     };
     use crate::{
         Batch, BatchMetadata, CalcFlowError, CancellationToken, EdgeBudget, EdgeReceiver, Epoch,
@@ -1743,7 +1843,9 @@ mod tests {
         StreamMessageKind, edge_channel,
         runtime::streaming::{
             metrics::MetricsRecorder,
-            progress::RawUpstreamPosition,
+            progress::{
+                NativeWatermarkCapability, RawUpstreamPosition, ReplayPositioningCapability,
+            },
             supervisor::{TaskId, TaskSupervisor},
         },
     };
@@ -1761,6 +1863,85 @@ mod tests {
                     if message.contains("canonical lowercase even-length hexadecimal")
             ));
         }
+    }
+
+    struct DriftingDescriptorSource {
+        native_calls: Arc<AtomicUsize>,
+        replay_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl StreamSource for DriftingDescriptorSource {
+        async fn open(&mut self, _cursor: Option<Cursor>) -> Result<()> {
+            Ok(())
+        }
+
+        async fn next(&mut self) -> Result<Option<SourceEvent>> {
+            Ok(None)
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn capabilities(&self) -> SourceCapabilities {
+            SourceCapabilities {
+                replayable: true,
+                max_batch_rows: 1,
+                max_batch_bytes: 1,
+            }
+        }
+
+        fn delivery_capability(&self) -> SourceDeliveryCapability {
+            SourceDeliveryCapability::Lossless
+        }
+
+        fn native_watermark_capability(&self) -> NativeWatermarkCapability {
+            if self.native_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                NativeWatermarkCapability::EmitsNative
+            } else {
+                NativeWatermarkCapability::NeverEmits
+            }
+        }
+
+        fn replay_positioning_capability(&self) -> Option<ReplayPositioningCapability> {
+            let capability = if self.replay_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                ReplayPositioningCapability::ExactPauseReportAndSeek
+            } else {
+                ReplayPositioningCapability::Unsupported
+            };
+            Some(capability)
+        }
+    }
+
+    #[test]
+    fn source_capability_descriptor_is_sampled_once_and_frozen() {
+        let native_calls = Arc::new(AtomicUsize::new(0));
+        let replay_calls = Arc::new(AtomicUsize::new(0));
+        let mut binding = SourceBinding::new(
+            Box::new(DriftingDescriptorSource {
+                native_calls: Arc::clone(&native_calls),
+                replay_calls: Arc::clone(&replay_calls),
+            }),
+            None,
+            0,
+        )
+        .unwrap();
+
+        binding.sample_capabilities_once();
+        let first = binding.progress_spec("input").unwrap();
+        let second = binding.progress_spec("input").unwrap();
+
+        assert_eq!(
+            first.descriptor.native_watermarks,
+            second.descriptor.native_watermarks
+        );
+        assert_eq!(
+            first.descriptor.replay_positioning,
+            second.descriptor.replay_positioning
+        );
+        assert_eq!(native_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(replay_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1845,7 +2026,12 @@ mod tests {
     }
 
     fn cursor(position: u8) -> Cursor {
+        cursor_for("input", position)
+    }
+
+    fn cursor_for(source_id: &str, position: u8) -> Cursor {
         Cursor::new(
+            source_id,
             vec![position],
             BTreeMap::from([("position".into(), json!(position))]),
         )
@@ -2034,7 +2220,7 @@ mod tests {
         }
 
         let cut = progress
-            .pause_for_checkpoint(Epoch::INITIAL, &cancellation)
+            .barrier(Epoch::INITIAL, &cancellation)
             .await
             .unwrap();
         assert_eq!(cut.cursor, Some(cursor(1)));
@@ -2199,17 +2385,17 @@ mod tests {
         let source = StepSource::new([
             Ok(Some(SourceEvent::Data {
                 batch: batch(10),
-                cursor: cursor(1),
+                cursor: cursor_for("orders", 1),
             })),
             Ok(Some(SourceEvent::Data {
                 batch: batch(20),
-                cursor: cursor(2),
+                cursor: cursor_for("orders", 2),
             })),
             Ok(None),
         ]);
         let opened_at = Arc::clone(&source.opened_at);
         let closed = Arc::clone(&source.closed);
-        let resume = cursor(0);
+        let resume = cursor_for("orders", 0);
         let binding = SourceBinding::new(Box::new(source), Some(resume.clone()), 5).unwrap();
         let (left_tx, mut left_rx) = edge_channel("source->left", EdgeBudget::default()).unwrap();
         let (right_tx, mut right_rx) =
@@ -2243,8 +2429,11 @@ mod tests {
             assert!(receiver.recv().await.unwrap().is_none());
         }
         let snapshot = progress.snapshot();
-        assert_eq!(snapshot.latest_observed_cursor, Some(cursor(2)));
-        assert_eq!(snapshot.durable_cursor, Some(cursor(0)));
+        assert_eq!(
+            snapshot.latest_observed_cursor,
+            Some(cursor_for("orders", 2))
+        );
+        assert_eq!(snapshot.durable_cursor, Some(cursor_for("orders", 0)));
         assert_eq!(snapshot.next_sequence, Some(7));
         assert!(snapshot.ended);
     }
@@ -2990,11 +3179,11 @@ mod tests {
         let source = StepSource::new([
             Ok(Some(SourceEvent::Data {
                 batch: batch(1),
-                cursor: cursor(2),
+                cursor: Cursor::new("orders", vec![2], JsonMap::new()).unwrap(),
             })),
             Ok(Some(SourceEvent::Data {
                 batch: batch(2),
-                cursor: cursor(1),
+                cursor: Cursor::new("orders", vec![1], JsonMap::new()).unwrap(),
             })),
         ]);
         let binding = SourceBinding::new(Box::new(source), None, 0).unwrap();
@@ -3017,6 +3206,36 @@ mod tests {
         ));
         let first = receiver.recv().await.unwrap().unwrap();
         assert_eq!(first.as_data().unwrap().metadata().sequence(), 0);
+        assert!(receiver.recv().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn foreign_source_cursor_fails_before_the_batch_is_enqueued() {
+        let cancellation = CancellationToken::new();
+        let mut supervisor = TaskSupervisor::new(cancellation.clone());
+        let source = StepSource::new([Ok(Some(SourceEvent::Data {
+            batch: batch(1),
+            cursor: Cursor::new("foreign", vec![1], JsonMap::new()).unwrap(),
+        }))]);
+        let binding = SourceBinding::new(Box::new(source), None, 0).unwrap();
+        let (sender, mut receiver) = edge_channel("source->sink", EdgeBudget::default()).unwrap();
+        spawn_source_tasks(
+            &mut supervisor,
+            &context(cancellation),
+            "orders",
+            binding,
+            vec![sender],
+        )
+        .unwrap();
+
+        let report = supervisor.join_all().await;
+
+        assert_eq!(report.errors.len(), 1);
+        assert!(matches!(
+            &report.errors[0].error,
+            CalcFlowError::InvalidArgument { field, message }
+                if field == "sources.orders.cursor" && message.contains("foreign")
+        ));
         assert!(receiver.recv().await.unwrap().is_none());
     }
 

@@ -8,14 +8,15 @@
 
 use std::{collections::BTreeMap, time::Duration};
 
+use datafusion::arrow::datatypes::SchemaRef;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CalcFlowError, DataFusionConfig, Edge, NodeOperator, OperatorMetadata, PipelineBuilder, Port,
-    PortEndpoint, Result, StreamOperator, UdfKind, UdfRegistrySnapshot, UnionOperator,
-    canonical_json,
+    BatchKind, CalcFlowError, DataFusionConfig, Edge, NodeOperator, OperatorMetadata,
+    PipelineBuilder, Port, PortEndpoint, Result, StreamOperator, UdfKind, UdfRegistrySnapshot,
+    UnionOperator, canonical_json,
 };
 
 use super::{NodeDefinition, TablePlanResources, compile_graph};
@@ -189,6 +190,8 @@ pub(crate) struct RuntimeSourceRoute {
     pub(crate) binding_id: String,
     pub(crate) target: PortEndpoint,
     pub(crate) edge_id: String,
+    pub(crate) expected_kind: BatchKind,
+    pub(crate) expected_schema: Option<SchemaRef>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -735,6 +738,9 @@ fn project_source_routes(
 ) -> Result<BTreeMap<String, RuntimeSourceRoute>> {
     let mut routes = BTreeMap::new();
     for (binding_id, target) in external_inputs {
+        let target_port = &nodes[node_indexes[&target.node_id]].input_ports[&target.port];
+        let expected_kind = target_port.kind();
+        let expected_schema = target_port.schema().cloned();
         let edge_id = format!(
             "source/{}/{}/{}",
             hex::encode(binding_id.as_bytes()),
@@ -769,6 +775,8 @@ fn project_source_routes(
                 binding_id,
                 target,
                 edge_id,
+                expected_kind,
+                expected_schema,
             },
         );
     }

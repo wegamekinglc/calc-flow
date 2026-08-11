@@ -1,6 +1,7 @@
 use std::{collections::BTreeSet, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
+use datafusion::arrow::ipc::writer::{DictionaryTracker, IpcDataGenerator, IpcWriteOptions};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -182,6 +183,9 @@ pub(crate) struct SourceDescriptor {
     pub(crate) native_watermarks: NativeWatermarkCapability,
     pub(crate) replay_positioning: ReplayPositioningCapability,
     pub(crate) existing_toggle_route: Option<ExistingPrivateToggleRoute>,
+    pub(crate) lossless_delivery: bool,
+    pub(crate) max_batch_rows: usize,
+    pub(crate) max_batch_bytes: usize,
 }
 
 impl SourceDescriptor {
@@ -198,7 +202,22 @@ impl SourceDescriptor {
             native_watermarks,
             replay_positioning,
             existing_toggle_route,
+            lossless_delivery: true,
+            max_batch_rows: usize::MAX,
+            max_batch_bytes: usize::MAX,
         }
+    }
+
+    pub(crate) const fn with_delivery_and_bounds(
+        mut self,
+        lossless_delivery: bool,
+        max_batch_rows: usize,
+        max_batch_bytes: usize,
+    ) -> Self {
+        self.lossless_delivery = lossless_delivery;
+        self.max_batch_rows = max_batch_rows;
+        self.max_batch_bytes = max_batch_bytes;
+        self
     }
 }
 
@@ -237,6 +256,7 @@ pub(crate) struct PreparedSourceBinding {
     pub(crate) normalized_config_fingerprint: NormalizedConfigFingerprint,
     pub(crate) replay_positioning: ReplayPositioningCapability,
     pub(crate) existing_toggle_route: Option<ExistingPrivateToggleRoute>,
+    capability_fingerprint: [u8; 32],
 }
 
 impl PreparedSourceBinding {
@@ -245,6 +265,7 @@ impl PreparedSourceBinding {
         digest.update(self.identity.as_str().as_bytes());
         digest.update([0]);
         digest.update(self.normalized_config_fingerprint.0);
+        digest.update(self.capability_fingerprint);
         hex::encode(digest.finalize())
     }
 }
@@ -316,6 +337,7 @@ fn prepare_binding(index: usize, binding: &SourceBindingSpec) -> Result<Prepared
         })?;
     let normalized = normalize_policy(&binding.descriptor, &binding.watermark_policy)?;
     let normalized_config_fingerprint = normalized_fingerprint(&normalized)?;
+    let capability_fingerprint = source_capability_fingerprint(&binding.descriptor)?;
     Ok(PreparedSourceBinding {
         identity: binding.descriptor.binding.clone(),
         ordinal,
@@ -324,6 +346,7 @@ fn prepare_binding(index: usize, binding: &SourceBindingSpec) -> Result<Prepared
         normalized_config_fingerprint,
         replay_positioning: binding.descriptor.replay_positioning,
         existing_toggle_route: binding.descriptor.existing_toggle_route.clone(),
+        capability_fingerprint,
     })
 }
 
@@ -507,6 +530,29 @@ fn digest(value: &serde_json::Value) -> Result<[u8; 32]> {
     Ok(Sha256::digest(canonical.as_bytes()).into())
 }
 
+fn source_capability_fingerprint(descriptor: &SourceDescriptor) -> Result<[u8; 32]> {
+    let schema = match &descriptor.declared_schema {
+        DeclaredSchema::Known(schema) => {
+            let mut dictionaries = DictionaryTracker::new(false);
+            let encoded = IpcDataGenerator {}.schema_to_bytes_with_dictionary_tracker(
+                schema,
+                &mut dictionaries,
+                &IpcWriteOptions::default(),
+            );
+            json!({"known_arrow_ipc": hex::encode(encoded.ipc_message)})
+        }
+        DeclaredSchema::DynamicOrUnknown => json!("dynamic_or_unknown"),
+    };
+    digest(&json!({
+        "schema": schema,
+        "native_watermarks": native_watermark_capability_tag(descriptor.native_watermarks),
+        "replay_positioning": replay_positioning_tag(descriptor.replay_positioning),
+        "delivery": if descriptor.lossless_delivery { "lossless" } else { "lossy" },
+        "max_batch_rows": descriptor.max_batch_rows,
+        "max_batch_bytes": descriptor.max_batch_bytes,
+    }))
+}
+
 fn duration_nanos(duration: Duration) -> String {
     duration.as_nanos().to_string()
 }
@@ -530,6 +576,15 @@ const fn native_directive_tag(directive: NativeWatermarkDirective) -> &'static s
             "disable_through_existing_private_route"
         }
         NativeWatermarkDirective::AlreadyDisabled => "already_disabled",
+    }
+}
+
+const fn native_watermark_capability_tag(capability: NativeWatermarkCapability) -> &'static str {
+    match capability {
+        NativeWatermarkCapability::NeverEmits => "never_emits",
+        NativeWatermarkCapability::EmitsNative => "emits_native",
+        NativeWatermarkCapability::RuntimeToggleable => "runtime_toggleable",
+        NativeWatermarkCapability::Unknown => "unknown",
     }
 }
 
@@ -606,6 +661,7 @@ fn prepared_fingerprint(
             "identity": binding.identity.as_str(),
             "ordinal": binding.ordinal.get(),
             "normalized": hex::encode(binding.normalized_config_fingerprint.0),
+            "capabilities": hex::encode(binding.capability_fingerprint),
             "watermark_mode": watermark_mode_tag(&binding.normalized_watermark),
             "replay_positioning": replay_positioning_tag(binding.replay_positioning),
             "toggle": binding.existing_toggle_route.as_ref().map(|route| route.route_id.as_ref()),
@@ -816,6 +872,28 @@ mod tests {
                 native_directive: NativeWatermarkDirective::EnableThroughExistingPrivateRoute
             }
         ));
+    }
+
+    #[test]
+    fn source_identity_hash_is_stable_and_rejects_declared_schema_drift() {
+        let prepare_known = |data_type| {
+            prepare(
+                NativeWatermarkCapability::EmitsNative,
+                DeclaredSchema::Known(schema(data_type)),
+                WatermarkPolicy::SourceProvided,
+                false,
+            )
+            .unwrap()
+            .bindings[0]
+                .identity_hash()
+        };
+
+        let first = prepare_known(DataType::Int64);
+        let equivalent_restart = prepare_known(DataType::Int64);
+        let drifted_restart = prepare_known(DataType::Utf8);
+
+        assert_eq!(first, equivalent_restart);
+        assert_ne!(first, drifted_restart);
     }
 
     #[test]

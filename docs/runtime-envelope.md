@@ -300,11 +300,15 @@ slice, not a public `StreamingRunner` replacement.
 One pure whole-job preflight consumes the plan and validates the context
 fingerprint, runtime topology, every source and sink route, duplicate or
 missing bindings, source capabilities and first-hop budgets, and sink delivery
-mechanisms. Capabilities are sampled once. For every requested exactly-once
-output, preflight walks the reachable subgraph and requires an exactly
-replayable source, deterministic operator checkpoint/restore, bounded lossless
-edges, and only transactional or unbounded epoch-idempotent sinks. An ordinary
-sink or bounded idempotency horizon fails the named output before a connector
+mechanisms. Each external-input binding name is the source's stable runtime and
+durable identity. Its declared Arrow schema, native-watermark behavior, replay
+positioning, delivery losslessness, and batch bounds are sampled once and
+frozen before lifecycle work; that descriptor participates in the durable
+identity check on recovery. For every requested exactly-once output, preflight
+walks the reachable subgraph and requires a lossless, exactly replayable source,
+deterministic operator checkpoint/restore, bounded lossless edges, and only
+transactional or unbounded epoch-idempotent sinks. A lossy source, ordinary
+sink, or bounded idempotency horizon fails the named output before a connector
 opens, an operator resets or restores, a state lineage is opened, or a task is
 registered.
 
@@ -317,11 +321,18 @@ A source binding owns two supervised tasks (D3):
 - teardown drops a blocked `open` or `next` future, never polls that source
   again, and calls `close` before the pump finishes.
 
+The private source boundary executes one ordered lifecycle: restore the
+durable cursor/end state, open and read, participate in each checkpoint
+barrier, observe end once, then close during teardown. A source restored as
+ended skips open, read, and later barriers, so restart cannot repeat its end
+effect.
+
 For each data event, the binding ID replaces connector-supplied source
 identity, the runtime assigns a checked per-binding sequence, and existing
 JSON attributes are preserved immutably. Cursor order keys must strictly
 advance, including past a recovery cursor, or the batch is rejected before
-enqueue. Source-provided watermarks must not regress. `None` becomes one
+enqueue. A cursor tagged for another stable binding is likewise rejected
+before its batch reaches an edge. Source-provided watermarks must not regress. `None` becomes one
 ordered `EndOfInput`; source-provided `Idle` and watermark events share the
 same per-edge FIFO as data. Progress keeps the latest observed cursor separate
 from the durable recovery cursor.

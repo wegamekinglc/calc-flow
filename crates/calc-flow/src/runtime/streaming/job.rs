@@ -5,11 +5,13 @@ use async_trait::async_trait;
 use super::{
     StreamJobContext,
     progress::{PreparedStreamJob, StreamProgressRuntimeConfig, prepare_stream_job},
-    source_task::{SourceBinding, SourceCapabilities, validate_source_capabilities},
+    source_task::{
+        SourceBinding, SourceCapabilities, SourceDeliveryCapability, validate_source_capabilities,
+    },
 };
 use crate::{
-    Batch, CalcFlowError, CheckpointManifest, DeliveryGuarantee, EdgeBudget, Epoch, JsonMap,
-    Result, RetentionClass, SinkDeliveryManifest, StreamExecutionPlan,
+    Batch, BatchKind, CalcFlowError, CheckpointManifest, DeliveryGuarantee, EdgeBudget, Epoch,
+    JsonMap, Result, RetentionClass, SinkDeliveryManifest, StreamExecutionPlan,
     json::validate_portable_identifier,
     pipeline::{
         OperatorCheckpointCapability, RuntimeProducer, RuntimeStreamNode, StreamRuntimePlanParts,
@@ -297,6 +299,14 @@ fn validate_delivery_requirements(
         }
         let proof = output_delivery_proof(plan, output_id, *guarantee, sinks)?;
         let field = format!("requirements.delivery.{}", proof.output_id);
+        if let Some(source_id) = proof.reachable_sources.iter().find(|source_id| {
+            sources[*source_id].sampled_delivery() == SourceDeliveryCapability::Lossy
+        }) {
+            return Err(CalcFlowError::InvalidArgument {
+                field,
+                message: format!("source {source_id:?} has lossy delivery"),
+            });
+        }
         if let Some(source_id) = proof
             .reachable_sources
             .iter()
@@ -464,8 +474,14 @@ fn validate_source(
             message: "binding does not match a compiled external input".into(),
         }
     })?;
+    named.binding.bind_resume_cursor(&named.binding_id)?;
     let edge = &plan.edges[&route.edge_id];
     let capabilities = named.binding.sample_capabilities_once();
+    validate_source_schema(
+        &named.binding_id,
+        named.binding.sampled_declared_schema(),
+        route,
+    )?;
     validate_source_budget(
         &named.binding_id,
         capabilities,
@@ -473,6 +489,31 @@ fn validate_source(
         &edge.stable_id,
     )?;
     Ok((named.binding_id, named.binding))
+}
+
+fn validate_source_schema(
+    binding_id: &str,
+    declared: &super::progress::DeclaredSchema,
+    route: &crate::pipeline::RuntimeSourceRoute,
+) -> Result<()> {
+    let field = format!("sources.{binding_id}.capabilities.declared_schema");
+    match (route.expected_kind, &route.expected_schema, declared) {
+        (BatchKind::Array, _, super::progress::DeclaredSchema::Known(_)) => {
+            Err(CalcFlowError::InvalidArgument {
+                field,
+                message: "array source cannot declare an Arrow schema".into(),
+            })
+        }
+        (BatchKind::Table, Some(expected), super::progress::DeclaredSchema::Known(actual))
+            if actual.as_ref() != expected.as_ref() =>
+        {
+            Err(CalcFlowError::InvalidArgument {
+                field,
+                message: "declared Arrow schema does not match the compiled ingress schema".into(),
+            })
+        }
+        _ => Ok(()),
+    }
 }
 
 fn validate_source_budget(
@@ -661,6 +702,7 @@ mod tests {
     };
 
     use async_trait::async_trait;
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
 
     use super::{
         ContinuousJobSpec, M2DeliveryMode, M2SinkDelivery, NamedSinkBinding, NamedSourceBinding,
@@ -672,7 +714,11 @@ mod tests {
         UdfRegistry, UnionOperator,
         runtime::streaming::{
             context::StreamTaskKind,
-            source_task::{Cursor, SourceBinding, SourceCapabilities, SourceEvent, StreamSource},
+            progress::DeclaredSchema,
+            source_task::{
+                Cursor, SourceBinding, SourceCapabilities, SourceDeliveryCapability, SourceEvent,
+                StreamSource,
+            },
         },
     };
 
@@ -774,6 +820,8 @@ mod tests {
         capability_calls: Arc<std::sync::atomic::AtomicUsize>,
         opened: Arc<AtomicBool>,
         capabilities: SourceCapabilities,
+        delivery: SourceDeliveryCapability,
+        declared_schema: DeclaredSchema,
     }
 
     #[async_trait]
@@ -794,6 +842,14 @@ mod tests {
         fn capabilities(&self) -> SourceCapabilities {
             self.capability_calls.fetch_add(1, Ordering::SeqCst);
             self.capabilities
+        }
+
+        fn delivery_capability(&self) -> SourceDeliveryCapability {
+            self.delivery
+        }
+
+        fn declared_schema(&self) -> DeclaredSchema {
+            self.declared_schema.clone()
         }
     }
 
@@ -816,6 +872,27 @@ mod tests {
 
     fn union_plan() -> crate::StreamExecutionPlan {
         union_plan_with(&StreamRequirements::default())
+    }
+
+    fn exact_schema_union_plan() -> crate::StreamExecutionPlan {
+        let fields = || Some(vec![Field::new("value", DataType::Int64, false)]);
+        let union = UnionOperator::new(
+            "merge",
+            vec![
+                Port::new("left", BatchKind::Table, true, fields()).unwrap(),
+                Port::new("right", BatchKind::Table, true, fields()).unwrap(),
+            ],
+        )
+        .unwrap();
+        PipelineBuilder::new("schema-preflight")
+            .unwrap()
+            .add_node("merge", Box::new(union))
+            .unwrap()
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements::default(),
+            )
+            .unwrap()
     }
 
     fn external_union_plan_with(requirements: &StreamRequirements) -> crate::StreamExecutionPlan {
@@ -868,6 +945,8 @@ mod tests {
                     capability_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                     opened: Arc::clone(opened),
                     capabilities,
+                    delivery: SourceDeliveryCapability::Lossless,
+                    declared_schema: DeclaredSchema::DynamicOrUnknown,
                 }),
                 None,
                 0,
@@ -938,6 +1017,8 @@ mod tests {
                             max_batch_rows: 1,
                             max_batch_bytes: 1,
                         },
+                        delivery: SourceDeliveryCapability::Lossless,
+                        declared_schema: DeclaredSchema::DynamicOrUnknown,
                     }),
                     None,
                     0,
@@ -1205,6 +1286,95 @@ mod tests {
             validated.sinks["output"][0].binding.delivery(),
             M2SinkDelivery::Transactional
         );
+        assert!(!opened.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn exactly_once_preflight_rejects_lossy_source_before_open() {
+        let opened = Arc::new(AtomicBool::new(false));
+        let capabilities = SourceCapabilities {
+            replayable: true,
+            max_batch_rows: 1,
+            max_batch_bytes: 1,
+        };
+        let requirements = StreamRequirements {
+            delivery: BTreeMap::from([("output".into(), crate::DeliveryGuarantee::ExactlyOnce)]),
+        };
+        let plan = union_plan_with(&requirements);
+        let mut left = named_source("left", capabilities, &opened);
+        left.binding = SourceBinding::new(
+            Box::new(CapabilityProbeSource {
+                capability_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                opened: Arc::clone(&opened),
+                capabilities,
+                delivery: SourceDeliveryCapability::Lossy,
+                declared_schema: DeclaredSchema::DynamicOrUnknown,
+            }),
+            None,
+            0,
+        )
+        .unwrap();
+        let spec = preflight_spec(
+            plan,
+            vec![left, named_source("right", capabilities, &opened)],
+            vec![NamedSinkBinding {
+                output_id: "output".into(),
+                sink_id: "transactional".into(),
+                binding: OrdinarySinkBinding::new_transactional(Box::new(ProbeTransactionalSink {
+                    opened: Arc::clone(&opened),
+                })),
+            }],
+        );
+
+        let error = preflight_error(spec);
+
+        assert!(matches!(
+            error,
+            CalcFlowError::InvalidArgument { ref field, ref message }
+                if field == "requirements.delivery.output" && message.contains("lossy")
+        ));
+        assert!(!opened.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn declared_schema_mismatch_fails_before_open() {
+        let opened = Arc::new(AtomicBool::new(false));
+        let capabilities = SourceCapabilities {
+            replayable: true,
+            max_batch_rows: 1,
+            max_batch_bytes: 1,
+        };
+        let source = |binding_id: &str, data_type: DataType| NamedSourceBinding {
+            binding_id: binding_id.into(),
+            binding: SourceBinding::new(
+                Box::new(CapabilityProbeSource {
+                    capability_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    opened: Arc::clone(&opened),
+                    capabilities,
+                    delivery: SourceDeliveryCapability::Lossless,
+                    declared_schema: DeclaredSchema::Known(Arc::new(Schema::new(vec![
+                        Field::new("value", data_type, false),
+                    ]))),
+                }),
+                None,
+                0,
+            )
+            .unwrap(),
+        };
+        let error = preflight_error(preflight_spec(
+            exact_schema_union_plan(),
+            vec![
+                source("left", DataType::Utf8),
+                source("right", DataType::Int64),
+            ],
+            vec![named_sink("output", "sink", &opened)],
+        ));
+
+        assert!(matches!(
+            error,
+            CalcFlowError::InvalidArgument { ref field, .. }
+                if field == "sources.left.capabilities.declared_schema"
+        ));
         assert!(!opened.load(Ordering::SeqCst));
     }
 
