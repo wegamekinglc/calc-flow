@@ -164,6 +164,7 @@ impl SinkEpochOwner {
 
 pub(crate) struct SinkTaskInputs {
     pub(crate) output_id: String,
+    pub(crate) pipeline_name: Option<String>,
     pub(crate) sinks: Vec<ValidatedOrdinarySink>,
     pub(crate) input: EdgeReceiver,
     pub(crate) context: StreamTaskContext,
@@ -371,7 +372,7 @@ async fn deliver_data(
             Ok(false) => return SinkLoopStep::Cancelled,
             Err(error) => {
                 return SinkLoopStep::Failed {
-                    sink_id: sink.sink_id.clone(),
+                    sink_id: sink.sink_id.to_string(),
                     error,
                 };
             }
@@ -410,7 +411,11 @@ async fn write_sink(
             });
         }
     }
-    metrics.record_sink_delivery(&sink_metric_id(output_id, &sink.sink_id), cost, &timer)?;
+    metrics.record_sink_delivery(
+        &sink_metric_id(output_id, sink.sink_id.as_str()),
+        cost,
+        &timer,
+    )?;
     Ok(true)
 }
 
@@ -445,10 +450,10 @@ async fn begin_checkpoint_epoch(
             .await;
         match result {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => return Err((sink.sink_id.clone(), error)),
+            Ok(Err(error)) => return Err((sink.sink_id.to_string(), error)),
             Err(payload) => {
                 return Err((
-                    sink.sink_id.clone(),
+                    sink.sink_id.to_string(),
                     CalcFlowError::TaskPanicked {
                         task_id: task_id.as_u64(),
                         message: panic_message(payload.as_ref()),
@@ -759,9 +764,29 @@ async fn commit_checkpoint_sinks(
             {
                 SinkLoopStep::Cancelled
             } else {
-                SinkLoopStep::CheckpointFailed { sink_id, error }
+                SinkLoopStep::CheckpointFailed {
+                    error: durable_commit_recovery_required(inputs, &sink_id, epoch),
+                    sink_id,
+                }
             }
         })
+}
+
+fn durable_commit_recovery_required(
+    inputs: &SinkTaskInputs,
+    sink_id: &str,
+    epoch: Epoch,
+) -> CalcFlowError {
+    CalcFlowError::RecoveryRequired {
+        pipeline_name: inputs
+            .pipeline_name
+            .clone()
+            .expect("durable sink commit requires a checkpoint pipeline identity"),
+        message: format!(
+            "sink {sink_id:?} did not acknowledge durable epoch {}; restart must recover it",
+            epoch.as_u64()
+        ),
+    }
 }
 
 async fn send_checkpoint_finalization(
@@ -857,7 +882,7 @@ async fn pre_commit_all(
     for sink in &mut inputs.sinks {
         if sink.binding.is_ordinary() {
             prepared.insert(
-                sink.sink_id.clone(),
+                sink.sink_id.to_string(),
                 SinkManifestEntry {
                     delivery: SinkDeliveryManifest::Ordinary,
                     pre_commit: None,
@@ -870,10 +895,10 @@ async fn pre_commit_all(
             .await;
         let metadata = match result {
             Ok(Ok(metadata)) => metadata,
-            Ok(Err(error)) => return Err((sink.sink_id.clone(), error, prepared)),
+            Ok(Err(error)) => return Err((sink.sink_id.to_string(), error, prepared)),
             Err(payload) => {
                 return Err((
-                    sink.sink_id.clone(),
+                    sink.sink_id.to_string(),
                     CalcFlowError::TaskPanicked {
                         task_id: task_id.as_u64(),
                         message: panic_message(payload.as_ref()),
@@ -882,13 +907,13 @@ async fn pre_commit_all(
                 ));
             }
         };
-        if let Err(error) = validate_pre_commit_metadata(&sink.sink_id, &metadata) {
-            return Err((sink.sink_id.clone(), error, prepared));
+        if let Err(error) = validate_pre_commit_metadata(sink.sink_id.as_str(), &metadata) {
+            return Err((sink.sink_id.to_string(), error, prepared));
         }
         prepared.insert(
-            sink.sink_id.clone(),
+            sink.sink_id.to_string(),
             SinkManifestEntry {
-                delivery: sink.binding.delivery().into_manifest(),
+                delivery: sink.binding.capability().into_manifest(),
                 pre_commit: Some(metadata),
             },
         );
@@ -931,7 +956,7 @@ async fn commit_all(
         if sink.binding.is_ordinary() {
             continue;
         }
-        let state = prepared[&sink.sink_id]
+        let state = prepared[sink.sink_id.as_str()]
             .pre_commit
             .as_ref()
             .expect("transactional pre-commit metadata is present");
@@ -949,10 +974,10 @@ async fn commit_all(
                         let result = std::panic::catch_unwind(AssertUnwindSafe(|| inject()));
                         match result {
                             Ok(Ok(())) => {}
-                            Ok(Err(error)) => return Err((sink.sink_id.clone(), error)),
+                            Ok(Err(error)) => return Err((sink.sink_id.to_string(), error)),
                             Err(payload) => {
                                 return Err((
-                                    sink.sink_id.clone(),
+                                    sink.sink_id.to_string(),
                                     CalcFlowError::TaskPanicked {
                                         task_id: task_id.as_u64(),
                                         message: panic_message(payload.as_ref()),
@@ -963,10 +988,10 @@ async fn commit_all(
                     }
                 }
             }
-            Ok(Err(error)) => return Err((sink.sink_id.clone(), error)),
+            Ok(Err(error)) => return Err((sink.sink_id.to_string(), error)),
             Err(payload) => {
                 return Err((
-                    sink.sink_id.clone(),
+                    sink.sink_id.to_string(),
                     CalcFlowError::TaskPanicked {
                         task_id: task_id.as_u64(),
                         message: panic_message(payload.as_ref()),
@@ -982,7 +1007,7 @@ async fn abort_all(
     inputs: &mut SinkTaskInputs,
     epoch: Epoch,
     prepared: &BTreeMap<String, SinkManifestEntry>,
-    task_id: TaskId,
+    _task_id: TaskId,
 ) {
     let output_id = inputs.output_id.clone();
     let progress = inputs.progress.clone();
@@ -991,23 +1016,21 @@ async fn abort_all(
             continue;
         }
         let state = prepared
-            .get(&sink.sink_id)
+            .get(sink.sink_id.as_str())
             .and_then(|entry| entry.pre_commit.as_ref());
         let result = AssertUnwindSafe(sink.binding.abort(epoch, state))
             .catch_unwind()
             .await;
         let error = match result {
             Ok(Ok(())) => None,
-            Ok(Err(error)) => Some(error),
-            Err(payload) => Some(CalcFlowError::TaskPanicked {
-                task_id: task_id.as_u64(),
-                message: panic_message(payload.as_ref()),
+            Ok(Err(_)) | Err(_) => Some(CalcFlowError::Internal {
+                message: format!("sink abort failed for epoch {}", epoch.as_u64()),
             }),
         };
         if let Some(error) = error {
             progress.record_failure(SinkTaskFailure {
                 output_id: output_id.clone(),
-                sink_id: sink.sink_id.clone(),
+                sink_id: sink.sink_id.to_string(),
                 phase: SinkFailurePhase::Checkpoint,
                 error,
             });
@@ -1026,18 +1049,27 @@ pub(crate) async fn recover_transactional_sinks(
     manifest: &crate::CheckpointManifest,
 ) -> Result<()> {
     for sink in sinks {
-        let entry = manifest.sinks().get(&sink.sink_id).ok_or_else(|| {
+        let entry = manifest.sinks().get(sink.sink_id.as_str()).ok_or_else(|| {
             CalcFlowError::CheckpointMismatch {
                 message: format!(
                     "checkpoint manifest is missing transactional sink {:?}",
-                    sink.sink_id
+                    sink.sink_id.as_str()
                 ),
             }
         })?;
         if !validate_recovery_entry(sink, entry)? {
             continue;
         }
-        sink.binding.recover(manifest).await?;
+        if sink.binding.recover(manifest).await.is_err() {
+            return Err(CalcFlowError::RecoveryRequired {
+                pipeline_name: manifest.pipeline_name().into(),
+                message: format!(
+                    "sink {:?} did not recover durable epoch {}; retry recovery before allocating a new epoch",
+                    sink.sink_id.as_str(),
+                    manifest.epoch().as_u64()
+                ),
+            });
+        }
     }
     Ok(())
 }
@@ -1046,12 +1078,12 @@ fn validate_recovery_entry(
     sink: &ValidatedOrdinarySink,
     entry: &SinkManifestEntry,
 ) -> Result<bool> {
-    let expected_delivery = sink.binding.delivery().into_manifest();
+    let expected_delivery = sink.binding.capability().into_manifest();
     if entry.delivery != expected_delivery {
         return Err(CalcFlowError::CheckpointMismatch {
             message: format!(
                 "checkpoint manifest sink {:?} delivery evidence does not match the prepared binding",
-                sink.sink_id
+                sink.sink_id.as_str()
             ),
         });
     }
@@ -1060,7 +1092,7 @@ fn validate_recovery_entry(
             return Err(CalcFlowError::CheckpointMismatch {
                 message: format!(
                     "checkpoint manifest ordinary sink {:?} carries transactional state",
-                    sink.sink_id
+                    sink.sink_id.as_str()
                 ),
             });
         }
@@ -1070,7 +1102,7 @@ fn validate_recovery_entry(
         return Err(CalcFlowError::CheckpointMismatch {
             message: format!(
                 "checkpoint manifest sink {:?} is not a prepared transaction",
-                sink.sink_id
+                sink.sink_id.as_str()
             ),
         });
     }
@@ -1100,7 +1132,7 @@ async fn close_all(inputs: &mut SinkTaskInputs, failure_signal: &TaskFailureSign
             failed = true;
             inputs.progress.record_failure(SinkTaskFailure {
                 output_id: inputs.output_id.clone(),
-                sink_id: sink.sink_id.clone(),
+                sink_id: sink.sink_id.to_string(),
                 phase: SinkFailurePhase::Close,
                 error,
             });
@@ -1136,7 +1168,7 @@ mod tests {
         RetentionClass, SinkDeliveryManifest, StreamJobContext, StreamMessage, edge_channel,
         runtime::streaming::{
             job::{
-                M2SinkDelivery, OrdinarySinkBinding, OrdinaryStreamSink, TransactionalStreamSink,
+                OrdinarySinkBinding, OrdinaryStreamSink, TransactionalStreamSink,
                 ValidatedOrdinarySink,
             },
             supervisor::TaskSupervisor,
@@ -1187,10 +1219,6 @@ mod tests {
 
     #[async_trait]
     impl OrdinaryStreamSink for RecordingSink {
-        fn delivery_capability(&self) -> M2SinkDelivery {
-            M2SinkDelivery::ProcessLocalOrdered
-        }
-
         async fn open(&mut self) -> Result<()> {
             Ok(())
         }
@@ -1234,6 +1262,52 @@ mod tests {
         fail_commit: bool,
         committed: Arc<Mutex<std::collections::BTreeSet<String>>>,
         log: Arc<Mutex<Vec<String>>>,
+    }
+
+    const PRECOMMIT_SENTINEL: &str = "precommit-secret-sentinel";
+
+    struct LeakingAbortSink;
+
+    #[async_trait]
+    impl TransactionalStreamSink for LeakingAbortSink {
+        async fn open(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn begin_epoch(&mut self, _epoch: crate::Epoch) -> Result<()> {
+            Ok(())
+        }
+
+        async fn write(&mut self, _batch: &Batch) -> Result<()> {
+            Ok(())
+        }
+
+        async fn pre_commit(&mut self, _epoch: crate::Epoch) -> Result<JsonMap> {
+            Ok(BTreeMap::from([(
+                "token".into(),
+                serde_json::json!(PRECOMMIT_SENTINEL),
+            )]))
+        }
+
+        async fn commit(&mut self, _epoch: crate::Epoch, _state: &JsonMap) -> Result<()> {
+            Ok(())
+        }
+
+        async fn abort(&mut self, _epoch: crate::Epoch, state: Option<&JsonMap>) -> Result<()> {
+            Err(CalcFlowError::Internal {
+                message: format!("abort failed for {state:?}"),
+            })
+        }
+
+        async fn recover(&mut self, manifest: &crate::CheckpointManifest) -> Result<()> {
+            Err(CalcFlowError::Internal {
+                message: format!("recover failed for {:?}", manifest.sinks()),
+            })
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[async_trait]
@@ -1402,6 +1476,7 @@ mod tests {
             &mut supervisor,
             SinkTaskInputs {
                 output_id: "output".into(),
+                pipeline_name: checkpoint.as_ref().map(|_| "pipeline".into()),
                 sinks,
                 input: receiver,
                 context: context.for_sink("output").unwrap(),
@@ -1615,6 +1690,50 @@ mod tests {
         assert!(log.contains(&"b:abort:1".into()));
         assert!(!log.iter().any(|entry| entry.contains(":commit:")));
         assert_eq!(closes.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn pre_commit_metadata_never_leaks_through_abort_diagnostics() {
+        let (ack_tx, mut ack_rx) = mpsc::channel(1);
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let (finalize_tx, _finalize_rx) = mpsc::channel(1);
+        let mut harness = harness_with_checkpoint(
+            vec![ValidatedOrdinarySink {
+                sink_id: "redacted".into(),
+                binding: OrdinarySinkBinding::new_transactional(Box::new(LeakingAbortSink)),
+            }],
+            Some(SinkCheckpointPort {
+                initial_epoch: crate::Epoch::INITIAL,
+                acknowledgements: ack_tx,
+                commands: command_rx,
+                finalizations: finalize_tx,
+                terminal_ready: None,
+            }),
+        );
+        harness.data.send(true).unwrap();
+        harness
+            .sender
+            .send(StreamMessage::barrier(crate::Epoch::INITIAL))
+            .await
+            .unwrap();
+        let acknowledgement = ack_rx.recv().await.unwrap();
+        assert_eq!(
+            acknowledgement.sinks["redacted"]
+                .pre_commit
+                .as_ref()
+                .unwrap()["token"],
+            serde_json::json!(PRECOMMIT_SENTINEL)
+        );
+
+        command_tx
+            .send(SinkCheckpointCommand::Abort(crate::Epoch::INITIAL))
+            .await
+            .unwrap();
+        let _ = harness.supervisor.join_all().await;
+
+        let diagnostics = format!("{:?}", harness.progress.take_failures());
+        assert!(!diagnostics.contains(PRECOMMIT_SENTINEL));
+        assert!(diagnostics.contains("sink abort failed for epoch 1"));
     }
 
     #[tokio::test]
@@ -1871,6 +1990,16 @@ mod tests {
         let report = harness.supervisor.join_all().await;
 
         assert_eq!(report.errors.len(), 1);
+        let failures = harness.progress.take_failures();
+        assert!(matches!(
+            &failures[0].error,
+            CalcFlowError::RecoveryRequired {
+                pipeline_name,
+                message,
+            } if pipeline_name == "pipeline"
+                && message.contains("sink \"b\"")
+                && message.contains("epoch 1")
+        ));
         assert!(finalize_rx.recv().await.is_none());
         assert_eq!(
             &*committed.lock(),
@@ -1961,6 +2090,53 @@ mod tests {
             .unwrap();
 
         assert_eq!(&log.lock()[..], ["deduplicated:recover:1"]);
+    }
+
+    #[tokio::test]
+    async fn pre_commit_metadata_never_leaks_through_recovery_diagnostics() {
+        let manifest = crate::CheckpointManifest::new(crate::CheckpointManifestFields {
+            pipeline_name: "pipeline".into(),
+            pipeline_fingerprint:
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            runtime_config_hash: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                .into(),
+            epoch: crate::Epoch::INITIAL,
+            created_at: Utc.with_ymd_and_hms(2026, 8, 9, 8, 0, 0).unwrap(),
+            recovery_status: crate::RecoveryStatus::Final,
+            sources: BTreeMap::new(),
+            operators: BTreeMap::new(),
+            sinks: BTreeMap::from([(
+                "redacted".into(),
+                crate::SinkManifestEntry {
+                    delivery: SinkDeliveryManifest::Transactional,
+                    pre_commit: Some(BTreeMap::from([(
+                        "token".into(),
+                        serde_json::json!(PRECOMMIT_SENTINEL),
+                    )])),
+                },
+            )]),
+        })
+        .unwrap();
+        let mut sinks = vec![ValidatedOrdinarySink {
+            sink_id: "redacted".into(),
+            binding: OrdinarySinkBinding::new_transactional(Box::new(LeakingAbortSink)),
+        }];
+
+        let error = recover_transactional_sinks(&mut sinks, &manifest)
+            .await
+            .unwrap_err();
+        let diagnostic = format!("{error:?}");
+
+        assert!(!diagnostic.contains(PRECOMMIT_SENTINEL));
+        assert!(matches!(
+            error,
+            CalcFlowError::RecoveryRequired {
+                ref pipeline_name,
+                ref message,
+            } if pipeline_name == "pipeline"
+                && message.contains("sink \"redacted\"")
+                && message.contains("epoch 1")
+        ));
     }
 
     #[tokio::test]

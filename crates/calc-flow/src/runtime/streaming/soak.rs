@@ -3437,33 +3437,44 @@ async fn run_checkpoint_restart_fault_case(
         .await
         .unwrap_or_else(|error| panic!("fault case {point:?}/{mode:?} hung: {error}"));
     let first_error = format!("{:?}", first_outcome.errors);
-    let failure_state = if point == CheckpointFaultPoint::PartialSinkCommit {
-        ContinuousJobState::RecoveryRequired
-    } else {
-        ContinuousJobState::Failed
-    };
-    let deterministic_terminal_error = match mode {
-        CheckpointFaultMode::Cancel => {
-            if point == CheckpointFaultPoint::PartialSinkCommit {
-                first_outcome.state == ContinuousJobState::RecoveryRequired
-                    && !first_outcome.errors.is_empty()
-                    && first_cancellation.is_cancelled()
-            } else {
-                first_outcome.state == ContinuousJobState::Cancelled
-                    && first_outcome.errors.is_empty()
-                    && first_cancellation.is_cancelled()
-            }
+    let deterministic_terminal_error = match (point, mode) {
+        (CheckpointFaultPoint::PartialSinkCommit, CheckpointFaultMode::Cancel) => {
+            first_outcome.state == ContinuousJobState::RecoveryRequired
+                && !first_outcome.errors.is_empty()
+                && first_cancellation.is_cancelled()
         }
-        CheckpointFaultMode::Io => {
-            first_outcome.state == failure_state
+        (
+            CheckpointFaultPoint::PartialSinkCommit,
+            CheckpointFaultMode::Io | CheckpointFaultMode::Panic | CheckpointFaultMode::Restart,
+        ) => {
+            first_outcome.state == ContinuousJobState::RecoveryRequired
+                && first_outcome.errors.iter().any(|failure| {
+                    matches!(
+                        &failure.error,
+                        CalcFlowError::RecoveryRequired {
+                            pipeline_name,
+                            message,
+                        } if pipeline_name == "checkpoint-restart-fault-matrix"
+                            && message.contains("sink \"sink-a\"")
+                            && message.contains("epoch 1")
+                    )
+                })
+        }
+        (_, CheckpointFaultMode::Cancel) => {
+            first_outcome.state == ContinuousJobState::Cancelled
+                && first_outcome.errors.is_empty()
+                && first_cancellation.is_cancelled()
+        }
+        (_, CheckpointFaultMode::Io) => {
+            first_outcome.state == ContinuousJobState::Failed
                 && first_error.contains("injected checkpoint I/O fault")
         }
-        CheckpointFaultMode::Panic => {
-            first_outcome.state == failure_state
+        (_, CheckpointFaultMode::Panic) => {
+            first_outcome.state == ContinuousJobState::Failed
                 && first_error.contains("injected checkpoint panic")
         }
-        CheckpointFaultMode::Restart => {
-            first_outcome.state == failure_state
+        (_, CheckpointFaultMode::Restart) => {
+            first_outcome.state == ContinuousJobState::Failed
                 && first_error.contains("injected checkpoint restart")
         }
     };

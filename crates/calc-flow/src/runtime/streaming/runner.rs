@@ -30,8 +30,8 @@ use super::{
         CheckpointRequest, ManualCheckpointFailure, ParticipantSet, spawn_checkpoint_coordinator,
     },
     job::{
-        ContinuousJobSpec, OrdinarySinkBinding, ValidatedContinuousJob, ValidatedOrdinarySink,
-        preflight_job,
+        ContinuousJobSpec, OrdinarySinkBinding, StableSinkId, ValidatedContinuousJob,
+        ValidatedOrdinarySink, preflight_job,
     },
     metrics::{M2MetricsSnapshot, MetricsRecorder, MetricsTimer, sink_metric_id},
     operator_task::{
@@ -1579,9 +1579,12 @@ fn metrics_for_job(job: &ValidatedContinuousJob) -> (MetricsRecorder, BTreeMap<S
         .sinks
         .iter()
         .flat_map(|(output_id, sinks)| {
-            sinks
-                .iter()
-                .map(move |sink| (sink_metric_id(output_id, &sink.sink_id), output_id.clone()))
+            sinks.iter().map(move |sink| {
+                (
+                    sink_metric_id(output_id, sink.sink_id.as_str()),
+                    output_id.clone(),
+                )
+            })
         })
         .collect::<BTreeMap<_, _>>();
     let metrics = MetricsRecorder::new(
@@ -1662,7 +1665,7 @@ fn checkpoint_identity(
     for (output_id, sinks) in &job.sinks {
         for sink in sinks {
             if let Some(previous_output) =
-                sink_outputs.insert(sink.sink_id.clone(), output_id.clone())
+                sink_outputs.insert(sink.sink_id.to_string(), output_id.clone())
             {
                 return Err(CalcFlowError::InvalidArgument {
                     field: format!("sinks.{}", sink.sink_id),
@@ -1965,7 +1968,7 @@ enum ConnectorResource {
     },
     Sink {
         output_id: String,
-        sink_id: String,
+        sink_id: StableSinkId,
         configured_index: usize,
         binding: OrdinarySinkBinding,
     },
@@ -1981,7 +1984,7 @@ impl ConnectorResource {
                 output_id, sink_id, ..
             } => FailureOrigin::SinkOpen {
                 output_id: output_id.clone(),
-                sink_id: sink_id.clone(),
+                sink_id: sink_id.to_string(),
             },
         }
     }
@@ -1995,7 +1998,7 @@ impl ConnectorResource {
                 output_id, sink_id, ..
             } => FailureOrigin::SinkClose {
                 output_id: output_id.clone(),
-                sink_id: sink_id.clone(),
+                sink_id: sink_id.to_string(),
             },
         }
     }
@@ -3231,6 +3234,9 @@ fn register_boundary_tasks(
             &mut runtime.supervisor,
             SinkTaskInputs {
                 output_id: output_id.clone(),
+                pipeline_name: checkpoint
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.identity.pipeline_name.clone()),
                 sinks: bindings,
                 input,
                 context: context
@@ -4497,6 +4503,7 @@ fn classify_failure_state(failure: &RuntimeFailure) -> ContinuousJobState {
             | FailureOrigin::SinkOpen { .. }
             | FailureOrigin::SinkClose { .. }
             | FailureOrigin::SinkWrite { .. }
+            | FailureOrigin::SinkCheckpoint { .. }
     ) || matches!(
         &failure.origin,
         FailureOrigin::Task { task_name, .. } if task_name.starts_with("source:")
@@ -4792,9 +4799,9 @@ mod tests {
                 CheckpointRequest, ParticipantSet, spawn_checkpoint_coordinator,
             },
             job::{
-                ContinuousJobSpec, M2DeliveryMode, M2SinkDelivery, NamedSinkBinding,
-                NamedSourceBinding, OrdinarySinkBinding, OrdinaryStreamSink,
-                TransactionalStreamSink, ValidatedOrdinarySink,
+                ContinuousJobSpec, M2DeliveryMode, NamedSinkBinding, NamedSourceBinding,
+                OrdinarySinkBinding, OrdinaryStreamSink, TransactionalStreamSink,
+                ValidatedOrdinarySink,
             },
             metrics::MetricsRecorder,
             progress::DurableSourceCut,
@@ -5263,10 +5270,6 @@ mod tests {
 
     #[async_trait]
     impl OrdinaryStreamSink for ProbeSink {
-        fn delivery_capability(&self) -> M2SinkDelivery {
-            M2SinkDelivery::ProcessLocalOrdered
-        }
-
         async fn open(&mut self) -> Result<()> {
             self.0.opened.fetch_add(1, Ordering::SeqCst);
             self.0.open_started.notify_waiters();
