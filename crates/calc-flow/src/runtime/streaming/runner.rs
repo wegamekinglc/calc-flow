@@ -2350,7 +2350,7 @@ async fn prepare_checkpoint_recovery(
         sources
             .get_mut(source_id)
             .expect("selected manifest source IDs were validated")
-            .install_durable_progress(restored)?;
+            .restore(source_id, restored)?;
     }
     for source_id in durable
         .sources
@@ -3968,7 +3968,7 @@ async fn pause_checkpoint_sources(
     cancellation: &CancellationToken,
 ) -> crate::Result<BTreeMap<super::progress::BindingIdentity, DurableSourceCut>> {
     let cuts = try_join_all(sources.iter().map(|(source_id, progress)| async move {
-        let cut = progress.pause_for_checkpoint(epoch, cancellation).await?;
+        let cut = progress.barrier(epoch, cancellation).await?;
         Ok::<_, CalcFlowError>((
             super::progress::BindingIdentity::new(source_id.as_str())?,
             cut.durable(source_id)?,
@@ -5237,7 +5237,7 @@ mod tests {
             self.delivered = true;
             Ok(Some(SourceEvent::Data {
                 batch: one_row(1),
-                cursor: Cursor::new(vec![1], JsonMap::new()).unwrap(),
+                cursor: Cursor::unbound(vec![1], JsonMap::new()).unwrap(),
             }))
         }
 
@@ -5717,7 +5717,7 @@ mod tests {
                 }),
                 (RunningSourceFailure::Cursor, 0 | 1) => Ok(Some(SourceEvent::Data {
                     batch: one_row(i64::try_from(call).unwrap()),
-                    cursor: Cursor::new(vec![1], JsonMap::new()).unwrap(),
+                    cursor: Cursor::unbound(vec![1], JsonMap::new()).unwrap(),
                 })),
                 (RunningSourceFailure::Cursor, _) => std::future::pending().await,
             }
@@ -6369,7 +6369,7 @@ mod tests {
             .enumerate()
             .map(|(index, value)| SourceEvent::Data {
                 batch: one_row(*value),
-                cursor: Cursor::new(vec![u8::try_from(index + 1).unwrap()], JsonMap::new())
+                cursor: Cursor::unbound(vec![u8::try_from(index + 1).unwrap()], JsonMap::new())
                     .unwrap(),
             })
             .collect();
@@ -6392,7 +6392,7 @@ mod tests {
         let events = (0..count)
             .map(|index| SourceEvent::Data {
                 batch: one_row(i64::try_from(index).unwrap()),
-                cursor: Cursor::new(
+                cursor: Cursor::unbound(
                     u64::try_from(index + 1).unwrap().to_be_bytes().to_vec(),
                     JsonMap::new(),
                 )
@@ -6784,8 +6784,11 @@ mod tests {
                     Arc::clone(gate),
                     Some(SourceEvent::Data {
                         batch: zero_row(),
-                        cursor: Cursor::new(vec![u8::try_from(index + 1).unwrap()], JsonMap::new())
-                            .unwrap(),
+                        cursor: Cursor::unbound(
+                            vec![u8::try_from(index + 1).unwrap()],
+                            JsonMap::new(),
+                        )
+                        .unwrap(),
                     }),
                 )
             })
@@ -6798,7 +6801,7 @@ mod tests {
                             Arc::clone(&gates[&gate]),
                             Some(SourceEvent::Data {
                                 batch: one_row(value),
-                                cursor: Cursor::new(
+                                cursor: Cursor::unbound(
                                     vec![u8::try_from(zero_cost_count + index + 1).unwrap()],
                                     JsonMap::new(),
                                 )
@@ -7368,7 +7371,7 @@ mod tests {
                 [
                     SourceEvent::Data {
                         batch: zero_row(),
-                        cursor: Cursor::new(cursor, JsonMap::new()).unwrap(),
+                        cursor: Cursor::unbound(cursor, JsonMap::new()).unwrap(),
                     },
                     SourceEvent::Idle,
                     SourceEvent::Watermark(EventTime::from_micros(watermark)),
@@ -10162,8 +10165,8 @@ mod tests {
     #[tokio::test]
     async fn two_sources_reopen_once_at_their_distinct_resume_cursors() {
         let plan = union_plan();
-        let left_resume = Cursor::new(vec![1], JsonMap::new()).unwrap();
-        let right_resume = Cursor::new(vec![2], JsonMap::new()).unwrap();
+        let left_resume = Cursor::new("left", vec![1], JsonMap::new()).unwrap();
+        let right_resume = Cursor::new("right", vec![2], JsonMap::new()).unwrap();
         let left_opened = Arc::new(Mutex::new(Vec::new()));
         let right_opened = Arc::new(Mutex::new(Vec::new()));
         let source_closed = Arc::new(AtomicUsize::new(0));
@@ -11658,7 +11661,7 @@ mod tests {
                                 Arc::clone(&source_gate),
                                 Some(SourceEvent::Data {
                                     batch: one_row(7),
-                                    cursor: Cursor::new(vec![1], JsonMap::new()).unwrap(),
+                                    cursor: Cursor::new("input", vec![1], JsonMap::new()).unwrap(),
                                 }),
                             ),
                             (Arc::clone(&source_gate), None),
@@ -11822,7 +11825,8 @@ mod tests {
                     crate::runtime::streaming::progress::NativeWatermarkCapability::NeverEmits,
                     crate::runtime::streaming::progress::ReplayPositioningCapability::ExactPauseReportAndSeek,
                     None,
-                ),
+                )
+                .with_delivery_and_bounds(true, 1, 1 << 20),
                 watermark_policy: crate::runtime::streaming::progress::WatermarkPolicy::Disabled {
                     idle_timeout: None,
                 },
@@ -12017,7 +12021,8 @@ mod tests {
                     crate::runtime::streaming::progress::NativeWatermarkCapability::NeverEmits,
                     crate::runtime::streaming::progress::ReplayPositioningCapability::ExactPauseReportAndSeek,
                     None,
-                ),
+                )
+                .with_delivery_and_bounds(true, 1, 1 << 20),
                 watermark_policy:
                     crate::runtime::streaming::progress::WatermarkPolicy::Disabled {
                         idle_timeout: None,

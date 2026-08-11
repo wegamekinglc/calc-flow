@@ -301,8 +301,11 @@ containment, bounded launch cleanup, and owner-settled cancellation. Its
 progress driver owns watermark generation, idle/reactivation handling,
 deterministic timer ordering, and multi-ingress progress. Exactly-once
 capability is proved per requested output across its reachable sources,
-operators, edges, and sinks; other checkpointed outputs may remain at least
-once.
+operators, edges, and sinks; lossy or non-replayable sources fail that proof.
+Each source binding name remains its stable identity across recovery, while
+its schema, watermark, replay, delivery, and batch-bound capabilities are
+sampled once before open and included in durable identity validation. Other
+checkpointed outputs may remain at least once.
 
 The Rust state surface is public and data-only. `StateBackend` opens an
 exclusive `StateLineageBackend`; `LocalStateBackend` stages, validates,

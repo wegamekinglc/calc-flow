@@ -198,7 +198,11 @@ impl StreamSource for SoakSource {
                 .expect("the twenty-minute soak cannot exhaust event-time space"),
         ));
         let batch = soak_batch(self.source_id, sequence)?;
-        let cursor = Cursor::new(sequence.to_be_bytes().to_vec(), JsonMap::new())?;
+        let cursor = Cursor::new(
+            self.source_id,
+            sequence.to_be_bytes().to_vec(),
+            JsonMap::new(),
+        )?;
         Ok(Some(SourceEvent::Data { batch, cursor }))
     }
 
@@ -1071,6 +1075,7 @@ impl StreamSource for CheckpointMatrixSource {
             return Ok(Some(SourceEvent::Data {
                 batch: checkpoint_matrix_batch(self.source_id)?,
                 cursor: Cursor::new(
+                    self.source_id,
                     checkpoint_matrix_cursor_order(self.source_id),
                     JsonMap::new(),
                 )?,
@@ -1175,7 +1180,11 @@ impl StreamSource for CheckpointRestartSoakSource {
         self.pending_watermark = Some(EventTime::from_micros(watermark_micros));
         Ok(Some(SourceEvent::Data {
             batch: checkpoint_restart_soak_batch(self.source_id, sequence)?,
-            cursor: Cursor::new(sequence.to_be_bytes().to_vec(), JsonMap::new())?,
+            cursor: Cursor::new(
+                self.source_id,
+                sequence.to_be_bytes().to_vec(),
+                JsonMap::new(),
+            )?,
         }))
     }
 
