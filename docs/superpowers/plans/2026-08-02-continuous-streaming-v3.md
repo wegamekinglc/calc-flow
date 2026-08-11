@@ -1,9 +1,9 @@
 # Calc-Flow 3.0 持续流计算详细开发计划
 
-> **状态：** M0 至 M3 已完成；最新 `main@6275599c` 包含 PR #86 的 M3 progress
-> coordination、20 分钟 soak 与实现证据。当前 public v2 runner 保持不变；public A6
-> 必须等 M4/M5 完整状态与 checkpoint 语义完成后另行评审、原子集成。M4 按
-> `m4-state-window` specification、API note 与 critique 执行。
+> **状态：** M0-M5 internal complete; Public A6 pending
+> 现有 public v2 runner 保持不变。Public A6 的实现边界已由
+> `a6-public-continuous-runtime` specification、API note 与 zero-blocker critique
+> 冻结，仍须通过独立的原子实现与评审后才能标记为 public complete。
 >
 > **依据：**
 > [`Arroyo / RisingWave 独立调研与 Calc-Flow 流式演进建议`](../../research/2026-08-02-arroyo-risingwave-streaming-research.md)
