@@ -1,13 +1,27 @@
-use std::{collections::BTreeMap, collections::BTreeSet, time::Duration};
+use std::{
+    collections::BTreeMap,
+    collections::BTreeSet,
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
 
-use tokio::{sync::mpsc, task::JoinHandle, time::Instant};
+use parking_lot::Mutex;
+
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+    time::Instant,
+};
 
 use crate::{CalcFlowError, CancellationToken, Epoch, Result};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CheckpointRequest {
     Periodic,
     Terminal,
+    Manual(oneshot::Sender<Result<Epoch>>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -85,10 +99,40 @@ enum CoordinatorCommand {
     ManifestDurable(Epoch),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ManualCheckpointFailure {
+    Cancelled,
+    Failed {
+        message: String,
+    },
+    RecoveryRequired {
+        pipeline_name: String,
+        message: String,
+    },
+}
+
+impl ManualCheckpointFailure {
+    fn into_error(self) -> CalcFlowError {
+        match self {
+            Self::Cancelled => checkpoint_cancelled(),
+            Self::Failed { message } => CalcFlowError::Internal { message },
+            Self::RecoveryRequired {
+                pipeline_name,
+                message,
+            } => CalcFlowError::RecoveryRequired {
+                pipeline_name,
+                message,
+            },
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct CheckpointCoordinatorHandle {
     requests: mpsc::Sender<CheckpointRequest>,
     commands: mpsc::Sender<CoordinatorCommand>,
+    cancellation: CancellationToken,
+    termination: Arc<Mutex<Option<ManualCheckpointFailure>>>,
 }
 
 impl CheckpointCoordinatorHandle {
@@ -97,6 +141,12 @@ impl CheckpointCoordinatorHandle {
             .send(request)
             .await
             .map_err(|_| coordinator_closed())
+    }
+
+    pub(crate) async fn request_manual(&self) -> Result<ManualCheckpointWaiter> {
+        let (result, receiver) = oneshot::channel();
+        self.request(CheckpointRequest::Manual(result)).await?;
+        Ok(ManualCheckpointWaiter { receiver })
     }
 
     pub(crate) async fn ack(&self, ack: CheckpointAck) -> Result<()> {
@@ -111,6 +161,31 @@ impl CheckpointCoordinatorHandle {
             .send(CoordinatorCommand::ManifestDurable(epoch))
             .await
             .map_err(|_| coordinator_closed())
+    }
+
+    pub(crate) fn terminate(&self, failure: ManualCheckpointFailure) {
+        let mut termination = self.termination.lock();
+        if termination.is_none() {
+            *termination = Some(failure);
+        }
+        drop(termination);
+        self.cancellation.cancel();
+    }
+}
+
+pub(crate) struct ManualCheckpointWaiter {
+    receiver: oneshot::Receiver<Result<Epoch>>,
+}
+
+impl Future for ManualCheckpointWaiter {
+    type Output = Result<Epoch>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        match Pin::new(&mut self.receiver).poll(context) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(result)) => Poll::Ready(result),
+            Poll::Ready(Err(_)) => Poll::Ready(Err(coordinator_closed())),
+        }
     }
 }
 
@@ -141,9 +216,12 @@ pub(crate) fn spawn_checkpoint_coordinator(
     let (request_tx, request_rx) = mpsc::channel(channel_capacity);
     let (command_tx, command_rx) = mpsc::channel(channel_capacity);
     let (event_tx, event_rx) = mpsc::channel(channel_capacity);
+    let termination = Arc::new(Mutex::new(None));
     let handle = CheckpointCoordinatorHandle {
         requests: request_tx,
         commands: command_tx,
+        cancellation: cancellation.clone(),
+        termination: Arc::clone(&termination),
     };
     let task = tokio::spawn(run_coordinator(
         expected,
@@ -153,13 +231,14 @@ pub(crate) fn spawn_checkpoint_coordinator(
         command_rx,
         event_tx,
         cancellation,
+        termination,
     ));
     Ok((handle, event_rx, task))
 }
 
 struct EpochState {
-    request: CheckpointRequest,
     epoch: Epoch,
+    manual_result: Option<oneshot::Sender<Result<Epoch>>>,
     phase: CheckpointPhase,
     deadline: Instant,
     source_acks: BTreeMap<String, CheckpointAck>,
@@ -180,9 +259,11 @@ async fn run_coordinator(
     mut commands: mpsc::Receiver<CoordinatorCommand>,
     events: mpsc::Sender<CheckpointEvent>,
     cancellation: CancellationToken,
+    termination: Arc<Mutex<Option<ManualCheckpointFailure>>>,
 ) -> Result<()> {
     loop {
-        let Some(request) = receive_request(&mut requests, &cancellation).await? else {
+        let Some(request) = receive_request(&mut requests, &cancellation, &termination).await?
+        else {
             return Ok(());
         };
         let (mut state, following_epoch) = begin_epoch(request, next_epoch, timeout)?;
@@ -194,15 +275,33 @@ async fn run_coordinator(
         )
         .await?;
         loop {
-            let Some(command) =
-                receive_command(&mut commands, &state, &events, &cancellation).await?
-            else {
-                return Ok(());
-            };
-            if apply_or_fail_protocol(&mut state, &expected, command, &events, &cancellation)
-                .await?
+            let command = match receive_command(&mut commands, &state, &events, &cancellation).await
             {
-                break;
+                Ok(Some(command)) => command,
+                Ok(None) => {
+                    let failure = termination_failure(&termination);
+                    fail_epoch_manual(&mut state, failure.clone());
+                    fail_queued_manuals(&mut requests, failure).await;
+                    return Ok(());
+                }
+                Err(error) => {
+                    let failure = checkpoint_failed(&error.to_string());
+                    fail_epoch_manual(&mut state, failure.clone());
+                    fail_queued_manuals(&mut requests, failure).await;
+                    return Err(error);
+                }
+            };
+            match apply_or_fail_protocol(&mut state, &expected, command, &events, &cancellation)
+                .await
+            {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(error) => {
+                    let failure = checkpoint_failed(&error.to_string());
+                    fail_epoch_manual(&mut state, failure.clone());
+                    fail_queued_manuals(&mut requests, failure).await;
+                    return Err(error);
+                }
             }
         }
     }
@@ -211,12 +310,43 @@ async fn run_coordinator(
 async fn receive_request(
     requests: &mut mpsc::Receiver<CheckpointRequest>,
     cancellation: &CancellationToken,
+    termination: &Arc<Mutex<Option<ManualCheckpointFailure>>>,
 ) -> Result<Option<CheckpointRequest>> {
     tokio::select! {
         biased;
-        () = cancellation.cancelled() => Ok(None),
+        () = cancellation.cancelled() => {
+            fail_queued_manuals(requests, termination_failure(termination)).await;
+            Ok(None)
+        },
         request = requests.recv() => request.map(Some).ok_or_else(coordinator_closed),
     }
+}
+
+fn fail_epoch_manual(state: &mut EpochState, failure: ManualCheckpointFailure) {
+    if let Some(result) = state.manual_result.take() {
+        let _ = result.send(Err(failure.into_error()));
+    }
+}
+
+async fn fail_queued_manuals(
+    requests: &mut mpsc::Receiver<CheckpointRequest>,
+    failure: ManualCheckpointFailure,
+) {
+    requests.close();
+    while let Some(request) = requests.recv().await {
+        if let CheckpointRequest::Manual(result) = request {
+            let _ = result.send(Err(failure.clone().into_error()));
+        }
+    }
+}
+
+fn termination_failure(
+    termination: &Arc<Mutex<Option<ManualCheckpointFailure>>>,
+) -> ManualCheckpointFailure {
+    termination
+        .lock()
+        .clone()
+        .unwrap_or(ManualCheckpointFailure::Cancelled)
 }
 
 fn begin_epoch(
@@ -225,10 +355,14 @@ fn begin_epoch(
     timeout: Duration,
 ) -> Result<(EpochState, Epoch)> {
     let next_epoch = epoch.next()?;
+    let manual_result = match request {
+        CheckpointRequest::Periodic | CheckpointRequest::Terminal => None,
+        CheckpointRequest::Manual(result) => Some(result),
+    };
     Ok((
         EpochState {
-            request,
             epoch,
+            manual_result,
             phase: CheckpointPhase::Requested,
             deadline: Instant::now() + timeout,
             source_acks: BTreeMap::new(),
@@ -442,6 +576,9 @@ async fn advance_after_ack(
                     cancellation,
                 )
                 .await?;
+                if let Some(result) = state.manual_result.take() {
+                    let _ = result.send(Ok(state.epoch));
+                }
                 return Ok(true);
             }
             CheckpointAdvancement::Pending => return Ok(false),
@@ -510,6 +647,18 @@ fn coordinator_closed() -> CalcFlowError {
     }
 }
 
+fn checkpoint_cancelled() -> CalcFlowError {
+    CalcFlowError::Cancelled {
+        run_id: "checkpoint".into(),
+    }
+}
+
+fn checkpoint_failed(message: &str) -> ManualCheckpointFailure {
+    ManualCheckpointFailure::Failed {
+        message: message.into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeSet, time::Duration};
@@ -518,7 +667,7 @@ mod tests {
         CheckpointAck, CheckpointEvent, CheckpointPhase, CheckpointRequest, ParticipantSet,
         spawn_checkpoint_coordinator,
     };
-    use crate::{CancellationToken, Epoch};
+    use crate::{CalcFlowError, CancellationToken, Epoch};
 
     fn participants() -> ParticipantSet {
         ParticipantSet {
@@ -526,6 +675,187 @@ mod tests {
             operators: BTreeSet::from(["operator".into()]),
             sinks: BTreeSet::from(["sink".into()]),
         }
+    }
+
+    async fn complete_epoch(
+        handle: &super::CheckpointCoordinatorHandle,
+        events: &mut tokio::sync::mpsc::Receiver<CheckpointEvent>,
+        epoch: Epoch,
+    ) {
+        handle
+            .ack(CheckpointAck::source("source", epoch, "source-state"))
+            .await
+            .unwrap();
+        assert_eq!(
+            events.recv().await.unwrap(),
+            CheckpointEvent::PhaseAdvanced(epoch, CheckpointPhase::SourcesCut)
+        );
+        handle
+            .ack(CheckpointAck::operator("operator", epoch, "operator-state"))
+            .await
+            .unwrap();
+        assert_eq!(
+            events.recv().await.unwrap(),
+            CheckpointEvent::PhaseAdvanced(epoch, CheckpointPhase::OperatorsSnapshotted)
+        );
+        handle
+            .ack(CheckpointAck::sink_precommit("sink", epoch, "sink-state"))
+            .await
+            .unwrap();
+        assert_eq!(
+            events.recv().await.unwrap(),
+            CheckpointEvent::ReadyToPublish(epoch)
+        );
+        handle.manifest_durable(epoch).await.unwrap();
+        assert_eq!(
+            events.recv().await.unwrap(),
+            CheckpointEvent::PhaseAdvanced(epoch, CheckpointPhase::ManifestDurable)
+        );
+        handle
+            .ack(CheckpointAck::sink_commit("sink", epoch))
+            .await
+            .unwrap();
+        assert_eq!(
+            events.recv().await.unwrap(),
+            CheckpointEvent::Completed(epoch)
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_periodic_and_manual_requests_share_one_fifo_epoch_allocator() {
+        let cancellation = CancellationToken::new();
+        let (handle, mut events, task) = spawn_checkpoint_coordinator(
+            participants(),
+            Epoch::INITIAL,
+            4,
+            Duration::from_secs(30),
+            cancellation.clone(),
+        )
+        .unwrap();
+        let first = handle.request_manual().await.unwrap();
+        handle.request(CheckpointRequest::Periodic).await.unwrap();
+        let third = handle.request_manual().await.unwrap();
+
+        assert_eq!(
+            events.recv().await.unwrap(),
+            CheckpointEvent::Started(Epoch::INITIAL)
+        );
+        complete_epoch(&handle, &mut events, Epoch::INITIAL).await;
+        assert_eq!(first.await.unwrap(), Epoch::INITIAL);
+
+        let second_epoch = Epoch::INITIAL.next().unwrap();
+        assert_eq!(
+            events.recv().await.unwrap(),
+            CheckpointEvent::Started(second_epoch)
+        );
+        complete_epoch(&handle, &mut events, second_epoch).await;
+
+        let third_epoch = second_epoch.next().unwrap();
+        assert_eq!(
+            events.recv().await.unwrap(),
+            CheckpointEvent::Started(third_epoch)
+        );
+        complete_epoch(&handle, &mut events, third_epoch).await;
+        assert_eq!(third.await.unwrap(), third_epoch);
+
+        cancellation.cancel();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_fails_inflight_and_queued_manual_waiters_deterministically() {
+        let cancellation = CancellationToken::new();
+        let (handle, mut events, task) = spawn_checkpoint_coordinator(
+            participants(),
+            Epoch::INITIAL,
+            4,
+            Duration::from_secs(30),
+            cancellation.clone(),
+        )
+        .unwrap();
+        let inflight = handle.request_manual().await.unwrap();
+        let queued = handle.request_manual().await.unwrap();
+        assert_eq!(
+            events.recv().await.unwrap(),
+            CheckpointEvent::Started(Epoch::INITIAL)
+        );
+
+        cancellation.cancel();
+
+        assert!(matches!(
+            inflight.await,
+            Err(CalcFlowError::Cancelled { ref run_id }) if run_id == "checkpoint"
+        ));
+        assert!(matches!(
+            queued.await,
+            Err(CalcFlowError::Cancelled { ref run_id }) if run_id == "checkpoint"
+        ));
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeout_fails_manual_waiter_with_epoch_context() {
+        let cancellation = CancellationToken::new();
+        let (handle, mut events, task) = spawn_checkpoint_coordinator(
+            participants(),
+            Epoch::INITIAL,
+            2,
+            Duration::from_secs(5),
+            cancellation.clone(),
+        )
+        .unwrap();
+        let waiter = handle.request_manual().await.unwrap();
+        assert_eq!(
+            events.recv().await.unwrap(),
+            CheckpointEvent::Started(Epoch::INITIAL)
+        );
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            events.recv().await.unwrap(),
+            CheckpointEvent::Failed(Epoch::INITIAL, "timeout".into())
+        );
+        assert!(matches!(
+            waiter.await,
+            Err(CalcFlowError::Internal { ref message })
+                if message.contains("checkpoint epoch 1 timed out")
+        ));
+        assert!(task.await.unwrap().is_err());
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn dropped_manual_waiter_does_not_dequeue_accepted_request() {
+        let cancellation = CancellationToken::new();
+        let (handle, mut events, task) = spawn_checkpoint_coordinator(
+            participants(),
+            Epoch::INITIAL,
+            4,
+            Duration::from_secs(30),
+            cancellation.clone(),
+        )
+        .unwrap();
+        let dropped = handle.request_manual().await.unwrap();
+        let retained = handle.request_manual().await.unwrap();
+        drop(dropped);
+
+        assert_eq!(
+            events.recv().await.unwrap(),
+            CheckpointEvent::Started(Epoch::INITIAL)
+        );
+        complete_epoch(&handle, &mut events, Epoch::INITIAL).await;
+        let retained_epoch = Epoch::INITIAL.next().unwrap();
+        assert_eq!(
+            events.recv().await.unwrap(),
+            CheckpointEvent::Started(retained_epoch)
+        );
+        complete_epoch(&handle, &mut events, retained_epoch).await;
+        assert_eq!(retained.await.unwrap(), retained_epoch);
+
+        cancellation.cancel();
+        task.await.unwrap().unwrap();
     }
 
     #[tokio::test]
