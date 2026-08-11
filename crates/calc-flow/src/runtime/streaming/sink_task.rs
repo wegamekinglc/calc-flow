@@ -1052,7 +1052,7 @@ pub(crate) async fn recover_transactional_sinks(
         let entry = manifest.sinks().get(sink.sink_id.as_str()).ok_or_else(|| {
             CalcFlowError::CheckpointMismatch {
                 message: format!(
-                    "checkpoint manifest is missing transactional sink {:?}",
+                    "checkpoint manifest is missing sink {:?}",
                     sink.sink_id.as_str()
                 ),
             }
@@ -1060,7 +1060,10 @@ pub(crate) async fn recover_transactional_sinks(
         if !validate_recovery_entry(sink, entry)? {
             continue;
         }
-        if sink.binding.recover(manifest).await.is_err() {
+        let recovery = AssertUnwindSafe(sink.binding.recover(manifest))
+            .catch_unwind()
+            .await;
+        if !matches!(recovery, Ok(Ok(()))) {
             return Err(CalcFlowError::RecoveryRequired {
                 pipeline_name: manifest.pipeline_name().into(),
                 message: format!(
@@ -1266,10 +1269,12 @@ mod tests {
 
     const PRECOMMIT_SENTINEL: &str = "precommit-secret-sentinel";
 
-    struct LeakingAbortSink;
+    struct LeakingLifecycleSink {
+        panic_on_recover: bool,
+    }
 
     #[async_trait]
-    impl TransactionalStreamSink for LeakingAbortSink {
+    impl TransactionalStreamSink for LeakingLifecycleSink {
         async fn open(&mut self) -> Result<()> {
             Ok(())
         }
@@ -1300,6 +1305,10 @@ mod tests {
         }
 
         async fn recover(&mut self, manifest: &crate::CheckpointManifest) -> Result<()> {
+            assert!(
+                !self.panic_on_recover,
+                "recover panicked for {PRECOMMIT_SENTINEL}"
+            );
             Err(CalcFlowError::Internal {
                 message: format!("recover failed for {:?}", manifest.sinks()),
             })
@@ -1700,7 +1709,9 @@ mod tests {
         let mut harness = harness_with_checkpoint(
             vec![ValidatedOrdinarySink {
                 sink_id: "redacted".into(),
-                binding: OrdinarySinkBinding::new_transactional(Box::new(LeakingAbortSink)),
+                binding: OrdinarySinkBinding::new_transactional(Box::new(LeakingLifecycleSink {
+                    panic_on_recover: false,
+                })),
             }],
             Some(SinkCheckpointPort {
                 initial_epoch: crate::Epoch::INITIAL,
@@ -2093,6 +2104,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_missing_ordinary_sink_uses_capability_neutral_diagnostic() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let closes = Arc::new(AtomicUsize::new(0));
+        let manifest = crate::CheckpointManifest::new(crate::CheckpointManifestFields {
+            pipeline_name: "pipeline".into(),
+            pipeline_fingerprint:
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            runtime_config_hash: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                .into(),
+            epoch: crate::Epoch::INITIAL,
+            created_at: Utc.with_ymd_and_hms(2026, 8, 9, 8, 0, 0).unwrap(),
+            recovery_status: crate::RecoveryStatus::Final,
+            sources: BTreeMap::new(),
+            operators: BTreeMap::new(),
+            sinks: BTreeMap::new(),
+        })
+        .unwrap();
+        let mut sinks = vec![validated_sink("ordinary", &log, None, false, None, &closes)];
+
+        let error = recover_transactional_sinks(&mut sinks, &manifest)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CalcFlowError::CheckpointMismatch { ref message }
+                if message == "checkpoint manifest is missing sink \"ordinary\""
+        ));
+    }
+
+    #[tokio::test]
     async fn pre_commit_metadata_never_leaks_through_recovery_diagnostics() {
         let manifest = crate::CheckpointManifest::new(crate::CheckpointManifestFields {
             pipeline_name: "pipeline".into(),
@@ -2119,7 +2161,58 @@ mod tests {
         .unwrap();
         let mut sinks = vec![ValidatedOrdinarySink {
             sink_id: "redacted".into(),
-            binding: OrdinarySinkBinding::new_transactional(Box::new(LeakingAbortSink)),
+            binding: OrdinarySinkBinding::new_transactional(Box::new(LeakingLifecycleSink {
+                panic_on_recover: false,
+            })),
+        }];
+
+        let error = recover_transactional_sinks(&mut sinks, &manifest)
+            .await
+            .unwrap_err();
+        let diagnostic = format!("{error:?}");
+
+        assert!(!diagnostic.contains(PRECOMMIT_SENTINEL));
+        assert!(matches!(
+            error,
+            CalcFlowError::RecoveryRequired {
+                ref pipeline_name,
+                ref message,
+            } if pipeline_name == "pipeline"
+                && message.contains("sink \"redacted\"")
+                && message.contains("epoch 1")
+        ));
+    }
+
+    #[tokio::test]
+    async fn recovery_panic_is_redacted_and_requires_forward_recovery() {
+        let manifest = crate::CheckpointManifest::new(crate::CheckpointManifestFields {
+            pipeline_name: "pipeline".into(),
+            pipeline_fingerprint:
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            runtime_config_hash: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                .into(),
+            epoch: crate::Epoch::INITIAL,
+            created_at: Utc.with_ymd_and_hms(2026, 8, 9, 8, 0, 0).unwrap(),
+            recovery_status: crate::RecoveryStatus::Final,
+            sources: BTreeMap::new(),
+            operators: BTreeMap::new(),
+            sinks: BTreeMap::from([(
+                "redacted".into(),
+                crate::SinkManifestEntry {
+                    delivery: SinkDeliveryManifest::Transactional,
+                    pre_commit: Some(BTreeMap::from([(
+                        "token".into(),
+                        serde_json::json!(PRECOMMIT_SENTINEL),
+                    )])),
+                },
+            )]),
+        })
+        .unwrap();
+        let mut sinks = vec![ValidatedOrdinarySink {
+            sink_id: "redacted".into(),
+            binding: OrdinarySinkBinding::new_transactional(Box::new(LeakingLifecycleSink {
+                panic_on_recover: true,
+            })),
         }];
 
         let error = recover_transactional_sinks(&mut sinks, &manifest)
