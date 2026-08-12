@@ -30,14 +30,14 @@ def test_streaming_error_vectors_freeze_python_safe_projection() -> None:
 
     document = json.loads(fixture.read_text(encoding="utf-8"))
 
-    assert document["schema_version"] == 1
-    assert tuple(document["categories"]) == _EXPECTED_CATEGORIES
-    assert [vector["case"] for vector in document["vectors"]] == sorted(
+    assert document["schema_version"] == 1  # nosec B101
+    assert tuple(document["categories"]) == _EXPECTED_CATEGORIES  # nosec B101
+    assert [vector["case"] for vector in document["vectors"]] == sorted(  # nosec B101
         vector["case"] for vector in document["vectors"]
     )
     for vector in document["vectors"]:
         expected = vector["expected"]
-        assert set(expected) == {
+        assert set(expected) == {  # nosec B101
             "category",
             "message",
             "job_id",
@@ -48,7 +48,7 @@ def test_streaming_error_vectors_freeze_python_safe_projection() -> None:
             "diagnostic_id",
             "position",
         }
-        assert expected["category"] in _EXPECTED_CATEGORIES
+        assert expected["category"] in _EXPECTED_CATEGORIES  # nosec B101
         rendered = json.dumps(expected, sort_keys=True)
         for sentinel in vector["private_sentinels"]:
-            assert sentinel not in rendered
+            assert sentinel not in rendered  # nosec B101
