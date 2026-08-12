@@ -19,7 +19,7 @@
       "case": "checkpoint_io",
       "private_sentinels": [
         "/srv/private/checkpoints/customer-42",
-        "postgres://admin:secret@private.example/jobs?token=raw"
+        "private-connector-payload-redaction-sentinel"
       ],
       "expected": {
         "category": "io",
@@ -54,8 +54,8 @@
     {
       "case": "source_open",
       "private_sentinels": [
-        "postgres://admin:secret@private.example/jobs?token=raw",
-        "authorization: bearer raw-secret"
+        "private-connector-payload-redaction-sentinel",
+        "private-authorization-redaction-sentinel"
       ],
       "expected": {
         "category": "connector",
@@ -72,7 +72,7 @@
     {
       "case": "task_panicked",
       "private_sentinels": [
-        "panic payload contains bearer-secret",
+        "private-panic-payload-redaction-sentinel",
         "source:orders:private-task-name",
         "91"
       ],

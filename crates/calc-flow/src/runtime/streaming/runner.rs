@@ -5139,8 +5139,8 @@ mod tests {
 
     #[tokio::test]
     async fn owning_job_status_remains_safe_during_a_concurrent_lifecycle_transition() {
-        const CURSOR_SENTINEL: &str = "raw-cursor-order-bearer-secret";
-        const PAYLOAD_SENTINEL: &str = "postgres://admin:secret@private.example";
+        const CURSOR_SENTINEL: &str = "private-cursor-order-redaction-sentinel";
+        const PAYLOAD_SENTINEL: &str = "private-connector-payload-redaction-sentinel";
         const PATH_SENTINEL: &str = "/srv/private/checkpoints/customer-42";
 
         let source = LifecycleProbe::default();

@@ -960,9 +960,9 @@ mod tests {
         supervisor::TaskId,
     };
 
-    const SECRET: &str = "postgres://admin:secret@private.example/jobs?token=raw";
+    const SECRET: &str = "private-connector-payload-redaction-sentinel";
     const PATH: &str = "/srv/private/checkpoints/customer-42";
-    const PANIC: &str = "panic payload contains bearer-secret";
+    const PANIC: &str = "private-panic-payload-redaction-sentinel";
 
     #[test]
     fn streaming_projection_maps_shared_error_vectors_without_sensitive_text() {
