@@ -155,7 +155,8 @@ mod tests {
             .unwrap();
         let invalid_temporary_directory = directory.path().join("not-a-directory");
         std::fs::write(&invalid_temporary_directory, b"sentinel").unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let test_executable = std::env::args_os().next().unwrap();
+        let output = std::process::Command::new(test_executable)
             .args([
                 "--exact",
                 "runtime::streaming::checkpoint::tests::managed_checkpoint_runtime_rejects_subprocess_descendant_without_temporary_storage",
