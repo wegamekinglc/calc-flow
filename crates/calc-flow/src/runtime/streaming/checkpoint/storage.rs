@@ -12,13 +12,11 @@ use std::{
 
 use fs2::FileExt;
 use parking_lot::Mutex;
-use sha2::{Digest as _, Sha256};
 
 use crate::{CalcFlowError, CancellationToken, LocalStateBackend};
 
 const STATE_CHILD: &str = "state";
 const MANIFEST_CHILD: &str = "manifests";
-const LEASE_DIRECTORY: &str = "calc-flow-managed-checkpoint-leases-v1";
 const PREFLIGHT_PROBE_PREFIX: &str = ".tmp-checkpoint-preflight";
 
 static PROCESS_LEASES: LazyLock<Mutex<BTreeSet<PathBuf>>> =
@@ -48,27 +46,52 @@ impl ManagedCheckpointRuntime {
         self,
         cancellation: &CancellationToken,
     ) -> crate::Result<OpenedManagedCheckpointRuntime> {
-        if cancellation.is_cancelled() {
-            return Err(cancelled_open());
-        }
-        let requested = self.managed_root;
-        let canonical_root = prepare_managed_root(&requested).await?;
-        let lease = acquire_managed_root_lease(canonical_root.clone()).await?;
-        let state_root = prepare_fixed_child(&canonical_root, STATE_CHILD).await?;
-        let manifest_root = prepare_fixed_child(&canonical_root, MANIFEST_CHILD).await?;
-        preflight_directory(&state_root).await?;
-        preflight_directory(&manifest_root).await?;
-        let state_backend = LocalStateBackend::new(&state_root)
-            .await
-            .map_err(|_| initialization_error())?;
-        if cancellation.is_cancelled() {
-            return Err(cancelled_open());
-        }
-        Ok(OpenedManagedCheckpointRuntime {
-            state_backend: Arc::new(state_backend),
-            manifest_root,
-            _lease: lease,
-        })
+        ensure_open_active(cancellation)?;
+        open_managed_storage(self.managed_root, cancellation).await
+    }
+}
+
+async fn open_managed_storage(
+    requested: PathBuf,
+    cancellation: &CancellationToken,
+) -> crate::Result<OpenedManagedCheckpointRuntime> {
+    let prepared = prepare_managed_namespace(&requested).await?;
+    let state_backend = LocalStateBackend::new(&prepared.state_root)
+        .await
+        .map_err(|_| initialization_error())?;
+    ensure_open_active(cancellation)?;
+    Ok(OpenedManagedCheckpointRuntime {
+        state_backend: Arc::new(state_backend),
+        manifest_root: prepared.manifest_root,
+        _lease: prepared.lease,
+    })
+}
+
+struct PreparedManagedNamespace {
+    state_root: PathBuf,
+    manifest_root: PathBuf,
+    lease: ManagedRootLease,
+}
+
+async fn prepare_managed_namespace(requested: &Path) -> crate::Result<PreparedManagedNamespace> {
+    let canonical_root = prepare_managed_root(requested).await?;
+    let lease = acquire_managed_root_lease(canonical_root.clone()).await?;
+    let state_root = prepare_fixed_child(&canonical_root, STATE_CHILD).await?;
+    let manifest_root = prepare_fixed_child(&canonical_root, MANIFEST_CHILD).await?;
+    preflight_directory(&state_root).await?;
+    preflight_directory(&manifest_root).await?;
+    Ok(PreparedManagedNamespace {
+        state_root,
+        manifest_root,
+        lease,
+    })
+}
+
+fn ensure_open_active(cancellation: &CancellationToken) -> crate::Result<()> {
+    if cancellation.is_cancelled() {
+        Err(cancelled_open())
+    } else {
+        Ok(())
     }
 }
 
@@ -158,26 +181,46 @@ async fn prepare_managed_root(requested: &Path) -> crate::Result<PathBuf> {
 async fn prepare_fixed_child(root: &Path, child: &str) -> crate::Result<PathBuf> {
     let root = root.to_owned();
     let child = child.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let requested = root.join(child);
-        match std::fs::symlink_metadata(&requested) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                return Err(initialization_error());
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir(&requested).map_err(|_| initialization_error())?;
-            }
-            Err(_) => return Err(initialization_error()),
-        }
-        let canonical = std::fs::canonicalize(&requested).map_err(|_| initialization_error())?;
-        if canonical.parent() != Some(root.as_path()) {
-            return Err(initialization_error());
-        }
+    tokio::task::spawn_blocking(move || prepare_fixed_child_blocking(&root, &child))
+        .await
+        .map_err(|_| initialization_error())?
+}
+
+fn prepare_fixed_child_blocking(root: &Path, child: &str) -> crate::Result<PathBuf> {
+    let requested = root.join(child);
+    ensure_fixed_child_directory(&requested)?;
+    let canonical = std::fs::canonicalize(&requested).map_err(|_| initialization_error())?;
+    validate_fixed_child_parent(root, canonical)
+}
+
+fn ensure_fixed_child_directory(requested: &Path) -> crate::Result<()> {
+    match std::fs::symlink_metadata(requested) {
+        Ok(metadata) => validate_fixed_child_metadata(&metadata),
+        Err(error) => create_missing_fixed_child(requested, &error),
+    }
+}
+
+fn validate_fixed_child_metadata(metadata: &std::fs::Metadata) -> crate::Result<()> {
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        Err(initialization_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn create_missing_fixed_child(requested: &Path, error: &std::io::Error) -> crate::Result<()> {
+    if error.kind() != std::io::ErrorKind::NotFound {
+        return Err(initialization_error());
+    }
+    std::fs::create_dir(requested).map_err(|_| initialization_error())
+}
+
+fn validate_fixed_child_parent(root: &Path, canonical: PathBuf) -> crate::Result<PathBuf> {
+    if canonical.parent() == Some(root) {
         Ok(canonical)
-    })
-    .await
-    .map_err(|_| initialization_error())?
+    } else {
+        Err(initialization_error())
+    }
 }
 
 async fn preflight_directory(root: &Path) -> crate::Result<()> {
@@ -214,48 +257,70 @@ async fn acquire_managed_root_lease(root: PathBuf) -> crate::Result<ManagedRootL
 }
 
 fn acquire_managed_root_lease_blocking(root: PathBuf) -> crate::Result<ManagedRootLease> {
-    let mut process_leases = PROCESS_LEASES.lock();
-    if process_leases
-        .iter()
-        .any(|leased| paths_overlap(leased, &root))
-    {
-        return Err(lease_conflict());
-    }
-    let lease_directory = std::env::temp_dir().join(LEASE_DIRECTORY);
-    std::fs::create_dir_all(&lease_directory).map_err(|_| initialization_error())?;
-    validate_directory(&lease_directory)?;
-    let lease_directory =
-        std::fs::canonicalize(lease_directory).map_err(|_| initialization_error())?;
-    let ancestors = root.ancestors().collect::<Vec<_>>();
-    let mut files = Vec::with_capacity(ancestors.len());
-    for ancestor in ancestors.iter().rev() {
-        let hash = hex::encode(Sha256::digest(ancestor.as_os_str().as_encoded_bytes()));
-        let path = lease_directory.join(format!("{hash}.lock"));
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)
-            .map_err(|_| initialization_error())?;
-        let result = if *ancestor == root.as_path() {
-            FileExt::try_lock_exclusive(&file)
-        } else {
-            FileExt::try_lock_shared(&file)
-        };
-        match result {
-            Ok(()) => files.push(file),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                return Err(lease_conflict());
-            }
-            Err(_) => return Err(initialization_error()),
-        }
-    }
-    process_leases.insert(root.clone());
+    register_process_lease(&root)?;
+    let files = acquire_directory_locks(&root).inspect_err(|_| {
+        unregister_process_lease(&root);
+    })?;
     Ok(ManagedRootLease {
         canonical_root: root,
         files,
     })
+}
+
+fn register_process_lease(root: &Path) -> crate::Result<()> {
+    let mut process_leases = PROCESS_LEASES.lock();
+    if process_leases
+        .iter()
+        .any(|leased| paths_overlap(leased, root))
+    {
+        return Err(lease_conflict());
+    }
+    process_leases.insert(root.to_owned());
+    Ok(())
+}
+
+fn unregister_process_lease(root: &Path) {
+    PROCESS_LEASES.lock().remove(root);
+}
+
+fn acquire_directory_locks(root: &Path) -> crate::Result<Vec<File>> {
+    let ancestors = root.ancestors().collect::<Vec<_>>();
+    let mut files = Vec::with_capacity(ancestors.len());
+    for ancestor in ancestors.iter().rev() {
+        let file = open_directory_for_lock(ancestor).map_err(|_| initialization_error())?;
+        try_lock_directory(&file, *ancestor == root)?;
+        files.push(file);
+    }
+    Ok(files)
+}
+
+#[cfg(not(windows))]
+fn open_directory_for_lock(path: &Path) -> std::io::Result<File> {
+    File::open(path)
+}
+
+#[cfg(windows)]
+fn open_directory_for_lock(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+fn try_lock_directory(file: &File, exclusive: bool) -> crate::Result<()> {
+    let result = if exclusive {
+        FileExt::try_lock_exclusive(file)
+    } else {
+        FileExt::try_lock_shared(file)
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Err(lease_conflict()),
+        Err(_) => Err(initialization_error()),
+    }
 }
 
 fn paths_overlap(left: &Path, right: &Path) -> bool {

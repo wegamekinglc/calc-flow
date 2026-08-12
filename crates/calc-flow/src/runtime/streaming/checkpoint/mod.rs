@@ -130,4 +130,47 @@ mod tests {
         assert!(matches!(descendant, crate::CalcFlowError::Conflict { .. }));
         drop(opened);
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_checkpoint_runtime_rejects_subprocess_descendant_without_temporary_storage() {
+        const CHILD_ROOT: &str = "CALC_FLOW_CHECKPOINT_LEASE_CHILD_ROOT";
+
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let error = ManagedCheckpointRuntime::new(root)
+                .unwrap()
+                .open(&crate::CancellationToken::new())
+                .await
+                .unwrap_err();
+            assert!(matches!(error, crate::CalcFlowError::Conflict { .. }));
+            return;
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("managed");
+        let opened = ManagedCheckpointRuntime::new(&root)
+            .unwrap()
+            .open(&crate::CancellationToken::new())
+            .await
+            .unwrap();
+        let invalid_temporary_directory = directory.path().join("not-a-directory");
+        std::fs::write(&invalid_temporary_directory, b"sentinel").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime::streaming::checkpoint::tests::managed_checkpoint_runtime_rejects_subprocess_descendant_without_temporary_storage",
+                "--nocapture",
+            ])
+            .env(CHILD_ROOT, root.join("nested"))
+            .env("TMPDIR", invalid_temporary_directory)
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "child failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        drop(opened);
+    }
 }
