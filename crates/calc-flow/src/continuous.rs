@@ -4,6 +4,90 @@
 //! runtime. It intentionally lives below `calc_flow::continuous` while the
 //! crate-root breaking cutover remains deferred.
 //!
+//! The complete lifecycle owns connectors from binding through terminal
+//! cleanup:
+//!
+//! ```no_run
+//! use std::collections::BTreeMap;
+//! use async_trait::async_trait;
+//! use calc_flow::{
+//!     Batch, ExpressionOperator, JsonMap, PipelineBuilder, Result, StreamRequirements,
+//!     UdfRegistry,
+//!     continuous::{
+//!         Cursor, ManagedCheckpointRuntime, NativeWatermarkCapability, ReplayPositioning,
+//!         SinkBinding, SinkRecovery, SourceBinding, SourceCapabilities,
+//!         SourceDeliveryCapability, SourceEvent, SourceSchema, StreamSource, StreamingRunner,
+//!         TransactionalStreamSink,
+//!     },
+//! };
+//!
+//! struct Orders;
+//!
+//! #[async_trait]
+//! impl StreamSource for Orders {
+//!     fn capabilities(&self) -> SourceCapabilities {
+//!         SourceCapabilities {
+//!             replay_positioning: ReplayPositioning::ExactPauseReportAndSeek,
+//!             delivery: SourceDeliveryCapability::Lossless,
+//!             max_batch_rows: 1,
+//!             max_batch_bytes: 1024,
+//!             schema: SourceSchema::DynamicOrUnknown,
+//!             native_watermarks: NativeWatermarkCapability::NeverEmits,
+//!         }
+//!     }
+//!     async fn open(&mut self, _: Option<Cursor>) -> Result<()> { Ok(()) }
+//!     async fn next(&mut self) -> Result<Option<SourceEvent>> {
+//!         std::future::pending().await
+//!     }
+//!     async fn close(&mut self) -> Result<()> { Ok(()) }
+//! }
+//!
+//! struct Archive;
+//!
+//! #[async_trait]
+//! impl TransactionalStreamSink for Archive {
+//!     async fn open(&mut self) -> Result<()> { Ok(()) }
+//!     async fn begin_epoch(&mut self, _: calc_flow::Epoch) -> Result<()> { Ok(()) }
+//!     async fn write(&mut self, _: &Batch) -> Result<()> { Ok(()) }
+//!     async fn pre_commit(&mut self, _: calc_flow::Epoch) -> Result<JsonMap> {
+//!         Ok(JsonMap::new())
+//!     }
+//!     async fn commit(&mut self, _: calc_flow::Epoch, _: &JsonMap) -> Result<()> { Ok(()) }
+//!     async fn abort(&mut self, _: calc_flow::Epoch, _: Option<&JsonMap>) -> Result<()> { Ok(()) }
+//!     async fn recover(&mut self, _: &SinkRecovery) -> Result<()> { Ok(()) }
+//!     async fn close(&mut self) -> Result<()> { Ok(()) }
+//! }
+//!
+//! # #[tokio::main]
+//! # async fn main() -> Result<()> {
+//! let plan = PipelineBuilder::new("orders")?
+//!     .add_node(
+//!         "total",
+//!         Box::new(ExpressionOperator::new(
+//!             "total", "total = price * quantity", Vec::new(), None, Vec::new(),
+//!         )?),
+//!     )?
+//!     .compile_stream(&UdfRegistry::new().snapshot(), &StreamRequirements::default())?;
+//! let source_id = plan.source_binding_ids()[0].to_owned();
+//! let output_id = plan.sink_binding_ids()[0].to_owned();
+//! let runner = StreamingRunner::new(
+//!     plan,
+//!     BTreeMap::from([(source_id, SourceBinding::new(Orders))]),
+//!     BTreeMap::from([(
+//!         output_id,
+//!         vec![SinkBinding::transactional("archive", Archive)?],
+//!     )]),
+//!     ManagedCheckpointRuntime::new(".calc-flow-continuous")?,
+//! )?;
+//! let job = runner.start().await?;
+//! let completed_epoch = job.trigger_checkpoint().await?;
+//! assert_eq!(job.status().checkpoint.last_completed_epoch, Some(completed_epoch));
+//! let outcome = job.shutdown().await;
+//! assert!(outcome.completed_epoch >= Some(completed_epoch));
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! A runner is a one-shot owner. Calling [`StreamingRunner::start`] consumes
 //! it and returns the sole [`StreamingJob`] lifecycle owner.
 //!
@@ -199,7 +283,7 @@ pub struct SourceCapabilities {
 }
 
 /// One connector event; checkpoint barriers remain runtime-owned.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum SourceEvent {
     /// One data batch and its replay position.
     Data { batch: Batch, cursor: Cursor },
@@ -207,6 +291,21 @@ pub enum SourceEvent {
     Watermark(crate::EventTime),
     /// A temporary idle observation that does not end the source.
     Idle,
+}
+
+impl fmt::Debug for SourceEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Data { batch, cursor } => formatter
+                .debug_struct("Data")
+                .field("kind", &batch.kind())
+                .field("rows", &batch.num_rows())
+                .field("cursor", cursor)
+                .finish(),
+            Self::Watermark(value) => formatter.debug_tuple("Watermark").field(value).finish(),
+            Self::Idle => formatter.write_str("Idle"),
+        }
+    }
 }
 
 /// Watermark behavior attached immutably to one source binding.
@@ -377,12 +476,24 @@ pub trait StreamSink: Send {
 }
 
 /// Sink-scoped recovery evidence created by the runtime.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct SinkRecovery {
     epoch: Epoch,
     terminal: bool,
     delivery: SinkDelivery,
     pre_commit: JsonMap,
+}
+
+impl fmt::Debug for SinkRecovery {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SinkRecovery")
+            .field("epoch", &self.epoch)
+            .field("terminal", &self.terminal)
+            .field("delivery", &self.delivery)
+            .field("pre_commit", &"<redacted>")
+            .finish()
+    }
 }
 
 impl SinkRecovery {
@@ -596,6 +707,11 @@ fn validate_sink_id(sink_id: &str) -> Result<()> {
 /// Single-root local state and manifest namespace owner.
 pub struct ManagedCheckpointRuntime {
     inner: InternalManagedCheckpointRuntime,
+    #[cfg(test)]
+    fault: Option<(
+        crate::runtime::streaming::runner::CheckpointFaultPoint,
+        crate::runtime::streaming::runner::CheckpointFaultMode,
+    )>,
 }
 
 impl ManagedCheckpointRuntime {
@@ -606,8 +722,22 @@ impl ManagedCheckpointRuntime {
     /// Returns a safe validation error when the lexical path is empty.
     pub fn new(managed_root: impl Into<PathBuf>) -> Result<Self> {
         InternalManagedCheckpointRuntime::new(managed_root)
-            .map(|inner| Self { inner })
+            .map(|inner| Self {
+                inner,
+                #[cfg(test)]
+                fault: None,
+            })
             .map_err(safe_error)
+    }
+
+    #[cfg(test)]
+    fn with_fault_for_test(
+        mut self,
+        point: crate::runtime::streaming::runner::CheckpointFaultPoint,
+        mode: crate::runtime::streaming::runner::CheckpointFaultMode,
+    ) -> Self {
+        self.fault = Some((point, mode));
+        self
     }
 }
 
@@ -715,8 +845,29 @@ impl StreamingRunner {
             edge_budget: config.edge_budget,
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
         };
-        OneShotContinuousRunner::new()
-            .start_checkpointed_with_config(spec, checkpoints.inner, config)
+        #[cfg(test)]
+        let start = match checkpoints.fault {
+            Some((point, mode)) => OneShotContinuousRunner::new()
+                .start_checkpointed_with_config_and_fault(
+                    spec,
+                    checkpoints.inner,
+                    config,
+                    point,
+                    mode,
+                ),
+            None => OneShotContinuousRunner::new().start_checkpointed_with_config(
+                spec,
+                checkpoints.inner,
+                config,
+            ),
+        };
+        #[cfg(not(test))]
+        let start = OneShotContinuousRunner::new().start_checkpointed_with_config(
+            spec,
+            checkpoints.inner,
+            config,
+        );
+        start
             .await
             .map(|inner| StreamingJob { inner })
             .map_err(|failure| start_error(job_id, &failure))
@@ -754,10 +905,7 @@ impl StreamingJob {
     ///
     /// Returns a safe streaming error if the request cannot reach the completed point.
     pub async fn trigger_checkpoint(&self) -> Result<Epoch> {
-        self.inner
-            .trigger_checkpoint()
-            .await
-            .map_err(|error| lifecycle_error(self.id(), error))
+        self.inner.trigger_checkpoint().await
     }
 
     /// Requests graceful shutdown and returns the immutable terminal outcome.
@@ -784,37 +932,89 @@ fn validate_binding_shapes(
     sources: &BTreeMap<String, SourceBinding>,
     sinks: &BTreeMap<String, Vec<SinkBinding>>,
 ) -> Result<()> {
+    if sources
+        .keys()
+        .any(|source_id| crate::json::validate_portable_identifier("source", source_id).is_err())
+    {
+        return Err(invalid_shape_id(
+            ComponentKind::Source,
+            "source binding ID is not a portable identifier",
+        ));
+    }
+    if sinks
+        .keys()
+        .any(|output_id| crate::json::validate_portable_identifier("output", output_id).is_err())
+    {
+        return Err(invalid_shape_id(
+            ComponentKind::Sink,
+            "sink output ID is not a portable identifier",
+        ));
+    }
     let expected_sources = plan
         .source_binding_ids()
         .into_iter()
         .collect::<BTreeSet<_>>();
     let actual_sources = sources.keys().map(String::as_str).collect::<BTreeSet<_>>();
-    if expected_sources != actual_sources {
-        return Err(CalcFlowError::InvalidArgument {
-            field: "sources".into(),
-            message: "must exactly cover the stream plan source bindings".into(),
-        });
+    if let Some(source_id) = actual_sources.difference(&expected_sources).next() {
+        return Err(shape_error(
+            ComponentKind::Source,
+            source_id,
+            format!("source binding {source_id:?} does not match a compiled external input"),
+        ));
+    }
+    if let Some(source_id) = expected_sources.difference(&actual_sources).next() {
+        return Err(shape_error(
+            ComponentKind::Source,
+            source_id,
+            format!("source bindings are missing external input {source_id:?}"),
+        ));
     }
     let expected_outputs = plan.sink_binding_ids().into_iter().collect::<BTreeSet<_>>();
     let actual_outputs = sinks.keys().map(String::as_str).collect::<BTreeSet<_>>();
-    if expected_outputs != actual_outputs || sinks.values().any(Vec::is_empty) {
-        return Err(CalcFlowError::InvalidArgument {
-            field: "sinks".into(),
-            message: "must route at least one sink for every stream plan output".into(),
-        });
+    if let Some(output_id) = actual_outputs.difference(&expected_outputs).next() {
+        return Err(shape_error(
+            ComponentKind::Sink,
+            output_id,
+            format!("sink route {output_id:?} does not match a compiled graph output"),
+        ));
+    }
+    if let Some(output_id) = expected_outputs
+        .difference(&actual_outputs)
+        .copied()
+        .next()
+        .or_else(|| {
+            sinks
+                .iter()
+                .find_map(|(output_id, bindings)| bindings.is_empty().then_some(output_id.as_str()))
+        })
+    {
+        return Err(shape_error(
+            ComponentKind::Sink,
+            output_id,
+            format!("sink bindings are missing graph output {output_id:?}"),
+        ));
     }
     let mut sink_ids = BTreeSet::new();
-    if sinks
+    if let Some(sink_id) = sinks
         .values()
         .flatten()
-        .any(|sink| !sink_ids.insert(sink.sink_id()))
+        .find_map(|sink| (!sink_ids.insert(sink.sink_id())).then(|| sink.sink_id().to_owned()))
     {
-        return Err(CalcFlowError::InvalidArgument {
-            field: "sinks".into(),
-            message: "sink IDs must be globally unique".into(),
-        });
+        return Err(shape_error(
+            ComponentKind::Sink,
+            &sink_id,
+            format!("sink ID {sink_id:?} is configured for more than one graph output"),
+        ));
     }
     Ok(())
+}
+
+fn shape_error(kind: ComponentKind, id: &str, message: String) -> CalcFlowError {
+    CalcFlowError::Streaming(projection::validation_error(kind, Some(id), message))
+}
+
+fn invalid_shape_id(kind: ComponentKind, message: &str) -> CalcFlowError {
+    CalcFlowError::Streaming(projection::validation_error(kind, None, message.into()))
 }
 
 fn allocate_job_id() -> Result<u64> {
@@ -834,17 +1034,482 @@ fn allocate_job_id() -> Result<u64> {
     reason = "the safe conversion seam owns and drops the raw error"
 )]
 fn safe_error(error: CalcFlowError) -> CalcFlowError {
+    if matches!(error, CalcFlowError::Streaming(_)) {
+        return error;
+    }
     CalcFlowError::Streaming(projection::project_public_error(None, &error))
-}
-
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "the safe conversion seam owns and drops the raw error"
-)]
-fn lifecycle_error(job_id: u64, error: CalcFlowError) -> CalcFlowError {
-    CalcFlowError::Streaming(projection::project_public_error(Some(job_id), &error))
 }
 
 fn start_error(job_id: u64, failure: &StartFailure) -> CalcFlowError {
     CalcFlowError::Streaming(projection::project_start_failure(job_id, failure))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeMap, time::Duration};
+
+    use async_trait::async_trait;
+
+    use super::{
+        Cursor, ManagedCheckpointRuntime, NativeWatermarkCapability, ReplayPositioning,
+        SinkBinding, SinkRecovery, SourceBinding, SourceCapabilities, SourceDeliveryCapability,
+        SourceEvent, SourceSchema, StreamSource, StreamingErrorCategory, StreamingRunner,
+        TransactionalStreamSink,
+    };
+    use crate::{
+        Batch, CalcFlowError, ExpressionOperator, JsonMap, PipelineBuilder, Result,
+        StreamRequirements, UdfRegistry,
+        runtime::streaming::runner::{CheckpointFaultMode, CheckpointFaultPoint},
+    };
+
+    struct PendingSource;
+
+    #[async_trait]
+    impl StreamSource for PendingSource {
+        fn capabilities(&self) -> SourceCapabilities {
+            SourceCapabilities {
+                replay_positioning: ReplayPositioning::ExactPauseReportAndSeek,
+                delivery: SourceDeliveryCapability::Lossless,
+                max_batch_rows: 1,
+                max_batch_bytes: 1024,
+                schema: SourceSchema::DynamicOrUnknown,
+                native_watermarks: NativeWatermarkCapability::EmitsNative,
+            }
+        }
+
+        async fn open(&mut self, _cursor: Option<Cursor>) -> Result<()> {
+            Ok(())
+        }
+
+        async fn next(&mut self) -> Result<Option<SourceEvent>> {
+            std::future::pending().await
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct TransactionalSink;
+
+    struct FailingCommitSink;
+
+    struct FailingPreCommitSink;
+
+    struct PanickingPreCommitSink;
+
+    #[async_trait]
+    impl TransactionalStreamSink for TransactionalSink {
+        async fn open(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn begin_epoch(&mut self, _epoch: crate::Epoch) -> Result<()> {
+            Ok(())
+        }
+
+        async fn write(&mut self, _batch: &Batch) -> Result<()> {
+            Ok(())
+        }
+
+        async fn pre_commit(&mut self, _epoch: crate::Epoch) -> Result<JsonMap> {
+            Ok(JsonMap::new())
+        }
+
+        async fn commit(&mut self, _epoch: crate::Epoch, _pre_commit: &JsonMap) -> Result<()> {
+            Ok(())
+        }
+
+        async fn abort(
+            &mut self,
+            _epoch: crate::Epoch,
+            _pre_commit: Option<&JsonMap>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn recover(&mut self, _recovery: &SinkRecovery) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl TransactionalStreamSink for FailingCommitSink {
+        async fn open(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn begin_epoch(&mut self, _epoch: crate::Epoch) -> Result<()> {
+            Ok(())
+        }
+
+        async fn write(&mut self, _batch: &Batch) -> Result<()> {
+            Ok(())
+        }
+
+        async fn pre_commit(&mut self, _epoch: crate::Epoch) -> Result<JsonMap> {
+            Ok(JsonMap::new())
+        }
+
+        async fn commit(&mut self, _epoch: crate::Epoch, _pre_commit: &JsonMap) -> Result<()> {
+            Err(CalcFlowError::Internal {
+                message: "credential-canary".into(),
+            })
+        }
+
+        async fn abort(
+            &mut self,
+            _epoch: crate::Epoch,
+            _pre_commit: Option<&JsonMap>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn recover(&mut self, _recovery: &SinkRecovery) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl TransactionalStreamSink for FailingPreCommitSink {
+        async fn open(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn begin_epoch(&mut self, _epoch: crate::Epoch) -> Result<()> {
+            Ok(())
+        }
+
+        async fn write(&mut self, _batch: &Batch) -> Result<()> {
+            Ok(())
+        }
+
+        async fn pre_commit(&mut self, _epoch: crate::Epoch) -> Result<JsonMap> {
+            Err(CalcFlowError::Internal {
+                message: "credential-canary".into(),
+            })
+        }
+
+        async fn commit(&mut self, _epoch: crate::Epoch, _pre_commit: &JsonMap) -> Result<()> {
+            Ok(())
+        }
+
+        async fn abort(
+            &mut self,
+            _epoch: crate::Epoch,
+            _pre_commit: Option<&JsonMap>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn recover(&mut self, _recovery: &SinkRecovery) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl TransactionalStreamSink for PanickingPreCommitSink {
+        async fn open(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn begin_epoch(&mut self, _epoch: crate::Epoch) -> Result<()> {
+            Ok(())
+        }
+
+        async fn write(&mut self, _batch: &Batch) -> Result<()> {
+            Ok(())
+        }
+
+        async fn pre_commit(&mut self, _epoch: crate::Epoch) -> Result<JsonMap> {
+            panic!("credential-canary")
+        }
+
+        async fn commit(&mut self, _epoch: crate::Epoch, _pre_commit: &JsonMap) -> Result<()> {
+            Ok(())
+        }
+
+        async fn abort(
+            &mut self,
+            _epoch: crate::Epoch,
+            _pre_commit: Option<&JsonMap>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn recover(&mut self, _recovery: &SinkRecovery) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_checkpoint_io_fault_keeps_public_category_and_coordinates() {
+        let plan = PipelineBuilder::new("checkpoint-io")
+            .unwrap()
+            .add_node(
+                "operator",
+                Box::new(
+                    ExpressionOperator::new(
+                        "operator",
+                        "value = value",
+                        Vec::new(),
+                        None,
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap()
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements::default(),
+            )
+            .unwrap();
+        let source_id = plan.source_binding_ids()[0].to_owned();
+        let output_id = plan.sink_binding_ids()[0].to_owned();
+        let directory = tempfile::tempdir().unwrap();
+        let checkpoints = ManagedCheckpointRuntime::new(directory.path().join("managed"))
+            .unwrap()
+            .with_fault_for_test(CheckpointFaultPoint::ManifestWrite, CheckpointFaultMode::Io);
+        let job = StreamingRunner::new(
+            plan,
+            BTreeMap::from([(source_id, SourceBinding::new(PendingSource))]),
+            BTreeMap::from([(
+                output_id,
+                vec![SinkBinding::transactional("sink", TransactionalSink).unwrap()],
+            )]),
+            checkpoints,
+        )
+        .unwrap()
+        .start()
+        .await
+        .unwrap();
+
+        let error = tokio::time::timeout(Duration::from_secs(5), job.trigger_checkpoint())
+            .await
+            .expect("the injected checkpoint fault must settle")
+            .unwrap_err();
+        let CalcFlowError::Streaming(error) = error else {
+            panic!("manual checkpoint failures must use the streaming boundary");
+        };
+
+        assert_eq!(error.category(), StreamingErrorCategory::Io);
+        assert_eq!(error.epoch(), Some(crate::Epoch::INITIAL));
+        assert_eq!(
+            error.component_kind(),
+            Some(super::ComponentKind::Checkpoint)
+        );
+        assert_eq!(error.job_id(), Some(job.id()));
+        assert!(!format!("{error:?}").contains(directory.path().to_str().unwrap()));
+        let status = job.status();
+        assert_eq!(
+            status.checkpoint.failure_category,
+            Some(StreamingErrorCategory::Io)
+        );
+        assert_eq!(status.checkpoint.current_epoch, Some(crate::Epoch::INITIAL));
+        let _ = job.wait().await;
+    }
+
+    #[tokio::test]
+    async fn manual_checkpoint_sink_commit_failure_keeps_connector_coordinates() {
+        let plan = PipelineBuilder::new("checkpoint-sink-failure")
+            .unwrap()
+            .add_node(
+                "operator",
+                Box::new(
+                    ExpressionOperator::new(
+                        "operator",
+                        "value = value",
+                        Vec::new(),
+                        None,
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap()
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements::default(),
+            )
+            .unwrap();
+        let source_id = plan.source_binding_ids()[0].to_owned();
+        let output_id = plan.sink_binding_ids()[0].to_owned();
+        let directory = tempfile::tempdir().unwrap();
+        let job = StreamingRunner::new(
+            plan,
+            BTreeMap::from([(source_id, SourceBinding::new(PendingSource))]),
+            BTreeMap::from([(
+                output_id,
+                vec![SinkBinding::transactional("archive", FailingCommitSink).unwrap()],
+            )]),
+            ManagedCheckpointRuntime::new(directory.path().join("managed")).unwrap(),
+        )
+        .unwrap()
+        .start()
+        .await
+        .unwrap();
+
+        let error = tokio::time::timeout(Duration::from_secs(5), job.trigger_checkpoint())
+            .await
+            .expect("the sink commit failure must settle")
+            .unwrap_err();
+        let CalcFlowError::Streaming(error) = error else {
+            panic!("manual checkpoint failures must use the streaming boundary");
+        };
+
+        assert_eq!(error.category(), StreamingErrorCategory::Connector);
+        assert_eq!(error.component_kind(), Some(super::ComponentKind::Sink));
+        assert_eq!(error.component_id(), Some("archive"));
+        assert_eq!(error.epoch(), Some(crate::Epoch::INITIAL));
+        assert_eq!(
+            error.checkpoint_phase(),
+            Some(super::CheckpointPhase::ManifestDurable)
+        );
+        assert_eq!(
+            error.message(),
+            "sink \"archive\" commit failed for checkpoint epoch 1"
+        );
+        assert!(!format!("{error:?}").contains("credential-canary"));
+        let outcome = job.wait().await;
+        assert_eq!(outcome.state, super::JobState::RecoveryRequired);
+        let outcome_error = outcome
+            .errors
+            .iter()
+            .find(|error| error.component_id() == Some("archive"))
+            .expect("the terminal outcome must retain the sink commit failure");
+        assert_eq!(outcome_error.category(), StreamingErrorCategory::Connector);
+        assert_eq!(outcome_error.epoch(), Some(crate::Epoch::INITIAL));
+        assert_eq!(
+            outcome_error.checkpoint_phase(),
+            Some(super::CheckpointPhase::ManifestDurable)
+        );
+        assert_eq!(outcome_error.message(), error.message());
+    }
+
+    #[tokio::test]
+    async fn accepted_manual_checkpoint_reports_precommit_connector_failure() {
+        let plan = PipelineBuilder::new("checkpoint-precommit-failure")
+            .unwrap()
+            .add_node(
+                "operator",
+                Box::new(
+                    ExpressionOperator::new(
+                        "operator",
+                        "value = value",
+                        Vec::new(),
+                        None,
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap()
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements::default(),
+            )
+            .unwrap();
+        let source_id = plan.source_binding_ids()[0].to_owned();
+        let output_id = plan.sink_binding_ids()[0].to_owned();
+        let directory = tempfile::tempdir().unwrap();
+        let job = StreamingRunner::new(
+            plan,
+            BTreeMap::from([(source_id, SourceBinding::new(PendingSource))]),
+            BTreeMap::from([(
+                output_id,
+                vec![SinkBinding::transactional("archive", FailingPreCommitSink).unwrap()],
+            )]),
+            ManagedCheckpointRuntime::new(directory.path().join("managed")).unwrap(),
+        )
+        .unwrap()
+        .start()
+        .await
+        .unwrap();
+
+        let error = tokio::time::timeout(Duration::from_secs(5), job.trigger_checkpoint())
+            .await
+            .expect("the sink pre-commit failure must settle")
+            .unwrap_err();
+        let CalcFlowError::Streaming(error) = error else {
+            panic!("accepted manual failures must use the streaming boundary");
+        };
+
+        assert_eq!(error.category(), StreamingErrorCategory::Connector);
+        assert_eq!(error.component_kind(), Some(super::ComponentKind::Sink));
+        assert_eq!(error.component_id(), Some("archive"));
+        assert_eq!(error.epoch(), Some(crate::Epoch::INITIAL));
+        assert!(!format!("{error:?}").contains("credential-canary"));
+        let _ = job.wait().await;
+    }
+
+    #[tokio::test]
+    async fn accepted_manual_checkpoint_reports_contained_precommit_panic() {
+        let plan = PipelineBuilder::new("checkpoint-precommit-panic")
+            .unwrap()
+            .add_node(
+                "operator",
+                Box::new(
+                    ExpressionOperator::new(
+                        "operator",
+                        "value = value",
+                        Vec::new(),
+                        None,
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap()
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements::default(),
+            )
+            .unwrap();
+        let source_id = plan.source_binding_ids()[0].to_owned();
+        let output_id = plan.sink_binding_ids()[0].to_owned();
+        let directory = tempfile::tempdir().unwrap();
+        let job = StreamingRunner::new(
+            plan,
+            BTreeMap::from([(source_id, SourceBinding::new(PendingSource))]),
+            BTreeMap::from([(
+                output_id,
+                vec![SinkBinding::transactional("archive", PanickingPreCommitSink).unwrap()],
+            )]),
+            ManagedCheckpointRuntime::new(directory.path().join("managed")).unwrap(),
+        )
+        .unwrap()
+        .start()
+        .await
+        .unwrap();
+
+        let error = tokio::time::timeout(Duration::from_secs(5), job.trigger_checkpoint())
+            .await
+            .expect("the contained sink panic must settle")
+            .unwrap_err();
+        let CalcFlowError::Streaming(error) = error else {
+            panic!("accepted manual failures must use the streaming boundary");
+        };
+
+        assert_eq!(error.category(), StreamingErrorCategory::TaskPanicked);
+        assert_eq!(error.epoch(), Some(crate::Epoch::INITIAL));
+        assert!(!format!("{error:?}").contains("credential-canary"));
+        let _ = job.wait().await;
+    }
 }

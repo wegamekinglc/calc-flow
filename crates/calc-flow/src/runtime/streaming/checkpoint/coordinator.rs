@@ -103,19 +103,37 @@ enum CoordinatorCommand {
 pub(crate) enum ManualCheckpointFailure {
     Cancelled,
     Failed {
-        message: String,
+        category: ManualCheckpointFailureCategory,
+        epoch: Option<Epoch>,
+        phase: Option<CheckpointPhase>,
     },
     RecoveryRequired {
         pipeline_name: String,
         message: String,
     },
+    SinkCommit {
+        sink_id: String,
+        epoch: Epoch,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ManualCheckpointFailureCategory {
+    Io,
+    Timeout,
+    Protocol,
+    Internal,
 }
 
 impl ManualCheckpointFailure {
     fn into_error(self) -> CalcFlowError {
         match self {
             Self::Cancelled => checkpoint_cancelled(),
-            Self::Failed { message } => CalcFlowError::Internal { message },
+            Self::Failed {
+                category,
+                epoch,
+                phase,
+            } => super::super::projection::manual_checkpoint_failure_error(category, epoch, phase),
             Self::RecoveryRequired {
                 pipeline_name,
                 message,
@@ -123,6 +141,9 @@ impl ManualCheckpointFailure {
                 pipeline_name,
                 message,
             },
+            Self::SinkCommit { sink_id, epoch } => {
+                super::super::projection::manual_sink_commit_failure_error(&sink_id, epoch)
+            }
         }
     }
 }
@@ -247,6 +268,11 @@ struct EpochState {
     sink_commits: BTreeMap<String, CheckpointAck>,
 }
 
+struct CoordinatorFailure {
+    error: CalcFlowError,
+    category: ManualCheckpointFailureCategory,
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the owned coordinator task receives every bounded channel and immutable policy"
@@ -285,10 +311,10 @@ async fn run_coordinator(
                     return Ok(());
                 }
                 Err(error) => {
-                    let failure = checkpoint_failed(&error.to_string());
+                    let failure = checkpoint_failed(error.category, state.epoch, state.phase);
                     fail_epoch_manual(&mut state, failure.clone());
                     fail_queued_manuals(&mut requests, failure).await;
-                    return Err(error);
+                    return Err(error.error);
                 }
             };
             match apply_or_fail_protocol(&mut state, &expected, command, &events, &cancellation)
@@ -297,10 +323,10 @@ async fn run_coordinator(
                 Ok(true) => break,
                 Ok(false) => {}
                 Err(error) => {
-                    let failure = checkpoint_failed(&error.to_string());
+                    let failure = checkpoint_failed(error.category, state.epoch, state.phase);
                     fail_epoch_manual(&mut state, failure.clone());
                     fail_queued_manuals(&mut requests, failure).await;
-                    return Err(error);
+                    return Err(error.error);
                 }
             }
         }
@@ -379,7 +405,7 @@ async fn receive_command(
     state: &EpochState,
     events: &mpsc::Sender<CheckpointEvent>,
     cancellation: &CancellationToken,
-) -> Result<Option<CoordinatorCommand>> {
+) -> std::result::Result<Option<CoordinatorCommand>, CoordinatorFailure> {
     tokio::select! {
         biased;
         () = cancellation.cancelled() => Ok(None),
@@ -388,13 +414,24 @@ async fn receive_command(
                 events,
                 CheckpointEvent::Failed(state.epoch, "timeout".into()),
                 cancellation,
-            ).await?;
+            )
+            .await
+            .map_err(|error| CoordinatorFailure {
+                error,
+                category: ManualCheckpointFailureCategory::Internal,
+            })?;
             cancellation.cancel();
-            Err(CalcFlowError::Internal {
-                message: format!("checkpoint epoch {} timed out", state.epoch.as_u64()),
+            Err(CoordinatorFailure {
+                error: CalcFlowError::Internal {
+                    message: format!("checkpoint epoch {} timed out", state.epoch.as_u64()),
+                },
+                category: ManualCheckpointFailureCategory::Timeout,
             })
         }
-        command = commands.recv() => command.map(Some).ok_or_else(coordinator_closed),
+        command = commands.recv() => command.map(Some).ok_or_else(|| CoordinatorFailure {
+            error: coordinator_closed(),
+            category: ManualCheckpointFailureCategory::Internal,
+        }),
     }
 }
 
@@ -404,7 +441,7 @@ async fn apply_or_fail_protocol(
     command: CoordinatorCommand,
     events: &mpsc::Sender<CheckpointEvent>,
     cancellation: &CancellationToken,
-) -> Result<bool> {
+) -> std::result::Result<bool, CoordinatorFailure> {
     match apply_command(state, expected, command, events, cancellation).await {
         Ok(completed) => Ok(completed),
         Err(error) => {
@@ -413,9 +450,16 @@ async fn apply_or_fail_protocol(
                 CheckpointEvent::Failed(state.epoch, "protocol".into()),
                 cancellation,
             )
-            .await?;
+            .await
+            .map_err(|send_error| CoordinatorFailure {
+                error: send_error,
+                category: ManualCheckpointFailureCategory::Internal,
+            })?;
             cancellation.cancel();
-            Err(error)
+            Err(CoordinatorFailure {
+                error,
+                category: ManualCheckpointFailureCategory::Protocol,
+            })
         }
     }
 }
@@ -653,9 +697,15 @@ fn checkpoint_cancelled() -> CalcFlowError {
     }
 }
 
-fn checkpoint_failed(message: &str) -> ManualCheckpointFailure {
+fn checkpoint_failed(
+    category: ManualCheckpointFailureCategory,
+    epoch: Epoch,
+    phase: CheckpointPhase,
+) -> ManualCheckpointFailure {
     ManualCheckpointFailure::Failed {
-        message: message.into(),
+        category,
+        epoch: Some(epoch),
+        phase: Some(phase),
     }
 }
 
@@ -817,11 +867,14 @@ mod tests {
             events.recv().await.unwrap(),
             CheckpointEvent::Failed(Epoch::INITIAL, "timeout".into())
         );
-        assert!(matches!(
-            waiter.await,
-            Err(CalcFlowError::Internal { ref message })
-                if message.contains("checkpoint epoch 1 timed out")
-        ));
+        let CalcFlowError::Streaming(error) = waiter.await.unwrap_err() else {
+            panic!("manual timeout must use the safe streaming boundary");
+        };
+        assert_eq!(
+            error.category(),
+            crate::runtime::streaming::projection::StreamingErrorCategory::CheckpointTimeout
+        );
+        assert_eq!(error.epoch(), Some(Epoch::INITIAL));
         assert!(task.await.unwrap().is_err());
         assert!(cancellation.is_cancelled());
     }

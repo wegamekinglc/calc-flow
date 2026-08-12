@@ -1,5 +1,7 @@
 use std::{
+    any::Any,
     collections::BTreeMap,
+    fmt,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -9,15 +11,45 @@ use std::{
 
 use async_trait::async_trait;
 use calc_flow::{
-    Batch, BatchKind, CalcFlowError, ExpressionOperator, JsonMap, PipelineBuilder, Port, Result,
-    StreamOperator, StreamRequirements, UdfRegistry, UnionOperator,
+    Batch, BatchKind, BatchMetadata, CalcFlowError, DeliveryGuarantee, ExpressionOperator,
+    ExternalPayload, JsonMap, PipelineBuilder, Port, Result, StreamOperator, StreamRequirements,
+    UdfRegistry, UnionOperator,
     continuous::{
-        Cursor, JobState, ManagedCheckpointRuntime, NativeWatermarkCapability, ReplayPositioning,
-        SinkBinding, SinkRecovery, SourceBinding, SourceCapabilities, SourceDeliveryCapability,
-        SourceEvent, SourceSchema, SourceStatus, StreamSink, StreamSource, StreamingErrorCategory,
-        StreamingJob, StreamingRunner, TransactionalStreamSink,
+        ComponentKind, Cursor, JobState, ManagedCheckpointRuntime, NativeWatermarkCapability,
+        ReplayPositioning, SinkBinding, SinkRecovery, SourceBinding, SourceCapabilities,
+        SourceDeliveryCapability, SourceEvent, SourceSchema, SourceStatus, StreamSink,
+        StreamSource, StreamingErrorCategory, StreamingJob, StreamingRunner,
+        TransactionalStreamSink,
     },
 };
+
+const SECRET: &str = "credential-canary-value";
+
+struct SecretPayload;
+
+impl fmt::Debug for SecretPayload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(SECRET)
+    }
+}
+
+impl ExternalPayload for SecretPayload {
+    fn backend(&self) -> &'static str {
+        "secret-probe"
+    }
+
+    fn len(&self) -> usize {
+        1
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        1
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
 
 struct FiniteSource;
 
@@ -82,6 +114,32 @@ fn public_continuous_types_are_available_to_external_crates() {
     let _ = accept_source_status_contract;
 }
 
+#[test]
+fn public_connector_debug_redacts_batch_and_cursor_payloads() {
+    let batch = Batch::external(
+        Arc::new(SecretPayload),
+        BatchMetadata::new(
+            "source",
+            0,
+            BTreeMap::from([("secret".into(), SECRET.into())]),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let cursor = Cursor::new(
+        "source",
+        SECRET.as_bytes().to_vec(),
+        BTreeMap::from([("secret".into(), SECRET.into())]),
+    )
+    .unwrap();
+    let event = SourceEvent::Data { batch, cursor };
+
+    for rendered in [format!("{event:?}"), format!("{event:#?}")] {
+        assert!(!rendered.contains(SECRET));
+        assert!(!rendered.contains("credential"));
+    }
+}
+
 #[derive(Clone, Default)]
 struct LifecycleProbe {
     capability_reads: Arc<AtomicUsize>,
@@ -90,6 +148,7 @@ struct LifecycleProbe {
     sink_opens: Arc<AtomicUsize>,
     sink_closes: Arc<AtomicUsize>,
     sink_recoveries: Arc<Mutex<Vec<bool>>>,
+    sink_recovery_debugs: Arc<Mutex<Vec<String>>>,
 }
 
 struct PendingSource {
@@ -97,6 +156,10 @@ struct PendingSource {
 }
 
 struct EndingSource {
+    probe: LifecycleProbe,
+}
+
+struct LossySource {
     probe: LifecycleProbe,
 }
 
@@ -158,6 +221,30 @@ impl StreamSource for EndingSource {
 }
 
 #[async_trait]
+impl StreamSource for LossySource {
+    fn capabilities(&self) -> SourceCapabilities {
+        self.probe.capability_reads.fetch_add(1, Ordering::SeqCst);
+        SourceCapabilities {
+            delivery: SourceDeliveryCapability::Lossy,
+            ..exact_source_capabilities()
+        }
+    }
+
+    async fn open(&mut self, _cursor: Option<Cursor>) -> Result<()> {
+        self.probe.source_opens.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn next(&mut self) -> Result<Option<SourceEvent>> {
+        std::future::pending().await
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
 impl StreamSource for FailingSource {
     fn capabilities(&self) -> SourceCapabilities {
         exact_source_capabilities()
@@ -199,7 +286,7 @@ impl TransactionalStreamSink for TransactionalSink {
     }
 
     async fn pre_commit(&mut self, _epoch: calc_flow::Epoch) -> Result<JsonMap> {
-        Ok(JsonMap::new())
+        Ok(BTreeMap::from([("secret".into(), SECRET.into())]))
     }
 
     async fn commit(&mut self, _epoch: calc_flow::Epoch, _pre_commit: &JsonMap) -> Result<()> {
@@ -220,6 +307,11 @@ impl TransactionalStreamSink for TransactionalSink {
             .lock()
             .unwrap()
             .push(recovery.terminal());
+        self.probe
+            .sink_recovery_debugs
+            .lock()
+            .unwrap()
+            .extend([format!("{recovery:?}"), format!("{recovery:#?}")]);
         Ok(())
     }
 
@@ -230,6 +322,12 @@ impl TransactionalStreamSink for TransactionalSink {
 }
 
 fn continuous_plan() -> calc_flow::StreamExecutionPlan {
+    continuous_plan_with_requirements(&StreamRequirements::default())
+}
+
+fn continuous_plan_with_requirements(
+    requirements: &StreamRequirements,
+) -> calc_flow::StreamExecutionPlan {
     PipelineBuilder::new("public_continuous")
         .unwrap()
         .add_node(
@@ -246,10 +344,7 @@ fn continuous_plan() -> calc_flow::StreamExecutionPlan {
             ),
         )
         .unwrap()
-        .compile_stream(
-            &UdfRegistry::new().snapshot(),
-            &StreamRequirements::default(),
-        )
+        .compile_stream(&UdfRegistry::new().snapshot(), requirements)
         .unwrap()
 }
 
@@ -286,7 +381,7 @@ fn continuous_runner(root: &Path, probe: LifecycleProbe) -> StreamingRunner {
             }),
         )]),
         BTreeMap::from([(
-            output_id,
+            output_id.clone(),
             vec![SinkBinding::transactional("sink", TransactionalSink { probe }).unwrap()],
         )]),
         ManagedCheckpointRuntime::new(root).unwrap(),
@@ -332,7 +427,7 @@ async fn public_job_checkpoints_and_cancel_settles_connectors() {
             }),
         )]),
         BTreeMap::from([(
-            output_id,
+            output_id.clone(),
             vec![
                 SinkBinding::transactional(
                     "sink",
@@ -389,10 +484,171 @@ fn runner_shape_validation_is_safe_and_side_effect_free() {
         panic!("public runner errors must use the safe streaming boundary");
     };
     assert_eq!(error.category(), StreamingErrorCategory::Validation);
-    assert_eq!(error.message(), "streaming job validation failed");
+    assert_eq!(error.component_kind(), Some(ComponentKind::Sink));
+    assert_eq!(error.component_id(), Some("output"));
+    assert_eq!(
+        error.message(),
+        "sink bindings are missing graph output \"output\""
+    );
     assert_eq!(probe.capability_reads.load(Ordering::SeqCst), 0);
     assert_eq!(probe.source_opens.load(Ordering::SeqCst), 0);
     assert!(!root.exists());
+}
+
+#[test]
+fn runner_shape_errors_keep_safe_participant_coordinates() {
+    let plan = continuous_plan();
+    let source_id = plan.source_binding_ids()[0].to_owned();
+    let output_id = plan.sink_binding_ids()[0].to_owned();
+    let directory = tempfile::tempdir().unwrap();
+    let checkpoint = || ManagedCheckpointRuntime::new(directory.path().join("managed")).unwrap();
+
+    let unknown_source = match StreamingRunner::new(
+        continuous_plan(),
+        BTreeMap::from([("extra".into(), SourceBinding::new(FiniteSource))]),
+        BTreeMap::from([(
+            output_id.clone(),
+            vec![
+                SinkBinding::transactional(
+                    "sink",
+                    TransactionalSink {
+                        probe: LifecycleProbe::default(),
+                    },
+                )
+                .unwrap(),
+            ],
+        )]),
+        checkpoint(),
+    ) {
+        Ok(_) => panic!("the unknown source must fail"),
+        Err(error) => error,
+    };
+    let CalcFlowError::Streaming(unknown_source) = unknown_source else {
+        panic!("shape errors must use the streaming boundary");
+    };
+    assert_eq!(unknown_source.component_kind(), Some(ComponentKind::Source));
+    assert_eq!(unknown_source.component_id(), Some("extra"));
+    assert_eq!(
+        unknown_source.message(),
+        "source binding \"extra\" does not match a compiled external input"
+    );
+
+    let missing_sink = match StreamingRunner::new(
+        plan,
+        BTreeMap::from([(source_id, SourceBinding::new(FiniteSource))]),
+        BTreeMap::new(),
+        checkpoint(),
+    ) {
+        Ok(_) => panic!("the missing sink must fail"),
+        Err(error) => error,
+    };
+    let CalcFlowError::Streaming(missing_sink) = missing_sink else {
+        panic!("shape errors must use the streaming boundary");
+    };
+    assert_eq!(missing_sink.component_kind(), Some(ComponentKind::Sink));
+    assert_eq!(missing_sink.component_id(), Some(output_id.as_str()));
+    assert_eq!(
+        missing_sink.message(),
+        format!("sink bindings are missing graph output {output_id:?}")
+    );
+}
+
+#[test]
+fn invalid_shape_ids_are_redacted_before_the_public_boundary() {
+    let plan = continuous_plan();
+    let output_id = plan.sink_binding_ids()[0].to_owned();
+    let canary = "https://user:credential@host";
+    let directory = tempfile::tempdir().unwrap();
+
+    let error = match StreamingRunner::new(
+        plan,
+        BTreeMap::from([(canary.into(), SourceBinding::new(FiniteSource))]),
+        BTreeMap::from([(
+            output_id,
+            vec![
+                SinkBinding::transactional(
+                    "sink",
+                    TransactionalSink {
+                        probe: LifecycleProbe::default(),
+                    },
+                )
+                .unwrap(),
+            ],
+        )]),
+        ManagedCheckpointRuntime::new(directory.path().join("managed")).unwrap(),
+    ) {
+        Ok(_) => panic!("the forbidden source ID must fail shape validation"),
+        Err(error) => error,
+    };
+    let CalcFlowError::Streaming(error) = error else {
+        panic!("shape errors must use the streaming boundary");
+    };
+
+    assert_eq!(error.category(), StreamingErrorCategory::Validation);
+    assert_eq!(error.component_kind(), Some(ComponentKind::Source));
+    assert_eq!(error.component_id(), None);
+    assert_eq!(
+        error.message(),
+        "source binding ID is not a portable identifier"
+    );
+    for rendered in [error.to_string(), format!("{error:?}")] {
+        assert!(!rendered.contains(canary));
+        assert!(!rendered.contains("credential"));
+    }
+}
+
+#[tokio::test]
+async fn invalid_operator_ids_are_redacted_before_public_projection() {
+    let canary = "https://user:credential@host";
+    let plan = PipelineBuilder::new("invalid-operator")
+        .unwrap()
+        .add_node(
+            canary,
+            Box::new(
+                ExpressionOperator::new(canary, "value = value", Vec::new(), None, Vec::new())
+                    .unwrap(),
+            ),
+        )
+        .unwrap()
+        .compile_stream(
+            &UdfRegistry::new().snapshot(),
+            &StreamRequirements::default(),
+        )
+        .unwrap();
+    let source_id = plan.source_binding_ids()[0].to_owned();
+    let output_id = plan.sink_binding_ids()[0].to_owned();
+    let directory = tempfile::tempdir().unwrap();
+    let runner = StreamingRunner::new(
+        plan,
+        BTreeMap::from([(source_id, SourceBinding::new(FiniteSource))]),
+        BTreeMap::from([(
+            output_id,
+            vec![
+                SinkBinding::transactional(
+                    "sink",
+                    TransactionalSink {
+                        probe: LifecycleProbe::default(),
+                    },
+                )
+                .unwrap(),
+            ],
+        )]),
+        ManagedCheckpointRuntime::new(directory.path().join("managed")).unwrap(),
+    )
+    .unwrap();
+
+    let error = runner.start().await.unwrap_err();
+    let CalcFlowError::Streaming(error) = error else {
+        panic!("operator validation must use the streaming boundary");
+    };
+    assert_eq!(error.category(), StreamingErrorCategory::Validation);
+    assert_eq!(error.component_kind(), Some(ComponentKind::Operator));
+    assert_eq!(error.component_id(), None);
+    assert_eq!(error.message(), "operator ID is not a portable identifier");
+    for rendered in [error.to_string(), format!("{error:?}")] {
+        assert!(!rendered.contains(canary));
+        assert!(!rendered.contains("credential"));
+    }
 }
 
 #[tokio::test]
@@ -477,7 +733,69 @@ async fn capability_mismatch_precedes_lifecycle_and_storage_side_effects() {
     };
 
     assert_eq!(error.category(), StreamingErrorCategory::Validation);
+    assert_eq!(error.component_kind(), Some(ComponentKind::Operator));
+    assert_eq!(error.component_id(), Some("external"));
+    assert_eq!(
+        error.message(),
+        "operator \"external\" checkpoint capability is invalid"
+    );
     assert_eq!(probe.capability_reads.load(Ordering::SeqCst), 2);
+    assert_eq!(probe.source_opens.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.sink_opens.load(Ordering::SeqCst), 0);
+    assert!(!root.exists());
+}
+
+#[tokio::test]
+async fn delivery_capability_failure_names_the_safe_source_before_lifecycle() {
+    let baseline = continuous_plan();
+    let output_id = baseline.sink_binding_ids()[0].to_owned();
+    let requirements = StreamRequirements {
+        delivery: BTreeMap::from([(output_id.clone(), DeliveryGuarantee::ExactlyOnce)]),
+    };
+    let plan = continuous_plan_with_requirements(&requirements);
+    let source_id = plan.source_binding_ids()[0].to_owned();
+    let probe = LifecycleProbe::default();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("not-created");
+    let runner = StreamingRunner::new(
+        plan,
+        BTreeMap::from([(
+            source_id.clone(),
+            SourceBinding::new(LossySource {
+                probe: probe.clone(),
+            }),
+        )]),
+        BTreeMap::from([(
+            output_id.clone(),
+            vec![
+                SinkBinding::transactional(
+                    "sink",
+                    TransactionalSink {
+                        probe: probe.clone(),
+                    },
+                )
+                .unwrap(),
+            ],
+        )]),
+        ManagedCheckpointRuntime::new(&root).unwrap(),
+    )
+    .unwrap();
+
+    let error = match runner.start().await {
+        Ok(_) => panic!("the lossy source must fail exactly-once preflight"),
+        Err(error) => error,
+    };
+    let CalcFlowError::Streaming(error) = error else {
+        panic!("capability failures must use the streaming boundary");
+    };
+
+    assert_eq!(error.category(), StreamingErrorCategory::Validation);
+    assert_eq!(error.component_kind(), Some(ComponentKind::Source));
+    assert_eq!(error.component_id(), Some(source_id.as_str()));
+    assert_eq!(
+        error.message(),
+        format!("output {output_id:?} requires exactly_once but source {source_id:?} is lossy")
+    );
     assert_eq!(probe.source_opens.load(Ordering::SeqCst), 0);
     assert_eq!(probe.sink_opens.load(Ordering::SeqCst), 0);
     assert!(!root.exists());
@@ -501,6 +819,14 @@ async fn sink_recovery_distinguishes_non_terminal_checkpoints() {
         .await
         .unwrap();
     assert_eq!(*probe.sink_recoveries.lock().unwrap(), [false]);
+    assert!(
+        probe
+            .sink_recovery_debugs
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|rendered| !rendered.contains(SECRET))
+    );
     restored.cancel().await;
 }
 

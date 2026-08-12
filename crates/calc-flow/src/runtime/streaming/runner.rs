@@ -29,8 +29,8 @@ use super::{
         ManagedCheckpointRuntime, OpenedManagedCheckpointRuntime,
         coordinator::{
             CheckpointAck, CheckpointCoordinatorHandle, CheckpointEvent, CheckpointPhase,
-            CheckpointRequest, ManualCheckpointFailure, ParticipantSet,
-            spawn_checkpoint_coordinator,
+            CheckpointRequest, ManualCheckpointFailure, ManualCheckpointFailureCategory,
+            ParticipantSet, spawn_checkpoint_coordinator,
         },
     },
     job::{
@@ -180,8 +180,9 @@ impl CheckpointFaultInjector {
             return Ok(());
         };
         match fault.mode {
-            CheckpointFaultMode::Io => Err(CalcFlowError::Internal {
-                message: format!("injected checkpoint I/O fault at {point:?}"),
+            CheckpointFaultMode::Io => Err(CalcFlowError::Io {
+                path: format!("/fault-injection/{point:?}/credential-canary"),
+                source: std::io::Error::other("injected checkpoint I/O fault"),
             }),
             CheckpointFaultMode::Panic => {
                 panic!("injected checkpoint panic at {point:?}")
@@ -622,6 +623,7 @@ struct RuntimeStatus {
 pub(crate) enum CheckpointFailureCategory {
     Timeout,
     Protocol,
+    Io,
     Maintenance,
     Runtime,
 }
@@ -1178,7 +1180,24 @@ impl ContinuousJob {
             }
             changed.await;
         };
-        coordinator.request_manual().await?.await
+        let result = coordinator.request_manual().await?.await;
+        if matches!(&result, Err(CalcFlowError::Cancelled { .. })) {
+            let outcome = self.wait().await;
+            if !matches!(
+                outcome.cause,
+                TerminalCause::ExplicitCancel | TerminalCause::DeadlineExceeded
+            ) {
+                let status = self.status();
+                if let Some(error) = super::projection::project_manual_terminal_outcome(
+                    self.core.job_id,
+                    &outcome,
+                    status.checkpoint.as_ref(),
+                ) {
+                    return Err(CalcFlowError::Streaming(error));
+                }
+            }
+        }
+        result
     }
 
     pub(crate) fn shutdown(&self) -> OutcomeObserver {
@@ -1506,6 +1525,23 @@ impl OneShotContinuousRunner {
         let runner = self.runner;
         let start = match CheckpointRuntimeSpec::managed(checkpoint, config) {
             Ok(checkpoint) => runner.start_checkpointed(spec, checkpoint),
+            Err(error) => preflight_error_observer(error),
+        };
+        OneShotStartObserver::new(runner, start)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_checkpointed_with_config_and_fault(
+        self,
+        spec: ContinuousJobSpec,
+        checkpoint: ManagedCheckpointRuntime,
+        config: StreamRuntimeConfig,
+        point: CheckpointFaultPoint,
+        mode: CheckpointFaultMode,
+    ) -> OneShotStartObserver {
+        let runner = self.runner;
+        let start = match CheckpointRuntimeSpec::managed(checkpoint, config) {
+            Ok(checkpoint) => runner.start_checkpointed(spec, checkpoint.with_fault(point, mode)),
             Err(error) => preflight_error_observer(error),
         };
         OneShotStartObserver::new(runner, start)
@@ -3676,6 +3712,7 @@ fn register_boundary_tasks(
                 channels,
                 live_progress: live_progress.clone(),
                 sources: source_progress.clone(),
+                sinks: sink_progress.clone(),
                 cancellation: context.cancellation().clone(),
                 metrics: core.metrics.clone(),
                 core: Arc::clone(core),
@@ -3711,6 +3748,7 @@ struct LiveCheckpointTaskInputs {
     channels: LiveCheckpointChannels,
     live_progress: LiveProgressCoordinator,
     sources: BTreeMap<String, SourceProgress>,
+    sinks: BTreeMap<String, SinkProgress>,
     cancellation: CancellationToken,
     metrics: MetricsRecorder,
     core: Arc<JobCore>,
@@ -3735,7 +3773,9 @@ impl Drop for ManualCheckpointRegistration {
         self.core.manual_checkpoint.lock().take();
         self.core.changed.notify_waiters();
         self.coordinator.terminate(ManualCheckpointFailure::Failed {
-            message: "checkpoint task terminated before the queued request ran".into(),
+            category: ManualCheckpointFailureCategory::Internal,
+            epoch: None,
+            phase: None,
         });
     }
 }
@@ -3867,6 +3907,7 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
         mut channels,
         live_progress,
         sources,
+        sinks,
         cancellation,
         metrics,
         core,
@@ -4094,6 +4135,13 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
     let publication_unknown = assembly.manifest_installed_unknown;
     let sink_commit_incomplete =
         assembly.manifest_durable && assembly.finalized_sink_outputs != expected_sinks;
+    let sink_commit_failure = sink_commit_incomplete
+        .then(|| {
+            sinks
+                .values()
+                .find_map(SinkProgress::checkpoint_failure_sink_id)
+        })
+        .flatten();
     let result = match result {
         _ if publication_unknown => Err(CalcFlowError::RecoveryRequired {
             pipeline_name: checkpoint.identity.pipeline_name.clone(),
@@ -4118,28 +4166,64 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
         }),
         result => result,
     };
-    let manual_failure = match &result {
-        _ if core.operation_cancel_requested.load(Ordering::Acquire)
-            && !assembly.manifest_durable
-            && !publication_unknown =>
-        {
-            ManualCheckpointFailure::Cancelled
+    let manual_failure = if let (Some(sink_id), Some(epoch)) = (sink_commit_failure, assembly.epoch)
+    {
+        ManualCheckpointFailure::SinkCommit { sink_id, epoch }
+    } else {
+        match &result {
+            _ if core.operation_cancel_requested.load(Ordering::Acquire)
+                && !assembly.manifest_durable
+                && !publication_unknown =>
+            {
+                ManualCheckpointFailure::Cancelled
+            }
+            Err(CalcFlowError::RecoveryRequired {
+                pipeline_name,
+                message,
+            }) => ManualCheckpointFailure::RecoveryRequired {
+                pipeline_name: pipeline_name.clone(),
+                message: message.clone(),
+            },
+            Err(error) => ManualCheckpointFailure::Failed {
+                category: if matches!(error, CalcFlowError::Io { .. }) {
+                    ManualCheckpointFailureCategory::Io
+                } else {
+                    ManualCheckpointFailureCategory::Internal
+                },
+                epoch: assembly.epoch,
+                phase: checkpoint.status.snapshot().phase,
+            },
+            Ok(()) if cancellation.is_cancelled() => ManualCheckpointFailure::Cancelled,
+            Ok(()) => ManualCheckpointFailure::Failed {
+                category: ManualCheckpointFailureCategory::Internal,
+                epoch: assembly.epoch,
+                phase: checkpoint.status.snapshot().phase,
+            },
         }
-        Err(CalcFlowError::RecoveryRequired {
-            pipeline_name,
-            message,
-        }) => ManualCheckpointFailure::RecoveryRequired {
-            pipeline_name: pipeline_name.clone(),
-            message: message.clone(),
-        },
-        Err(error) => ManualCheckpointFailure::Failed {
-            message: error.to_string(),
-        },
-        Ok(()) if cancellation.is_cancelled() => ManualCheckpointFailure::Cancelled,
-        Ok(()) => ManualCheckpointFailure::Failed {
-            message: "checkpoint job completed before the queued request ran".into(),
-        },
     };
+    match &manual_failure {
+        ManualCheckpointFailure::Failed { category, .. } => {
+            let category = match category {
+                ManualCheckpointFailureCategory::Timeout => CheckpointFailureCategory::Timeout,
+                ManualCheckpointFailureCategory::Protocol => CheckpointFailureCategory::Protocol,
+                ManualCheckpointFailureCategory::Io => CheckpointFailureCategory::Io,
+                ManualCheckpointFailureCategory::Internal => CheckpointFailureCategory::Runtime,
+            };
+            checkpoint.status.fail_if_unset(category);
+        }
+        ManualCheckpointFailure::Cancelled
+            if core.operation_cancel_requested.load(Ordering::Acquire) =>
+        {
+            checkpoint.status.cancel();
+        }
+        ManualCheckpointFailure::Cancelled => {
+            checkpoint
+                .status
+                .fail_if_unset(CheckpointFailureCategory::Runtime);
+        }
+        ManualCheckpointFailure::RecoveryRequired { .. }
+        | ManualCheckpointFailure::SinkCommit { .. } => {}
+    }
     coordinator.terminate(manual_failure);
     drop(coordinator);
     let result = match (result, coordinator_task.await) {
@@ -4150,12 +4234,8 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
         }),
     };
     if result.is_err() {
-        checkpoint
-            .status
-            .fail_if_unset(CheckpointFailureCategory::Runtime);
         assembly.fail_metrics(&metrics, assembly.terminal)?;
     } else if cancellation.is_cancelled() {
-        checkpoint.status.cancel();
         assembly.cancel_metrics();
     }
     result
@@ -13329,10 +13409,15 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("{name} fault did not converge: {error}"));
 
-            assert!(
-                matches!(&manual, Err(CalcFlowError::Internal { .. })),
-                "unexpected {name} manual result: {manual:?}"
+            let CalcFlowError::Streaming(error) = manual.unwrap_err() else {
+                panic!("{name} manual failure must use the streaming boundary");
+            };
+            assert_eq!(
+                error.category(),
+                crate::runtime::streaming::projection::StreamingErrorCategory::Io,
+                "{name}"
             );
+            assert_eq!(error.epoch(), Some(crate::Epoch::INITIAL), "{name}");
             assert_eq!(outcome.state, ContinuousJobState::Failed, "{name}");
             assert!(
                 !directory

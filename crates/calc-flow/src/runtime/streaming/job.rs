@@ -305,7 +305,19 @@ impl OwningContinuousJob {
     }
 
     pub(crate) async fn trigger_checkpoint(&self) -> Result<Epoch> {
-        self.job.trigger_checkpoint().await
+        match self.job.trigger_checkpoint().await {
+            Ok(epoch) => Ok(epoch),
+            Err(error) => {
+                let status = self.job.status();
+                Err(CalcFlowError::Streaming(
+                    super::projection::project_manual_checkpoint_error(
+                        self.id(),
+                        &error,
+                        status.checkpoint.as_ref(),
+                    ),
+                ))
+            }
+        }
     }
 
     pub(crate) fn public_outcome(
