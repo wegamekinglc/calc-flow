@@ -1723,15 +1723,17 @@ pub(super) mod tests {
 
     pub(crate) async fn prepare_benchmark_alignment_fixture(
         operator: Box<dyn StreamOperator>,
+        checkpoint_capability: OperatorCheckpointCapability,
         transaction: Option<Arc<crate::state::ManifestTransaction>>,
         batches: [Batch; 3],
     ) -> BenchmarkAlignmentFixture {
         let output_port = operator.output_ports()[0].clone();
         let (checkpoint_tx, checkpoint) = mpsc::channel(1);
-        let mut harness = harness_with_operator(
+        let mut harness = harness_with_operator_capability(
             &["left", "right"],
             1,
             CompiledStreamOperator::External(operator),
+            checkpoint_capability,
             output_port,
             Some(OperatorCheckpointPort {
                 acknowledgements: checkpoint_tx,

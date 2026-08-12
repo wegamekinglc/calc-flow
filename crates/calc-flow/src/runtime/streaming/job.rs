@@ -15,9 +15,10 @@ use super::runner::RunnerLifecycleProbe;
 use super::{
     StreamJobContext,
     progress::{PreparedStreamJob, StreamProgressRuntimeConfig, prepare_stream_job},
+    projection::JobStatus,
     runner::{
-        ContinuousJob, ContinuousJobOutcome, ContinuousJobState, ContinuousJobStatus,
-        ContinuousRunner, runner_shutdown_failure,
+        ContinuousJob, ContinuousJobOutcome, ContinuousJobState, ContinuousRunner,
+        runner_shutdown_failure,
     },
     source_task::{
         SourceBinding, SourceCapabilities, SourceDeliveryCapability, validate_source_capabilities,
@@ -299,8 +300,8 @@ impl OwningContinuousJob {
         self.job.id()
     }
 
-    pub(crate) fn status(&self) -> ContinuousJobStatus {
-        self.job.status()
+    pub(crate) fn status(&self) -> JobStatus {
+        self.job.public_status()
     }
 
     pub(crate) fn state(&self) -> ContinuousJobState {

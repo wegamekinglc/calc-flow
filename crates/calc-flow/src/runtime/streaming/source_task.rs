@@ -310,6 +310,11 @@ impl SourceBinding {
             .expect("validated source bindings sampled delivery capability")
     }
 
+    pub(crate) fn sampled_replay_positioning(&self) -> ReplayPositioningCapability {
+        self.replay_positioning
+            .expect("validated source bindings sampled replay positioning")
+    }
+
     pub(crate) fn sampled_declared_schema(&self) -> &DeclaredSchema {
         self.declared_schema
             .as_ref()

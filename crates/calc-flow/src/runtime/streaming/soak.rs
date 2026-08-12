@@ -2792,6 +2792,16 @@ async fn prepare_private_alignment_benchmark(
     };
     let inner = super::operator_task::tests::prepare_benchmark_alignment_fixture(
         operator,
+        match kind {
+            PrivateAlignmentKind::PassThrough => {
+                crate::pipeline::OperatorCheckpointCapability::Stateless
+            }
+            PrivateAlignmentKind::Window => {
+                crate::pipeline::OperatorCheckpointCapability::CheckpointedStateful {
+                    state_version: crate::operator::WINDOW_STATE_LAYOUT_VERSION,
+                }
+            }
+        },
         transaction,
         batches,
     )
@@ -3438,6 +3448,20 @@ async fn run_checkpoint_restart_fault_case(
         .unwrap_or_else(|error| panic!("fault case {point:?}/{mode:?} hung: {error}"));
     let first_error = format!("{:?}", first_outcome.errors);
     let deterministic_terminal_error = match (point, mode) {
+        (CheckpointFaultPoint::ManifestRename, _) => {
+            first_outcome.state == ContinuousJobState::RecoveryRequired
+                && first_outcome.errors.iter().any(|failure| {
+                    matches!(
+                        &failure.error,
+                        CalcFlowError::RecoveryRequired {
+                            pipeline_name,
+                            message,
+                        } if pipeline_name == "checkpoint-restart-fault-matrix"
+                            && message.contains("checkpoint epoch 1")
+                            && message.contains("publication durability is unknown")
+                    )
+                })
+        }
         (CheckpointFaultPoint::PartialSinkCommit, CheckpointFaultMode::Cancel) => {
             first_outcome.state == ContinuousJobState::RecoveryRequired
                 && !first_outcome.errors.is_empty()
