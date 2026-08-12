@@ -39,6 +39,11 @@ mod operator_task;
 mod progress;
 #[allow(
     dead_code,
+    reason = "A6 safe status/error projection remains crate-private until the public facade gate"
+)]
+mod projection;
+#[allow(
+    dead_code,
     reason = "M2 internal runner remains crate-private until the post-M5 public A6 gate"
 )]
 mod runner;
