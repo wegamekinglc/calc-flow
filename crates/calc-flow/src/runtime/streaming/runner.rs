@@ -30,8 +30,8 @@ use super::{
         CheckpointRequest, ManualCheckpointFailure, ParticipantSet, spawn_checkpoint_coordinator,
     },
     job::{
-        ContinuousJobSpec, OrdinarySinkBinding, StableSinkId, ValidatedContinuousJob,
-        ValidatedOrdinarySink, preflight_job,
+        ContinuousJobSpec, OrdinarySinkBinding, OwningContinuousJob, StableSinkId,
+        ValidatedContinuousJob, ValidatedOrdinarySink, preflight_job,
     },
     metrics::{M2MetricsSnapshot, MetricsRecorder, MetricsTimer, sink_metric_id},
     operator_task::{
@@ -346,6 +346,7 @@ impl OpenedCheckpointRuntime {
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum FailureOrigin {
     Preflight,
+    RunnerLifecycle,
     OperatorEntry {
         node_id: String,
     },
@@ -395,6 +396,14 @@ pub(crate) struct RuntimeFailure {
 pub(crate) struct StartFailure {
     pub(crate) primary: Arc<RuntimeFailure>,
     pub(crate) diagnostic_id: Option<u64>,
+    pub(crate) cleanup_failures: Vec<Arc<RuntimeFailure>>,
+}
+
+pub(crate) fn runner_shutdown_failure(error: CalcFlowError) -> Arc<RuntimeFailure> {
+    Arc::new(RuntimeFailure {
+        origin: FailureOrigin::RunnerLifecycle,
+        error,
+    })
 }
 
 pub(crate) type StartResult<T> = Result<T, StartFailure>;
@@ -1246,6 +1255,7 @@ fn cancelled_start_failure(job_id: u64) -> StartFailure {
             },
         }),
         diagnostic_id: None,
+        cleanup_failures: Vec::new(),
     }
 }
 
@@ -1323,6 +1333,7 @@ struct RunnerRegistryState {
 struct RunnerCore {
     commands: mpsc::UnboundedSender<RunnerCommand>,
     root_cancel: CancellationToken,
+    stop_after_first_job: bool,
     registry: Mutex<RunnerRegistryState>,
     driver: Mutex<Option<JoinHandle<()>>>,
     diagnostics: RunnerDiagnostics,
@@ -1333,6 +1344,8 @@ struct RunnerCore {
     abandonment_warnings: AtomicU64,
     #[cfg(test)]
     next_launch_probe: Mutex<Option<Arc<TestLaunchProbe>>>,
+    #[cfg(test)]
+    panic_lifecycle_after_shutdown: AtomicBool,
 }
 
 const ABANDONED_RUNNER_WARNING: &str =
@@ -1353,12 +1366,112 @@ pub(crate) struct ContinuousRunner {
     core: Arc<RunnerCore>,
 }
 
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct RunnerLifecycleProbe {
+    core: Arc<RunnerCore>,
+}
+
+#[cfg(test)]
+impl RunnerLifecycleProbe {
+    pub(crate) fn registry_counts(&self) -> (usize, usize) {
+        let registry = self.core.registry.lock();
+        (registry.live_jobs.len(), registry.reaper_jobs.len())
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.core.closed.load(Ordering::Acquire) && self.core.driver.lock().is_none()
+    }
+
+    pub(crate) async fn join(&self) -> crate::Result<()> {
+        RunnerShutdownObserver::new(Arc::clone(&self.core)).await
+    }
+}
+
+/// Crate-private one-shot ownership boundary for the future public runner.
+pub(crate) struct OneShotContinuousRunner {
+    runner: ContinuousRunner,
+}
+
+pub(crate) struct OneShotStartObserver {
+    inner: Pin<Box<dyn Future<Output = StartResult<OwningContinuousJob>> + Send>>,
+}
+
+impl OneShotContinuousRunner {
+    pub(crate) fn new() -> Self {
+        Self {
+            runner: ContinuousRunner::new_one_shot(),
+        }
+    }
+
+    pub(crate) fn start(self, spec: ContinuousJobSpec) -> OneShotStartObserver {
+        let runner = self.runner;
+        let start = runner.start(spec);
+        OneShotStartObserver::new(runner, start)
+    }
+
+    pub(crate) fn start_checkpointed(
+        self,
+        spec: ContinuousJobSpec,
+        checkpoint: CheckpointRuntimeSpec,
+    ) -> OneShotStartObserver {
+        let runner = self.runner;
+        let start = runner.start_checkpointed(spec, checkpoint);
+        OneShotStartObserver::new(runner, start)
+    }
+
+    #[cfg(test)]
+    fn panic_lifecycle_after_shutdown_for_test(&self) {
+        self.runner
+            .core
+            .panic_lifecycle_after_shutdown
+            .store(true, Ordering::Release);
+    }
+}
+
+impl OneShotStartObserver {
+    fn new(mut runner: ContinuousRunner, start: StartObserver) -> Self {
+        Self {
+            inner: Box::pin(async move {
+                match start.await {
+                    Ok(job) => Ok(OwningContinuousJob::new(job, runner)),
+                    Err(mut failure) => {
+                        if let Err(error) = runner.shutdown().await {
+                            failure
+                                .cleanup_failures
+                                .push(runner_shutdown_failure(error));
+                        }
+                        Err(failure)
+                    }
+                }
+            }),
+        }
+    }
+}
+
+impl Future for OneShotStartObserver {
+    type Output = StartResult<OwningContinuousJob>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        self.inner.as_mut().poll(context)
+    }
+}
+
 impl ContinuousRunner {
     pub(crate) fn new() -> Self {
+        Self::new_with_stop_after_first_job(false)
+    }
+
+    fn new_one_shot() -> Self {
+        Self::new_with_stop_after_first_job(true)
+    }
+
+    fn new_with_stop_after_first_job(stop_after_first_job: bool) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         let core = Arc::new(RunnerCore {
             commands,
             root_cancel: CancellationToken::new(),
+            stop_after_first_job,
             registry: Mutex::new(RunnerRegistryState {
                 provisional: None,
                 live_jobs: BTreeMap::new(),
@@ -1375,6 +1488,8 @@ impl ContinuousRunner {
             abandonment_warnings: AtomicU64::new(0),
             #[cfg(test)]
             next_launch_probe: Mutex::new(None),
+            #[cfg(test)]
+            panic_lifecycle_after_shutdown: AtomicBool::new(false),
         });
         let driver = tokio::spawn(runner_lifecycle(Arc::clone(&core), receiver));
         *core.driver.lock() = Some(driver);
@@ -1389,6 +1504,13 @@ impl ContinuousRunner {
     pub(crate) fn registry_counts(&self) -> (usize, usize) {
         let registry = self.core.registry.lock();
         (registry.live_jobs.len(), registry.reaper_jobs.len())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lifecycle_probe(&self) -> RunnerLifecycleProbe {
+        RunnerLifecycleProbe {
+            core: Arc::clone(&self.core),
+        }
     }
 
     pub(crate) fn start(&self, spec: ContinuousJobSpec) -> StartObserver {
@@ -1430,6 +1552,7 @@ impl ContinuousRunner {
                         error,
                     }),
                     diagnostic_id: None,
+                    cleanup_failures: Vec::new(),
                 }));
             }
         };
@@ -1478,6 +1601,7 @@ impl ContinuousRunner {
                     },
                 }),
                 diagnostic_id: None,
+                cleanup_failures: Vec::new(),
             }));
         };
         let launch_id = LaunchId(launch_id);
@@ -1543,6 +1667,7 @@ impl ContinuousRunner {
                     },
                 }),
                 diagnostic_id: None,
+                cleanup_failures: Vec::new(),
             }));
         }
         StartObserver::observe(core)
@@ -1644,6 +1769,7 @@ fn conflict_observer(key: &str) -> StartObserver {
             },
         }),
         diagnostic_id: None,
+        cleanup_failures: Vec::new(),
     }))
 }
 
@@ -1654,6 +1780,7 @@ fn preflight_error_observer(error: CalcFlowError) -> StartObserver {
             error,
         }),
         diagnostic_id: None,
+        cleanup_failures: Vec::new(),
     }))
 }
 
@@ -1810,7 +1937,10 @@ async fn runner_lifecycle(
                     };
                     publish_driver_report(&runner_core, report);
                     active = None;
-                    if !shutting_down && let Some(next) = pending.take() {
+                    if runner_core.stop_after_first_job {
+                        shutting_down = true;
+                        begin_lifecycle_shutdown(&runner_core, &mut pending);
+                    } else if !shutting_down && let Some(next) = pending.take() {
                         active = Some(next.launch_id);
                         next.core.state.lock().owner = DriverOwnership::Driving;
                         drivers.spawn(run_job_driver(
@@ -1826,6 +1956,13 @@ async fn runner_lifecycle(
     }
     runner_core.closed.store(true, Ordering::Release);
     runner_core.changed.notify_waiters();
+    #[cfg(test)]
+    assert!(
+        !runner_core
+            .panic_lifecycle_after_shutdown
+            .load(Ordering::Acquire),
+        "injected runner lifecycle shutdown panic"
+    );
 }
 
 fn begin_lifecycle_shutdown(runner: &RunnerCore, pending: &mut Option<PendingStart>) {
@@ -1901,6 +2038,7 @@ impl DriverReport {
             completion: DriverCompletion::StartFailed(StartFailure {
                 primary: failure,
                 diagnostic_id: None,
+                cleanup_failures: Vec::new(),
             }),
             cleanup_failures: Vec::new(),
         }
@@ -2069,6 +2207,7 @@ async fn run_job_driver(
                             error,
                         }),
                         diagnostic_id: None,
+                        cleanup_failures: Vec::new(),
                     }),
                     cleanup_failures: Vec::new(),
                 };
@@ -2151,6 +2290,7 @@ async fn run_job_driver(
                 completion: DriverCompletion::StartFailed(StartFailure {
                     primary,
                     diagnostic_id: None,
+                    cleanup_failures: Vec::new(),
                 }),
                 cleanup_failures: Vec::new(),
             };
@@ -2338,6 +2478,7 @@ async fn recover_terminal_manifest(
             completion: DriverCompletion::StartFailed(StartFailure {
                 primary,
                 diagnostic_id: None,
+                cleanup_failures: Vec::new(),
             }),
             cleanup_failures: close_failures.into_iter().skip(1).collect(),
         };
@@ -2390,6 +2531,7 @@ fn checkpoint_start_failure(launch_id: LaunchId, error: CalcFlowError) -> Driver
                 error,
             }),
             diagnostic_id: None,
+            cleanup_failures: Vec::new(),
         }),
         cleanup_failures: Vec::new(),
     }
@@ -4645,6 +4787,7 @@ async fn finish_failed_launch(
         completion: DriverCompletion::StartFailed(StartFailure {
             primary: failures.remove(0),
             diagnostic_id: None,
+            cleanup_failures: Vec::new(),
         }),
         cleanup_failures,
     }
@@ -4779,10 +4922,11 @@ mod tests {
         ABANDONED_RUNNER_WARNING, CheckpointCoordinatorHandle, CheckpointFailureCategory,
         CheckpointPhase, CheckpointRuntimeSpec, ContinuousJobState, ContinuousRunner,
         DriverCompletion, DriverOwnership, FailureOrigin as RuntimeFailureOrigin, JobCore,
-        LaunchId, RunnerCore, RunnerDiagnostics, RunnerRegistryState, RunnerShutdownObserver,
-        RuntimeFailure, RuntimeTaskProgress, TerminalCause, classify_failure_state,
-        finish_running_report, maybe_request_terminal_checkpoint, notify_sink_manifest_durable,
-        settle_durable_manifest, source_cuts_are_terminal,
+        LaunchId, OneShotContinuousRunner, OneShotStartObserver, RunnerCore, RunnerDiagnostics,
+        RunnerRegistryState, RunnerShutdownObserver, RuntimeFailure, RuntimeTaskProgress,
+        TerminalCause, classify_failure_state, finish_running_report,
+        maybe_request_terminal_checkpoint, notify_sink_manifest_durable, settle_durable_manifest,
+        source_cuts_are_terminal,
     };
     use crate::{
         Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken,
@@ -4810,6 +4954,334 @@ mod tests {
             supervisor::{SupervisionReport, TaskId},
         },
     };
+
+    #[test]
+    fn one_shot_runner_start_has_a_consuming_signature() {
+        let start: fn(OneShotContinuousRunner, ContinuousJobSpec) -> OneShotStartObserver =
+            OneShotContinuousRunner::start;
+
+        let _ = start;
+    }
+
+    #[test]
+    fn one_shot_runner_reuse_ui_is_a_move_error() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let fixture = manifest_dir.join("tests/ui/one_shot_runner_reuse.rs");
+        let output_dir = manifest_dir.join("../../target/ui-tests");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let output = std::process::Command::new(rustc)
+            .arg("--edition=2024")
+            .arg("--crate-name=one_shot_runner_reuse")
+            .arg(&fixture)
+            .arg("--out-dir")
+            .arg(output_dir)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(!output.status.success(), "fixture unexpectedly compiled");
+        assert!(stderr.contains("error[E0382]"), "{stderr}");
+    }
+
+    #[test]
+    fn one_shot_checkpointed_start_has_a_consuming_signature() {
+        let start: fn(
+            OneShotContinuousRunner,
+            ContinuousJobSpec,
+            CheckpointRuntimeSpec,
+        ) -> OneShotStartObserver = OneShotContinuousRunner::start_checkpointed;
+
+        let _ = start;
+    }
+
+    #[tokio::test]
+    async fn owning_job_waiters_observe_one_terminal_without_owning_cancellation() {
+        let source = LifecycleProbe::default();
+        let sink = LifecycleProbe::default();
+        let job = OneShotContinuousRunner::new()
+            .start(spec(
+                false,
+                Arc::new(AtomicUsize::new(0)),
+                source.clone(),
+                sink.clone(),
+            ))
+            .await
+            .unwrap();
+        let runner = job.runner_probe_for_test();
+
+        let mut dropped_waiter = Box::pin(job.wait());
+        assert!(matches!(
+            futures::poll!(dropped_waiter.as_mut()),
+            Poll::Pending
+        ));
+        drop(dropped_waiter);
+        assert_eq!(job.state(), ContinuousJobState::Running);
+
+        let mut dropped_shutdown = Box::pin(job.shutdown());
+        assert!(matches!(
+            futures::poll!(dropped_shutdown.as_mut()),
+            Poll::Pending
+        ));
+        drop(dropped_shutdown);
+        assert_eq!(job.state(), ContinuousJobState::Draining);
+
+        let first = job.cancel();
+        let second = job.cancel();
+        let (first, second) = tokio::join!(first, second);
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.state, ContinuousJobState::Cancelled);
+        assert_eq!(first.cause, TerminalCause::ExplicitCancel);
+        assert_eq!(source.closed.load(Ordering::SeqCst), 1);
+        assert_eq!(sink.closed.load(Ordering::SeqCst), 1);
+        assert!(job.owner_settled_for_test());
+        assert_eq!(runner.registry_counts(), (0, 0));
+        assert!(runner.is_finished());
+    }
+
+    #[tokio::test]
+    async fn one_shot_start_failure_waits_for_begun_resource_cleanup() {
+        let source = LifecycleProbe::default();
+        source.fail_open.store(true, Ordering::SeqCst);
+        let sink = LifecycleProbe::default();
+
+        let failure = OneShotContinuousRunner::new()
+            .start(spec(
+                false,
+                Arc::new(AtomicUsize::new(0)),
+                source.clone(),
+                sink.clone(),
+            ))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            failure.primary.origin,
+            super::FailureOrigin::SourceOpen { .. }
+        ));
+        assert_eq!(source.opened.load(Ordering::SeqCst), 1);
+        assert_eq!(source.closed.load(Ordering::SeqCst), 1);
+        assert_eq!(sink.opened.load(Ordering::SeqCst), 1);
+        assert_eq!(sink.closed.load(Ordering::SeqCst), 1);
+        assert!(failure.cleanup_failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn one_shot_start_failure_surfaces_runner_lifecycle_join_failure() {
+        let source = LifecycleProbe::default();
+        source.fail_open.store(true, Ordering::SeqCst);
+        let sink = LifecycleProbe::default();
+        let runner = OneShotContinuousRunner::new();
+        runner.panic_lifecycle_after_shutdown_for_test();
+
+        let failure = runner
+            .start(spec(false, Arc::new(AtomicUsize::new(0)), source, sink))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            failure.cleanup_failures.as_slice(),
+            [failure]
+                if matches!(failure.origin, super::FailureOrigin::RunnerLifecycle)
+                    && matches!(failure.error, CalcFlowError::Internal { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn owning_job_drop_cancels_while_an_existing_waiter_only_observes() {
+        let source = LifecycleProbe::default();
+        source.block_close.store(true, Ordering::SeqCst);
+        let sink = LifecycleProbe::default();
+        let job = OneShotContinuousRunner::new()
+            .start(spec(
+                false,
+                Arc::new(AtomicUsize::new(0)),
+                source.clone(),
+                sink.clone(),
+            ))
+            .await
+            .unwrap();
+        let runner = job.runner_probe_for_test();
+        let mut waiter = Box::pin(job.wait());
+        let close_started = source.close_started.notified();
+
+        drop(job);
+
+        close_started.await;
+        assert!(futures::poll!(waiter.as_mut()).is_pending());
+        assert_eq!(runner.registry_counts().0, 1);
+        assert!(!runner.is_finished());
+
+        source.close_release.notify_waiters();
+        let outcome = waiter.await;
+        assert_eq!(outcome.state, ContinuousJobState::Cancelled);
+        assert_eq!(outcome.cause, TerminalCause::ExplicitCancel);
+        assert_eq!(source.closed.load(Ordering::SeqCst), 1);
+        assert_eq!(sink.closed.load(Ordering::SeqCst), 1);
+        assert_eq!(runner.registry_counts(), (0, 0));
+        assert!(runner.is_finished());
+    }
+
+    #[tokio::test]
+    async fn owning_job_natural_terminal_reaps_runner_without_a_waiter() {
+        let source = LifecycleProbe::default();
+        source.finite.store(true, Ordering::SeqCst);
+        let sink = LifecycleProbe::default();
+        let job = OneShotContinuousRunner::new()
+            .start(spec(
+                false,
+                Arc::new(AtomicUsize::new(0)),
+                source.clone(),
+                sink.clone(),
+            ))
+            .await
+            .unwrap();
+        let runner = job.runner_probe_for_test();
+
+        runner.join().await.unwrap();
+
+        assert_eq!(job.state(), ContinuousJobState::Completed);
+        assert_eq!(source.closed.load(Ordering::SeqCst), 1);
+        assert_eq!(sink.closed.load(Ordering::SeqCst), 1);
+        assert_eq!(runner.registry_counts(), (0, 0));
+        assert!(runner.is_finished());
+        let outcome = job.wait().await;
+        assert_eq!(outcome.state, ContinuousJobState::Completed);
+        assert_eq!(outcome.cause, TerminalCause::NaturalEnd);
+        assert!(job.owner_settled_for_test());
+    }
+
+    #[tokio::test]
+    async fn owning_job_contains_task_panic_before_publishing_terminal() {
+        let source = LifecycleProbe::default();
+        source.panic_next.store(true, Ordering::SeqCst);
+        let sink = LifecycleProbe::default();
+        let job = OneShotContinuousRunner::new()
+            .start(spec(
+                false,
+                Arc::new(AtomicUsize::new(0)),
+                source.clone(),
+                sink.clone(),
+            ))
+            .await
+            .unwrap();
+
+        let outcome = job.wait().await;
+
+        assert_eq!(outcome.state, ContinuousJobState::Failed);
+        assert!(matches!(
+            outcome.errors[0].error,
+            CalcFlowError::TaskPanicked { ref message, .. }
+                if message == "source next panicked"
+        ));
+        assert_eq!(source.closed.load(Ordering::SeqCst), 1);
+        assert_eq!(sink.closed.load(Ordering::SeqCst), 1);
+        assert!(job.owner_settled_for_test());
+    }
+
+    #[tokio::test]
+    async fn owning_job_surfaces_runner_lifecycle_join_failure() {
+        let source = LifecycleProbe::default();
+        let sink = LifecycleProbe::default();
+        let runner = OneShotContinuousRunner::new();
+        runner.panic_lifecycle_after_shutdown_for_test();
+        let job = runner
+            .start(spec(false, Arc::new(AtomicUsize::new(0)), source, sink))
+            .await
+            .unwrap();
+        let runner = job.runner_probe_for_test();
+
+        let outcome = job.cancel().await;
+
+        assert!(matches!(
+            outcome.errors.last(),
+            Some(failure)
+                if matches!(failure.origin, super::FailureOrigin::RunnerLifecycle)
+                    && matches!(failure.error, CalcFlowError::Internal { .. })
+        ));
+        assert_eq!(runner.registry_counts(), (0, 0));
+        assert!(runner.is_finished());
+    }
+
+    #[tokio::test]
+    async fn checkpointed_owning_job_releases_transaction_and_lineage_lease() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Arc::new(
+            LocalStateBackend::new(directory.path().join("state"))
+                .await
+                .unwrap(),
+        );
+        let plan = PipelineBuilder::new("one-shot-checkpoint-lease")
+            .unwrap()
+            .add_checkpoint_capable_node(
+                "node",
+                Box::new(StressForwardOperator::new(None)) as Box<dyn StreamOperator>,
+            )
+            .unwrap()
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements {
+                    delivery: BTreeMap::from([(
+                        "output".into(),
+                        crate::DeliveryGuarantee::ExactlyOnce,
+                    )]),
+                },
+            )
+            .unwrap();
+        let lineage_key = StateLineageKey::new(plan.name(), plan.fingerprint()).unwrap();
+        let source_polls = Arc::new(AtomicUsize::new(0));
+        let source_closed = Arc::new(AtomicUsize::new(0));
+        let sink_opened = Arc::new(AtomicUsize::new(0));
+        let sink_closed = Arc::new(AtomicUsize::new(0));
+        let spec = ContinuousJobSpec {
+            context: StreamJobContext::new(
+                9_901,
+                plan.fingerprint(),
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            ),
+            plan,
+            sources: vec![NamedSourceBinding {
+                binding_id: "input".into(),
+                binding: counting_pending_binding(0, &source_polls, &source_closed),
+            }],
+            sinks: vec![NamedSinkBinding {
+                output_id: "output".into(),
+                sink_id: "sink".into(),
+                binding: OrdinarySinkBinding::new_transactional(Box::new(CheckpointProbeSink {
+                    opened: Arc::clone(&sink_opened),
+                    closed: Arc::clone(&sink_closed),
+                })),
+            }],
+            edge_budget: EdgeBudget {
+                max_rows: 1,
+                max_bytes: 1 << 20,
+            },
+            delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+        };
+        let checkpoint = CheckpointRuntimeSpec::new(
+            backend.clone(),
+            directory.path().join("manifests"),
+            StreamRuntimeConfig::default(),
+        )
+        .unwrap();
+        let job = OneShotContinuousRunner::new()
+            .start_checkpointed(spec, checkpoint)
+            .await
+            .unwrap();
+        wait_for_counter(&source_polls, 1).await;
+
+        let outcome = job.cancel().await;
+
+        assert_eq!(outcome.state, ContinuousJobState::Cancelled);
+        assert_eq!(source_closed.load(Ordering::SeqCst), 1);
+        assert_eq!(sink_opened.load(Ordering::SeqCst), 1);
+        assert_eq!(sink_closed.load(Ordering::SeqCst), 1);
+        let lineage = backend.open_lineage(&lineage_key).await.unwrap();
+        drop(lineage);
+    }
 
     struct ResetOperator {
         inputs: [Port; 1],
@@ -8677,6 +9149,7 @@ mod tests {
         let core = Arc::new(RunnerCore {
             commands,
             root_cancel: CancellationToken::new(),
+            stop_after_first_job: false,
             registry: Mutex::new(RunnerRegistryState {
                 provisional: None,
                 live_jobs: BTreeMap::new(),
@@ -8691,6 +9164,7 @@ mod tests {
             changed: Notify::new(),
             abandonment_warnings: AtomicU64::new(0),
             next_launch_probe: Mutex::new(None),
+            panic_lifecycle_after_shutdown: AtomicBool::new(false),
         });
         let mut first = Box::pin(RunnerShutdownObserver::new(Arc::clone(&core)));
 
