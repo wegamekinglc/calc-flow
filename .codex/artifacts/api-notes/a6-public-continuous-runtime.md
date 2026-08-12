@@ -4,14 +4,19 @@ Artifact slug: `a6-public-continuous-runtime`.
 
 ## Control and Status
 
-- Controlling input: the latest Multica issue attachment named
-  `a6-public-continuous-runtime.md`, SHA-256
-  `bf60b2f401df35ef500c27b27db7861fd2fc1df3040495428c31c985f6180b72`.
-- Baseline: `main@70f7e3d1e9306c419a0b2358527ec888c2ed9934`.
+- Controlling input:
+  `.codex/artifacts/specs/a6-public-continuous-runtime.md` on PR #113 source
+  head `5cea87097f37ba579d3985a96e18d856f41c14f9`, SHA-256
+  `d2730be9dd135ad95e57db052b87e515ec722d468b4c4bc9b34dab26b9735948`.
+- Baseline: `main@aa3bbf0b40aef74898a59b6d0d0028c59a2d6993`, including
+  merged PR #108 (`d4a85bcecbac0eefa8ff1c5bf75a5b54fe23a447`) and PR #110
+  (`aa3bbf0b40aef74898a59b6d0d0028c59a2d6993`).
 - Status: proposed public surface, ready for a new independent critique.
 - Superseded input: both earlier specs, the API note at
   `a4d7441f760cbea33a1657923bc0378adb610fb7c452ccefe3e287e60b2fcec3`,
-  and both Block critiques are historical review inputs only. They do not
+  both Block critiques, the old-baseline API note at
+  `f5305d1786b5b388397c544317beb2ce28ae4cb489988fe0a072ab9600ff31e7`,
+  and its zero-blocker critique are historical review inputs only. They do not
   control any signature or behavior below.
 - Scope of this artifact: public Rust, PyO3, Python, Studio persistence wiring,
   errors, examples, and the atomic repository cutover. This note changes no
@@ -55,7 +60,10 @@ The public `StreamingRunner` is push-based over `BatchExecutionPlan`; it has
 
 The M5 source-driven runner, job, source/sink traits, capability proof,
 checkpoint coordinator, status, reaper, and manifest transaction are
-crate-private. Important baseline deltas that this API must not preserve are:
+crate-private. PRs #108/#110 add manual FIFO coordination, source-bound
+cursors, once-sampled source descriptors, and durable capability identity.
+Important current-main details that this public API must preserve or tighten
+are:
 
 - `ContinuousRunner::start(&self)` permits a reusable runner core instead of a
   consuming public start;
@@ -66,7 +74,13 @@ crate-private. Important baseline deltas that this API must not preserve are:
   `source()`;
 - `ManifestPublication::Installed { parent_synced: false, .. }` can already be
   selected, so it is not an absent publication;
-- `SourceCapabilities.replayable: bool` can stand in for exact positioning;
+- #108 resolves manual waiters only at `CheckpointAdvancement::Completed`,
+  after durable publication and every expected sink commit acknowledgement;
+- #110 binds configured, restored, and emitted cursors to the external source
+  binding ID, samples schema/watermark/replay/delivery/bounds once before
+  open, and fingerprints that descriptor into durable source identity;
+- the private compatibility fallback can still infer exact positioning from
+  `SourceCapabilities.replayable: bool`; Public A6 must remove that fallback;
 - `TransactionalStreamSink::recover` receives the complete manifest;
 - private status includes cursors, task details, and an owner-drop counter that
   cannot be read after the only public owner has been dropped.
@@ -81,7 +95,7 @@ overloads, or compatibility wrappers for removed v2 runner/checkpoint names.
 | Surface                   | Remove                                                                                                               | Add or retain                                                                                                                       |
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | Rust checkpoint exports   | `Checkpoint`, `CHECKPOINT_FORMAT_VERSION`, `MAX_CHECKPOINT_DOCUMENT_BYTES`, `CheckpointStore`, `FileCheckpointStore` | Keep manifest v3 and standalone state APIs; add single-root local `ManagedCheckpointRuntime`                                        |
-| Rust connector exports    | `Source`, `SourceItem`, `BatchingSource`, `Sink`, `SinkRouter`                                                       | `Cursor`, `SourceEvent`, `StreamSource`, `SourceBinding`, async sink traits, `SinkBinding`, `SinkRecovery`                          |
+| Rust connector exports    | `Source`, `SourceItem`, `BatchingSource`, `Sink`, `SinkRouter`                                                       | identity-bound `Cursor`, frozen `SourceCapabilities`, `SourceEvent`, `StreamSource`, bindings, async sink traits, scoped recovery   |
 | Rust runner exports       | `MicroBatchRunner`; push runner methods `step`, `reset`, `plan_snapshot`                                             | one-shot `StreamingRunner::start(self)` and non-cloneable `StreamingJob`                                                            |
 | PyO3 registration         | `_MicroBatchRunner`, legacy `_StreamingRunner`, `_FileCheckpointStore`                                               | `StreamExecutionPlan`, single-directory `_ManagedCheckpointRuntime`, replacement runner/job, safe error projections                 |
 | Python public API         | `Source`, `MicroBatchRunner`, public `FileCheckpointStore`, push runner methods                                      | async continuous protocols/bindings, single-directory checkpoint owner, stream plan, runner/job, status/outcome/config/error types  |
@@ -137,12 +151,21 @@ semantic lineage identity or rejects recovery.
 ```rust
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Cursor {
+    source_id: Option<String>,
     order: Vec<u8>,
     payload: JsonMap,
 }
 
 impl Cursor {
-    pub fn new(order: Vec<u8>, payload: JsonMap) -> Result<Self>;
+    /// Constructs a cursor already owned by one external source binding ID.
+    pub fn new(
+        source_id: impl Into<String>,
+        order: Vec<u8>,
+        payload: JsonMap,
+    ) -> Result<Self>;
+    /// Constructs a cursor whose owner is assigned by runner admission.
+    pub fn unbound(order: Vec<u8>, payload: JsonMap) -> Result<Self>;
+    pub fn source_id(&self) -> Option<&str>;
     pub fn order(&self) -> &[u8];
     pub fn payload(&self) -> &JsonMap;
 }
@@ -162,6 +185,13 @@ pub enum NativeWatermarkCapability {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceDeliveryCapability {
+    Lossless,
+    Lossy,
+}
+
 #[derive(Clone, Debug)]
 pub enum SourceSchema {
     Exact(SchemaRef),
@@ -171,6 +201,7 @@ pub enum SourceSchema {
 #[derive(Clone, Debug)]
 pub struct SourceCapabilities {
     pub replay_positioning: ReplayPositioning,
+    pub delivery: SourceDeliveryCapability,
     pub max_batch_rows: usize,
     pub max_batch_bytes: usize,
     pub schema: SourceSchema,
@@ -219,18 +250,34 @@ impl SourceBinding {
 }
 ```
 
-`Cursor::new` requires a non-empty order key of at most 16 KiB and a bounded
-strict JSON payload. Its lowercase-hex manifest encoding remains v3. Cursor
-order/payload is available only to the connector and managed manifest; it is
-never projected into status, errors, debug output, logs, metrics, or public
+`Cursor::new` creates an explicitly owned cursor and `Cursor::unbound` creates
+an unbound cursor, matching the post-#110 private value shape. Both validate a
+non-empty order key of at most 16 KiB and a bounded strict JSON payload; `new`
+additionally validates the portable source ID. Runner preflight/admission
+binds an unbound configured or emitted cursor to the exact external input key.
+A cursor already owned by a different source fails before connector open when
+configured, or before
+progress/data admission when emitted. Recovery reconstructs an owned cursor
+from the enclosing manifest source participant; the manifest entry does not
+duplicate the ID. A cursor passed to `StreamSource::open` is therefore always
+owned and `source_id()` is `Some`.
+
+The lowercase-hex manifest order encoding remains v3. Cursor order/payload is
+available only to the connector and managed manifest; source ownership is
+used only for validation. Order, payload, and restored offsets are never
+projected into status, errors, debug output, logs, metrics, or public
 diagnostics.
 
 `ReplayPositioning` replaces every public `replayable` boolean. Capabilities
-are sampled exactly once in whole-job preflight and frozen into source
-identity, status, manifest validation, Rust/Python projections, and the
-per-output proof. `ExactPauseReportAndSeek` is a declared protocol plus a
-connector conformance obligation: a source that ignores the cursor passed to
-`open` fails conformance and cannot qualify any exactly-once output.
+are sampled exactly once in whole-job preflight before `open`. The runtime
+combines `SourceCapabilities` with the normalized binding watermark policy,
+freezes schema, native-watermark capability, replay positioning, delivery,
+and positive row/byte bounds, and fingerprints that complete descriptor into
+the prepared-job and durable per-source identities. Recovery rejects drift in
+any field. `ExactPauseReportAndSeek` plus `Lossless` is a declared protocol
+and connector conformance obligation: a source that ignores the owned cursor
+passed to `open` fails conformance and cannot qualify any exactly-once output.
+`SourceDeliveryCapability::Lossy` can qualify only at-least-once outputs.
 
 The source ID is not stored in `SourceBinding`; it is the exact external input
 key in the runner's `BTreeMap`. Runtime-owned source sequence numbers begin at
@@ -578,7 +625,7 @@ falls back to formatting the source error:
 | stream-plan compile or frozen-plan incompatibility     | `Compile`                       |
 | complete managed-root or lineage lease conflict        | `Conflict`                      |
 | explicit or cooperative lifecycle cancellation         | `Cancelled`                     |
-| checkpoint deadline before durable completion          | `CheckpointTimeout`             |
+| checkpoint deadline before the D5 completed point      | `CheckpointTimeout`             |
 | candidate, identity, checksum, or manifest mismatch    | `CheckpointMismatch`            |
 | installed manifest with unknown parent-sync durability | `CheckpointPublicationUnknown`  |
 | engine-owned filesystem or state/manifest I/O          | `Io`                            |
@@ -620,6 +667,9 @@ pub struct EdgeStatus {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceStatus {
     pub replay_positioning: ReplayPositioning,
+    pub delivery: SourceDeliveryCapability,
+    pub max_batch_rows: usize,
+    pub max_batch_bytes: usize,
     pub next_sequence: Option<u64>,
     pub ended: bool,
     pub polls: u64,
@@ -690,7 +740,7 @@ pub struct CheckpointStatus {
     pub sink_commit_acknowledgements: usize,
     pub expected_sink_commits: usize,
     pub elapsed: Option<Duration>,
-    pub last_durable_epoch: Option<Epoch>,
+    pub last_completed_epoch: Option<Epoch>,
     pub installed_unknown_epoch: Option<Epoch>,
     pub failure_category: Option<StreamingErrorCategory>,
     pub runtime_config_changed: bool,
@@ -727,14 +777,16 @@ names the two observed/configured quantities separately.
 
 ### Checkpoint publication and manual completion
 
-The public method does not return a publication enum. Its semantic result is
-fixed by this three-way classification:
+The public method does not return a publication enum. Publication retains its
+three states, but manual success additionally requires the existing #108
+`Completed` advancement:
 
-| Internal publication result   | Public manual observer                                                                                                                      | Checkpoint status                                                           | Sink intent                                                             |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| absent                        | `CalcFlowError::Streaming` with the mapped safe category; never returns epoch `E`                                                           | durable epoch unchanged; no installed-unknown epoch                         | prepared intent may abort; recovery cannot select `E`                   |
-| installed, durability unknown | `CalcFlowError::Streaming(error)` where category is `CheckpointPublicationUnknown` and `error.epoch() == Some(E)`; Python typed subclass    | `recovery_required`; `installed_unknown_epoch = E`; durable epoch unchanged | neither commit nor abort; preserve intent for next-start reconciliation |
-| durable                       | returns `E`                                                                                                                                 | `last_durable_epoch = E`; installed-unknown epoch cleared                   | commit may continue; later failure is forward-recoverable               |
+| Internal publication/completion result                   | Public manual observer                                                                                                                   | Checkpoint status                                                                 | Sink intent                                                                       |
+| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| absent                                                   | `CalcFlowError::Streaming` with the mapped safe category; never returns epoch `E`                                                        | completed epoch unchanged; no installed-unknown epoch                             | prepared intent may abort; recovery cannot select `E`                             |
+| installed, durability unknown                            | `CalcFlowError::Streaming(error)` where category is `CheckpointPublicationUnknown` and `error.epoch() == Some(E)`; Python typed subclass | `recovery_required`; `installed_unknown_epoch = E`; completed epoch unchanged     | neither commit nor abort; preserve intent for next-start reconciliation           |
+| durable, but a sink commit fails before `Completed`      | `CalcFlowError::Streaming` with the mapped safe category; never returns epoch `E`                                                        | completed epoch unchanged; job may become `recovery_required`                     | durable intent remains selectable and is completed forward on the next start      |
+| durable and every expected sink commit is acknowledged   | returns `E`                                                                                                                              | `last_completed_epoch = E`; installed-unknown epoch cleared after `Completed`     | every expected sink commit is acknowledged; later maintenance cannot revoke `E`   |
 
 Manual, periodic, and terminal requests share one bounded, FIFO,
 single-flight coordinator. Requests never coalesce. Every accepted request
@@ -745,22 +797,27 @@ configured bound.
 
 `trigger_checkpoint()` returns `E` only after all referenced state segments
 are durable, all sinks have pre-committed, the expected canonical manifest
-bytes have been installed, and the manifest parent directory has been
-synchronized. It does not wait for sink commit acknowledgement, retention,
-or compaction. An immediate crash after the return must recover `E` and drive
-sink commits forward.
+bytes have been installed, the manifest parent directory has been
+synchronized, and every expected sink commit has been acknowledged. This is
+the existing #108 `CheckpointAdvancement::Completed` seam; Public A6 adds no
+second queue, epoch allocator, waiter registry, or earlier public completion
+point. It does not wait for later retention, orphan collection, or compaction.
+An immediate crash after the return can select `E`, and no sink commit for
+`E` remains unacknowledged.
 
 If rename installed the expected bytes but parent sync failed, the observer
 receives the distinct indeterminate-publication error. The job does not
-advance `last_durable_epoch`, commit, or abort. It converges to
+advance `last_completed_epoch`, commit, or abort. It converges to
 `recovery_required`. A next process may select `E` if it persisted and fully
 validates, or select the highest remaining wholly valid epoch if it did not.
 Neither path may claim that `E` was absent at the original failure point.
 
-A failure before install is absent. A post-durable sink/maintenance failure
-does not revoke a previously returned epoch; it is visible through later
-status and the terminal outcome. Dropping a manual observer loses only its
-result and leaves the accepted request in FIFO order.
+A failure before install is absent. A sink commit failure after durability but
+before `Completed` fails the observer and preserves forward-recoverable intent;
+it is not a successful manual checkpoint. A maintenance failure after
+`Completed` does not revoke a previously returned epoch and is visible through
+later status and the terminal outcome. Dropping a manual observer loses only
+its result and leaves the accepted request in FIFO order.
 
 The indeterminate-publication shape is therefore:
 
@@ -800,14 +857,19 @@ a new job. A caller wanting a fresh lineage supplies a fresh managed namespace.
 
 Whole-job preflight first validates exact source-map equality, exact output
 coverage, globally unique sink IDs, stable participant identities, source
-batch bounds, and all connector capability values. It samples capabilities
-once and derives a proof separately for each requested output over only its
-reachable subgraph.
+batch bounds, and all connector capability values. It binds unowned cursors to
+their source-map key and rejects foreign configured cursors. It then samples
+capabilities once before open, normalizes the watermark policy, freezes and
+fingerprints the complete descriptor, and derives a proof separately for each
+requested output over only its reachable subgraph. Recovery rejects descriptor
+drift before connector open; live admission binds unowned emitted cursors and
+rejects foreign ones before progress or data can advance.
 
 Exactly-once for output `O` requires:
 
-- every reachable source declares `ExactPauseReportAndSeek`, honors emitted
-  cursors on reopen in connector conformance, and fits its first-hop bounds;
+- every reachable source declares `ExactPauseReportAndSeek` and `Lossless`,
+  honors emitted owned cursors on reopen in connector conformance, and fits
+  its first-hop bounds;
 - durable progress and the resolved watermark policy (default
   `SourceProvided`) have the exact M5 projection;
 - every reachable stateful operator and selected UDF is deterministic;
@@ -935,6 +997,11 @@ class NativeWatermarkCapability(StrEnum):
     UNKNOWN = "unknown"
 
 
+class SourceDeliveryCapability(StrEnum):
+    LOSSLESS = "lossless"
+    LOSSY = "lossy"
+
+
 @dataclass(frozen=True, slots=True)
 class SourceProvidedWatermarks:
     pass
@@ -983,11 +1050,13 @@ type SinkDelivery = (
 class Cursor:
     order: bytes
     payload: Mapping[str, JSONValue]
+    source_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class SourceCapabilities:
     replay_positioning: ReplayPositioning
+    delivery: SourceDeliveryCapability
     max_batch_rows: int
     max_batch_bytes: int
     schema: pa.Schema | None = None
@@ -1086,10 +1155,22 @@ class SinkBinding:
     ) -> SinkBinding: ...
 ```
 
-The three `WatermarkPolicy` and `SinkDelivery` variant classes are the frozen
-Python projections of the corresponding Rust enums. `watermark_policy=None`
-means `SourceProvidedWatermarks()`, not disabled. `Watermark.at` must be
-timezone-aware and is normalized to an exact UTC microsecond.
+The `SourceDeliveryCapability`, three `WatermarkPolicy`, and three
+`SinkDelivery` variants are the frozen Python projections of the corresponding
+Rust values. `watermark_policy=None` means `SourceProvidedWatermarks()`, not
+disabled. `Watermark.at` must be timezone-aware and is normalized to an exact
+UTC microsecond.
+
+`Cursor(..., source_id=None)` is unbound. Preflight/admission creates a fresh
+frozen cursor bound to the exact source-map key; an explicitly named different
+`source_id` is rejected before open or live progress. A cursor delivered to
+`StreamSource.open` always has a non-`None` `source_id`, including recovery
+from a v3 manifest whose enclosing source participant supplies the identity.
+The adapter never mutates the connector's frozen value. `SourceCapabilities`
+is called once before open; its delivery, replay, schema, native-watermark, and
+row/byte-bound values plus the normalized binding watermark policy are copied,
+frozen, and fingerprinted into durable identity. No Python `replayable` boolean
+or private fallback is accepted.
 
 Adapter construction validates all required connector methods with
 `inspect.iscoroutinefunction` before invoking any connector method or entering
@@ -1259,6 +1340,9 @@ class SourceStatus(TypedDict):
         "exact_pause_report_and_seek",
         "unsupported",
     ]
+    delivery: Literal["lossless", "lossy"]
+    max_batch_rows: int
+    max_batch_bytes: int
     next_sequence: int | None
     ended: bool
     polls: int
@@ -1334,7 +1418,7 @@ class CheckpointStatus(TypedDict):
     sink_commit_acknowledgements: int
     expected_sink_commits: int
     elapsed_micros: int | None
-    last_durable_epoch: int | None
+    last_completed_epoch: int | None
     installed_unknown_epoch: int | None
     failure_category: str | None
     runtime_config_changed: bool
@@ -1610,13 +1694,23 @@ must all remain green after the public Python legacy symbol disappears.
 - `ReplayPositioning` is an enum carried through identity/status/manifest; a
   boolean cannot distinguish exact pause/report/seek from an informal claim
   and cannot state the conformance obligation.
+- `SourceCapabilities` is one complete once-sampled descriptor, including
+  lossless/lossy delivery and declared bounds. Retaining #110's private
+  `replayable` fallback or resampling schema/watermark/delivery independently
+  would let preflight, durable identity, status, and recovery disagree.
+- `Cursor` retains an optional source owner so an unbound connector value can
+  be bound once while an already foreign value fails closed. Omitting the
+  owner from memory would recreate the cross-source recovery/admission bug
+  that #110 removed; duplicating it inside the v3 cursor entry would change the
+  manifest wire format and is therefore rejected.
 - `SinkRecovery` is an engine-created scoped capability. Passing a full
   manifest would expose cross-participant cursor, state, and sink evidence and
   let a connector mutate a caller-owned recovery document.
 - Manual checkpoint success is an epoch only. The installed-unknown branch is
   a distinct typed error and status field; treating it as absent contradicts
-  the baseline's selectable post-rename state, while returning success before
-  parent sync overstates durability.
+  the baseline's selectable post-rename state. Returning success before parent
+  sync overstates durability; returning after parent sync but before all sink
+  commit acknowledgements would contradict #108's `Completed` waiter seam.
 - Connector lifecycle is async-only in Python so native cancellation and GC
   can settle one owned coroutine graph. Supporting synchronous callbacks would
   make the promised cleanup boundary unachievable.
@@ -1657,7 +1751,9 @@ subclass. Backticks delimit values and are not part of the message.
 | sink ID `archive` occurs on two outputs          | `validation` / `StreamingRuntimeError`                                      | `sink ID "archive" is configured for more than one graph output`                                |
 | source bound is zero                             | `validation` / `StreamingRuntimeError`                                      | `source "orders" max_batch_rows must be greater than zero`                                      |
 | source batch bound exceeds first edge            | `validation` / `StreamingRuntimeError`                                      | `source "orders" maximum batch exceeds edge "<stable_edge_id>" budget`                          |
+| cursor is owned by source `other`                | `validation` / `StreamingRuntimeError`                                      | `source "orders" received a foreign cursor owned by "other"`                                    |
 | exact output reaches unsupported source          | `compile` / `StreamingRuntimeError`                                         | `output "result" requires exactly_once but source "orders" lacks exact_pause_report_and_seek`   |
+| exact output reaches lossy source                | `compile` / `StreamingRuntimeError`                                         | `output "result" requires exactly_once but source "orders" is lossy`                            |
 | exact source ignores restored cursor             | `validation` / `StreamingRuntimeError`                                      | `source "orders" declared exact_pause_report_and_seek but did not honor the restore cursor`     |
 | exact output reaches volatile operator/UDF       | `compile` / `StreamingRuntimeError`                                         | `output "result" requires exactly_once but operator "price" is not deterministic`               |
 | exact output reaches ordinary sink               | `compile` / `StreamingRuntimeError`                                         | `output "result" requires exactly_once but sink "preview" is ordinary`                          |
@@ -1666,8 +1762,9 @@ subclass. Backticks delimit values and are not part of the message.
 | derived state lineage lease is held              | `conflict` / `StreamingRuntimeError`                                        | `state lineage "<pipeline_name>" is already leased`                                             |
 | local root initialization fails                  | `io` / `StreamingRuntimeError`                                              | `managed checkpoint storage initialization failed`                                              |
 | any canonical manifest candidate is invalid      | `checkpoint_mismatch` / `StreamingRuntimeError`                             | `checkpoint lineage contains an invalid manifest candidate at epoch <E>`                        |
-| checkpoint request times out before install      | `checkpoint_timeout` / `StreamingRuntimeError`                              | `checkpoint epoch <E> exceeded the configured timeout`                                          |
+| checkpoint request times out before `Completed`  | `checkpoint_timeout` / `StreamingRuntimeError`                              | `checkpoint epoch <E> exceeded the configured timeout`                                          |
 | manifest installed but parent sync failed        | `checkpoint_publication_unknown` / `CheckpointPublicationUnknownError`      | `checkpoint epoch <E> was installed but publication durability is unknown`                      |
+| sink commit fails before `Completed`             | `connector` / `StreamingRuntimeError`                                       | `sink "archive" commit failed for checkpoint epoch <E>`                                         |
 | Python source lifecycle method is synchronous    | builtin `TypeError`                                                         | `source "orders" open() must be declared with async def`                                        |
 | Python transactional sink method is synchronous  | builtin `TypeError`                                                         | `sink "archive" recover() must be declared with async def`                                      |
 | Python blocking method runs in event loop        | builtin `RuntimeError`                                                      | `<method>() cannot run inside an event loop; use <method>_async()`                              |
@@ -1717,9 +1814,9 @@ async fn main() -> calc_flow::Result<()> {
         checkpoints,
     )?;
     let job = runner.start().await?;
-    let durable_epoch = job.trigger_checkpoint().await?;
+    let completed_epoch = job.trigger_checkpoint().await?;
     let outcome = job.shutdown().await;
-    assert!(outcome.completed_epoch >= Some(durable_epoch));
+    assert!(outcome.completed_epoch >= Some(completed_epoch));
     Ok(())
 }
 ```
@@ -1739,6 +1836,7 @@ from calc_flow.runtime import (
     ReplayPositioning,
     SourceBinding,
     SourceCapabilities,
+    SourceDeliveryCapability,
     StreamingRunner,
 )
 
@@ -1747,6 +1845,7 @@ class Orders:
     def capabilities(self) -> SourceCapabilities:
         return SourceCapabilities(
             ReplayPositioning.EXACT_PAUSE_REPORT_AND_SEEK,
+            delivery=SourceDeliveryCapability.LOSSLESS,
             max_batch_rows=100,
             max_batch_bytes=1 << 20,
         )
@@ -1759,7 +1858,11 @@ class Orders:
             return None
         batch = make_batch(self.offset)
         self.offset += 1
-        cursor = Cursor(self.offset.to_bytes(8, "big"), {"offset": self.offset})
+        cursor = Cursor(
+            self.offset.to_bytes(8, "big"),
+            {"offset": self.offset},
+            source_id="input",
+        )
         return Data(batch, cursor)
 
     async def close(self) -> None:
@@ -1845,9 +1948,9 @@ blockers only when every named proof below exists.
 | Critique axis          | Required positive proof                                                                                                                             | Required adversarial proof                                                                                                        |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | ownership              | consuming Rust `start(self)`; non-Clone job; one-root owner; launch/job/GC/drop convergence; complete-root and lineage leases released after settle | dropped start/job, cancelled Python gate, same-root in-process/cross-process/symlink conflicts, backend/two-root compile failures |
-| checkpoint completion  | manual success after rename plus parent sync; immediate-crash recovery of returned epoch                                                            | real directory-sync failure yields installed-unknown, no durable advance/commit/abort; both crash persistence outcomes            |
+| checkpoint completion  | manual success at #108 `Completed` after parent sync and all sink commit acks; immediate-crash recovery of returned epoch                           | real directory-sync failure; partial commit fails observer; no completed advance; both installed-unknown crash outcomes           |
 | recovery               | empty lineage, `R + 1`, all-valid sparse highest, terminal resume, cross-language restart                                                           | corrupt-lower/valid-higher and valid-lower/corrupt-higher both poison; sink canaries see only their own recovery                  |
-| capability proof       | requested/effective delivery stable across Rust/Python/status/manifest; reachable-only derivation                                                   | declared-exact source ignores restore cursor; volatile reachable UDF; bounded sink retention; disjoint bad output isolation       |
+| capability proof       | cursor plus frozen descriptor parity across Rust/Python/status/identity/manifest; reachable-only requested/effective derivation                     | foreign cursor; descriptor drift; boolean fallback; ignored restore cursor; lossy source; volatile UDF; bounded sink retention    |
 | redaction              | every fallible A6 lifecycle returns only the safe wrapper; exact D7/error/log/manifest censuses                                                     | raw variant rejected; constructor/start/checkpoint/outcome and Python cause/context canaries; two-sink isolation                  |
 | cutover                | crate/native/Python/Studio/example/benchmark/docs/release smoke all agree on one revision                                                           | removed imports/methods fail; default Studio startup/routes work without the removed public store; generated API remains clean    |
 
@@ -1860,9 +1963,10 @@ blockers only when every named proof below exists.
 | pure construction and gated start         | inline runner tests: no I/O/lifecycle at construction; every launch cancellation gate settles tasks/connectors and both root/lineage leases                                                    |
 | complete namespace lease                  | inline state/runner plus subprocess tests: one-root derived children, same-root cross-process/symlink conflicts, backend/two-root signature rejection                                          |
 | new run/resume/terminal                   | public runner tests: empty epoch one, selected `R` then `R + 1`, terminal no-poll/no-reemit, every-candidate fail-closed                                                                       |
-| checkpoint FIFO and completion            | public/inline coordinator tests: bounded queue, periodic/manual/terminal ordering, dropped observer, durable return seam, post-durable failure                                                 |
+| checkpoint FIFO and completion            | public/inline coordinator tests: #108 bounded FIFO reuse, periodic/manual/terminal ordering, dropped observer, `Completed` return seam, partial-commit failure                                 |
 | installed-unknown                         | real filesystem parent-sync failure and restart tests: typed epoch, recovery-required, no commit/abort, persisted and lost outcomes                                                            |
-| exact positioning/capability              | public connector conformance: enum/identity/status/manifest parity and cursor-ignoring adversary; per-output reachability                                                                      |
+| cursor and frozen source identity         | Rust/Python configured/restored/emitted binding, foreign rejection, once-sampled schema/watermark/replay/delivery/bounds fingerprint, restart-drift matrix                                     |
+| exact positioning/capability              | public connector conformance: no `replayable` fallback, lossless enum/identity/status/manifest parity, cursor-ignoring adversary, per-output reachability                                      |
 | sink-scoped recovery                      | two-sink Rust canary and `python/tests/test_continuous_runtime.py`: no cursor/operator/root/other-sink visibility, defensive copies                                                            |
 | Python async lifecycle/cancellation       | `python/tests/test_continuous_runtime.py`: reject every sync method before call; all four awaiter-cancel rows; GC; no callback root/lease/task left                                            |
 | Python synchronous status                 | event-loop test calls `job.status()` successfully, sees a fresh sorted dict, proves no `status_async` and no `abandoned_job_drops`                                                             |
@@ -1900,8 +2004,10 @@ classification.
 | Retention            | `m5_fault/retention/io`            | `m5_fault/retention/panic`            | `m5_fault/retention/cancel`            | `m5_fault/retention/restart`            |
 | Compaction           | `m5_fault/compaction/io`           | `m5_fault/compaction/panic`           | `m5_fault/compaction/cancel`           | `m5_fault/compaction/restart`           |
 
-Manifest-rename and parent-sync cases explicitly cover absent, durable, and
-installed-unknown plus both post-crash outcomes of installed-unknown. The
+Manifest-rename and parent-sync cases explicitly cover absent,
+installed-unknown, and completed plus both post-crash outcomes of
+installed-unknown. Partial-sink-commit cases must fail the manual observer and
+preserve forward recovery; only `Completed` may return the epoch. The
 parent-sync installed-unknown case uses a real directory-sync failure, not
 only a post-sync test hook.
 
@@ -1950,7 +2056,7 @@ git diff --check
 ```
 
 The public implementation is compared with baseline
-`70f7e3d1e9306c419a0b2358527ec888c2ed9934` using the existing common-edge
+`aa3bbf0b40aef74898a59b6d0d0028c59a2d6993` using the existing common-edge
 harness. A greater-than-5% regression needs statistically conclusive same-host
 evidence and explicit approval. A6 adds no data-path task, queue, batch copy,
 Arrow materialization, or per-batch serialization relative to the M5 private
@@ -1958,7 +2064,11 @@ path.
 
 ## Open Questions
 
-None. This surface is ready for `cf-critic` to review independently on
-ownership, checkpoint completion, recovery, capability proof, redaction, and
-cutover. It must not move to implementation until that review reports zero
-blockers on all six axes.
+None. This surface now matches the controlling spec hash and
+`main@aa3bbf0b…`: it preserves the single-root owner and safe error boundary,
+projects #108's `Completed` manual-checkpoint seam, and exposes #110's
+identity-bound cursor plus once-sampled lossless/lossy source descriptor with
+no `replayable` fallback. It is ready for `cf-critic` to review independently
+on ownership, checkpoint completion, recovery, capability proof, redaction,
+and cutover. It must not move to implementation until that review reports zero
+blockers on all six axes against this API-note hash and the exact PR head.
