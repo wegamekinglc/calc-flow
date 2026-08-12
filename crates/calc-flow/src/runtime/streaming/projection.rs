@@ -1,0 +1,1406 @@
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
+
+use serde::Serialize;
+use thiserror::Error;
+
+use super::{
+    checkpoint::coordinator::CheckpointPhase as InternalCheckpointPhase,
+    job::{SinkCapability, ValidatedContinuousJob},
+    metrics::sink_metric_id,
+    progress::ReplayPositioningCapability,
+    runner::{
+        CheckpointFailureCategory, CheckpointStatus as InternalCheckpointStatus,
+        ContinuousJobOutcome, ContinuousJobState, ContinuousJobStatus, FailureOrigin,
+        RuntimeFailure, TerminalCause as InternalTerminalCause,
+    },
+    source_task::SourceDeliveryCapability,
+};
+use crate::{CalcFlowError, DeliveryGuarantee, Epoch, RetentionClass};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StreamingErrorCategory {
+    Validation,
+    Compile,
+    Conflict,
+    Cancelled,
+    CheckpointTimeout,
+    CheckpointMismatch,
+    CheckpointPublicationUnknown,
+    Io,
+    Operator,
+    Connector,
+    TaskPanicked,
+    Internal,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ComponentKind {
+    Job,
+    Edge,
+    Source,
+    Operator,
+    Sink,
+    Checkpoint,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CheckpointPhase {
+    Requested,
+    SourcesCut,
+    OperatorsSnapshotted,
+    SinksPrecommitted,
+    ManifestInstalled,
+    ManifestDurable,
+    SinksCommitted,
+    Completed,
+}
+
+impl From<InternalCheckpointPhase> for CheckpointPhase {
+    fn from(phase: InternalCheckpointPhase) -> Self {
+        match phase {
+            InternalCheckpointPhase::Requested => Self::Requested,
+            InternalCheckpointPhase::SourcesCut => Self::SourcesCut,
+            InternalCheckpointPhase::OperatorsSnapshotted => Self::OperatorsSnapshotted,
+            InternalCheckpointPhase::SinksPrecommitted => Self::SinksPrecommitted,
+            InternalCheckpointPhase::ManifestDurable => Self::ManifestDurable,
+            InternalCheckpointPhase::SinksCommitted => Self::SinksCommitted,
+            InternalCheckpointPhase::Completed => Self::Completed,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Error, PartialEq, Serialize)]
+#[error("{message}")]
+pub(crate) struct StreamingError {
+    category: StreamingErrorCategory,
+    message: String,
+    job_id: Option<u64>,
+    epoch: Option<Epoch>,
+    checkpoint_phase: Option<CheckpointPhase>,
+    component_kind: Option<ComponentKind>,
+    component_id: Option<String>,
+    diagnostic_id: Option<u64>,
+    position: u32,
+}
+
+impl StreamingError {
+    pub(crate) const fn category(&self) -> StreamingErrorCategory {
+        self.category
+    }
+
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub(crate) const fn job_id(&self) -> Option<u64> {
+        self.job_id
+    }
+
+    pub(crate) const fn epoch(&self) -> Option<Epoch> {
+        self.epoch
+    }
+
+    pub(crate) const fn checkpoint_phase(&self) -> Option<CheckpointPhase> {
+        self.checkpoint_phase
+    }
+
+    pub(crate) const fn component_kind(&self) -> Option<ComponentKind> {
+        self.component_kind
+    }
+
+    pub(crate) fn component_id(&self) -> Option<&str> {
+        self.component_id.as_deref()
+    }
+
+    pub(crate) const fn diagnostic_id(&self) -> Option<u64> {
+        self.diagnostic_id
+    }
+
+    pub(crate) const fn position(&self) -> u32 {
+        self.position
+    }
+}
+
+pub(crate) fn project_runtime_failures(
+    job_id: u64,
+    failures: Vec<Arc<RuntimeFailure>>,
+    diagnostic_id: Option<u64>,
+) -> Vec<StreamingError> {
+    project_runtime_failures_with_checkpoint(job_id, failures, diagnostic_id, None)
+}
+
+fn project_runtime_failures_with_checkpoint(
+    job_id: u64,
+    failures: Vec<Arc<RuntimeFailure>>,
+    diagnostic_id: Option<u64>,
+    checkpoint: Option<&InternalCheckpointStatus>,
+) -> Vec<StreamingError> {
+    failures
+        .into_iter()
+        .enumerate()
+        .map(|(position, failure)| {
+            project_runtime_failure(
+                job_id,
+                &failure,
+                diagnostic_id,
+                u32::try_from(position).unwrap_or(u32::MAX),
+                checkpoint,
+            )
+        })
+        .collect()
+}
+
+fn project_runtime_failure(
+    job_id: u64,
+    failure: &RuntimeFailure,
+    diagnostic_id: Option<u64>,
+    position: u32,
+    checkpoint: Option<&InternalCheckpointStatus>,
+) -> StreamingError {
+    if let Some(error) =
+        project_checkpoint_failure(job_id, failure, diagnostic_id, position, checkpoint)
+    {
+        return error;
+    }
+    let (category, message, component_kind, component_id) = safe_failure_fields(failure);
+    StreamingError {
+        category,
+        message,
+        job_id: Some(job_id),
+        epoch: None,
+        checkpoint_phase: None,
+        component_kind,
+        component_id,
+        diagnostic_id,
+        position,
+    }
+}
+
+fn project_checkpoint_failure(
+    job_id: u64,
+    failure: &RuntimeFailure,
+    diagnostic_id: Option<u64>,
+    position: u32,
+    checkpoint: Option<&InternalCheckpointStatus>,
+) -> Option<StreamingError> {
+    let status = checkpoint?;
+    if !matches!(
+        &failure.origin,
+        FailureOrigin::Task { task_name, .. } if task_name == "checkpoint"
+    ) {
+        return None;
+    }
+    if let Some(epoch) = status.installed_unknown_epoch {
+        return Some(checkpoint_publication_unknown(
+            epoch,
+            job_id,
+            diagnostic_id,
+            position,
+        ));
+    }
+    let category = match status.failure_category? {
+        CheckpointFailureCategory::Timeout => StreamingErrorCategory::CheckpointTimeout,
+        CheckpointFailureCategory::Protocol => StreamingErrorCategory::CheckpointMismatch,
+        CheckpointFailureCategory::Maintenance | CheckpointFailureCategory::Runtime => {
+            StreamingErrorCategory::Internal
+        }
+    };
+    let message = match (category, status.current_epoch) {
+        (StreamingErrorCategory::CheckpointTimeout, Some(epoch)) => format!(
+            "checkpoint epoch {} exceeded the configured timeout",
+            epoch.as_u64()
+        ),
+        (StreamingErrorCategory::CheckpointTimeout, None) => {
+            "checkpoint request exceeded the configured timeout".into()
+        }
+        (StreamingErrorCategory::CheckpointMismatch, Some(epoch)) => {
+            format!(
+                "checkpoint epoch {} did not match the active protocol",
+                epoch.as_u64()
+            )
+        }
+        (StreamingErrorCategory::CheckpointMismatch, None) => {
+            "checkpoint request did not match the active protocol".into()
+        }
+        _ => "checkpoint runtime failed".into(),
+    };
+    Some(StreamingError {
+        category,
+        message,
+        job_id: Some(job_id),
+        epoch: status.current_epoch,
+        checkpoint_phase: status.phase.map(CheckpointPhase::from),
+        component_kind: Some(ComponentKind::Checkpoint),
+        component_id: None,
+        diagnostic_id,
+        position,
+    })
+}
+
+fn safe_failure_fields(
+    failure: &RuntimeFailure,
+) -> (
+    StreamingErrorCategory,
+    String,
+    Option<ComponentKind>,
+    Option<String>,
+) {
+    if matches!(failure.error, CalcFlowError::TaskPanicked { .. }) {
+        return (
+            StreamingErrorCategory::TaskPanicked,
+            "streaming task failed".into(),
+            None,
+            None,
+        );
+    }
+    match &failure.origin {
+        FailureOrigin::Preflight => preflight_failure_fields(&failure.error),
+        FailureOrigin::RunnerLifecycle => (
+            StreamingErrorCategory::Internal,
+            "streaming runner lifecycle failed".into(),
+            Some(ComponentKind::Job),
+            None,
+        ),
+        FailureOrigin::OperatorEntry { node_id } => (
+            StreamingErrorCategory::Operator,
+            format!("operator {node_id:?} entry failed"),
+            Some(ComponentKind::Operator),
+            Some(node_id.clone()),
+        ),
+        FailureOrigin::SourceOpen { binding_id } => {
+            connector_failure_fields(ComponentKind::Source, binding_id, "source", "open")
+        }
+        FailureOrigin::SourceClose { binding_id } => {
+            connector_failure_fields(ComponentKind::Source, binding_id, "source", "close")
+        }
+        FailureOrigin::SinkOpen { sink_id, .. } => {
+            connector_failure_fields(ComponentKind::Sink, sink_id, "sink", "open")
+        }
+        FailureOrigin::SinkClose { sink_id, .. } => {
+            connector_failure_fields(ComponentKind::Sink, sink_id, "sink", "close")
+        }
+        FailureOrigin::SinkWrite { sink_id, .. } => {
+            connector_failure_fields(ComponentKind::Sink, sink_id, "sink", "write")
+        }
+        FailureOrigin::SinkCheckpoint { sink_id, .. } => {
+            connector_failure_fields(ComponentKind::Sink, sink_id, "sink", "checkpoint")
+        }
+        FailureOrigin::SinkIngress { edge_id, .. } => (
+            StreamingErrorCategory::Internal,
+            "sink ingress failed".into(),
+            Some(ComponentKind::Edge),
+            Some(edge_id.clone()),
+        ),
+        FailureOrigin::Task { task_name, .. } => task_failure_fields(task_name),
+        FailureOrigin::Metrics { .. } => (
+            StreamingErrorCategory::Internal,
+            "streaming metrics accounting failed".into(),
+            Some(ComponentKind::Job),
+            None,
+        ),
+    }
+}
+
+fn task_failure_fields(
+    task_name: &str,
+) -> (
+    StreamingErrorCategory,
+    String,
+    Option<ComponentKind>,
+    Option<String>,
+) {
+    if let Some((source_id, unit)) = task_name
+        .strip_prefix("source:")
+        .and_then(|name| name.rsplit_once(':'))
+        && matches!(unit, "pump" | "task")
+    {
+        return connector_failure_fields(ComponentKind::Source, source_id, "source", "callback");
+    }
+    if let Some(node_id) = task_name.strip_prefix("operator:") {
+        return (
+            StreamingErrorCategory::Operator,
+            format!("operator {node_id:?} execution failed"),
+            Some(ComponentKind::Operator),
+            Some(node_id.into()),
+        );
+    }
+    (
+        StreamingErrorCategory::Internal,
+        "streaming task failed".into(),
+        None,
+        None,
+    )
+}
+
+fn preflight_failure_fields(
+    error: &CalcFlowError,
+) -> (
+    StreamingErrorCategory,
+    String,
+    Option<ComponentKind>,
+    Option<String>,
+) {
+    let category = match error {
+        CalcFlowError::InvalidArgument { .. } => StreamingErrorCategory::Validation,
+        CalcFlowError::Compile { .. } => StreamingErrorCategory::Compile,
+        CalcFlowError::Conflict { .. } | CalcFlowError::PlanLeased { .. } => {
+            StreamingErrorCategory::Conflict
+        }
+        CalcFlowError::Cancelled { .. } => StreamingErrorCategory::Cancelled,
+        CalcFlowError::CheckpointMismatch { .. } => StreamingErrorCategory::CheckpointMismatch,
+        CalcFlowError::Io { .. } => StreamingErrorCategory::Io,
+        _ => StreamingErrorCategory::Internal,
+    };
+    let component_kind = matches!(
+        error,
+        CalcFlowError::CheckpointMismatch { .. }
+            | CalcFlowError::RecoveryRequired { .. }
+            | CalcFlowError::Io { .. }
+    )
+    .then_some(ComponentKind::Checkpoint);
+    let message = match category {
+        StreamingErrorCategory::Validation => "streaming job validation failed",
+        StreamingErrorCategory::Compile => "streaming plan compilation failed",
+        StreamingErrorCategory::Conflict => "streaming runtime ownership conflict",
+        StreamingErrorCategory::Cancelled => "streaming job was cancelled",
+        StreamingErrorCategory::CheckpointMismatch => {
+            "checkpoint lineage contains invalid recovery data"
+        }
+        StreamingErrorCategory::Io => "managed checkpoint storage operation failed",
+        _ => "streaming runtime initialization failed",
+    };
+    (category, message.into(), component_kind, None)
+}
+
+fn connector_failure_fields(
+    component_kind: ComponentKind,
+    component_id: &str,
+    component_name: &str,
+    operation: &str,
+) -> (
+    StreamingErrorCategory,
+    String,
+    Option<ComponentKind>,
+    Option<String>,
+) {
+    (
+        StreamingErrorCategory::Connector,
+        format!("{component_name} {component_id:?} {operation} failed"),
+        Some(component_kind),
+        Some(component_id.into()),
+    )
+}
+
+pub(crate) fn checkpoint_publication_unknown(
+    epoch: Epoch,
+    job_id: u64,
+    diagnostic_id: Option<u64>,
+    position: u32,
+) -> StreamingError {
+    StreamingError {
+        category: StreamingErrorCategory::CheckpointPublicationUnknown,
+        message: format!(
+            "checkpoint epoch {} was installed but publication durability is unknown",
+            epoch.as_u64()
+        ),
+        job_id: Some(job_id),
+        epoch: Some(epoch),
+        checkpoint_phase: Some(CheckpointPhase::ManifestInstalled),
+        component_kind: Some(ComponentKind::Checkpoint),
+        component_id: None,
+        diagnostic_id,
+        position,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum JobState {
+    Running,
+    Draining,
+    Completed,
+    Cancelled,
+    Failed,
+    RecoveryRequired,
+}
+
+impl From<ContinuousJobState> for JobState {
+    fn from(state: ContinuousJobState) -> Self {
+        match state {
+            ContinuousJobState::Running => Self::Running,
+            ContinuousJobState::Draining => Self::Draining,
+            ContinuousJobState::Completed => Self::Completed,
+            ContinuousJobState::Cancelled => Self::Cancelled,
+            ContinuousJobState::Failed => Self::Failed,
+            ContinuousJobState::RecoveryRequired => Self::RecoveryRequired,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TerminalCause {
+    NaturalEnd,
+    GracefulShutdown,
+    ExplicitCancel,
+    DeadlineExceeded,
+    Failure,
+}
+
+impl From<&InternalTerminalCause> for TerminalCause {
+    fn from(cause: &InternalTerminalCause) -> Self {
+        match cause {
+            InternalTerminalCause::NaturalEnd => Self::NaturalEnd,
+            InternalTerminalCause::GracefulShutdown => Self::GracefulShutdown,
+            InternalTerminalCause::ExplicitCancel => Self::ExplicitCancel,
+            InternalTerminalCause::DeadlineExceeded => Self::DeadlineExceeded,
+            InternalTerminalCause::TaskFailure { .. } => Self::Failure,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReplayPositioning {
+    ExactPauseReportAndSeek,
+    Unsupported,
+}
+
+impl From<ReplayPositioningCapability> for ReplayPositioning {
+    fn from(capability: ReplayPositioningCapability) -> Self {
+        match capability {
+            ReplayPositioningCapability::ExactPauseReportAndSeek => Self::ExactPauseReportAndSeek,
+            ReplayPositioningCapability::Unsupported => Self::Unsupported,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SourceDelivery {
+    Lossless,
+    Lossy,
+}
+
+impl From<SourceDeliveryCapability> for SourceDelivery {
+    fn from(capability: SourceDeliveryCapability) -> Self {
+        match capability {
+            SourceDeliveryCapability::Lossless => Self::Lossless,
+            SourceDeliveryCapability::Lossy => Self::Lossy,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum SinkDelivery {
+    Ordinary,
+    EpochIdempotent {
+        mechanism: String,
+        retention: RetentionClass,
+    },
+    Transactional,
+}
+
+impl From<SinkCapability> for SinkDelivery {
+    fn from(capability: SinkCapability) -> Self {
+        match capability {
+            SinkCapability::Ordinary => Self::Ordinary,
+            SinkCapability::EpochIdempotent {
+                mechanism,
+                retention,
+            } => Self::EpochIdempotent {
+                mechanism,
+                retention,
+            },
+            SinkCapability::Transactional => Self::Transactional,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct OutputDeliveryStatus {
+    pub(crate) requested: DeliveryGuarantee,
+    pub(crate) effective: DeliveryGuarantee,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct EdgeStatus {
+    pub(crate) current_envelopes: usize,
+    pub(crate) current_rows: usize,
+    pub(crate) current_bytes: usize,
+    pub(crate) high_water_envelopes: usize,
+    pub(crate) high_water_rows: usize,
+    pub(crate) high_water_bytes: usize,
+    pub(crate) blocked_sends: u64,
+    pub(crate) blocked_duration: Duration,
+    pub(crate) envelope_limit: usize,
+    pub(crate) row_limit: usize,
+    pub(crate) byte_limit: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct SourceStatus {
+    pub(crate) replay_positioning: ReplayPositioning,
+    pub(crate) delivery: SourceDelivery,
+    pub(crate) max_batch_rows: usize,
+    pub(crate) max_batch_bytes: usize,
+    pub(crate) next_sequence: Option<u64>,
+    pub(crate) ended: bool,
+    pub(crate) polls: u64,
+    pub(crate) data_batches: u64,
+    pub(crate) data_rows: u64,
+    pub(crate) data_bytes: u64,
+    pub(crate) fanned_out_batches: u64,
+    pub(crate) fanned_out_rows: u64,
+    pub(crate) fanned_out_bytes: u64,
+    pub(crate) errors: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct OperatorStatus {
+    pub(crate) input_batches: u64,
+    pub(crate) input_rows: u64,
+    pub(crate) input_bytes: u64,
+    pub(crate) fanned_out_batches: u64,
+    pub(crate) fanned_out_rows: u64,
+    pub(crate) fanned_out_bytes: u64,
+    pub(crate) processing_duration: Duration,
+    pub(crate) errors: u64,
+    pub(crate) ended: bool,
+    pub(crate) late_rows: u64,
+    pub(crate) late_affected_batches: u64,
+    pub(crate) max_lateness: Option<Duration>,
+    pub(crate) null_event_time_rows: u64,
+    pub(crate) null_event_time_batches: u64,
+    pub(crate) datafusion_runtime_created: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct SinkStatus {
+    pub(crate) output_id: String,
+    pub(crate) effective_delivery: SinkDelivery,
+    pub(crate) delivered_batches: u64,
+    pub(crate) delivered_rows: u64,
+    pub(crate) delivered_bytes: u64,
+    pub(crate) write_duration: Duration,
+    pub(crate) errors: u64,
+    pub(crate) ended: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub(crate) struct CheckpointStatus {
+    pub(crate) current_epoch: Option<Epoch>,
+    pub(crate) phase: Option<CheckpointPhase>,
+    pub(crate) terminal: bool,
+    pub(crate) source_acknowledgements: usize,
+    pub(crate) expected_sources: usize,
+    pub(crate) operator_acknowledgements: usize,
+    pub(crate) expected_operators: usize,
+    pub(crate) sink_precommit_acknowledgements: usize,
+    pub(crate) expected_sink_precommits: usize,
+    pub(crate) sink_commit_acknowledgements: usize,
+    pub(crate) expected_sink_commits: usize,
+    pub(crate) elapsed: Option<Duration>,
+    pub(crate) last_completed_epoch: Option<Epoch>,
+    pub(crate) installed_unknown_epoch: Option<Epoch>,
+    pub(crate) failure_category: Option<StreamingErrorCategory>,
+    pub(crate) runtime_config_changed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct JobStatus {
+    pub(crate) job_id: u64,
+    pub(crate) state: JobState,
+    pub(crate) terminal_cause: Option<TerminalCause>,
+    pub(crate) delivery: BTreeMap<String, OutputDeliveryStatus>,
+    pub(crate) task_count: usize,
+    pub(crate) task_errors: u64,
+    pub(crate) metrics_overflowed: bool,
+    pub(crate) edges: BTreeMap<String, EdgeStatus>,
+    pub(crate) sources: BTreeMap<String, SourceStatus>,
+    pub(crate) operators: BTreeMap<String, OperatorStatus>,
+    pub(crate) sinks: BTreeMap<String, SinkStatus>,
+    pub(crate) checkpoint: CheckpointStatus,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct JobOutcome {
+    pub(crate) state: JobState,
+    pub(crate) cause: TerminalCause,
+    pub(crate) completed_epoch: Option<Epoch>,
+    pub(crate) errors: Vec<StreamingError>,
+}
+
+pub(crate) fn project_job_outcome(
+    job_id: u64,
+    outcome: &ContinuousJobOutcome,
+    checkpoint: Option<&InternalCheckpointStatus>,
+    diagnostic_id: Option<u64>,
+) -> JobOutcome {
+    JobOutcome {
+        state: outcome.state.into(),
+        cause: TerminalCause::from(&outcome.cause),
+        completed_epoch: checkpoint.and_then(|status| status.last_completed_epoch),
+        errors: project_runtime_failures_with_checkpoint(
+            job_id,
+            outcome.errors.clone(),
+            diagnostic_id,
+            checkpoint,
+        ),
+    }
+}
+
+#[derive(Clone)]
+struct SourceProjection {
+    replay_positioning: ReplayPositioning,
+    delivery: SourceDelivery,
+    max_batch_rows: usize,
+    max_batch_bytes: usize,
+}
+
+#[derive(Clone)]
+struct SinkProjection {
+    metric_id: String,
+    output_id: String,
+    delivery: SinkDelivery,
+}
+
+#[derive(Default)]
+pub(crate) struct StatusProjection {
+    delivery: BTreeMap<String, OutputDeliveryStatus>,
+    edge_limits: BTreeMap<String, (usize, usize)>,
+    sources: BTreeMap<String, SourceProjection>,
+    sinks: BTreeMap<String, SinkProjection>,
+}
+
+impl StatusProjection {
+    pub(crate) fn new(job: &ValidatedContinuousJob) -> Self {
+        let delivery = job
+            .plan
+            .sink_routes
+            .keys()
+            .map(|output_id| {
+                let requested = job
+                    .plan
+                    .requirements
+                    .delivery
+                    .get(output_id)
+                    .copied()
+                    .unwrap_or(DeliveryGuarantee::AtLeastOnce);
+                (
+                    output_id.clone(),
+                    OutputDeliveryStatus {
+                        requested,
+                        effective: requested,
+                    },
+                )
+            })
+            .collect();
+        let edge_limits = job
+            .plan
+            .edges
+            .iter()
+            .map(|(edge_id, edge)| {
+                (
+                    edge_id.clone(),
+                    (edge.budget.max_rows, edge.budget.max_bytes),
+                )
+            })
+            .collect();
+        let sources = job
+            .sources
+            .iter()
+            .map(|(source_id, binding)| {
+                let capabilities = binding.sampled_capabilities();
+                (
+                    source_id.clone(),
+                    SourceProjection {
+                        replay_positioning: binding.sampled_replay_positioning().into(),
+                        delivery: binding.sampled_delivery().into(),
+                        max_batch_rows: capabilities.max_batch_rows,
+                        max_batch_bytes: capabilities.max_batch_bytes,
+                    },
+                )
+            })
+            .collect();
+        let sinks = job
+            .sinks
+            .iter()
+            .flat_map(|(output_id, sinks)| {
+                sinks.iter().map(move |sink| {
+                    (
+                        sink.sink_id.to_string(),
+                        SinkProjection {
+                            metric_id: sink_metric_id(output_id, sink.sink_id.as_str()),
+                            output_id: output_id.clone(),
+                            delivery: sink.binding.capability().into(),
+                        },
+                    )
+                })
+            })
+            .collect();
+        Self {
+            delivery,
+            edge_limits,
+            sources,
+            sinks,
+        }
+    }
+
+    pub(crate) fn sink_outputs(&self) -> BTreeMap<String, String> {
+        self.sinks
+            .values()
+            .map(|sink| (sink.metric_id.clone(), sink.output_id.clone()))
+            .collect()
+    }
+
+    pub(crate) fn project(&self, status: &ContinuousJobStatus) -> JobStatus {
+        let state = JobState::from(status.state);
+        let terminal_cause = if matches!(
+            state,
+            JobState::Completed
+                | JobState::Cancelled
+                | JobState::Failed
+                | JobState::RecoveryRequired
+        ) {
+            status.terminal_cause.as_ref().map(TerminalCause::from)
+        } else {
+            None
+        };
+        JobStatus {
+            job_id: status.job_id,
+            state,
+            terminal_cause,
+            delivery: self.delivery.clone(),
+            task_count: status.tasks.len(),
+            task_errors: status.metrics.job.task_errors,
+            metrics_overflowed: status.metrics.job.metrics_overflowed,
+            edges: self.project_edges(status),
+            sources: self.project_sources(status),
+            operators: Self::project_operators(status),
+            sinks: self.project_sinks(status),
+            checkpoint: project_checkpoint(status.checkpoint.as_ref()),
+        }
+    }
+
+    fn project_edges(&self, status: &ContinuousJobStatus) -> BTreeMap<String, EdgeStatus> {
+        status
+            .metrics
+            .edges
+            .iter()
+            .map(|(edge_id, metrics)| {
+                let (row_limit, byte_limit) = self.edge_limits[edge_id];
+                let channel = &metrics.channel;
+                (
+                    edge_id.clone(),
+                    EdgeStatus {
+                        current_envelopes: channel.queue_depth,
+                        current_rows: channel.charged_rows,
+                        current_bytes: channel.charged_bytes,
+                        high_water_envelopes: channel.high_water_depth,
+                        high_water_rows: channel.high_water_rows,
+                        high_water_bytes: channel.high_water_bytes,
+                        blocked_sends: channel.blocked_sends,
+                        blocked_duration: channel.blocked_duration,
+                        envelope_limit: row_limit,
+                        row_limit,
+                        byte_limit,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn project_sources(&self, status: &ContinuousJobStatus) -> BTreeMap<String, SourceStatus> {
+        self.sources
+            .iter()
+            .map(|(source_id, projection)| {
+                let progress = &status.sources[source_id];
+                let metrics = &status.metrics.sources[source_id];
+                (
+                    source_id.clone(),
+                    SourceStatus {
+                        replay_positioning: projection.replay_positioning,
+                        delivery: projection.delivery,
+                        max_batch_rows: projection.max_batch_rows,
+                        max_batch_bytes: projection.max_batch_bytes,
+                        next_sequence: progress.next_sequence,
+                        ended: progress.ended,
+                        polls: metrics.poll_count,
+                        data_batches: metrics.data_batches,
+                        data_rows: metrics.data_rows,
+                        data_bytes: metrics.data_bytes,
+                        fanned_out_batches: metrics.fully_fanned_out_batches,
+                        fanned_out_rows: metrics.fully_fanned_out_rows,
+                        fanned_out_bytes: metrics.fully_fanned_out_bytes,
+                        errors: metrics.errors,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn project_operators(status: &ContinuousJobStatus) -> BTreeMap<String, OperatorStatus> {
+        status
+            .metrics
+            .nodes
+            .iter()
+            .map(|(node_id, metrics)| {
+                let progress = &status.nodes[node_id];
+                (
+                    node_id.clone(),
+                    OperatorStatus {
+                        input_batches: metrics.input_batches,
+                        input_rows: metrics.input_rows,
+                        input_bytes: metrics.input_bytes,
+                        fanned_out_batches: metrics.fully_fanned_out_batches,
+                        fanned_out_rows: metrics.fully_fanned_out_rows,
+                        fanned_out_bytes: metrics.fully_fanned_out_bytes,
+                        processing_duration: metrics.processing_duration,
+                        errors: metrics.errors,
+                        ended: progress.ended,
+                        late_rows: metrics.late_rows,
+                        late_affected_batches: metrics.affected_batches,
+                        max_lateness: metrics.max_lateness_micros.map(Duration::from_micros),
+                        null_event_time_rows: metrics.null_event_time_rows,
+                        null_event_time_batches: metrics.null_event_time_batches,
+                        datafusion_runtime_created: progress.datafusion_runtime_created,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn project_sinks(&self, status: &ContinuousJobStatus) -> BTreeMap<String, SinkStatus> {
+        self.sinks
+            .iter()
+            .map(|(sink_id, projection)| {
+                let metrics = &status.metrics.sinks[&projection.metric_id];
+                let progress = &status.sinks[&projection.metric_id];
+                (
+                    sink_id.clone(),
+                    SinkStatus {
+                        output_id: projection.output_id.clone(),
+                        effective_delivery: projection.delivery.clone(),
+                        delivered_batches: metrics.delivered_batches,
+                        delivered_rows: metrics.delivered_rows,
+                        delivered_bytes: metrics.delivered_bytes,
+                        write_duration: metrics.write_duration,
+                        errors: metrics.errors,
+                        ended: progress.ended,
+                    },
+                )
+            })
+            .collect()
+    }
+}
+
+fn project_checkpoint(status: Option<&super::runner::CheckpointStatus>) -> CheckpointStatus {
+    status.map_or_else(CheckpointStatus::default, |status| {
+        let installed_unknown = status.installed_unknown_epoch.is_some();
+        CheckpointStatus {
+            current_epoch: status.current_epoch,
+            phase: if installed_unknown {
+                Some(CheckpointPhase::ManifestInstalled)
+            } else {
+                status.phase.map(CheckpointPhase::from)
+            },
+            terminal: status.terminal,
+            source_acknowledgements: status.source_acknowledgements,
+            expected_sources: status.expected_sources,
+            operator_acknowledgements: status.operator_acknowledgements,
+            expected_operators: status.expected_operators,
+            sink_precommit_acknowledgements: status.sink_precommit_acknowledgements,
+            expected_sink_precommits: status.expected_sinks,
+            sink_commit_acknowledgements: status.sink_commit_acknowledgements,
+            expected_sink_commits: status.expected_sinks,
+            elapsed: status.elapsed,
+            last_completed_epoch: status.last_completed_epoch,
+            installed_unknown_epoch: status.installed_unknown_epoch,
+            failure_category: if installed_unknown {
+                Some(StreamingErrorCategory::CheckpointPublicationUnknown)
+            } else {
+                status.failure_category.map(checkpoint_failure_category)
+            },
+            runtime_config_changed: status.runtime_config_changed,
+        }
+    })
+}
+
+fn checkpoint_failure_category(category: CheckpointFailureCategory) -> StreamingErrorCategory {
+    match category {
+        CheckpointFailureCategory::Timeout => StreamingErrorCategory::CheckpointTimeout,
+        CheckpointFailureCategory::Protocol => StreamingErrorCategory::CheckpointMismatch,
+        CheckpointFailureCategory::Maintenance | CheckpointFailureCategory::Runtime => {
+            StreamingErrorCategory::Internal
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeMap, error::Error as _, sync::Arc};
+
+    use crate::{CalcFlowError, Epoch};
+
+    use super::{ComponentKind, StreamingErrorCategory, project_runtime_failures};
+    use crate::runtime::streaming::runner::{FailureOrigin, RuntimeFailure};
+    use crate::runtime::streaming::{
+        checkpoint::coordinator::CheckpointPhase as InternalCheckpointPhase,
+        metrics::M2MetricsSnapshot,
+        runner::{
+            CheckpointFailureCategory, CheckpointStatus as InternalCheckpointStatus,
+            ContinuousJobOutcome, ContinuousJobState, ContinuousJobStatus,
+            TerminalCause as InternalTerminalCause,
+        },
+        supervisor::TaskId,
+    };
+
+    const SECRET: &str = "postgres://admin:secret@private.example/jobs?token=raw";
+    const PATH: &str = "/srv/private/checkpoints/customer-42";
+    const PANIC: &str = "panic payload contains bearer-secret";
+
+    #[test]
+    fn streaming_projection_maps_shared_error_vectors_without_sensitive_text() {
+        let failures = vec![
+            Arc::new(RuntimeFailure {
+                origin: FailureOrigin::Preflight,
+                error: CalcFlowError::Io {
+                    path: PATH.into(),
+                    source: std::io::Error::other(SECRET),
+                },
+            }),
+            Arc::new(RuntimeFailure {
+                origin: FailureOrigin::SourceOpen {
+                    binding_id: "orders".into(),
+                },
+                error: CalcFlowError::ExternalProvider {
+                    provider: "python".into(),
+                    name: "source".into(),
+                    version: "1".into(),
+                    message: SECRET.into(),
+                },
+            }),
+            Arc::new(RuntimeFailure {
+                origin: FailureOrigin::Task {
+                    task_id: TaskId::new(91),
+                    task_name: format!("source:orders:{SECRET}"),
+                },
+                error: CalcFlowError::TaskPanicked {
+                    task_id: 91,
+                    message: PANIC.into(),
+                },
+            }),
+        ];
+
+        let projected = project_runtime_failures(17, failures, Some(23));
+
+        assert_eq!(projected.len(), 3);
+        assert_eq!(projected[0].category(), StreamingErrorCategory::Io);
+        assert_eq!(
+            projected[0].component_kind(),
+            Some(ComponentKind::Checkpoint)
+        );
+        assert_eq!(projected[1].category(), StreamingErrorCategory::Connector);
+        assert_eq!(projected[1].component_kind(), Some(ComponentKind::Source));
+        assert_eq!(projected[1].component_id(), Some("orders"));
+        assert_eq!(
+            projected[2].category(),
+            StreamingErrorCategory::TaskPanicked
+        );
+        assert_eq!(projected[2].component_id(), None);
+        assert_eq!(
+            projected
+                .iter()
+                .map(super::StreamingError::position)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert!(projected.iter().all(|error| error.job_id() == Some(17)));
+        assert!(
+            projected
+                .iter()
+                .all(|error| error.diagnostic_id() == Some(23))
+        );
+        assert!(projected.iter().all(|error| error.epoch().is_none()));
+
+        let rendered = projected
+            .iter()
+            .flat_map(|error| {
+                [
+                    error.to_string(),
+                    format!("{error:?}"),
+                    format!("{error:#?}"),
+                    serde_json::to_string(error).unwrap(),
+                ]
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for sentinel in [SECRET, PATH, PANIC, "source:orders:", "91"] {
+            assert!(!rendered.contains(sentinel), "leaked sentinel {sentinel:?}");
+        }
+        assert!(projected.iter().all(|error| error.source().is_none()));
+    }
+
+    #[test]
+    fn runtime_task_and_metrics_failures_use_safe_public_coordinates() {
+        const METRIC_ID: &str = "sink/736563726574/63726564656e7469616c";
+        let failures = vec![
+            Arc::new(RuntimeFailure {
+                origin: FailureOrigin::Task {
+                    task_id: TaskId::new(1),
+                    task_name: "source:orders:pump".into(),
+                },
+                error: CalcFlowError::ExternalProvider {
+                    provider: "python".into(),
+                    name: "source".into(),
+                    version: "1".into(),
+                    message: SECRET.into(),
+                },
+            }),
+            Arc::new(RuntimeFailure {
+                origin: FailureOrigin::Task {
+                    task_id: TaskId::new(2),
+                    task_name: "operator:price".into(),
+                },
+                error: CalcFlowError::Operator {
+                    node_id: "price".into(),
+                    message: SECRET.into(),
+                },
+            }),
+            Arc::new(RuntimeFailure {
+                origin: FailureOrigin::Metrics {
+                    component_id: METRIC_ID.into(),
+                    counter: "errors",
+                },
+                error: CalcFlowError::Internal {
+                    message: SECRET.into(),
+                },
+            }),
+        ];
+
+        let projected = project_runtime_failures(17, failures, Some(23));
+
+        assert_eq!(projected[0].category(), StreamingErrorCategory::Connector);
+        assert_eq!(projected[0].component_kind(), Some(ComponentKind::Source));
+        assert_eq!(projected[0].component_id(), Some("orders"));
+        assert_eq!(projected[1].category(), StreamingErrorCategory::Operator);
+        assert_eq!(projected[1].component_kind(), Some(ComponentKind::Operator));
+        assert_eq!(projected[1].component_id(), Some("price"));
+        assert_eq!(projected[2].category(), StreamingErrorCategory::Internal);
+        assert_eq!(projected[2].component_kind(), Some(ComponentKind::Job));
+        assert_eq!(projected[2].component_id(), None);
+        let rendered = serde_json::to_string(&projected).unwrap();
+        for sentinel in [SECRET, METRIC_ID, "736563726574", "63726564656e7469616c"] {
+            assert!(!rendered.contains(sentinel), "leaked sentinel {sentinel:?}");
+        }
+    }
+
+    #[test]
+    fn publication_unknown_projection_keeps_only_the_safe_epoch_coordinate() {
+        let epoch = Epoch::new(7).unwrap();
+        let error = super::checkpoint_publication_unknown(epoch, 17, None, 4);
+
+        assert_eq!(
+            error.category(),
+            StreamingErrorCategory::CheckpointPublicationUnknown
+        );
+        assert_eq!(error.epoch(), Some(epoch));
+        assert_eq!(
+            error.to_string(),
+            "checkpoint epoch 7 was installed but publication durability is unknown"
+        );
+        assert_eq!(error.position(), 4);
+    }
+
+    #[test]
+    fn nonterminal_status_never_exposes_a_provisional_terminal_cause() {
+        let internal = ContinuousJobStatus {
+            job_id: 17,
+            state: ContinuousJobState::Running,
+            terminal_cause: Some(InternalTerminalCause::ExplicitCancel),
+            tasks: BTreeMap::new(),
+            edges: BTreeMap::new(),
+            sources: BTreeMap::new(),
+            nodes: BTreeMap::new(),
+            sinks: BTreeMap::new(),
+            progress: None,
+            checkpoint: None,
+            metrics: M2MetricsSnapshot::default(),
+        };
+
+        let status = super::StatusProjection::default().project(&internal);
+
+        assert_eq!(status.state, super::JobState::Running);
+        assert_eq!(status.terminal_cause, None);
+    }
+
+    #[test]
+    fn checkpoint_projection_keeps_completed_and_indeterminate_epochs_distinct() {
+        let completed = Epoch::new(7).unwrap();
+        let indeterminate = Epoch::new(8).unwrap();
+        let checkpoint = InternalCheckpointStatus {
+            current_epoch: Some(indeterminate),
+            phase: Some(InternalCheckpointPhase::SinksPrecommitted),
+            terminal: false,
+            source_acknowledgements: 2,
+            operator_acknowledgements: 3,
+            sink_precommit_acknowledgements: 4,
+            sink_commit_acknowledgements: 0,
+            expected_sources: 2,
+            expected_operators: 3,
+            expected_sinks: 4,
+            elapsed: Some(std::time::Duration::from_micros(91)),
+            last_completed_epoch: Some(completed),
+            installed_unknown_epoch: Some(indeterminate),
+            failure_category: Some(CheckpointFailureCategory::Timeout),
+            runtime_config_changed: true,
+        };
+        let internal = ContinuousJobStatus {
+            job_id: 17,
+            state: ContinuousJobState::Running,
+            terminal_cause: None,
+            tasks: BTreeMap::new(),
+            edges: BTreeMap::new(),
+            sources: BTreeMap::new(),
+            nodes: BTreeMap::new(),
+            sinks: BTreeMap::new(),
+            progress: None,
+            checkpoint: Some(checkpoint),
+            metrics: M2MetricsSnapshot::default(),
+        };
+
+        let status = super::StatusProjection::default().project(&internal);
+
+        assert_eq!(status.checkpoint.last_completed_epoch, Some(completed));
+        assert_eq!(
+            status.checkpoint.installed_unknown_epoch,
+            Some(indeterminate)
+        );
+        assert_ne!(
+            status.checkpoint.last_completed_epoch,
+            status.checkpoint.installed_unknown_epoch
+        );
+        assert_eq!(
+            status.checkpoint.failure_category,
+            Some(StreamingErrorCategory::CheckpointPublicationUnknown)
+        );
+        assert_eq!(
+            status.checkpoint.phase,
+            Some(super::CheckpointPhase::ManifestInstalled)
+        );
+        assert_eq!(status.checkpoint.expected_sink_precommits, 4);
+        assert_eq!(status.checkpoint.expected_sink_commits, 4);
+    }
+
+    #[test]
+    fn job_outcome_reuses_the_safe_ordered_error_projection() {
+        let raw = ContinuousJobOutcome {
+            state: ContinuousJobState::Failed,
+            cause: InternalTerminalCause::TaskFailure {
+                primary_task_id: TaskId::new(91),
+            },
+            errors: vec![
+                Arc::new(RuntimeFailure {
+                    origin: FailureOrigin::Task {
+                        task_id: TaskId::new(91),
+                        task_name: format!("source:orders:{SECRET}"),
+                    },
+                    error: CalcFlowError::TaskPanicked {
+                        task_id: 91,
+                        message: PANIC.into(),
+                    },
+                }),
+                Arc::new(RuntimeFailure {
+                    origin: FailureOrigin::SourceClose {
+                        binding_id: "orders".into(),
+                    },
+                    error: CalcFlowError::ExternalProvider {
+                        provider: "python".into(),
+                        name: "source".into(),
+                        version: "1".into(),
+                        message: SECRET.into(),
+                    },
+                }),
+            ],
+        };
+
+        let outcome = super::project_job_outcome(17, &raw, None, Some(23));
+
+        assert_eq!(outcome.state, super::JobState::Failed);
+        assert_eq!(outcome.cause, super::TerminalCause::Failure);
+        assert_eq!(outcome.completed_epoch, None);
+        assert_eq!(
+            outcome
+                .errors
+                .iter()
+                .map(super::StreamingError::category)
+                .collect::<Vec<_>>(),
+            vec![
+                StreamingErrorCategory::TaskPanicked,
+                StreamingErrorCategory::Connector,
+            ]
+        );
+        assert_eq!(
+            outcome
+                .errors
+                .iter()
+                .map(super::StreamingError::position)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        let rendered = serde_json::to_string(&outcome).unwrap();
+        for sentinel in [SECRET, PANIC, "source:orders:", "91"] {
+            assert!(!rendered.contains(sentinel), "leaked sentinel {sentinel:?}");
+        }
+    }
+
+    #[test]
+    fn job_outcome_projects_indeterminate_checkpoint_as_the_same_safe_value() {
+        let completed = Epoch::new(6).unwrap();
+        let indeterminate = Epoch::new(7).unwrap();
+        let checkpoint = InternalCheckpointStatus {
+            current_epoch: Some(indeterminate),
+            phase: Some(InternalCheckpointPhase::SinksPrecommitted),
+            terminal: false,
+            source_acknowledgements: 1,
+            operator_acknowledgements: 1,
+            sink_precommit_acknowledgements: 1,
+            sink_commit_acknowledgements: 0,
+            expected_sources: 1,
+            expected_operators: 1,
+            expected_sinks: 1,
+            elapsed: None,
+            last_completed_epoch: Some(completed),
+            installed_unknown_epoch: Some(indeterminate),
+            failure_category: Some(CheckpointFailureCategory::Runtime),
+            runtime_config_changed: false,
+        };
+        let raw = ContinuousJobOutcome {
+            state: ContinuousJobState::RecoveryRequired,
+            cause: InternalTerminalCause::TaskFailure {
+                primary_task_id: TaskId::new(3),
+            },
+            errors: vec![Arc::new(RuntimeFailure {
+                origin: FailureOrigin::Task {
+                    task_id: TaskId::new(3),
+                    task_name: "checkpoint".into(),
+                },
+                error: CalcFlowError::RecoveryRequired {
+                    pipeline_name: SECRET.into(),
+                    message: PANIC.into(),
+                },
+            })],
+        };
+
+        let outcome = super::project_job_outcome(17, &raw, Some(&checkpoint), Some(23));
+
+        assert_eq!(outcome.state, super::JobState::RecoveryRequired);
+        assert_eq!(outcome.completed_epoch, Some(completed));
+        assert_eq!(outcome.errors.len(), 1);
+        assert_eq!(
+            outcome.errors[0].category(),
+            StreamingErrorCategory::CheckpointPublicationUnknown
+        );
+        assert_eq!(outcome.errors[0].epoch(), Some(indeterminate));
+        assert_eq!(
+            outcome.errors[0].checkpoint_phase(),
+            Some(super::CheckpointPhase::ManifestInstalled)
+        );
+        assert_eq!(outcome.errors[0].diagnostic_id(), Some(23));
+        let rendered = serde_json::to_string(&outcome).unwrap();
+        for sentinel in [SECRET, PANIC] {
+            assert!(!rendered.contains(sentinel), "leaked sentinel {sentinel:?}");
+        }
+    }
+
+    #[test]
+    fn rust_projection_matches_the_shared_python_vectors() {
+        let fixture = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/a6/streaming_error_projection.json"
+        ));
+        let document: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        let categories = [
+            StreamingErrorCategory::Validation,
+            StreamingErrorCategory::Compile,
+            StreamingErrorCategory::Conflict,
+            StreamingErrorCategory::Cancelled,
+            StreamingErrorCategory::CheckpointTimeout,
+            StreamingErrorCategory::CheckpointMismatch,
+            StreamingErrorCategory::CheckpointPublicationUnknown,
+            StreamingErrorCategory::Io,
+            StreamingErrorCategory::Operator,
+            StreamingErrorCategory::Connector,
+            StreamingErrorCategory::TaskPanicked,
+            StreamingErrorCategory::Internal,
+        ];
+        assert_eq!(
+            serde_json::to_value(categories).unwrap(),
+            document["categories"]
+        );
+
+        for vector in document["vectors"].as_array().unwrap() {
+            let case = vector["case"].as_str().unwrap();
+            let error = match case {
+                "checkpoint_io" => project_runtime_failures(
+                    17,
+                    vec![Arc::new(RuntimeFailure {
+                        origin: FailureOrigin::Preflight,
+                        error: CalcFlowError::Io {
+                            path: PATH.into(),
+                            source: std::io::Error::other(SECRET),
+                        },
+                    })],
+                    Some(23),
+                )
+                .remove(0),
+                "checkpoint_publication_unknown" => {
+                    super::checkpoint_publication_unknown(Epoch::new(7).unwrap(), 17, None, 0)
+                }
+                "source_open" => project_runtime_failures(
+                    17,
+                    vec![Arc::new(RuntimeFailure {
+                        origin: FailureOrigin::SourceOpen {
+                            binding_id: "orders".into(),
+                        },
+                        error: CalcFlowError::ExternalProvider {
+                            provider: "python".into(),
+                            name: "source".into(),
+                            version: "1".into(),
+                            message: SECRET.into(),
+                        },
+                    })],
+                    Some(23),
+                )
+                .remove(0),
+                "task_panicked" => project_runtime_failures(
+                    17,
+                    vec![Arc::new(RuntimeFailure {
+                        origin: FailureOrigin::Task {
+                            task_id: TaskId::new(91),
+                            task_name: "source:orders:private-task-name".into(),
+                        },
+                        error: CalcFlowError::TaskPanicked {
+                            task_id: 91,
+                            message: PANIC.into(),
+                        },
+                    })],
+                    Some(23),
+                )
+                .remove(0),
+                other => panic!("unknown shared projection vector {other:?}"),
+            };
+            let actual = serde_json::to_value(error).unwrap();
+            assert_eq!(actual, vector["expected"], "shared vector {case:?}");
+            let rendered = actual.to_string();
+            for sentinel in vector["private_sentinels"].as_array().unwrap() {
+                assert!(!rendered.contains(sentinel.as_str().unwrap()));
+            }
+        }
+    }
+}

@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "categories": [
+    "validation",
+    "compile",
+    "conflict",
+    "cancelled",
+    "checkpoint_timeout",
+    "checkpoint_mismatch",
+    "checkpoint_publication_unknown",
+    "io",
+    "operator",
+    "connector",
+    "task_panicked",
+    "internal"
+  ],
+  "vectors": [
+    {
+      "case": "checkpoint_io",
+      "private_sentinels": [
+        "/srv/private/checkpoints/customer-42",
+        "postgres://admin:secret@private.example/jobs?token=raw"
+      ],
+      "expected": {
+        "category": "io",
+        "message": "managed checkpoint storage operation failed",
+        "job_id": 17,
+        "epoch": null,
+        "checkpoint_phase": null,
+        "component_kind": "checkpoint",
+        "component_id": null,
+        "diagnostic_id": 23,
+        "position": 0
+      }
+    },
+    {
+      "case": "checkpoint_publication_unknown",
+      "private_sentinels": [
+        "/srv/private/checkpoints/customer-42",
+        "parent directory sync failed for secret volume"
+      ],
+      "expected": {
+        "category": "checkpoint_publication_unknown",
+        "message": "checkpoint epoch 7 was installed but publication durability is unknown",
+        "job_id": 17,
+        "epoch": 7,
+        "checkpoint_phase": "manifest_installed",
+        "component_kind": "checkpoint",
+        "component_id": null,
+        "diagnostic_id": null,
+        "position": 0
+      }
+    },
+    {
+      "case": "source_open",
+      "private_sentinels": [
+        "postgres://admin:secret@private.example/jobs?token=raw",
+        "authorization: bearer raw-secret"
+      ],
+      "expected": {
+        "category": "connector",
+        "message": "source \"orders\" open failed",
+        "job_id": 17,
+        "epoch": null,
+        "checkpoint_phase": null,
+        "component_kind": "source",
+        "component_id": "orders",
+        "diagnostic_id": 23,
+        "position": 0
+      }
+    },
+    {
+      "case": "task_panicked",
+      "private_sentinels": [
+        "panic payload contains bearer-secret",
+        "source:orders:private-task-name",
+        "91"
+      ],
+      "expected": {
+        "category": "task_panicked",
+        "message": "streaming task failed",
+        "job_id": 17,
+        "epoch": null,
+        "checkpoint_phase": null,
+        "component_kind": null,
+        "component_id": null,
+        "diagnostic_id": 23,
+        "position": 0
+      }
+    }
+  ]
+}
