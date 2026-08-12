@@ -2281,10 +2281,22 @@ mod tests {
     #[tokio::test]
     async fn sensitive_lifecycle_panic_payloads_never_reach_process_stderr() {
         if std::env::var_os(SENSITIVE_PANIC_CHILD).is_none() {
-            let output = Command::new(current_test_binary())
+            let cargo = std::path::Path::new(env!("CARGO"));
+            assert!(
+                cargo.is_absolute(),
+                "Cargo must provide its test harness with an absolute executable path"
+            );
+            let output = Command::new(cargo)
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
                 .args([
-                    "--exact",
+                    "test",
+                    "--quiet",
+                    "--package",
+                    env!("CARGO_PKG_NAME"),
+                    "--lib",
                     "runtime::streaming::sink_task::tests::sensitive_lifecycle_panic_payloads_never_reach_process_stderr",
+                    "--",
+                    "--exact",
                     "--nocapture",
                     "--test-threads=1",
                 ])
@@ -2323,27 +2335,6 @@ mod tests {
 
         let unrelated = std::panic::catch_unwind(|| panic!("{PUBLIC_PANIC_SENTINEL}"));
         assert!(unrelated.is_err());
-    }
-
-    fn current_test_binary() -> std::path::PathBuf {
-        let invoked_as = std::env::args_os()
-            .next()
-            .expect("the test harness must have an argv[0]");
-        let path = std::path::PathBuf::from(invoked_as);
-        let absolute = if path.is_absolute() {
-            path
-        } else {
-            std::env::current_dir()
-                .expect("the test working directory must be available")
-                .join(path)
-        };
-        let canonical = std::fs::canonicalize(absolute)
-            .expect("the current test harness path must resolve to an executable file");
-        assert!(
-            canonical.is_file(),
-            "the current test harness path must name a file"
-        );
-        canonical
     }
 
     async fn exercise_commit_panic_redaction() {
