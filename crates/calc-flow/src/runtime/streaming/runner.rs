@@ -25,9 +25,13 @@ use tokio::{
 use super::{
     ChannelMetrics, EdgeReceiver, EdgeSender,
     channel::edge_channel_with_metrics,
-    checkpoint::coordinator::{
-        CheckpointAck, CheckpointCoordinatorHandle, CheckpointEvent, CheckpointPhase,
-        CheckpointRequest, ManualCheckpointFailure, ParticipantSet, spawn_checkpoint_coordinator,
+    checkpoint::{
+        ManagedCheckpointRuntime, OpenedManagedCheckpointRuntime,
+        coordinator::{
+            CheckpointAck, CheckpointCoordinatorHandle, CheckpointEvent, CheckpointPhase,
+            CheckpointRequest, ManualCheckpointFailure, ParticipantSet,
+            spawn_checkpoint_coordinator,
+        },
     },
     job::{
         ContinuousJobSpec, OrdinarySinkBinding, OwningContinuousJob, StableSinkId,
@@ -243,13 +247,20 @@ impl CheckpointStartedTestGate {
 }
 
 pub(crate) struct CheckpointRuntimeSpec {
-    state_backend: Arc<dyn StateBackend>,
-    manifest_root: PathBuf,
+    storage: CheckpointRuntimeStorage,
     config: StreamRuntimeConfig,
     #[cfg(test)]
     faults: CheckpointFaultInjector,
     #[cfg(test)]
     started_gate: Option<CheckpointStartedTestGate>,
+}
+
+enum CheckpointRuntimeStorage {
+    LegacyParts {
+        state_backend: Arc<dyn StateBackend>,
+        manifest_root: PathBuf,
+    },
+    Managed(ManagedCheckpointRuntime),
 }
 
 impl CheckpointRuntimeSpec {
@@ -266,8 +277,31 @@ impl CheckpointRuntimeSpec {
             });
         }
         Ok(Self {
-            state_backend,
-            manifest_root: manifest_root.into(),
+            storage: CheckpointRuntimeStorage::LegacyParts {
+                state_backend,
+                manifest_root: manifest_root.into(),
+            },
+            config,
+            #[cfg(test)]
+            faults: CheckpointFaultInjector::default(),
+            #[cfg(test)]
+            started_gate: None,
+        })
+    }
+
+    fn managed(
+        storage: ManagedCheckpointRuntime,
+        config: StreamRuntimeConfig,
+    ) -> crate::Result<Self> {
+        config.validate()?;
+        if config.retained_epochs == 0 {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "retained_epochs".into(),
+                message: "must be positive".into(),
+            });
+        }
+        Ok(Self {
+            storage: CheckpointRuntimeStorage::Managed(storage),
             config,
             #[cfg(test)]
             faults: CheckpointFaultInjector::default(),
@@ -311,6 +345,7 @@ struct ValidatedCheckpointRuntime {
 
 struct OpenedCheckpointRuntime {
     transaction: Arc<ManifestTransaction>,
+    _managed_storage: Option<OpenedManagedCheckpointRuntime>,
     identity: PreparedManifestIdentity,
     config: StreamRuntimeConfig,
     selected: Option<SelectedManifest>,
@@ -1413,10 +1448,14 @@ impl OneShotContinuousRunner {
     pub(crate) fn start_checkpointed(
         self,
         spec: ContinuousJobSpec,
-        checkpoint: CheckpointRuntimeSpec,
+        checkpoint: ManagedCheckpointRuntime,
     ) -> OneShotStartObserver {
         let runner = self.runner;
-        let start = runner.start_checkpointed(spec, checkpoint);
+        let start = match CheckpointRuntimeSpec::managed(checkpoint, StreamRuntimeConfig::default())
+        {
+            Ok(checkpoint) => runner.start_checkpointed(spec, checkpoint),
+            Err(error) => preflight_error_observer(error),
+        };
         OneShotStartObserver::new(runner, start)
     }
 
@@ -2646,31 +2685,48 @@ async fn open_checkpoint_runtime(
     cancellation: &CancellationToken,
 ) -> crate::Result<OpenedCheckpointRuntime> {
     let ValidatedCheckpointRuntime { spec, identity } = checkpoint;
+    let (state_backend, manifest_root, managed_storage) = match spec.storage {
+        CheckpointRuntimeStorage::LegacyParts {
+            state_backend,
+            manifest_root,
+        } => (state_backend, manifest_root, None),
+        CheckpointRuntimeStorage::Managed(storage) => {
+            let opened = storage.open(cancellation).await?;
+            let state_backend: Arc<dyn StateBackend> = opened.state_backend();
+            let manifest_root = opened.manifest_root().to_owned();
+            (state_backend, manifest_root, Some(opened))
+        }
+    };
+    let managed = managed_storage.is_some();
     let key = StateLineageKey::new(&identity.pipeline_name, &identity.pipeline_fingerprint)?;
     let lineage = settle_checkpoint_operation(
         cancellation,
         "lineage-open",
-        spec.state_backend.open_lineage(&key),
+        state_backend.open_lineage(&key),
     )
-    .await?;
+    .await
+    .map_err(|error| sanitize_managed_preflight_error(error, managed, false))?;
     let transaction = ManifestTransaction::open_cancellable(
         Arc::from(lineage),
         &key,
-        &spec.manifest_root,
+        &manifest_root,
         spec.config.retained_epochs,
         cancellation,
     )
-    .await?;
+    .await
+    .map_err(|error| sanitize_managed_preflight_error(error, managed, false))?;
     let selected = transaction
         .select_latest_cancellable(&identity, cancellation)
-        .await?;
+        .await
+        .map_err(|error| sanitize_managed_preflight_error(error, managed, true))?;
     let startup_orphans_removed = transaction
         .retain_cancellable(
             &identity,
             selected.as_ref().map(|selected| &selected.manifest),
             cancellation,
         )
-        .await?
+        .await
+        .map_err(|error| sanitize_managed_preflight_error(error, managed, true))?
         .removed_orphan_segments;
     #[cfg(test)]
     let transaction = {
@@ -2704,6 +2760,7 @@ async fn open_checkpoint_runtime(
     let status = CheckpointStatusHandle::new(&identity, selected.as_ref());
     Ok(OpenedCheckpointRuntime {
         transaction,
+        _managed_storage: managed_storage,
         identity,
         config: spec.config,
         selected,
@@ -2715,6 +2772,35 @@ async fn open_checkpoint_runtime(
         #[cfg(test)]
         started_gate: spec.started_gate,
     })
+}
+
+fn sanitize_managed_preflight_error(
+    error: CalcFlowError,
+    managed: bool,
+    manifest_candidate: bool,
+) -> CalcFlowError {
+    if !managed {
+        return error;
+    }
+    if manifest_candidate {
+        return CalcFlowError::CheckpointMismatch {
+            message: "checkpoint lineage contains an invalid manifest candidate".into(),
+        };
+    }
+    match error {
+        CalcFlowError::Conflict { .. } | CalcFlowError::PlanLeased { .. } => {
+            CalcFlowError::Conflict {
+                resource: "managed checkpoint directory".into(),
+                key: "active".into(),
+            }
+        }
+        CalcFlowError::Cancelled { .. } => CalcFlowError::Cancelled {
+            run_id: "managed-checkpoint-open".into(),
+        },
+        _ => CalcFlowError::Internal {
+            message: "managed checkpoint storage initialization failed".into(),
+        },
+    }
 }
 
 async fn settle_checkpoint_operation<T>(
@@ -4938,6 +5024,7 @@ mod tests {
         StateLineageBackend, StateLineageKey, StreamCollector, StreamJobContext, StreamOperator,
         StreamOperatorContext, StreamRequirements, StreamRuntimeConfig, UdfRegistry, UnionOperator,
         runtime::streaming::{
+            checkpoint::ManagedCheckpointRuntime,
             checkpoint::coordinator::{
                 CheckpointAck, CheckpointEvent, CheckpointPhase as CoordinatorPhase,
                 CheckpointRequest, ParticipantSet, spawn_checkpoint_coordinator,
@@ -4989,10 +5076,92 @@ mod tests {
         let start: fn(
             OneShotContinuousRunner,
             ContinuousJobSpec,
-            CheckpointRuntimeSpec,
+            ManagedCheckpointRuntime,
         ) -> OneShotStartObserver = OneShotContinuousRunner::start_checkpointed;
 
         let _ = start;
+    }
+
+    #[tokio::test]
+    async fn managed_checkpoint_identity_mismatch_is_redacted_before_lifecycle_work() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("credential-secret-checkpoint-root");
+        let opened = ManagedCheckpointRuntime::new(&root)
+            .unwrap()
+            .open(&CancellationToken::new())
+            .await
+            .unwrap();
+        let source = LifecycleProbe::default();
+        let sink = LifecycleProbe::default();
+        let resets = Arc::new(AtomicUsize::new(0));
+        let job_spec = spec(false, Arc::clone(&resets), source.clone(), sink.clone());
+        let config = StreamRuntimeConfig::default();
+        let manifest = crate::CheckpointManifest::new(CheckpointManifestFields {
+            pipeline_name: "credential-secret-foreign-job".into(),
+            pipeline_fingerprint: job_spec.plan.fingerprint().into(),
+            runtime_config_hash: job_spec.plan.runtime_config_hash(&config).unwrap(),
+            epoch: crate::Epoch::INITIAL,
+            created_at: chrono::Utc.with_ymd_and_hms(2026, 8, 12, 8, 0, 0).unwrap(),
+            recovery_status: RecoveryStatus::Final,
+            sources: BTreeMap::from([(
+                "input".into(),
+                SourceManifestEntry {
+                    cursor: None,
+                    identity_hash:
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+                    sequence: 0,
+                    ended: false,
+                    watermark_policy: SourceWatermarkManifestState::Disabled { idle: false },
+                },
+            )]),
+            operators: BTreeMap::from([(
+                "node".into(),
+                OperatorManifestEntry {
+                    progress: BTreeMap::from([(
+                        "input".into(),
+                        OperatorIngressManifestEntry {
+                            state: ManifestIngressState::Active,
+                            watermark: None,
+                        },
+                    )]),
+                    inline_metadata: BTreeMap::new(),
+                    segments: Vec::new(),
+                },
+            )]),
+            sinks: BTreeMap::from([(
+                "sink".into(),
+                SinkManifestEntry {
+                    delivery: SinkDeliveryManifest::Ordinary,
+                    pre_commit: None,
+                },
+            )]),
+        })
+        .unwrap();
+        std::fs::write(
+            opened
+                .manifest_root_for_test()
+                .join("manifest-00000000000000000001.json"),
+            manifest.canonical_bytes().unwrap(),
+        )
+        .unwrap();
+        drop(opened);
+
+        let failure = OneShotContinuousRunner::new()
+            .start_checkpointed(job_spec, ManagedCheckpointRuntime::new(&root).unwrap())
+            .await
+            .unwrap_err();
+
+        for rendered in [format!("{failure:?}"), format!("{failure:#?}")] {
+            assert!(!rendered.contains("credential-secret"));
+            assert!(!rendered.contains(&root.display().to_string()));
+        }
+        assert!(matches!(
+            failure.primary.error,
+            CalcFlowError::CheckpointMismatch { .. }
+        ));
+        assert_eq!(resets.load(Ordering::SeqCst), 0);
+        assert_eq!(source.opened.load(Ordering::SeqCst), 0);
+        assert_eq!(sink.opened.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -5207,11 +5376,6 @@ mod tests {
     #[tokio::test]
     async fn checkpointed_owning_job_releases_transaction_and_lineage_lease() {
         let directory = tempfile::tempdir().unwrap();
-        let backend = Arc::new(
-            LocalStateBackend::new(directory.path().join("state"))
-                .await
-                .unwrap(),
-        );
         let plan = PipelineBuilder::new("one-shot-checkpoint-lease")
             .unwrap()
             .add_checkpoint_capable_node(
@@ -5229,7 +5393,6 @@ mod tests {
                 },
             )
             .unwrap();
-        let lineage_key = StateLineageKey::new(plan.name(), plan.fingerprint()).unwrap();
         let source_polls = Arc::new(AtomicUsize::new(0));
         let source_closed = Arc::new(AtomicUsize::new(0));
         let sink_opened = Arc::new(AtomicUsize::new(0));
@@ -5261,12 +5424,7 @@ mod tests {
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
         };
-        let checkpoint = CheckpointRuntimeSpec::new(
-            backend.clone(),
-            directory.path().join("manifests"),
-            StreamRuntimeConfig::default(),
-        )
-        .unwrap();
+        let checkpoint = ManagedCheckpointRuntime::new(directory.path()).unwrap();
         let job = OneShotContinuousRunner::new()
             .start_checkpointed(spec, checkpoint)
             .await
@@ -5279,8 +5437,11 @@ mod tests {
         assert_eq!(source_closed.load(Ordering::SeqCst), 1);
         assert_eq!(sink_opened.load(Ordering::SeqCst), 1);
         assert_eq!(sink_closed.load(Ordering::SeqCst), 1);
-        let lineage = backend.open_lineage(&lineage_key).await.unwrap();
-        drop(lineage);
+        ManagedCheckpointRuntime::new(directory.path())
+            .unwrap()
+            .open(&CancellationToken::new())
+            .await
+            .unwrap();
     }
 
     struct ResetOperator {
@@ -11932,11 +12093,6 @@ mod tests {
     )]
     async fn post_manifest_manual_commit_failure_requires_recovery_and_continues_epoch() {
         let directory = tempfile::tempdir().unwrap();
-        let backend = Arc::new(
-            LocalStateBackend::new(directory.path().join("state"))
-                .await
-                .unwrap(),
-        );
         let manifest_root = directory.path().join("manifests");
         let fail_commit = Arc::new(AtomicBool::new(true));
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -11960,9 +12116,8 @@ mod tests {
                 .unwrap()
         };
         let checkpoint = || {
-            CheckpointRuntimeSpec::new(
-                backend.clone(),
-                &manifest_root,
+            CheckpointRuntimeSpec::managed(
+                ManagedCheckpointRuntime::new(directory.path()).unwrap(),
                 StreamRuntimeConfig {
                     checkpoint_interval: StdDuration::from_secs(3_600),
                     checkpoint_timeout: StdDuration::from_secs(10),
@@ -12912,11 +13067,6 @@ mod tests {
     )]
     async fn checkpointed_runner_commits_a_terminal_epoch_without_a_post_end_barrier() {
         let directory = tempfile::tempdir().unwrap();
-        let backend = Arc::new(
-            LocalStateBackend::new(directory.path().join("state"))
-                .await
-                .unwrap(),
-        );
         let terminal_plan = || {
             PipelineBuilder::new("checkpoint-terminal")
                 .unwrap()
@@ -12967,9 +13117,8 @@ mod tests {
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
         };
-        let checkpoint = CheckpointRuntimeSpec::new(
-            backend.clone(),
-            directory.path().join("manifests"),
+        let checkpoint = CheckpointRuntimeSpec::managed(
+            ManagedCheckpointRuntime::new(directory.path()).unwrap(),
             StreamRuntimeConfig {
                 checkpoint_interval: StdDuration::from_secs(3_600),
                 checkpoint_timeout: StdDuration::from_secs(10),
@@ -13039,9 +13188,8 @@ mod tests {
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
         };
-        let restored_checkpoint = CheckpointRuntimeSpec::new(
-            backend.clone(),
-            directory.path().join("manifests"),
+        let restored_checkpoint = CheckpointRuntimeSpec::managed(
+            ManagedCheckpointRuntime::new(directory.path()).unwrap(),
             StreamRuntimeConfig {
                 checkpoint_interval: StdDuration::from_secs(3_600),
                 checkpoint_timeout: StdDuration::from_secs(10),
@@ -13411,9 +13559,11 @@ mod tests {
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
         };
-        let checkpoint =
-            CheckpointRuntimeSpec::new(backend, directory.path().join("manifests"), config)
-                .unwrap();
+        let checkpoint = CheckpointRuntimeSpec::managed(
+            ManagedCheckpointRuntime::new(directory.path()).unwrap(),
+            config,
+        )
+        .unwrap();
         let mut runner = ContinuousRunner::new();
 
         let job = runner.start_checkpointed(spec, checkpoint).await.unwrap();
