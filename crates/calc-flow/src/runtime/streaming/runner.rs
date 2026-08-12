@@ -274,13 +274,7 @@ impl CheckpointRuntimeSpec {
         manifest_root: impl Into<PathBuf>,
         config: StreamRuntimeConfig,
     ) -> crate::Result<Self> {
-        config.validate()?;
-        if config.retained_epochs == 0 {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "retained_epochs".into(),
-                message: "must be positive".into(),
-            });
-        }
+        validate_checkpoint_config(&config)?;
         Ok(Self {
             storage: CheckpointRuntimeStorage::LegacyParts {
                 state_backend,
@@ -298,13 +292,7 @@ impl CheckpointRuntimeSpec {
         storage: ManagedCheckpointRuntime,
         config: StreamRuntimeConfig,
     ) -> crate::Result<Self> {
-        config.validate()?;
-        if config.retained_epochs == 0 {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "retained_epochs".into(),
-                message: "must be positive".into(),
-            });
-        }
+        validate_checkpoint_config(&config)?;
         Ok(Self {
             storage: CheckpointRuntimeStorage::Managed(storage),
             config,
@@ -321,13 +309,7 @@ impl CheckpointRuntimeSpec {
         manifest_root: impl Into<PathBuf>,
         config: StreamRuntimeConfig,
     ) -> crate::Result<Self> {
-        config.validate()?;
-        if config.retained_epochs == 0 {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "retained_epochs".into(),
-                message: "must be positive".into(),
-            });
-        }
+        validate_checkpoint_config(&config)?;
         Ok(Self {
             storage: CheckpointRuntimeStorage::ManagedTestParts {
                 state_backend,
@@ -365,6 +347,17 @@ impl CheckpointRuntimeSpec {
         self.started_gate = Some(gate);
         self
     }
+}
+
+fn validate_checkpoint_config(config: &StreamRuntimeConfig) -> crate::Result<()> {
+    config.validate()?;
+    if config.retained_epochs == 0 {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "retained_epochs".into(),
+            message: "must be positive".into(),
+        });
+    }
+    Ok(())
 }
 
 struct ValidatedCheckpointRuntime {
@@ -2837,24 +2830,27 @@ fn sanitize_managed_preflight_error(
     if !managed {
         return error;
     }
+    match error {
+        CalcFlowError::Conflict { .. } | CalcFlowError::PlanLeased { .. } => {
+            return CalcFlowError::Conflict {
+                resource: "managed checkpoint directory".into(),
+                key: "active".into(),
+            };
+        }
+        CalcFlowError::Cancelled { .. } => {
+            return CalcFlowError::Cancelled {
+                run_id: "managed-checkpoint-open".into(),
+            };
+        }
+        _ => {}
+    }
     if manifest_candidate {
         return CalcFlowError::CheckpointMismatch {
             message: "checkpoint lineage contains an invalid manifest candidate".into(),
         };
     }
-    match error {
-        CalcFlowError::Conflict { .. } | CalcFlowError::PlanLeased { .. } => {
-            CalcFlowError::Conflict {
-                resource: "managed checkpoint directory".into(),
-                key: "active".into(),
-            }
-        }
-        CalcFlowError::Cancelled { .. } => CalcFlowError::Cancelled {
-            run_id: "managed-checkpoint-open".into(),
-        },
-        _ => CalcFlowError::Internal {
-            message: "managed checkpoint storage initialization failed".into(),
-        },
+    CalcFlowError::Internal {
+        message: "managed checkpoint storage initialization failed".into(),
     }
 }
 
@@ -5099,7 +5095,7 @@ mod tests {
         RunnerRegistryState, RunnerShutdownObserver, RuntimeFailure, RuntimeTaskProgress,
         TerminalCause, classify_failure_state, finish_running_report,
         maybe_request_terminal_checkpoint, notify_sink_manifest_durable, settle_durable_manifest,
-        source_cuts_are_terminal,
+        sanitize_managed_preflight_error, source_cuts_are_terminal,
     };
     use crate::{
         Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken,
@@ -5167,6 +5163,22 @@ mod tests {
         ) -> OneShotStartObserver = OneShotContinuousRunner::start_checkpointed;
 
         let _ = start;
+    }
+
+    #[test]
+    fn managed_manifest_preflight_preserves_cancellation() {
+        let error = sanitize_managed_preflight_error(
+            CalcFlowError::Cancelled {
+                run_id: "credential-secret-run".into(),
+            },
+            true,
+            true,
+        );
+
+        assert!(matches!(
+            error,
+            CalcFlowError::Cancelled { ref run_id } if run_id == "managed-checkpoint-open"
+        ));
     }
 
     #[tokio::test]

@@ -131,7 +131,7 @@ mod tests {
         drop(opened);
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn managed_checkpoint_runtime_rejects_subprocess_descendant_without_temporary_storage() {
         const CHILD_ROOT: &str = "CALC_FLOW_CHECKPOINT_LEASE_CHILD_ROOT";
