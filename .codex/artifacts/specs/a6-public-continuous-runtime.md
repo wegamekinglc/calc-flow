@@ -944,12 +944,4 @@ hash; any implementation push invalidates the result.
 
 ## Open Questions
 
-None in the controlling specification. The companion API note and prior
-critique remain stale at `main@70f7e3d1e9306c419a0b2358527ec888c2ed9934` and
-are not approval for this revision. The API designer must rebase the exact
-signatures to `main@aa3bbf0b40aef74898a59b6d0d0028c59a2d6993`, preserve
-the single-root local owner and safe streaming-error wrapper, expose the
-#108 `Completed` manual-checkpoint seam, and add the #110 identity-bound cursor
-and frozen source descriptor without a `replayable` fallback. An independent
-critic must then re-run ownership, checkpoint completion, recovery, capability
-proof, redaction, and cutover against the refreshed spec/API-note hashes.
+None.

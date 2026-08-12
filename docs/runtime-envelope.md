@@ -692,9 +692,11 @@ The current tree does not provide these public surfaces:
 - **Python and Studio** — neither surface projects the private continuous
   runtime.
 
-The pending public boundary is frozen by the Public A6
+The reviewed design snapshot for the pending public boundary is recorded in
+the Public A6
 [specification](../.codex/artifacts/specs/a6-public-continuous-runtime.md),
 [API note](../.codex/artifacts/api-notes/a6-public-continuous-runtime.md), and
-[zero-blocker critique](../.codex/artifacts/critiques/a6-public-continuous-runtime.md).
-Those artifacts approve a future atomic implementation; they do not change the
+[critique](../.codex/artifacts/critiques/a6-public-continuous-runtime.md).
+The critique reports zero design blockers with caveats; it is not runtime
+implementation evidence or merge approval. These artifacts do not change the
 current public surface described above.
