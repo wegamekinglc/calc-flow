@@ -570,7 +570,7 @@ impl BatchExecutionPlan {
             .map(|table| {
                 let mut runtime = DataFusionRuntime::new(table.config)?;
                 runtime.register_udfs(&table.udfs, &table.selected_udfs)?;
-                Ok(runtime)
+                Ok::<DataFusionRuntime, CalcFlowError>(runtime)
             })
             .transpose()?;
         let execution = self

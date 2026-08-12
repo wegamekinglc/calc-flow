@@ -1,5 +1,5 @@
 mod micro_batch;
-mod streaming;
+pub(crate) mod streaming;
 
 use std::collections::BTreeMap;
 

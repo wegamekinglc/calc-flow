@@ -9,6 +9,7 @@ mod batch;
 mod checkpoint;
 mod config;
 mod context;
+pub mod continuous;
 mod datafusion;
 mod error;
 mod expression;

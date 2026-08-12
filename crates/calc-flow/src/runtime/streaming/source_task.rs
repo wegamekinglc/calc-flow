@@ -83,6 +83,14 @@ impl Cursor {
         &self.order
     }
 
+    pub(crate) fn source_id(&self) -> Option<&str> {
+        self.source_id.as_ref().map(BindingIdentity::as_str)
+    }
+
+    pub(crate) const fn payload(&self) -> &JsonMap {
+        &self.payload
+    }
+
     pub(crate) fn manifest_entry(&self) -> crate::CursorManifestEntry {
         crate::CursorManifestEntry {
             order: hex::encode(&self.order),
@@ -238,16 +246,12 @@ pub(crate) struct SourceBinding {
 }
 
 impl SourceBinding {
-    #[allow(
-        clippy::unnecessary_wraps,
-        reason = "preserve the validated-binding constructor contract while capability validation moves to whole-job preflight"
-    )]
-    pub(crate) fn new(
+    fn from_parts(
         source: Box<dyn StreamSource>,
         resume_cursor: Option<Cursor>,
         next_sequence: u64,
-    ) -> Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             source,
             capabilities: None,
             delivery: None,
@@ -263,7 +267,23 @@ impl SourceBinding {
             prepared_progress: None,
             #[cfg(test)]
             accepted_sequence_recorder: None,
-        })
+        }
+    }
+
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "preserve the validated-binding constructor contract while capability validation moves to whole-job preflight"
+    )]
+    pub(crate) fn new(
+        source: Box<dyn StreamSource>,
+        resume_cursor: Option<Cursor>,
+        next_sequence: u64,
+    ) -> Result<Self> {
+        Ok(Self::from_parts(source, resume_cursor, next_sequence))
+    }
+
+    pub(crate) fn unconfigured(source: Box<dyn StreamSource>) -> Self {
+        Self::from_parts(source, None, 0)
     }
 
     pub(crate) fn with_watermark_policy(mut self, policy: WatermarkPolicy) -> Self {

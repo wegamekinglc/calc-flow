@@ -1494,9 +1494,17 @@ impl OneShotContinuousRunner {
         spec: ContinuousJobSpec,
         checkpoint: ManagedCheckpointRuntime,
     ) -> OneShotStartObserver {
+        self.start_checkpointed_with_config(spec, checkpoint, StreamRuntimeConfig::default())
+    }
+
+    pub(crate) fn start_checkpointed_with_config(
+        self,
+        spec: ContinuousJobSpec,
+        checkpoint: ManagedCheckpointRuntime,
+        config: StreamRuntimeConfig,
+    ) -> OneShotStartObserver {
         let runner = self.runner;
-        let start = match CheckpointRuntimeSpec::managed(checkpoint, StreamRuntimeConfig::default())
-        {
+        let start = match CheckpointRuntimeSpec::managed(checkpoint, config) {
             Ok(checkpoint) => runner.start_checkpointed(spec, checkpoint),
             Err(error) => preflight_error_observer(error),
         };
@@ -5604,7 +5612,7 @@ mod tests {
         );
         assert_eq!(
             first.sources["input"].replay_positioning,
-            crate::runtime::streaming::projection::ReplayPositioning::ExactPauseReportAndSeek
+            crate::continuous::ReplayPositioning::ExactPauseReportAndSeek
         );
         assert_eq!(first.sources["input"].max_batch_rows, 1);
         assert_eq!(first.sources["input"].max_batch_bytes, 1);

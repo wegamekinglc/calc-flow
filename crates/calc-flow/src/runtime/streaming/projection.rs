@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
@@ -11,15 +11,19 @@ use super::{
     runner::{
         CheckpointFailureCategory, CheckpointStatus as InternalCheckpointStatus,
         ContinuousJobOutcome, ContinuousJobState, ContinuousJobStatus, FailureOrigin,
-        RuntimeFailure, TerminalCause as InternalTerminalCause,
+        RuntimeFailure, StartFailure, TerminalCause as InternalTerminalCause,
     },
-    source_task::SourceDeliveryCapability,
+    source_task::SourceDeliveryCapability as InternalSourceDeliveryCapability,
 };
-use crate::{CalcFlowError, DeliveryGuarantee, Epoch, RetentionClass};
+use crate::{
+    CalcFlowError, DeliveryGuarantee, Epoch, RetentionClass,
+    continuous::{ReplayPositioning, SourceDeliveryCapability},
+};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+/// Stable category for a redacted public streaming failure.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum StreamingErrorCategory {
+pub enum StreamingErrorCategory {
     Validation,
     Compile,
     Conflict,
@@ -34,9 +38,10 @@ pub(crate) enum StreamingErrorCategory {
     Internal,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+/// Public component kind associated with a streaming failure.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ComponentKind {
+pub enum ComponentKind {
     Job,
     Edge,
     Source,
@@ -45,9 +50,10 @@ pub(crate) enum ComponentKind {
     Checkpoint,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+/// Observable phase of the single active checkpoint.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum CheckpointPhase {
+pub enum CheckpointPhase {
     Requested,
     SourcesCut,
     OperatorsSnapshotted,
@@ -72,9 +78,10 @@ impl From<InternalCheckpointPhase> for CheckpointPhase {
     }
 }
 
+/// Safe, data-only streaming failure with no raw cause or extension payload.
 #[derive(Clone, Debug, Eq, Error, PartialEq, Serialize)]
 #[error("{message}")]
-pub(crate) struct StreamingError {
+pub struct StreamingError {
     category: StreamingErrorCategory,
     message: String,
     job_id: Option<u64>,
@@ -87,41 +94,69 @@ pub(crate) struct StreamingError {
 }
 
 impl StreamingError {
-    pub(crate) const fn category(&self) -> StreamingErrorCategory {
+    /// Returns the stable failure category.
+    pub const fn category(&self) -> StreamingErrorCategory {
         self.category
     }
 
-    pub(crate) fn message(&self) -> &str {
+    /// Returns the safe engine-authored message.
+    pub fn message(&self) -> &str {
         &self.message
     }
 
-    pub(crate) const fn job_id(&self) -> Option<u64> {
+    /// Returns the owning job ID when one was allocated.
+    pub const fn job_id(&self) -> Option<u64> {
         self.job_id
     }
 
-    pub(crate) const fn epoch(&self) -> Option<Epoch> {
+    /// Returns the associated checkpoint epoch, when applicable.
+    pub const fn epoch(&self) -> Option<Epoch> {
         self.epoch
     }
 
-    pub(crate) const fn checkpoint_phase(&self) -> Option<CheckpointPhase> {
+    /// Returns the checkpoint phase, when applicable.
+    pub const fn checkpoint_phase(&self) -> Option<CheckpointPhase> {
         self.checkpoint_phase
     }
 
-    pub(crate) const fn component_kind(&self) -> Option<ComponentKind> {
+    /// Returns the stable component kind, when applicable.
+    pub const fn component_kind(&self) -> Option<ComponentKind> {
         self.component_kind
     }
 
-    pub(crate) fn component_id(&self) -> Option<&str> {
+    /// Returns the stable component ID, when applicable.
+    pub fn component_id(&self) -> Option<&str> {
         self.component_id.as_deref()
     }
 
-    pub(crate) const fn diagnostic_id(&self) -> Option<u64> {
+    /// Returns the safe diagnostic correlation ID, when available.
+    pub const fn diagnostic_id(&self) -> Option<u64> {
         self.diagnostic_id
     }
 
-    pub(crate) const fn position(&self) -> u32 {
+    /// Returns this failure's deterministic position in an outcome.
+    pub const fn position(&self) -> u32 {
         self.position
     }
+}
+
+pub(crate) fn project_public_error(job_id: Option<u64>, error: &CalcFlowError) -> StreamingError {
+    let (category, message, component_kind, component_id) = preflight_failure_fields(error);
+    StreamingError {
+        category,
+        message,
+        job_id,
+        epoch: None,
+        checkpoint_phase: None,
+        component_kind,
+        component_id,
+        diagnostic_id: None,
+        position: 0,
+    }
+}
+
+pub(crate) fn project_start_failure(job_id: u64, failure: &StartFailure) -> StreamingError {
+    project_runtime_failure(job_id, &failure.primary, failure.diagnostic_id, 0, None)
 }
 
 pub(crate) fn project_runtime_failures(
@@ -416,9 +451,10 @@ pub(crate) fn checkpoint_publication_unknown(
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+/// Public lifecycle state for a continuous job.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum JobState {
+pub enum JobState {
     Running,
     Draining,
     Completed,
@@ -440,9 +476,10 @@ impl From<ContinuousJobState> for JobState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+/// Stable cause of one immutable terminal outcome.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum TerminalCause {
+pub enum TerminalCause {
     NaturalEnd,
     GracefulShutdown,
     ExplicitCancel,
@@ -462,13 +499,6 @@ impl From<&InternalTerminalCause> for TerminalCause {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ReplayPositioning {
-    ExactPauseReportAndSeek,
-    Unsupported,
-}
-
 impl From<ReplayPositioningCapability> for ReplayPositioning {
     fn from(capability: ReplayPositioningCapability) -> Self {
         match capability {
@@ -478,25 +508,19 @@ impl From<ReplayPositioningCapability> for ReplayPositioning {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum SourceDelivery {
-    Lossless,
-    Lossy,
-}
-
-impl From<SourceDeliveryCapability> for SourceDelivery {
-    fn from(capability: SourceDeliveryCapability) -> Self {
+impl From<InternalSourceDeliveryCapability> for SourceDeliveryCapability {
+    fn from(capability: InternalSourceDeliveryCapability) -> Self {
         match capability {
-            SourceDeliveryCapability::Lossless => Self::Lossless,
-            SourceDeliveryCapability::Lossy => Self::Lossy,
+            InternalSourceDeliveryCapability::Lossless => Self::Lossless,
+            InternalSourceDeliveryCapability::Lossy => Self::Lossy,
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+/// Frozen delivery mechanism for one sink binding.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum SinkDelivery {
+pub enum SinkDelivery {
     Ordinary,
     EpochIdempotent {
         mechanism: String,
@@ -521,118 +545,126 @@ impl From<SinkCapability> for SinkDelivery {
     }
 }
 
+/// Requested and proven delivery guarantee for one plan output.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct OutputDeliveryStatus {
-    pub(crate) requested: DeliveryGuarantee,
-    pub(crate) effective: DeliveryGuarantee,
+pub struct OutputDeliveryStatus {
+    pub requested: DeliveryGuarantee,
+    pub effective: DeliveryGuarantee,
 }
 
+/// Payload-free queue counters and limits for one stable edge.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct EdgeStatus {
-    pub(crate) current_envelopes: usize,
-    pub(crate) current_rows: usize,
-    pub(crate) current_bytes: usize,
-    pub(crate) high_water_envelopes: usize,
-    pub(crate) high_water_rows: usize,
-    pub(crate) high_water_bytes: usize,
-    pub(crate) blocked_sends: u64,
-    pub(crate) blocked_duration: Duration,
-    pub(crate) envelope_limit: usize,
-    pub(crate) row_limit: usize,
-    pub(crate) byte_limit: usize,
+pub struct EdgeStatus {
+    pub current_envelopes: usize,
+    pub current_rows: usize,
+    pub current_bytes: usize,
+    pub high_water_envelopes: usize,
+    pub high_water_rows: usize,
+    pub high_water_bytes: usize,
+    pub blocked_sends: u64,
+    pub blocked_duration: Duration,
+    pub envelope_limit: usize,
+    pub row_limit: usize,
+    pub byte_limit: usize,
 }
 
+/// Frozen capabilities and payload-free counters for one source.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct SourceStatus {
-    pub(crate) replay_positioning: ReplayPositioning,
-    pub(crate) delivery: SourceDelivery,
-    pub(crate) max_batch_rows: usize,
-    pub(crate) max_batch_bytes: usize,
-    pub(crate) next_sequence: Option<u64>,
-    pub(crate) ended: bool,
-    pub(crate) polls: u64,
-    pub(crate) data_batches: u64,
-    pub(crate) data_rows: u64,
-    pub(crate) data_bytes: u64,
-    pub(crate) fanned_out_batches: u64,
-    pub(crate) fanned_out_rows: u64,
-    pub(crate) fanned_out_bytes: u64,
-    pub(crate) errors: u64,
+pub struct SourceStatus {
+    pub replay_positioning: ReplayPositioning,
+    pub delivery: SourceDeliveryCapability,
+    pub max_batch_rows: usize,
+    pub max_batch_bytes: usize,
+    pub next_sequence: Option<u64>,
+    pub ended: bool,
+    pub polls: u64,
+    pub data_batches: u64,
+    pub data_rows: u64,
+    pub data_bytes: u64,
+    pub fanned_out_batches: u64,
+    pub fanned_out_rows: u64,
+    pub fanned_out_bytes: u64,
+    pub errors: u64,
 }
 
+/// Payload-free execution counters for one operator.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct OperatorStatus {
-    pub(crate) input_batches: u64,
-    pub(crate) input_rows: u64,
-    pub(crate) input_bytes: u64,
-    pub(crate) fanned_out_batches: u64,
-    pub(crate) fanned_out_rows: u64,
-    pub(crate) fanned_out_bytes: u64,
-    pub(crate) processing_duration: Duration,
-    pub(crate) errors: u64,
-    pub(crate) ended: bool,
-    pub(crate) late_rows: u64,
-    pub(crate) late_affected_batches: u64,
-    pub(crate) max_lateness: Option<Duration>,
-    pub(crate) null_event_time_rows: u64,
-    pub(crate) null_event_time_batches: u64,
-    pub(crate) datafusion_runtime_created: bool,
+pub struct OperatorStatus {
+    pub input_batches: u64,
+    pub input_rows: u64,
+    pub input_bytes: u64,
+    pub fanned_out_batches: u64,
+    pub fanned_out_rows: u64,
+    pub fanned_out_bytes: u64,
+    pub processing_duration: Duration,
+    pub errors: u64,
+    pub ended: bool,
+    pub late_rows: u64,
+    pub late_affected_batches: u64,
+    pub max_lateness: Option<Duration>,
+    pub null_event_time_rows: u64,
+    pub null_event_time_batches: u64,
+    pub datafusion_runtime_created: bool,
 }
 
+/// Frozen delivery evidence and counters for one sink.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct SinkStatus {
-    pub(crate) output_id: String,
-    pub(crate) effective_delivery: SinkDelivery,
-    pub(crate) delivered_batches: u64,
-    pub(crate) delivered_rows: u64,
-    pub(crate) delivered_bytes: u64,
-    pub(crate) write_duration: Duration,
-    pub(crate) errors: u64,
-    pub(crate) ended: bool,
+pub struct SinkStatus {
+    pub output_id: String,
+    pub effective_delivery: SinkDelivery,
+    pub delivered_batches: u64,
+    pub delivered_rows: u64,
+    pub delivered_bytes: u64,
+    pub write_duration: Duration,
+    pub errors: u64,
+    pub ended: bool,
 }
 
+/// Progress and completion state for the single active checkpoint.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub(crate) struct CheckpointStatus {
-    pub(crate) current_epoch: Option<Epoch>,
-    pub(crate) phase: Option<CheckpointPhase>,
-    pub(crate) terminal: bool,
-    pub(crate) source_acknowledgements: usize,
-    pub(crate) expected_sources: usize,
-    pub(crate) operator_acknowledgements: usize,
-    pub(crate) expected_operators: usize,
-    pub(crate) sink_precommit_acknowledgements: usize,
-    pub(crate) expected_sink_precommits: usize,
-    pub(crate) sink_commit_acknowledgements: usize,
-    pub(crate) expected_sink_commits: usize,
-    pub(crate) elapsed: Option<Duration>,
-    pub(crate) last_completed_epoch: Option<Epoch>,
-    pub(crate) installed_unknown_epoch: Option<Epoch>,
-    pub(crate) failure_category: Option<StreamingErrorCategory>,
-    pub(crate) runtime_config_changed: bool,
+pub struct CheckpointStatus {
+    pub current_epoch: Option<Epoch>,
+    pub phase: Option<CheckpointPhase>,
+    pub terminal: bool,
+    pub source_acknowledgements: usize,
+    pub expected_sources: usize,
+    pub operator_acknowledgements: usize,
+    pub expected_operators: usize,
+    pub sink_precommit_acknowledgements: usize,
+    pub expected_sink_precommits: usize,
+    pub sink_commit_acknowledgements: usize,
+    pub expected_sink_commits: usize,
+    pub elapsed: Option<Duration>,
+    pub last_completed_epoch: Option<Epoch>,
+    pub installed_unknown_epoch: Option<Epoch>,
+    pub failure_category: Option<StreamingErrorCategory>,
+    pub runtime_config_changed: bool,
 }
 
+/// Cloned, data-only observation snapshot for one job.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct JobStatus {
-    pub(crate) job_id: u64,
-    pub(crate) state: JobState,
-    pub(crate) terminal_cause: Option<TerminalCause>,
-    pub(crate) delivery: BTreeMap<String, OutputDeliveryStatus>,
-    pub(crate) task_count: usize,
-    pub(crate) task_errors: u64,
-    pub(crate) metrics_overflowed: bool,
-    pub(crate) edges: BTreeMap<String, EdgeStatus>,
-    pub(crate) sources: BTreeMap<String, SourceStatus>,
-    pub(crate) operators: BTreeMap<String, OperatorStatus>,
-    pub(crate) sinks: BTreeMap<String, SinkStatus>,
-    pub(crate) checkpoint: CheckpointStatus,
+pub struct JobStatus {
+    pub job_id: u64,
+    pub state: JobState,
+    pub terminal_cause: Option<TerminalCause>,
+    pub delivery: BTreeMap<String, OutputDeliveryStatus>,
+    pub task_count: usize,
+    pub task_errors: u64,
+    pub metrics_overflowed: bool,
+    pub edges: BTreeMap<String, EdgeStatus>,
+    pub sources: BTreeMap<String, SourceStatus>,
+    pub operators: BTreeMap<String, OperatorStatus>,
+    pub sinks: BTreeMap<String, SinkStatus>,
+    pub checkpoint: CheckpointStatus,
 }
 
+/// Immutable terminal result returned by every owning lifecycle observer.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct JobOutcome {
-    pub(crate) state: JobState,
-    pub(crate) cause: TerminalCause,
-    pub(crate) completed_epoch: Option<Epoch>,
-    pub(crate) errors: Vec<StreamingError>,
+pub struct JobOutcome {
+    pub state: JobState,
+    pub cause: TerminalCause,
+    pub completed_epoch: Option<Epoch>,
+    pub errors: Vec<StreamingError>,
 }
 
 pub(crate) fn project_job_outcome(
@@ -657,7 +689,7 @@ pub(crate) fn project_job_outcome(
 #[derive(Clone)]
 struct SourceProjection {
     replay_positioning: ReplayPositioning,
-    delivery: SourceDelivery,
+    delivery: SourceDeliveryCapability,
     max_batch_rows: usize,
     max_batch_bytes: usize,
 }
