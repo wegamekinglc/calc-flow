@@ -790,6 +790,12 @@ fn validate_runtime_topology(plan: &StreamRuntimePlanParts) -> Result<()> {
                 message: "operator ID is configured more than once".into(),
             });
         }
+        if operator_id != node.node_id {
+            return Err(CalcFlowError::InvalidArgument {
+                field: format!("operators.{operator_id}"),
+                message: format!("operator ID must match node ID {:?}", node.node_id),
+            });
+        }
         validate_node_ingresses(plan, node)?;
         validate_node_outputs(plan, node)?;
     }
@@ -1765,6 +1771,23 @@ mod tests {
             error,
             CalcFlowError::InvalidArgument { ref field, ref message }
                 if field == "operators.a" && message.contains("configured more than once")
+        ));
+    }
+
+    #[test]
+    fn runtime_preflight_rejects_operator_id_that_differs_from_node_id() {
+        let mut plan = disjoint_union_plan_with(&StreamRequirements::default())
+            .into_runtime_parts(EdgeBudget::default())
+            .unwrap();
+        plan.nodes[0].node_id = "renamed-node".into();
+
+        let error = super::validate_runtime_topology(&plan).unwrap_err();
+
+        assert!(matches!(
+            error,
+            CalcFlowError::InvalidArgument { ref field, ref message }
+                if field == "operators.a"
+                    && message.contains("must match node ID")
         ));
     }
 

@@ -470,6 +470,34 @@ async fn snapshot_persists_separate_assignment_late_and_null_time_metrics() {
 }
 
 #[tokio::test]
+async fn full_range_lateness_is_recorded_without_signed_overflow() {
+    let spec = WindowSpec::tumbling("event_time", Duration::from_micros(1))
+        .unwrap()
+        .aggregate(AggregateFunction::Count, "value", "count_value")
+        .unwrap();
+    let mut source = WindowAggregateOperator::new("window", input_schema(), spec).unwrap();
+    let job = job();
+    let context =
+        StreamOperatorContext::new(&job, "window", Some(EventTime::from_micros(i64::MAX)));
+    let mut ignored = EdgeCollector::new(source.output_ports().to_vec());
+
+    source
+        .process_data(
+            "input",
+            input_batch(vec![i64::MIN], vec!["late"], vec![1]),
+            &context,
+            &mut ignored,
+        )
+        .await
+        .unwrap();
+
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    let metrics = snapshot.inline_metadata["metrics"].as_object().unwrap();
+    assert_eq!(metrics["late_rows"], 1);
+    assert_eq!(metrics["max_lateness_micros"], u64::MAX - 1);
+}
+
+#[tokio::test]
 async fn delta_threshold_prepares_one_replacement_base_before_inventory_growth() {
     let job = job();
     let context = StreamOperatorContext::new(&job, "window", None);

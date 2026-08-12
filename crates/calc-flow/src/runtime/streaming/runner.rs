@@ -25,9 +25,13 @@ use tokio::{
 use super::{
     ChannelMetrics, EdgeReceiver, EdgeSender,
     channel::edge_channel_with_metrics,
-    checkpoint::coordinator::{
-        CheckpointAck, CheckpointCoordinatorHandle, CheckpointEvent, CheckpointPhase,
-        CheckpointRequest, ManualCheckpointFailure, ParticipantSet, spawn_checkpoint_coordinator,
+    checkpoint::{
+        ManagedCheckpointRuntime, OpenedManagedCheckpointRuntime,
+        coordinator::{
+            CheckpointAck, CheckpointCoordinatorHandle, CheckpointEvent, CheckpointPhase,
+            CheckpointRequest, ManualCheckpointFailure, ParticipantSet,
+            spawn_checkpoint_coordinator,
+        },
     },
     job::{
         ContinuousJobSpec, OrdinarySinkBinding, OwningContinuousJob, StableSinkId,
@@ -245,13 +249,25 @@ impl CheckpointStartedTestGate {
 }
 
 pub(crate) struct CheckpointRuntimeSpec {
-    state_backend: Arc<dyn StateBackend>,
-    manifest_root: PathBuf,
+    storage: CheckpointRuntimeStorage,
     config: StreamRuntimeConfig,
     #[cfg(test)]
     faults: CheckpointFaultInjector,
     #[cfg(test)]
     started_gate: Option<CheckpointStartedTestGate>,
+}
+
+enum CheckpointRuntimeStorage {
+    LegacyParts {
+        state_backend: Arc<dyn StateBackend>,
+        manifest_root: PathBuf,
+    },
+    Managed(ManagedCheckpointRuntime),
+    #[cfg(test)]
+    ManagedTestParts {
+        state_backend: Arc<dyn StateBackend>,
+        manifest_root: PathBuf,
+    },
 }
 
 impl CheckpointRuntimeSpec {
@@ -260,20 +276,49 @@ impl CheckpointRuntimeSpec {
         manifest_root: impl Into<PathBuf>,
         config: StreamRuntimeConfig,
     ) -> crate::Result<Self> {
-        config.validate()?;
-        if config.retained_epochs == 0 {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "retained_epochs".into(),
-                message: "must be positive".into(),
-            });
-        }
+        validate_checkpoint_config(&config)?;
         Ok(Self {
-            state_backend,
-            manifest_root: manifest_root.into(),
+            storage: CheckpointRuntimeStorage::LegacyParts {
+                state_backend,
+                manifest_root: manifest_root.into(),
+            },
             config,
             #[cfg(test)]
             faults: CheckpointFaultInjector::default(),
             #[cfg(test)]
+            started_gate: None,
+        })
+    }
+
+    fn managed(
+        storage: ManagedCheckpointRuntime,
+        config: StreamRuntimeConfig,
+    ) -> crate::Result<Self> {
+        validate_checkpoint_config(&config)?;
+        Ok(Self {
+            storage: CheckpointRuntimeStorage::Managed(storage),
+            config,
+            #[cfg(test)]
+            faults: CheckpointFaultInjector::default(),
+            #[cfg(test)]
+            started_gate: None,
+        })
+    }
+
+    #[cfg(test)]
+    fn managed_test_parts(
+        state_backend: Arc<dyn StateBackend>,
+        manifest_root: impl Into<PathBuf>,
+        config: StreamRuntimeConfig,
+    ) -> crate::Result<Self> {
+        validate_checkpoint_config(&config)?;
+        Ok(Self {
+            storage: CheckpointRuntimeStorage::ManagedTestParts {
+                state_backend,
+                manifest_root: manifest_root.into(),
+            },
+            config,
+            faults: CheckpointFaultInjector::default(),
             started_gate: None,
         })
     }
@@ -306,6 +351,17 @@ impl CheckpointRuntimeSpec {
     }
 }
 
+fn validate_checkpoint_config(config: &StreamRuntimeConfig) -> crate::Result<()> {
+    config.validate()?;
+    if config.retained_epochs == 0 {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "retained_epochs".into(),
+            message: "must be positive".into(),
+        });
+    }
+    Ok(())
+}
+
 struct ValidatedCheckpointRuntime {
     spec: CheckpointRuntimeSpec,
     identity: PreparedManifestIdentity,
@@ -313,12 +369,14 @@ struct ValidatedCheckpointRuntime {
 
 struct OpenedCheckpointRuntime {
     transaction: Arc<ManifestTransaction>,
+    _managed_storage: Option<OpenedManagedCheckpointRuntime>,
     identity: PreparedManifestIdentity,
     config: StreamRuntimeConfig,
     selected: Option<SelectedManifest>,
     next_epoch: Epoch,
     status: CheckpointStatusHandle,
     startup_orphans_removed: usize,
+    managed: bool,
     #[cfg(test)]
     faults: CheckpointFaultInjector,
     #[cfg(test)]
@@ -1434,10 +1492,14 @@ impl OneShotContinuousRunner {
     pub(crate) fn start_checkpointed(
         self,
         spec: ContinuousJobSpec,
-        checkpoint: CheckpointRuntimeSpec,
+        checkpoint: ManagedCheckpointRuntime,
     ) -> OneShotStartObserver {
         let runner = self.runner;
-        let start = runner.start_checkpointed(spec, checkpoint);
+        let start = match CheckpointRuntimeSpec::managed(checkpoint, StreamRuntimeConfig::default())
+        {
+            Ok(checkpoint) => runner.start_checkpointed(spec, checkpoint),
+            Err(error) => preflight_error_observer(error),
+        };
         OneShotStartObserver::new(runner, start)
     }
 
@@ -2282,11 +2344,17 @@ async fn run_job_driver(
                     &checkpoint.identity,
                     selected,
                     sinks,
+                    checkpoint.managed,
                 )
                 .await;
             }
             Ok(false) => {}
-            Err(error) => return checkpoint_start_failure(launch_id, error),
+            Err(error) => {
+                return checkpoint_start_failure(
+                    launch_id,
+                    sanitize_managed_recovery_error(error, checkpoint.managed),
+                );
+            }
         }
     }
     let recovery_timer = checkpoint
@@ -2305,7 +2373,12 @@ async fn run_job_driver(
             .await
             {
                 Ok(restored) => restored,
-                Err(error) => return checkpoint_start_failure(launch_id, error),
+                Err(error) => {
+                    return checkpoint_start_failure(
+                        launch_id,
+                        sanitize_managed_recovery_error(error, checkpoint.managed),
+                    );
+                }
             }
         }
         None => (BTreeMap::new(), None),
@@ -2337,10 +2410,13 @@ async fn run_job_driver(
     let mut runtime = match entry {
         Ok(entry) => entry,
         Err(EntryFailure::Failed(primary)) => {
+            let managed_recovery = checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| checkpoint.managed && checkpoint.selected.is_some());
             return DriverReport {
                 launch_id,
                 completion: DriverCompletion::StartFailed(StartFailure {
-                    primary,
+                    primary: sanitize_managed_recovery_failure(primary, managed_recovery),
                     diagnostic_id: None,
                     cleanup_failures: Vec::new(),
                 }),
@@ -2397,7 +2473,7 @@ async fn run_job_driver(
                             .record_checkpoint_restore(elapsed, sink_retries)
                     })
             }
-            Err(error) => Err(error),
+            Err(error) => Err(sanitize_managed_recovery_error(error, checkpoint.managed)),
         };
         if let Err(error) = recovery {
             let mut resources = connector_resources(opened_sources, opened_sinks);
@@ -2497,6 +2573,7 @@ async fn recover_terminal_manifest(
     identity: &PreparedManifestIdentity,
     selected: &SelectedManifest,
     sinks: BTreeMap<String, Vec<ValidatedOrdinarySink>>,
+    managed: bool,
 ) -> DriverReport {
     let recovery_timer = core.metrics.timer();
     let mut resources = connector_resources(BTreeMap::new(), sinks);
@@ -2514,7 +2591,7 @@ async fn recover_terminal_manifest(
             launch_id,
             vec![Arc::new(RuntimeFailure {
                 origin: FailureOrigin::Preflight,
-                error,
+                error: sanitize_managed_recovery_error(error, managed),
             })],
             &mut resources,
             &mut supervisor,
@@ -2540,7 +2617,12 @@ async fn recover_terminal_manifest(
         .await
     {
         Ok(report) => report,
-        Err(error) => return checkpoint_start_failure(launch_id, error),
+        Err(error) => {
+            return checkpoint_start_failure(
+                launch_id,
+                sanitize_managed_recovery_error(error, managed),
+            );
+        }
     };
     let restore_metrics = recovery_timer
         .elapsed("checkpoint", "restore_duration")
@@ -2739,31 +2821,52 @@ async fn open_checkpoint_runtime(
     cancellation: &CancellationToken,
 ) -> crate::Result<OpenedCheckpointRuntime> {
     let ValidatedCheckpointRuntime { spec, identity } = checkpoint;
+    let (state_backend, manifest_root, managed_storage, managed) = match spec.storage {
+        CheckpointRuntimeStorage::LegacyParts {
+            state_backend,
+            manifest_root,
+        } => (state_backend, manifest_root, None, false),
+        CheckpointRuntimeStorage::Managed(storage) => {
+            let opened = storage.open(cancellation).await?;
+            let state_backend: Arc<dyn StateBackend> = opened.state_backend();
+            let manifest_root = opened.manifest_root().to_owned();
+            (state_backend, manifest_root, Some(opened), true)
+        }
+        #[cfg(test)]
+        CheckpointRuntimeStorage::ManagedTestParts {
+            state_backend,
+            manifest_root,
+        } => (state_backend, manifest_root, None, true),
+    };
     let key = StateLineageKey::new(&identity.pipeline_name, &identity.pipeline_fingerprint)?;
     let lineage = settle_checkpoint_operation(
         cancellation,
         "lineage-open",
-        spec.state_backend.open_lineage(&key),
+        state_backend.open_lineage(&key),
     )
-    .await?;
+    .await
+    .map_err(|error| sanitize_managed_preflight_error(error, managed, false))?;
     let transaction = ManifestTransaction::open_cancellable(
         Arc::from(lineage),
         &key,
-        &spec.manifest_root,
+        &manifest_root,
         spec.config.retained_epochs,
         cancellation,
     )
-    .await?;
+    .await
+    .map_err(|error| sanitize_managed_preflight_error(error, managed, false))?;
     let selected = transaction
         .select_latest_cancellable(&identity, cancellation)
-        .await?;
+        .await
+        .map_err(|error| sanitize_managed_preflight_error(error, managed, true))?;
     let startup_orphans_removed = transaction
         .retain_cancellable(
             &identity,
             selected.as_ref().map(|selected| &selected.manifest),
             cancellation,
         )
-        .await?
+        .await
+        .map_err(|error| sanitize_managed_preflight_error(error, managed, true))?
         .removed_orphan_segments;
     #[cfg(test)]
     let transaction = {
@@ -2797,16 +2900,82 @@ async fn open_checkpoint_runtime(
     let status = CheckpointStatusHandle::new(&identity, selected.as_ref());
     Ok(OpenedCheckpointRuntime {
         transaction,
+        _managed_storage: managed_storage,
         identity,
         config: spec.config,
         selected,
         next_epoch,
         status,
         startup_orphans_removed,
+        managed,
         #[cfg(test)]
         faults: spec.faults,
         #[cfg(test)]
         started_gate: spec.started_gate,
+    })
+}
+
+fn sanitize_managed_preflight_error(
+    error: CalcFlowError,
+    managed: bool,
+    manifest_candidate: bool,
+) -> CalcFlowError {
+    if !managed {
+        return error;
+    }
+    match error {
+        CalcFlowError::Conflict { .. } | CalcFlowError::PlanLeased { .. } => {
+            return CalcFlowError::Conflict {
+                resource: "managed checkpoint directory".into(),
+                key: "active".into(),
+            };
+        }
+        CalcFlowError::Cancelled { .. } => {
+            return CalcFlowError::Cancelled {
+                run_id: "managed-checkpoint-open".into(),
+            };
+        }
+        _ => {}
+    }
+    if manifest_candidate {
+        return CalcFlowError::CheckpointMismatch {
+            message: "checkpoint lineage contains an invalid manifest candidate".into(),
+        };
+    }
+    CalcFlowError::Internal {
+        message: "managed checkpoint storage initialization failed".into(),
+    }
+}
+
+fn sanitize_managed_recovery_error(error: CalcFlowError, managed: bool) -> CalcFlowError {
+    if !managed {
+        return error;
+    }
+    safe_managed_recovery_error(&error)
+}
+
+fn safe_managed_recovery_error(error: &CalcFlowError) -> CalcFlowError {
+    match error {
+        CalcFlowError::Cancelled { .. } => CalcFlowError::Cancelled {
+            run_id: "managed-checkpoint-recovery".into(),
+        },
+        _ => CalcFlowError::Internal {
+            message: "managed checkpoint recovery failed".into(),
+        },
+    }
+}
+
+fn sanitize_managed_recovery_failure(
+    failure: Arc<RuntimeFailure>,
+    managed: bool,
+) -> Arc<RuntimeFailure> {
+    if !managed {
+        return failure;
+    }
+    let error = safe_managed_recovery_error(&failure.error);
+    Arc::new(RuntimeFailure {
+        origin: FailureOrigin::Preflight,
+        error,
     })
 }
 
@@ -5038,8 +5207,8 @@ mod tests {
         LaunchId, OneShotContinuousRunner, OneShotStartObserver, RunnerCore, RunnerDiagnostics,
         RunnerRegistryState, RunnerShutdownObserver, RuntimeFailure, RuntimeTaskProgress,
         TerminalCause, classify_failure_state, finish_running_report,
-        maybe_request_terminal_checkpoint, notify_sink_manifest_durable, settle_durable_manifest,
-        source_cuts_are_terminal,
+        maybe_request_terminal_checkpoint, notify_sink_manifest_durable,
+        sanitize_managed_preflight_error, settle_durable_manifest, source_cuts_are_terminal,
     };
     use crate::{
         Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken,
@@ -5051,6 +5220,7 @@ mod tests {
         StateLineageBackend, StateLineageKey, StreamCollector, StreamJobContext, StreamOperator,
         StreamOperatorContext, StreamRequirements, StreamRuntimeConfig, UdfRegistry, UnionOperator,
         runtime::streaming::{
+            checkpoint::ManagedCheckpointRuntime,
             checkpoint::coordinator::{
                 CheckpointAck, CheckpointEvent, CheckpointPhase as CoordinatorPhase,
                 CheckpointRequest, ParticipantSet, spawn_checkpoint_coordinator,
@@ -5102,10 +5272,284 @@ mod tests {
         let start: fn(
             OneShotContinuousRunner,
             ContinuousJobSpec,
-            CheckpointRuntimeSpec,
+            ManagedCheckpointRuntime,
         ) -> OneShotStartObserver = OneShotContinuousRunner::start_checkpointed;
 
         let _ = start;
+    }
+
+    #[test]
+    fn managed_manifest_preflight_preserves_cancellation() {
+        let error = sanitize_managed_preflight_error(
+            CalcFlowError::Cancelled {
+                run_id: "credential-secret-run".into(),
+            },
+            true,
+            true,
+        );
+
+        assert!(matches!(
+            error,
+            CalcFlowError::Cancelled { ref run_id } if run_id == "managed-checkpoint-open"
+        ));
+    }
+
+    #[tokio::test]
+    async fn managed_checkpoint_identity_mismatch_is_redacted_before_lifecycle_work() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("credential-secret-checkpoint-root");
+        let opened = ManagedCheckpointRuntime::new(&root)
+            .unwrap()
+            .open(&CancellationToken::new())
+            .await
+            .unwrap();
+        let source = LifecycleProbe::default();
+        let sink = LifecycleProbe::default();
+        let resets = Arc::new(AtomicUsize::new(0));
+        let job_spec = spec(false, Arc::clone(&resets), source.clone(), sink.clone());
+        let config = StreamRuntimeConfig::default();
+        let manifest = crate::CheckpointManifest::new(CheckpointManifestFields {
+            pipeline_name: "credential-secret-foreign-job".into(),
+            pipeline_fingerprint: job_spec.plan.fingerprint().into(),
+            runtime_config_hash: job_spec.plan.runtime_config_hash(&config).unwrap(),
+            epoch: crate::Epoch::INITIAL,
+            created_at: chrono::Utc.with_ymd_and_hms(2026, 8, 12, 8, 0, 0).unwrap(),
+            recovery_status: RecoveryStatus::Final,
+            sources: BTreeMap::from([(
+                "input".into(),
+                SourceManifestEntry {
+                    cursor: None,
+                    identity_hash:
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+                    sequence: 0,
+                    ended: false,
+                    watermark_policy: SourceWatermarkManifestState::Disabled { idle: false },
+                },
+            )]),
+            operators: BTreeMap::from([(
+                "node".into(),
+                OperatorManifestEntry {
+                    progress: BTreeMap::from([(
+                        "input".into(),
+                        OperatorIngressManifestEntry {
+                            state: ManifestIngressState::Active,
+                            watermark: None,
+                        },
+                    )]),
+                    inline_metadata: BTreeMap::new(),
+                    segments: Vec::new(),
+                },
+            )]),
+            sinks: BTreeMap::from([(
+                "sink".into(),
+                SinkManifestEntry {
+                    delivery: SinkDeliveryManifest::Ordinary,
+                    pre_commit: None,
+                },
+            )]),
+        })
+        .unwrap();
+        std::fs::write(
+            opened
+                .manifest_root_for_test()
+                .join("manifest-00000000000000000001.json"),
+            manifest.canonical_bytes().unwrap(),
+        )
+        .unwrap();
+        drop(opened);
+
+        let failure = OneShotContinuousRunner::new()
+            .start_checkpointed(job_spec, ManagedCheckpointRuntime::new(&root).unwrap())
+            .await
+            .unwrap_err();
+
+        for rendered in [format!("{failure:?}"), format!("{failure:#?}")] {
+            assert!(!rendered.contains("credential-secret"));
+            assert!(!rendered.contains(&root.display().to_string()));
+        }
+        assert!(matches!(
+            failure.primary.error,
+            CalcFlowError::CheckpointMismatch { .. }
+        ));
+        assert_eq!(resets.load(Ordering::SeqCst), 0);
+        assert_eq!(source.opened.load(Ordering::SeqCst), 0);
+        assert_eq!(sink.opened.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the redaction canaries and lifecycle assertions form one recovery scenario"
+    )]
+    async fn managed_checkpoint_missing_state_is_redacted_before_lifecycle_work() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("credential-secret-checkpoint-root");
+        let source = LifecycleProbe::default();
+        let sink = LifecycleProbe::default();
+        let resets = Arc::new(AtomicUsize::new(0));
+        let job_spec = spec(false, Arc::clone(&resets), source.clone(), sink.clone());
+        let config = StreamRuntimeConfig::default();
+        let prepared = crate::runtime::streaming::progress::prepare_stream_job(
+            job_spec.plan.fingerprint(),
+            &[crate::runtime::streaming::progress::SourceBindingSpec {
+                descriptor: crate::runtime::streaming::progress::SourceDescriptor::new(
+                    crate::runtime::streaming::progress::BindingIdentity::new("input").unwrap(),
+                    crate::runtime::streaming::progress::DeclaredSchema::DynamicOrUnknown,
+                    crate::runtime::streaming::progress::NativeWatermarkCapability::EmitsNative,
+                    crate::runtime::streaming::progress::ReplayPositioningCapability::ExactPauseReportAndSeek,
+                    None,
+                )
+                .with_delivery_and_bounds(true, 1, 1),
+                watermark_policy:
+                    crate::runtime::streaming::progress::WatermarkPolicy::SourceProvided,
+            }],
+            crate::runtime::streaming::progress::StreamProgressRuntimeConfig::default(),
+        )
+        .unwrap();
+        let identity_hash = prepared.bindings[0].identity_hash();
+        let key = StateLineageKey::new(job_spec.plan.name(), job_spec.plan.fingerprint()).unwrap();
+        let missing_segment = local_state_handle(
+            &key,
+            "node",
+            crate::Epoch::INITIAL,
+            "credential-secret-segment",
+            b"credential-secret-state",
+        );
+        let checksum = missing_segment.sha256().to_owned();
+        let manifest = crate::CheckpointManifest::new(CheckpointManifestFields {
+            pipeline_name: job_spec.plan.name().into(),
+            pipeline_fingerprint: job_spec.plan.fingerprint().into(),
+            runtime_config_hash: job_spec.plan.runtime_config_hash(&config).unwrap(),
+            epoch: crate::Epoch::INITIAL,
+            created_at: chrono::Utc.with_ymd_and_hms(2026, 8, 12, 8, 0, 0).unwrap(),
+            recovery_status: RecoveryStatus::Final,
+            sources: BTreeMap::from([(
+                "input".into(),
+                SourceManifestEntry {
+                    cursor: Some(CursorManifestEntry {
+                        order: "09".into(),
+                        payload: BTreeMap::from([(
+                            "credential-secret-cursor".into(),
+                            serde_json::json!("credential-secret-payload"),
+                        )]),
+                    }),
+                    identity_hash: identity_hash.clone(),
+                    sequence: 1,
+                    ended: false,
+                    watermark_policy: SourceWatermarkManifestState::SourceProvided {
+                        last_emitted_micros: None,
+                        idle: false,
+                    },
+                },
+            )]),
+            operators: BTreeMap::from([(
+                "node".into(),
+                OperatorManifestEntry {
+                    progress: BTreeMap::from([(
+                        "input".into(),
+                        OperatorIngressManifestEntry {
+                            state: ManifestIngressState::Active,
+                            watermark: None,
+                        },
+                    )]),
+                    inline_metadata: BTreeMap::new(),
+                    segments: vec![missing_segment],
+                },
+            )]),
+            sinks: BTreeMap::from([(
+                "sink".into(),
+                SinkManifestEntry {
+                    delivery: SinkDeliveryManifest::Ordinary,
+                    pre_commit: None,
+                },
+            )]),
+        })
+        .unwrap();
+        let backend = LocalStateBackend::new(root.join("state")).await.unwrap();
+        let lineage = backend.open_lineage(&key).await.unwrap();
+        lineage
+            .stage_segment(
+                &manifest.operators()["node"].segments[0],
+                b"credential-secret-state",
+            )
+            .await
+            .unwrap();
+        lineage
+            .validate_segment(&manifest.operators()["node"].segments[0])
+            .await
+            .unwrap();
+        lineage
+            .publish_segment(&manifest.operators()["node"].segments[0])
+            .await
+            .unwrap();
+        let transaction = crate::state::ManifestTransaction::open(
+            Arc::from(lineage),
+            &key,
+            root.join("manifests"),
+            config.retained_epochs,
+        )
+        .await
+        .unwrap();
+        transaction
+            .publish(crate::state::PreparedEpochManifest {
+                manifest,
+                staged_segments: BTreeMap::new(),
+            })
+            .await
+            .unwrap();
+        drop(transaction);
+
+        let failure_path = format!(
+            "{}/credential-secret-segment/{checksum}/{identity_hash}/credential-secret-cursor/credential-secret-pre-commit",
+            root.display()
+        );
+        let load_count = Arc::new(AtomicUsize::new(0));
+        let checkpoint = CheckpointRuntimeSpec::managed_test_parts(
+            Arc::new(FailAfterValidationBackend {
+                inner: backend,
+                load_count: Arc::clone(&load_count),
+                failure_path: failure_path.into(),
+            }),
+            root.join("manifests"),
+            config,
+        )
+        .unwrap();
+        let mut runner = ContinuousRunner::new();
+        let failure = runner
+            .start_checkpointed(job_spec, checkpoint)
+            .await
+            .unwrap_err();
+        runner.shutdown().await.unwrap();
+
+        assert!(
+            matches!(
+                failure.primary.error,
+                CalcFlowError::Internal { ref message }
+                    if message == "managed checkpoint recovery failed"
+            ),
+            "unexpected failure: {failure:#?}"
+        );
+        let canaries = [
+            "credential-secret",
+            root.to_str().unwrap(),
+            checksum.as_str(),
+            identity_hash.as_str(),
+        ];
+        let mut current: &(dyn std::error::Error + 'static) = &failure.primary.error;
+        loop {
+            let rendered = format!("{current} {current:?}");
+            for canary in canaries {
+                assert!(!rendered.contains(canary), "leaked {canary:?}: {rendered}");
+            }
+            let Some(source) = current.source() else {
+                break;
+            };
+            current = source;
+        }
+        assert_eq!(resets.load(Ordering::SeqCst), 0);
+        assert_eq!(source.opened.load(Ordering::SeqCst), 0);
+        assert_eq!(sink.opened.load(Ordering::SeqCst), 0);
+        assert_eq!(load_count.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
@@ -5496,11 +5940,6 @@ mod tests {
     #[tokio::test]
     async fn checkpointed_owning_job_releases_transaction_and_lineage_lease() {
         let directory = tempfile::tempdir().unwrap();
-        let backend = Arc::new(
-            LocalStateBackend::new(directory.path().join("state"))
-                .await
-                .unwrap(),
-        );
         let plan = PipelineBuilder::new("one-shot-checkpoint-lease")
             .unwrap()
             .add_checkpoint_capable_node(
@@ -5518,7 +5957,6 @@ mod tests {
                 },
             )
             .unwrap();
-        let lineage_key = StateLineageKey::new(plan.name(), plan.fingerprint()).unwrap();
         let source_polls = Arc::new(AtomicUsize::new(0));
         let source_closed = Arc::new(AtomicUsize::new(0));
         let sink_opened = Arc::new(AtomicUsize::new(0));
@@ -5550,12 +5988,7 @@ mod tests {
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
         };
-        let checkpoint = CheckpointRuntimeSpec::new(
-            backend.clone(),
-            directory.path().join("manifests"),
-            StreamRuntimeConfig::default(),
-        )
-        .unwrap();
+        let checkpoint = ManagedCheckpointRuntime::new(directory.path()).unwrap();
         let job = OneShotContinuousRunner::new()
             .start_checkpointed(spec, checkpoint)
             .await
@@ -5568,8 +6001,11 @@ mod tests {
         assert_eq!(source_closed.load(Ordering::SeqCst), 1);
         assert_eq!(sink_opened.load(Ordering::SeqCst), 1);
         assert_eq!(sink_closed.load(Ordering::SeqCst), 1);
-        let lineage = backend.open_lineage(&lineage_key).await.unwrap();
-        drop(lineage);
+        ManagedCheckpointRuntime::new(directory.path())
+            .unwrap()
+            .open(&CancellationToken::new())
+            .await
+            .unwrap();
     }
 
     struct ResetOperator {
@@ -6225,6 +6661,19 @@ mod tests {
         failure_armed: Arc<AtomicBool>,
     }
 
+    #[derive(Clone)]
+    struct FailAfterValidationBackend {
+        inner: LocalStateBackend,
+        load_count: Arc<AtomicUsize>,
+        failure_path: Arc<str>,
+    }
+
+    struct FailAfterValidationLineage {
+        inner: Box<dyn StateLineageBackend>,
+        load_count: Arc<AtomicUsize>,
+        failure_path: Arc<str>,
+    }
+
     #[async_trait]
     impl StateBackend for FailOnceRetentionBackend {
         async fn open_lineage(
@@ -6234,6 +6683,20 @@ mod tests {
             Ok(Box::new(FailOnceRetentionLineage {
                 inner: self.inner.open_lineage(key).await?,
                 failure_armed: Arc::clone(&self.failure_armed),
+            }))
+        }
+    }
+
+    #[async_trait]
+    impl StateBackend for FailAfterValidationBackend {
+        async fn open_lineage(
+            &self,
+            key: &StateLineageKey,
+        ) -> Result<Box<dyn StateLineageBackend>> {
+            Ok(Box::new(FailAfterValidationLineage {
+                inner: self.inner.open_lineage(key).await?,
+                load_count: Arc::clone(&self.load_count),
+                failure_path: Arc::clone(&self.failure_path),
             }))
         }
     }
@@ -6266,6 +6729,42 @@ mod tests {
                     message: "injected retention failure".into(),
                 });
             }
+            self.inner.collect_orphans(retained).await
+        }
+    }
+
+    #[async_trait]
+    impl StateLineageBackend for FailAfterValidationLineage {
+        fn identity_hash(&self) -> &str {
+            self.inner.identity_hash()
+        }
+
+        async fn stage_segment(&self, handle: &StateHandle, bytes: &[u8]) -> Result<()> {
+            self.inner.stage_segment(handle, bytes).await
+        }
+
+        async fn validate_segment(&self, handle: &StateHandle) -> Result<()> {
+            self.inner.validate_segment(handle).await
+        }
+
+        async fn publish_segment(&self, handle: &StateHandle) -> Result<()> {
+            self.inner.publish_segment(handle).await
+        }
+
+        async fn load_segment(&self, handle: &StateHandle) -> Result<Vec<u8>> {
+            if self.load_count.fetch_add(1, Ordering::SeqCst) >= 2 {
+                return Err(CalcFlowError::Io {
+                    path: self.failure_path.to_string(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "credential-secret-I/O-source",
+                    ),
+                });
+            }
+            self.inner.load_segment(handle).await
+        }
+
+        async fn collect_orphans(&self, retained: &[StateHandle]) -> Result<usize> {
             self.inner.collect_orphans(retained).await
         }
     }
@@ -12276,11 +12775,6 @@ mod tests {
     )]
     async fn post_manifest_manual_commit_failure_requires_recovery_and_continues_epoch() {
         let directory = tempfile::tempdir().unwrap();
-        let backend = Arc::new(
-            LocalStateBackend::new(directory.path().join("state"))
-                .await
-                .unwrap(),
-        );
         let manifest_root = directory.path().join("manifests");
         let fail_commit = Arc::new(AtomicBool::new(true));
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -12304,9 +12798,8 @@ mod tests {
                 .unwrap()
         };
         let checkpoint = || {
-            CheckpointRuntimeSpec::new(
-                backend.clone(),
-                &manifest_root,
+            CheckpointRuntimeSpec::managed(
+                ManagedCheckpointRuntime::new(directory.path()).unwrap(),
                 StreamRuntimeConfig {
                     checkpoint_interval: StdDuration::from_secs(3_600),
                     checkpoint_timeout: StdDuration::from_secs(10),
@@ -13416,11 +13909,6 @@ mod tests {
     )]
     async fn checkpointed_runner_commits_a_terminal_epoch_without_a_post_end_barrier() {
         let directory = tempfile::tempdir().unwrap();
-        let backend = Arc::new(
-            LocalStateBackend::new(directory.path().join("state"))
-                .await
-                .unwrap(),
-        );
         let terminal_plan = || {
             PipelineBuilder::new("checkpoint-terminal")
                 .unwrap()
@@ -13471,9 +13959,8 @@ mod tests {
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
         };
-        let checkpoint = CheckpointRuntimeSpec::new(
-            backend.clone(),
-            directory.path().join("manifests"),
+        let checkpoint = CheckpointRuntimeSpec::managed(
+            ManagedCheckpointRuntime::new(directory.path()).unwrap(),
             StreamRuntimeConfig {
                 checkpoint_interval: StdDuration::from_secs(3_600),
                 checkpoint_timeout: StdDuration::from_secs(10),
@@ -13543,9 +14030,8 @@ mod tests {
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
         };
-        let restored_checkpoint = CheckpointRuntimeSpec::new(
-            backend.clone(),
-            directory.path().join("manifests"),
+        let restored_checkpoint = CheckpointRuntimeSpec::managed(
+            ManagedCheckpointRuntime::new(directory.path()).unwrap(),
             StreamRuntimeConfig {
                 checkpoint_interval: StdDuration::from_secs(3_600),
                 checkpoint_timeout: StdDuration::from_secs(10),
@@ -13930,9 +14416,11 @@ mod tests {
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
         };
-        let checkpoint =
-            CheckpointRuntimeSpec::new(backend, directory.path().join("manifests"), config)
-                .unwrap();
+        let checkpoint = CheckpointRuntimeSpec::managed(
+            ManagedCheckpointRuntime::new(directory.path()).unwrap(),
+            config,
+        )
+        .unwrap();
         let mut runner = ContinuousRunner::new();
 
         let job = runner.start_checkpointed(spec, checkpoint).await.unwrap();
