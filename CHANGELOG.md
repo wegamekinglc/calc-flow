@@ -5,6 +5,11 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-12: Preserve full-range late-window accounting when the watermark
+  and window end span more than `i64::MAX` microseconds. Valid `EventTime`
+  inputs now record the exact `u64` lateness metric instead of aborting the
+  input batch with a signed-subtraction overflow.
+
 - 2026-08-10: Add the crate-private M5 epoch-checkpoint runtime: whole-job and
   per-output capability preflight, globally aligned source/operator cuts,
   manifest-last state publication and strict recovery selection,

@@ -1318,11 +1318,9 @@ fn record_late_assignment(
         .late_rows
         .checked_add(1)
         .ok_or_else(|| operator_error(operator_id, "late row counter overflowed"))?;
-    let lateness = watermark
-        .as_micros()
-        .checked_sub(end.as_micros())
-        .and_then(|value| u64::try_from(value).ok())
-        .ok_or_else(|| operator_error(operator_id, "late assignment distance overflowed"))?;
+    let lateness =
+        u64::try_from(i128::from(watermark.as_micros()) - i128::from(end.as_micros()))
+            .map_err(|_| operator_error(operator_id, "late assignment distance overflowed"))?;
     metrics.max_lateness_micros = Some(
         metrics
             .max_lateness_micros
