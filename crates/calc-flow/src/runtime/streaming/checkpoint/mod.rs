@@ -88,7 +88,7 @@ mod tests {
         assert!(error.source().is_none());
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn managed_checkpoint_runtime_resolves_symlink_aliases_before_leasing() {
         let directory = tempfile::tempdir().unwrap();
@@ -155,8 +155,7 @@ mod tests {
             .unwrap();
         let invalid_temporary_directory = directory.path().join("not-a-directory");
         std::fs::write(&invalid_temporary_directory, b"sentinel").unwrap();
-        let test_executable = std::env::args_os().next().unwrap();
-        let output = std::process::Command::new(test_executable)
+        let output = std::process::Command::new("/proc/self/exe")
             .args([
                 "--exact",
                 "runtime::streaming::checkpoint::tests::managed_checkpoint_runtime_rejects_subprocess_descendant_without_temporary_storage",
