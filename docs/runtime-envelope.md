@@ -691,3 +691,12 @@ The current tree does not provide these public surfaces:
   sink bindings, status/control methods, or v2 runner replacement is exposed.
 - **Python and Studio** — neither surface projects the private continuous
   runtime.
+
+The reviewed design snapshot for the pending public boundary is recorded in
+the Public A6
+[specification](../.codex/artifacts/specs/a6-public-continuous-runtime.md),
+[API note](../.codex/artifacts/api-notes/a6-public-continuous-runtime.md), and
+[critique](../.codex/artifacts/critiques/a6-public-continuous-runtime.md).
+The critique reports zero design blockers with caveats; it is not runtime
+implementation evidence or merge approval. These artifacts do not change the
+current public surface described above.
