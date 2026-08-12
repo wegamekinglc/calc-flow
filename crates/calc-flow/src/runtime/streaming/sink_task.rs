@@ -2,6 +2,7 @@ use std::{
     cell::Cell,
     collections::BTreeMap,
     future::Future,
+    io::{self, Write},
     panic::{self, AssertUnwindSafe},
     sync::{Arc, Once},
 };
@@ -39,11 +40,31 @@ fn install_sensitive_sink_panic_hook() {
             let redact = REDACT_SENSITIVE_SINK_PANIC
                 .try_with(Cell::get)
                 .unwrap_or(false);
-            if !redact {
+            if redact {
+                write_redacted_sensitive_sink_panic(panic);
+            } else {
                 previous(panic);
             }
         }));
     });
+}
+
+fn write_redacted_sensitive_sink_panic(panic: &panic::PanicHookInfo<'_>) {
+    let mut stderr = io::stderr().lock();
+    if let Some(location) = panic.location() {
+        let _ = writeln!(
+            stderr,
+            "transactional sink panicked at {}:{}:{} (payload redacted)",
+            location.file(),
+            location.line(),
+            location.column()
+        );
+    } else {
+        let _ = writeln!(
+            stderr,
+            "transactional sink panicked at an unknown location (payload redacted)"
+        );
+    }
 }
 
 struct SensitiveSinkPanicGuard {
@@ -1326,6 +1347,7 @@ mod tests {
 
     const PRECOMMIT_SENTINEL: &str = "precommit-secret-sentinel";
     const PUBLIC_PANIC_SENTINEL: &str = "unrelated-public-panic-sentinel";
+    const REDACTED_PANIC_DIAGNOSTIC: &str = "transactional sink panicked at ";
     const SENSITIVE_PANIC_CHILD: &str = "CALC_FLOW_SENSITIVE_SINK_PANIC_CHILD";
 
     struct LeakingLifecycleSink {
@@ -2259,7 +2281,7 @@ mod tests {
     #[tokio::test]
     async fn sensitive_lifecycle_panic_payloads_never_reach_process_stderr() {
         if std::env::var_os(SENSITIVE_PANIC_CHILD).is_none() {
-            let output = Command::new(std::env::current_exe().unwrap())
+            let output = Command::new(current_test_binary())
                 .args([
                     "--exact",
                     "runtime::streaming::sink_task::tests::sensitive_lifecycle_panic_payloads_never_reach_process_stderr",
@@ -2281,6 +2303,15 @@ mod tests {
                 stderr.contains(PUBLIC_PANIC_SENTINEL),
                 "child did not exercise the process panic hook: {stderr}"
             );
+            assert_eq!(
+                stderr.matches(REDACTED_PANIC_DIAGNOSTIC).count(),
+                3,
+                "each sensitive lifecycle panic must emit a payload-free diagnostic: {stderr}"
+            );
+            assert!(
+                stderr.contains("sink_task.rs:"),
+                "redacted panic diagnostic omitted its source location: {stderr}"
+            );
             assert!(!stdout.contains(PRECOMMIT_SENTINEL), "{stdout}");
             assert!(!stderr.contains(PRECOMMIT_SENTINEL), "{stderr}");
             return;
@@ -2292,6 +2323,27 @@ mod tests {
 
         let unrelated = std::panic::catch_unwind(|| panic!("{PUBLIC_PANIC_SENTINEL}"));
         assert!(unrelated.is_err());
+    }
+
+    fn current_test_binary() -> std::path::PathBuf {
+        let invoked_as = std::env::args_os()
+            .next()
+            .expect("the test harness must have an argv[0]");
+        let path = std::path::PathBuf::from(invoked_as);
+        let absolute = if path.is_absolute() {
+            path
+        } else {
+            std::env::current_dir()
+                .expect("the test working directory must be available")
+                .join(path)
+        };
+        let canonical = std::fs::canonicalize(absolute)
+            .expect("the current test harness path must resolve to an executable file");
+        assert!(
+            canonical.is_file(),
+            "the current test harness path must name a file"
+        );
+        canonical
     }
 
     async fn exercise_commit_panic_redaction() {
