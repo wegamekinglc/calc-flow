@@ -5128,8 +5128,8 @@ mod tests {
         LaunchId, OneShotContinuousRunner, OneShotStartObserver, RunnerCore, RunnerDiagnostics,
         RunnerRegistryState, RunnerShutdownObserver, RuntimeFailure, RuntimeTaskProgress,
         TerminalCause, classify_failure_state, finish_running_report,
-        maybe_request_terminal_checkpoint, notify_sink_manifest_durable, settle_durable_manifest,
-        sanitize_managed_preflight_error, source_cuts_are_terminal,
+        maybe_request_terminal_checkpoint, notify_sink_manifest_durable,
+        sanitize_managed_preflight_error, settle_durable_manifest, source_cuts_are_terminal,
     };
     use crate::{
         Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken,
