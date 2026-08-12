@@ -5452,7 +5452,13 @@ mod tests {
                             watermark: None,
                         },
                     )]),
-                    inline_metadata: BTreeMap::new(),
+                    inline_metadata:
+                        crate::pipeline::OperatorCheckpointCapability::CheckpointedStateful {
+                            state_version: 1,
+                        }
+                        .encode_snapshot("node", crate::OperatorStateSnapshot::default())
+                        .unwrap()
+                        .inline_metadata,
                     segments: vec![missing_segment],
                 },
             )]),
@@ -8157,7 +8163,7 @@ mod tests {
         };
         let plan = PipelineBuilder::new("launch")
             .unwrap()
-            .add_node("node", Box::new(operator) as Box<dyn StreamOperator>)
+            .add_checkpoint_capable_node("node", Box::new(operator) as Box<dyn StreamOperator>)
             .unwrap()
             .compile_stream(
                 &UdfRegistry::new().snapshot(),
