@@ -151,13 +151,123 @@ pub(crate) enum CompiledStreamOperator {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OperatorCheckpointCapability {
-    DeterministicRestore,
+    Stateless,
+    CheckpointedStateful { state_version: u32 },
     Unproven,
+}
+
+const OPERATOR_STATE_VERSION_KEY: &str = "__calc_flow_operator_state_version";
+
+impl OperatorCheckpointCapability {
+    pub(crate) const fn supports_deterministic_restore(self) -> bool {
+        matches!(self, Self::Stateless | Self::CheckpointedStateful { .. })
+    }
+
+    pub(crate) fn encode_snapshot(
+        self,
+        operator_id: &str,
+        mut snapshot: crate::OperatorStateSnapshot,
+    ) -> Result<crate::OperatorStateSnapshot> {
+        match self {
+            Self::Stateless if snapshot_is_empty(&snapshot) => Ok(snapshot),
+            Self::Stateless => Err(checkpoint_capability_mismatch(
+                operator_id,
+                "declared stateless but produced checkpoint state",
+            )),
+            Self::CheckpointedStateful { state_version: 0 } => Err(checkpoint_capability_mismatch(
+                operator_id,
+                "declared checkpoint state version 0",
+            )),
+            Self::CheckpointedStateful { state_version } => {
+                if snapshot
+                    .inline_metadata
+                    .insert(OPERATOR_STATE_VERSION_KEY.into(), json!(state_version))
+                    .is_some()
+                {
+                    return Err(checkpoint_capability_mismatch(
+                        operator_id,
+                        "used the reserved operator state version key",
+                    ));
+                }
+                Ok(snapshot)
+            }
+            Self::Unproven => Err(checkpoint_capability_mismatch(
+                operator_id,
+                "has no proven checkpoint capability",
+            )),
+        }
+    }
+
+    pub(crate) fn decode_snapshot(
+        self,
+        operator_id: &str,
+        mut snapshot: crate::OperatorStateSnapshot,
+    ) -> Result<crate::OperatorStateSnapshot> {
+        match self {
+            Self::Stateless if snapshot_is_empty(&snapshot) => Ok(snapshot),
+            Self::Stateless => Err(checkpoint_capability_mismatch(
+                operator_id,
+                "declared stateless but its restored checkpoint contains state",
+            )),
+            Self::CheckpointedStateful { state_version } => {
+                let restored_version = snapshot
+                    .inline_metadata
+                    .remove(OPERATOR_STATE_VERSION_KEY)
+                    .and_then(|value| value.as_u64())
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or_else(|| {
+                        checkpoint_capability_mismatch(
+                            operator_id,
+                            "checkpoint is missing a valid operator state version",
+                        )
+                    })?;
+                if restored_version != state_version {
+                    return Err(checkpoint_capability_mismatch(
+                        operator_id,
+                        &format!(
+                            "checkpoint state version {restored_version} is incompatible with declared version {state_version}"
+                        ),
+                    ));
+                }
+                Ok(snapshot)
+            }
+            Self::Unproven => Err(checkpoint_capability_mismatch(
+                operator_id,
+                "has no proven restore capability",
+            )),
+        }
+    }
+}
+
+fn snapshot_is_empty(snapshot: &crate::OperatorStateSnapshot) -> bool {
+    snapshot.inline_metadata.is_empty() && snapshot.segments.is_empty()
+}
+
+fn checkpoint_capability_mismatch(operator_id: &str, message: &str) -> CalcFlowError {
+    CalcFlowError::CheckpointMismatch {
+        message: format!("operator {operator_id:?} {message}"),
+    }
+}
+
+/// Cross-restart operator identity derived from the compiled graph node ID.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct StableOperatorId(String);
+
+impl StableOperatorId {
+    fn from_node_id(node_id: &str) -> Self {
+        debug_assert!(!node_id.is_empty(), "compiled node IDs are non-empty");
+        Self(node_id.into())
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// A directly owned compiled node ready to move into one runtime task.
 pub(crate) struct RuntimeStreamNode {
     pub(crate) node_id: String,
+    pub(crate) operator_id: StableOperatorId,
     pub(crate) operator: CompiledStreamOperator,
     pub(crate) checkpoint_capability: OperatorCheckpointCapability,
     pub(crate) input_ports: BTreeMap<String, Port>,
@@ -502,6 +612,7 @@ fn build_runtime_nodes(
             let checkpoint_capability = definition.checkpoint_capability;
             RuntimeStreamNode {
                 node_id: node_id.clone(),
+                operator_id: StableOperatorId::from_node_id(node_id),
                 operator: CompiledStreamOperator::convert(definition, table)
                     .expect("stream-capable nodes were validated before conversion"),
                 checkpoint_capability,
@@ -847,11 +958,15 @@ mod runtime_projection_tests {
     use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 
     use crate::{
-        BatchKind, Edge, Epoch, OperatorStateSnapshot, PipelineBuilder, Port, PortEndpoint,
-        StreamRequirements, UdfRegistry, UnionOperator, WindowAggregateOperator, WindowSpec,
+        BatchKind, Edge, Epoch, ExpressionOperator, OperatorStateSnapshot, PipelineBuilder, Port,
+        PortEndpoint, SqlOperator, StreamOperator, StreamRequirements, UdfRegistry, UnionOperator,
+        WindowAggregateOperator, WindowSpec,
     };
 
-    use super::{CompiledStreamOperator, EdgeBudget, RuntimeEdgeKind, RuntimeProducer};
+    use super::{
+        CompiledStreamOperator, EdgeBudget, OperatorCheckpointCapability, RuntimeEdgeKind,
+        RuntimeProducer,
+    };
 
     fn endpoint(node_id: &str, port: &str) -> PortEndpoint {
         PortEndpoint::new(node_id, port).unwrap()
@@ -866,6 +981,187 @@ mod runtime_projection_tests {
                 .collect(),
         )
         .unwrap()
+    }
+
+    fn only_capability(builder: PipelineBuilder) -> OperatorCheckpointCapability {
+        builder
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements::default(),
+            )
+            .unwrap()
+            .into_runtime_parts(EdgeBudget::default())
+            .unwrap()
+            .nodes
+            .into_iter()
+            .next()
+            .unwrap()
+            .checkpoint_capability
+    }
+
+    #[test]
+    fn built_in_and_external_operators_have_explicit_checkpoint_capabilities() {
+        let expression = PipelineBuilder::new("expression")
+            .unwrap()
+            .add_node(
+                "expression",
+                Box::new(
+                    ExpressionOperator::new(
+                        "expression",
+                        "total = a + b",
+                        Vec::new(),
+                        None,
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        let sql = PipelineBuilder::new("sql")
+            .unwrap()
+            .add_node(
+                "sql",
+                Box::new(
+                    SqlOperator::new(
+                        "sql",
+                        "SELECT a FROM events",
+                        vec!["events".into()],
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        let union_builder = PipelineBuilder::new("union")
+            .unwrap()
+            .add_node("union", Box::new(union("union", &["left", "right"])))
+            .unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "event_time",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        )]));
+        let window = PipelineBuilder::new("window")
+            .unwrap()
+            .add_node(
+                "window",
+                WindowAggregateOperator::new(
+                    "window",
+                    schema,
+                    WindowSpec::tumbling("event_time", Duration::from_secs(1)).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let external = PipelineBuilder::new("external")
+            .unwrap()
+            .add_node(
+                "external",
+                Box::new(union("external", &["left", "right"])) as Box<dyn StreamOperator>,
+            )
+            .unwrap();
+
+        assert_eq!(
+            only_capability(expression),
+            OperatorCheckpointCapability::Stateless
+        );
+        assert_eq!(
+            only_capability(sql),
+            OperatorCheckpointCapability::Stateless
+        );
+        assert_eq!(
+            only_capability(union_builder),
+            OperatorCheckpointCapability::Stateless
+        );
+        assert_eq!(
+            only_capability(window),
+            OperatorCheckpointCapability::CheckpointedStateful { state_version: 1 }
+        );
+        assert_eq!(
+            only_capability(external),
+            OperatorCheckpointCapability::Unproven
+        );
+    }
+
+    #[test]
+    fn checkpoint_capability_versions_state_and_fails_closed_on_mismatch() {
+        let capability = OperatorCheckpointCapability::CheckpointedStateful { state_version: 7 };
+        let snapshot = OperatorStateSnapshot {
+            inline_metadata: [("value".into(), serde_json::json!(11))]
+                .into_iter()
+                .collect(),
+            segments: [("delta".into(), vec![1, 2, 3])].into_iter().collect(),
+        };
+
+        let encoded = capability
+            .encode_snapshot("stateful", snapshot.clone())
+            .unwrap();
+        assert_ne!(encoded.inline_metadata, snapshot.inline_metadata);
+        let decoded = capability
+            .decode_snapshot("stateful", encoded.clone())
+            .unwrap();
+        assert_eq!(decoded.inline_metadata, snapshot.inline_metadata);
+        assert_eq!(decoded.segments, snapshot.segments);
+
+        let mismatch = OperatorCheckpointCapability::CheckpointedStateful { state_version: 8 }
+            .decode_snapshot("stateful", encoded)
+            .unwrap_err();
+        assert!(matches!(
+            mismatch,
+            crate::CalcFlowError::CheckpointMismatch { .. }
+        ));
+        assert!(mismatch.to_string().contains("stateful"));
+        assert!(mismatch.to_string().contains("version 7"));
+        assert!(mismatch.to_string().contains("version 8"));
+    }
+
+    #[test]
+    fn checkpoint_capability_rejects_state_for_stateless_and_unproven_operators() {
+        let state = OperatorStateSnapshot {
+            inline_metadata: [("value".into(), serde_json::json!(1))]
+                .into_iter()
+                .collect(),
+            segments: std::collections::BTreeMap::new(),
+        };
+
+        assert!(
+            OperatorCheckpointCapability::Stateless
+                .encode_snapshot("stateless", OperatorStateSnapshot::default())
+                .is_ok()
+        );
+        assert!(
+            OperatorCheckpointCapability::Stateless
+                .encode_snapshot("stateless", state)
+                .is_err()
+        );
+        assert!(
+            OperatorCheckpointCapability::Unproven
+                .encode_snapshot("external", OperatorStateSnapshot::default())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn checkpoint_state_version_changes_stream_fingerprint() {
+        let fingerprint = |state_version| {
+            PipelineBuilder::new("versioned")
+                .unwrap()
+                .add_checkpoint_capable_node_with_version(
+                    "stateful",
+                    Box::new(union("stateful", &["left", "right"])) as Box<dyn StreamOperator>,
+                    state_version,
+                )
+                .unwrap()
+                .compile_stream(
+                    &UdfRegistry::new().snapshot(),
+                    &StreamRequirements::default(),
+                )
+                .unwrap()
+                .fingerprint()
+                .to_owned()
+        };
+
+        assert_ne!(fingerprint(1), fingerprint(2));
     }
 
     #[test]
@@ -899,6 +1195,8 @@ mod runtime_projection_tests {
         assert_eq!(parts.nodes.len(), 2);
         assert_eq!(parts.nodes[0].node_id, "first");
         assert_eq!(parts.nodes[1].node_id, "tail");
+        assert_eq!(parts.nodes[0].operator_id.as_str(), "first");
+        assert_eq!(parts.nodes[1].operator_id.as_str(), "tail");
         assert_eq!(parts.nodes[0].input_ports.len(), 2);
         assert_eq!(parts.nodes[1].output_ports.len(), 1);
         assert_eq!(
@@ -949,10 +1247,13 @@ mod runtime_projection_tests {
         .unwrap();
         let mut compiled = CompiledStreamOperator::Window(window);
 
+        let capability = OperatorCheckpointCapability::CheckpointedStateful { state_version: 1 };
         let snapshot = compiled.checkpoint(Epoch::INITIAL).unwrap();
         assert!(!snapshot.inline_metadata.is_empty());
         assert!(snapshot.segments.is_empty());
-        compiled.restore(&snapshot).unwrap();
+        let encoded = capability.encode_snapshot("window", snapshot).unwrap();
+        let decoded = capability.decode_snapshot("window", encoded).unwrap();
+        compiled.restore(&decoded).unwrap();
         compiled.restore(&OperatorStateSnapshot::default()).unwrap();
     }
 }

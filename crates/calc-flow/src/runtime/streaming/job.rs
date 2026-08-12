@@ -27,9 +27,7 @@ use crate::{
     Batch, BatchKind, CalcFlowError, CheckpointManifest, DeliveryGuarantee, EdgeBudget, Epoch,
     JsonMap, Result, RetentionClass, SinkDeliveryManifest, StreamExecutionPlan,
     json::validate_portable_identifier,
-    pipeline::{
-        OperatorCheckpointCapability, RuntimeProducer, RuntimeStreamNode, StreamRuntimePlanParts,
-    },
+    pipeline::{RuntimeProducer, RuntimeStreamNode, StreamRuntimePlanParts},
 };
 
 pub(crate) struct NamedSourceBinding {
@@ -366,11 +364,13 @@ pub(crate) struct ValidatedContinuousJob {
     pub(crate) sinks: BTreeMap<String, Vec<ValidatedOrdinarySink>>,
     pub(crate) progress: PreparedStreamJob,
     pub(crate) delivery_mode: M2DeliveryMode,
+    pub(crate) delivery_proofs: BTreeMap<String, OutputDeliveryProof>,
 }
 
 pub(crate) struct OutputDeliveryProof {
     pub(crate) output_id: String,
     pub(crate) requested: DeliveryGuarantee,
+    pub(crate) effective: DeliveryGuarantee,
     pub(crate) reachable_sources: BTreeSet<String>,
     pub(crate) reachable_operators: BTreeSet<String>,
     pub(crate) sink_mechanisms: BTreeMap<String, SinkDeliveryManifest>,
@@ -392,7 +392,8 @@ pub(crate) fn preflight_job(spec: ContinuousJobSpec) -> Result<ValidatedContinuo
     validate_runtime_topology(&plan)?;
     let (validated_sources, progress) = validate_sources(&plan, sources)?;
     let validated_sinks = validate_sinks(&plan, sinks)?;
-    validate_delivery_requirements(&plan, &validated_sources, &validated_sinks)?;
+    let delivery_proofs =
+        validate_delivery_requirements(&plan, &validated_sources, &validated_sinks)?;
 
     Ok(ValidatedContinuousJob {
         context,
@@ -401,6 +402,7 @@ pub(crate) fn preflight_job(spec: ContinuousJobSpec) -> Result<ValidatedContinuo
         sinks: validated_sinks,
         progress,
         delivery_mode,
+        delivery_proofs,
     })
 }
 
@@ -421,12 +423,20 @@ fn validate_delivery_requirements(
     plan: &StreamRuntimePlanParts,
     sources: &BTreeMap<String, SourceBinding>,
     sinks: &BTreeMap<String, Vec<ValidatedOrdinarySink>>,
-) -> Result<()> {
-    for (output_id, guarantee) in &plan.requirements.delivery {
-        if *guarantee != DeliveryGuarantee::ExactlyOnce {
+) -> Result<BTreeMap<String, OutputDeliveryProof>> {
+    let mut proofs = BTreeMap::new();
+    for output_id in plan.sink_routes.keys() {
+        let requested = plan
+            .requirements
+            .delivery
+            .get(output_id)
+            .copied()
+            .unwrap_or(DeliveryGuarantee::AtLeastOnce);
+        let proof = output_delivery_proof(plan, output_id, requested, sinks)?;
+        if requested != DeliveryGuarantee::ExactlyOnce {
+            proofs.insert(output_id.clone(), proof);
             continue;
         }
-        let proof = output_delivery_proof(plan, output_id, *guarantee, sinks)?;
         let field = format!("requirements.delivery.{}", proof.output_id);
         if let Some(source_id) = proof.reachable_sources.iter().find(|source_id| {
             sources[*source_id].sampled_delivery() == SourceDeliveryCapability::Lossy
@@ -450,9 +460,7 @@ fn validate_delivery_requirements(
             plan.nodes
                 .iter()
                 .find(|node| node.node_id.as_str() == operator_id.as_str())
-                .is_none_or(|node| {
-                    node.checkpoint_capability != OperatorCheckpointCapability::DeterministicRestore
-                })
+                .is_none_or(|node| !node.checkpoint_capability.supports_deterministic_restore())
         }) {
             return Err(CalcFlowError::InvalidArgument {
                 field,
@@ -487,8 +495,9 @@ fn validate_delivery_requirements(
                 }
             }
         }
+        proofs.insert(output_id.clone(), proof);
     }
-    Ok(())
+    Ok(proofs)
 }
 
 fn output_delivery_proof(
@@ -540,6 +549,7 @@ fn output_delivery_proof(
     Ok(OutputDeliveryProof {
         output_id: output_id.into(),
         requested,
+        effective: requested,
         reachable_sources,
         reachable_operators,
         sink_mechanisms,
@@ -769,7 +779,16 @@ fn missing_sink(output_id: &str) -> CalcFlowError {
 }
 
 fn validate_runtime_topology(plan: &StreamRuntimePlanParts) -> Result<()> {
+    let mut operator_ids = BTreeSet::new();
     for node in &plan.nodes {
+        let operator_id = node.operator_id.as_str();
+        validate_portable_identifier(&format!("operators.{operator_id}"), operator_id)?;
+        if !operator_ids.insert(operator_id) {
+            return Err(CalcFlowError::InvalidArgument {
+                field: format!("operators.{operator_id}"),
+                message: "operator ID is configured more than once".into(),
+            });
+        }
         validate_node_ingresses(plan, node)?;
         validate_node_outputs(plan, node)?;
     }
@@ -1454,6 +1473,14 @@ mod tests {
             validated.sinks["output"][0].binding.capability(),
             SinkCapability::Transactional
         );
+        assert_eq!(
+            validated.delivery_proofs["output"].requested,
+            crate::DeliveryGuarantee::ExactlyOnce
+        );
+        assert_eq!(
+            validated.delivery_proofs["output"].effective,
+            crate::DeliveryGuarantee::ExactlyOnce
+        );
         assert!(!opened.load(Ordering::SeqCst));
     }
 
@@ -1709,7 +1736,35 @@ mod tests {
         .unwrap();
 
         assert_eq!(validated.sources.len(), 4);
+        assert_eq!(
+            validated.delivery_proofs["a.output"].effective,
+            crate::DeliveryGuarantee::ExactlyOnce
+        );
+        assert_eq!(
+            validated.delivery_proofs["b.output"].requested,
+            crate::DeliveryGuarantee::AtLeastOnce
+        );
+        assert_eq!(
+            validated.delivery_proofs["b.output"].effective,
+            crate::DeliveryGuarantee::AtLeastOnce
+        );
         assert!(!opened.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn runtime_preflight_rejects_duplicate_stable_operator_ids() {
+        let mut plan = disjoint_union_plan_with(&StreamRequirements::default())
+            .into_runtime_parts(EdgeBudget::default())
+            .unwrap();
+        plan.nodes[1].operator_id = plan.nodes[0].operator_id.clone();
+
+        let error = super::validate_runtime_topology(&plan).unwrap_err();
+
+        assert!(matches!(
+            error,
+            CalcFlowError::InvalidArgument { ref field, ref message }
+                if field == "operators.a" && message.contains("configured more than once")
+        ));
     }
 
     #[test]

@@ -175,10 +175,12 @@ impl PipelineBuilder {
     {
         let operator = operator.into();
         let checkpoint_capability = match &operator {
-            NodeOperator::Expression(_)
-            | NodeOperator::Sql(_)
-            | NodeOperator::Union(_)
-            | NodeOperator::Window(_) => OperatorCheckpointCapability::DeterministicRestore,
+            NodeOperator::Expression(_) | NodeOperator::Sql(_) | NodeOperator::Union(_) => {
+                OperatorCheckpointCapability::Stateless
+            }
+            NodeOperator::Window(_) => OperatorCheckpointCapability::CheckpointedStateful {
+                state_version: crate::operator::WINDOW_STATE_LAYOUT_VERSION,
+            },
             NodeOperator::Batch(_) | NodeOperator::Stream(_) => {
                 OperatorCheckpointCapability::Unproven
             }
@@ -191,10 +193,23 @@ impl PipelineBuilder {
     where
         O: Into<NodeOperator>,
     {
+        self.add_checkpoint_capable_node_with_version(node_id, operator, 1)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn add_checkpoint_capable_node_with_version<O>(
+        self,
+        node_id: &str,
+        operator: O,
+        state_version: u32,
+    ) -> Result<Self>
+    where
+        O: Into<NodeOperator>,
+    {
         self.add_node_with_capability(
             node_id,
             operator.into(),
-            OperatorCheckpointCapability::DeterministicRestore,
+            OperatorCheckpointCapability::CheckpointedStateful { state_version },
         )
     }
 

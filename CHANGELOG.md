@@ -5,6 +5,13 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-13: Add crate-private stable operator checkpoint identities and
+  explicit stateless, versioned stateful, or unproven capabilities. Stream
+  fingerprints now freeze the capability contract, checkpoint admission
+  rejects unproven operators before task registration, restore fails closed on
+  state-layout version mismatch, and per-output delivery proof records both
+  requested and effective guarantees without silently upgrading at-least-once.
+
 - 2026-08-10: Add the crate-private M5 epoch-checkpoint runtime: whole-job and
   per-output capability preflight, globally aligned source/operator cuts,
   manifest-last state publication and strict recovery selection,

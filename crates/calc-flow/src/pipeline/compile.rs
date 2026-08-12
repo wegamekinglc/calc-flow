@@ -501,13 +501,23 @@ pub(crate) fn graph_fingerprint(
                 &declared_udfs,
                 &canonical_udfs,
             );
-            Ok(json!({
+            let mut value = json!({
                 "configuration": configuration,
                 "input_ports": port_values(node.operator.input_ports()),
                 "node_id": node_id,
                 "output_ports": port_values(node.operator.output_ports()),
                 "udf_references": canonical_udfs,
-            }))
+            });
+            if execution_mode == "stream" {
+                value
+                    .as_object_mut()
+                    .expect("fingerprint node is an object")
+                    .insert(
+                        "checkpoint_capability".into(),
+                        checkpoint_capability_value(node.checkpoint_capability),
+                    );
+            }
+            Ok(value)
         })
         .collect::<Result<Vec<Value>>>()?;
     let mut sorted_edges = edges.to_vec();
@@ -531,6 +541,17 @@ pub(crate) fn graph_fingerprint(
     }
     let canonical = canonical_json(&value)?;
     Ok(hex::encode(Sha256::digest(canonical.as_bytes())))
+}
+
+fn checkpoint_capability_value(capability: OperatorCheckpointCapability) -> Value {
+    match capability {
+        OperatorCheckpointCapability::Stateless => json!({"kind": "stateless"}),
+        OperatorCheckpointCapability::CheckpointedStateful { state_version } => json!({
+            "kind": "checkpointed_stateful",
+            "state_version": state_version,
+        }),
+        OperatorCheckpointCapability::Unproven => json!({"kind": "unproven"}),
+    }
 }
 
 fn canonical_udf_references(references: &[UdfReference]) -> Vec<UdfReference> {
