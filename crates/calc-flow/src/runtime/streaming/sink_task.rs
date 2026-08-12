@@ -1,4 +1,10 @@
-use std::{collections::BTreeMap, panic::AssertUnwindSafe, sync::Arc};
+use std::{
+    cell::Cell,
+    collections::BTreeMap,
+    future::Future,
+    panic::{self, AssertUnwindSafe},
+    sync::{Arc, Once},
+};
 
 use futures::FutureExt;
 use parking_lot::Mutex;
@@ -17,6 +23,61 @@ use crate::{
 };
 
 const MAX_SINK_PRECOMMIT_BYTES: usize = 64 * 1024;
+
+thread_local! {
+    static REDACT_SENSITIVE_SINK_PANIC: Cell<bool> = const { Cell::new(false) };
+}
+
+static INSTALL_SENSITIVE_SINK_PANIC_HOOK: Once = Once::new();
+
+fn install_sensitive_sink_panic_hook() {
+    // Keep one permanent delegating hook. Swapping a process-global hook around
+    // each connector call would suppress unrelated panics on concurrent tasks.
+    INSTALL_SENSITIVE_SINK_PANIC_HOOK.call_once(|| {
+        let previous = panic::take_hook();
+        panic::set_hook(Box::new(move |panic| {
+            let redact = REDACT_SENSITIVE_SINK_PANIC
+                .try_with(Cell::get)
+                .unwrap_or(false);
+            if !redact {
+                previous(panic);
+            }
+        }));
+    });
+}
+
+struct SensitiveSinkPanicGuard {
+    previous: bool,
+}
+
+impl SensitiveSinkPanicGuard {
+    fn enter() -> Self {
+        let previous = REDACT_SENSITIVE_SINK_PANIC.with(|redact| redact.replace(true));
+        Self { previous }
+    }
+}
+
+impl Drop for SensitiveSinkPanicGuard {
+    fn drop(&mut self) {
+        REDACT_SENSITIVE_SINK_PANIC.with(|redact| redact.set(self.previous));
+    }
+}
+
+async fn catch_sensitive_sink_unwind<F>(future: F) -> std::thread::Result<F::Output>
+where
+    F: Future,
+{
+    install_sensitive_sink_panic_hook();
+    let future = AssertUnwindSafe(future).catch_unwind();
+    futures::pin_mut!(future);
+    futures::future::poll_fn(|context| {
+        // Tokio may move the future between worker threads, so scope each poll
+        // instead of relying on a task-wide thread-local value.
+        let _guard = SensitiveSinkPanicGuard::enter();
+        future.as_mut().poll(context)
+    })
+    .await
+}
 
 pub(crate) struct SinkCheckpointAck {
     pub(crate) output_id: String,
@@ -944,6 +1005,8 @@ async fn commit_all(
     prepared: &BTreeMap<String, SinkManifestEntry>,
     task_id: TaskId,
 ) -> std::result::Result<(), (String, CalcFlowError)> {
+    #[cfg(not(test))]
+    let _ = task_id;
     #[cfg(test)]
     let transactional_sink_count = inputs
         .sinks
@@ -960,9 +1023,7 @@ async fn commit_all(
             .pre_commit
             .as_ref()
             .expect("transactional pre-commit metadata is present");
-        let result = AssertUnwindSafe(sink.binding.commit(epoch, state))
-            .catch_unwind()
-            .await;
+        let result = catch_sensitive_sink_unwind(sink.binding.commit(epoch, state)).await;
         match result {
             Ok(Ok(())) => {
                 #[cfg(test)]
@@ -971,7 +1032,7 @@ async fn commit_all(
                     if committed_sink_count < transactional_sink_count
                         && let Some(inject) = &inputs.sink_commit_fault
                     {
-                        let result = std::panic::catch_unwind(AssertUnwindSafe(|| inject()));
+                        let result = panic::catch_unwind(AssertUnwindSafe(|| inject()));
                         match result {
                             Ok(Ok(())) => {}
                             Ok(Err(error)) => return Err((sink.sink_id.to_string(), error)),
@@ -989,12 +1050,11 @@ async fn commit_all(
                 }
             }
             Ok(Err(error)) => return Err((sink.sink_id.to_string(), error)),
-            Err(payload) => {
+            Err(_) => {
                 return Err((
                     sink.sink_id.to_string(),
-                    CalcFlowError::TaskPanicked {
-                        task_id: task_id.as_u64(),
-                        message: panic_message(payload.as_ref()),
+                    CalcFlowError::Internal {
+                        message: format!("sink commit panicked for epoch {}", epoch.as_u64()),
                     },
                 ));
             }
@@ -1018,9 +1078,7 @@ async fn abort_all(
         let state = prepared
             .get(sink.sink_id.as_str())
             .and_then(|entry| entry.pre_commit.as_ref());
-        let result = AssertUnwindSafe(sink.binding.abort(epoch, state))
-            .catch_unwind()
-            .await;
+        let result = catch_sensitive_sink_unwind(sink.binding.abort(epoch, state)).await;
         let error = match result {
             Ok(Ok(())) => None,
             Ok(Err(_)) | Err(_) => Some(CalcFlowError::Internal {
@@ -1060,9 +1118,7 @@ pub(crate) async fn recover_transactional_sinks(
         if !validate_recovery_entry(sink, entry)? {
             continue;
         }
-        let recovery = AssertUnwindSafe(sink.binding.recover(manifest))
-            .catch_unwind()
-            .await;
+        let recovery = catch_sensitive_sink_unwind(sink.binding.recover(manifest)).await;
         if !matches!(recovery, Ok(Ok(()))) {
             return Err(CalcFlowError::RecoveryRequired {
                 pipeline_name: manifest.pipeline_name().into(),
@@ -1148,6 +1204,7 @@ async fn close_all(inputs: &mut SinkTaskInputs, failure_signal: &TaskFailureSign
 mod tests {
     use std::{
         collections::BTreeMap,
+        process::Command,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -1268,8 +1325,12 @@ mod tests {
     }
 
     const PRECOMMIT_SENTINEL: &str = "precommit-secret-sentinel";
+    const PUBLIC_PANIC_SENTINEL: &str = "unrelated-public-panic-sentinel";
+    const SENSITIVE_PANIC_CHILD: &str = "CALC_FLOW_SENSITIVE_SINK_PANIC_CHILD";
 
     struct LeakingLifecycleSink {
+        panic_on_abort: bool,
+        panic_on_commit: bool,
         panic_on_recover: bool,
     }
 
@@ -1295,10 +1356,18 @@ mod tests {
         }
 
         async fn commit(&mut self, _epoch: crate::Epoch, _state: &JsonMap) -> Result<()> {
+            assert!(
+                !self.panic_on_commit,
+                "commit panicked for {PRECOMMIT_SENTINEL}"
+            );
             Ok(())
         }
 
         async fn abort(&mut self, _epoch: crate::Epoch, state: Option<&JsonMap>) -> Result<()> {
+            assert!(
+                !self.panic_on_abort,
+                "abort panicked for {PRECOMMIT_SENTINEL}"
+            );
             Err(CalcFlowError::Internal {
                 message: format!("abort failed for {state:?}"),
             })
@@ -1710,6 +1779,8 @@ mod tests {
             vec![ValidatedOrdinarySink {
                 sink_id: "redacted".into(),
                 binding: OrdinarySinkBinding::new_transactional(Box::new(LeakingLifecycleSink {
+                    panic_on_abort: false,
+                    panic_on_commit: false,
                     panic_on_recover: false,
                 })),
             }],
@@ -2162,6 +2233,8 @@ mod tests {
         let mut sinks = vec![ValidatedOrdinarySink {
             sink_id: "redacted".into(),
             binding: OrdinarySinkBinding::new_transactional(Box::new(LeakingLifecycleSink {
+                panic_on_abort: false,
+                panic_on_commit: false,
                 panic_on_recover: false,
             })),
         }];
@@ -2184,7 +2257,128 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovery_panic_is_redacted_and_requires_forward_recovery() {
+    async fn sensitive_lifecycle_panic_payloads_never_reach_process_stderr() {
+        if std::env::var_os(SENSITIVE_PANIC_CHILD).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "runtime::streaming::sink_task::tests::sensitive_lifecycle_panic_payloads_never_reach_process_stderr",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(SENSITIVE_PANIC_CHILD, "1")
+                .env("RUST_BACKTRACE", "0")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            assert!(
+                output.status.success(),
+                "child test failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+            assert!(
+                stderr.contains(PUBLIC_PANIC_SENTINEL),
+                "child did not exercise the process panic hook: {stderr}"
+            );
+            assert!(!stdout.contains(PRECOMMIT_SENTINEL), "{stdout}");
+            assert!(!stderr.contains(PRECOMMIT_SENTINEL), "{stderr}");
+            return;
+        }
+
+        exercise_commit_panic_redaction().await;
+        exercise_abort_panic_redaction().await;
+        exercise_recovery_panic_redaction().await;
+
+        let unrelated = std::panic::catch_unwind(|| panic!("{PUBLIC_PANIC_SENTINEL}"));
+        assert!(unrelated.is_err());
+    }
+
+    async fn exercise_commit_panic_redaction() {
+        let (ack_tx, mut ack_rx) = mpsc::channel(1);
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let (finalize_tx, _finalize_rx) = mpsc::channel(1);
+        let mut harness = harness_with_checkpoint(
+            vec![ValidatedOrdinarySink {
+                sink_id: "redacted".into(),
+                binding: OrdinarySinkBinding::new_transactional(Box::new(LeakingLifecycleSink {
+                    panic_on_abort: false,
+                    panic_on_commit: true,
+                    panic_on_recover: false,
+                })),
+            }],
+            Some(SinkCheckpointPort {
+                initial_epoch: crate::Epoch::INITIAL,
+                acknowledgements: ack_tx,
+                commands: command_rx,
+                finalizations: finalize_tx,
+                terminal_ready: None,
+            }),
+        );
+        harness.data.send(true).unwrap();
+        harness
+            .sender
+            .send(StreamMessage::barrier(crate::Epoch::INITIAL))
+            .await
+            .unwrap();
+        ack_rx.recv().await.unwrap();
+        command_tx
+            .send(SinkCheckpointCommand::ManifestDurable(
+                crate::Epoch::INITIAL,
+            ))
+            .await
+            .unwrap();
+
+        let report = harness.supervisor.join_all().await;
+        let diagnostics = format!("{:?}", harness.progress.take_failures());
+
+        assert_eq!(report.errors.len(), 1);
+        assert!(!diagnostics.contains(PRECOMMIT_SENTINEL));
+        assert!(diagnostics.contains("restart must recover"));
+    }
+
+    async fn exercise_abort_panic_redaction() {
+        let (ack_tx, mut ack_rx) = mpsc::channel(1);
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let (finalize_tx, _finalize_rx) = mpsc::channel(1);
+        let mut harness = harness_with_checkpoint(
+            vec![ValidatedOrdinarySink {
+                sink_id: "redacted".into(),
+                binding: OrdinarySinkBinding::new_transactional(Box::new(LeakingLifecycleSink {
+                    panic_on_abort: true,
+                    panic_on_commit: false,
+                    panic_on_recover: false,
+                })),
+            }],
+            Some(SinkCheckpointPort {
+                initial_epoch: crate::Epoch::INITIAL,
+                acknowledgements: ack_tx,
+                commands: command_rx,
+                finalizations: finalize_tx,
+                terminal_ready: None,
+            }),
+        );
+        harness.data.send(true).unwrap();
+        harness
+            .sender
+            .send(StreamMessage::barrier(crate::Epoch::INITIAL))
+            .await
+            .unwrap();
+        ack_rx.recv().await.unwrap();
+        command_tx
+            .send(SinkCheckpointCommand::Abort(crate::Epoch::INITIAL))
+            .await
+            .unwrap();
+
+        let report = harness.supervisor.join_all().await;
+        let diagnostics = format!("{:?}", harness.progress.take_failures());
+
+        assert_eq!(report.errors.len(), 1);
+        assert!(!diagnostics.contains(PRECOMMIT_SENTINEL));
+        assert!(diagnostics.contains("sink abort failed for epoch 1"));
+    }
+
+    async fn exercise_recovery_panic_redaction() {
         let manifest = crate::CheckpointManifest::new(crate::CheckpointManifestFields {
             pipeline_name: "pipeline".into(),
             pipeline_fingerprint:
@@ -2211,6 +2405,8 @@ mod tests {
         let mut sinks = vec![ValidatedOrdinarySink {
             sink_id: "redacted".into(),
             binding: OrdinarySinkBinding::new_transactional(Box::new(LeakingLifecycleSink {
+                panic_on_abort: false,
+                panic_on_commit: false,
                 panic_on_recover: true,
             })),
         }];
