@@ -694,7 +694,9 @@ impl MetricsRecorder {
                         attempt_node_error(&mut snapshot.nodes, node_id, &mut first_overflow);
                     }
                 }
-                FailureOrigin::Preflight | FailureOrigin::Metrics { .. } => {}
+                FailureOrigin::Preflight
+                | FailureOrigin::RunnerLifecycle
+                | FailureOrigin::Metrics { .. } => {}
             }
         }
         let (component_id, counter) = first_overflow?;

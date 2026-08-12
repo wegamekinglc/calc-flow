@@ -1,13 +1,24 @@
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     fmt,
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
 };
 
 use async_trait::async_trait;
+use futures::{FutureExt, future::BoxFuture};
 
+#[cfg(test)]
+use super::runner::RunnerLifecycleProbe;
 use super::{
     StreamJobContext,
     progress::{PreparedStreamJob, StreamProgressRuntimeConfig, prepare_stream_job},
+    runner::{
+        ContinuousJob, ContinuousJobOutcome, ContinuousJobState, ContinuousJobStatus,
+        ContinuousRunner, runner_shutdown_failure,
+    },
     source_task::{
         SourceBinding, SourceCapabilities, SourceDeliveryCapability, validate_source_capabilities,
     },
@@ -225,6 +236,122 @@ pub(crate) struct ContinuousJobSpec {
     pub(crate) sinks: Vec<NamedSinkBinding>,
     pub(crate) edge_budget: EdgeBudget,
     pub(crate) delivery_mode: M2DeliveryMode,
+}
+
+type OwningJobCompletion = futures::future::Shared<BoxFuture<'static, Arc<ContinuousJobOutcome>>>;
+
+struct OwningJobOwner {
+    completion: OwningJobCompletion,
+    #[cfg(test)]
+    runner: RunnerLifecycleProbe,
+}
+
+impl OwningJobOwner {
+    fn wait(&self) -> OwningJobCompletion {
+        self.completion.clone()
+    }
+
+    #[cfg(test)]
+    fn is_terminal(&self) -> bool {
+        self.completion.peek().is_some()
+    }
+}
+
+/// Crate-private owning handle for one continuous job and its runner reaper.
+pub(crate) struct OwningContinuousJob {
+    job: ContinuousJob,
+    owner: Arc<OwningJobOwner>,
+}
+
+impl fmt::Debug for OwningContinuousJob {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OwningContinuousJob")
+            .field("job_id", &self.id())
+            .field("state", &self.state())
+            .finish_non_exhaustive()
+    }
+}
+
+impl OwningContinuousJob {
+    pub(crate) fn new(job: ContinuousJob, mut runner: ContinuousRunner) -> Self {
+        #[cfg(test)]
+        let runner_probe = runner.lifecycle_probe();
+        let terminal = job.wait();
+        let completion = async move {
+            let mut outcome = terminal.await;
+            if let Err(error) = runner.shutdown().await {
+                Arc::make_mut(&mut outcome)
+                    .errors
+                    .push(runner_shutdown_failure(error));
+            }
+            outcome
+        }
+        .boxed()
+        .shared();
+        let owner = Arc::new(OwningJobOwner {
+            completion,
+            #[cfg(test)]
+            runner: runner_probe,
+        });
+        Self { job, owner }
+    }
+
+    pub(crate) fn id(&self) -> u64 {
+        self.job.id()
+    }
+
+    pub(crate) fn status(&self) -> ContinuousJobStatus {
+        self.job.status()
+    }
+
+    pub(crate) fn state(&self) -> ContinuousJobState {
+        self.job.state()
+    }
+
+    pub(crate) fn wait(&self) -> OwningOutcomeObserver {
+        OwningOutcomeObserver::new(self.owner.wait())
+    }
+
+    pub(crate) fn shutdown(&self) -> OwningOutcomeObserver {
+        drop(self.job.shutdown());
+        self.wait()
+    }
+
+    pub(crate) fn cancel(&self) -> OwningOutcomeObserver {
+        drop(self.job.cancel());
+        self.wait()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn owner_settled_for_test(&self) -> bool {
+        self.owner.is_terminal()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn runner_probe_for_test(&self) -> RunnerLifecycleProbe {
+        self.owner.runner.clone()
+    }
+}
+
+pub(crate) struct OwningOutcomeObserver {
+    inner: Pin<Box<dyn Future<Output = Arc<ContinuousJobOutcome>> + Send>>,
+}
+
+impl OwningOutcomeObserver {
+    fn new(completion: OwningJobCompletion) -> Self {
+        Self {
+            inner: Box::pin(completion),
+        }
+    }
+}
+
+impl Future for OwningOutcomeObserver {
+    type Output = Arc<ContinuousJobOutcome>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        self.inner.as_mut().poll(context)
+    }
 }
 
 pub(crate) struct ValidatedOrdinarySink {
