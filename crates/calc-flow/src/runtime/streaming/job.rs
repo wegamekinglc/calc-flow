@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
+use std::{
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
+    fmt,
+};
 
 use async_trait::async_trait;
 
@@ -23,9 +26,41 @@ pub(crate) struct NamedSourceBinding {
     pub(crate) binding: SourceBinding,
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct StableSinkId(String);
+
+impl StableSinkId {
+    pub(crate) fn new(value: impl Into<String>) -> Result<Self> {
+        Self::new_at_field(value, "sink.id")
+    }
+
+    fn new_at_field(value: impl Into<String>, field: &str) -> Result<Self> {
+        let value = value.into();
+        validate_portable_identifier(field, &value)?;
+        Ok(Self(value))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for StableSinkId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[cfg(test)]
+impl From<&str> for StableSinkId {
+    fn from(value: &str) -> Self {
+        Self::new(value).expect("test sink IDs must be portable")
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum M2SinkDelivery {
-    ProcessLocalOrdered,
+pub(crate) enum SinkCapability {
+    Ordinary,
     EpochIdempotent {
         mechanism: String,
         retention: RetentionClass,
@@ -33,10 +68,10 @@ pub(crate) enum M2SinkDelivery {
     Transactional,
 }
 
-impl M2SinkDelivery {
+impl SinkCapability {
     pub(crate) fn into_manifest(self) -> SinkDeliveryManifest {
         match self {
-            Self::ProcessLocalOrdered => SinkDeliveryManifest::Ordinary,
+            Self::Ordinary => SinkDeliveryManifest::Ordinary,
             Self::EpochIdempotent {
                 mechanism,
                 retention,
@@ -51,10 +86,6 @@ impl M2SinkDelivery {
 
 #[async_trait]
 pub(crate) trait OrdinaryStreamSink: Send {
-    fn delivery_capability(&self) -> M2SinkDelivery {
-        M2SinkDelivery::ProcessLocalOrdered
-    }
-
     async fn open(&mut self) -> Result<()>;
     async fn write(&mut self, batch: &Batch) -> Result<()>;
     async fn close(&mut self) -> Result<()>;
@@ -79,21 +110,21 @@ enum SinkImplementation {
 
 pub(crate) struct OrdinarySinkBinding {
     sink: SinkImplementation,
-    delivery: Option<M2SinkDelivery>,
+    capability: SinkCapability,
 }
 
 impl OrdinarySinkBinding {
     pub(crate) fn new(sink: Box<dyn OrdinaryStreamSink>) -> Self {
         Self {
             sink: SinkImplementation::Ordinary(sink),
-            delivery: None,
+            capability: SinkCapability::Ordinary,
         }
     }
 
     pub(crate) fn new_transactional(sink: Box<dyn TransactionalStreamSink>) -> Self {
         Self {
             sink: SinkImplementation::Transactional(sink),
-            delivery: Some(M2SinkDelivery::Transactional),
+            capability: SinkCapability::Transactional,
         }
     }
 
@@ -105,48 +136,19 @@ impl OrdinarySinkBinding {
         validate_portable_identifier("sink.delivery.mechanism", mechanism)?;
         Ok(Self {
             sink: SinkImplementation::Transactional(sink),
-            delivery: Some(M2SinkDelivery::EpochIdempotent {
+            capability: SinkCapability::EpochIdempotent {
                 mechanism: mechanism.into(),
                 retention,
-            }),
+            },
         })
     }
 
-    fn sample_delivery_once(&mut self, field: &str) -> Result<M2SinkDelivery> {
-        if let Some(delivery) = &self.delivery {
-            return Ok(delivery.clone());
-        }
-        let SinkImplementation::Ordinary(sink) = &self.sink else {
-            return Err(CalcFlowError::Internal {
-                message: "transactional sink binding omitted its delivery capability".into(),
-            });
-        };
-        let declared = sink.delivery_capability();
-        if declared != M2SinkDelivery::ProcessLocalOrdered {
-            let claim = match declared {
-                M2SinkDelivery::ProcessLocalOrdered => unreachable!(),
-                M2SinkDelivery::EpochIdempotent { .. } => "epoch-idempotent",
-                M2SinkDelivery::Transactional => "transactional",
-            };
-            return Err(CalcFlowError::InvalidArgument {
-                field: field.into(),
-                message: format!(
-                    "ordinary sink cannot declare {claim} delivery without the transactional lifecycle"
-                ),
-            });
-        }
-        self.delivery = Some(declared.clone());
-        Ok(declared)
-    }
-
-    pub(crate) fn delivery(&self) -> M2SinkDelivery {
-        self.delivery
-            .clone()
-            .expect("validated sink bindings sampled delivery capability")
+    pub(crate) fn capability(&self) -> SinkCapability {
+        self.capability.clone()
     }
 
     pub(crate) fn is_ordinary(&self) -> bool {
-        matches!(self.delivery(), M2SinkDelivery::ProcessLocalOrdered)
+        matches!(self.capability, SinkCapability::Ordinary)
     }
 
     pub(crate) async fn open(&mut self) -> Result<()> {
@@ -226,7 +228,7 @@ pub(crate) struct ContinuousJobSpec {
 }
 
 pub(crate) struct ValidatedOrdinarySink {
-    pub(crate) sink_id: String,
+    pub(crate) sink_id: StableSinkId,
     pub(crate) binding: OrdinarySinkBinding,
 }
 
@@ -403,8 +405,8 @@ fn output_delivery_proof(
         .iter()
         .map(|sink| {
             (
-                sink.sink_id.clone(),
-                sink.binding.delivery().into_manifest(),
+                sink.sink_id.to_string(),
+                sink.binding.capability().into_manifest(),
             )
         })
         .collect();
@@ -560,16 +562,25 @@ fn validate_sinks(
     sinks: Vec<NamedSinkBinding>,
 ) -> Result<BTreeMap<String, Vec<ValidatedOrdinarySink>>> {
     let mut validated = BTreeMap::<String, Vec<ValidatedOrdinarySink>>::new();
+    let mut sink_outputs = BTreeMap::<StableSinkId, String>::new();
     for named in sinks {
         let (output_id, sink) = validate_sink(plan, named)?;
-        let output_sinks = validated.entry(output_id.clone()).or_default();
-        if output_sinks
-            .iter()
-            .any(|existing| existing.sink_id == sink.sink_id)
-        {
-            return Err(duplicate_sink(&output_id, &sink.sink_id));
+        match sink_outputs.entry(sink.sink_id.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(output_id.clone());
+            }
+            Entry::Occupied(entry) if entry.get() == &output_id => {
+                return Err(duplicate_sink(&output_id, sink.sink_id.as_str()));
+            }
+            Entry::Occupied(entry) => {
+                return Err(sink_bound_to_multiple_outputs(
+                    sink.sink_id.as_str(),
+                    entry.get(),
+                    &output_id,
+                ));
+            }
         }
-        output_sinks.push(sink);
+        validated.entry(output_id).or_default().push(sink);
     }
     if let Some(output_id) = plan
         .sink_routes
@@ -583,27 +594,21 @@ fn validate_sinks(
 
 fn validate_sink(
     plan: &StreamRuntimePlanParts,
-    mut named: NamedSinkBinding,
+    named: NamedSinkBinding,
 ) -> Result<(String, ValidatedOrdinarySink)> {
     validate_runtime_id(&named.output_id, &format!("sinks.{}", named.output_id))?;
-    validate_runtime_id(
-        &named.sink_id,
-        &format!("sinks.{}.{}", named.output_id, named.sink_id),
-    )?;
+    let sink_id =
+        StableSinkId::new_at_field(named.sink_id, &format!("sinks.{}.id", named.output_id))?;
     if !plan.sink_routes.contains_key(&named.output_id) {
         return Err(CalcFlowError::InvalidArgument {
             field: format!("sinks.{}", named.output_id),
             message: "route does not match a compiled external output".into(),
         });
     }
-    named.binding.sample_delivery_once(&format!(
-        "sinks.{}.{}.delivery_capability",
-        named.output_id, named.sink_id
-    ))?;
     Ok((
         named.output_id,
         ValidatedOrdinarySink {
-            sink_id: named.sink_id,
+            sink_id,
             binding: named.binding,
         },
     ))
@@ -613,6 +618,19 @@ fn duplicate_sink(output_id: &str, sink_id: &str) -> CalcFlowError {
     CalcFlowError::InvalidArgument {
         field: format!("sinks.{output_id}.{sink_id}"),
         message: "sink is configured more than once".into(),
+    }
+}
+
+fn sink_bound_to_multiple_outputs(
+    sink_id: &str,
+    previous_output: &str,
+    output_id: &str,
+) -> CalcFlowError {
+    CalcFlowError::InvalidArgument {
+        field: format!("sinks.{sink_id}"),
+        message: format!(
+            "sink ID is bound to more than one output: {previous_output:?} and {output_id:?}"
+        ),
     }
 }
 
@@ -705,8 +723,9 @@ mod tests {
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
 
     use super::{
-        ContinuousJobSpec, M2DeliveryMode, M2SinkDelivery, NamedSinkBinding, NamedSourceBinding,
-        OrdinarySinkBinding, OrdinaryStreamSink, TransactionalStreamSink, preflight_job,
+        ContinuousJobSpec, M2DeliveryMode, NamedSinkBinding, NamedSourceBinding,
+        OrdinarySinkBinding, OrdinaryStreamSink, SinkCapability, StableSinkId,
+        TransactionalStreamSink, preflight_job,
     };
     use crate::{
         Batch, BatchKind, CalcFlowError, CancellationToken, EdgeBudget, JsonMap, PipelineBuilder,
@@ -726,8 +745,44 @@ mod tests {
         StreamJobContext::new(42, "fingerprint", JsonMap::new(), None, cancellation)
     }
 
+    #[test]
+    fn stable_sink_id_is_portable_and_round_trips_without_output_identity() {
+        let sink_id = StableSinkId::new("warehouse.primary").unwrap();
+
+        assert_eq!(sink_id.as_str(), "warehouse.primary");
+        assert!(StableSinkId::new("warehouse primary").is_err());
+        assert!(StableSinkId::new("").is_err());
+    }
+
+    #[test]
+    fn sink_capability_is_fixed_by_the_binding_constructor() {
+        let opened = Arc::new(AtomicBool::new(false));
+        let ordinary = OrdinarySinkBinding::new(Box::new(ProbeSink {
+            opened: Arc::clone(&opened),
+        }));
+        let transactional =
+            OrdinarySinkBinding::new_transactional(Box::new(ProbeTransactionalSink {
+                opened: Arc::clone(&opened),
+            }));
+        let epoch_idempotent = OrdinarySinkBinding::new_epoch_idempotent(
+            Box::new(ProbeTransactionalSink { opened }),
+            "epoch-ledger",
+            RetentionClass::Unbounded,
+        )
+        .unwrap();
+
+        assert_eq!(ordinary.capability(), SinkCapability::Ordinary);
+        assert_eq!(transactional.capability(), SinkCapability::Transactional);
+        assert_eq!(
+            epoch_idempotent.capability(),
+            SinkCapability::EpochIdempotent {
+                mechanism: "epoch-ledger".into(),
+                retention: RetentionClass::Unbounded,
+            }
+        );
+    }
+
     struct ProbeSink {
-        capability_calls: Arc<std::sync::atomic::AtomicUsize>,
         opened: Arc<AtomicBool>,
     }
 
@@ -773,35 +828,6 @@ mod tests {
 
     #[async_trait]
     impl OrdinaryStreamSink for ProbeSink {
-        fn delivery_capability(&self) -> M2SinkDelivery {
-            self.capability_calls.fetch_add(1, Ordering::SeqCst);
-            M2SinkDelivery::ProcessLocalOrdered
-        }
-
-        async fn open(&mut self) -> Result<()> {
-            self.opened.store(true, Ordering::SeqCst);
-            Ok(())
-        }
-
-        async fn write(&mut self, _batch: &Batch) -> Result<()> {
-            Ok(())
-        }
-
-        async fn close(&mut self) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    struct ClaimingOrdinarySink {
-        opened: Arc<AtomicBool>,
-    }
-
-    #[async_trait]
-    impl OrdinaryStreamSink for ClaimingOrdinarySink {
-        fn delivery_capability(&self) -> M2SinkDelivery {
-            M2SinkDelivery::Transactional
-        }
-
         async fn open(&mut self) -> Result<()> {
             self.opened.store(true, Ordering::SeqCst);
             Ok(())
@@ -960,7 +986,6 @@ mod tests {
             output_id: output_id.into(),
             sink_id: sink_id.into(),
             binding: OrdinarySinkBinding::new(Box::new(ProbeSink {
-                capability_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 opened: Arc::clone(opened),
             })),
         }
@@ -1002,8 +1027,6 @@ mod tests {
     fn whole_job_preflight_freezes_capabilities_and_all_boundary_routes_before_open() {
         let left_capability_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let right_capability_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let primary_sink_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let secondary_sink_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let opened = Arc::new(AtomicBool::new(false));
         let source = |binding_id: &str, capability_calls: &Arc<std::sync::atomic::AtomicUsize>| {
             NamedSourceBinding {
@@ -1040,20 +1063,16 @@ mod tests {
                 source("left", &left_capability_calls),
                 source("right", &right_capability_calls),
             ],
-            sinks: [
-                ("sink-a", &primary_sink_calls),
-                ("sink-b", &secondary_sink_calls),
-            ]
-            .into_iter()
-            .map(|(sink_id, capability_calls)| NamedSinkBinding {
-                output_id: "output".into(),
-                sink_id: sink_id.into(),
-                binding: OrdinarySinkBinding::new(Box::new(ProbeSink {
-                    capability_calls: Arc::clone(capability_calls),
-                    opened: Arc::clone(&opened),
-                })),
-            })
-            .collect(),
+            sinks: ["sink-a", "sink-b"]
+                .into_iter()
+                .map(|sink_id| NamedSinkBinding {
+                    output_id: "output".into(),
+                    sink_id: sink_id.into(),
+                    binding: OrdinarySinkBinding::new(Box::new(ProbeSink {
+                        opened: Arc::clone(&opened),
+                    })),
+                })
+                .collect(),
             edge_budget: EdgeBudget {
                 max_rows: 1,
                 max_bytes: 1,
@@ -1061,12 +1080,7 @@ mod tests {
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
         };
 
-        for calls in [
-            &left_capability_calls,
-            &right_capability_calls,
-            &primary_sink_calls,
-            &secondary_sink_calls,
-        ] {
+        for calls in [&left_capability_calls, &right_capability_calls] {
             assert_eq!(calls.load(Ordering::SeqCst), 0);
         }
 
@@ -1076,12 +1090,7 @@ mod tests {
         assert_eq!(validated.sinks["output"].len(), 2);
         assert_eq!(validated.plan.source_routes.len(), 2);
         assert_eq!(validated.plan.sink_routes.len(), 1);
-        for calls in [
-            &left_capability_calls,
-            &right_capability_calls,
-            &primary_sink_calls,
-            &secondary_sink_calls,
-        ] {
+        for calls in [&left_capability_calls, &right_capability_calls] {
             assert_eq!(calls.load(Ordering::SeqCst), 1);
         }
         assert!(!opened.load(Ordering::SeqCst));
@@ -1224,6 +1233,38 @@ mod tests {
     }
 
     #[test]
+    fn preflight_rejects_sink_id_reused_across_outputs_before_open() {
+        let opened = Arc::new(AtomicBool::new(false));
+        let capabilities = SourceCapabilities {
+            replayable: true,
+            max_batch_rows: 1,
+            max_batch_bytes: 1,
+        };
+        let sources = ["a.left", "a.right", "b.left", "b.right"]
+            .into_iter()
+            .map(|binding_id| named_source(binding_id, capabilities, &opened))
+            .collect();
+        let sinks = ["a.output", "b.output"]
+            .into_iter()
+            .map(|output_id| named_sink(output_id, "shared", &opened))
+            .collect();
+
+        let error = preflight_error(preflight_spec(
+            disjoint_union_plan_with(&StreamRequirements::default()),
+            sources,
+            sinks,
+        ));
+
+        assert!(matches!(
+            error,
+            CalcFlowError::InvalidArgument { ref field, ref message }
+                if field == "sinks.shared"
+                    && message.contains("more than one output")
+        ));
+        assert!(!opened.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn preflight_rejects_exactly_once_before_open() {
         let opened = Arc::new(AtomicBool::new(false));
         let capabilities = SourceCapabilities {
@@ -1283,8 +1324,8 @@ mod tests {
 
         assert_eq!(validated.sinks["output"].len(), 1);
         assert_eq!(
-            validated.sinks["output"][0].binding.delivery(),
-            M2SinkDelivery::Transactional
+            validated.sinks["output"][0].binding.capability(),
+            SinkCapability::Transactional
         );
         assert!(!opened.load(Ordering::SeqCst));
     }
@@ -1457,76 +1498,6 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_sink_preflight_rejects_nonordinary_declared_capability() {
-        let opened = Arc::new(AtomicBool::new(false));
-        let capabilities = SourceCapabilities {
-            replayable: true,
-            max_batch_rows: 1,
-            max_batch_bytes: 1,
-        };
-        let requirements = StreamRequirements::default();
-        let error = preflight_error(preflight_spec(
-            union_plan_with(&requirements),
-            vec![
-                named_source("left", capabilities, &opened),
-                named_source("right", capabilities, &opened),
-            ],
-            vec![NamedSinkBinding {
-                output_id: "output".into(),
-                sink_id: "claiming".into(),
-                binding: OrdinarySinkBinding::new(Box::new(ClaimingOrdinarySink {
-                    opened: Arc::clone(&opened),
-                })),
-            }],
-        ));
-
-        assert!(matches!(
-            error,
-            CalcFlowError::InvalidArgument { ref field, ref message }
-                if field == "sinks.output.claiming.delivery_capability"
-                    && message.contains("ordinary sink")
-                    && message.contains("transactional")
-        ));
-        assert!(!opened.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn exactly_once_preflight_rejects_transactional_claim_from_ordinary_sink() {
-        let opened = Arc::new(AtomicBool::new(false));
-        let capabilities = SourceCapabilities {
-            replayable: true,
-            max_batch_rows: 1,
-            max_batch_bytes: 1,
-        };
-        let requirements = StreamRequirements {
-            delivery: BTreeMap::from([("output".into(), crate::DeliveryGuarantee::ExactlyOnce)]),
-        };
-        let error = preflight_error(preflight_spec(
-            union_plan_with(&requirements),
-            vec![
-                named_source("left", capabilities, &opened),
-                named_source("right", capabilities, &opened),
-            ],
-            vec![NamedSinkBinding {
-                output_id: "output".into(),
-                sink_id: "claiming".into(),
-                binding: OrdinarySinkBinding::new(Box::new(ClaimingOrdinarySink {
-                    opened: Arc::clone(&opened),
-                })),
-            }],
-        ));
-
-        assert!(matches!(
-            error,
-            CalcFlowError::InvalidArgument { ref field, ref message }
-                if field == "sinks.output.claiming.delivery_capability"
-                    && message.contains("ordinary sink")
-                    && message.contains("transactional")
-        ));
-        assert!(!opened.load(Ordering::SeqCst));
-    }
-
-    #[test]
     fn exactly_once_preflight_accepts_unbounded_epoch_idempotent_sink_evidence() {
         let opened = Arc::new(AtomicBool::new(false));
         let capabilities = SourceCapabilities {
@@ -1559,8 +1530,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            validated.sinks["output"][0].binding.delivery(),
-            M2SinkDelivery::EpochIdempotent {
+            validated.sinks["output"][0].binding.capability(),
+            SinkCapability::EpochIdempotent {
                 mechanism: "epoch-ledger".into(),
                 retention: RetentionClass::Unbounded,
             }
