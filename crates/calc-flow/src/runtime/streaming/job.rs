@@ -8,9 +8,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use parking_lot::Mutex;
-use tokio::sync::Notify;
+use futures::{FutureExt, future::BoxFuture};
 
+#[cfg(test)]
+use super::runner::RunnerLifecycleProbe;
 use super::{
     StreamJobContext,
     progress::{PreparedStreamJob, StreamProgressRuntimeConfig, prepare_stream_job},
@@ -237,46 +238,22 @@ pub(crate) struct ContinuousJobSpec {
     pub(crate) delivery_mode: M2DeliveryMode,
 }
 
-enum OwningJobOwnerState {
-    Running,
-    Terminal(Arc<ContinuousJobOutcome>),
-}
+type OwningJobCompletion = futures::future::Shared<BoxFuture<'static, Arc<ContinuousJobOutcome>>>;
 
 struct OwningJobOwner {
-    state: Mutex<OwningJobOwnerState>,
-    changed: Notify,
+    completion: OwningJobCompletion,
+    #[cfg(test)]
+    runner: RunnerLifecycleProbe,
 }
 
 impl OwningJobOwner {
-    fn new() -> Self {
-        Self {
-            state: Mutex::new(OwningJobOwnerState::Running),
-            changed: Notify::new(),
-        }
-    }
-
-    fn publish(&self, outcome: Arc<ContinuousJobOutcome>) {
-        let mut state = self.state.lock();
-        if matches!(*state, OwningJobOwnerState::Running) {
-            *state = OwningJobOwnerState::Terminal(outcome);
-        }
-        drop(state);
-        self.changed.notify_waiters();
-    }
-
-    async fn wait(self: Arc<Self>) -> Arc<ContinuousJobOutcome> {
-        loop {
-            let changed = self.changed.notified();
-            if let OwningJobOwnerState::Terminal(outcome) = &*self.state.lock() {
-                return Arc::clone(outcome);
-            }
-            changed.await;
-        }
+    fn wait(&self) -> OwningJobCompletion {
+        self.completion.clone()
     }
 
     #[cfg(test)]
     fn is_terminal(&self) -> bool {
-        matches!(*self.state.lock(), OwningJobOwnerState::Terminal(_))
+        self.completion.peek().is_some()
     }
 }
 
@@ -284,11 +261,10 @@ impl OwningJobOwner {
 pub(crate) struct OwningContinuousJob {
     job: ContinuousJob,
     owner: Arc<OwningJobOwner>,
-    _reaper: tokio::task::JoinHandle<()>,
 }
 
-impl std::fmt::Debug for OwningContinuousJob {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for OwningContinuousJob {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("OwningContinuousJob")
             .field("job_id", &self.id())
@@ -299,19 +275,22 @@ impl std::fmt::Debug for OwningContinuousJob {
 
 impl OwningContinuousJob {
     pub(crate) fn new(job: ContinuousJob, mut runner: ContinuousRunner) -> Self {
-        let owner = Arc::new(OwningJobOwner::new());
-        let observed_owner = Arc::clone(&owner);
+        #[cfg(test)]
+        let runner_probe = runner.lifecycle_probe();
         let terminal = job.wait();
-        let reaper = tokio::spawn(async move {
+        let completion = async move {
             let outcome = terminal.await;
             let _ = runner.shutdown().await;
-            observed_owner.publish(outcome);
-        });
-        Self {
-            job,
-            owner,
-            _reaper: reaper,
+            outcome
         }
+        .boxed()
+        .shared();
+        let owner = Arc::new(OwningJobOwner {
+            completion,
+            #[cfg(test)]
+            runner: runner_probe,
+        });
+        Self { job, owner }
     }
 
     pub(crate) fn id(&self) -> u64 {
@@ -327,7 +306,7 @@ impl OwningContinuousJob {
     }
 
     pub(crate) fn wait(&self) -> OwningOutcomeObserver {
-        OwningOutcomeObserver::new(Arc::clone(&self.owner))
+        OwningOutcomeObserver::new(self.owner.wait())
     }
 
     pub(crate) fn shutdown(&self) -> OwningOutcomeObserver {
@@ -344,6 +323,11 @@ impl OwningContinuousJob {
     pub(crate) fn owner_settled_for_test(&self) -> bool {
         self.owner.is_terminal()
     }
+
+    #[cfg(test)]
+    pub(crate) fn runner_probe_for_test(&self) -> RunnerLifecycleProbe {
+        self.owner.runner.clone()
+    }
 }
 
 pub(crate) struct OwningOutcomeObserver {
@@ -351,9 +335,9 @@ pub(crate) struct OwningOutcomeObserver {
 }
 
 impl OwningOutcomeObserver {
-    fn new(owner: Arc<OwningJobOwner>) -> Self {
+    fn new(completion: OwningJobCompletion) -> Self {
         Self {
-            inner: Box::pin(owner.wait()),
+            inner: Box::pin(completion),
         }
     }
 }

@@ -1323,6 +1323,7 @@ struct RunnerRegistryState {
 struct RunnerCore {
     commands: mpsc::UnboundedSender<RunnerCommand>,
     root_cancel: CancellationToken,
+    stop_after_first_job: bool,
     registry: Mutex<RunnerRegistryState>,
     driver: Mutex<Option<JoinHandle<()>>>,
     diagnostics: RunnerDiagnostics,
@@ -1353,6 +1354,28 @@ pub(crate) struct ContinuousRunner {
     core: Arc<RunnerCore>,
 }
 
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct RunnerLifecycleProbe {
+    core: Arc<RunnerCore>,
+}
+
+#[cfg(test)]
+impl RunnerLifecycleProbe {
+    pub(crate) fn registry_counts(&self) -> (usize, usize) {
+        let registry = self.core.registry.lock();
+        (registry.live_jobs.len(), registry.reaper_jobs.len())
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.core.closed.load(Ordering::Acquire) && self.core.driver.lock().is_none()
+    }
+
+    pub(crate) async fn join(&self) -> crate::Result<()> {
+        RunnerShutdownObserver::new(Arc::clone(&self.core)).await
+    }
+}
+
 /// Crate-private one-shot ownership boundary for the future public runner.
 pub(crate) struct OneShotContinuousRunner {
     runner: ContinuousRunner,
@@ -1365,7 +1388,7 @@ pub(crate) struct OneShotStartObserver {
 impl OneShotContinuousRunner {
     pub(crate) fn new() -> Self {
         Self {
-            runner: ContinuousRunner::new(),
+            runner: ContinuousRunner::new_one_shot(),
         }
     }
 
@@ -1412,10 +1435,19 @@ impl Future for OneShotStartObserver {
 
 impl ContinuousRunner {
     pub(crate) fn new() -> Self {
+        Self::new_with_stop_after_first_job(false)
+    }
+
+    fn new_one_shot() -> Self {
+        Self::new_with_stop_after_first_job(true)
+    }
+
+    fn new_with_stop_after_first_job(stop_after_first_job: bool) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         let core = Arc::new(RunnerCore {
             commands,
             root_cancel: CancellationToken::new(),
+            stop_after_first_job,
             registry: Mutex::new(RunnerRegistryState {
                 provisional: None,
                 live_jobs: BTreeMap::new(),
@@ -1446,6 +1478,13 @@ impl ContinuousRunner {
     pub(crate) fn registry_counts(&self) -> (usize, usize) {
         let registry = self.core.registry.lock();
         (registry.live_jobs.len(), registry.reaper_jobs.len())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lifecycle_probe(&self) -> RunnerLifecycleProbe {
+        RunnerLifecycleProbe {
+            core: Arc::clone(&self.core),
+        }
     }
 
     pub(crate) fn start(&self, spec: ContinuousJobSpec) -> StartObserver {
@@ -1867,7 +1906,10 @@ async fn runner_lifecycle(
                     };
                     publish_driver_report(&runner_core, report);
                     active = None;
-                    if !shutting_down && let Some(next) = pending.take() {
+                    if runner_core.stop_after_first_job {
+                        shutting_down = true;
+                        begin_lifecycle_shutdown(&runner_core, &mut pending);
+                    } else if !shutting_down && let Some(next) = pending.take() {
                         active = Some(next.launch_id);
                         next.core.state.lock().owner = DriverOwnership::Driving;
                         drivers.spawn(run_job_driver(
@@ -4973,6 +5015,7 @@ mod tests {
     #[tokio::test]
     async fn owning_job_drop_cancels_while_an_existing_waiter_only_observes() {
         let source = LifecycleProbe::default();
+        source.block_close.store(true, Ordering::SeqCst);
         let sink = LifecycleProbe::default();
         let job = OneShotContinuousRunner::new()
             .start(spec(
@@ -4983,17 +5026,54 @@ mod tests {
             ))
             .await
             .unwrap();
-        let waiter = job.wait();
+        let runner = job.runner_probe_for_test();
+        let mut waiter = Box::pin(job.wait());
+        let close_started = source.close_started.notified();
 
         drop(job);
 
-        let outcome = tokio::time::timeout(StdDuration::from_secs(1), waiter)
-            .await
-            .expect("owning job drop did not converge through the reaper");
+        close_started.await;
+        assert!(futures::poll!(waiter.as_mut()).is_pending());
+        assert_eq!(runner.registry_counts().0, 1);
+        assert!(!runner.is_finished());
+
+        source.close_release.notify_waiters();
+        let outcome = waiter.await;
         assert_eq!(outcome.state, ContinuousJobState::Cancelled);
         assert_eq!(outcome.cause, TerminalCause::ExplicitCancel);
         assert_eq!(source.closed.load(Ordering::SeqCst), 1);
         assert_eq!(sink.closed.load(Ordering::SeqCst), 1);
+        assert_eq!(runner.registry_counts(), (0, 0));
+        assert!(runner.is_finished());
+    }
+
+    #[tokio::test]
+    async fn owning_job_natural_terminal_reaps_runner_without_a_waiter() {
+        let source = LifecycleProbe::default();
+        source.finite.store(true, Ordering::SeqCst);
+        let sink = LifecycleProbe::default();
+        let job = OneShotContinuousRunner::new()
+            .start(spec(
+                false,
+                Arc::new(AtomicUsize::new(0)),
+                source.clone(),
+                sink.clone(),
+            ))
+            .await
+            .unwrap();
+        let runner = job.runner_probe_for_test();
+
+        runner.join().await.unwrap();
+
+        assert_eq!(job.state(), ContinuousJobState::Completed);
+        assert_eq!(source.closed.load(Ordering::SeqCst), 1);
+        assert_eq!(sink.closed.load(Ordering::SeqCst), 1);
+        assert_eq!(runner.registry_counts(), (0, 0));
+        assert!(runner.is_finished());
+        let outcome = job.wait().await;
+        assert_eq!(outcome.state, ContinuousJobState::Completed);
+        assert_eq!(outcome.cause, TerminalCause::NaturalEnd);
+        assert!(job.owner_settled_for_test());
     }
 
     #[tokio::test]
@@ -8969,6 +9049,7 @@ mod tests {
         let core = Arc::new(RunnerCore {
             commands,
             root_cancel: CancellationToken::new(),
+            stop_after_first_job: false,
             registry: Mutex::new(RunnerRegistryState {
                 provisional: None,
                 live_jobs: BTreeMap::new(),
