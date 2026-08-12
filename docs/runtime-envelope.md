@@ -263,7 +263,9 @@ exact schema, or are all schema-less.
 The compiled plan records the deterministic topology, stable edge IDs, the
 source and sink binding slots (external input and output names in
 deterministic order), the semantic fingerprint, and the per-output delivery
-requirements. It never executes directly. The crate-private source-driven
+requirements. For stream plans, the semantic fingerprint also freezes every
+operator's checkpoint capability and state-layout version. It never executes
+directly. The crate-private source-driven
 continuous runner consumes it into owned runtime nodes, internal edges, and
 synthesized bounded source and sink boundary edges. Pure array graphs need no
 table engine:
@@ -277,7 +279,8 @@ private checkpointed job starts, whole-job preflight proves every reachable
 source, operator, bounded edge, and bound sink for each exactly-once output.
 It reports the output and first incompatible stable component before connector
 lifecycle work. A private job without checkpoint wiring rejects every
-exactly-once request.
+exactly-once request. The frozen requested/effective proof is kept for every
+output; an at-least-once request is never silently upgraded.
 
 Two hashes describe the plan (NFR-5):
 
@@ -310,7 +313,11 @@ deterministic operator checkpoint/restore, bounded lossless edges, and only
 transactional or unbounded epoch-idempotent sinks. A lossy source, ordinary
 sink, or bounded idempotency horizon fails the named output before a connector
 opens, an operator resets or restores, a state lineage is opened, or a task is
-registered.
+registered. Independently of an output request, a checkpoint-enabled job
+admits only operators explicitly classified as stateless or versioned
+checkpointed-stateful; an unproven third-party stream operator fails before
+task registration. The compiled graph node ID is the stable operator ID and
+must be unique and portable.
 
 A source binding owns two supervised tasks (D3):
 
@@ -372,6 +379,11 @@ and stages operator state, acknowledges the coordinator, immediately forwards
 the barrier, and reopens its live ingresses. An identical repeated barrier is
 idempotent. A foreign, conflicting, future, or regressed epoch fails closed,
 and snapshot/stage failure forwards no barrier.
+Stateful snapshots carry the operator's nonzero state-layout version in their
+inline metadata. Recovery removes that envelope only after checking the stored
+version against the compiled capability; missing or mismatched versions fail
+closed before operator tasks are spawned. Stateless operators must produce and
+restore empty state.
 
 One sink task owns each graph output and writes each batch to its configured
 sinks in stable order. The third sink does not see a batch when the second sink

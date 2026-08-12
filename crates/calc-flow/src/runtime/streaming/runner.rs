@@ -63,7 +63,8 @@ use super::{
     },
 };
 use crate::pipeline::{
-    RuntimeSinkRoute, RuntimeSourceRoute, RuntimeStreamNode, StreamRuntimePlanParts,
+    OperatorCheckpointCapability, RuntimeSinkRoute, RuntimeSourceRoute, RuntimeStreamNode,
+    StreamRuntimePlanParts,
 };
 #[cfg(test)]
 use crate::state::ManifestTransactionFaultPoint;
@@ -1655,6 +1656,11 @@ impl ContinuousRunner {
                 message: "exactly-once delivery requires a checkpoint runtime".into(),
             });
         }
+        if checkpoint.is_some()
+            && let Err(error) = validate_checkpoint_operator_capabilities(&validated.plan)
+        {
+            return preflight_error_observer(error);
+        }
         let checkpoint = match checkpoint {
             Some(spec) => {
                 let identity = match checkpoint_identity(
@@ -1782,6 +1788,30 @@ impl ContinuousRunner {
     }
 }
 
+fn validate_checkpoint_operator_capabilities(plan: &StreamRuntimePlanParts) -> crate::Result<()> {
+    for node in &plan.nodes {
+        let operator_id = node.operator_id.as_str();
+        match node.checkpoint_capability {
+            OperatorCheckpointCapability::Stateless => {}
+            OperatorCheckpointCapability::CheckpointedStateful { state_version }
+                if state_version > 0 => {}
+            OperatorCheckpointCapability::CheckpointedStateful { .. } => {
+                return Err(CalcFlowError::InvalidArgument {
+                    field: format!("operators.{operator_id}.checkpoint_capability"),
+                    message: "checkpoint state version must be greater than zero".into(),
+                });
+            }
+            OperatorCheckpointCapability::Unproven => {
+                return Err(CalcFlowError::InvalidArgument {
+                    field: format!("operators.{operator_id}.checkpoint_capability"),
+                    message: "operator checkpoint capability is unproven".into(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn metrics_for_job(job: &ValidatedContinuousJob) -> MetricsRecorder {
     let sink_metric_ids = job
         .sinks
@@ -1891,7 +1921,7 @@ fn checkpoint_identity(
             .plan
             .nodes
             .iter()
-            .map(|node| node.node_id.clone())
+            .map(|node| node.operator_id.as_str().to_owned())
             .collect(),
         sink_ids: sink_outputs.into_keys().collect(),
     })
@@ -2264,6 +2294,7 @@ async fn run_job_driver(
         sinks,
         progress: prepared_progress,
         delivery_mode: _,
+        delivery_proofs: _,
     } = validated;
     let cancellation = context.cancellation().clone();
     let checkpoint = match checkpoint {
@@ -2300,6 +2331,9 @@ async fn run_job_driver(
     if let Some(checkpoint) = checkpoint.as_ref()
         && let Some(selected) = checkpoint.selected.as_ref()
     {
+        if let Err(error) = validate_manifest_operator_capabilities(&selected.manifest, &plan) {
+            return checkpoint_start_failure(launch_id, error);
+        }
         match manifest_is_terminal(&selected.manifest, &plan) {
             Ok(true) => {
                 drop(sources);
@@ -2331,6 +2365,7 @@ async fn run_job_driver(
         Some(checkpoint) => {
             match prepare_checkpoint_recovery(
                 checkpoint,
+                &plan,
                 &prepared_progress,
                 &mut sources,
                 &cancellation,
@@ -2504,17 +2539,17 @@ fn manifest_is_terminal(
     let sources_terminal = manifest.sources().values().all(|source| source.ended);
     let mut operators_terminal = true;
     for node in &plan.nodes {
+        let operator_id = node.operator_id.as_str();
         let entry = manifest
             .operators()
-            .get(&node.node_id)
+            .get(operator_id)
             .expect("selected manifest operator IDs were validated");
         let expected = node.ingress_edges.keys().cloned().collect::<BTreeSet<_>>();
         let actual = entry.progress.keys().cloned().collect::<BTreeSet<_>>();
         if actual != expected {
             return Err(CalcFlowError::CheckpointMismatch {
                 message: format!(
-                    "terminal recovery operator {:?} ingress IDs do not match the prepared plan",
-                    node.node_id
+                    "terminal recovery operator {operator_id:?} ingress IDs do not match the prepared plan"
                 ),
             });
         }
@@ -2621,6 +2656,33 @@ async fn recover_terminal_manifest(
     }
 }
 
+fn validate_manifest_operator_capabilities(
+    manifest: &CheckpointManifest,
+    plan: &StreamRuntimePlanParts,
+) -> crate::Result<()> {
+    for node in &plan.nodes {
+        let operator_id = node.operator_id.as_str();
+        let entry = manifest.operators().get(operator_id).ok_or_else(|| {
+            CalcFlowError::CheckpointMismatch {
+                message: format!("checkpoint is missing operator {operator_id:?}"),
+            }
+        })?;
+        let segments = if entry.segments.is_empty() {
+            BTreeMap::new()
+        } else {
+            BTreeMap::from([("state".into(), Vec::new())])
+        };
+        node.checkpoint_capability.decode_snapshot(
+            operator_id,
+            crate::OperatorStateSnapshot {
+                inline_metadata: entry.inline_metadata.clone(),
+                segments,
+            },
+        )?;
+    }
+    Ok(())
+}
+
 fn checkpoint_start_failure(launch_id: LaunchId, error: CalcFlowError) -> DriverReport {
     DriverReport {
         launch_id,
@@ -2638,6 +2700,7 @@ fn checkpoint_start_failure(launch_id: LaunchId, error: CalcFlowError) -> Driver
 
 async fn prepare_checkpoint_recovery(
     checkpoint: &OpenedCheckpointRuntime,
+    plan: &StreamRuntimePlanParts,
     prepared_progress: &super::progress::PreparedStreamJob,
     sources: &mut BTreeMap<String, SourceBinding>,
     cancellation: &CancellationToken,
@@ -2668,6 +2731,11 @@ async fn prepare_checkpoint_recovery(
             .remove(source_id)
             .expect("restored ended source was validated before connector ownership");
     }
+    let checkpoint_capabilities = plan
+        .nodes
+        .iter()
+        .map(|node| (node.operator_id.as_str(), node.checkpoint_capability))
+        .collect::<BTreeMap<_, _>>();
     let mut operators = BTreeMap::new();
     for (operator_id, entry) in selected.manifest.operators() {
         let snapshot = checkpoint
@@ -2679,6 +2747,14 @@ async fn prepare_checkpoint_recovery(
                 cancellation,
             )
             .await?;
+        let snapshot = checkpoint_capabilities
+            .get(operator_id.as_str())
+            .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                message: format!(
+                    "checkpoint operator {operator_id:?} is absent from the prepared plan"
+                ),
+            })?
+            .decode_snapshot(operator_id, snapshot)?;
         operators.insert(
             operator_id.clone(),
             OperatorRestoreState {
@@ -3048,8 +3124,9 @@ impl LiveCheckpointChannels {
         let mut operator_command_receivers = BTreeMap::new();
         for node in &plan.nodes {
             let (sender, receiver) = mpsc::channel(capacity);
-            operator_commands.insert(node.node_id.clone(), sender);
-            operator_command_receivers.insert(node.node_id.clone(), receiver);
+            let operator_id = node.operator_id.as_str().to_owned();
+            operator_commands.insert(operator_id.clone(), sender);
+            operator_command_receivers.insert(operator_id, receiver);
         }
         let mut sink_commands = BTreeMap::new();
         let mut sink_command_receivers = BTreeMap::new();
@@ -3267,7 +3344,8 @@ fn register_operator_nodes(
     registration: &mut OperatorRegistration<'_>,
 ) -> Result<(), EntryFailure> {
     for node in nodes {
-        let node_id = node.node_id.clone();
+        let node_id = node.operator_id.as_str().to_owned();
+        debug_assert_eq!(node.node_id, node_id);
         let progress = OperatorProgress::default();
         let ingresses =
             take_node_ingresses(&node, registration.receivers).map_err(preflight_entry_failure)?;
@@ -3282,6 +3360,7 @@ fn register_operator_nodes(
             OperatorTaskInputs {
                 node_id: node_id.clone(),
                 operator: node.operator,
+                checkpoint_capability: node.checkpoint_capability,
                 ingresses,
                 outputs,
                 output_ports: node.output_ports,
@@ -5373,7 +5452,13 @@ mod tests {
                             watermark: None,
                         },
                     )]),
-                    inline_metadata: BTreeMap::new(),
+                    inline_metadata:
+                        crate::pipeline::OperatorCheckpointCapability::CheckpointedStateful {
+                            state_version: 1,
+                        }
+                        .encode_snapshot("node", crate::OperatorStateSnapshot::default())
+                        .unwrap()
+                        .inline_metadata,
                     segments: vec![missing_segment],
                 },
             )]),
@@ -7936,6 +8021,61 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn checkpoint_admission_covers_all_operator_capability_classes() {
+        let operator = || {
+            UnionOperator::new(
+                "merge",
+                vec![
+                    Port::new("left", BatchKind::Table, true, None).unwrap(),
+                    Port::new("right", BatchKind::Table, true, None).unwrap(),
+                ],
+            )
+            .unwrap()
+        };
+        let compile = |builder: PipelineBuilder| {
+            builder
+                .compile_stream(
+                    &UdfRegistry::new().snapshot(),
+                    &StreamRequirements::default(),
+                )
+                .unwrap()
+                .into_runtime_parts(EdgeBudget::default())
+                .unwrap()
+        };
+        let stateless = compile(
+            PipelineBuilder::new("stateless")
+                .unwrap()
+                .add_node("merge", Box::new(operator()))
+                .unwrap(),
+        );
+        let checkpointed = compile(
+            PipelineBuilder::new("checkpointed")
+                .unwrap()
+                .add_checkpoint_capable_node(
+                    "merge",
+                    Box::new(operator()) as Box<dyn StreamOperator>,
+                )
+                .unwrap(),
+        );
+        let unproven = compile(
+            PipelineBuilder::new("unproven")
+                .unwrap()
+                .add_node("merge", Box::new(operator()) as Box<dyn StreamOperator>)
+                .unwrap(),
+        );
+
+        assert!(super::validate_checkpoint_operator_capabilities(&stateless).is_ok());
+        assert!(super::validate_checkpoint_operator_capabilities(&checkpointed).is_ok());
+        let error = super::validate_checkpoint_operator_capabilities(&unproven).unwrap_err();
+        assert!(matches!(
+            error,
+            CalcFlowError::InvalidArgument { ref field, ref message }
+                if field == "operators.merge.checkpoint_capability"
+                    && message.contains("unproven")
+        ));
+    }
+
     fn unary_expression_plan() -> crate::StreamExecutionPlan {
         let expression =
             ExpressionOperator::new("calc", "plus_one = value + 1", Vec::new(), None, Vec::new())
@@ -8023,7 +8163,7 @@ mod tests {
         };
         let plan = PipelineBuilder::new("launch")
             .unwrap()
-            .add_node("node", Box::new(operator) as Box<dyn StreamOperator>)
+            .add_checkpoint_capable_node("node", Box::new(operator) as Box<dyn StreamOperator>)
             .unwrap()
             .compile_stream(
                 &UdfRegistry::new().snapshot(),
@@ -14193,7 +14333,22 @@ mod tests {
                             watermark: None,
                         },
                     )]),
-                    inline_metadata: BTreeMap::from([("restored".into(), serde_json::json!(true))]),
+                    inline_metadata:
+                        crate::pipeline::OperatorCheckpointCapability::CheckpointedStateful {
+                            state_version: 1,
+                        }
+                        .encode_snapshot(
+                            "node",
+                            crate::OperatorStateSnapshot {
+                                inline_metadata: BTreeMap::from([(
+                                    "restored".into(),
+                                    serde_json::json!(true),
+                                )]),
+                                segments: BTreeMap::new(),
+                            },
+                        )
+                        .unwrap()
+                        .inline_metadata,
                     segments: Vec::new(),
                 },
             )]),

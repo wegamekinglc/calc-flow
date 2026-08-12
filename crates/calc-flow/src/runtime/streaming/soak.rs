@@ -2792,6 +2792,16 @@ async fn prepare_private_alignment_benchmark(
     };
     let inner = super::operator_task::tests::prepare_benchmark_alignment_fixture(
         operator,
+        match kind {
+            PrivateAlignmentKind::PassThrough => {
+                crate::pipeline::OperatorCheckpointCapability::Stateless
+            }
+            PrivateAlignmentKind::Window => {
+                crate::pipeline::OperatorCheckpointCapability::CheckpointedStateful {
+                    state_version: crate::operator::WINDOW_STATE_LAYOUT_VERSION,
+                }
+            }
+        },
         transaction,
         batches,
     )

@@ -39,7 +39,7 @@ use super::{LateMetricDelta, OperatorMetadata, accumulate_late_metrics, validate
 /// Maximum number of concrete hopping-window assignments for one input row.
 pub const MAX_WINDOW_OVERLAP: u64 = 1_024;
 
-const WINDOW_STATE_LAYOUT_VERSION: u32 = 1;
+pub(crate) const WINDOW_STATE_LAYOUT_VERSION: u32 = 1;
 const MAX_GROUP_KEY_BYTES: usize = 65_536;
 const MAX_WINDOW_DELTA_SEGMENTS: usize = 32;
 

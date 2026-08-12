@@ -5,6 +5,13 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-13: Add crate-private stable operator checkpoint identities and
+  explicit stateless, versioned stateful, or unproven capabilities. Stream
+  fingerprints now freeze the capability contract, checkpoint admission
+  rejects unproven operators before task registration, restore fails closed on
+  state-layout version mismatch, and per-output delivery proof records both
+  requested and effective guarantees without silently upgrading at-least-once.
+
 - 2026-08-12: Preserve full-range late-window accounting when the watermark
   and window end span more than `i64::MAX` microseconds. Valid `EventTime`
   inputs now record the exact `u64` lateness metric instead of aborting the

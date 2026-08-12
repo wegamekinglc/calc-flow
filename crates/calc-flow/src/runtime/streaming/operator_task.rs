@@ -24,7 +24,7 @@ use crate::{
     Batch, CalcFlowError, CancellationToken, EdgeBudget, Epoch, EventTime, ManifestIngressState,
     OperatorIngressManifestEntry, Port, Result, StreamCollector, StreamOperatorContext,
     operator::{LateMetricDelta, LateMetricSink, accumulate_late_metrics},
-    pipeline::CompiledStreamOperator,
+    pipeline::{CompiledStreamOperator, OperatorCheckpointCapability},
 };
 
 pub(crate) struct OperatorEntryAck {
@@ -167,6 +167,7 @@ impl LateMetricSink for OperatorProgress {
 pub(crate) struct OperatorTaskInputs {
     pub(crate) node_id: String,
     pub(crate) operator: CompiledStreamOperator,
+    pub(crate) checkpoint_capability: OperatorCheckpointCapability,
     pub(crate) ingresses: BTreeMap<String, OperatorIngress>,
     pub(crate) outputs: BTreeMap<String, Vec<EdgeSender>>,
     pub(crate) output_ports: BTreeMap<String, Port>,
@@ -663,7 +664,9 @@ async fn capture_operator_checkpoint(
         .checkpoint
         .as_ref()
         .and_then(|checkpoint| checkpoint.transaction.clone());
-    let snapshot = inputs.operator.checkpoint(epoch)?;
+    let snapshot = inputs
+        .checkpoint_capability
+        .encode_snapshot(&inputs.node_id, inputs.operator.checkpoint(epoch)?)?;
     let staged = match transaction {
         Some(transaction) => {
             transaction
@@ -1165,7 +1168,7 @@ pub(super) mod tests {
         Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken, EdgeBudget, EventTime,
         JsonMap, ManifestIngressState, OperatorMetadata, Port, Result, StreamCollector,
         StreamJobContext, StreamMessage, StreamMessageKind, StreamOperator, StreamOperatorContext,
-        pipeline::CompiledStreamOperator,
+        pipeline::{CompiledStreamOperator, OperatorCheckpointCapability},
         runtime::streaming::supervisor::{TaskId, TaskSupervisor},
     };
 
@@ -1596,6 +1599,7 @@ pub(super) mod tests {
             OperatorTaskInputs {
                 node_id: "node".into(),
                 operator: CompiledStreamOperator::External(Box::new(operator)),
+                checkpoint_capability: OperatorCheckpointCapability::Stateless,
                 ingresses: BTreeMap::from([(
                     "input".into(),
                     OperatorIngress::new("source->input".into(), input_receiver),
@@ -1719,15 +1723,17 @@ pub(super) mod tests {
 
     pub(crate) async fn prepare_benchmark_alignment_fixture(
         operator: Box<dyn StreamOperator>,
+        checkpoint_capability: OperatorCheckpointCapability,
         transaction: Option<Arc<crate::state::ManifestTransaction>>,
         batches: [Batch; 3],
     ) -> BenchmarkAlignmentFixture {
         let output_port = operator.output_ports()[0].clone();
         let (checkpoint_tx, checkpoint) = mpsc::channel(1);
-        let mut harness = harness_with_operator(
+        let mut harness = harness_with_operator_capability(
             &["left", "right"],
             1,
             CompiledStreamOperator::External(operator),
+            checkpoint_capability,
             output_port,
             Some(OperatorCheckpointPort {
                 acknowledgements: checkpoint_tx,
@@ -1810,6 +1816,26 @@ pub(super) mod tests {
         checkpoint: Option<OperatorCheckpointPort>,
         restore: Option<OperatorRestoreState>,
     ) -> Harness {
+        harness_with_operator_capability(
+            input_names,
+            branch_count,
+            operator,
+            OperatorCheckpointCapability::Stateless,
+            output_port,
+            checkpoint,
+            restore,
+        )
+    }
+
+    fn harness_with_operator_capability(
+        input_names: &[&str],
+        branch_count: usize,
+        operator: CompiledStreamOperator,
+        checkpoint_capability: OperatorCheckpointCapability,
+        output_port: Port,
+        checkpoint: Option<OperatorCheckpointPort>,
+        restore: Option<OperatorRestoreState>,
+    ) -> Harness {
         let cancellation = CancellationToken::new();
         let context =
             StreamJobContext::new(7, "fingerprint", JsonMap::new(), None, cancellation.clone());
@@ -1874,6 +1900,7 @@ pub(super) mod tests {
             OperatorTaskInputs {
                 node_id: "node".into(),
                 operator,
+                checkpoint_capability,
                 ingresses,
                 outputs: BTreeMap::from([("output".into(), output_senders)]),
                 output_ports: BTreeMap::from([("output".into(), output_port)]),
@@ -2386,10 +2413,11 @@ pub(super) mod tests {
             observed: Arc::new(Mutex::new(Vec::new())),
         };
         let (checkpoint_tx, mut checkpoint_rx) = mpsc::channel(1);
-        let mut harness = harness_with_operator(
+        let mut harness = harness_with_operator_capability(
             &["input"],
             1,
             CompiledStreamOperator::External(Box::new(operator)),
+            OperatorCheckpointCapability::CheckpointedStateful { state_version: 1 },
             output_port,
             Some(OperatorCheckpointPort {
                 acknowledgements: checkpoint_tx,
