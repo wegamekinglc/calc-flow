@@ -17,7 +17,7 @@ use super::{
     progress::{PreparedStreamJob, StreamProgressRuntimeConfig, prepare_stream_job},
     runner::{
         ContinuousJob, ContinuousJobOutcome, ContinuousJobState, ContinuousJobStatus,
-        ContinuousRunner,
+        ContinuousRunner, runner_shutdown_failure,
     },
     source_task::{
         SourceBinding, SourceCapabilities, SourceDeliveryCapability, validate_source_capabilities,
@@ -279,8 +279,12 @@ impl OwningContinuousJob {
         let runner_probe = runner.lifecycle_probe();
         let terminal = job.wait();
         let completion = async move {
-            let outcome = terminal.await;
-            let _ = runner.shutdown().await;
+            let mut outcome = terminal.await;
+            if let Err(error) = runner.shutdown().await {
+                Arc::make_mut(&mut outcome)
+                    .errors
+                    .push(runner_shutdown_failure(error));
+            }
             outcome
         }
         .boxed()

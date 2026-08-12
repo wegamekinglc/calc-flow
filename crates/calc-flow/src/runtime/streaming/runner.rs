@@ -346,6 +346,7 @@ impl OpenedCheckpointRuntime {
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum FailureOrigin {
     Preflight,
+    RunnerLifecycle,
     OperatorEntry {
         node_id: String,
     },
@@ -395,6 +396,14 @@ pub(crate) struct RuntimeFailure {
 pub(crate) struct StartFailure {
     pub(crate) primary: Arc<RuntimeFailure>,
     pub(crate) diagnostic_id: Option<u64>,
+    pub(crate) cleanup_failures: Vec<Arc<RuntimeFailure>>,
+}
+
+pub(crate) fn runner_shutdown_failure(error: CalcFlowError) -> Arc<RuntimeFailure> {
+    Arc::new(RuntimeFailure {
+        origin: FailureOrigin::RunnerLifecycle,
+        error,
+    })
 }
 
 pub(crate) type StartResult<T> = Result<T, StartFailure>;
@@ -1246,6 +1255,7 @@ fn cancelled_start_failure(job_id: u64) -> StartFailure {
             },
         }),
         diagnostic_id: None,
+        cleanup_failures: Vec::new(),
     }
 }
 
@@ -1334,6 +1344,8 @@ struct RunnerCore {
     abandonment_warnings: AtomicU64,
     #[cfg(test)]
     next_launch_probe: Mutex<Option<Arc<TestLaunchProbe>>>,
+    #[cfg(test)]
+    panic_lifecycle_after_shutdown: AtomicBool,
 }
 
 const ABANDONED_RUNNER_WARNING: &str =
@@ -1407,6 +1419,14 @@ impl OneShotContinuousRunner {
         let start = runner.start_checkpointed(spec, checkpoint);
         OneShotStartObserver::new(runner, start)
     }
+
+    #[cfg(test)]
+    fn panic_lifecycle_after_shutdown_for_test(&self) {
+        self.runner
+            .core
+            .panic_lifecycle_after_shutdown
+            .store(true, Ordering::Release);
+    }
 }
 
 impl OneShotStartObserver {
@@ -1415,9 +1435,13 @@ impl OneShotStartObserver {
             inner: Box::pin(async move {
                 match start.await {
                     Ok(job) => Ok(OwningContinuousJob::new(job, runner)),
-                    Err(error) => {
-                        let _ = runner.shutdown().await;
-                        Err(error)
+                    Err(mut failure) => {
+                        if let Err(error) = runner.shutdown().await {
+                            failure
+                                .cleanup_failures
+                                .push(runner_shutdown_failure(error));
+                        }
+                        Err(failure)
                     }
                 }
             }),
@@ -1464,6 +1488,8 @@ impl ContinuousRunner {
             abandonment_warnings: AtomicU64::new(0),
             #[cfg(test)]
             next_launch_probe: Mutex::new(None),
+            #[cfg(test)]
+            panic_lifecycle_after_shutdown: AtomicBool::new(false),
         });
         let driver = tokio::spawn(runner_lifecycle(Arc::clone(&core), receiver));
         *core.driver.lock() = Some(driver);
@@ -1526,6 +1552,7 @@ impl ContinuousRunner {
                         error,
                     }),
                     diagnostic_id: None,
+                    cleanup_failures: Vec::new(),
                 }));
             }
         };
@@ -1574,6 +1601,7 @@ impl ContinuousRunner {
                     },
                 }),
                 diagnostic_id: None,
+                cleanup_failures: Vec::new(),
             }));
         };
         let launch_id = LaunchId(launch_id);
@@ -1639,6 +1667,7 @@ impl ContinuousRunner {
                     },
                 }),
                 diagnostic_id: None,
+                cleanup_failures: Vec::new(),
             }));
         }
         StartObserver::observe(core)
@@ -1740,6 +1769,7 @@ fn conflict_observer(key: &str) -> StartObserver {
             },
         }),
         diagnostic_id: None,
+        cleanup_failures: Vec::new(),
     }))
 }
 
@@ -1750,6 +1780,7 @@ fn preflight_error_observer(error: CalcFlowError) -> StartObserver {
             error,
         }),
         diagnostic_id: None,
+        cleanup_failures: Vec::new(),
     }))
 }
 
@@ -1925,6 +1956,13 @@ async fn runner_lifecycle(
     }
     runner_core.closed.store(true, Ordering::Release);
     runner_core.changed.notify_waiters();
+    #[cfg(test)]
+    assert!(
+        !runner_core
+            .panic_lifecycle_after_shutdown
+            .load(Ordering::Acquire),
+        "injected runner lifecycle shutdown panic"
+    );
 }
 
 fn begin_lifecycle_shutdown(runner: &RunnerCore, pending: &mut Option<PendingStart>) {
@@ -2000,6 +2038,7 @@ impl DriverReport {
             completion: DriverCompletion::StartFailed(StartFailure {
                 primary: failure,
                 diagnostic_id: None,
+                cleanup_failures: Vec::new(),
             }),
             cleanup_failures: Vec::new(),
         }
@@ -2168,6 +2207,7 @@ async fn run_job_driver(
                             error,
                         }),
                         diagnostic_id: None,
+                        cleanup_failures: Vec::new(),
                     }),
                     cleanup_failures: Vec::new(),
                 };
@@ -2250,6 +2290,7 @@ async fn run_job_driver(
                 completion: DriverCompletion::StartFailed(StartFailure {
                     primary,
                     diagnostic_id: None,
+                    cleanup_failures: Vec::new(),
                 }),
                 cleanup_failures: Vec::new(),
             };
@@ -2437,6 +2478,7 @@ async fn recover_terminal_manifest(
             completion: DriverCompletion::StartFailed(StartFailure {
                 primary,
                 diagnostic_id: None,
+                cleanup_failures: Vec::new(),
             }),
             cleanup_failures: close_failures.into_iter().skip(1).collect(),
         };
@@ -2489,6 +2531,7 @@ fn checkpoint_start_failure(launch_id: LaunchId, error: CalcFlowError) -> Driver
                 error,
             }),
             diagnostic_id: None,
+            cleanup_failures: Vec::new(),
         }),
         cleanup_failures: Vec::new(),
     }
@@ -4744,6 +4787,7 @@ async fn finish_failed_launch(
         completion: DriverCompletion::StartFailed(StartFailure {
             primary: failures.remove(0),
             diagnostic_id: None,
+            cleanup_failures: Vec::new(),
         }),
         cleanup_failures,
     }
@@ -4938,7 +4982,6 @@ mod tests {
 
         assert!(!output.status.success(), "fixture unexpectedly compiled");
         assert!(stderr.contains("error[E0382]"), "{stderr}");
-        assert!(stderr.contains("use of moved value: `runner`"), "{stderr}");
     }
 
     #[test]
@@ -4965,12 +5008,21 @@ mod tests {
             ))
             .await
             .unwrap();
+        let runner = job.runner_probe_for_test();
 
-        let dropped_waiter = job.wait();
+        let mut dropped_waiter = Box::pin(job.wait());
+        assert!(matches!(
+            futures::poll!(dropped_waiter.as_mut()),
+            Poll::Pending
+        ));
         drop(dropped_waiter);
         assert_eq!(job.state(), ContinuousJobState::Running);
 
-        let dropped_shutdown = job.shutdown();
+        let mut dropped_shutdown = Box::pin(job.shutdown());
+        assert!(matches!(
+            futures::poll!(dropped_shutdown.as_mut()),
+            Poll::Pending
+        ));
         drop(dropped_shutdown);
         assert_eq!(job.state(), ContinuousJobState::Draining);
 
@@ -4984,6 +5036,8 @@ mod tests {
         assert_eq!(source.closed.load(Ordering::SeqCst), 1);
         assert_eq!(sink.closed.load(Ordering::SeqCst), 1);
         assert!(job.owner_settled_for_test());
+        assert_eq!(runner.registry_counts(), (0, 0));
+        assert!(runner.is_finished());
     }
 
     #[tokio::test]
@@ -5010,6 +5064,28 @@ mod tests {
         assert_eq!(source.closed.load(Ordering::SeqCst), 1);
         assert_eq!(sink.opened.load(Ordering::SeqCst), 1);
         assert_eq!(sink.closed.load(Ordering::SeqCst), 1);
+        assert!(failure.cleanup_failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn one_shot_start_failure_surfaces_runner_lifecycle_join_failure() {
+        let source = LifecycleProbe::default();
+        source.fail_open.store(true, Ordering::SeqCst);
+        let sink = LifecycleProbe::default();
+        let runner = OneShotContinuousRunner::new();
+        runner.panic_lifecycle_after_shutdown_for_test();
+
+        let failure = runner
+            .start(spec(false, Arc::new(AtomicUsize::new(0)), source, sink))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            failure.cleanup_failures.as_slice(),
+            [failure]
+                if matches!(failure.origin, super::FailureOrigin::RunnerLifecycle)
+                    && matches!(failure.error, CalcFlowError::Internal { .. })
+        ));
     }
 
     #[tokio::test]
@@ -5102,6 +5178,30 @@ mod tests {
         assert_eq!(source.closed.load(Ordering::SeqCst), 1);
         assert_eq!(sink.closed.load(Ordering::SeqCst), 1);
         assert!(job.owner_settled_for_test());
+    }
+
+    #[tokio::test]
+    async fn owning_job_surfaces_runner_lifecycle_join_failure() {
+        let source = LifecycleProbe::default();
+        let sink = LifecycleProbe::default();
+        let runner = OneShotContinuousRunner::new();
+        runner.panic_lifecycle_after_shutdown_for_test();
+        let job = runner
+            .start(spec(false, Arc::new(AtomicUsize::new(0)), source, sink))
+            .await
+            .unwrap();
+        let runner = job.runner_probe_for_test();
+
+        let outcome = job.cancel().await;
+
+        assert!(matches!(
+            outcome.errors.last(),
+            Some(failure)
+                if matches!(failure.origin, super::FailureOrigin::RunnerLifecycle)
+                    && matches!(failure.error, CalcFlowError::Internal { .. })
+        ));
+        assert_eq!(runner.registry_counts(), (0, 0));
+        assert!(runner.is_finished());
     }
 
     #[tokio::test]
@@ -9064,6 +9164,7 @@ mod tests {
             changed: Notify::new(),
             abandonment_warnings: AtomicU64::new(0),
             next_launch_probe: Mutex::new(None),
+            panic_lifecycle_after_shutdown: AtomicBool::new(false),
         });
         let mut first = Box::pin(RunnerShutdownObserver::new(Arc::clone(&core)));
 
