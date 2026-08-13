@@ -1680,12 +1680,18 @@ mod tests {
         SourceSchema, StreamExecutionPlan, StreamRequirements, StreamSink, StreamSource,
         StreamingRunner, TransactionalStreamSink, UdfRegistry,
     };
+    use datafusion::arrow::{
+        array::Int64Array,
+        datatypes::{DataType, Field, Schema},
+        record_batch::RecordBatch,
+    };
     use pyo3::{
-        Py, Python, pyclass, pymethods,
-        types::{PyDict, PyDictMethods},
+        Bound, Py, Python, pyclass, pymethods,
+        types::{PyAnyMethods, PyDict, PyDictMethods},
     };
 
-    use super::PyContinuousStreamingRunner;
+    use super::{PyContinuousStreamingRunner, PyManagedCheckpointRuntime};
+    use crate::{batch::PyBatch, pipeline::PyStreamExecutionPlan};
 
     struct PendingSource {
         closed: Arc<AtomicBool>,
@@ -1933,7 +1939,7 @@ mod tests {
                 Box::new(
                     ExpressionOperator::new(
                         "operator",
-                        "value = value",
+                        "result = value + 1",
                         Vec::new(),
                         None,
                         Vec::new(),
@@ -1947,6 +1953,373 @@ mod tests {
                 &StreamRequirements::default(),
             )
             .unwrap()
+    }
+
+    fn python_batch() -> PyBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let values = Arc::new(Int64Array::from(vec![1_i64]));
+        let record = RecordBatch::try_new(schema, vec![values]).unwrap();
+        PyBatch::from_inner(
+            Batch::table(vec![record], calc_flow::BatchMetadata::default()).unwrap(),
+        )
+    }
+
+    fn assert_native_source_variants(py: Python<'_>, locals: &Bound<'_, PyDict>) {
+        let policy =
+            |name: &str| super::source_policy(&locals.get_item(name).unwrap().unwrap()).unwrap();
+        assert!(matches!(
+            policy("source_provided"),
+            calc_flow::WatermarkPolicy::SourceProvided
+        ));
+        assert!(matches!(
+            policy("bounded"),
+            calc_flow::WatermarkPolicy::BoundedOutOfOrderness {
+                event_time_column,
+                max_out_of_orderness,
+                emit_interval,
+                idle_timeout: Some(idle_timeout),
+            } if event_time_column == "event_time"
+                && max_out_of_orderness == std::time::Duration::from_micros(5)
+                && emit_interval == std::time::Duration::from_micros(7)
+                && idle_timeout == std::time::Duration::from_micros(11)
+        ));
+        assert!(matches!(
+            policy("disabled"),
+            calc_flow::WatermarkPolicy::Disabled { idle_timeout: None }
+        ));
+        assert!(
+            super::source_policy(&locals.get_item("invalid_policy").unwrap().unwrap()).is_err()
+        );
+
+        let awaits = Arc::new(crate::runtime::PythonAwaitRegistry::new());
+        let context = Arc::new(super::Mutex::new(None));
+        let ownership = Arc::new(super::ConnectorOwnership::new());
+        let python_source = |name: &str| super::PythonContinuousSource {
+            binding: Arc::new(crate::config::PythonRoot::new(
+                locals.get_item(name).unwrap().unwrap().unbind(),
+            )),
+            awaits: Arc::clone(&awaits),
+            capability_error: Arc::new(super::Mutex::new(None)),
+            context: Arc::clone(&context),
+            _ownership: ownership.retain(),
+        };
+        let capabilities = python_source("good_capabilities")
+            .parsed_capabilities()
+            .unwrap();
+        assert_eq!(
+            capabilities.replay_positioning,
+            ReplayPositioning::Unsupported
+        );
+        assert_eq!(capabilities.delivery, SourceDeliveryCapability::Lossy);
+        assert_eq!(capabilities.max_batch_rows, 3);
+        assert_eq!(capabilities.max_batch_bytes, 5);
+        assert_eq!(
+            capabilities.native_watermarks,
+            NativeWatermarkCapability::RuntimeToggleable
+        );
+        assert!(
+            python_source("invalid_delivery")
+                .parsed_capabilities()
+                .is_err()
+        );
+        assert!(
+            python_source("invalid_watermarks")
+                .parsed_capabilities()
+                .is_err()
+        );
+        let mut invalid_source = python_source("invalid_replay");
+        assert_eq!(invalid_source.capabilities().max_batch_rows, usize::MAX);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let error = py
+            .detach(|| runtime.block_on(invalid_source.open(None)))
+            .unwrap_err();
+        assert!(error.to_string().contains("source.capabilities"));
+    }
+
+    fn assert_native_sink_variants(py: Python<'_>, locals: &Bound<'_, PyDict>) {
+        let awaits = Arc::new(crate::runtime::PythonAwaitRegistry::new());
+        let context = Arc::new(super::Mutex::new(None));
+        let ownership = Arc::new(super::ConnectorOwnership::new());
+        let sinks = PyDict::new(py);
+        sinks
+            .set_item(
+                "output",
+                (
+                    locals.get_item("bounded_sink").unwrap().unwrap(),
+                    locals.get_item("unbounded_sink").unwrap().unwrap(),
+                ),
+            )
+            .unwrap();
+        let (native, roots) = super::build_sinks(&sinks, &awaits, &context, &ownership).unwrap();
+        assert_eq!(native["output"].len(), 2);
+        assert_eq!(roots.len(), 2);
+        drop(native);
+        drop(roots);
+
+        assert!(
+            super::build_one_sink(
+                locals.get_item("invalid_sink").unwrap().unwrap(),
+                &awaits,
+                &context,
+                &ownership,
+            )
+            .is_err()
+        );
+        let invalid_shape = PyDict::new(py);
+        invalid_shape.set_item("output", 1).unwrap();
+        assert!(super::build_sinks(&invalid_shape, &awaits, &context, &ownership).is_err());
+
+        for retention in [
+            calc_flow::RetentionClass::Bounded,
+            calc_flow::RetentionClass::Unbounded,
+        ] {
+            let delivery = calc_flow::SinkDelivery::EpochIdempotent {
+                mechanism: "key".into(),
+                retention,
+            };
+            let value = super::sink_delivery_to_py(py, &delivery).unwrap();
+            assert_eq!(
+                value
+                    .get_item("kind")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "epoch_idempotent"
+            );
+        }
+    }
+
+    #[test]
+    fn native_binding_descriptors_cover_delivery_and_watermark_variants() {
+        Python::initialize();
+        Python::attach(|py| {
+            let locals = PyDict::new(py);
+            py.run(
+                pyo3::ffi::c_str!(
+                    "class Policy:\n    def __init__(self, value): self.value = value\n    def _native_policy(self): return self.value\nsource_provided = Policy({'kind': 'source_provided'})\nbounded = Policy({'kind': 'bounded_out_of_orderness', 'event_time_column': 'event_time', 'max_out_of_orderness_micros': 5, 'emit_interval_micros': 7, 'idle_timeout_micros': 11})\ndisabled = Policy({'kind': 'disabled', 'idle_timeout_micros': None})\ninvalid_policy = Policy({'kind': 'invalid'})\nclass Capabilities:\n    def __init__(self, **overrides):\n        self.value = {'replay_positioning': 'unsupported', 'delivery': 'lossy', 'max_batch_rows': 3, 'max_batch_bytes': 5, 'schema': None, 'native_watermarks': 'runtime_toggleable'}\n        self.value.update(overrides)\n    def _native_capabilities(self): return self.value\ngood_capabilities = Capabilities()\ninvalid_replay = Capabilities(replay_positioning='invalid')\ninvalid_delivery = Capabilities(delivery='invalid')\ninvalid_watermarks = Capabilities(native_watermarks='invalid')\nclass Sink:\n    def __init__(self, sink_id, descriptor):\n        self.sink_id = sink_id\n        self.descriptor = descriptor\n    def _native_descriptor(self): return self.descriptor\nbounded_sink = Sink('bounded', {'kind': 'epoch_idempotent', 'mechanism': 'key', 'retention': 'bounded'})\nunbounded_sink = Sink('unbounded', {'kind': 'epoch_idempotent', 'mechanism': 'key', 'retention': 'unbounded'})\ninvalid_sink = Sink('invalid', {'kind': 'epoch_idempotent', 'mechanism': 'key', 'retention': 'invalid'})"
+                ),
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+            assert_native_source_variants(py, &locals);
+            assert_native_sink_variants(py, &locals);
+        });
+    }
+
+    #[test]
+    fn native_projection_names_cover_job_and_error_variants() {
+        assert_eq!(
+            [
+                calc_flow::JobState::Running,
+                calc_flow::JobState::Draining,
+                calc_flow::JobState::Completed,
+                calc_flow::JobState::Cancelled,
+                calc_flow::JobState::Failed,
+                calc_flow::JobState::RecoveryRequired,
+            ]
+            .map(super::job_state_name),
+            [
+                "running",
+                "draining",
+                "completed",
+                "cancelled",
+                "failed",
+                "recovery_required",
+            ]
+        );
+        assert_eq!(
+            [
+                calc_flow::TerminalCause::NaturalEnd,
+                calc_flow::TerminalCause::GracefulShutdown,
+                calc_flow::TerminalCause::ExplicitCancel,
+                calc_flow::TerminalCause::DeadlineExceeded,
+                calc_flow::TerminalCause::Failure,
+            ]
+            .map(super::terminal_cause_name),
+            [
+                "natural_end",
+                "graceful_shutdown",
+                "explicit_cancel",
+                "deadline_exceeded",
+                "failure",
+            ]
+        );
+        assert_eq!(
+            [
+                calc_flow::StreamingErrorCategory::Validation,
+                calc_flow::StreamingErrorCategory::Compile,
+                calc_flow::StreamingErrorCategory::Conflict,
+                calc_flow::StreamingErrorCategory::Cancelled,
+                calc_flow::StreamingErrorCategory::CheckpointTimeout,
+                calc_flow::StreamingErrorCategory::CheckpointMismatch,
+                calc_flow::StreamingErrorCategory::CheckpointPublicationUnknown,
+                calc_flow::StreamingErrorCategory::Io,
+                calc_flow::StreamingErrorCategory::Operator,
+                calc_flow::StreamingErrorCategory::Connector,
+                calc_flow::StreamingErrorCategory::TaskPanicked,
+                calc_flow::StreamingErrorCategory::Internal,
+            ]
+            .map(super::streaming_error_category_name),
+            [
+                "validation",
+                "compile",
+                "conflict",
+                "cancelled",
+                "checkpoint_timeout",
+                "checkpoint_mismatch",
+                "checkpoint_publication_unknown",
+                "io",
+                "operator",
+                "connector",
+                "task_panicked",
+                "internal",
+            ]
+        );
+    }
+
+    #[test]
+    fn native_projection_names_cover_checkpoint_and_delivery_variants() {
+        assert_eq!(
+            [
+                calc_flow::CheckpointPhase::Requested,
+                calc_flow::CheckpointPhase::SourcesCut,
+                calc_flow::CheckpointPhase::OperatorsSnapshotted,
+                calc_flow::CheckpointPhase::SinksPrecommitted,
+                calc_flow::CheckpointPhase::ManifestInstalled,
+                calc_flow::CheckpointPhase::ManifestDurable,
+                calc_flow::CheckpointPhase::SinksCommitted,
+                calc_flow::CheckpointPhase::Completed,
+            ]
+            .map(super::checkpoint_phase_name),
+            [
+                "requested",
+                "sources_cut",
+                "operators_snapshotted",
+                "sinks_precommitted",
+                "manifest_installed",
+                "manifest_durable",
+                "sinks_committed",
+                "completed",
+            ]
+        );
+        assert_eq!(
+            [
+                calc_flow::ComponentKind::Job,
+                calc_flow::ComponentKind::Edge,
+                calc_flow::ComponentKind::Source,
+                calc_flow::ComponentKind::Operator,
+                calc_flow::ComponentKind::Sink,
+                calc_flow::ComponentKind::Checkpoint,
+            ]
+            .map(super::component_kind_name),
+            ["job", "edge", "source", "operator", "sink", "checkpoint"]
+        );
+        assert_eq!(
+            [
+                ReplayPositioning::ExactPauseReportAndSeek,
+                ReplayPositioning::Unsupported,
+            ]
+            .map(super::replay_positioning_name),
+            ["exact_pause_report_and_seek", "unsupported"]
+        );
+        assert_eq!(
+            [
+                SourceDeliveryCapability::Lossless,
+                SourceDeliveryCapability::Lossy,
+            ]
+            .map(super::source_delivery_name),
+            ["lossless", "lossy"]
+        );
+        assert_eq!(
+            [
+                calc_flow::DeliveryGuarantee::AtLeastOnce,
+                calc_flow::DeliveryGuarantee::ExactlyOnce,
+            ]
+            .map(super::delivery_guarantee_name),
+            ["at_least_once", "exactly_once"]
+        );
+    }
+
+    #[test]
+    fn native_python_connectors_run_to_completion_and_project_status() {
+        Python::initialize();
+        let directory = tempfile::tempdir().unwrap();
+        Python::attach(|py| {
+            let locals = PyDict::new(py);
+            locals
+                .set_item("batch", Py::new(py, python_batch()).unwrap())
+                .unwrap();
+            py.run(
+                pyo3::ffi::c_str!(
+                    "import asyncio\nevents = []\nclass NativeSource:\n    def __init__(self):\n        self.emitted = False\n        self.release = asyncio.Event()\n    def _native_capabilities(self):\n        return {'replay_positioning': 'exact_pause_report_and_seek', 'delivery': 'lossless', 'max_batch_rows': 1, 'max_batch_bytes': 1024, 'schema': None, 'native_watermarks': 'emits_native'}\n    def _native_policy(self): return {'kind': 'source_provided'}\n    async def _native_open(self, source_id, order, payload):\n        assert source_id is order is payload is None\n        events.append('source.open')\n    async def _native_next(self):\n        if self.emitted:\n            await self.release.wait()\n            return None\n        self.emitted = True\n        return ('data', batch, None, b'1', {'offset': 1})\n    async def _native_close(self): events.append('source.close')\nclass NativeSink:\n    sink_id = 'archive'\n    def _native_descriptor(self): return {'kind': 'ordinary'}\n    async def _native_open(self): events.append('sink.open')\n    async def _native_write(self, value): events.append(f'sink.write:{value.num_rows}')\n    async def _native_close(self): events.append('sink.close')\nclass NativeTransactionalSink:\n    sink_id = 'transactional-archive'\n    def _native_descriptor(self): return {'kind': 'transactional'}\n    async def _native_open(self): events.append('transactional.open')\n    async def _native_begin_epoch(self, epoch): events.append(f'transactional.begin:{epoch}')\n    async def _native_write(self, value): events.append(f'transactional.write:{value.num_rows}')\n    async def _native_pre_commit(self, epoch):\n        events.append(f'transactional.pre_commit:{epoch}')\n        return {'epoch': epoch}\n    async def _native_commit(self, epoch, pre_commit):\n        assert pre_commit == {'epoch': epoch}\n        events.append(f'transactional.commit:{epoch}')\n    async def _native_abort(self, epoch, pre_commit): events.append(f'transactional.abort:{epoch}')\n    async def _native_recover(self, epoch, terminal, delivery, pre_commit): events.append(f'transactional.recover:{epoch}')\n    async def _native_close(self): events.append('transactional.close')\nsource = NativeSource()\nsink = NativeSink()\ntransactional_sink = NativeTransactionalSink()"
+                ),
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+
+            let sources = PyDict::new(py);
+            sources
+                .set_item("input", locals.get_item("source").unwrap().unwrap())
+                .unwrap();
+            let sinks = PyDict::new(py);
+            sinks
+                .set_item(
+                    "output",
+                    [
+                        locals.get_item("sink").unwrap().unwrap(),
+                        locals.get_item("transactional_sink").unwrap().unwrap(),
+                    ],
+                )
+                .unwrap();
+            let config = PyDict::new(py);
+            config
+                .set_item("checkpoint_interval_micros", 60_000_000_u64)
+                .unwrap();
+            config
+                .set_item("checkpoint_timeout_micros", 600_000_000_u64)
+                .unwrap();
+            config.set_item("edge_max_rows", 10_000_u64).unwrap();
+            config.set_item("edge_max_bytes", 64_u64 << 20).unwrap();
+            config.set_item("retained_epochs", 2_u64).unwrap();
+
+            let plan = Py::new(
+                py,
+                PyStreamExecutionPlan::new(test_stream_plan("python-native-connectors"), py.None()),
+            )
+            .unwrap();
+            let checkpoints = Py::new(
+                py,
+                PyManagedCheckpointRuntime::new(directory.path().to_str().unwrap()).unwrap(),
+            )
+            .unwrap();
+            let runner = PyContinuousStreamingRunner::new(
+                plan.borrow(py),
+                &sources,
+                &sinks,
+                checkpoints.borrow(py),
+                &config,
+            )
+            .unwrap();
+            locals
+                .set_item("runner", Py::new(py, runner).unwrap())
+                .unwrap();
+            py.run(
+                &CString::new(
+                    "import asyncio\nasync def exercise():\n    assert 'consumed=false' in repr(runner)\n    job = await runner.start_async()\n    assert job.id > 0\n    while 'transactional.write:1' not in events:\n        await asyncio.sleep(0)\n    epoch = await job.trigger_checkpoint_async()\n    assert epoch >= 1\n    source.release.set()\n    status = job.status()\n    assert status['job_id'] == job.id\n    assert set(status) == {'job_id', 'state', 'terminal_cause', 'delivery', 'task_count', 'task_errors', 'metrics_overflowed', 'edges', 'sources', 'operators', 'sinks', 'checkpoint'}\n    outcome = await job.wait_async()\n    assert outcome['state'] == 'completed', outcome\n    assert outcome['cause'] == 'natural_end'\n    assert outcome['errors'] == ()\n    assert 'state=completed' in repr(job)\nasyncio.run(exercise())\nassert 'source.open' in events\nassert 'sink.open' in events\nassert 'sink.write:1' in events\nassert 'source.close' in events\nassert 'sink.close' in events\nassert any(value.startswith('transactional.begin:') for value in events)\nassert any(value.startswith('transactional.pre_commit:') for value in events)\nassert any(value.startswith('transactional.commit:') for value in events)\nassert 'transactional.close' in events",
+                )
+                .unwrap(),
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+        });
     }
 
     fn pending_runner(managed_root: &std::path::Path, closed: Arc<AtomicBool>) -> StreamingRunner {

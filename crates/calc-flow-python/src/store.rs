@@ -145,3 +145,108 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(export_project_yaml, module)?)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        ffi::CString,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use pyo3::types::PyDict;
+
+    use super::*;
+
+    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    fn directory(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "calc-flow-python-project-store-{label}-{}-{}",
+            std::process::id(),
+            NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn project_json(name: &str) -> String {
+        format!(
+            r#"{{"format_version":2,"id":"{name}","name":"{name}","pipeline":{{"name":"{name}","nodes":[{{"id":"calc","operator":{{"kind":"expression","expression":"b = a + 1"}}}}]}}}}"#
+        )
+    }
+
+    #[test]
+    fn native_project_store_covers_async_crud_and_strict_documents() {
+        Python::initialize();
+        Python::attach(|py| {
+            let project_directory = directory("crud");
+            let projects = Py::new(py, PyFileProjectStore::new(project_directory.clone())).unwrap();
+            let locals = PyDict::new(py);
+            locals.set_item("projects", projects).unwrap();
+            locals
+                .set_item("project_document", project_json("stored"))
+                .unwrap();
+            py.run(
+                &CString::new(
+                    "import asyncio, json\nasync def exercise():\n    await projects.create(project_document)\n    try:\n        await projects.create(project_document)\n    except Exception as error:\n        assert 'already exists' in str(error)\n    assert json.loads(await projects.get('stored'))['id'] == 'stored'\n    assert len(await projects.list()) == 1\n    await projects.put(project_document)\n    await projects.delete('stored')\n    try:\n        await projects.get('stored')\n    except Exception as error:\n        assert 'not found' in str(error)\nasyncio.run(exercise())",
+                )
+                .unwrap(),
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+
+            assert!(parse_project(r#"{"format_version":1}"#).is_err());
+            std::fs::remove_dir_all(project_directory).unwrap();
+        });
+    }
+
+    #[test]
+    fn native_project_store_registration_and_transforms_are_strict() {
+        Python::initialize();
+        Python::attach(|py| {
+            let module = PyModule::new(py, "_native").unwrap();
+            register(&module).unwrap();
+            assert!(module.getattr("_FileProjectStore").is_ok());
+            assert!(module.getattr("_FileCheckpointStore").is_err());
+            assert!(module.getattr("import_project_json").is_ok());
+            assert!(module.getattr("import_project_yaml").is_ok());
+            assert!(module.getattr("export_project_json").is_ok());
+            assert!(module.getattr("export_project_yaml").is_ok());
+
+            let project = project_json("portable");
+            let imported = import_project_json(py, project.as_bytes()).unwrap();
+            assert!(imported.ends_with('\n'));
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&imported).unwrap()["format_version"],
+                2
+            );
+
+            let yaml = export_project_yaml(py, &project).unwrap();
+            assert!(yaml.contains("format_version: 2"));
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(
+                    &import_project_yaml(py, yaml.as_bytes()).unwrap(),
+                )
+                .unwrap()["id"],
+                "portable"
+            );
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(
+                    &export_project_json(py, &project).unwrap()
+                )
+                .unwrap()["id"],
+                "portable"
+            );
+            assert!(
+                import_project_json(py, &vec![b'x'; calc_flow::MAX_PROJECT_DOCUMENT_BYTES + 1])
+                    .is_err()
+            );
+            assert!(
+                import_project_yaml(
+                    py,
+                    b"format_version: 2\nid: aliases\nname: &name aliases\ndescription: *name\npipeline: {name: p, nodes: []}\n",
+                )
+                .is_err()
+            );
+        });
+    }
+}
