@@ -5,13 +5,15 @@ use pyo3::{
     PyTraverseError, PyVisit,
     exceptions::{PyRuntimeError, PyTypeError},
     prelude::*,
-    types::{PyAny, PyDict, PyString},
+    types::{PyAny, PyDict, PyString, PyTuple},
 };
 
 use crate::batch::PyBatch;
 use crate::execution_options::{PyExecutionCancellation, PyExecutionOptions};
 
 const CLEARED_PLAN_MESSAGE: &str = "ExecutionPlan has been cleared by garbage collection";
+const CLEARED_STREAM_PLAN_MESSAGE: &str =
+    "StreamExecutionPlan has been consumed or cleared by garbage collection";
 const CLEARED_RESULT_MESSAGE: &str = "RunResult has been cleared by garbage collection";
 
 struct PlanState {
@@ -60,6 +62,110 @@ impl ExecutionPlanOwner {
 #[pyclass(name = "ExecutionPlan", frozen, module = "calc_flow._native")]
 pub(crate) struct PyExecutionPlan {
     state: RwLock<Option<PlanState>>,
+}
+
+struct StreamPlanState {
+    inner: calc_flow::StreamExecutionPlan,
+    owner: Py<PyAny>,
+}
+
+#[pyclass(name = "StreamExecutionPlan", frozen, module = "calc_flow._native")]
+pub(crate) struct PyStreamExecutionPlan {
+    state: RwLock<Option<StreamPlanState>>,
+}
+
+impl PyStreamExecutionPlan {
+    pub(crate) fn new(inner: calc_flow::StreamExecutionPlan, owner: Py<PyAny>) -> Self {
+        Self {
+            state: RwLock::new(Some(StreamPlanState { inner, owner })),
+        }
+    }
+
+    pub(crate) fn take(&self) -> PyResult<(calc_flow::StreamExecutionPlan, Py<PyAny>)> {
+        let state = self
+            .state
+            .write()
+            .take()
+            .ok_or_else(|| PyRuntimeError::new_err(CLEARED_STREAM_PLAN_MESSAGE))?;
+        Ok((state.inner, state.owner))
+    }
+
+    fn with_plan<T>(&self, read: impl FnOnce(&calc_flow::StreamExecutionPlan) -> T) -> PyResult<T> {
+        self.state
+            .read()
+            .as_ref()
+            .map(|state| read(&state.inner))
+            .ok_or_else(|| PyRuntimeError::new_err(CLEARED_STREAM_PLAN_MESSAGE))
+    }
+}
+
+#[pymethods]
+impl PyStreamExecutionPlan {
+    #[getter]
+    fn name(&self) -> PyResult<String> {
+        self.with_plan(|plan| plan.name().to_owned())
+    }
+
+    #[getter]
+    fn fingerprint(&self) -> PyResult<String> {
+        self.with_plan(|plan| plan.fingerprint().to_owned())
+    }
+
+    #[getter]
+    fn source_binding_ids<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let values = self.with_plan(|plan| {
+            plan.source_binding_ids()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })?;
+        PyTuple::new(py, values)
+    }
+
+    #[getter]
+    fn sink_binding_ids<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let values = self.with_plan(|plan| {
+            plan.sink_binding_ids()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })?;
+        PyTuple::new(py, values)
+    }
+
+    #[getter]
+    fn requirements<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let requirements = self.with_plan(|plan| {
+            plan.requirements()
+                .delivery
+                .iter()
+                .map(|(output, guarantee)| {
+                    let guarantee = match guarantee {
+                        calc_flow::DeliveryGuarantee::AtLeastOnce => "at_least_once",
+                        calc_flow::DeliveryGuarantee::ExactlyOnce => "exactly_once",
+                    };
+                    (output.clone(), guarantee)
+                })
+                .collect::<Vec<_>>()
+        })?;
+        let delivery = PyDict::new(py);
+        for (output, guarantee) in requirements {
+            delivery.set_item(output, guarantee)?;
+        }
+        Ok(delivery)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        if let Some(state) = self.state.read().as_ref() {
+            visit.call(&state.owner)?;
+        }
+        Ok(())
+    }
+
+    fn __clear__(&self) {
+        drop(self.state.write().take());
+    }
 }
 
 impl PyExecutionPlan {
@@ -419,6 +525,7 @@ fn extract_inputs(inputs: &Bound<'_, PyDict>) -> PyResult<BTreeMap<String, calc_
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyExecutionPlan>()?;
+    module.add_class::<PyStreamExecutionPlan>()?;
     module.add_class::<PyRunResult>()?;
     Ok(())
 }

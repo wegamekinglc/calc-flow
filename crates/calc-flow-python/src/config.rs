@@ -8,7 +8,7 @@ use pyo3::{
     types::{PyAny, PyBool},
 };
 
-use crate::pipeline::PyExecutionPlan;
+use crate::pipeline::{PyExecutionPlan, PyStreamExecutionPlan};
 
 const CLEARED_RUNTIME_MESSAGE: &str = "Runtime has been cleared by garbage collection";
 
@@ -428,6 +428,42 @@ impl PyRuntime {
             runtime.tokio,
             owner,
         ))
+    }
+
+    fn compile_stream_project(
+        slf: PyRef<'_, Self>,
+        py: Python<'_>,
+        project_json: &str,
+        delivery: BTreeMap<String, String>,
+    ) -> PyResult<PyStreamExecutionPlan> {
+        let runtime = slf.snapshot()?;
+        let project = calc_flow::import_project_json(project_json.as_bytes())
+            .map_err(crate::error::to_py_err)?;
+        let delivery = delivery
+            .into_iter()
+            .map(|(output, guarantee)| {
+                let guarantee = match guarantee.as_str() {
+                    "at_least_once" => calc_flow::DeliveryGuarantee::AtLeastOnce,
+                    "exactly_once" => calc_flow::DeliveryGuarantee::ExactlyOnce,
+                    _ => {
+                        return Err(PyTypeError::new_err(format!(
+                            "delivery requirement for {output:?} must be 'at_least_once' or 'exactly_once'"
+                        )));
+                    }
+                };
+                Ok((output, guarantee))
+            })
+            .collect::<PyResult<BTreeMap<_, _>>>()?;
+        let requirements = calc_flow::StreamRequirements { delivery };
+        let plan = calc_flow::compile_stream_project(
+            &project,
+            &runtime.providers,
+            &runtime.udfs,
+            &requirements,
+        )
+        .map_err(crate::error::to_py_err)?;
+        let owner = slf.into_pyobject(py)?.into_any().unbind();
+        Ok(PyStreamExecutionPlan::new(plan, owner))
     }
 
     #[allow(

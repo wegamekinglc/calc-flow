@@ -9,8 +9,8 @@ use crate::operator::expression_query;
 use crate::{
     BatchExecutionPlan, BatchKind, CalcFlowError, DataFusionConfig, Edge, ExpressionOperator,
     ExternalOperatorSpec, JsonMap, NodeOperator, PipelineBuilder, Port, PortEndpoint,
-    ProviderRegistry, Result, SqlOperator, UdfKind, UdfReference, UdfRegistrySnapshot,
-    validate_selected_udfs,
+    ProviderRegistry, Result, SqlOperator, StreamExecutionPlan, StreamRequirements, UdfKind,
+    UdfReference, UdfRegistrySnapshot, validate_selected_udfs,
 };
 
 pub const PROJECT_FORMAT_VERSION: u32 = 2;
@@ -203,7 +203,7 @@ pub fn validate_project(
     providers: &ProviderRegistry,
     udfs: &UdfRegistrySnapshot,
 ) -> ValidationReport {
-    let issues = semantic_issues(project, providers, udfs);
+    let issues = semantic_issues(project, providers, udfs, CompileMode::Batch);
     if !issues.is_empty() {
         return ValidationReport {
             valid: false,
@@ -242,11 +242,12 @@ pub fn compile_project(
     providers: &ProviderRegistry,
     udfs: &UdfRegistrySnapshot,
 ) -> Result<BatchExecutionPlan> {
-    let issues = semantic_issues(project, providers, udfs);
+    let issues = semantic_issues(project, providers, udfs, CompileMode::Batch);
     if let Some(first) = issues.first() {
         return Err(validation_error(first));
     }
-    let plan = build_project(project, providers, udfs)?;
+    let plan =
+        build_project_builder(project, providers, CompileMode::Batch)?.compile_batch(udfs)?;
     let mut coverage = Vec::new();
     validate_source_coverage(project, &plan, &mut coverage);
     if let Some(first) = coverage.first() {
@@ -255,11 +256,45 @@ pub fn compile_project(
     Ok(plan)
 }
 
+/// Compiles a strict, data-only project into a continuous stream plan.
+///
+/// # Errors
+///
+/// Returns a stable validation error or the underlying stream graph
+/// compilation failure. External operators must provide a stream factory.
+pub fn compile_stream_project(
+    project: &ProjectSpec,
+    providers: &ProviderRegistry,
+    udfs: &UdfRegistrySnapshot,
+    requirements: &StreamRequirements,
+) -> Result<StreamExecutionPlan> {
+    let issues = semantic_issues(project, providers, udfs, CompileMode::Stream);
+    if let Some(first) = issues.first() {
+        return Err(validation_error(first));
+    }
+    build_project_builder(project, providers, CompileMode::Stream)?
+        .compile_stream(udfs, requirements)
+}
+
+#[derive(Clone, Copy)]
+enum CompileMode {
+    Batch,
+    Stream,
+}
+
 fn build_project(
     project: &ProjectSpec,
     providers: &ProviderRegistry,
     udfs: &UdfRegistrySnapshot,
 ) -> Result<BatchExecutionPlan> {
+    build_project_builder(project, providers, CompileMode::Batch)?.compile_batch(udfs)
+}
+
+fn build_project_builder(
+    project: &ProjectSpec,
+    providers: &ProviderRegistry,
+    mode: CompileMode,
+) -> Result<PipelineBuilder> {
     let mut builder = PipelineBuilder::new(&project.pipeline.name)?
         .with_datafusion_config(project.pipeline.datafusion);
     for node in &project.pipeline.nodes {
@@ -308,11 +343,18 @@ fn build_project(
                 options,
             } => {
                 let spec = ExternalOperatorSpec::new(provider, name, version, options.clone())?;
-                NodeOperator::Batch(
-                    providers
-                        .resolve_batch(provider, name, version)?
-                        .create(&spec, inputs, outputs)?,
-                )
+                match mode {
+                    CompileMode::Batch => NodeOperator::Batch(
+                        providers
+                            .resolve_batch(provider, name, version)?
+                            .create(&spec, inputs, outputs)?,
+                    ),
+                    CompileMode::Stream => NodeOperator::Stream(
+                        providers
+                            .resolve_stream(provider, name, version)?
+                            .create(&spec, inputs, outputs)?,
+                    ),
+                }
             }
         };
         builder = builder.add_node(&node.id, operator)?;
@@ -323,7 +365,7 @@ fn build_project(
             PortEndpoint::new(&edge.target_node, &edge.target_port)?,
         ))?;
     }
-    builder.compile_batch(udfs)
+    Ok(builder)
 }
 
 fn configured_ports(node: &NodeSpec, inputs: bool) -> Result<Vec<Port>> {
@@ -386,6 +428,7 @@ fn semantic_issues(
     project: &ProjectSpec,
     providers: &ProviderRegistry,
     udfs: &UdfRegistrySnapshot,
+    mode: CompileMode,
 ) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
     if project.format_version != PROJECT_FORMAT_VERSION {
@@ -435,7 +478,7 @@ fn semantic_issues(
         );
     }
     validate_run_options(&project.run_options, &mut issues);
-    validate_nodes(project, providers, udfs, &mut issues);
+    validate_nodes(project, providers, udfs, mode, &mut issues);
     validate_edges(project, &mut issues);
     validate_sources(project, &mut issues);
     issues
@@ -454,6 +497,7 @@ fn validate_nodes(
     project: &ProjectSpec,
     providers: &ProviderRegistry,
     udfs: &UdfRegistrySnapshot,
+    mode: CompileMode,
     issues: &mut Vec<ValidationIssue>,
 ) {
     let mut node_ids = BTreeSet::new();
@@ -481,7 +525,7 @@ fn validate_nodes(
         }
         validate_ports(&node.input_ports, &format!("{base}.input_ports"), issues);
         validate_ports(&node.output_ports, &format!("{base}.output_ports"), issues);
-        validate_operator(node, node_index, providers, udfs, issues);
+        validate_operator(node, node_index, providers, udfs, mode, issues);
         selected_udfs.extend(operator_udfs(&node.operator).iter().cloned());
     }
     if validate_selected_udfs(&selected_udfs).is_err() {
@@ -508,6 +552,7 @@ fn validate_operator(
     index: usize,
     providers: &ProviderRegistry,
     udfs: &UdfRegistrySnapshot,
+    mode: CompileMode,
     issues: &mut Vec<ValidationIssue>,
 ) {
     let base = format!("pipeline.nodes[{index}].operator");
@@ -572,7 +617,7 @@ fn validate_operator(
         } => {
             match ExternalOperatorSpec::new(provider, name, version, BTreeMap::new()) {
                 Ok(_) => {
-                    if providers.resolve_batch(provider, name, version).is_err() {
+                    if !provider_available(providers, mode, provider, name, version) {
                         issues.push(issue(
                             &base,
                             "missing_provider",
@@ -602,6 +647,19 @@ fn validate_operator(
             false,
             issues,
         );
+    }
+}
+
+fn provider_available(
+    providers: &ProviderRegistry,
+    mode: CompileMode,
+    provider: &str,
+    name: &str,
+    version: &str,
+) -> bool {
+    match mode {
+        CompileMode::Batch => providers.resolve_batch(provider, name, version).is_ok(),
+        CompileMode::Stream => providers.resolve_stream(provider, name, version).is_ok(),
     }
 }
 

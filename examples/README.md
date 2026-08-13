@@ -33,8 +33,9 @@ The files cover:
   DataFusion SQL query.
 - `03_registered_udf.py` — a trusted, versioned Python scalar UDF registered on
   `Runtime` and explicitly selected by a node.
-- `04_micro_batch_recovery.py` — a replayable source, checkpoint commit, plan
-  lease release, and recovery from the stored source cursor.
+- `04_micro_batch_recovery.py` — the async source-driven continuous lifecycle,
+  a replayable cursor, managed checkpoints, synchronous status, and explicit
+  terminal wait.
 - `05_async_execution.py` — non-blocking `execute_async()` use with copied
   settings and a timezone-aware deadline normalized to UTC inside an asyncio
   application.
@@ -58,8 +59,8 @@ operator API. Historical v1 behavior remains available at the
 
 The Rust crate ships parallel examples under
 [`crates/calc-flow/examples/`](../crates/calc-flow/examples/README.md). The
-expression (`01_datafusion_pipeline.py` ↔ `expression_pipeline.rs`), SQL join
-(`02_sql_join.py` ↔ `sql_join.rs`), and micro-batch recovery
-(`04_micro_batch_recovery.py` ↔ `micro_batch_recovery.rs`) examples share their
-datasets and expressions across surfaces so the Python binding and the Rust
-crate read as one engine.
+expression (`01_datafusion_pipeline.py` ↔ `expression_pipeline.rs`) and SQL
+join (`02_sql_join.py` ↔ `sql_join.rs`) examples share their datasets and
+expressions. `04_micro_batch_recovery.py` now demonstrates the source-driven
+continuous facade while `micro_batch_recovery.rs` remains the Rust v2
+counterpart until the atomic A6 cleanup.

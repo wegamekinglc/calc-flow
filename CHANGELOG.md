@@ -5,6 +5,14 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-14: Add the Python source-driven continuous facade with distinct
+  batch and stream plans, immutable connector/config values, managed local
+  checkpoints, one-shot runner ownership, async lifecycle methods, and
+  guarded blocking facades. Connector methods are validated as `async def`
+  before launch; cancelled wait observers detach without cancelling their
+  jobs. The push runner remains available as `LegacyStreamingRunner` until
+  the A6 atomic cleanup.
+
 - 2026-08-13: Add crate-private stable operator checkpoint identities and
   explicit stateless, versioned stateful, or unproven capabilities. Stream
   fingerprints now freeze the capability contract, checkpoint admission

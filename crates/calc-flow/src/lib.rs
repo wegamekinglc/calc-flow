@@ -31,7 +31,8 @@ pub use checkpoint::{
 pub use config::{
     ArrowFieldSpec, DataSourceSpec, EdgeSpec, NodeSpec, OperatorSpec, PROJECT_FORMAT_VERSION,
     PipelineSpec, PortSpec, PositionSpec, ProjectSpec, RunOptions, ValidationIssue,
-    ValidationReport, compile_project, project_json_schema, validate_project,
+    ValidationReport, compile_project, compile_stream_project, project_json_schema,
+    validate_project,
 };
 pub use context::{CancellationToken, RunContext};
 pub use datafusion::{DataFusionConfig, DataFusionQueryMetric, DataFusionRuntime};

@@ -34,13 +34,38 @@ fn provider_error(name: &str, error: impl std::fmt::Display) -> calc_flow::CalcF
     }
 }
 
-struct PythonAwaitRegistry {
+pub(crate) struct PythonAwaitRegistry {
     pending: AtomicU64,
     idle: tokio::sync::Notify,
 }
 
+pub(crate) struct PythonAsyncContext {
+    event_loop: Arc<PythonRoot>,
+    context: Arc<PythonRoot>,
+}
+
+impl PythonAsyncContext {
+    pub(crate) fn capture(py: Python<'_>) -> PyResult<Self> {
+        let event_loop = py
+            .import(pyo3::intern!(py, "asyncio"))?
+            .call_method0(pyo3::intern!(py, "get_running_loop"))?;
+        let context = py
+            .import(pyo3::intern!(py, "contextvars"))?
+            .call_method0(pyo3::intern!(py, "copy_context"))?;
+        Ok(Self {
+            event_loop: Arc::new(PythonRoot::new(event_loop.unbind())),
+            context: Arc::new(PythonRoot::new(context.unbind())),
+        })
+    }
+
+    pub(crate) fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(self.event_loop.object())?;
+        visit.call(self.context.object())
+    }
+}
+
 impl PythonAwaitRegistry {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             pending: AtomicU64::new(0),
             idle: tokio::sync::Notify::new(),
@@ -54,7 +79,7 @@ impl PythonAwaitRegistry {
         }
     }
 
-    async fn wait_idle(&self) {
+    pub(crate) async fn wait_idle(&self) {
         loop {
             let notified = self.idle.notified();
             if self.pending.load(Ordering::Acquire) == 0 {
@@ -299,10 +324,28 @@ impl Drop for PythonAwaitCancelGuard {
     }
 }
 
-async fn resolve_python(
+pub(crate) async fn resolve_python(
     value: Py<PyAny>,
     callback_name: &str,
     awaits: &Arc<PythonAwaitRegistry>,
+) -> calc_flow::Result<Py<PyAny>> {
+    resolve_python_with_context(value, callback_name, awaits, None).await
+}
+
+pub(crate) async fn resolve_python_in_context(
+    value: Py<PyAny>,
+    callback_name: &str,
+    awaits: &Arc<PythonAwaitRegistry>,
+    context: &Arc<PythonAsyncContext>,
+) -> calc_flow::Result<Py<PyAny>> {
+    resolve_python_with_context(value, callback_name, awaits, Some(context)).await
+}
+
+async fn resolve_python_with_context(
+    value: Py<PyAny>,
+    callback_name: &str,
+    awaits: &Arc<PythonAwaitRegistry>,
+    context: Option<&Arc<PythonAsyncContext>>,
 ) -> calc_flow::Result<Py<PyAny>> {
     let is_awaitable = Python::attach(|py| {
         py.import(pyo3::intern!(py, "inspect"))?
@@ -315,10 +358,21 @@ async fn resolve_python(
         return Ok(value);
     }
     let scheduled = Python::attach(|py| -> PyResult<_> {
-        let locals = pyo3_async_runtimes::tokio::get_current_locals(py)?;
-        let event_loop = locals.event_loop(py);
-        let context = locals.context(py);
-        let state = Arc::new(PythonAwaitState::new(event_loop.clone().unbind()));
+        let (event_loop, python_context) = if let Some(context) = context {
+            (
+                context.event_loop.object().clone_ref(py),
+                context
+                    .context
+                    .object()
+                    .bind(py)
+                    .call_method0(pyo3::intern!(py, "copy"))?
+                    .unbind(),
+            )
+        } else {
+            let locals = pyo3_async_runtimes::tokio::get_current_locals(py)?;
+            (locals.event_loop(py).unbind(), locals.context(py).unbind())
+        };
+        let state = Arc::new(PythonAwaitState::new(event_loop.clone_ref(py)));
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let completion = Arc::new(PythonAwaitCompletion {
             sender: Mutex::new(Some(sender)),
@@ -328,14 +382,14 @@ async fn resolve_python(
             py,
             PythonAwaitScheduler {
                 awaitable: Some(value),
-                context: Some(context.clone().unbind()),
+                context: Some(python_context.clone_ref(py)),
                 state: Some(Arc::clone(&state)),
                 completion,
             },
         )?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item(pyo3::intern!(py, "context"), context)?;
-        event_loop.call_method(
+        kwargs.set_item(pyo3::intern!(py, "context"), python_context)?;
+        event_loop.bind(py).call_method(
             pyo3::intern!(py, "call_soon_threadsafe"),
             (scheduler,),
             Some(&kwargs),
@@ -356,7 +410,10 @@ async fn resolve_python(
     result.map_err(|error| provider_error(callback_name, error))
 }
 
-fn python_json(value: &Bound<'_, PyAny>, label: &str) -> calc_flow::Result<serde_json::Value> {
+pub(crate) fn python_json(
+    value: &Bound<'_, PyAny>,
+    label: &str,
+) -> calc_flow::Result<serde_json::Value> {
     let py = value.py();
     let kwargs = PyDict::new(py);
     kwargs
