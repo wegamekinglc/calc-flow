@@ -1,17 +1,26 @@
-"""Resume micro-batch processing from a committed source cursor."""
+"""Run the source-driven continuous API with managed checkpoints."""
 
 from __future__ import annotations
 
-import gc
+import asyncio
 from tempfile import TemporaryDirectory
 
 import pyarrow as pa
 
 from calc_flow import (
     Batch,
-    FileCheckpointStore,
-    MicroBatchRunner,
+    Cursor,
+    Data,
+    DisabledWatermarks,
+    ManagedCheckpointRuntime,
+    NativeWatermarkCapability,
     PipelineBuilder,
+    ReplayPositioning,
+    SinkBinding,
+    SourceBinding,
+    SourceCapabilities,
+    SourceDeliveryCapability,
+    StreamingRunner,
 )
 
 
@@ -20,58 +29,74 @@ class ReplaySource:
         self._values = tuple(values)
         self._offset = 0
 
-    def open(self, cursor: object) -> None:
-        self._offset = 0 if cursor is None else int(cursor["offset"])
+    def capabilities(self) -> SourceCapabilities:
+        return SourceCapabilities(
+            ReplayPositioning.EXACT_PAUSE_REPORT_AND_SEEK,
+            SourceDeliveryCapability.LOSSLESS,
+            max_batch_rows=1,
+            max_batch_bytes=1024,
+            native_watermarks=NativeWatermarkCapability.NEVER_EMITS,
+        )
 
-    def next(self) -> tuple[Batch, dict[str, int], int] | None:
+    async def open(self, cursor: Cursor | None) -> None:
+        self._offset = 0 if cursor is None else int(cursor.payload["offset"])
+
+    async def next(self) -> Data | None:
         if self._offset == len(self._values):
             return None
         value = self._values[self._offset]
         self._offset += 1
-        return (
+        return Data(
             Batch.from_pyarrow(pa.table({"value": [value]})),
-            {"offset": self._offset},
-            self._offset,
+            Cursor(self._offset.to_bytes(8, "big"), {"offset": self._offset}),
         )
 
+    async def close(self) -> None:
+        pass
 
-def main() -> None:
-    with TemporaryDirectory(prefix="calc-flow-checkpoints-") as directory:
-        store = FileCheckpointStore(directory)
+
+class CollectSink:
+    def __init__(self) -> None:
+        self.values: list[int] = []
+
+    async def open(self) -> None:
+        pass
+
+    async def write(self, batch: Batch) -> None:
+        self.values.extend(batch.to_pyarrow()["result"].to_pylist())
+
+    async def close(self) -> None:
+        pass
+
+
+async def main() -> None:
+    with TemporaryDirectory(prefix="calc-flow-continuous-") as directory:
         plan = (
-            PipelineBuilder("recovery-example")
+            PipelineBuilder("continuous-example")
             .expression("calculate", "result = value + 1")
-            .compile()
+            .compile_stream()
         )
-        first_runner = MicroBatchRunner(
+        source = ReplaySource([1, 2, 3])
+        sink = CollectSink()
+        runner = StreamingRunner(
             plan,
-            ReplaySource([1, 2, 3]),
-            store,
-            checkpoint_every=1,
+            {
+                "input": SourceBinding(
+                    source,
+                    watermark_policy=DisabledWatermarks(),
+                )
+            },
+            {"output": [SinkBinding.ordinary("console", sink)]},
+            ManagedCheckpointRuntime(directory),
         )
-        first_result = first_runner.next()
-        del first_runner
-        gc.collect()
+        job = await runner.start_async()
+        print("started job:", job.id, job.status()["state"])
+        outcome = await job.wait_async()
 
-        recovered_runner = MicroBatchRunner(
-            plan,
-            ReplaySource([1, 2, 3]),
-            store,
-            checkpoint_every=1,
-        )
-        recovered_results = []
-        while (result := recovered_runner.next()) is not None:
-            recovered_results.append(result.outputs["output"].to_pyarrow().to_pylist())
-        checkpoint = store.load_blocking("recovery-example")
-
-        assert first_result is not None
-        print("first committed batch:", first_result.outputs["output"].to_pyarrow())
-        print("recovered batches:", recovered_results)
-        print(
-            "final source cursor:",
-            checkpoint["source_cursor"] if checkpoint else None,
-        )
+        print("terminal state:", outcome.state)
+        print("completed epoch:", outcome.completed_epoch)
+        print("results:", sink.values)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

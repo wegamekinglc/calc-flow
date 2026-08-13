@@ -1,18 +1,27 @@
 use std::{
+    collections::BTreeMap,
     future::Future,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 use parking_lot::Mutex;
 use pyo3::{
-    IntoPyObjectExt,
+    IntoPyObjectExt, PyTraverseError, PyVisit,
+    exceptions::{PyRuntimeError, PyTypeError},
     prelude::*,
     sync::PyOnceLock,
-    types::{PyAny, PyCFunction, PyDict, PyDictMethods, PyTuple, PyType},
+    types::{PyAny, PyCFunction, PyCapsule, PyDict, PyDictMethods, PyList, PyTuple, PyType},
+};
+
+use crate::{
+    batch::PyBatch,
+    config::PythonRoot,
+    pipeline::PyStreamExecutionPlan,
+    runtime::{PythonAsyncContext, PythonAwaitRegistry, python_json, resolve_python_in_context},
 };
 
 const SAFE_EXCEPTION_STORAGE: &str = "_calc_flow_safe_fields";
@@ -103,6 +112,10 @@ pub(crate) struct PyContinuousStreamingRunner {
 
 struct RunnerStartState {
     runner: Mutex<Option<calc_flow::continuous::StreamingRunner>>,
+    roots: Mutex<Vec<Arc<PythonRoot>>>,
+    awaits: Arc<PythonAwaitRegistry>,
+    context: Arc<Mutex<Option<Arc<PythonAsyncContext>>>>,
+    ownership: Arc<ConnectorOwnership>,
 }
 
 #[pyclass(frozen, module = "calc_flow._native")]
@@ -113,12 +126,25 @@ struct PyStreamingStartAwaitable {
 
 #[pyclass(name = "_StreamingJob", frozen, module = "calc_flow._native")]
 pub(crate) struct PyStreamingJob {
-    inner: Arc<calc_flow::continuous::StreamingJob>,
+    inner: Mutex<Option<Arc<calc_flow::continuous::StreamingJob>>>,
+    roots: Arc<Mutex<Vec<Arc<PythonRoot>>>>,
+    awaits: Arc<PythonAwaitRegistry>,
+    context: Arc<Mutex<Option<Arc<PythonAsyncContext>>>>,
+}
+
+#[pyclass(
+    name = "_ManagedCheckpointRuntime",
+    frozen,
+    module = "calc_flow._native"
+)]
+pub(crate) struct PyManagedCheckpointRuntime {
+    inner: Mutex<Option<calc_flow::continuous::ManagedCheckpointRuntime>>,
 }
 
 #[pyclass(frozen, module = "calc_flow._native")]
 struct PyStreamingJobAwaitable {
     inner: Arc<calc_flow::continuous::StreamingJob>,
+    awaits: Arc<PythonAwaitRegistry>,
     operation: JobOperation,
     started: AtomicBool,
 }
@@ -131,6 +157,456 @@ enum JobOperation {
     Wait,
 }
 
+fn connector_error(component: &str, error: impl std::fmt::Display) -> calc_flow::CalcFlowError {
+    calc_flow::CalcFlowError::ExternalProvider {
+        provider: "python".into(),
+        name: component.into(),
+        version: "1".into(),
+        message: error.to_string(),
+    }
+}
+
+fn required_item<'py>(mapping: &Bound<'py, PyDict>, key: &str) -> PyResult<Bound<'py, PyAny>> {
+    mapping
+        .get_item(key)?
+        .ok_or_else(|| PyTypeError::new_err(format!("missing required field {key:?}")))
+}
+
+fn json_map(value: &Bound<'_, PyAny>, label: &str) -> calc_flow::Result<calc_flow::JsonMap> {
+    let value = python_json(value, label)?;
+    serde_json::from_value(value).map_err(|error| connector_error(label, error))
+}
+
+struct PythonContinuousSource {
+    binding: Arc<PythonRoot>,
+    awaits: Arc<PythonAwaitRegistry>,
+    capability_error: Arc<Mutex<Option<String>>>,
+    context: Arc<Mutex<Option<Arc<PythonAsyncContext>>>>,
+    _ownership: ConnectorOwnershipLease,
+}
+
+struct ConnectorOwnership {
+    pending: AtomicUsize,
+    idle: tokio::sync::Notify,
+}
+
+impl ConnectorOwnership {
+    fn new() -> Self {
+        Self {
+            pending: AtomicUsize::new(0),
+            idle: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn retain(self: &Arc<Self>) -> ConnectorOwnershipLease {
+        self.pending.fetch_add(1, Ordering::AcqRel);
+        ConnectorOwnershipLease(Arc::clone(self))
+    }
+
+    async fn wait_idle(&self) {
+        loop {
+            let notified = self.idle.notified();
+            if self.pending.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+struct ConnectorOwnershipLease(Arc<ConnectorOwnership>);
+
+type PythonSourceBindings = (
+    BTreeMap<String, calc_flow::continuous::SourceBinding>,
+    Vec<Arc<PythonRoot>>,
+);
+type PythonSinkBindings = (
+    BTreeMap<String, Vec<calc_flow::continuous::SinkBinding>>,
+    Vec<Arc<PythonRoot>>,
+);
+
+impl Drop for ConnectorOwnershipLease {
+    fn drop(&mut self) {
+        let previous = self.0.pending.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0);
+        if previous == 1 {
+            self.0.idle.notify_waiters();
+        }
+    }
+}
+
+async fn resolve_connector(
+    value: Py<PyAny>,
+    callback_name: &str,
+    awaits: &Arc<PythonAwaitRegistry>,
+    context: &Arc<Mutex<Option<Arc<PythonAsyncContext>>>>,
+) -> calc_flow::Result<Py<PyAny>> {
+    let context = context
+        .lock()
+        .clone()
+        .ok_or_else(|| connector_error(callback_name, "Python event loop is unavailable"))?;
+    resolve_python_in_context(value, callback_name, awaits, &context).await
+}
+
+impl PythonContinuousSource {
+    fn parsed_capabilities(&self) -> PyResult<calc_flow::continuous::SourceCapabilities> {
+        Python::attach(|py| {
+            let value = self
+                .binding
+                .object()
+                .bind(py)
+                .call_method0("_native_capabilities")?;
+            let value = value.cast::<PyDict>()?;
+            let replay_positioning = match required_item(value, "replay_positioning")?
+                .extract::<String>()?
+                .as_str()
+            {
+                "exact_pause_report_and_seek" => {
+                    calc_flow::continuous::ReplayPositioning::ExactPauseReportAndSeek
+                }
+                "unsupported" => calc_flow::continuous::ReplayPositioning::Unsupported,
+                other => {
+                    return Err(PyTypeError::new_err(format!(
+                        "unsupported replay positioning {other:?}"
+                    )));
+                }
+            };
+            let delivery = match required_item(value, "delivery")?
+                .extract::<String>()?
+                .as_str()
+            {
+                "lossless" => calc_flow::continuous::SourceDeliveryCapability::Lossless,
+                "lossy" => calc_flow::continuous::SourceDeliveryCapability::Lossy,
+                other => {
+                    return Err(PyTypeError::new_err(format!(
+                        "unsupported source delivery {other:?}"
+                    )));
+                }
+            };
+            let schema = required_item(value, "schema")?;
+            let schema = if schema.is_none() {
+                calc_flow::continuous::SourceSchema::DynamicOrUnknown
+            } else {
+                let capsule = schema
+                    .call_method0("__arrow_c_schema__")?
+                    .cast_into::<PyCapsule>()?;
+                let schema = pyo3_arrow::PySchema::from_arrow_pycapsule(&capsule)?;
+                calc_flow::continuous::SourceSchema::Exact(schema.into())
+            };
+            let native_watermarks = match required_item(value, "native_watermarks")?
+                .extract::<String>()?
+                .as_str()
+            {
+                "never_emits" => calc_flow::continuous::NativeWatermarkCapability::NeverEmits,
+                "emits_native" => calc_flow::continuous::NativeWatermarkCapability::EmitsNative,
+                "runtime_toggleable" => {
+                    calc_flow::continuous::NativeWatermarkCapability::RuntimeToggleable
+                }
+                "unknown" => calc_flow::continuous::NativeWatermarkCapability::Unknown,
+                other => {
+                    return Err(PyTypeError::new_err(format!(
+                        "unsupported native watermark capability {other:?}"
+                    )));
+                }
+            };
+            Ok(calc_flow::continuous::SourceCapabilities {
+                replay_positioning,
+                delivery,
+                max_batch_rows: required_item(value, "max_batch_rows")?.extract()?,
+                max_batch_bytes: required_item(value, "max_batch_bytes")?.extract()?,
+                schema,
+                native_watermarks,
+            })
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl calc_flow::continuous::StreamSource for PythonContinuousSource {
+    fn capabilities(&self) -> calc_flow::continuous::SourceCapabilities {
+        self.parsed_capabilities().unwrap_or_else(|error| {
+            self.capability_error.lock().replace(error.to_string());
+            calc_flow::continuous::SourceCapabilities {
+                replay_positioning:
+                    calc_flow::continuous::ReplayPositioning::ExactPauseReportAndSeek,
+                delivery: calc_flow::continuous::SourceDeliveryCapability::Lossless,
+                max_batch_rows: usize::MAX,
+                max_batch_bytes: usize::MAX,
+                schema: calc_flow::continuous::SourceSchema::DynamicOrUnknown,
+                native_watermarks: calc_flow::continuous::NativeWatermarkCapability::NeverEmits,
+            }
+        })
+    }
+
+    async fn open(
+        &mut self,
+        cursor: Option<calc_flow::continuous::Cursor>,
+    ) -> calc_flow::Result<()> {
+        if let Some(error) = self.capability_error.lock().take() {
+            return Err(connector_error("source.capabilities", error));
+        }
+        let (source_id, order, payload) = Python::attach(|py| -> PyResult<_> {
+            let Some(cursor) = cursor else {
+                return Ok((py.None(), py.None(), py.None()));
+            };
+            let payload = serde_json::to_string(cursor.payload())
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            Ok((
+                cursor.source_id().into_py_any(py)?,
+                cursor.order().into_py_any(py)?,
+                crate::config::json_to_python(py, &payload)?.unbind(),
+            ))
+        })
+        .map_err(|error| connector_error("source.open", error))?;
+        let value = Python::attach(|py| {
+            self.binding
+                .object()
+                .bind(py)
+                .call_method1("_native_open", (source_id, order, payload))
+                .map(Bound::unbind)
+        })
+        .map_err(|error| connector_error("source.open", error))?;
+        resolve_connector(value, "source.open", &self.awaits, &self.context).await?;
+        Ok(())
+    }
+
+    async fn next(&mut self) -> calc_flow::Result<Option<calc_flow::continuous::SourceEvent>> {
+        let value = Python::attach(|py| {
+            self.binding
+                .object()
+                .bind(py)
+                .call_method0("_native_next")
+                .map(Bound::unbind)
+        })
+        .map_err(|error| connector_error("source.next", error))?;
+        let value = resolve_connector(value, "source.next", &self.awaits, &self.context).await?;
+        Python::attach(|py| {
+            let value = value.bind(py);
+            if value.is_none() {
+                return Ok(None);
+            }
+            let value = value
+                .cast::<PyTuple>()
+                .map_err(|_| connector_error("source.next", "invalid source event"))?;
+            let tag = value
+                .get_item(0)
+                .and_then(|item| item.extract::<String>())
+                .map_err(|error| connector_error("source.next", error))?;
+            let event = match tag.as_str() {
+                "data" if value.len() == 5 => {
+                    let batch = value
+                        .get_item(1)
+                        .map_err(|error| connector_error("source.next", error))?
+                        .extract::<PyRef<'_, PyBatch>>()
+                        .map_err(|error| connector_error("source.next", error))?
+                        .clone_inner()
+                        .and_then(|batch| crate::batch::rehome_python_payload(py, batch))
+                        .map_err(|error| connector_error("source.next", error))?;
+                    let source_id = value
+                        .get_item(2)
+                        .and_then(|item| item.extract::<Option<String>>())
+                        .map_err(|error| connector_error("source.next", error))?;
+                    let order = value
+                        .get_item(3)
+                        .and_then(|item| item.extract::<Vec<u8>>())
+                        .map_err(|error| connector_error("source.next", error))?;
+                    let payload = value
+                        .get_item(4)
+                        .map_err(|error| connector_error("source.next", error))?;
+                    let payload = json_map(&payload, "source.next cursor")?;
+                    let cursor = match source_id {
+                        Some(source_id) => {
+                            calc_flow::continuous::Cursor::new(source_id, order, payload)?
+                        }
+                        None => calc_flow::continuous::Cursor::unbound(order, payload)?,
+                    };
+                    calc_flow::continuous::SourceEvent::Data { batch, cursor }
+                }
+                "watermark" if value.len() == 2 => {
+                    let micros = value
+                        .get_item(1)
+                        .and_then(|item| item.extract::<i64>())
+                        .map_err(|error| connector_error("source.next", error))?;
+                    calc_flow::continuous::SourceEvent::Watermark(
+                        calc_flow::EventTime::from_micros(micros),
+                    )
+                }
+                "idle" if value.len() == 1 => calc_flow::continuous::SourceEvent::Idle,
+                _ => return Err(connector_error("source.next", "invalid source event")),
+            };
+            Ok(Some(event))
+        })
+    }
+
+    async fn close(&mut self) -> calc_flow::Result<()> {
+        let value = Python::attach(|py| {
+            self.binding
+                .object()
+                .bind(py)
+                .call_method0("_native_close")
+                .map(Bound::unbind)
+        })
+        .map_err(|error| connector_error("source.close", error))?;
+        resolve_connector(value, "source.close", &self.awaits, &self.context).await?;
+        Ok(())
+    }
+}
+
+struct PythonContinuousSink {
+    binding: Arc<PythonRoot>,
+    awaits: Arc<PythonAwaitRegistry>,
+    context: Arc<Mutex<Option<Arc<PythonAsyncContext>>>>,
+    _ownership: ConnectorOwnershipLease,
+}
+
+impl PythonContinuousSink {
+    async fn call0(&self, method: &str) -> calc_flow::Result<()> {
+        let value = Python::attach(|py| {
+            self.binding
+                .object()
+                .bind(py)
+                .call_method0(method)
+                .map(Bound::unbind)
+        })
+        .map_err(|error| connector_error(method, error))?;
+        resolve_connector(value, method, &self.awaits, &self.context).await?;
+        Ok(())
+    }
+
+    async fn call_args(&self, method: &str, args: Py<PyTuple>) -> calc_flow::Result<Py<PyAny>> {
+        let value = Python::attach(|py| {
+            self.binding
+                .object()
+                .bind(py)
+                .call_method1(method, args.bind(py))
+                .map(Bound::unbind)
+        })
+        .map_err(|error| connector_error(method, error))?;
+        resolve_connector(value, method, &self.awaits, &self.context).await
+    }
+
+    async fn write_batch(&self, batch: &calc_flow::Batch) -> calc_flow::Result<()> {
+        let args = Python::attach(|py| {
+            let batch = Py::new(py, PyBatch::from_inner_python(py, batch.clone())?)?;
+            PyTuple::new(py, [batch]).map(Bound::unbind)
+        })
+        .map_err(|error| connector_error("sink.write", error))?;
+        self.call_args("_native_write", args).await?;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl calc_flow::continuous::StreamSink for PythonContinuousSink {
+    async fn open(&mut self) -> calc_flow::Result<()> {
+        self.call0("_native_open").await
+    }
+
+    async fn write(&mut self, batch: &calc_flow::Batch) -> calc_flow::Result<()> {
+        self.write_batch(batch).await
+    }
+
+    async fn close(&mut self) -> calc_flow::Result<()> {
+        self.call0("_native_close").await
+    }
+}
+
+#[async_trait::async_trait]
+impl calc_flow::continuous::TransactionalStreamSink for PythonContinuousSink {
+    async fn open(&mut self) -> calc_flow::Result<()> {
+        self.call0("_native_open").await
+    }
+
+    async fn begin_epoch(&mut self, epoch: calc_flow::Epoch) -> calc_flow::Result<()> {
+        let args = Python::attach(|py| PyTuple::new(py, [epoch.as_u64()]).map(Bound::unbind))
+            .map_err(|error| connector_error("sink.begin_epoch", error))?;
+        self.call_args("_native_begin_epoch", args).await?;
+        Ok(())
+    }
+
+    async fn write(&mut self, batch: &calc_flow::Batch) -> calc_flow::Result<()> {
+        self.write_batch(batch).await
+    }
+
+    async fn pre_commit(
+        &mut self,
+        epoch: calc_flow::Epoch,
+    ) -> calc_flow::Result<calc_flow::JsonMap> {
+        let args = Python::attach(|py| PyTuple::new(py, [epoch.as_u64()]).map(Bound::unbind))
+            .map_err(|error| connector_error("sink.pre_commit", error))?;
+        let value = self.call_args("_native_pre_commit", args).await?;
+        Python::attach(|py| json_map(value.bind(py), "sink.pre_commit"))
+    }
+
+    async fn commit(
+        &mut self,
+        epoch: calc_flow::Epoch,
+        pre_commit: &calc_flow::JsonMap,
+    ) -> calc_flow::Result<()> {
+        let args = python_epoch_json_args(epoch, Some(pre_commit), "sink.commit")?;
+        self.call_args("_native_commit", args).await?;
+        Ok(())
+    }
+
+    async fn abort(
+        &mut self,
+        epoch: calc_flow::Epoch,
+        pre_commit: Option<&calc_flow::JsonMap>,
+    ) -> calc_flow::Result<()> {
+        let args = python_epoch_json_args(epoch, pre_commit, "sink.abort")?;
+        self.call_args("_native_abort", args).await?;
+        Ok(())
+    }
+
+    async fn recover(
+        &mut self,
+        recovery: &calc_flow::continuous::SinkRecovery,
+    ) -> calc_flow::Result<()> {
+        let args = Python::attach(|py| -> PyResult<_> {
+            let delivery = sink_delivery_to_py(py, recovery.delivery())?;
+            let encoded = serde_json::to_string(recovery.pre_commit())
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            let pre_commit = crate::config::json_to_python(py, &encoded)?;
+            PyTuple::new(
+                py,
+                [
+                    recovery.epoch().as_u64().into_py_any(py)?,
+                    recovery.terminal().into_py_any(py)?,
+                    delivery.into_any().unbind(),
+                    pre_commit.into_any().unbind(),
+                ],
+            )
+            .map(Bound::unbind)
+        })
+        .map_err(|error| connector_error("sink.recover", error))?;
+        self.call_args("_native_recover", args).await?;
+        Ok(())
+    }
+
+    async fn close(&mut self) -> calc_flow::Result<()> {
+        self.call0("_native_close").await
+    }
+}
+
+fn python_epoch_json_args(
+    epoch: calc_flow::Epoch,
+    value: Option<&calc_flow::JsonMap>,
+    label: &str,
+) -> calc_flow::Result<Py<PyTuple>> {
+    Python::attach(|py| {
+        let value = match value {
+            Some(value) => {
+                let encoded = serde_json::to_string(value)
+                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                crate::config::json_to_python(py, &encoded)?.unbind()
+            }
+            None => py.None(),
+        };
+        PyTuple::new(py, [epoch.as_u64().into_py_any(py)?, value]).map(Bound::unbind)
+    })
+    .map_err(|error| connector_error(label, error))
+}
+
 impl PyContinuousStreamingRunner {
     #[allow(
         dead_code,
@@ -140,14 +616,243 @@ impl PyContinuousStreamingRunner {
         Self {
             inner: Arc::new(RunnerStartState {
                 runner: Mutex::new(Some(inner)),
+                roots: Mutex::new(Vec::new()),
+                awaits: Arc::new(PythonAwaitRegistry::new()),
+                context: Arc::new(Mutex::new(None)),
+                ownership: Arc::new(ConnectorOwnership::new()),
             }),
         }
     }
 }
 
+impl PyManagedCheckpointRuntime {
+    fn take(&self) -> PyResult<calc_flow::continuous::ManagedCheckpointRuntime> {
+        self.inner.lock().take().ok_or_else(|| {
+            PyRuntimeError::new_err("managed checkpoint runtime has already been consumed")
+        })
+    }
+}
+
+#[pymethods]
+impl PyManagedCheckpointRuntime {
+    #[new]
+    #[pyo3(signature = (directory, /))]
+    fn new(directory: &str) -> PyResult<Self> {
+        let inner = calc_flow::continuous::ManagedCheckpointRuntime::new(directory)
+            .map_err(crate::error::to_py_err)?;
+        Ok(Self {
+            inner: Mutex::new(Some(inner)),
+        })
+    }
+}
+
+fn source_policy(binding: &Bound<'_, PyAny>) -> PyResult<calc_flow::continuous::WatermarkPolicy> {
+    let value = binding.call_method0("_native_policy")?;
+    let value = value.cast::<PyDict>()?;
+    let optional_duration = |key: &str| -> PyResult<Option<Duration>> {
+        required_item(value, key)?
+            .extract::<Option<u64>>()
+            .map(|value| value.map(Duration::from_micros))
+    };
+    match required_item(value, "kind")?.extract::<String>()?.as_str() {
+        "source_provided" => Ok(calc_flow::continuous::WatermarkPolicy::SourceProvided),
+        "bounded_out_of_orderness" => Ok(
+            calc_flow::continuous::WatermarkPolicy::BoundedOutOfOrderness {
+                event_time_column: required_item(value, "event_time_column")?.extract()?,
+                max_out_of_orderness: Duration::from_micros(
+                    required_item(value, "max_out_of_orderness_micros")?.extract()?,
+                ),
+                emit_interval: Duration::from_micros(
+                    required_item(value, "emit_interval_micros")?.extract()?,
+                ),
+                idle_timeout: optional_duration("idle_timeout_micros")?,
+            },
+        ),
+        "disabled" => Ok(calc_flow::continuous::WatermarkPolicy::Disabled {
+            idle_timeout: optional_duration("idle_timeout_micros")?,
+        }),
+        kind => Err(PyTypeError::new_err(format!(
+            "unsupported watermark policy {kind:?}"
+        ))),
+    }
+}
+
+fn build_sources(
+    sources: &Bound<'_, PyDict>,
+    awaits: &Arc<PythonAwaitRegistry>,
+    context: &Arc<Mutex<Option<Arc<PythonAsyncContext>>>>,
+    ownership: &Arc<ConnectorOwnership>,
+) -> PyResult<PythonSourceBindings> {
+    let mut native = BTreeMap::new();
+    let mut roots = Vec::new();
+    for (source_id, binding) in sources {
+        let source_id = source_id
+            .extract::<String>()
+            .map_err(|_| PyTypeError::new_err("source binding IDs must be strings"))?;
+        let policy = source_policy(&binding)?;
+        let root = Arc::new(PythonRoot::new(binding.unbind()));
+        let source = PythonContinuousSource {
+            binding: Arc::clone(&root),
+            awaits: Arc::clone(awaits),
+            capability_error: Arc::new(Mutex::new(None)),
+            context: Arc::clone(context),
+            _ownership: ownership.retain(),
+        };
+        native.insert(
+            source_id,
+            calc_flow::continuous::SourceBinding::new(source).with_watermark_policy(policy),
+        );
+        roots.push(root);
+    }
+    Ok((native, roots))
+}
+
+fn sink_descriptor<'py>(binding: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
+    binding
+        .call_method0("_native_descriptor")?
+        .cast_into::<PyDict>()
+        .map_err(Into::into)
+}
+
+fn build_one_sink(
+    binding: Bound<'_, PyAny>,
+    awaits: &Arc<PythonAwaitRegistry>,
+    context: &Arc<Mutex<Option<Arc<PythonAsyncContext>>>>,
+    ownership: &Arc<ConnectorOwnership>,
+) -> PyResult<(calc_flow::continuous::SinkBinding, Arc<PythonRoot>)> {
+    let descriptor = sink_descriptor(&binding)?;
+    let kind = required_item(&descriptor, "kind")?.extract::<String>()?;
+    let sink_id = binding.getattr("sink_id")?.extract::<String>()?;
+    let root = Arc::new(PythonRoot::new(binding.unbind()));
+    let sink = PythonContinuousSink {
+        binding: Arc::clone(&root),
+        awaits: Arc::clone(awaits),
+        context: Arc::clone(context),
+        _ownership: ownership.retain(),
+    };
+    let binding = match kind.as_str() {
+        "ordinary" => calc_flow::continuous::SinkBinding::ordinary(&sink_id, sink),
+        "transactional" => calc_flow::continuous::SinkBinding::transactional(&sink_id, sink),
+        "epoch_idempotent" => {
+            let mechanism = required_item(&descriptor, "mechanism")?.extract::<String>()?;
+            let retention = match required_item(&descriptor, "retention")?
+                .extract::<String>()?
+                .as_str()
+            {
+                "bounded" => calc_flow::RetentionClass::Bounded,
+                "unbounded" => calc_flow::RetentionClass::Unbounded,
+                value => {
+                    return Err(PyTypeError::new_err(format!(
+                        "unsupported retention {value:?}"
+                    )));
+                }
+            };
+            calc_flow::continuous::SinkBinding::epoch_idempotent(
+                &sink_id, sink, &mechanism, retention,
+            )
+        }
+        value => {
+            return Err(PyTypeError::new_err(format!(
+                "unsupported sink delivery {value:?}"
+            )));
+        }
+    }
+    .map_err(crate::error::to_py_err)?;
+    Ok((binding, root))
+}
+
+fn build_sinks(
+    sinks: &Bound<'_, PyDict>,
+    awaits: &Arc<PythonAwaitRegistry>,
+    context: &Arc<Mutex<Option<Arc<PythonAsyncContext>>>>,
+    ownership: &Arc<ConnectorOwnership>,
+) -> PyResult<PythonSinkBindings> {
+    let mut native = BTreeMap::new();
+    let mut roots = Vec::new();
+    for (output_id, bindings) in sinks {
+        let output_id = output_id
+            .extract::<String>()
+            .map_err(|_| PyTypeError::new_err("sink output IDs must be strings"))?;
+        let bindings = if let Ok(values) = bindings.cast::<PyList>() {
+            values.iter().collect::<Vec<_>>()
+        } else if let Ok(values) = bindings.cast::<PyTuple>() {
+            values.iter().collect::<Vec<_>>()
+        } else {
+            return Err(PyTypeError::new_err(format!(
+                "sinks[{output_id:?}] must be a list or tuple"
+            )));
+        };
+        let mut output_bindings = Vec::new();
+        for binding in bindings {
+            let (binding, root) = build_one_sink(binding, awaits, context, ownership)?;
+            output_bindings.push(binding);
+            roots.push(root);
+        }
+        native.insert(output_id, output_bindings);
+    }
+    Ok((native, roots))
+}
+
+fn runtime_config(config: &Bound<'_, PyDict>) -> PyResult<calc_flow::StreamRuntimeConfig> {
+    Ok(calc_flow::StreamRuntimeConfig {
+        checkpoint_interval: Duration::from_micros(
+            required_item(config, "checkpoint_interval_micros")?.extract()?,
+        ),
+        checkpoint_timeout: Duration::from_micros(
+            required_item(config, "checkpoint_timeout_micros")?.extract()?,
+        ),
+        edge_budget: calc_flow::EdgeBudget::new(
+            required_item(config, "edge_max_rows")?.extract()?,
+            required_item(config, "edge_max_bytes")?.extract()?,
+        )
+        .map_err(crate::error::to_py_err)?,
+        retained_epochs: required_item(config, "retained_epochs")?.extract()?,
+    })
+}
+
 #[pymethods]
 impl PyContinuousStreamingRunner {
+    #[new]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 constructor extraction owns its PyRef boundary values"
+    )]
+    fn new(
+        plan: PyRef<'_, PyStreamExecutionPlan>,
+        sources: &Bound<'_, PyDict>,
+        sinks: &Bound<'_, PyDict>,
+        checkpoints: PyRef<'_, PyManagedCheckpointRuntime>,
+        config: &Bound<'_, PyDict>,
+    ) -> PyResult<Self> {
+        let awaits = Arc::new(PythonAwaitRegistry::new());
+        let context = Arc::new(Mutex::new(None));
+        let ownership = Arc::new(ConnectorOwnership::new());
+        let (sources, mut roots) = build_sources(sources, &awaits, &context, &ownership)?;
+        let (sinks, sink_roots) = build_sinks(sinks, &awaits, &context, &ownership)?;
+        roots.extend(sink_roots);
+        let config = runtime_config(config)?;
+        let (plan, plan_owner) = plan.take()?;
+        roots.push(Arc::new(PythonRoot::new(plan_owner)));
+        let checkpoints = checkpoints.take()?;
+        let runner = calc_flow::continuous::StreamingRunner::new(plan, sources, sinks, checkpoints)
+            .and_then(|runner| runner.with_runtime_config(config))
+            .map_err(streaming_py_err)?;
+        Ok(Self {
+            inner: Arc::new(RunnerStartState {
+                runner: Mutex::new(Some(runner)),
+                roots: Mutex::new(roots),
+                awaits,
+                context,
+                ownership,
+            }),
+        })
+    }
+
     fn start_async(&self, py: Python<'_>) -> PyResult<Py<PyStreamingStartAwaitable>> {
+        self.inner
+            .context
+            .lock()
+            .replace(Arc::new(PythonAsyncContext::capture(py)?));
         Py::new(
             py,
             PyStreamingStartAwaitable {
@@ -161,46 +866,100 @@ impl PyContinuousStreamingRunner {
         let consumed = self.inner.runner.lock().is_none();
         format!("<calc_flow._native._ContinuousStreamingRunner consumed={consumed}>")
     }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        for root in self.inner.roots.lock().iter() {
+            visit.call(root.object())?;
+        }
+        if let Some(context) = self.inner.context.lock().as_ref() {
+            context.traverse(&visit)?;
+        }
+        Ok(())
+    }
+
+    fn __clear__(&self) {
+        let runner = self.inner.runner.lock().take();
+        self.inner.roots.lock().clear();
+        if runner.is_some() {
+            drop(self.inner.context.lock().take());
+        }
+        drop(runner);
+    }
+
+    fn _release_roots(&self) {
+        self.inner.roots.lock().clear();
+    }
+
+    fn _wait_start_cleanup_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let ownership = Arc::clone(&self.inner.ownership);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            ownership.wait_idle().await;
+            Ok(())
+        })
+    }
 }
 
 #[pymethods]
 impl PyStreamingStartAwaitable {
     fn __await__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         if self.started.swap(true, Ordering::AcqRel) {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            return Err(PyRuntimeError::new_err(
                 "streaming start awaitable has already been awaited",
             ));
         }
         let runner = self.inner.runner.lock().take().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err(
-                "streaming runner has already been consumed by start()",
-            )
+            PyRuntimeError::new_err("streaming runner has already been consumed by start()")
         })?;
+        let state = Arc::clone(&self.inner);
         let observer = observer_result_future(py, async move {
             let job = runner.start().await.map_err(streaming_py_err)?;
-            Python::attach(|py| Py::new(py, PyStreamingJob::from_inner(job)))
+            let roots = state.roots.lock().clone();
+            let awaits = Arc::clone(&state.awaits);
+            let context = Arc::clone(&state.context);
+            Python::attach(|py| {
+                Py::new(
+                    py,
+                    PyStreamingJob::from_inner_with_roots(job, roots, awaits, context),
+                )
+            })
         })?;
         resolved_observer_await(py, observer)
     }
 }
 
 impl PyStreamingJob {
-    fn from_inner(inner: calc_flow::continuous::StreamingJob) -> Self {
+    fn from_inner_with_roots(
+        inner: calc_flow::continuous::StreamingJob,
+        roots: Vec<Arc<PythonRoot>>,
+        awaits: Arc<PythonAwaitRegistry>,
+        context: Arc<Mutex<Option<Arc<PythonAsyncContext>>>>,
+    ) -> Self {
         Self {
-            inner: Arc::new(inner),
+            inner: Mutex::new(Some(Arc::new(inner))),
+            roots: Arc::new(Mutex::new(roots)),
+            awaits,
+            context,
         }
+    }
+
+    fn job(&self) -> PyResult<Arc<calc_flow::continuous::StreamingJob>> {
+        self.inner
+            .lock()
+            .clone()
+            .ok_or_else(|| PyRuntimeError::new_err("StreamingJob has been cleared"))
     }
 }
 
 #[pymethods]
 impl PyStreamingJob {
     #[getter]
-    fn id(&self) -> u64 {
-        self.inner.id()
+    fn id(&self) -> PyResult<u64> {
+        self.job().map(|job| job.id())
     }
 
     fn status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        job_status_to_py(py, &self.inner.status())
+        job_status_to_py(py, &self.job()?.status())
     }
 
     fn trigger_checkpoint_async(&self, py: Python<'_>) -> PyResult<Py<PyStreamingJobAwaitable>> {
@@ -220,11 +979,37 @@ impl PyStreamingJob {
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "<calc_flow._native._StreamingJob id={} state={}>",
-            self.inner.id(),
-            job_state_name(self.inner.status().state)
+        self.job().map_or_else(
+            |_| "<calc_flow._native._StreamingJob cleared=True>".into(),
+            |job| {
+                format!(
+                    "<calc_flow._native._StreamingJob id={} state={}>",
+                    job.id(),
+                    job_state_name(job.status().state)
+                )
+            },
         )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        for root in self.roots.lock().iter() {
+            visit.call(root.object())?;
+        }
+        if let Some(context) = self.context.lock().as_ref() {
+            context.traverse(&visit)?;
+        }
+        Ok(())
+    }
+
+    fn __clear__(&self) {
+        drop(self.inner.lock().take());
+        self.roots.lock().clear();
+    }
+
+    fn _release_roots(&self) {
+        self.roots.lock().clear();
+        drop(self.context.lock().take());
     }
 }
 
@@ -237,7 +1022,8 @@ impl PyStreamingJob {
         Py::new(
             py,
             PyStreamingJobAwaitable {
-                inner: Arc::clone(&self.inner),
+                inner: self.job()?,
+                awaits: Arc::clone(&self.awaits),
                 operation,
                 started: AtomicBool::new(false),
             },
@@ -249,11 +1035,12 @@ impl PyStreamingJob {
 impl PyStreamingJobAwaitable {
     fn __await__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         if self.started.swap(true, Ordering::AcqRel) {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            return Err(PyRuntimeError::new_err(
                 "streaming job awaitable has already been awaited",
             ));
         }
         let job = Arc::clone(&self.inner);
+        let awaits = Arc::clone(&self.awaits);
         let observer = match self.operation {
             JobOperation::TriggerCheckpoint => persistent_future(py, async move {
                 job.trigger_checkpoint()
@@ -263,14 +1050,17 @@ impl PyStreamingJobAwaitable {
             })?,
             JobOperation::Shutdown => persistent_future(py, async move {
                 let outcome = job.shutdown().await;
+                awaits.wait_idle().await;
                 Python::attach(|py| job_outcome_to_py(py, &outcome).map(Bound::unbind))
             })?,
             JobOperation::Cancel => persistent_future(py, async move {
                 let outcome = job.cancel().await;
+                awaits.wait_idle().await;
                 Python::attach(|py| job_outcome_to_py(py, &outcome).map(Bound::unbind))
             })?,
             JobOperation::Wait => observer_result_future(py, async move {
                 let outcome = job.wait().await;
+                awaits.wait_idle().await;
                 Python::attach(|py| job_outcome_to_py(py, &outcome).map(Bound::unbind))
             })?,
         };
@@ -294,7 +1084,7 @@ fn resolved_observer_await<'py>(
         namespace
             .get_item("resolve_observer_result")?
             .ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err(
+                PyRuntimeError::new_err(
                     "failed to initialize streaming observer resolver",
                 )
             })
@@ -616,7 +1406,7 @@ fn job_status_to_py<'py>(
 
 fn delivery_status_to_py<'py>(
     py: Python<'py>,
-    statuses: &std::collections::BTreeMap<String, calc_flow::continuous::OutputDeliveryStatus>,
+    statuses: &BTreeMap<String, calc_flow::continuous::OutputDeliveryStatus>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let values = PyDict::new(py);
     for (output_id, status) in statuses {
@@ -630,7 +1420,7 @@ fn delivery_status_to_py<'py>(
 
 fn edge_status_to_py<'py>(
     py: Python<'py>,
-    statuses: &std::collections::BTreeMap<String, calc_flow::continuous::EdgeStatus>,
+    statuses: &BTreeMap<String, calc_flow::continuous::EdgeStatus>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let values = PyDict::new(py);
     for (edge_id, status) in statuses {
@@ -655,7 +1445,7 @@ fn edge_status_to_py<'py>(
 
 fn source_status_to_py<'py>(
     py: Python<'py>,
-    statuses: &std::collections::BTreeMap<String, calc_flow::continuous::SourceStatus>,
+    statuses: &BTreeMap<String, calc_flow::continuous::SourceStatus>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let values = PyDict::new(py);
     for (source_id, status) in statuses {
@@ -683,7 +1473,7 @@ fn source_status_to_py<'py>(
 
 fn operator_status_to_py<'py>(
     py: Python<'py>,
-    statuses: &std::collections::BTreeMap<String, calc_flow::continuous::OperatorStatus>,
+    statuses: &BTreeMap<String, calc_flow::continuous::OperatorStatus>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let values = PyDict::new(py);
     for (operator_id, status) in statuses {
@@ -712,7 +1502,7 @@ fn operator_status_to_py<'py>(
 
 fn sink_status_to_py<'py>(
     py: Python<'py>,
-    statuses: &std::collections::BTreeMap<String, calc_flow::continuous::SinkStatus>,
+    statuses: &BTreeMap<String, calc_flow::continuous::SinkStatus>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let values = PyDict::new(py);
     for (sink_id, status) in statuses {
@@ -885,6 +1675,7 @@ const fn delivery_guarantee_name(guarantee: calc_flow::DeliveryGuarantee) -> &'s
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = module.py();
+    module.add_class::<PyManagedCheckpointRuntime>()?;
     module.add_class::<PyContinuousStreamingRunner>()?;
     module.add_class::<PyStreamingJob>()?;
     let streaming_runtime_error = streaming_runtime_error_type(py)?;
