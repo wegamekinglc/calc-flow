@@ -395,15 +395,41 @@ fn create_exception_type(
 
 fn structured_exception_namespace(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     let namespace = PyDict::new(py);
-    namespace.set_item("__slots__", PyTuple::new(py, [NATIVE_EXCEPTION_STORAGE])?)?;
-    let property = py.import("builtins")?.getattr("property")?;
+    set_exception_storage_slot(py, &namespace)?;
     for (index, field) in SAFE_EXCEPTION_FIELDS.into_iter().enumerate() {
-        let getter = exception_field_getter(py, index)?;
-        namespace.set_item(field, property.call1((getter,))?)?;
+        set_exception_field_property(py, &namespace, field, index)?;
     }
-    let storage_getter = exception_storage_getter(py)?;
-    namespace.set_item(SAFE_EXCEPTION_STORAGE, property.call1((storage_getter,))?)?;
+    set_exception_storage_property(py, &namespace)?;
     Ok(namespace)
+}
+
+fn set_exception_storage_slot(py: Python<'_>, namespace: &Bound<'_, PyDict>) -> PyResult<()> {
+    namespace.set_item("__slots__", PyTuple::new(py, [NATIVE_EXCEPTION_STORAGE])?)
+}
+
+fn set_exception_field_property(
+    py: Python<'_>,
+    namespace: &Bound<'_, PyDict>,
+    field: &str,
+    index: usize,
+) -> PyResult<()> {
+    let getter = exception_field_getter(py, index)?;
+    set_exception_property(py, namespace, field, &getter)
+}
+
+fn set_exception_storage_property(py: Python<'_>, namespace: &Bound<'_, PyDict>) -> PyResult<()> {
+    let getter = exception_storage_getter(py)?;
+    set_exception_property(py, namespace, SAFE_EXCEPTION_STORAGE, &getter)
+}
+
+fn set_exception_property(
+    py: Python<'_>,
+    namespace: &Bound<'_, PyDict>,
+    name: &str,
+    getter: &Bound<'_, PyCFunction>,
+) -> PyResult<()> {
+    let property = py.import("builtins")?.getattr("property")?;
+    namespace.set_item(name, property.call1((getter,))?)
 }
 
 fn exception_field_getter(py: Python<'_>, index: usize) -> PyResult<Bound<'_, PyCFunction>> {
