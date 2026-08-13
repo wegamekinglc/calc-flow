@@ -30,6 +30,7 @@ const SAFE_EXCEPTION_FIELDS: [&str; 9] = [
 ];
 static STREAMING_RUNTIME_ERROR_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static CHECKPOINT_PUBLICATION_UNKNOWN_ERROR_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static OBSERVER_RESULT_RESOLVER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 macro_rules! set_py_items {
     ($mapping:expr, { $($key:literal => $value:expr),+ $(,)? }) => {{
@@ -175,11 +176,11 @@ impl PyStreamingStartAwaitable {
                 "streaming runner has already been consumed by start()",
             )
         })?;
-        let observer = pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let observer = observer_result_future(py, async move {
             let job = runner.start().await.map_err(streaming_py_err)?;
             Python::attach(|py| Py::new(py, PyStreamingJob::from_inner(job)))
         })?;
-        observer.call_method0("__await__")
+        resolved_observer_await(py, observer)
     }
 }
 
@@ -268,13 +269,55 @@ impl PyStreamingJobAwaitable {
                 let outcome = job.cancel().await;
                 Python::attach(|py| job_outcome_to_py(py, &outcome).map(Bound::unbind))
             })?,
-            JobOperation::Wait => pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            JobOperation::Wait => observer_result_future(py, async move {
                 let outcome = job.wait().await;
                 Python::attach(|py| job_outcome_to_py(py, &outcome).map(Bound::unbind))
             })?,
         };
-        observer.call_method0("__await__")
+        resolved_observer_await(py, observer)
     }
+}
+
+fn resolved_observer_await<'py>(
+    py: Python<'py>,
+    observer: Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let resolver = OBSERVER_RESULT_RESOLVER.get_or_try_init(py, || {
+        let namespace = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "async def resolve_observer_result(observer):\n    succeeded, value = await observer\n    if succeeded:\n        return value\n    try:\n        raise value\n    except BaseException as error:\n        BaseException.__context__.__set__(error, None)\n        raise"
+            ),
+            Some(&namespace),
+            Some(&namespace),
+        )?;
+        namespace
+            .get_item("resolve_observer_result")?
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "failed to initialize streaming observer resolver",
+                )
+            })
+            .map(Bound::unbind)
+    })?;
+    resolver
+        .bind(py)
+        .call1((observer,))?
+        .call_method0("__await__")
+}
+
+fn observer_result_future<'py, F, T>(py: Python<'py>, future: F) -> PyResult<Bound<'py, PyAny>>
+where
+    F: Future<Output = PyResult<T>> + Send + 'static,
+    T: for<'a> IntoPyObject<'a> + Send + 'static,
+{
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let result = future.await;
+        Python::attach(|py| match result {
+            Ok(value) => py_tuple!(py, [true, value]).map(Bound::unbind),
+            Err(error) => py_tuple!(py, [false, error.value(py)]).map(Bound::unbind),
+        })
+    })
 }
 
 fn persistent_future<'py, F, T>(py: Python<'py>, future: F) -> PyResult<Bound<'py, PyAny>>
@@ -283,7 +326,7 @@ where
     T: for<'a> IntoPyObject<'a> + Send + 'static,
 {
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    let observer = pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let observer = observer_result_future(py, async move {
         receiver
             .await
             .map_err(|_| internal_streaming_py_err("streaming lifecycle task failed"))?
@@ -397,7 +440,6 @@ fn structured_exception_namespace(py: Python<'_>) -> PyResult<Bound<'_, PyDict>>
     let namespace = PyDict::new(py);
     set_exception_storage_slot(py, &namespace)?;
     set_exception_attribute_guards(py, &namespace)?;
-    set_exception_context_property(py, &namespace)?;
     for (index, field) in SAFE_EXCEPTION_FIELDS.into_iter().enumerate() {
         set_exception_field_property(py, &namespace, field, index)?;
     }
@@ -423,25 +465,6 @@ fn set_exception_field_property(
 ) -> PyResult<()> {
     let getter = exception_field_getter(py, index)?;
     set_exception_property(py, namespace, field, &getter)
-}
-
-fn set_exception_context_property(py: Python<'_>, namespace: &Bound<'_, PyDict>) -> PyResult<()> {
-    let getter = PyCFunction::new_closure(
-        py,
-        None,
-        None,
-        move |args, _kwargs| -> PyResult<Py<PyAny>> {
-            // CPython can install an active handled exception after PyErr construction.
-            let instance = args.get_item(0)?;
-            let base_context = args
-                .py()
-                .get_type::<pyo3::exceptions::PyBaseException>()
-                .getattr("__context__")?;
-            base_context.call_method1("__set__", (instance, args.py().None()))?;
-            Ok(args.py().None())
-        },
-    )?;
-    set_exception_property(py, namespace, "__context__", &getter)
 }
 
 fn set_exception_storage_property(py: Python<'_>, namespace: &Bound<'_, PyDict>) -> PyResult<()> {
@@ -1589,7 +1612,7 @@ mod tests {
             locals.set_item("runner", runner).unwrap();
             py.run(
                 &CString::new(
-                    "import asyncio, traceback\nACTIVE_CONTEXT_SENTINEL = 'active-exception-sensitive-sentinel'\nasync def exercise():\n    try:\n        raise RuntimeError(ACTIVE_CONTEXT_SENTINEL)\n    except RuntimeError:\n        try:\n            await runner.start_async()\n        except Exception as error:\n            assert type(error).__name__ == 'StreamingRuntimeError'\n            assert error.__cause__ is None\n            assert error.__context__ is None\n            assert BaseException.__context__.__get__(error) is None\n            rendered = ''.join(traceback.format_exception(error))\n            assert ACTIVE_CONTEXT_SENTINEL not in rendered\n        else:\n            raise AssertionError('start unexpectedly succeeded')\nasyncio.run(exercise())",
+                    "import asyncio, traceback\nACTIVE_CONTEXT_SENTINEL = 'active-exception-sensitive-sentinel'\nasync def exercise():\n    try:\n        raise RuntimeError(ACTIVE_CONTEXT_SENTINEL)\n    except RuntimeError:\n        try:\n            await runner.start_async()\n        except Exception as error:\n            assert type(error).__name__ == 'StreamingRuntimeError'\n            assert error.__cause__ is None\n            assert BaseException.__context__.__get__(error) is None\n            assert error.__context__ is None\n            rendered = ''.join(traceback.format_exception(error))\n            assert ACTIVE_CONTEXT_SENTINEL not in rendered\n        else:\n            raise AssertionError('start unexpectedly succeeded')\nasyncio.run(exercise())",
                 )
                 .unwrap(),
                 Some(&locals),
