@@ -397,6 +397,7 @@ fn structured_exception_namespace(py: Python<'_>) -> PyResult<Bound<'_, PyDict>>
     let namespace = PyDict::new(py);
     set_exception_storage_slot(py, &namespace)?;
     set_exception_attribute_guards(py, &namespace)?;
+    set_exception_context_property(py, &namespace)?;
     for (index, field) in SAFE_EXCEPTION_FIELDS.into_iter().enumerate() {
         set_exception_field_property(py, &namespace, field, index)?;
     }
@@ -422,6 +423,25 @@ fn set_exception_field_property(
 ) -> PyResult<()> {
     let getter = exception_field_getter(py, index)?;
     set_exception_property(py, namespace, field, &getter)
+}
+
+fn set_exception_context_property(py: Python<'_>, namespace: &Bound<'_, PyDict>) -> PyResult<()> {
+    let getter = PyCFunction::new_closure(
+        py,
+        None,
+        None,
+        move |args, _kwargs| -> PyResult<Py<PyAny>> {
+            // CPython can install an active handled exception after PyErr construction.
+            let instance = args.get_item(0)?;
+            let base_context = args
+                .py()
+                .get_type::<pyo3::exceptions::PyBaseException>()
+                .getattr("__context__")?;
+            base_context.call_method1("__set__", (instance, args.py().None()))?;
+            Ok(args.py().None())
+        },
+    )?;
+    set_exception_property(py, namespace, "__context__", &getter)
 }
 
 fn set_exception_storage_property(py: Python<'_>, namespace: &Bound<'_, PyDict>) -> PyResult<()> {
@@ -1546,6 +1566,30 @@ mod tests {
             py.run(
                 &CString::new(
                     "import asyncio, traceback\nasync def exercise():\n    try:\n        await runner.start_async()\n    except Exception as error:\n        assert type(error).__name__ == 'StreamingRuntimeError'\n        assert error.category == 'connector'\n        assert error.message == str(error)\n        assert error.job_id is not None\n        assert error.epoch is None\n        assert error.checkpoint_phase is None\n        assert error.component_kind == 'source'\n        assert error.component_id == 'input'\n        assert error.diagnostic_id is None\n        assert error.position == 0\n        assert error.__cause__ is None\n        assert error.__context__ is None\n        rendered = repr(error) + str(error) + ''.join(traceback.format_exception(error)) + repr(vars(error))\n        for sentinel in ('private-connector-payload-redaction-sentinel', 'python-private-provider', 'private-source', 'private-version'):\n            assert sentinel not in rendered\n        try:\n            error.category = 'tampered'\n        except AttributeError:\n            pass\n        else:\n            raise AssertionError('safe exception fields must be read-only')\n        backing = error._calc_flow_safe_fields\n        try:\n            backing['category'] = 'tampered-through-dict'\n        except TypeError:\n            pass\n        else:\n            raise AssertionError('safe exception backing must be immutable')\n        try:\n            error._calc_flow_safe_fields = {'category': 'tampered-through-replacement'}\n        except AttributeError:\n            pass\n        else:\n            raise AssertionError('safe exception backing must not be replaceable')\n        vars(error)['_calc_flow_safe_fields'] = {'category': 'shadowed'}\n        assert error._calc_flow_safe_fields['category'] == 'connector'\n        assert error.category == 'connector'\n        assert error.message == str(error)\n    else:\n        raise AssertionError('start unexpectedly succeeded')\nasyncio.run(exercise())",
+                )
+                .unwrap(),
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+        });
+    }
+
+    #[test]
+    fn start_error_clears_active_exception_context() {
+        Python::initialize();
+        let directory = tempfile::tempdir().unwrap();
+        Python::attach(|py| {
+            let locals = PyDict::new(py);
+            let runner = Py::new(
+                py,
+                PyContinuousStreamingRunner::from_inner(failing_runner(directory.path())),
+            )
+            .unwrap();
+            locals.set_item("runner", runner).unwrap();
+            py.run(
+                &CString::new(
+                    "import asyncio, traceback\nACTIVE_CONTEXT_SENTINEL = 'active-exception-sensitive-sentinel'\nasync def exercise():\n    try:\n        raise RuntimeError(ACTIVE_CONTEXT_SENTINEL)\n    except RuntimeError:\n        try:\n            await runner.start_async()\n        except Exception as error:\n            assert type(error).__name__ == 'StreamingRuntimeError'\n            assert error.__cause__ is None\n            assert error.__context__ is None\n            assert BaseException.__context__.__get__(error) is None\n            rendered = ''.join(traceback.format_exception(error))\n            assert ACTIVE_CONTEXT_SENTINEL not in rendered\n        else:\n            raise AssertionError('start unexpectedly succeeded')\nasyncio.run(exercise())",
                 )
                 .unwrap(),
                 Some(&locals),
