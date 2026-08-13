@@ -168,6 +168,15 @@ impl SinkProgress {
         std::mem::take(&mut self.0.lock().failures)
     }
 
+    pub(crate) fn checkpoint_failure_sink_id(&self) -> Option<String> {
+        self.0
+            .lock()
+            .failures
+            .iter()
+            .find(|failure| failure.phase == SinkFailurePhase::Checkpoint)
+            .map(|failure| failure.sink_id.clone())
+    }
+
     fn record_delivery(&self, rows: usize, bytes: usize) -> Result<()> {
         let mut state = self.0.lock();
         let (batches, rows, bytes) = next_delivery_totals(&state.snapshot, rows, bytes)?;

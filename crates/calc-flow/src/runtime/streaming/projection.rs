@@ -1,25 +1,31 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    checkpoint::coordinator::CheckpointPhase as InternalCheckpointPhase,
+    checkpoint::coordinator::{
+        CheckpointPhase as InternalCheckpointPhase, ManualCheckpointFailureCategory,
+    },
     job::{SinkCapability, ValidatedContinuousJob},
     metrics::sink_metric_id,
     progress::ReplayPositioningCapability,
     runner::{
         CheckpointFailureCategory, CheckpointStatus as InternalCheckpointStatus,
         ContinuousJobOutcome, ContinuousJobState, ContinuousJobStatus, FailureOrigin,
-        RuntimeFailure, TerminalCause as InternalTerminalCause,
+        RuntimeFailure, StartFailure, TerminalCause as InternalTerminalCause,
     },
-    source_task::SourceDeliveryCapability,
+    source_task::SourceDeliveryCapability as InternalSourceDeliveryCapability,
 };
-use crate::{CalcFlowError, DeliveryGuarantee, Epoch, RetentionClass};
+use crate::{
+    CalcFlowError, DeliveryGuarantee, Epoch, RetentionClass,
+    continuous::{ReplayPositioning, SourceDeliveryCapability},
+};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+/// Stable category for a redacted public streaming failure.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum StreamingErrorCategory {
+pub enum StreamingErrorCategory {
     Validation,
     Compile,
     Conflict,
@@ -34,9 +40,10 @@ pub(crate) enum StreamingErrorCategory {
     Internal,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+/// Public component kind associated with a streaming failure.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ComponentKind {
+pub enum ComponentKind {
     Job,
     Edge,
     Source,
@@ -45,9 +52,10 @@ pub(crate) enum ComponentKind {
     Checkpoint,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+/// Observable phase of the single active checkpoint.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum CheckpointPhase {
+pub enum CheckpointPhase {
     Requested,
     SourcesCut,
     OperatorsSnapshotted,
@@ -72,9 +80,10 @@ impl From<InternalCheckpointPhase> for CheckpointPhase {
     }
 }
 
+/// Safe, data-only streaming failure with no raw cause or extension payload.
 #[derive(Clone, Debug, Eq, Error, PartialEq, Serialize)]
 #[error("{message}")]
-pub(crate) struct StreamingError {
+pub struct StreamingError {
     category: StreamingErrorCategory,
     message: String,
     job_id: Option<u64>,
@@ -87,41 +96,241 @@ pub(crate) struct StreamingError {
 }
 
 impl StreamingError {
-    pub(crate) const fn category(&self) -> StreamingErrorCategory {
+    /// Returns the stable failure category.
+    pub const fn category(&self) -> StreamingErrorCategory {
         self.category
     }
 
-    pub(crate) fn message(&self) -> &str {
+    /// Returns the safe engine-authored message.
+    pub fn message(&self) -> &str {
         &self.message
     }
 
-    pub(crate) const fn job_id(&self) -> Option<u64> {
+    /// Returns the owning job ID when one was allocated.
+    pub const fn job_id(&self) -> Option<u64> {
         self.job_id
     }
 
-    pub(crate) const fn epoch(&self) -> Option<Epoch> {
+    /// Returns the associated checkpoint epoch, when applicable.
+    pub const fn epoch(&self) -> Option<Epoch> {
         self.epoch
     }
 
-    pub(crate) const fn checkpoint_phase(&self) -> Option<CheckpointPhase> {
+    /// Returns the checkpoint phase, when applicable.
+    pub const fn checkpoint_phase(&self) -> Option<CheckpointPhase> {
         self.checkpoint_phase
     }
 
-    pub(crate) const fn component_kind(&self) -> Option<ComponentKind> {
+    /// Returns the stable component kind, when applicable.
+    pub const fn component_kind(&self) -> Option<ComponentKind> {
         self.component_kind
     }
 
-    pub(crate) fn component_id(&self) -> Option<&str> {
+    /// Returns the stable component ID, when applicable.
+    pub fn component_id(&self) -> Option<&str> {
         self.component_id.as_deref()
     }
 
-    pub(crate) const fn diagnostic_id(&self) -> Option<u64> {
+    /// Returns the safe diagnostic correlation ID, when available.
+    pub const fn diagnostic_id(&self) -> Option<u64> {
         self.diagnostic_id
     }
 
-    pub(crate) const fn position(&self) -> u32 {
+    /// Returns this failure's deterministic position in an outcome.
+    pub const fn position(&self) -> u32 {
         self.position
     }
+}
+
+pub(crate) fn project_public_error(job_id: Option<u64>, error: &CalcFlowError) -> StreamingError {
+    let (category, message, component_kind, component_id) = preflight_failure_fields(error);
+    StreamingError {
+        category,
+        message,
+        job_id,
+        epoch: None,
+        checkpoint_phase: None,
+        component_kind,
+        component_id,
+        diagnostic_id: None,
+        position: 0,
+    }
+}
+
+pub(crate) fn validation_error(
+    component_kind: ComponentKind,
+    component_id: Option<&str>,
+    message: String,
+) -> StreamingError {
+    StreamingError {
+        category: StreamingErrorCategory::Validation,
+        message,
+        job_id: None,
+        epoch: None,
+        checkpoint_phase: None,
+        component_kind: Some(component_kind),
+        component_id: component_id.map(str::to_owned),
+        diagnostic_id: None,
+        position: 0,
+    }
+}
+
+pub(crate) fn project_start_failure(job_id: u64, failure: &StartFailure) -> StreamingError {
+    project_runtime_failure(job_id, &failure.primary, failure.diagnostic_id, 0, None)
+}
+
+pub(crate) fn manual_checkpoint_failure_error(
+    category: ManualCheckpointFailureCategory,
+    epoch: Option<Epoch>,
+    phase: Option<InternalCheckpointPhase>,
+) -> CalcFlowError {
+    CalcFlowError::Streaming(StreamingError {
+        category: match category {
+            ManualCheckpointFailureCategory::Io => StreamingErrorCategory::Io,
+            ManualCheckpointFailureCategory::Timeout => StreamingErrorCategory::CheckpointTimeout,
+            ManualCheckpointFailureCategory::Protocol => StreamingErrorCategory::CheckpointMismatch,
+            ManualCheckpointFailureCategory::Internal => StreamingErrorCategory::Internal,
+        },
+        message: manual_checkpoint_failure_message(category, epoch),
+        job_id: None,
+        epoch,
+        checkpoint_phase: phase.map(CheckpointPhase::from),
+        component_kind: Some(ComponentKind::Checkpoint),
+        component_id: None,
+        diagnostic_id: None,
+        position: 0,
+    })
+}
+
+pub(crate) fn manual_sink_commit_failure_error(sink_id: &str, epoch: Epoch) -> CalcFlowError {
+    CalcFlowError::Streaming(sink_commit_failure(None, sink_id, epoch, None, 0))
+}
+
+fn sink_commit_failure(
+    job_id: Option<u64>,
+    sink_id: &str,
+    epoch: Epoch,
+    diagnostic_id: Option<u64>,
+    position: u32,
+) -> StreamingError {
+    StreamingError {
+        category: StreamingErrorCategory::Connector,
+        message: format!(
+            "sink {sink_id:?} commit failed for checkpoint epoch {}",
+            epoch.as_u64()
+        ),
+        job_id,
+        epoch: Some(epoch),
+        checkpoint_phase: Some(CheckpointPhase::ManifestDurable),
+        component_kind: Some(ComponentKind::Sink),
+        component_id: Some(sink_id.into()),
+        diagnostic_id,
+        position,
+    }
+}
+
+fn manual_checkpoint_failure_message(
+    category: ManualCheckpointFailureCategory,
+    epoch: Option<Epoch>,
+) -> String {
+    match (category, epoch) {
+        (ManualCheckpointFailureCategory::Io, Some(epoch)) => format!(
+            "checkpoint storage operation failed for epoch {}",
+            epoch.as_u64()
+        ),
+        (ManualCheckpointFailureCategory::Io, None) => "checkpoint storage operation failed".into(),
+        (ManualCheckpointFailureCategory::Timeout, Some(epoch)) => format!(
+            "checkpoint epoch {} exceeded the configured timeout",
+            epoch.as_u64()
+        ),
+        (ManualCheckpointFailureCategory::Timeout, None) => {
+            "checkpoint request exceeded the configured timeout".into()
+        }
+        (ManualCheckpointFailureCategory::Protocol, Some(epoch)) => format!(
+            "checkpoint epoch {} did not match the active protocol",
+            epoch.as_u64()
+        ),
+        (ManualCheckpointFailureCategory::Protocol, None) => {
+            "checkpoint request did not match the active protocol".into()
+        }
+        (ManualCheckpointFailureCategory::Internal, _) => "checkpoint runtime failed".into(),
+    }
+}
+
+pub(crate) fn project_manual_checkpoint_error(
+    job_id: u64,
+    error: &CalcFlowError,
+    status: Option<&InternalCheckpointStatus>,
+) -> StreamingError {
+    if let CalcFlowError::Streaming(error) = error {
+        return StreamingError {
+            category: error.category,
+            message: error.message.clone(),
+            job_id: Some(job_id),
+            epoch: error.epoch,
+            checkpoint_phase: error.checkpoint_phase,
+            component_kind: error.component_kind,
+            component_id: error.component_id.clone(),
+            diagnostic_id: error.diagnostic_id,
+            position: error.position,
+        };
+    }
+    if let Some(status) = status {
+        if let Some(epoch) = status.installed_unknown_epoch {
+            return checkpoint_publication_unknown(epoch, job_id, None, 0);
+        }
+        if let Some(category) = status.failure_category {
+            let category = match category {
+                CheckpointFailureCategory::Timeout => StreamingErrorCategory::CheckpointTimeout,
+                CheckpointFailureCategory::Protocol => StreamingErrorCategory::CheckpointMismatch,
+                CheckpointFailureCategory::Io => StreamingErrorCategory::Io,
+                CheckpointFailureCategory::Runtime if matches!(error, CalcFlowError::Io { .. }) => {
+                    StreamingErrorCategory::Io
+                }
+                CheckpointFailureCategory::Maintenance | CheckpointFailureCategory::Runtime => {
+                    StreamingErrorCategory::Internal
+                }
+            };
+            let message = match (category, status.current_epoch) {
+                (StreamingErrorCategory::CheckpointTimeout, Some(epoch)) => format!(
+                    "checkpoint epoch {} exceeded the configured timeout",
+                    epoch.as_u64()
+                ),
+                (StreamingErrorCategory::CheckpointTimeout, None) => {
+                    "checkpoint request exceeded the configured timeout".into()
+                }
+                (StreamingErrorCategory::CheckpointMismatch, Some(epoch)) => {
+                    format!(
+                        "checkpoint epoch {} did not match the active protocol",
+                        epoch.as_u64()
+                    )
+                }
+                (StreamingErrorCategory::CheckpointMismatch, None) => {
+                    "checkpoint request did not match the active protocol".into()
+                }
+                (StreamingErrorCategory::Io, Some(epoch)) => {
+                    format!(
+                        "checkpoint storage operation failed for epoch {}",
+                        epoch.as_u64()
+                    )
+                }
+                (StreamingErrorCategory::Io, None) => "checkpoint storage operation failed".into(),
+                _ => "checkpoint runtime failed".into(),
+            };
+            return StreamingError {
+                category,
+                message,
+                job_id: Some(job_id),
+                epoch: status.current_epoch,
+                checkpoint_phase: status.phase.map(CheckpointPhase::from),
+                component_kind: Some(ComponentKind::Checkpoint),
+                component_id: None,
+                diagnostic_id: None,
+                position: 0,
+            };
+        }
+    }
+    project_public_error(Some(job_id), error)
 }
 
 pub(crate) fn project_runtime_failures(
@@ -160,6 +369,16 @@ fn project_runtime_failure(
     position: u32,
     checkpoint: Option<&InternalCheckpointStatus>,
 ) -> StreamingError {
+    if let (
+        FailureOrigin::SinkCheckpoint { sink_id, .. },
+        CalcFlowError::RecoveryRequired { .. },
+        Some(status),
+    ) = (&failure.origin, &failure.error, checkpoint)
+        && let Some(epoch) = status.current_epoch
+        && status.phase == Some(InternalCheckpointPhase::ManifestDurable)
+    {
+        return sink_commit_failure(Some(job_id), sink_id, epoch, diagnostic_id, position);
+    }
     if let Some(error) =
         project_checkpoint_failure(job_id, failure, diagnostic_id, position, checkpoint)
     {
@@ -177,6 +396,46 @@ fn project_runtime_failure(
         diagnostic_id,
         position,
     }
+}
+
+pub(crate) fn project_manual_terminal_outcome(
+    job_id: u64,
+    outcome: &ContinuousJobOutcome,
+    checkpoint: Option<&InternalCheckpointStatus>,
+) -> Option<StreamingError> {
+    let (failure, mut error) = outcome
+        .errors
+        .iter()
+        .enumerate()
+        .map(|(position, failure)| {
+            (
+                failure,
+                project_runtime_failure(
+                    job_id,
+                    failure,
+                    None,
+                    u32::try_from(position).unwrap_or(u32::MAX),
+                    checkpoint,
+                ),
+            )
+        })
+        .next()?;
+    if error.epoch.is_none()
+        && let Some(status) = checkpoint
+    {
+        error.epoch = status.current_epoch;
+        error.checkpoint_phase = status.phase.map(CheckpointPhase::from);
+    }
+    if let (FailureOrigin::SinkCheckpoint { sink_id, .. }, Some(epoch)) =
+        (&failure.origin, error.epoch)
+        && !matches!(failure.error, CalcFlowError::RecoveryRequired { .. })
+    {
+        error.message = format!(
+            "sink {sink_id:?} pre_commit failed for checkpoint epoch {}",
+            epoch.as_u64()
+        );
+    }
+    Some(error)
 }
 
 fn project_checkpoint_failure(
@@ -204,6 +463,10 @@ fn project_checkpoint_failure(
     let category = match status.failure_category? {
         CheckpointFailureCategory::Timeout => StreamingErrorCategory::CheckpointTimeout,
         CheckpointFailureCategory::Protocol => StreamingErrorCategory::CheckpointMismatch,
+        CheckpointFailureCategory::Io => StreamingErrorCategory::Io,
+        CheckpointFailureCategory::Runtime if matches!(failure.error, CalcFlowError::Io { .. }) => {
+            StreamingErrorCategory::Io
+        }
         CheckpointFailureCategory::Maintenance | CheckpointFailureCategory::Runtime => {
             StreamingErrorCategory::Internal
         }
@@ -225,6 +488,13 @@ fn project_checkpoint_failure(
         (StreamingErrorCategory::CheckpointMismatch, None) => {
             "checkpoint request did not match the active protocol".into()
         }
+        (StreamingErrorCategory::Io, Some(epoch)) => {
+            format!(
+                "checkpoint storage operation failed for epoch {}",
+                epoch.as_u64()
+            )
+        }
+        (StreamingErrorCategory::Io, None) => "checkpoint storage operation failed".into(),
         _ => "checkpoint runtime failed".into(),
     };
     Some(StreamingError {
@@ -343,8 +613,10 @@ fn preflight_failure_fields(
     Option<ComponentKind>,
     Option<String>,
 ) {
+    if let CalcFlowError::InvalidArgument { field, message } = error {
+        return invalid_argument_failure_fields(field, message);
+    }
     let category = match error {
-        CalcFlowError::InvalidArgument { .. } => StreamingErrorCategory::Validation,
         CalcFlowError::Compile { .. } => StreamingErrorCategory::Compile,
         CalcFlowError::Conflict { .. } | CalcFlowError::PlanLeased { .. } => {
             StreamingErrorCategory::Conflict
@@ -373,6 +645,136 @@ fn preflight_failure_fields(
         _ => "streaming runtime initialization failed",
     };
     (category, message.into(), component_kind, None)
+}
+
+fn invalid_argument_failure_fields(
+    field: &str,
+    message: &str,
+) -> (
+    StreamingErrorCategory,
+    String,
+    Option<ComponentKind>,
+    Option<String>,
+) {
+    if let Some(value) = field.strip_prefix("operators.") {
+        let operator_id = strip_field_suffix(value, &[".checkpoint_capability"]);
+        if crate::json::validate_portable_identifier("operator", operator_id).is_err() {
+            return (
+                StreamingErrorCategory::Validation,
+                "operator ID is not a portable identifier".into(),
+                Some(ComponentKind::Operator),
+                None,
+            );
+        }
+        return (
+            StreamingErrorCategory::Validation,
+            format!("operator {operator_id:?} checkpoint capability is invalid"),
+            Some(ComponentKind::Operator),
+            Some(operator_id.into()),
+        );
+    }
+    if let Some(value) = field.strip_prefix("sources.") {
+        let source_id = strip_field_suffix(
+            value,
+            &[
+                ".capabilities.declared_schema",
+                ".capabilities.max_batch_rows",
+                ".capabilities.max_batch_bytes",
+                ".watermark_policy.max_out_of_orderness",
+                ".watermark_policy.event_time_column",
+                ".capabilities.native_watermarks",
+                ".watermark_policy",
+                ".capabilities",
+                ".outputs",
+                ".cursor",
+                ".watermark",
+            ],
+        );
+        return (
+            StreamingErrorCategory::Validation,
+            format!("source {source_id:?} capability validation failed"),
+            Some(ComponentKind::Source),
+            Some(source_id.into()),
+        );
+    }
+    if let Some(output_id) = field.strip_prefix("requirements.delivery.") {
+        return delivery_requirement_failure_fields(output_id, message);
+    }
+    if let Some(value) = field.strip_prefix("sinks.") {
+        return (
+            StreamingErrorCategory::Validation,
+            format!("sink {value:?} binding validation failed"),
+            Some(ComponentKind::Sink),
+            Some(value.into()),
+        );
+    }
+    (
+        StreamingErrorCategory::Validation,
+        "streaming job validation failed".into(),
+        None,
+        None,
+    )
+}
+
+fn delivery_requirement_failure_fields(
+    output_id: &str,
+    message: &str,
+) -> (
+    StreamingErrorCategory,
+    String,
+    Option<ComponentKind>,
+    Option<String>,
+) {
+    let participant = [
+        (ComponentKind::Source, "source "),
+        (ComponentKind::Operator, "operator "),
+        (ComponentKind::Sink, "sink "),
+    ]
+    .into_iter()
+    .find_map(|(kind, prefix)| quoted_value_after(message, prefix).map(|id| (kind, id)));
+    let safe_message = match participant {
+        Some((ComponentKind::Source, source_id)) if message.contains("lossy delivery") => {
+            format!("output {output_id:?} requires exactly_once but source {source_id:?} is lossy")
+        }
+        Some((ComponentKind::Source, source_id))
+            if message.contains("cannot replay from an exact cursor") =>
+        {
+            format!(
+                "output {output_id:?} requires exactly_once but source {source_id:?} lacks exact_pause_report_and_seek"
+            )
+        }
+        Some((ComponentKind::Operator, operator_id)) => format!(
+            "output {output_id:?} requires exactly_once but operator {operator_id:?} is not deterministic"
+        ),
+        Some((ComponentKind::Sink, sink_id)) if message.contains("bounded retention") => format!(
+            "output {output_id:?} requires exactly_once but sink {sink_id:?} has bounded retention"
+        ),
+        Some((ComponentKind::Sink, sink_id)) if message.contains("not transactional") => {
+            format!("output {output_id:?} requires exactly_once but sink {sink_id:?} is ordinary")
+        }
+        _ => format!("output {output_id:?} delivery capability proof failed"),
+    };
+    let (kind, component_id) = participant
+        .map(|(kind, id)| (kind, id.to_owned()))
+        .unwrap_or((ComponentKind::Job, output_id.to_owned()));
+    (
+        StreamingErrorCategory::Validation,
+        safe_message,
+        Some(kind),
+        Some(component_id),
+    )
+}
+
+fn strip_field_suffix<'a>(value: &'a str, suffixes: &[&str]) -> &'a str {
+    suffixes
+        .iter()
+        .find_map(|suffix| value.strip_suffix(suffix))
+        .unwrap_or(value)
+}
+
+fn quoted_value_after<'a>(message: &'a str, prefix: &str) -> Option<&'a str> {
+    let suffix = message.split_once(prefix)?.1.strip_prefix('"')?;
+    suffix.split_once('"').map(|(value, _)| value)
 }
 
 fn connector_failure_fields(
@@ -416,9 +818,10 @@ pub(crate) fn checkpoint_publication_unknown(
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+/// Public lifecycle state for a continuous job.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum JobState {
+pub enum JobState {
     Running,
     Draining,
     Completed,
@@ -440,9 +843,10 @@ impl From<ContinuousJobState> for JobState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+/// Stable cause of one immutable terminal outcome.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum TerminalCause {
+pub enum TerminalCause {
     NaturalEnd,
     GracefulShutdown,
     ExplicitCancel,
@@ -462,13 +866,6 @@ impl From<&InternalTerminalCause> for TerminalCause {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ReplayPositioning {
-    ExactPauseReportAndSeek,
-    Unsupported,
-}
-
 impl From<ReplayPositioningCapability> for ReplayPositioning {
     fn from(capability: ReplayPositioningCapability) -> Self {
         match capability {
@@ -478,25 +875,19 @@ impl From<ReplayPositioningCapability> for ReplayPositioning {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum SourceDelivery {
-    Lossless,
-    Lossy,
-}
-
-impl From<SourceDeliveryCapability> for SourceDelivery {
-    fn from(capability: SourceDeliveryCapability) -> Self {
+impl From<InternalSourceDeliveryCapability> for SourceDeliveryCapability {
+    fn from(capability: InternalSourceDeliveryCapability) -> Self {
         match capability {
-            SourceDeliveryCapability::Lossless => Self::Lossless,
-            SourceDeliveryCapability::Lossy => Self::Lossy,
+            InternalSourceDeliveryCapability::Lossless => Self::Lossless,
+            InternalSourceDeliveryCapability::Lossy => Self::Lossy,
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum SinkDelivery {
+/// Frozen delivery mechanism for one sink binding.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SinkDelivery {
     Ordinary,
     EpochIdempotent {
         mechanism: String,
@@ -521,118 +912,126 @@ impl From<SinkCapability> for SinkDelivery {
     }
 }
 
+/// Requested and proven delivery guarantee for one plan output.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct OutputDeliveryStatus {
-    pub(crate) requested: DeliveryGuarantee,
-    pub(crate) effective: DeliveryGuarantee,
+pub struct OutputDeliveryStatus {
+    pub requested: DeliveryGuarantee,
+    pub effective: DeliveryGuarantee,
 }
 
+/// Payload-free queue counters and limits for one stable edge.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct EdgeStatus {
-    pub(crate) current_envelopes: usize,
-    pub(crate) current_rows: usize,
-    pub(crate) current_bytes: usize,
-    pub(crate) high_water_envelopes: usize,
-    pub(crate) high_water_rows: usize,
-    pub(crate) high_water_bytes: usize,
-    pub(crate) blocked_sends: u64,
-    pub(crate) blocked_duration: Duration,
-    pub(crate) envelope_limit: usize,
-    pub(crate) row_limit: usize,
-    pub(crate) byte_limit: usize,
+pub struct EdgeStatus {
+    pub current_envelopes: usize,
+    pub current_rows: usize,
+    pub current_bytes: usize,
+    pub high_water_envelopes: usize,
+    pub high_water_rows: usize,
+    pub high_water_bytes: usize,
+    pub blocked_sends: u64,
+    pub blocked_duration: Duration,
+    pub envelope_limit: usize,
+    pub row_limit: usize,
+    pub byte_limit: usize,
 }
 
+/// Frozen capabilities and payload-free counters for one source.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct SourceStatus {
-    pub(crate) replay_positioning: ReplayPositioning,
-    pub(crate) delivery: SourceDelivery,
-    pub(crate) max_batch_rows: usize,
-    pub(crate) max_batch_bytes: usize,
-    pub(crate) next_sequence: Option<u64>,
-    pub(crate) ended: bool,
-    pub(crate) polls: u64,
-    pub(crate) data_batches: u64,
-    pub(crate) data_rows: u64,
-    pub(crate) data_bytes: u64,
-    pub(crate) fanned_out_batches: u64,
-    pub(crate) fanned_out_rows: u64,
-    pub(crate) fanned_out_bytes: u64,
-    pub(crate) errors: u64,
+pub struct SourceStatus {
+    pub replay_positioning: ReplayPositioning,
+    pub delivery: SourceDeliveryCapability,
+    pub max_batch_rows: usize,
+    pub max_batch_bytes: usize,
+    pub next_sequence: Option<u64>,
+    pub ended: bool,
+    pub polls: u64,
+    pub data_batches: u64,
+    pub data_rows: u64,
+    pub data_bytes: u64,
+    pub fanned_out_batches: u64,
+    pub fanned_out_rows: u64,
+    pub fanned_out_bytes: u64,
+    pub errors: u64,
 }
 
+/// Payload-free execution counters for one operator.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct OperatorStatus {
-    pub(crate) input_batches: u64,
-    pub(crate) input_rows: u64,
-    pub(crate) input_bytes: u64,
-    pub(crate) fanned_out_batches: u64,
-    pub(crate) fanned_out_rows: u64,
-    pub(crate) fanned_out_bytes: u64,
-    pub(crate) processing_duration: Duration,
-    pub(crate) errors: u64,
-    pub(crate) ended: bool,
-    pub(crate) late_rows: u64,
-    pub(crate) late_affected_batches: u64,
-    pub(crate) max_lateness: Option<Duration>,
-    pub(crate) null_event_time_rows: u64,
-    pub(crate) null_event_time_batches: u64,
-    pub(crate) datafusion_runtime_created: bool,
+pub struct OperatorStatus {
+    pub input_batches: u64,
+    pub input_rows: u64,
+    pub input_bytes: u64,
+    pub fanned_out_batches: u64,
+    pub fanned_out_rows: u64,
+    pub fanned_out_bytes: u64,
+    pub processing_duration: Duration,
+    pub errors: u64,
+    pub ended: bool,
+    pub late_rows: u64,
+    pub late_affected_batches: u64,
+    pub max_lateness: Option<Duration>,
+    pub null_event_time_rows: u64,
+    pub null_event_time_batches: u64,
+    pub datafusion_runtime_created: bool,
 }
 
+/// Frozen delivery evidence and counters for one sink.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct SinkStatus {
-    pub(crate) output_id: String,
-    pub(crate) effective_delivery: SinkDelivery,
-    pub(crate) delivered_batches: u64,
-    pub(crate) delivered_rows: u64,
-    pub(crate) delivered_bytes: u64,
-    pub(crate) write_duration: Duration,
-    pub(crate) errors: u64,
-    pub(crate) ended: bool,
+pub struct SinkStatus {
+    pub output_id: String,
+    pub effective_delivery: SinkDelivery,
+    pub delivered_batches: u64,
+    pub delivered_rows: u64,
+    pub delivered_bytes: u64,
+    pub write_duration: Duration,
+    pub errors: u64,
+    pub ended: bool,
 }
 
+/// Progress and completion state for the single active checkpoint.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub(crate) struct CheckpointStatus {
-    pub(crate) current_epoch: Option<Epoch>,
-    pub(crate) phase: Option<CheckpointPhase>,
-    pub(crate) terminal: bool,
-    pub(crate) source_acknowledgements: usize,
-    pub(crate) expected_sources: usize,
-    pub(crate) operator_acknowledgements: usize,
-    pub(crate) expected_operators: usize,
-    pub(crate) sink_precommit_acknowledgements: usize,
-    pub(crate) expected_sink_precommits: usize,
-    pub(crate) sink_commit_acknowledgements: usize,
-    pub(crate) expected_sink_commits: usize,
-    pub(crate) elapsed: Option<Duration>,
-    pub(crate) last_completed_epoch: Option<Epoch>,
-    pub(crate) installed_unknown_epoch: Option<Epoch>,
-    pub(crate) failure_category: Option<StreamingErrorCategory>,
-    pub(crate) runtime_config_changed: bool,
+pub struct CheckpointStatus {
+    pub current_epoch: Option<Epoch>,
+    pub phase: Option<CheckpointPhase>,
+    pub terminal: bool,
+    pub source_acknowledgements: usize,
+    pub expected_sources: usize,
+    pub operator_acknowledgements: usize,
+    pub expected_operators: usize,
+    pub sink_precommit_acknowledgements: usize,
+    pub expected_sink_precommits: usize,
+    pub sink_commit_acknowledgements: usize,
+    pub expected_sink_commits: usize,
+    pub elapsed: Option<Duration>,
+    pub last_completed_epoch: Option<Epoch>,
+    pub installed_unknown_epoch: Option<Epoch>,
+    pub failure_category: Option<StreamingErrorCategory>,
+    pub runtime_config_changed: bool,
 }
 
+/// Cloned, data-only observation snapshot for one job.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct JobStatus {
-    pub(crate) job_id: u64,
-    pub(crate) state: JobState,
-    pub(crate) terminal_cause: Option<TerminalCause>,
-    pub(crate) delivery: BTreeMap<String, OutputDeliveryStatus>,
-    pub(crate) task_count: usize,
-    pub(crate) task_errors: u64,
-    pub(crate) metrics_overflowed: bool,
-    pub(crate) edges: BTreeMap<String, EdgeStatus>,
-    pub(crate) sources: BTreeMap<String, SourceStatus>,
-    pub(crate) operators: BTreeMap<String, OperatorStatus>,
-    pub(crate) sinks: BTreeMap<String, SinkStatus>,
-    pub(crate) checkpoint: CheckpointStatus,
+pub struct JobStatus {
+    pub job_id: u64,
+    pub state: JobState,
+    pub terminal_cause: Option<TerminalCause>,
+    pub delivery: BTreeMap<String, OutputDeliveryStatus>,
+    pub task_count: usize,
+    pub task_errors: u64,
+    pub metrics_overflowed: bool,
+    pub edges: BTreeMap<String, EdgeStatus>,
+    pub sources: BTreeMap<String, SourceStatus>,
+    pub operators: BTreeMap<String, OperatorStatus>,
+    pub sinks: BTreeMap<String, SinkStatus>,
+    pub checkpoint: CheckpointStatus,
 }
 
+/// Immutable terminal result returned by every owning lifecycle observer.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct JobOutcome {
-    pub(crate) state: JobState,
-    pub(crate) cause: TerminalCause,
-    pub(crate) completed_epoch: Option<Epoch>,
-    pub(crate) errors: Vec<StreamingError>,
+pub struct JobOutcome {
+    pub state: JobState,
+    pub cause: TerminalCause,
+    pub completed_epoch: Option<Epoch>,
+    pub errors: Vec<StreamingError>,
 }
 
 pub(crate) fn project_job_outcome(
@@ -657,7 +1056,7 @@ pub(crate) fn project_job_outcome(
 #[derive(Clone)]
 struct SourceProjection {
     replay_positioning: ReplayPositioning,
-    delivery: SourceDelivery,
+    delivery: SourceDeliveryCapability,
     max_batch_rows: usize,
     max_batch_bytes: usize,
 }
@@ -935,6 +1334,7 @@ fn checkpoint_failure_category(category: CheckpointFailureCategory) -> Streaming
     match category {
         CheckpointFailureCategory::Timeout => StreamingErrorCategory::CheckpointTimeout,
         CheckpointFailureCategory::Protocol => StreamingErrorCategory::CheckpointMismatch,
+        CheckpointFailureCategory::Io => StreamingErrorCategory::Io,
         CheckpointFailureCategory::Maintenance | CheckpointFailureCategory::Runtime => {
             StreamingErrorCategory::Internal
         }
@@ -1115,6 +1515,155 @@ mod tests {
             "checkpoint epoch 7 was installed but publication durability is unknown"
         );
         assert_eq!(error.position(), 4);
+    }
+
+    #[test]
+    fn manual_checkpoint_projection_keeps_timeout_io_and_unknown_coordinates() {
+        let epoch = Epoch::new(7).unwrap();
+        let status = |failure_category, installed_unknown_epoch| InternalCheckpointStatus {
+            current_epoch: Some(epoch),
+            phase: Some(InternalCheckpointPhase::SinksPrecommitted),
+            terminal: false,
+            source_acknowledgements: 1,
+            operator_acknowledgements: 1,
+            sink_precommit_acknowledgements: 0,
+            sink_commit_acknowledgements: 0,
+            expected_sources: 1,
+            expected_operators: 1,
+            expected_sinks: 1,
+            elapsed: None,
+            last_completed_epoch: None,
+            installed_unknown_epoch,
+            failure_category: Some(failure_category),
+            runtime_config_changed: false,
+        };
+        let timeout = super::project_manual_checkpoint_error(
+            17,
+            &CalcFlowError::Internal {
+                message: SECRET.into(),
+            },
+            Some(&status(CheckpointFailureCategory::Timeout, None)),
+        );
+        let io = super::project_manual_checkpoint_error(
+            17,
+            &CalcFlowError::Io {
+                path: PATH.into(),
+                source: std::io::Error::other(SECRET),
+            },
+            Some(&status(CheckpointFailureCategory::Runtime, None)),
+        );
+        let unknown = super::project_manual_checkpoint_error(
+            17,
+            &CalcFlowError::Io {
+                path: PATH.into(),
+                source: std::io::Error::other(SECRET),
+            },
+            Some(&status(CheckpointFailureCategory::Runtime, Some(epoch))),
+        );
+        let outcome_io = super::project_runtime_failures_with_checkpoint(
+            17,
+            vec![Arc::new(RuntimeFailure {
+                origin: FailureOrigin::Task {
+                    task_id: TaskId::new(3),
+                    task_name: "checkpoint".into(),
+                },
+                error: CalcFlowError::Io {
+                    path: PATH.into(),
+                    source: std::io::Error::other(SECRET),
+                },
+            })],
+            None,
+            Some(&status(CheckpointFailureCategory::Runtime, None)),
+        )
+        .remove(0);
+
+        assert_eq!(
+            timeout.category(),
+            StreamingErrorCategory::CheckpointTimeout
+        );
+        assert_eq!(timeout.epoch(), Some(epoch));
+        assert_eq!(io.category(), StreamingErrorCategory::Io);
+        assert_eq!(io.epoch(), Some(epoch));
+        assert_eq!(outcome_io.category(), StreamingErrorCategory::Io);
+        assert_eq!(outcome_io.epoch(), Some(epoch));
+        assert_eq!(
+            unknown.category(),
+            StreamingErrorCategory::CheckpointPublicationUnknown
+        );
+        assert_eq!(unknown.epoch(), Some(epoch));
+        assert_eq!(
+            unknown.checkpoint_phase(),
+            Some(super::CheckpointPhase::ManifestInstalled)
+        );
+        for rendered in [
+            format!("{timeout:?}"),
+            format!("{io:#?}"),
+            format!("{unknown:?}"),
+        ] {
+            assert!(!rendered.contains(SECRET));
+            assert!(!rendered.contains(PATH));
+        }
+    }
+
+    #[test]
+    fn sink_delivery_uses_the_locked_externally_tagged_json_shape() {
+        assert_eq!(
+            serde_json::to_value(super::SinkDelivery::Ordinary).unwrap(),
+            serde_json::json!("ordinary")
+        );
+        assert_eq!(
+            serde_json::to_value(super::SinkDelivery::Transactional).unwrap(),
+            serde_json::json!("transactional")
+        );
+        assert_eq!(
+            serde_json::to_value(super::SinkDelivery::EpochIdempotent {
+                mechanism: "ledger".into(),
+                retention: crate::RetentionClass::Unbounded,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "epoch_idempotent": {
+                    "mechanism": "ledger",
+                    "retention": "unbounded",
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn validation_projection_preserves_dotted_participant_ids() {
+        for (field, message, kind, id) in [
+            (
+                "operators.warehouse.primary.checkpoint_capability",
+                "operator checkpoint capability is unproven",
+                ComponentKind::Operator,
+                "warehouse.primary",
+            ),
+            (
+                "sources.warehouse.primary.capabilities.max_batch_rows",
+                "must be greater than zero",
+                ComponentKind::Source,
+                "warehouse.primary",
+            ),
+            (
+                "sinks.warehouse.primary",
+                "binding validation failed",
+                ComponentKind::Sink,
+                "warehouse.primary",
+            ),
+        ] {
+            let projected = super::project_public_error(
+                None,
+                &CalcFlowError::InvalidArgument {
+                    field: field.into(),
+                    message: message.into(),
+                },
+            );
+
+            assert_eq!(projected.category(), StreamingErrorCategory::Validation);
+            assert_eq!(projected.component_kind(), Some(kind));
+            assert_eq!(projected.component_id(), Some(id));
+        }
     }
 
     #[test]
