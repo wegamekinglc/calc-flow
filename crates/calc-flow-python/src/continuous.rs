@@ -31,6 +31,18 @@ const SAFE_EXCEPTION_FIELDS: [&str; 9] = [
 static STREAMING_RUNTIME_ERROR_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static CHECKPOINT_PUBLICATION_UNKNOWN_ERROR_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 
+macro_rules! set_py_items {
+    ($mapping:expr, { $($key:literal => $value:expr),+ $(,)? }) => {{
+        $($mapping.set_item($key, $value)?;)+
+    }};
+}
+
+macro_rules! py_tuple {
+    ($py:expr, [$($value:expr),+ $(,)?]) => {
+        PyTuple::new($py, [$($value.into_py_any($py)?,)+])
+    };
+}
+
 struct SafeStreamingErrorFields {
     category: String,
     message: String,
@@ -313,19 +325,19 @@ fn structured_streaming_py_err(
             streaming_runtime_error_type(py)?
         };
         let exception = PyErr::from_type(exception_type, fallback_message.clone());
-        let values = PyTuple::new(
+        let values = py_tuple!(
             py,
             [
-                fields.category.into_py_any(py)?,
-                fields.message.into_py_any(py)?,
-                fields.job_id.into_py_any(py)?,
-                fields.epoch.into_py_any(py)?,
-                fields.checkpoint_phase.into_py_any(py)?,
-                fields.component_kind.into_py_any(py)?,
-                fields.component_id.into_py_any(py)?,
-                fields.diagnostic_id.into_py_any(py)?,
-                fields.position.into_py_any(py)?,
-            ],
+                fields.category,
+                fields.message,
+                fields.job_id,
+                fields.epoch,
+                fields.checkpoint_phase,
+                fields.component_kind,
+                fields.component_id,
+                fields.diagnostic_id,
+                fields.position,
+            ]
         )?;
         exception
             .value(py)
@@ -386,16 +398,26 @@ fn structured_exception_namespace(py: Python<'_>) -> PyResult<Bound<'_, PyDict>>
     namespace.set_item("__slots__", PyTuple::new(py, [NATIVE_EXCEPTION_STORAGE])?)?;
     let property = py.import("builtins")?.getattr("property")?;
     for (index, field) in SAFE_EXCEPTION_FIELDS.into_iter().enumerate() {
-        let getter = PyCFunction::new_closure(py, None, None, move |args, _kwargs| {
-            let instance = args.get_item(0)?;
-            instance
-                .getattr(NATIVE_EXCEPTION_STORAGE)?
-                .get_item(index)
-                .map(Bound::unbind)
-        })?;
+        let getter = exception_field_getter(py, index)?;
         namespace.set_item(field, property.call1((getter,))?)?;
     }
-    let storage_getter = PyCFunction::new_closure(py, None, None, move |args, _kwargs| {
+    let storage_getter = exception_storage_getter(py)?;
+    namespace.set_item(SAFE_EXCEPTION_STORAGE, property.call1((storage_getter,))?)?;
+    Ok(namespace)
+}
+
+fn exception_field_getter(py: Python<'_>, index: usize) -> PyResult<Bound<'_, PyCFunction>> {
+    PyCFunction::new_closure(py, None, None, move |args, _kwargs| {
+        let instance = args.get_item(0)?;
+        instance
+            .getattr(NATIVE_EXCEPTION_STORAGE)?
+            .get_item(index)
+            .map(Bound::unbind)
+    })
+}
+
+fn exception_storage_getter(py: Python<'_>) -> PyResult<Bound<'_, PyCFunction>> {
+    PyCFunction::new_closure(py, None, None, move |args, _kwargs| {
         let instance = args.get_item(0)?;
         let values = instance.getattr(NATIVE_EXCEPTION_STORAGE)?;
         let fields = PyDict::new(args.py());
@@ -407,9 +429,7 @@ fn structured_exception_namespace(py: Python<'_>) -> PyResult<Bound<'_, PyDict>>
             .getattr("MappingProxyType")?
             .call1((fields,))
             .map(Bound::unbind)
-    })?;
-    namespace.set_item(SAFE_EXCEPTION_STORAGE, property.call1((storage_getter,))?)?;
-    Ok(namespace)
+    })
 }
 
 fn job_outcome_to_py<'py>(
@@ -437,21 +457,17 @@ fn streaming_error_value_to_py<'py>(
     error: &calc_flow::continuous::StreamingError,
 ) -> PyResult<Bound<'py, PyDict>> {
     let value = PyDict::new(py);
-    value.set_item("category", streaming_error_category_name(error.category()))?;
-    value.set_item("message", error.message())?;
-    value.set_item("job_id", error.job_id())?;
-    value.set_item("epoch", error.epoch().map(calc_flow::Epoch::as_u64))?;
-    value.set_item(
-        "checkpoint_phase",
-        error.checkpoint_phase().map(checkpoint_phase_name),
-    )?;
-    value.set_item(
-        "component_kind",
-        error.component_kind().map(component_kind_name),
-    )?;
-    value.set_item("component_id", error.component_id())?;
-    value.set_item("diagnostic_id", error.diagnostic_id())?;
-    value.set_item("position", error.position())?;
+    set_py_items!(value, {
+        "category" => streaming_error_category_name(error.category()),
+        "message" => error.message(),
+        "job_id" => error.job_id(),
+        "epoch" => error.epoch().map(calc_flow::Epoch::as_u64),
+        "checkpoint_phase" => error.checkpoint_phase().map(checkpoint_phase_name),
+        "component_kind" => error.component_kind().map(component_kind_name),
+        "component_id" => error.component_id(),
+        "diagnostic_id" => error.diagnostic_id(),
+        "position" => error.position(),
+    });
     Ok(value)
 }
 
@@ -460,24 +476,20 @@ fn job_status_to_py<'py>(
     status: &calc_flow::continuous::JobStatus,
 ) -> PyResult<Bound<'py, PyDict>> {
     let value = PyDict::new(py);
-    value.set_item("job_id", status.job_id)?;
-    value.set_item("state", job_state_name(status.state))?;
-    value.set_item(
-        "terminal_cause",
-        status.terminal_cause.map(terminal_cause_name),
-    )?;
-    value.set_item("delivery", delivery_status_to_py(py, &status.delivery)?)?;
-    value.set_item("task_count", status.task_count)?;
-    value.set_item("task_errors", status.task_errors)?;
-    value.set_item("metrics_overflowed", status.metrics_overflowed)?;
-    value.set_item("edges", edge_status_to_py(py, &status.edges)?)?;
-    value.set_item("sources", source_status_to_py(py, &status.sources)?)?;
-    value.set_item("operators", operator_status_to_py(py, &status.operators)?)?;
-    value.set_item("sinks", sink_status_to_py(py, &status.sinks)?)?;
-    value.set_item(
-        "checkpoint",
-        checkpoint_status_to_py(py, &status.checkpoint)?,
-    )?;
+    set_py_items!(value, {
+        "job_id" => status.job_id,
+        "state" => job_state_name(status.state),
+        "terminal_cause" => status.terminal_cause.map(terminal_cause_name),
+        "delivery" => delivery_status_to_py(py, &status.delivery)?,
+        "task_count" => status.task_count,
+        "task_errors" => status.task_errors,
+        "metrics_overflowed" => status.metrics_overflowed,
+        "edges" => edge_status_to_py(py, &status.edges)?,
+        "sources" => source_status_to_py(py, &status.sources)?,
+        "operators" => operator_status_to_py(py, &status.operators)?,
+        "sinks" => sink_status_to_py(py, &status.sinks)?,
+        "checkpoint" => checkpoint_status_to_py(py, &status.checkpoint)?,
+    });
     Ok(value)
 }
 
@@ -502,20 +514,19 @@ fn edge_status_to_py<'py>(
     let values = PyDict::new(py);
     for (edge_id, status) in statuses {
         let value = PyDict::new(py);
-        value.set_item("current_envelopes", status.current_envelopes)?;
-        value.set_item("current_rows", status.current_rows)?;
-        value.set_item("current_bytes", status.current_bytes)?;
-        value.set_item("high_water_envelopes", status.high_water_envelopes)?;
-        value.set_item("high_water_rows", status.high_water_rows)?;
-        value.set_item("high_water_bytes", status.high_water_bytes)?;
-        value.set_item("blocked_sends", status.blocked_sends)?;
-        value.set_item(
-            "blocked_duration_micros",
-            duration_micros(status.blocked_duration),
-        )?;
-        value.set_item("envelope_limit", status.envelope_limit)?;
-        value.set_item("row_limit", status.row_limit)?;
-        value.set_item("byte_limit", status.byte_limit)?;
+        set_py_items!(value, {
+            "current_envelopes" => status.current_envelopes,
+            "current_rows" => status.current_rows,
+            "current_bytes" => status.current_bytes,
+            "high_water_envelopes" => status.high_water_envelopes,
+            "high_water_rows" => status.high_water_rows,
+            "high_water_bytes" => status.high_water_bytes,
+            "blocked_sends" => status.blocked_sends,
+            "blocked_duration_micros" => duration_micros(status.blocked_duration),
+            "envelope_limit" => status.envelope_limit,
+            "row_limit" => status.row_limit,
+            "byte_limit" => status.byte_limit,
+        });
         values.set_item(edge_id, value)?;
     }
     Ok(values)
@@ -528,23 +539,22 @@ fn source_status_to_py<'py>(
     let values = PyDict::new(py);
     for (source_id, status) in statuses {
         let value = PyDict::new(py);
-        value.set_item(
-            "replay_positioning",
-            replay_positioning_name(status.replay_positioning),
-        )?;
-        value.set_item("delivery", source_delivery_name(status.delivery))?;
-        value.set_item("max_batch_rows", status.max_batch_rows)?;
-        value.set_item("max_batch_bytes", status.max_batch_bytes)?;
-        value.set_item("next_sequence", status.next_sequence)?;
-        value.set_item("ended", status.ended)?;
-        value.set_item("polls", status.polls)?;
-        value.set_item("data_batches", status.data_batches)?;
-        value.set_item("data_rows", status.data_rows)?;
-        value.set_item("data_bytes", status.data_bytes)?;
-        value.set_item("fanned_out_batches", status.fanned_out_batches)?;
-        value.set_item("fanned_out_rows", status.fanned_out_rows)?;
-        value.set_item("fanned_out_bytes", status.fanned_out_bytes)?;
-        value.set_item("errors", status.errors)?;
+        set_py_items!(value, {
+            "replay_positioning" => replay_positioning_name(status.replay_positioning),
+            "delivery" => source_delivery_name(status.delivery),
+            "max_batch_rows" => status.max_batch_rows,
+            "max_batch_bytes" => status.max_batch_bytes,
+            "next_sequence" => status.next_sequence,
+            "ended" => status.ended,
+            "polls" => status.polls,
+            "data_batches" => status.data_batches,
+            "data_rows" => status.data_rows,
+            "data_bytes" => status.data_bytes,
+            "fanned_out_batches" => status.fanned_out_batches,
+            "fanned_out_rows" => status.fanned_out_rows,
+            "fanned_out_bytes" => status.fanned_out_bytes,
+            "errors" => status.errors,
+        });
         values.set_item(source_id, value)?;
     }
     Ok(values)
@@ -557,30 +567,23 @@ fn operator_status_to_py<'py>(
     let values = PyDict::new(py);
     for (operator_id, status) in statuses {
         let value = PyDict::new(py);
-        value.set_item("input_batches", status.input_batches)?;
-        value.set_item("input_rows", status.input_rows)?;
-        value.set_item("input_bytes", status.input_bytes)?;
-        value.set_item("fanned_out_batches", status.fanned_out_batches)?;
-        value.set_item("fanned_out_rows", status.fanned_out_rows)?;
-        value.set_item("fanned_out_bytes", status.fanned_out_bytes)?;
-        value.set_item(
-            "processing_duration_micros",
-            duration_micros(status.processing_duration),
-        )?;
-        value.set_item("errors", status.errors)?;
-        value.set_item("ended", status.ended)?;
-        value.set_item("late_rows", status.late_rows)?;
-        value.set_item("late_affected_batches", status.late_affected_batches)?;
-        value.set_item(
-            "max_lateness_micros",
-            status.max_lateness.map(duration_micros),
-        )?;
-        value.set_item("null_event_time_rows", status.null_event_time_rows)?;
-        value.set_item("null_event_time_batches", status.null_event_time_batches)?;
-        value.set_item(
-            "datafusion_runtime_created",
-            status.datafusion_runtime_created,
-        )?;
+        set_py_items!(value, {
+            "input_batches" => status.input_batches,
+            "input_rows" => status.input_rows,
+            "input_bytes" => status.input_bytes,
+            "fanned_out_batches" => status.fanned_out_batches,
+            "fanned_out_rows" => status.fanned_out_rows,
+            "fanned_out_bytes" => status.fanned_out_bytes,
+            "processing_duration_micros" => duration_micros(status.processing_duration),
+            "errors" => status.errors,
+            "ended" => status.ended,
+            "late_rows" => status.late_rows,
+            "late_affected_batches" => status.late_affected_batches,
+            "max_lateness_micros" => status.max_lateness.map(duration_micros),
+            "null_event_time_rows" => status.null_event_time_rows,
+            "null_event_time_batches" => status.null_event_time_batches,
+            "datafusion_runtime_created" => status.datafusion_runtime_created,
+        });
         values.set_item(operator_id, value)?;
     }
     Ok(values)
@@ -593,20 +596,16 @@ fn sink_status_to_py<'py>(
     let values = PyDict::new(py);
     for (sink_id, status) in statuses {
         let value = PyDict::new(py);
-        value.set_item("output_id", &status.output_id)?;
-        value.set_item(
-            "effective_delivery",
-            sink_delivery_to_py(py, &status.effective_delivery)?,
-        )?;
-        value.set_item("delivered_batches", status.delivered_batches)?;
-        value.set_item("delivered_rows", status.delivered_rows)?;
-        value.set_item("delivered_bytes", status.delivered_bytes)?;
-        value.set_item(
-            "write_duration_micros",
-            duration_micros(status.write_duration),
-        )?;
-        value.set_item("errors", status.errors)?;
-        value.set_item("ended", status.ended)?;
+        set_py_items!(value, {
+            "output_id" => &status.output_id,
+            "effective_delivery" => sink_delivery_to_py(py, &status.effective_delivery)?,
+            "delivered_batches" => status.delivered_batches,
+            "delivered_rows" => status.delivered_rows,
+            "delivered_bytes" => status.delivered_bytes,
+            "write_duration_micros" => duration_micros(status.write_duration),
+            "errors" => status.errors,
+            "ended" => status.ended,
+        });
         values.set_item(sink_id, value)?;
     }
     Ok(values)
@@ -617,43 +616,24 @@ fn checkpoint_status_to_py<'py>(
     status: &calc_flow::continuous::CheckpointStatus,
 ) -> PyResult<Bound<'py, PyDict>> {
     let value = PyDict::new(py);
-    value.set_item(
-        "current_epoch",
-        status.current_epoch.map(calc_flow::Epoch::as_u64),
-    )?;
-    value.set_item("phase", status.phase.map(checkpoint_phase_name))?;
-    value.set_item("terminal", status.terminal)?;
-    value.set_item("source_acknowledgements", status.source_acknowledgements)?;
-    value.set_item("expected_sources", status.expected_sources)?;
-    value.set_item(
-        "operator_acknowledgements",
-        status.operator_acknowledgements,
-    )?;
-    value.set_item("expected_operators", status.expected_operators)?;
-    value.set_item(
-        "sink_precommit_acknowledgements",
-        status.sink_precommit_acknowledgements,
-    )?;
-    value.set_item("expected_sink_precommits", status.expected_sink_precommits)?;
-    value.set_item(
-        "sink_commit_acknowledgements",
-        status.sink_commit_acknowledgements,
-    )?;
-    value.set_item("expected_sink_commits", status.expected_sink_commits)?;
-    value.set_item("elapsed_micros", status.elapsed.map(duration_micros))?;
-    value.set_item(
-        "last_completed_epoch",
-        status.last_completed_epoch.map(calc_flow::Epoch::as_u64),
-    )?;
-    value.set_item(
-        "installed_unknown_epoch",
-        status.installed_unknown_epoch.map(calc_flow::Epoch::as_u64),
-    )?;
-    value.set_item(
-        "failure_category",
-        status.failure_category.map(streaming_error_category_name),
-    )?;
-    value.set_item("runtime_config_changed", status.runtime_config_changed)?;
+    set_py_items!(value, {
+        "current_epoch" => status.current_epoch.map(calc_flow::Epoch::as_u64),
+        "phase" => status.phase.map(checkpoint_phase_name),
+        "terminal" => status.terminal,
+        "source_acknowledgements" => status.source_acknowledgements,
+        "expected_sources" => status.expected_sources,
+        "operator_acknowledgements" => status.operator_acknowledgements,
+        "expected_operators" => status.expected_operators,
+        "sink_precommit_acknowledgements" => status.sink_precommit_acknowledgements,
+        "expected_sink_precommits" => status.expected_sink_precommits,
+        "sink_commit_acknowledgements" => status.sink_commit_acknowledgements,
+        "expected_sink_commits" => status.expected_sink_commits,
+        "elapsed_micros" => status.elapsed.map(duration_micros),
+        "last_completed_epoch" => status.last_completed_epoch.map(calc_flow::Epoch::as_u64),
+        "installed_unknown_epoch" => status.installed_unknown_epoch.map(calc_flow::Epoch::as_u64),
+        "failure_category" => status.failure_category.map(streaming_error_category_name),
+        "runtime_config_changed" => status.runtime_config_changed,
+    });
     Ok(value)
 }
 
