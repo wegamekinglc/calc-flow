@@ -3,12 +3,11 @@ mod support;
 use std::collections::{BTreeMap, HashMap};
 
 use calc_flow::{
-    BatchMetadata, BatchOperator, CalcFlowError, Checkpoint, DataFusionConfig, DataSourceSpec,
-    Edge, NodeSpec, OperatorSpec, PROJECT_FORMAT_VERSION, PipelineBuilder, PipelineSpec,
-    PortEndpoint, ProjectSpec, RunOptions, UdfRegistry, canonical_json, export_project_json,
-    export_project_yaml, import_project_json, import_project_yaml,
+    BatchMetadata, BatchOperator, CalcFlowError, DataFusionConfig, DataSourceSpec, Edge, NodeSpec,
+    OperatorSpec, PROJECT_FORMAT_VERSION, PipelineBuilder, PipelineSpec, PortEndpoint, ProjectSpec,
+    RunOptions, UdfRegistry, canonical_json, export_project_json, export_project_yaml,
+    import_project_json, import_project_yaml,
 };
-use chrono::{TimeZone, Utc};
 use proptest::{
     collection::vec,
     prelude::*,
@@ -214,48 +213,4 @@ proptest! {
         prop_assert_ne!(metadata.attributes(), &caller_attributes);
     }
 
-    #[test]
-    fn checkpoints_round_trip_generated_json_state_and_enforce_invariants(
-        pipeline in "[a-z][a-z0-9_-]{0,11}",
-        fingerprint in "[a-f0-9]{1,24}",
-        has_cursor in any::<bool>(),
-        cursor_value in json_value(),
-        sequence in any::<u64>(),
-        state in json_map(),
-    ) {
-        let cursor = has_cursor.then_some(cursor_value);
-        let checkpoint = Checkpoint::new(
-            &pipeline,
-            &fingerprint,
-            cursor,
-            sequence,
-            state.clone(),
-            Utc.with_ymd_and_hms(2026, 7, 14, 0, 0, 0).unwrap(),
-        )
-        .unwrap();
-        let wire = serde_json::to_vec(&checkpoint).unwrap();
-        let decoded: Checkpoint = serde_json::from_slice(&wire).unwrap();
-
-        prop_assert_eq!(&decoded, &checkpoint);
-        prop_assert_eq!(checkpoint.pipeline_name, pipeline);
-        prop_assert_eq!(checkpoint.pipeline_fingerprint, fingerprint);
-        prop_assert_eq!(checkpoint.sequence, sequence);
-        prop_assert_eq!(checkpoint.state, state);
-        prop_assert!(Checkpoint::new(
-            "",
-            "fingerprint",
-            None,
-            sequence,
-            BTreeMap::new(),
-            Utc.with_ymd_and_hms(2026, 7, 14, 0, 0, 0).unwrap(),
-        ).is_err());
-        prop_assert!(Checkpoint::new(
-            "pipeline",
-            "fingerprint",
-            None,
-            sequence,
-            BTreeMap::from([(String::new(), Value::Null)]),
-            Utc.with_ymd_and_hms(2026, 7, 14, 0, 0, 0).unwrap(),
-        ).is_err());
-    }
 }

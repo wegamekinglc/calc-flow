@@ -273,63 +273,51 @@ The checked schema is [schemas/project-v2.schema.json](../schemas/project-v2.sch
 
 ## Streaming and recovery
 
-Rust and Python expose two runner modes:
+Rust and Python expose one source-driven continuous runtime. A
+`StreamExecutionPlan` freezes source and sink binding IDs and delivery
+requirements. `StreamingRunner` owns that plan, all `SourceBinding` and
+`SinkBinding` values, a `ManagedCheckpointRuntime`, and an optional
+`StreamRuntimeConfig`. Starting consumes the runner and returns the sole
+`StreamingJob` lifecycle owner.
 
-- `MicroBatchRunner` opens a replayable source at the committed JSON cursor
-  and pulls formed `(Batch, cursor, sequence)` items;
-- `StreamingRunner` accepts one formed batch per step.
-
-Sinks are routed by graph output name. Sync and async Python sink callbacks are
-supported. Runners validate all routes before leasing a plan or delivering any
+Sources and sinks are async lifecycle connectors. A source declares replay,
+delivery, schema, watermark, and batch-bound capabilities before it opens.
+Ordinary sinks provide at-least-once delivery; transactional or
+epoch-idempotent bindings can prove exactly-once compatibility for a requested
 output.
 
-After execution, every configured sink must succeed before the checkpoint is
-committed. On execution, sink, or checkpoint failure, owned plan state is
-restored and the current source item remains retryable. A sink may therefore
-see the same batch again: delivery is at least once.
-
-`FileCheckpointStore` writes versioned JSON atomically. A checkpoint identifies
-the pipeline name/fingerprint, source cursor/sequence, node-keyed state, and
-creation time. One runner has an exclusive lease on a stateful plan.
-
-The crate also contains a source-driven continuous runtime with whole-job
-preflight, bounded source/operator/sink tasks, job-scoped event-time progress,
-window execution, aligned epoch checkpoints, manifest-last publication,
-operator-state restore, transactional sink completion, terminal checkpoints,
-a private runner/job/reaper lifecycle, deterministic status and metrics, panic
+The runtime performs whole-job preflight, runs bounded source/operator/sink
+tasks, and owns job-scoped event-time progress, window execution, aligned epoch
+checkpoints, manifest-last publication, operator-state restore, transactional
+sink completion, terminal checkpoints, deterministic status and metrics, panic
 containment, bounded launch cleanup, and owner-settled cancellation. Its
 progress driver owns watermark generation, idle/reactivation handling,
-deterministic timer ordering, and multi-ingress progress. Exactly-once
-capability is proved per requested output across its reachable sources,
-operators, edges, and sinks; lossy or non-replayable sources fail that proof.
-Every compiled operator also carries its graph node ID as its stable checkpoint
+deterministic timer ordering, and multi-ingress progress.
+
+Every compiled operator carries its graph node ID as its stable checkpoint
 identity and is classified as stateless, versioned checkpointed-stateful, or
 unproven. Checkpointed jobs reject unproven operators before task registration,
-and recovery checks the stored operator-state version before restore.
-Each source binding name remains its stable identity across recovery, while
-its schema, watermark, replay, delivery, and batch-bound capabilities are
-sampled once before open and included in durable identity validation. Other
-checkpointed outputs may remain at least once.
+and recovery checks stored operator-state versions before restore. Each source
+binding name remains its stable identity across recovery; its capability
+contract is sampled once before open and included in durable identity
+validation.
 
 The Rust state surface is public and data-only. `StateBackend` opens an
-exclusive `StateLineageBackend`; `LocalStateBackend` stages, validates,
-publishes, loads, and collects immutable checksum-addressed segments.
-`CheckpointManifest` is the strict bounded v3 manifest for source, operator,
-sink, watermark, and segment state. Window snapshots use retained Arrow IPC
-segments and deterministic compaction. The private runtime uses that manifest
-as its durable checkpoint and recovery truth. These runtime types remain
-crate-private. They expose no public watermark/checkpoint control and do not
-change the public v2 `MicroBatchRunner` or `StreamingRunner`, project and
-checkpoint formats, Python binding, or Studio routes. Public source-driven
-runner integration is not part of the current surface.
+exclusive `StateLineageBackend`; `LocalStateBackend` manages immutable,
+checksum-addressed segments. `CheckpointManifest` is the strict bounded v3
+manifest for source, operator, sink, watermark, and segment state. The runtime
+uses it as its durable checkpoint and recovery truth. `StreamingJob` exposes
+checkpoint, shutdown, cancel, wait, status, and outcome controls without
+exposing cursor payloads, connector state, or filesystem paths.
 
-Every private runtime edge uses the public two-field `EdgeBudget`. For
-`EdgeBudget::new(R, B)`, at most `R` envelopes, `R` rows, and `B` bytes may be
-reserved independently. The type and function signatures are unchanged.
-Direct `edge_channel` callers must choose
+The v2 micro-batch and push runners and public checkpoint-document store are
+removed. Project format v2 and Studio REST/OpenAPI routes are unchanged. Every
+runtime edge uses the public two-field `EdgeBudget`: for
+`EdgeBudget::new(R, B)`, at most `R` envelopes, `R` rows, and `B` bytes are
+reserved independently. Direct `edge_channel` callers must choose
 `R >= max(required_row_limit, required_simultaneous_messages)`. The [stream
 message envelope](runtime-envelope.md) documents the exact message, time,
-channel, lifecycle, and current delivery boundaries.
+channel, lifecycle, and delivery boundaries.
 
 ## Python binding boundary
 
@@ -338,8 +326,8 @@ The Python package lives under `python/calc_flow/`. The native extension is
 
 - functional builder and runtime wrappers;
 - strict Pydantic project documents;
-- async/blocking file-store adapters;
-- micro-batch and streaming runner adapters;
+- async/blocking project-store adapters;
+- the source-driven continuous runner/job adapter;
 - NumPy/JAX provider registration and bounded array expressions;
 - stable Python exception classes that mirror native error categories.
 

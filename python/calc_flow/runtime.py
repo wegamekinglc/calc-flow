@@ -9,29 +9,17 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, TypedDict, overload
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, TypedDict
 
 from calc_flow import _native
-from calc_flow.store import FileCheckpointStore, _copy_json_value, _run_blocking
+from calc_flow.store import _copy_json_value
 
 if TYPE_CHECKING:
-    from calc_flow.pipeline import BatchExecutionPlan, StreamExecutionPlan
+    from calc_flow.pipeline import StreamExecutionPlan
 
 type JSONValue = (
     None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
 )
-
-
-class Source(Protocol):
-    def open(self, cursor: object) -> object: ...
-
-    def next(self) -> object: ...
-
-
-async def _resolve(value: object) -> object:
-    if inspect.isawaitable(value):
-        return await value
-    return value
 
 
 async def _raise_after_cancellation_cleanup(
@@ -51,167 +39,6 @@ async def _raise_after_cancellation_cleanup(
     except BaseException as cleanup_error:
         raise cleanup_error from cancellation
     raise cancellation
-
-
-class _SourceAdapter:
-    __slots__ = ("_source",)
-
-    def __init__(self, source: Source) -> None:
-        for method in ("open", "next"):
-            if not callable(getattr(source, method, None)):
-                raise TypeError(f"source must provide callable {method}()")
-        self._source = source
-
-    async def open(self, cursor: object) -> None:
-        copied = _copy_json_value(cursor, root_mapping=False, label="source cursor")
-        await _resolve(self._source.open(copied))
-
-    async def next(self) -> tuple[_native.Batch, object, int] | None:
-        item = await _resolve(self._source.next())
-        if item is None:
-            return None
-        if type(item) is not tuple or len(item) != 3:
-            raise TypeError(
-                "source next() must return None or exactly (Batch, cursor, sequence)"
-            )
-        batch, cursor, sequence = item
-        if not isinstance(batch, _native.Batch):
-            raise TypeError("source item 0 must be a calc_flow.Batch")
-        copied_cursor = _copy_json_value(
-            cursor, root_mapping=False, label="source cursor"
-        )
-        if type(sequence) is not int or not 0 <= sequence <= 2**64 - 1:
-            raise TypeError("source sequence must be a non-negative u64 integer")
-        return batch, copied_cursor, sequence
-
-
-def _sink_mapping(
-    sinks: Mapping[str, Sequence[Callable[[_native.Batch], object]]] | None,
-) -> dict[str, list[Callable[[_native.Batch], object]]]:
-    if sinks is None:
-        return {}
-    if not isinstance(sinks, Mapping):
-        raise TypeError("sinks must be a mapping of output names to callback sequences")
-    copied: dict[str, list[Callable[[_native.Batch], object]]] = {}
-    for output, callbacks in sinks.items():
-        if not isinstance(output, str):
-            raise TypeError("sink output names must be strings")
-        if isinstance(callbacks, (str, bytes)) or not isinstance(callbacks, Sequence):
-            raise TypeError(f"sinks[{output!r}] must be a sequence of callables")
-        copied_callbacks = list(callbacks)
-        if not all(callable(callback) for callback in copied_callbacks):
-            raise TypeError(f"sinks[{output!r}] must contain only callables")
-        copied[output] = copied_callbacks
-    return copied
-
-
-class MicroBatchRunner:
-    __slots__ = ("_inner", "__weakref__")
-
-    def __init__(
-        self,
-        plan: Any,
-        source: Source,
-        checkpoints: FileCheckpointStore,
-        *,
-        sinks: Mapping[str, Sequence[Callable[[_native.Batch], object]]] | None = None,
-        checkpoint_every: int = 100,
-    ) -> None:
-        from calc_flow.pipeline import ExecutionPlan
-
-        if not isinstance(plan, ExecutionPlan):
-            raise TypeError("plan must be a calc_flow.ExecutionPlan")
-        if not isinstance(checkpoints, FileCheckpointStore):
-            raise TypeError("checkpoints must be a calc_flow.FileCheckpointStore")
-        if type(checkpoint_every) is not int or checkpoint_every <= 0:
-            raise ValueError("checkpoint_every must be a positive integer")
-        adapter = _SourceAdapter(source)
-        copied_sinks = _sink_mapping(sinks)
-        self._inner = _native._MicroBatchRunner(
-            plan._inner,
-            adapter,
-            checkpoints._inner,
-            copied_sinks,
-            checkpoint_every,
-        )
-
-    async def next_async(self) -> _native.RunResult | None:
-        try:
-            return await self._inner.next_async()
-        except asyncio.CancelledError as cancellation:
-            await _raise_after_cancellation_cleanup(
-                self._inner.wait_idle_async(), cancellation
-            )
-
-    async def reset_async(self) -> None:
-        await self._inner.reset_async()
-
-    async def plan_snapshot_async(self) -> dict[str, Any]:
-        state = await self._inner.plan_snapshot_async()
-        return _copy_json_value(state, root_mapping=True, label="plan state")
-
-    def next(self) -> _native.RunResult | None:
-        return _run_blocking(self.next_async, "next_async")
-
-    def reset(self) -> None:
-        return _run_blocking(self.reset_async, "reset_async")
-
-    def plan_snapshot(self) -> dict[str, Any]:
-        return _run_blocking(self.plan_snapshot_async, "plan_snapshot_async")
-
-
-class LegacyStreamingRunner:
-    __slots__ = ("_inner", "__weakref__")
-
-    def __init__(self, plan: Any, checkpoints: FileCheckpointStore) -> None:
-        from calc_flow.pipeline import ExecutionPlan
-
-        if not isinstance(plan, ExecutionPlan):
-            raise TypeError("plan must be a calc_flow.ExecutionPlan")
-        if not isinstance(checkpoints, FileCheckpointStore):
-            raise TypeError("checkpoints must be a calc_flow.FileCheckpointStore")
-        self._inner = _native._StreamingRunner(plan._inner, checkpoints._inner)
-
-    def step_async(
-        self,
-        batch: _native.Batch,
-        *,
-        sinks: Mapping[str, Sequence[Callable[[_native.Batch], object]]] | None = None,
-    ) -> Awaitable[_native.RunResult]:
-        if not isinstance(batch, _native.Batch):
-            raise TypeError("batch must be a calc_flow.Batch")
-        copied_sinks = _sink_mapping(sinks)
-
-        async def step() -> _native.RunResult:
-            try:
-                return await self._inner.step_async(batch, copied_sinks)
-            except asyncio.CancelledError as cancellation:
-                await _raise_after_cancellation_cleanup(
-                    self._inner.wait_idle_async(), cancellation
-                )
-
-        return step()
-
-    async def reset_async(self) -> None:
-        await self._inner.reset_async()
-
-    async def plan_snapshot_async(self) -> dict[str, Any]:
-        state = await self._inner.plan_snapshot_async()
-        return _copy_json_value(state, root_mapping=True, label="plan state")
-
-    def step(
-        self,
-        batch: _native.Batch,
-        *,
-        sinks: Mapping[str, Sequence[Callable[[_native.Batch], object]]] | None = None,
-    ) -> _native.RunResult:
-        return _run_blocking(lambda: self.step_async(batch, sinks=sinks), "step_async")
-
-    def reset(self) -> None:
-        return _run_blocking(self.reset_async, "reset_async")
-
-    def plan_snapshot(self) -> dict[str, Any]:
-        return _run_blocking(self.plan_snapshot_async, "plan_snapshot_async")
 
 
 class ReplayPositioning(StrEnum):
@@ -898,9 +725,8 @@ class StreamingJob:
 class StreamingRunner:
     """One-shot source-driven continuous runner owning all bindings."""
 
-    __slots__ = ("_inner", "_legacy", "__weakref__")
+    __slots__ = ("_inner", "__weakref__")
 
-    @overload
     def __init__(
         self,
         plan: StreamExecutionPlan,
@@ -909,44 +735,14 @@ class StreamingRunner:
         checkpoints: ManagedCheckpointRuntime,
         *,
         config: StreamRuntimeConfig | None = None,
-    ) -> None: ...
-
-    @overload
-    def __init__(
-        self,
-        plan: BatchExecutionPlan,
-        sources: FileCheckpointStore,
-    ) -> None: ...
-
-    def __init__(
-        self,
-        plan: StreamExecutionPlan | BatchExecutionPlan,
-        sources: Mapping[str, SourceBinding] | FileCheckpointStore,
-        sinks: Mapping[str, Sequence[SinkBinding]] | None = None,
-        checkpoints: ManagedCheckpointRuntime | None = None,
-        *,
-        config: StreamRuntimeConfig | None = None,
     ) -> None:
-        from calc_flow.pipeline import BatchExecutionPlan, StreamExecutionPlan
-
-        if isinstance(plan, BatchExecutionPlan):
-            if not isinstance(sources, FileCheckpointStore):
-                raise TypeError(
-                    "legacy batch plans require a calc_flow.FileCheckpointStore"
-                )
-            if sinks is not None or checkpoints is not None or config is not None:
-                raise TypeError(
-                    "legacy StreamingRunner accepts only plan and checkpoints"
-                )
-            self._inner = _native._StreamingRunner(plan._inner, sources._inner)
-            self._legacy = True
-            return
+        from calc_flow.pipeline import StreamExecutionPlan
 
         if not isinstance(plan, StreamExecutionPlan):
             raise TypeError("plan must be a calc_flow.StreamExecutionPlan")
         if not isinstance(sources, Mapping):
             raise TypeError("sources must be a mapping of source bindings")
-        if sinks is None:
+        if not isinstance(sinks, Mapping):
             raise TypeError("sinks must be a mapping of sink bindings")
         if not isinstance(checkpoints, ManagedCheckpointRuntime):
             raise TypeError("checkpoints must be a calc_flow.ManagedCheckpointRuntime")
@@ -966,70 +762,16 @@ class StreamingRunner:
         selected = StreamRuntimeConfig() if config is None else config
         if not isinstance(selected, StreamRuntimeConfig):
             raise TypeError("config must be a calc_flow.StreamRuntimeConfig or None")
-        self._inner = _native._ContinuousStreamingRunner(
+        self._inner = _native._StreamingRunner(
             plan._inner,
             copied_sources,
             copied_sinks,
             checkpoints._inner,
             selected._native(),
         )
-        self._legacy = False
-
-    def _require_legacy(self) -> None:
-        if not self._legacy:
-            raise RuntimeError("continuous runners do not support the legacy step API")
-
-    def step_async(
-        self,
-        batch: _native.Batch,
-        *,
-        sinks: Mapping[str, Sequence[Callable[[_native.Batch], object]]] | None = None,
-    ) -> Awaitable[_native.RunResult]:
-        """Run one formed batch when using the temporary legacy constructor."""
-        self._require_legacy()
-        if not isinstance(batch, _native.Batch):
-            raise TypeError("batch must be a calc_flow.Batch")
-        copied_sinks = _sink_mapping(sinks)
-
-        async def step() -> _native.RunResult:
-            try:
-                return await self._inner.step_async(batch, copied_sinks)
-            except asyncio.CancelledError as cancellation:
-                await _raise_after_cancellation_cleanup(
-                    self._inner.wait_idle_async(), cancellation
-                )
-
-        return step()
-
-    async def reset_async(self) -> None:
-        """Reset recovery state for the temporary legacy constructor."""
-        self._require_legacy()
-        await self._inner.reset_async()
-
-    async def plan_snapshot_async(self) -> dict[str, Any]:
-        """Snapshot plan state for the temporary legacy constructor."""
-        self._require_legacy()
-        state = await self._inner.plan_snapshot_async()
-        return _copy_json_value(state, root_mapping=True, label="plan state")
-
-    def step(
-        self,
-        batch: _native.Batch,
-        *,
-        sinks: Mapping[str, Sequence[Callable[[_native.Batch], object]]] | None = None,
-    ) -> _native.RunResult:
-        return _run_blocking(lambda: self.step_async(batch, sinks=sinks), "step_async")
-
-    def reset(self) -> None:
-        return _run_blocking(self.reset_async, "reset_async")
-
-    def plan_snapshot(self) -> dict[str, Any]:
-        return _run_blocking(self.plan_snapshot_async, "plan_snapshot_async")
 
     async def start_async(self) -> StreamingJob:
         """Consume this runner and asynchronously launch one owning job."""
-        if self._legacy:
-            raise RuntimeError("legacy streaming runners do not support start_async()")
         try:
             try:
                 return StreamingJob(await self._inner.start_async())

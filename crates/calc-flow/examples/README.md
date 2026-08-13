@@ -7,7 +7,7 @@ DataFusion. Run them from a repository checkout with:
 ```bash
 cargo run -p calc-flow --example expression_pipeline
 cargo run -p calc-flow --example sql_join
-cargo run -p calc-flow --example micro_batch_recovery
+cargo run -p calc-flow --example continuous_runtime
 cargo run -p calc-flow --example export_schema
 ```
 
@@ -18,9 +18,8 @@ The files cover:
   awaits `ExecutionPlan::execute`.
 - `sql_join.rs` — a `SqlOperator` joins two named table inputs (`orders`,
   `fees`) with one read-only DataFusion `SELECT`.
-- `micro_batch_recovery.rs` — a replayable `Source`, a recording `Sink`,
-  checkpoint commit, plan-lease release, and recovery from the stored source
-  cursor.
+- `continuous_runtime.rs` — a replayable `StreamSource`, an ordinary
+  `StreamSink`, managed checkpoints, and the one-shot runner/job lifecycle.
 - `export_schema.rs` — prints the canonical v2 project JSON Schema.
 
 The Python binding ships parallel examples under

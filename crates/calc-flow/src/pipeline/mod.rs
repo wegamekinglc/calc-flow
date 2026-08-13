@@ -16,7 +16,6 @@ pub use stream::{
     DeliveryGuarantee, EdgeBudget, StreamExecutionPlan, StreamRequirements, StreamRuntimeConfig,
 };
 
-pub(crate) use batch::{OperationToken, PlanLease, PlanTransaction};
 pub(crate) use compile::{
     CompiledNode, NodeDefinition, TablePlanResources, build_nodes, compile_graph,
 };

@@ -29,7 +29,6 @@ fn calc_flow_python(module: &Bound<'_, PyModule>) -> PyResult<()> {
     continuous::register(module)?;
     pipeline::register(module)?;
     store::register(module)?;
-    runtime::register(module)?;
     Ok(())
 }
 
@@ -90,15 +89,20 @@ mod tests {
             calc_flow_python(&module).unwrap();
 
             for name in [
-                "_ContinuousStreamingRunner",
+                "_StreamingRunner",
                 "_StreamingJob",
                 "StreamingRuntimeError",
                 "CheckpointPublicationUnknownError",
             ] {
                 assert!(module.getattr(name).is_ok(), "missing native {name}");
             }
-
-            assert!(module.getattr("_StreamingRunner").is_ok());
+            for name in [
+                "_ContinuousStreamingRunner",
+                "_FileCheckpointStore",
+                "_MicroBatchRunner",
+            ] {
+                assert!(module.getattr(name).is_err(), "unexpected native {name}");
+            }
         });
     }
 }

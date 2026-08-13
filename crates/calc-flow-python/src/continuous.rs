@@ -80,7 +80,7 @@ impl SafeStreamingErrorFields {
         }
     }
 
-    fn from_streaming(error: &calc_flow::continuous::StreamingError) -> Self {
+    fn from_streaming(error: &calc_flow::StreamingError) -> Self {
         Self {
             category: streaming_error_category_name(error.category()).to_owned(),
             message: error.message().to_owned(),
@@ -101,17 +101,13 @@ impl SafeStreamingErrorFields {
     }
 }
 
-#[pyclass(
-    name = "_ContinuousStreamingRunner",
-    frozen,
-    module = "calc_flow._native"
-)]
+#[pyclass(name = "_StreamingRunner", frozen, module = "calc_flow._native")]
 pub(crate) struct PyContinuousStreamingRunner {
     inner: Arc<RunnerStartState>,
 }
 
 struct RunnerStartState {
-    runner: Mutex<Option<calc_flow::continuous::StreamingRunner>>,
+    runner: Mutex<Option<calc_flow::StreamingRunner>>,
     roots: Mutex<Vec<Arc<PythonRoot>>>,
     awaits: Arc<PythonAwaitRegistry>,
     context: Arc<Mutex<Option<Arc<PythonAsyncContext>>>>,
@@ -126,7 +122,7 @@ struct PyStreamingStartAwaitable {
 
 #[pyclass(name = "_StreamingJob", frozen, module = "calc_flow._native")]
 pub(crate) struct PyStreamingJob {
-    inner: Mutex<Option<Arc<calc_flow::continuous::StreamingJob>>>,
+    inner: Mutex<Option<Arc<calc_flow::StreamingJob>>>,
     roots: Arc<Mutex<Vec<Arc<PythonRoot>>>>,
     awaits: Arc<PythonAwaitRegistry>,
     context: Arc<Mutex<Option<Arc<PythonAsyncContext>>>>,
@@ -138,12 +134,12 @@ pub(crate) struct PyStreamingJob {
     module = "calc_flow._native"
 )]
 pub(crate) struct PyManagedCheckpointRuntime {
-    inner: Mutex<Option<calc_flow::continuous::ManagedCheckpointRuntime>>,
+    inner: Mutex<Option<calc_flow::ManagedCheckpointRuntime>>,
 }
 
 #[pyclass(frozen, module = "calc_flow._native")]
 struct PyStreamingJobAwaitable {
-    inner: Arc<calc_flow::continuous::StreamingJob>,
+    inner: Arc<calc_flow::StreamingJob>,
     awaits: Arc<PythonAwaitRegistry>,
     operation: JobOperation,
     started: AtomicBool,
@@ -217,11 +213,11 @@ impl ConnectorOwnership {
 struct ConnectorOwnershipLease(Arc<ConnectorOwnership>);
 
 type PythonSourceBindings = (
-    BTreeMap<String, calc_flow::continuous::SourceBinding>,
+    BTreeMap<String, calc_flow::SourceBinding>,
     Vec<Arc<PythonRoot>>,
 );
 type PythonSinkBindings = (
-    BTreeMap<String, Vec<calc_flow::continuous::SinkBinding>>,
+    BTreeMap<String, Vec<calc_flow::SinkBinding>>,
     Vec<Arc<PythonRoot>>,
 );
 
@@ -249,7 +245,7 @@ async fn resolve_connector(
 }
 
 impl PythonContinuousSource {
-    fn parsed_capabilities(&self) -> PyResult<calc_flow::continuous::SourceCapabilities> {
+    fn parsed_capabilities(&self) -> PyResult<calc_flow::SourceCapabilities> {
         Python::attach(|py| {
             let value = self
                 .binding
@@ -262,9 +258,9 @@ impl PythonContinuousSource {
                 .as_str()
             {
                 "exact_pause_report_and_seek" => {
-                    calc_flow::continuous::ReplayPositioning::ExactPauseReportAndSeek
+                    calc_flow::ReplayPositioning::ExactPauseReportAndSeek
                 }
-                "unsupported" => calc_flow::continuous::ReplayPositioning::Unsupported,
+                "unsupported" => calc_flow::ReplayPositioning::Unsupported,
                 other => {
                     return Err(PyTypeError::new_err(format!(
                         "unsupported replay positioning {other:?}"
@@ -275,8 +271,8 @@ impl PythonContinuousSource {
                 .extract::<String>()?
                 .as_str()
             {
-                "lossless" => calc_flow::continuous::SourceDeliveryCapability::Lossless,
-                "lossy" => calc_flow::continuous::SourceDeliveryCapability::Lossy,
+                "lossless" => calc_flow::SourceDeliveryCapability::Lossless,
+                "lossy" => calc_flow::SourceDeliveryCapability::Lossy,
                 other => {
                     return Err(PyTypeError::new_err(format!(
                         "unsupported source delivery {other:?}"
@@ -285,31 +281,29 @@ impl PythonContinuousSource {
             };
             let schema = required_item(value, "schema")?;
             let schema = if schema.is_none() {
-                calc_flow::continuous::SourceSchema::DynamicOrUnknown
+                calc_flow::SourceSchema::DynamicOrUnknown
             } else {
                 let capsule = schema
                     .call_method0("__arrow_c_schema__")?
                     .cast_into::<PyCapsule>()?;
                 let schema = pyo3_arrow::PySchema::from_arrow_pycapsule(&capsule)?;
-                calc_flow::continuous::SourceSchema::Exact(schema.into())
+                calc_flow::SourceSchema::Exact(schema.into())
             };
             let native_watermarks = match required_item(value, "native_watermarks")?
                 .extract::<String>()?
                 .as_str()
             {
-                "never_emits" => calc_flow::continuous::NativeWatermarkCapability::NeverEmits,
-                "emits_native" => calc_flow::continuous::NativeWatermarkCapability::EmitsNative,
-                "runtime_toggleable" => {
-                    calc_flow::continuous::NativeWatermarkCapability::RuntimeToggleable
-                }
-                "unknown" => calc_flow::continuous::NativeWatermarkCapability::Unknown,
+                "never_emits" => calc_flow::NativeWatermarkCapability::NeverEmits,
+                "emits_native" => calc_flow::NativeWatermarkCapability::EmitsNative,
+                "runtime_toggleable" => calc_flow::NativeWatermarkCapability::RuntimeToggleable,
+                "unknown" => calc_flow::NativeWatermarkCapability::Unknown,
                 other => {
                     return Err(PyTypeError::new_err(format!(
                         "unsupported native watermark capability {other:?}"
                     )));
                 }
             };
-            Ok(calc_flow::continuous::SourceCapabilities {
+            Ok(calc_flow::SourceCapabilities {
                 replay_positioning,
                 delivery,
                 max_batch_rows: required_item(value, "max_batch_rows")?.extract()?,
@@ -322,26 +316,22 @@ impl PythonContinuousSource {
 }
 
 #[async_trait::async_trait]
-impl calc_flow::continuous::StreamSource for PythonContinuousSource {
-    fn capabilities(&self) -> calc_flow::continuous::SourceCapabilities {
+impl calc_flow::StreamSource for PythonContinuousSource {
+    fn capabilities(&self) -> calc_flow::SourceCapabilities {
         self.parsed_capabilities().unwrap_or_else(|error| {
             self.capability_error.lock().replace(error.to_string());
-            calc_flow::continuous::SourceCapabilities {
-                replay_positioning:
-                    calc_flow::continuous::ReplayPositioning::ExactPauseReportAndSeek,
-                delivery: calc_flow::continuous::SourceDeliveryCapability::Lossless,
+            calc_flow::SourceCapabilities {
+                replay_positioning: calc_flow::ReplayPositioning::ExactPauseReportAndSeek,
+                delivery: calc_flow::SourceDeliveryCapability::Lossless,
                 max_batch_rows: usize::MAX,
                 max_batch_bytes: usize::MAX,
-                schema: calc_flow::continuous::SourceSchema::DynamicOrUnknown,
-                native_watermarks: calc_flow::continuous::NativeWatermarkCapability::NeverEmits,
+                schema: calc_flow::SourceSchema::DynamicOrUnknown,
+                native_watermarks: calc_flow::NativeWatermarkCapability::NeverEmits,
             }
         })
     }
 
-    async fn open(
-        &mut self,
-        cursor: Option<calc_flow::continuous::Cursor>,
-    ) -> calc_flow::Result<()> {
+    async fn open(&mut self, cursor: Option<calc_flow::Cursor>) -> calc_flow::Result<()> {
         if let Some(error) = self.capability_error.lock().take() {
             return Err(connector_error("source.capabilities", error));
         }
@@ -370,7 +360,7 @@ impl calc_flow::continuous::StreamSource for PythonContinuousSource {
         Ok(())
     }
 
-    async fn next(&mut self) -> calc_flow::Result<Option<calc_flow::continuous::SourceEvent>> {
+    async fn next(&mut self) -> calc_flow::Result<Option<calc_flow::SourceEvent>> {
         let value = Python::attach(|py| {
             self.binding
                 .object()
@@ -415,23 +405,19 @@ impl calc_flow::continuous::StreamSource for PythonContinuousSource {
                         .map_err(|error| connector_error("source.next", error))?;
                     let payload = json_map(&payload, "source.next cursor")?;
                     let cursor = match source_id {
-                        Some(source_id) => {
-                            calc_flow::continuous::Cursor::new(source_id, order, payload)?
-                        }
-                        None => calc_flow::continuous::Cursor::unbound(order, payload)?,
+                        Some(source_id) => calc_flow::Cursor::new(source_id, order, payload)?,
+                        None => calc_flow::Cursor::unbound(order, payload)?,
                     };
-                    calc_flow::continuous::SourceEvent::Data { batch, cursor }
+                    calc_flow::SourceEvent::Data { batch, cursor }
                 }
                 "watermark" if value.len() == 2 => {
                     let micros = value
                         .get_item(1)
                         .and_then(|item| item.extract::<i64>())
                         .map_err(|error| connector_error("source.next", error))?;
-                    calc_flow::continuous::SourceEvent::Watermark(
-                        calc_flow::EventTime::from_micros(micros),
-                    )
+                    calc_flow::SourceEvent::Watermark(calc_flow::EventTime::from_micros(micros))
                 }
-                "idle" if value.len() == 1 => calc_flow::continuous::SourceEvent::Idle,
+                "idle" if value.len() == 1 => calc_flow::SourceEvent::Idle,
                 _ => return Err(connector_error("source.next", "invalid source event")),
             };
             Ok(Some(event))
@@ -497,7 +483,7 @@ impl PythonContinuousSink {
 }
 
 #[async_trait::async_trait]
-impl calc_flow::continuous::StreamSink for PythonContinuousSink {
+impl calc_flow::StreamSink for PythonContinuousSink {
     async fn open(&mut self) -> calc_flow::Result<()> {
         self.call0("_native_open").await
     }
@@ -512,7 +498,7 @@ impl calc_flow::continuous::StreamSink for PythonContinuousSink {
 }
 
 #[async_trait::async_trait]
-impl calc_flow::continuous::TransactionalStreamSink for PythonContinuousSink {
+impl calc_flow::TransactionalStreamSink for PythonContinuousSink {
     async fn open(&mut self) -> calc_flow::Result<()> {
         self.call0("_native_open").await
     }
@@ -558,10 +544,7 @@ impl calc_flow::continuous::TransactionalStreamSink for PythonContinuousSink {
         Ok(())
     }
 
-    async fn recover(
-        &mut self,
-        recovery: &calc_flow::continuous::SinkRecovery,
-    ) -> calc_flow::Result<()> {
+    async fn recover(&mut self, recovery: &calc_flow::SinkRecovery) -> calc_flow::Result<()> {
         let args = Python::attach(|py| -> PyResult<_> {
             let delivery = sink_delivery_to_py(py, recovery.delivery())?;
             let encoded = serde_json::to_string(recovery.pre_commit())
@@ -612,7 +595,7 @@ impl PyContinuousStreamingRunner {
         dead_code,
         reason = "constructed by the native connector bindings added in downstream A6-11"
     )]
-    pub(crate) fn from_inner(inner: calc_flow::continuous::StreamingRunner) -> Self {
+    pub(crate) fn from_inner(inner: calc_flow::StreamingRunner) -> Self {
         Self {
             inner: Arc::new(RunnerStartState {
                 runner: Mutex::new(Some(inner)),
@@ -626,7 +609,7 @@ impl PyContinuousStreamingRunner {
 }
 
 impl PyManagedCheckpointRuntime {
-    fn take(&self) -> PyResult<calc_flow::continuous::ManagedCheckpointRuntime> {
+    fn take(&self) -> PyResult<calc_flow::ManagedCheckpointRuntime> {
         self.inner.lock().take().ok_or_else(|| {
             PyRuntimeError::new_err("managed checkpoint runtime has already been consumed")
         })
@@ -638,15 +621,15 @@ impl PyManagedCheckpointRuntime {
     #[new]
     #[pyo3(signature = (directory, /))]
     fn new(directory: &str) -> PyResult<Self> {
-        let inner = calc_flow::continuous::ManagedCheckpointRuntime::new(directory)
-            .map_err(crate::error::to_py_err)?;
+        let inner =
+            calc_flow::ManagedCheckpointRuntime::new(directory).map_err(crate::error::to_py_err)?;
         Ok(Self {
             inner: Mutex::new(Some(inner)),
         })
     }
 }
 
-fn source_policy(binding: &Bound<'_, PyAny>) -> PyResult<calc_flow::continuous::WatermarkPolicy> {
+fn source_policy(binding: &Bound<'_, PyAny>) -> PyResult<calc_flow::WatermarkPolicy> {
     let value = binding.call_method0("_native_policy")?;
     let value = value.cast::<PyDict>()?;
     let optional_duration = |key: &str| -> PyResult<Option<Duration>> {
@@ -655,20 +638,18 @@ fn source_policy(binding: &Bound<'_, PyAny>) -> PyResult<calc_flow::continuous::
             .map(|value| value.map(Duration::from_micros))
     };
     match required_item(value, "kind")?.extract::<String>()?.as_str() {
-        "source_provided" => Ok(calc_flow::continuous::WatermarkPolicy::SourceProvided),
-        "bounded_out_of_orderness" => Ok(
-            calc_flow::continuous::WatermarkPolicy::BoundedOutOfOrderness {
-                event_time_column: required_item(value, "event_time_column")?.extract()?,
-                max_out_of_orderness: Duration::from_micros(
-                    required_item(value, "max_out_of_orderness_micros")?.extract()?,
-                ),
-                emit_interval: Duration::from_micros(
-                    required_item(value, "emit_interval_micros")?.extract()?,
-                ),
-                idle_timeout: optional_duration("idle_timeout_micros")?,
-            },
-        ),
-        "disabled" => Ok(calc_flow::continuous::WatermarkPolicy::Disabled {
+        "source_provided" => Ok(calc_flow::WatermarkPolicy::SourceProvided),
+        "bounded_out_of_orderness" => Ok(calc_flow::WatermarkPolicy::BoundedOutOfOrderness {
+            event_time_column: required_item(value, "event_time_column")?.extract()?,
+            max_out_of_orderness: Duration::from_micros(
+                required_item(value, "max_out_of_orderness_micros")?.extract()?,
+            ),
+            emit_interval: Duration::from_micros(
+                required_item(value, "emit_interval_micros")?.extract()?,
+            ),
+            idle_timeout: optional_duration("idle_timeout_micros")?,
+        }),
+        "disabled" => Ok(calc_flow::WatermarkPolicy::Disabled {
             idle_timeout: optional_duration("idle_timeout_micros")?,
         }),
         kind => Err(PyTypeError::new_err(format!(
@@ -700,7 +681,7 @@ fn build_sources(
         };
         native.insert(
             source_id,
-            calc_flow::continuous::SourceBinding::new(source).with_watermark_policy(policy),
+            calc_flow::SourceBinding::new(source).with_watermark_policy(policy),
         );
         roots.push(root);
     }
@@ -719,7 +700,7 @@ fn build_one_sink(
     awaits: &Arc<PythonAwaitRegistry>,
     context: &Arc<Mutex<Option<Arc<PythonAsyncContext>>>>,
     ownership: &Arc<ConnectorOwnership>,
-) -> PyResult<(calc_flow::continuous::SinkBinding, Arc<PythonRoot>)> {
+) -> PyResult<(calc_flow::SinkBinding, Arc<PythonRoot>)> {
     let descriptor = sink_descriptor(&binding)?;
     let kind = required_item(&descriptor, "kind")?.extract::<String>()?;
     let sink_id = binding.getattr("sink_id")?.extract::<String>()?;
@@ -731,8 +712,8 @@ fn build_one_sink(
         _ownership: ownership.retain(),
     };
     let binding = match kind.as_str() {
-        "ordinary" => calc_flow::continuous::SinkBinding::ordinary(&sink_id, sink),
-        "transactional" => calc_flow::continuous::SinkBinding::transactional(&sink_id, sink),
+        "ordinary" => calc_flow::SinkBinding::ordinary(&sink_id, sink),
+        "transactional" => calc_flow::SinkBinding::transactional(&sink_id, sink),
         "epoch_idempotent" => {
             let mechanism = required_item(&descriptor, "mechanism")?.extract::<String>()?;
             let retention = match required_item(&descriptor, "retention")?
@@ -747,9 +728,7 @@ fn build_one_sink(
                     )));
                 }
             };
-            calc_flow::continuous::SinkBinding::epoch_idempotent(
-                &sink_id, sink, &mechanism, retention,
-            )
+            calc_flow::SinkBinding::epoch_idempotent(&sink_id, sink, &mechanism, retention)
         }
         value => {
             return Err(PyTypeError::new_err(format!(
@@ -834,7 +813,7 @@ impl PyContinuousStreamingRunner {
         let (plan, plan_owner) = plan.take()?;
         roots.push(Arc::new(PythonRoot::new(plan_owner)));
         let checkpoints = checkpoints.take()?;
-        let runner = calc_flow::continuous::StreamingRunner::new(plan, sources, sinks, checkpoints)
+        let runner = calc_flow::StreamingRunner::new(plan, sources, sinks, checkpoints)
             .and_then(|runner| runner.with_runtime_config(config))
             .map_err(streaming_py_err)?;
         Ok(Self {
@@ -864,7 +843,7 @@ impl PyContinuousStreamingRunner {
 
     fn __repr__(&self) -> String {
         let consumed = self.inner.runner.lock().is_none();
-        format!("<calc_flow._native._ContinuousStreamingRunner consumed={consumed}>")
+        format!("<calc_flow._native._StreamingRunner consumed={consumed}>")
     }
 
     #[allow(clippy::needless_pass_by_value)]
@@ -930,7 +909,7 @@ impl PyStreamingStartAwaitable {
 
 impl PyStreamingJob {
     fn from_inner_with_roots(
-        inner: calc_flow::continuous::StreamingJob,
+        inner: calc_flow::StreamingJob,
         roots: Vec<Arc<PythonRoot>>,
         awaits: Arc<PythonAwaitRegistry>,
         context: Arc<Mutex<Option<Arc<PythonAsyncContext>>>>,
@@ -943,7 +922,7 @@ impl PyStreamingJob {
         }
     }
 
-    fn job(&self) -> PyResult<Arc<calc_flow::continuous::StreamingJob>> {
+    fn job(&self) -> PyResult<Arc<calc_flow::StreamingJob>> {
         self.inner
             .lock()
             .clone()
@@ -1135,10 +1114,10 @@ fn streaming_py_err(error: calc_flow::CalcFlowError) -> PyErr {
     }
 }
 
-fn streaming_error_to_py_err(error: &calc_flow::continuous::StreamingError) -> PyErr {
+fn streaming_error_to_py_err(error: &calc_flow::StreamingError) -> PyErr {
     let fields = SafeStreamingErrorFields::from_streaming(error);
-    let checkpoint_publication_unknown = error.category()
-        == calc_flow::continuous::StreamingErrorCategory::CheckpointPublicationUnknown;
+    let checkpoint_publication_unknown =
+        error.category() == calc_flow::StreamingErrorCategory::CheckpointPublicationUnknown;
     structured_streaming_py_err(fields, checkpoint_publication_unknown)
 }
 
@@ -1345,7 +1324,7 @@ fn exception_storage_getter(py: Python<'_>) -> PyResult<Bound<'_, PyCFunction>> 
 
 fn job_outcome_to_py<'py>(
     py: Python<'py>,
-    outcome: &calc_flow::continuous::JobOutcome,
+    outcome: &calc_flow::JobOutcome,
 ) -> PyResult<Bound<'py, PyDict>> {
     let value = PyDict::new(py);
     value.set_item("state", job_state_name(outcome.state))?;
@@ -1365,7 +1344,7 @@ fn job_outcome_to_py<'py>(
 
 fn streaming_error_value_to_py<'py>(
     py: Python<'py>,
-    error: &calc_flow::continuous::StreamingError,
+    error: &calc_flow::StreamingError,
 ) -> PyResult<Bound<'py, PyDict>> {
     let value = PyDict::new(py);
     set_py_items!(value, {
@@ -1384,7 +1363,7 @@ fn streaming_error_value_to_py<'py>(
 
 fn job_status_to_py<'py>(
     py: Python<'py>,
-    status: &calc_flow::continuous::JobStatus,
+    status: &calc_flow::JobStatus,
 ) -> PyResult<Bound<'py, PyDict>> {
     let value = PyDict::new(py);
     set_py_items!(value, {
@@ -1406,7 +1385,7 @@ fn job_status_to_py<'py>(
 
 fn delivery_status_to_py<'py>(
     py: Python<'py>,
-    statuses: &BTreeMap<String, calc_flow::continuous::OutputDeliveryStatus>,
+    statuses: &BTreeMap<String, calc_flow::OutputDeliveryStatus>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let values = PyDict::new(py);
     for (output_id, status) in statuses {
@@ -1420,7 +1399,7 @@ fn delivery_status_to_py<'py>(
 
 fn edge_status_to_py<'py>(
     py: Python<'py>,
-    statuses: &BTreeMap<String, calc_flow::continuous::EdgeStatus>,
+    statuses: &BTreeMap<String, calc_flow::EdgeStatus>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let values = PyDict::new(py);
     for (edge_id, status) in statuses {
@@ -1445,7 +1424,7 @@ fn edge_status_to_py<'py>(
 
 fn source_status_to_py<'py>(
     py: Python<'py>,
-    statuses: &BTreeMap<String, calc_flow::continuous::SourceStatus>,
+    statuses: &BTreeMap<String, calc_flow::SourceStatus>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let values = PyDict::new(py);
     for (source_id, status) in statuses {
@@ -1473,7 +1452,7 @@ fn source_status_to_py<'py>(
 
 fn operator_status_to_py<'py>(
     py: Python<'py>,
-    statuses: &BTreeMap<String, calc_flow::continuous::OperatorStatus>,
+    statuses: &BTreeMap<String, calc_flow::OperatorStatus>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let values = PyDict::new(py);
     for (operator_id, status) in statuses {
@@ -1502,7 +1481,7 @@ fn operator_status_to_py<'py>(
 
 fn sink_status_to_py<'py>(
     py: Python<'py>,
-    statuses: &BTreeMap<String, calc_flow::continuous::SinkStatus>,
+    statuses: &BTreeMap<String, calc_flow::SinkStatus>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let values = PyDict::new(py);
     for (sink_id, status) in statuses {
@@ -1524,7 +1503,7 @@ fn sink_status_to_py<'py>(
 
 fn checkpoint_status_to_py<'py>(
     py: Python<'py>,
-    status: &calc_flow::continuous::CheckpointStatus,
+    status: &calc_flow::CheckpointStatus,
 ) -> PyResult<Bound<'py, PyDict>> {
     let value = PyDict::new(py);
     set_py_items!(value, {
@@ -1550,12 +1529,12 @@ fn checkpoint_status_to_py<'py>(
 
 fn sink_delivery_to_py<'py>(
     py: Python<'py>,
-    delivery: &calc_flow::continuous::SinkDelivery,
+    delivery: &calc_flow::SinkDelivery,
 ) -> PyResult<Bound<'py, PyDict>> {
     let value = PyDict::new(py);
     match delivery {
-        calc_flow::continuous::SinkDelivery::Ordinary => value.set_item("kind", "ordinary")?,
-        calc_flow::continuous::SinkDelivery::EpochIdempotent {
+        calc_flow::SinkDelivery::Ordinary => value.set_item("kind", "ordinary")?,
+        calc_flow::SinkDelivery::EpochIdempotent {
             mechanism,
             retention,
         } => {
@@ -1569,7 +1548,7 @@ fn sink_delivery_to_py<'py>(
                 },
             )?;
         }
-        calc_flow::continuous::SinkDelivery::Transactional => {
+        calc_flow::SinkDelivery::Transactional => {
             value.set_item("kind", "transactional")?;
         }
     }
@@ -1580,89 +1559,83 @@ const fn duration_micros(duration: Duration) -> u128 {
     duration.as_micros()
 }
 
-const fn job_state_name(state: calc_flow::continuous::JobState) -> &'static str {
+const fn job_state_name(state: calc_flow::JobState) -> &'static str {
     match state {
-        calc_flow::continuous::JobState::Running => "running",
-        calc_flow::continuous::JobState::Draining => "draining",
-        calc_flow::continuous::JobState::Completed => "completed",
-        calc_flow::continuous::JobState::Cancelled => "cancelled",
-        calc_flow::continuous::JobState::Failed => "failed",
-        calc_flow::continuous::JobState::RecoveryRequired => "recovery_required",
+        calc_flow::JobState::Running => "running",
+        calc_flow::JobState::Draining => "draining",
+        calc_flow::JobState::Completed => "completed",
+        calc_flow::JobState::Cancelled => "cancelled",
+        calc_flow::JobState::Failed => "failed",
+        calc_flow::JobState::RecoveryRequired => "recovery_required",
     }
 }
 
-const fn terminal_cause_name(cause: calc_flow::continuous::TerminalCause) -> &'static str {
+const fn terminal_cause_name(cause: calc_flow::TerminalCause) -> &'static str {
     match cause {
-        calc_flow::continuous::TerminalCause::NaturalEnd => "natural_end",
-        calc_flow::continuous::TerminalCause::GracefulShutdown => "graceful_shutdown",
-        calc_flow::continuous::TerminalCause::ExplicitCancel => "explicit_cancel",
-        calc_flow::continuous::TerminalCause::DeadlineExceeded => "deadline_exceeded",
-        calc_flow::continuous::TerminalCause::Failure => "failure",
+        calc_flow::TerminalCause::NaturalEnd => "natural_end",
+        calc_flow::TerminalCause::GracefulShutdown => "graceful_shutdown",
+        calc_flow::TerminalCause::ExplicitCancel => "explicit_cancel",
+        calc_flow::TerminalCause::DeadlineExceeded => "deadline_exceeded",
+        calc_flow::TerminalCause::Failure => "failure",
     }
 }
 
 const fn streaming_error_category_name(
-    category: calc_flow::continuous::StreamingErrorCategory,
+    category: calc_flow::StreamingErrorCategory,
 ) -> &'static str {
     match category {
-        calc_flow::continuous::StreamingErrorCategory::Validation => "validation",
-        calc_flow::continuous::StreamingErrorCategory::Compile => "compile",
-        calc_flow::continuous::StreamingErrorCategory::Conflict => "conflict",
-        calc_flow::continuous::StreamingErrorCategory::Cancelled => "cancelled",
-        calc_flow::continuous::StreamingErrorCategory::CheckpointTimeout => "checkpoint_timeout",
-        calc_flow::continuous::StreamingErrorCategory::CheckpointMismatch => "checkpoint_mismatch",
-        calc_flow::continuous::StreamingErrorCategory::CheckpointPublicationUnknown => {
+        calc_flow::StreamingErrorCategory::Validation => "validation",
+        calc_flow::StreamingErrorCategory::Compile => "compile",
+        calc_flow::StreamingErrorCategory::Conflict => "conflict",
+        calc_flow::StreamingErrorCategory::Cancelled => "cancelled",
+        calc_flow::StreamingErrorCategory::CheckpointTimeout => "checkpoint_timeout",
+        calc_flow::StreamingErrorCategory::CheckpointMismatch => "checkpoint_mismatch",
+        calc_flow::StreamingErrorCategory::CheckpointPublicationUnknown => {
             "checkpoint_publication_unknown"
         }
-        calc_flow::continuous::StreamingErrorCategory::Io => "io",
-        calc_flow::continuous::StreamingErrorCategory::Operator => "operator",
-        calc_flow::continuous::StreamingErrorCategory::Connector => "connector",
-        calc_flow::continuous::StreamingErrorCategory::TaskPanicked => "task_panicked",
-        calc_flow::continuous::StreamingErrorCategory::Internal => "internal",
+        calc_flow::StreamingErrorCategory::Io => "io",
+        calc_flow::StreamingErrorCategory::Operator => "operator",
+        calc_flow::StreamingErrorCategory::Connector => "connector",
+        calc_flow::StreamingErrorCategory::TaskPanicked => "task_panicked",
+        calc_flow::StreamingErrorCategory::Internal => "internal",
     }
 }
 
-const fn checkpoint_phase_name(phase: calc_flow::continuous::CheckpointPhase) -> &'static str {
+const fn checkpoint_phase_name(phase: calc_flow::CheckpointPhase) -> &'static str {
     match phase {
-        calc_flow::continuous::CheckpointPhase::Requested => "requested",
-        calc_flow::continuous::CheckpointPhase::SourcesCut => "sources_cut",
-        calc_flow::continuous::CheckpointPhase::OperatorsSnapshotted => "operators_snapshotted",
-        calc_flow::continuous::CheckpointPhase::SinksPrecommitted => "sinks_precommitted",
-        calc_flow::continuous::CheckpointPhase::ManifestInstalled => "manifest_installed",
-        calc_flow::continuous::CheckpointPhase::ManifestDurable => "manifest_durable",
-        calc_flow::continuous::CheckpointPhase::SinksCommitted => "sinks_committed",
-        calc_flow::continuous::CheckpointPhase::Completed => "completed",
+        calc_flow::CheckpointPhase::Requested => "requested",
+        calc_flow::CheckpointPhase::SourcesCut => "sources_cut",
+        calc_flow::CheckpointPhase::OperatorsSnapshotted => "operators_snapshotted",
+        calc_flow::CheckpointPhase::SinksPrecommitted => "sinks_precommitted",
+        calc_flow::CheckpointPhase::ManifestInstalled => "manifest_installed",
+        calc_flow::CheckpointPhase::ManifestDurable => "manifest_durable",
+        calc_flow::CheckpointPhase::SinksCommitted => "sinks_committed",
+        calc_flow::CheckpointPhase::Completed => "completed",
     }
 }
 
-const fn component_kind_name(kind: calc_flow::continuous::ComponentKind) -> &'static str {
+const fn component_kind_name(kind: calc_flow::ComponentKind) -> &'static str {
     match kind {
-        calc_flow::continuous::ComponentKind::Job => "job",
-        calc_flow::continuous::ComponentKind::Edge => "edge",
-        calc_flow::continuous::ComponentKind::Source => "source",
-        calc_flow::continuous::ComponentKind::Operator => "operator",
-        calc_flow::continuous::ComponentKind::Sink => "sink",
-        calc_flow::continuous::ComponentKind::Checkpoint => "checkpoint",
+        calc_flow::ComponentKind::Job => "job",
+        calc_flow::ComponentKind::Edge => "edge",
+        calc_flow::ComponentKind::Source => "source",
+        calc_flow::ComponentKind::Operator => "operator",
+        calc_flow::ComponentKind::Sink => "sink",
+        calc_flow::ComponentKind::Checkpoint => "checkpoint",
     }
 }
 
-const fn replay_positioning_name(
-    capability: calc_flow::continuous::ReplayPositioning,
-) -> &'static str {
+const fn replay_positioning_name(capability: calc_flow::ReplayPositioning) -> &'static str {
     match capability {
-        calc_flow::continuous::ReplayPositioning::ExactPauseReportAndSeek => {
-            "exact_pause_report_and_seek"
-        }
-        calc_flow::continuous::ReplayPositioning::Unsupported => "unsupported",
+        calc_flow::ReplayPositioning::ExactPauseReportAndSeek => "exact_pause_report_and_seek",
+        calc_flow::ReplayPositioning::Unsupported => "unsupported",
     }
 }
 
-const fn source_delivery_name(
-    capability: calc_flow::continuous::SourceDeliveryCapability,
-) -> &'static str {
+const fn source_delivery_name(capability: calc_flow::SourceDeliveryCapability) -> &'static str {
     match capability {
-        calc_flow::continuous::SourceDeliveryCapability::Lossless => "lossless",
-        calc_flow::continuous::SourceDeliveryCapability::Lossy => "lossy",
+        calc_flow::SourceDeliveryCapability::Lossless => "lossless",
+        calc_flow::SourceDeliveryCapability::Lossy => "lossy",
     }
 }
 
@@ -1701,14 +1674,11 @@ mod tests {
 
     use async_trait::async_trait;
     use calc_flow::{
-        Batch, CalcFlowError, ExpressionOperator, PipelineBuilder, Result, StreamExecutionPlan,
-        StreamRequirements, UdfRegistry,
-        continuous::{
-            Cursor, ManagedCheckpointRuntime, NativeWatermarkCapability, ReplayPositioning,
-            SinkBinding, SinkRecovery, SourceBinding, SourceCapabilities, SourceDeliveryCapability,
-            SourceEvent, SourceSchema, StreamSink, StreamSource, StreamingRunner,
-            TransactionalStreamSink,
-        },
+        Batch, CalcFlowError, Cursor, ExpressionOperator, ManagedCheckpointRuntime,
+        NativeWatermarkCapability, PipelineBuilder, ReplayPositioning, Result, SinkBinding,
+        SinkRecovery, SourceBinding, SourceCapabilities, SourceDeliveryCapability, SourceEvent,
+        SourceSchema, StreamExecutionPlan, StreamRequirements, StreamSink, StreamSource,
+        StreamingRunner, TransactionalStreamSink, UdfRegistry,
     };
     use pyo3::{
         Py, Python, pyclass, pymethods,
@@ -2204,7 +2174,7 @@ mod tests {
                 .expect("cancelled start must release the managed checkpoint lease");
             assert_eq!(
                 replacement.cancel().await.state,
-                calc_flow::continuous::JobState::Cancelled
+                calc_flow::JobState::Cancelled
             );
             assert!(replacement_closed.load(Ordering::Acquire));
         });
@@ -2253,7 +2223,7 @@ mod tests {
                 .await
                 .expect("the managed checkpoint lease must be reusable after GC");
             let outcome = replacement.cancel().await;
-            assert_eq!(outcome.state, calc_flow::continuous::JobState::Cancelled);
+            assert_eq!(outcome.state, calc_flow::JobState::Cancelled);
             assert!(replacement_closed.load(Ordering::Acquire));
         });
     }

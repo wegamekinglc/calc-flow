@@ -46,9 +46,7 @@ from calc_flow.runtime import (
     JobOutcome,
     JobStatus,
     JSONValue,
-    LegacyStreamingRunner,
     ManagedCheckpointRuntime,
-    MicroBatchRunner,
     NativeWatermarkCapability,
     OrdinaryDelivery,
     ReplayPositioning,
@@ -71,7 +69,7 @@ from calc_flow.runtime import (
     Watermark,
     WatermarkPolicy,
 )
-from calc_flow.store import FileCheckpointStore, FileProjectStore
+from calc_flow.store import FileProjectStore
 
 __version__ = "2.0.0"
 Batch = _native.Batch
@@ -96,13 +94,11 @@ __all__ = [
     "ExecutionError",
     "ExecutionOptions",
     "DeliveryGuarantee",
-    "FileCheckpointStore",
     "FileProjectStore",
     "Idle",
     "JobOutcome",
     "JobStatus",
     "JSONValue",
-    "LegacyStreamingRunner",
     "ManagedCheckpointRuntime",
     "NativeWatermarkCapability",
     "OrdinaryDelivery",
@@ -116,7 +112,6 @@ __all__ = [
     "ProviderOption",
     "ProviderOptionsSchema",
     "ProviderPort",
-    "MicroBatchRunner",
     "Runtime",
     "RuntimeCapabilities",
     "RuntimeSessionScope",

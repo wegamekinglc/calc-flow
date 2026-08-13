@@ -5,13 +5,15 @@ engine or Studio capabilities.
 
 ## 2026-08
 
-- 2026-08-14: Add the Python source-driven continuous facade with distinct
-  batch and stream plans, immutable connector/config values, managed local
-  checkpoints, one-shot runner ownership, async lifecycle methods, and
-  guarded blocking facades. Connector methods are validated as `async def`
-  before launch; cancelled wait observers detach without cancelling their
-  jobs. The push runner remains available as `LegacyStreamingRunner` until
-  the A6 atomic cleanup.
+- 2026-08-14: Complete the A6 continuous-runtime cutover. Rust now exports the
+  source-driven connector, binding, managed-checkpoint, one-shot
+  `StreamingRunner`, and owning `StreamingJob` surface at the crate root.
+  Python exposes that lifecycle as the sole `StreamingRunner`. The v2
+  `Source`/`Sink`, `MicroBatchRunner`, push runner, public checkpoint store,
+  and their PyO3 compatibility classes are removed with no aliases. Studio's
+  unchanged v2 checkpoint inspection routes use a private async document
+  store; project format v2, checkpoint manifests v3, REST, and OpenAPI remain
+  unchanged.
 
 - 2026-08-13: Add crate-private stable operator checkpoint identities and
   explicit stateless, versioned stateful, or unproven capabilities. Stream

@@ -409,11 +409,9 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn(
             "`BatchMetadata::new(source, sequence, attributes)` validates the source "
             "and stores\n"
-            "JSON-compatible attributes. Its sequence is descriptive batch metadata.\n"
-            "`MicroBatchRunner` checkpoint ordering uses `SourceItem.sequence`, while\n"
-            "`StreamingRunner` maintains its own sequence counter; both are distinct "
-            "from\n"
-            "`BatchMetadata.sequence`.",
+            "JSON-compatible attributes. Its sequence is descriptive batch metadata "
+            "and is\n"
+            "independent of continuous source cursors and checkpoint epochs.",
             rust_api,
         )
 

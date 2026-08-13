@@ -2,15 +2,13 @@ mod support;
 
 use std::{any::Any, sync::Arc};
 
-use calc_flow::{Batch, BatchMetadata, BatchingSource, CalcFlowError, ExternalPayload, Source};
+use calc_flow::{Batch, BatchMetadata, ExternalPayload};
 use datafusion::arrow::{
     array::{Array, ArrayRef, Int64Array, ListArray},
     buffer::{OffsetBuffer, ScalarBuffer},
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
 };
-use serde_json::json;
-use support::{QueueSource, source_item};
 
 #[derive(Debug)]
 struct MeasuredArray;
@@ -109,112 +107,4 @@ fn external_batch_uses_the_payload_provided_byte_estimate() {
 
     assert_eq!(batch.estimated_bytes().unwrap(), 41);
     assert_eq!(batch.num_rows(), 3);
-}
-
-#[tokio::test]
-async fn batching_source_fails_a_single_item_over_the_row_limit_and_latches() {
-    let (source, _) = QueueSource::new(vec![source_item(&[1, 2], json!(2), 1)]);
-    let mut source = BatchingSource::new(source, 1, usize::MAX).unwrap();
-    source.open(None).await.unwrap();
-
-    assert!(matches!(
-        source.next().await,
-        Err(CalcFlowError::InvalidArgument { ref field, ref message })
-            if field == "source.batch" && message.contains("rows")
-    ));
-    assert!(matches!(
-        source.next().await,
-        Err(CalcFlowError::InvalidArgument { ref field, .. }) if field == "source"
-    ));
-}
-
-#[tokio::test]
-async fn batching_source_delivers_valid_groups_before_failing_an_oversize_item() {
-    let small = source_item(&[1, 2], json!(2), 1);
-    let bytes = arrow_bytes(&small.batch);
-    let (source, _) = QueueSource::new(vec![small, source_item(&[3, 4, 5, 6], json!(6), 2)]);
-    let mut source = BatchingSource::new(source, usize::MAX, bytes + 1).unwrap();
-    source.open(None).await.unwrap();
-
-    let first = source.next().await.unwrap().unwrap();
-    assert_eq!(first.batch.num_rows(), 2);
-    assert!(matches!(
-        source.next().await,
-        Err(CalcFlowError::InvalidArgument { ref field, ref message })
-            if field == "source.batch" && message.contains("bytes")
-    ));
-}
-
-#[tokio::test]
-async fn batching_source_reports_every_exceeded_limit_in_the_oversize_error() {
-    let item = source_item(&[1, 2, 3, 4], json!(4), 1);
-    let bytes = arrow_bytes(&item.batch);
-    let (source, _) = QueueSource::new(vec![item]);
-    let mut source = BatchingSource::new(source, 3, bytes - 1).unwrap();
-    source.open(None).await.unwrap();
-
-    match source.next().await {
-        Err(CalcFlowError::InvalidArgument { field, message }) => {
-            assert_eq!(field, "source.batch");
-            assert!(message.contains("rows"), "{message}");
-            assert!(message.contains("bytes"), "{message}");
-            let rows_at = message.find("rows").unwrap();
-            let bytes_at = message.find("bytes").unwrap();
-            assert!(rows_at < bytes_at, "{message}");
-        }
-        other => panic!("expected an oversize error, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn batching_source_emits_a_single_item_exactly_at_both_limits() {
-    let item = source_item(&[1, 2], json!(2), 1);
-    let bytes = arrow_bytes(&item.batch);
-    let (source, _) = QueueSource::new(vec![item]);
-    let mut source = BatchingSource::new(source, 2, bytes).unwrap();
-    source.open(None).await.unwrap();
-
-    let emitted = source.next().await.unwrap().unwrap();
-    assert_eq!(emitted.batch.num_rows(), 2);
-    assert_eq!(emitted.cursor, Some(json!(2)));
-    assert_eq!(emitted.sequence, 1);
-    assert!(source.next().await.unwrap().is_none());
-}
-
-#[tokio::test]
-async fn batching_source_reopen_clears_the_latched_oversize_fault() {
-    let (source, opens) = QueueSource::new(vec![
-        source_item(&[1, 2, 3], json!(3), 1),
-        source_item(&[4], json!(4), 2),
-    ]);
-    let mut source = BatchingSource::new(source, 2, usize::MAX).unwrap();
-    source.open(None).await.unwrap();
-
-    assert!(matches!(
-        source.next().await,
-        Err(CalcFlowError::InvalidArgument { ref field, .. }) if field == "source.batch"
-    ));
-    assert!(matches!(
-        source.next().await,
-        Err(CalcFlowError::InvalidArgument { ref field, .. }) if field == "source"
-    ));
-
-    source.open(None).await.unwrap();
-    let emitted = source.next().await.unwrap().unwrap();
-    assert_eq!(emitted.batch.num_rows(), 1);
-    assert_eq!(emitted.cursor, Some(json!(4)));
-    assert_eq!(emitted.sequence, 2);
-    assert!(source.next().await.unwrap().is_none());
-    assert_eq!(*opens.lock().unwrap(), vec![None, None]);
-}
-
-fn arrow_bytes(batch: &Batch) -> usize {
-    batch
-        .table_payload()
-        .unwrap()
-        .batches()
-        .iter()
-        .flat_map(RecordBatch::columns)
-        .map(|column| column.to_data().get_slice_memory_size().unwrap())
-        .sum()
 }
