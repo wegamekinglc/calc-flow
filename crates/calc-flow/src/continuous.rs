@@ -932,6 +932,16 @@ fn validate_binding_shapes(
     sources: &BTreeMap<String, SourceBinding>,
     sinks: &BTreeMap<String, Vec<SinkBinding>>,
 ) -> Result<()> {
+    validate_portable_binding_ids(sources, sinks)?;
+    validate_source_binding_shape(plan, sources)?;
+    validate_sink_binding_shape(plan, sinks)?;
+    validate_unique_sink_ids(sinks)
+}
+
+fn validate_portable_binding_ids(
+    sources: &BTreeMap<String, SourceBinding>,
+    sinks: &BTreeMap<String, Vec<SinkBinding>>,
+) -> Result<()> {
     if sources
         .keys()
         .any(|source_id| crate::json::validate_portable_identifier("source", source_id).is_err())
@@ -950,6 +960,13 @@ fn validate_binding_shapes(
             "sink output ID is not a portable identifier",
         ));
     }
+    Ok(())
+}
+
+fn validate_source_binding_shape(
+    plan: &StreamExecutionPlan,
+    sources: &BTreeMap<String, SourceBinding>,
+) -> Result<()> {
     let expected_sources = plan
         .source_binding_ids()
         .into_iter()
@@ -969,6 +986,13 @@ fn validate_binding_shapes(
             format!("source bindings are missing external input {source_id:?}"),
         ));
     }
+    Ok(())
+}
+
+fn validate_sink_binding_shape(
+    plan: &StreamExecutionPlan,
+    sinks: &BTreeMap<String, Vec<SinkBinding>>,
+) -> Result<()> {
     let expected_outputs = plan.sink_binding_ids().into_iter().collect::<BTreeSet<_>>();
     let actual_outputs = sinks.keys().map(String::as_str).collect::<BTreeSet<_>>();
     if let Some(output_id) = actual_outputs.difference(&expected_outputs).next() {
@@ -994,6 +1018,10 @@ fn validate_binding_shapes(
             format!("sink bindings are missing graph output {output_id:?}"),
         ));
     }
+    Ok(())
+}
+
+fn validate_unique_sink_ids(sinks: &BTreeMap<String, Vec<SinkBinding>>) -> Result<()> {
     let mut sink_ids = BTreeSet::new();
     if let Some(sink_id) = sinks
         .values()

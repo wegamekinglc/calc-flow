@@ -12957,10 +12957,23 @@ mod tests {
         .await
         .expect("post-manifest commit failure should converge");
 
-        assert!(
-            matches!(&manual, Err(CalcFlowError::RecoveryRequired { .. })),
-            "unexpected manual result: {manual:?}"
+        let CalcFlowError::Streaming(manual_error) = manual.unwrap_err() else {
+            panic!("manual commit failure must use the safe streaming boundary");
+        };
+        assert_eq!(
+            manual_error.category(),
+            crate::runtime::streaming::projection::StreamingErrorCategory::Connector
         );
+        assert_eq!(manual_error.epoch(), Some(crate::Epoch::INITIAL));
+        assert_eq!(
+            manual_error.checkpoint_phase(),
+            Some(crate::runtime::streaming::projection::CheckpointPhase::ManifestDurable)
+        );
+        assert_eq!(
+            manual_error.component_kind(),
+            Some(crate::runtime::streaming::projection::ComponentKind::Sink)
+        );
+        assert_eq!(manual_error.component_id(), Some("sink"));
         assert_eq!(failed.state, ContinuousJobState::RecoveryRequired);
         assert!(
             manifest_root
