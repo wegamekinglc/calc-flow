@@ -148,24 +148,11 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        ffi::CString,
-        sync::atomic::{AtomicU64, Ordering},
-    };
+    use std::ffi::CString;
 
     use pyo3::types::PyDict;
 
     use super::*;
-
-    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
-
-    fn directory(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "calc-flow-python-project-store-{label}-{}-{}",
-            std::process::id(),
-            NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
-        ))
-    }
 
     fn project_json(name: &str) -> String {
         format!(
@@ -177,8 +164,12 @@ mod tests {
     fn native_project_store_covers_async_crud_and_strict_documents() {
         Python::initialize();
         Python::attach(|py| {
-            let project_directory = directory("crud");
-            let projects = Py::new(py, PyFileProjectStore::new(project_directory.clone())).unwrap();
+            let project_directory = tempfile::tempdir().unwrap();
+            let projects = Py::new(
+                py,
+                PyFileProjectStore::new(project_directory.path().to_path_buf()),
+            )
+            .unwrap();
             let locals = PyDict::new(py);
             locals.set_item("projects", projects).unwrap();
             locals
@@ -195,7 +186,6 @@ mod tests {
             .unwrap();
 
             assert!(parse_project(r#"{"format_version":1}"#).is_err());
-            std::fs::remove_dir_all(project_directory).unwrap();
         });
     }
 
