@@ -1,8 +1,6 @@
 //! Source-driven continuous streaming lifecycle.
 //!
-//! This module is the integration-only Rust façade for the A6 continuous
-//! runtime. It intentionally lives below `calc_flow::continuous` while the
-//! crate-root breaking cutover remains deferred.
+//! This module implements the crate-root A6 continuous runtime façade.
 //!
 //! The complete lifecycle owns connectors from binding through terminal
 //! cleanup:
@@ -12,13 +10,10 @@
 //! use async_trait::async_trait;
 //! use calc_flow::{
 //!     Batch, ExpressionOperator, JsonMap, PipelineBuilder, Result, StreamRequirements,
-//!     UdfRegistry,
-//!     continuous::{
-//!         Cursor, ManagedCheckpointRuntime, NativeWatermarkCapability, ReplayPositioning,
-//!         SinkBinding, SinkRecovery, SourceBinding, SourceCapabilities,
-//!         SourceDeliveryCapability, SourceEvent, SourceSchema, StreamSource, StreamingRunner,
-//!         TransactionalStreamSink,
-//!     },
+//!     Cursor, ManagedCheckpointRuntime, NativeWatermarkCapability, ReplayPositioning,
+//!     SinkBinding, SinkRecovery, SourceBinding, SourceCapabilities,
+//!     SourceDeliveryCapability, SourceEvent, SourceSchema, StreamSource, StreamingRunner,
+//!     TransactionalStreamSink, UdfRegistry,
 //! };
 //!
 //! struct Orders;
@@ -92,7 +87,7 @@
 //! it and returns the sole [`StreamingJob`] lifecycle owner.
 //!
 //! ```compile_fail
-//! # async fn reuse(runner: calc_flow::continuous::StreamingRunner) {
+//! # async fn reuse(runner: calc_flow::StreamingRunner) {
 //! let _first = runner.start().await;
 //! let _second = runner.start().await; // the runner was moved
 //! # }
@@ -101,7 +96,7 @@
 //! A job is likewise the sole lifecycle owner and cannot be cloned.
 //!
 //! ```compile_fail
-//! # fn clone_job(job: calc_flow::continuous::StreamingJob) {
+//! # fn clone_job(job: calc_flow::StreamingJob) {
 //! let _second_owner = job.clone();
 //! # }
 //! ```
@@ -112,7 +107,7 @@
 //! ```compile_fail
 //! use std::rc::Rc;
 //! use async_trait::async_trait;
-//! use calc_flow::continuous::{Cursor, SourceCapabilities, SourceEvent, StreamSource};
+//! use calc_flow::{Cursor, SourceCapabilities, SourceEvent, StreamSource};
 //!
 //! struct LocalOnly(Rc<()>);
 //!

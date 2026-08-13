@@ -11,16 +11,13 @@ use std::{
 
 use async_trait::async_trait;
 use calc_flow::{
-    Batch, BatchKind, BatchMetadata, CalcFlowError, DeliveryGuarantee, ExpressionOperator,
-    ExternalPayload, JsonMap, PipelineBuilder, Port, Result, StreamOperator, StreamRequirements,
-    UdfRegistry, UnionOperator,
-    continuous::{
-        ComponentKind, Cursor, JobState, ManagedCheckpointRuntime, NativeWatermarkCapability,
-        ReplayPositioning, SinkBinding, SinkRecovery, SourceBinding, SourceCapabilities,
-        SourceDeliveryCapability, SourceEvent, SourceSchema, SourceStatus, StreamSink,
-        StreamSource, StreamingErrorCategory, StreamingJob, StreamingRunner,
-        TransactionalStreamSink,
-    },
+    Batch, BatchKind, BatchMetadata, CalcFlowError, ComponentKind, Cursor, DeliveryGuarantee,
+    ExpressionOperator, ExternalPayload, JobState, JsonMap, ManagedCheckpointRuntime,
+    NativeWatermarkCapability, PipelineBuilder, Port, ReplayPositioning, Result, SinkBinding,
+    SinkRecovery, SourceBinding, SourceCapabilities, SourceDeliveryCapability, SourceEvent,
+    SourceSchema, SourceStatus, StreamOperator, StreamRequirements, StreamSink, StreamSource,
+    StreamingErrorCategory, StreamingJob, StreamingRunner, TransactionalStreamSink, UdfRegistry,
+    UnionOperator,
 };
 
 const SECRET: &str = "credential-canary-value";

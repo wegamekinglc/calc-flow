@@ -19,7 +19,7 @@ After `uv sync --extra dev && uv run maturin develop`, run:
 uv run python examples/01_datafusion_pipeline.py
 uv run python examples/02_sql_join.py
 uv run python examples/03_registered_udf.py
-uv run python examples/04_micro_batch_recovery.py
+uv run python examples/04_continuous_runtime.py
 uv run python examples/05_async_execution.py
 JAX_PLATFORMS=cpu uv run python examples/06_numpy_array.py
 JAX_PLATFORMS=cpu uv run python examples/07_array_and_dataframe.py
@@ -33,7 +33,7 @@ The files cover:
   DataFusion SQL query.
 - `03_registered_udf.py` — a trusted, versioned Python scalar UDF registered on
   `Runtime` and explicitly selected by a node.
-- `04_micro_batch_recovery.py` — the async source-driven continuous lifecycle,
+- `04_continuous_runtime.py` — the async source-driven continuous lifecycle,
   a replayable cursor, managed checkpoints, synchronous status, and explicit
   terminal wait.
 - `05_async_execution.py` — non-blocking `execute_async()` use with copied
@@ -61,6 +61,5 @@ The Rust crate ships parallel examples under
 [`crates/calc-flow/examples/`](../crates/calc-flow/examples/README.md). The
 expression (`01_datafusion_pipeline.py` ↔ `expression_pipeline.rs`) and SQL
 join (`02_sql_join.py` ↔ `sql_join.rs`) examples share their datasets and
-expressions. `04_micro_batch_recovery.py` now demonstrates the source-driven
-continuous facade while `micro_batch_recovery.rs` remains the Rust v2
-counterpart until the atomic A6 cleanup.
+expressions. `04_continuous_runtime.py` and `continuous_runtime.rs` demonstrate
+the same source-driven lifecycle on the Python and Rust surfaces.

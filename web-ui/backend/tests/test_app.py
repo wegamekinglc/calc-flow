@@ -11,7 +11,6 @@ import pyarrow as pa
 import pytest
 from calc_flow import (
     CalcFlowError,
-    FileCheckpointStore,
     FileProjectStore,
     PipelineBuilder,
     ProjectDocument,
@@ -23,6 +22,7 @@ from starlette.requests import Request as StarletteRequest
 
 import calc_flow_studio.app as app_module
 from calc_flow_studio.app import API_PREFIX, create_app, validate_bind_host
+from calc_flow_studio.checkpoint_store import FileCheckpointDocumentStore
 from calc_flow_studio.models import RunEvent, RunResponse, RunStatus
 from calc_flow_studio.run_manager import CapabilitySnapshotError, RunManagerError
 
@@ -765,7 +765,7 @@ def test_import_and_export_threadpool_only_pure_rust_transformations(
 
 def test_checkpoint_routes_use_compiled_plan_identity_and_async_store(tmp_path) -> None:
     projects = FileProjectStore(tmp_path / "projects")
-    checkpoints = FileCheckpointStore(tmp_path / "checkpoints")
+    checkpoints = FileCheckpointDocumentStore(tmp_path / "checkpoints")
     runtime = Runtime()
     project = ProjectDocument.model_validate(_project())
     asyncio.run(projects.create(project))
@@ -808,6 +808,36 @@ def test_checkpoint_routes_use_compiled_plan_identity_and_async_store(tmp_path) 
     assert reset.json()["exists"] is False
     assert absent.json()["exists"] is False
     assert missing.status_code == 404
+
+
+def test_checkpoint_routes_preserve_unexpected_store_failures_as_internal(
+    tmp_path,
+) -> None:
+    class FailingCheckpointStore:
+        async def load(self, pipeline_name: str) -> dict[str, object] | None:
+            raise OSError(f"cannot load {pipeline_name}")
+
+        async def delete(self, pipeline_name: str) -> None:
+            raise OSError(f"cannot delete {pipeline_name}")
+
+    app = create_app(
+        project_directory=tmp_path / "projects",
+        checkpoint_store=FailingCheckpointStore(),
+    )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        assert _create(client).status_code == 201
+        inspected = client.get(f"{API_PREFIX}/projects/project_alpha/checkpoint")
+        reset = client.delete(f"{API_PREFIX}/projects/project_alpha/checkpoint")
+
+    assert inspected.status_code == 500
+    assert reset.status_code == 500
+
+
+def test_default_checkpoint_store_is_studio_private(tmp_path) -> None:
+    with _client(tmp_path) as client:
+        store = client.app.state.checkpoint_store
+
+    assert type(store).__module__ == "calc_flow_studio.checkpoint_store"
 
 
 def test_run_routes_use_injected_manager_and_preserve_sse_contract(tmp_path) -> None:

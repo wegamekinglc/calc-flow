@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from benchmarks.support import (
@@ -11,7 +9,7 @@ from benchmarks.support import (
     selected_scale,
     table_inputs,
 )
-from calc_flow import FileCheckpointStore, PipelineBuilder
+from calc_flow import PipelineBuilder
 
 
 @pytest.mark.benchmark(group=benchmark_group("dag"), min_rounds=3, max_time=0.5)
@@ -42,76 +40,3 @@ def test_graph_fan_out(benchmark: BenchmarkFixture, _scale: str) -> None:
     result = benchmark(plan.execute, {"input": batch})
 
     assert len(result.outputs) == 3
-
-
-def _checkpoint() -> dict[str, object]:
-    rows = selected_scale().table_rows
-    return {
-        "created_at": "2026-01-01T00:00:00Z",
-        "format_version": 2,
-        "pipeline_fingerprint": "a" * 64,
-        "pipeline_name": "benchmark-checkpoint",
-        "sequence": rows,
-        "source_cursor": {"offset": rows},
-        "state": {"counter": {"partitions": [0, 1, 2, 3], "rows": rows}},
-    }
-
-
-@pytest.mark.benchmark(group=benchmark_group("checkpoint"), min_rounds=5, max_time=0.5)
-@pytest.mark.parametrize("_scale", [selected_scale().name])
-def test_checkpoint_json_serialization(
-    benchmark: BenchmarkFixture, _scale: str
-) -> None:
-    checkpoint = _checkpoint()
-    record_benchmark(
-        benchmark,
-        scenario="checkpoint_json_serialization",
-        input_rows=0,
-        output_rows=0,
-    )
-
-    document = benchmark(json.dumps, checkpoint, sort_keys=True)
-
-    assert json.loads(document)["sequence"] == checkpoint["sequence"]
-
-
-@pytest.mark.benchmark(group=benchmark_group("checkpoint"), min_rounds=5, max_time=0.5)
-@pytest.mark.parametrize("_scale", [selected_scale().name])
-def test_checkpoint_atomic_write(
-    benchmark: BenchmarkFixture, tmp_path, _scale: str
-) -> None:
-    checkpoint = _checkpoint()
-    store = FileCheckpointStore(tmp_path)
-    record_benchmark(
-        benchmark,
-        scenario="checkpoint_atomic_write",
-        input_rows=0,
-        output_rows=0,
-    )
-
-    benchmark(store.save_blocking, checkpoint)
-
-    assert store.load_blocking(str(checkpoint["pipeline_name"])) == checkpoint
-
-
-@pytest.mark.benchmark(group=benchmark_group("checkpoint"), min_rounds=5, max_time=0.5)
-@pytest.mark.parametrize("_scale", [selected_scale().name])
-def test_checkpoint_recovery_load(
-    benchmark: BenchmarkFixture, tmp_path, _scale: str
-) -> None:
-    checkpoint = _checkpoint()
-    store = FileCheckpointStore(tmp_path)
-    store.save_blocking(checkpoint)
-    record_benchmark(
-        benchmark,
-        scenario="checkpoint_recovery_load",
-        input_rows=0,
-        output_rows=0,
-    )
-
-    recovered = benchmark(
-        store.load_blocking,
-        str(checkpoint["pipeline_name"]),
-    )
-
-    assert recovered == checkpoint

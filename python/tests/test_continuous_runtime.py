@@ -10,6 +10,7 @@ import pyarrow as pa
 import pytest
 
 import calc_flow
+import calc_flow.runtime as runtime_module
 from calc_flow import (
     Batch,
     BatchExecutionPlan,
@@ -25,6 +26,7 @@ from calc_flow import (
     StreamExecutionPlan,
     StreamingRunner,
     StreamRequirements,
+    _native,
 )
 
 
@@ -32,6 +34,29 @@ def test_public_continuous_type_aliases_are_exported() -> None:
     for name in ("JSONValue", "SinkDelivery", "SourceEvent", "WatermarkPolicy"):
         assert name in calc_flow.__all__
         assert getattr(calc_flow, name) is not None
+
+
+def test_legacy_continuous_runtime_symbols_are_removed() -> None:
+    for name in (
+        "FileCheckpointStore",
+        "LegacyStreamingRunner",
+        "MicroBatchRunner",
+    ):
+        assert name not in calc_flow.__all__
+        assert not hasattr(calc_flow, name)
+
+    assert not hasattr(runtime_module, "Source")
+    for name in (
+        "_ContinuousStreamingRunner",
+        "_FileCheckpointStore",
+        "_MicroBatchRunner",
+    ):
+        assert not hasattr(_native, name)
+
+    assert hasattr(_native, "_StreamingRunner")
+    assert hasattr(_native._StreamingRunner, "start_async")
+    for method in ("plan_snapshot_async", "reset_async", "step_async"):
+        assert not hasattr(_native._StreamingRunner, method)
 
 
 def test_streaming_exceptions_are_exported_from_errors_module() -> None:

@@ -30,10 +30,10 @@ assert result.outputs["output"].to_pyarrow()["total"].to_pylist() == [3, 7]
 The runnable inventories span both surfaces and share datasets and expressions:
 
 - Python: [`examples/README.md`](../examples/README.md) — expression pipeline,
-  SQL join, registered UDF, micro-batch recovery, async execution, and NumPy
+  SQL join, registered UDF, continuous execution, async batch execution, and NumPy
   arrays plus NumPy/JAX `pyarrow.Table` matrix multiplication.
 - Rust: [`crates/calc-flow/examples/README.md`](../crates/calc-flow/examples/README.md)
-  — `expression_pipeline.rs`, `sql_join.rs`, `micro_batch_recovery.rs`, and
+  — `expression_pipeline.rs`, `sql_join.rs`, `continuous_runtime.rs`, and
   `export_schema.rs`.
 
 ## Rust modules and exports
@@ -55,19 +55,19 @@ The `calc_flow` crate re-exports its supported public types from
 | State backend      | `StateBackend`, `StateLineageBackend`, `StateLineageKey`, `StateHandle`, `LocalStateBackend`                                        |
 | State manifest     | `CheckpointManifest`, `CheckpointManifestFields`, `ManifestExpectation`, `OperatorManifestEntry`, `RecoveryStatus`                  |
 | UDF/providers      | `UdfRegistry`, `UdfReference`, `ProviderRegistry`, `BatchOperatorFactory`, `StreamOperatorFactory`                                  |
-| Sources and sinks  | `Source`, `SourceItem`, `Sink`, `BatchingSource`                                                                                    |
-| Recovery           | `MicroBatchRunner`, `StreamingRunner`, `CheckpointStore`                                                                            |
+| Sources and sinks  | `StreamSource`, `StreamSink`, `TransactionalStreamSink`, `SourceBinding`, `SinkBinding`                                              |
+| Continuous runtime | `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`, `Cursor`, `SourceEvent`, `JobStatus`, `JobOutcome`                    |
 | Projects           | `ProjectSpec`, `compile_project`, `validate_project`                                                                                |
-| Persistence        | `FileProjectStore`, `FileCheckpointStore`                                                                                           |
+| Persistence        | `FileProjectStore`, `LocalStateBackend`, `CheckpointManifest`                                                                        |
 | Errors             | `CalcFlowError`, `Result<T>`                                                                                                        |
 
 `compile_project` produces a `BatchExecutionPlan`. `compile_batch` and
 `compile_stream` are the Rust graph-compilation entry points. A
-`StreamExecutionPlan` is consumed only by the crate-private source-driven
-continuous runtime, including its optional epoch-checkpoint owner; it is not
-accepted by a public source-driven runner. The public v2 `MicroBatchRunner`
-and `StreamingRunner` remain the current public runners. No public A6
-source-driven integration is present.
+`StreamExecutionPlan` is consumed by the public source-driven
+`StreamingRunner`. The runner owns source and sink bindings plus a
+`ManagedCheckpointRuntime`; `start(self)` consumes it and returns the sole
+`StreamingJob` lifecycle owner. The v2 source/sink traits, micro-batch runner,
+push runner, and public checkpoint-document store are not exported.
 
 `EdgeBudget::new(R, B)` keeps its two-field public shape and caps queued
 envelopes and charged rows independently at `R`, plus charged bytes at `B`.
@@ -224,21 +224,18 @@ These are execution ceilings, not end-to-end zero-copy claims.
 
 `FileProjectStore` provides async `create`, `put`, `get`, `list`, and
 `delete` plus explicit `*_blocking` forms. Import/export helpers accept safe
-JSON or YAML. `FileCheckpointStore` provides the equivalent async and blocking
-checkpoint operations.
+JSON or YAML. Continuous checkpoints are owned by
+`ManagedCheckpointRuntime`; applications do not read or write checkpoint
+documents through a public store.
 
-### Runners
+### Continuous runner
 
-`MicroBatchRunner(plan, source, checkpoints, *, sinks=None,
-checkpoint_every=100)` accepts a source with `open(cursor)` and `next()`.
-`next()` returns one `RunResult` or `None`; `next_async()` is the
-non-blocking form.
-
-`StreamingRunner(plan, checkpoints)` accepts a formed batch through
-`step(..., sinks=None)` or `step_async(..., sinks=None)`.
-
-Sink mappings use output names and sequences of sync or async callbacks. Both
-runners expose reset and plan-snapshot operations.
+`StreamingRunner(stream_plan, sources, sinks, checkpoints, *, config=None)`
+owns async `StreamSource` and sink connectors. `start_async()` consumes the
+runner and returns a `StreamingJob`; use `trigger_checkpoint_async()`,
+`shutdown_async()`, `cancel_async()`, or `wait_async()` to drive the job.
+Guarded blocking forms are available outside an event loop. Connector methods
+must be declared with `async def`.
 
 ## Local HTTP API
 

@@ -411,34 +411,9 @@ schema. `project_json_schema()` returns the generated schema;
 
 `FileProjectStore` has async `create`, `put`, `get`, `list`, and `delete`
 methods and explicit `*_blocking` variants. Safe JSON/YAML import/export helpers
-live in `calc_flow.store`. `FileCheckpointStore` exposes async and blocking
-`save`, `load`, and `delete` operations.
-
-## Micro-batch runner
-
-A Python source owns replay state:
-
-```python
-class Source:
-    def open(self, cursor: object) -> None:
-        self.offset = 0 if cursor is None else int(cursor["offset"])
-
-    def next(self):
-        if self.offset == len(self.values):
-            return None
-        value = self.values[self.offset]
-        self.offset += 1
-        return (
-            Batch.from_pyarrow(pa.table({"value": [value]})),
-            {"offset": self.offset},
-            self.offset,
-        )
-```
-
-Construct `MicroBatchRunner(plan, source, checkpoints, sinks=...,
-checkpoint_every=...)`. Call `next_async()` until it returns `None`, or use
-blocking `next()` outside an event loop. Recovery opens a new source with the
-last committed cursor.
+live in `calc_flow.store`. Continuous checkpoint documents are internal to
+`ManagedCheckpointRuntime`; the package has no public checkpoint-document
+store.
 
 ## Streaming runner
 
@@ -473,14 +448,12 @@ guarded blocking forms for callers outside an event loop. Cancelling a
 values, status, and outcomes cross the boundary as defensive copies. Managed
 checkpoint recovery reopens a replayable source with a cursor bound to the
 exact source-map key. See
-[`examples/04_micro_batch_recovery.py`](../examples/04_micro_batch_recovery.py).
+[`examples/04_continuous_runtime.py`](../examples/04_continuous_runtime.py).
 
-The previous push interface remains temporarily available as
-`LegacyStreamingRunner(plan, checkpoints)` through the A6 atomic cleanup. Its
-`step[_async]`, `reset[_async]`, and `plan_snapshot[_async]` behavior is
-unchanged. For source compatibility during the same window,
-`StreamingRunner(batch_plan, FileCheckpointStore(...))` selects that legacy
-push interface as well; stream plans always select the source-driven API above.
+The A6 cutover has no compatibility aliases: `MicroBatchRunner`,
+`LegacyStreamingRunner`, the batch-plan `StreamingRunner` overload, and
+`FileCheckpointStore` are removed. Compile a `StreamExecutionPlan` and migrate
+connectors to the async `StreamSource`/`StreamSink` protocols.
 
 ## Exceptions
 

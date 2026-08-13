@@ -265,8 +265,8 @@ source and sink binding slots (external input and output names in
 deterministic order), the semantic fingerprint, and the per-output delivery
 requirements. For stream plans, the semantic fingerprint also freezes every
 operator's checkpoint capability and state-layout version. It never executes
-directly. The crate-private source-driven
-continuous runner consumes it into owned runtime nodes, internal edges, and
+directly. The public source-driven `StreamingRunner` consumes it into owned
+runtime nodes, internal edges, and
 synthesized bounded source and sink boundary edges. Pure array graphs need no
 table engine:
 `requires_datafusion` reports whether any node needs a DataFusion session.
@@ -275,7 +275,7 @@ table engine:
 output — `AtLeastOnce` or `ExactlyOnce`; outputs absent from the map default
 to `AtLeastOnce`. The guarantee is scoped to one output, not a global property
 of the plan. Compilation applies the deterministic-UDF rule above. Before a
-private checkpointed job starts, whole-job preflight proves every reachable
+checkpointed job starts, whole-job preflight proves every reachable
 source, operator, bounded edge, and bound sink for each exactly-once output.
 It reports the output and first incompatible stable component before connector
 lifecycle work. A private job without checkpoint wiring rejects every
@@ -294,11 +294,13 @@ Two hashes describe the plan (NFR-5):
   interval, a 600-second checkpoint timeout, 10,000 envelopes, 10,000 rows and
   64 MiB per edge, and two retained epochs.
 
-## Current internal source-driven continuous runtime
+## Current source-driven continuous runtime
 
-The crate-private runtime can run a bounded source-to-operator-to-sink job with
-or without the private M5 checkpoint owner. It is a complete internal vertical
-slice, not a public `StreamingRunner` replacement.
+The crate-root `StreamingRunner` runs a bounded
+source-to-operator-to-sink job with managed epoch checkpoints and returns an
+owning `StreamingJob`. Its public connector and lifecycle types project the
+internal task/coordinator machinery without exposing control-message
+constructors or connector payloads.
 
 One pure whole-job preflight consumes the plan and validates the context
 fingerprint, runtime topology, every source and sink route, duplicate or
@@ -328,7 +330,7 @@ A source binding owns two supervised tasks (D3):
 - teardown drops a blocked `open` or `next` future, never polls that source
   again, and calls `close` before the pump finishes.
 
-The private source boundary executes one ordered lifecycle: restore the
+The source boundary executes one ordered lifecycle: restore the
 durable cursor/end state, open and read, participate in each checkpoint
 barrier, observe end once, then close during teardown. A source restored as
 ended skips open, read, and later barriers, so restart cannot repeat its end
@@ -504,36 +506,22 @@ harnesses remain opt-in and do not expand the public API.
 
 ## Delivery guarantees in the current runtime
 
-The executing runners remain `MicroBatchRunner` and the push-based
-`StreamingRunner` over `BatchExecutionPlan`. Both deliver sinks before
-committing checkpoints, giving at-least-once delivery: after a failure a
-sink may observe the same batch again. The streaming runner:
+The executing continuous runner consumes a `StreamExecutionPlan` and owns all
+source/sink bindings. Invalid stream graphs and delivery-capability mismatches
+fail before any source opens. Emission validation fails closed before enqueue,
+and control construction remains impossible outside the crate.
 
-- requires a plan with exactly one external input and holds an exclusive
-  lease on it;
-- executes one pushed batch per `step`, writing all sinks before saving the
-  checkpoint that commits the step;
-- owns no replay cursor in push mode, so the caller retains or reconstructs
-  the batch and resubmits it after a failed step;
-- recovers once from the durable checkpoint and continues its sequence from
-  there;
-- rolls operator state back on failure, and refuses further work until
-  `reset` if a rollback itself fails to complete.
-
-For the public stream surface, the guarantees remain compile-time and
-type-level: invalid stream graphs fail before any source opens, emission
-validation fails closed before enqueue, and control construction is impossible
-outside the crate. The private continuous runtime additionally enforces the
-source ordering, backpressure, cancellation, close, join, checkpoint, and
-recovery rules described above. Its exactly-once proof and commit protocol are
-scoped to each requested graph output; other checkpointed outputs may remain
-at least once and replay duplicates after a failure. These private guarantees
-do not add a public source-driven runner or change the delivery contract of the
-public v2 runners.
+The runtime enforces source ordering, backpressure, cancellation, close, join,
+checkpoint, and recovery rules described above. Exactly-once proof and commit
+are scoped to each requested graph output; ordinary-sink outputs remain at
+least once and may replay duplicates after a failure. The v2 micro-batch and
+formed-batch push runners are removed.
 
 ## Ownership, visibility, and non-goals
 
-Public: the `StreamMessage` handle and `StreamMessageKind`, the typed
+Public: `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`, source
+and sink connector/binding types, status/outcome projections, the
+`StreamMessage` handle and `StreamMessageKind`, the typed
 `EventTime` and `Epoch` values, `StreamJobContext` and
 `StreamOperatorContext`, the `StreamOperator` and `StreamCollector` traits,
 `OperatorStateSnapshot`, `EdgeCollector`, and the compiled plan types
@@ -542,16 +530,15 @@ Public: the `StreamMessage` handle and `StreamMessageKind`, the typed
 `edge_channel`, `EdgeSender`, `EdgeReceiver`, `EnvelopeCost`, and
 `ChannelMetrics`. `CalcFlowError::TaskPanicked` is public because the error
 enum is public and non-exhaustive. Operational instances come from the private
-task, supervisor, and runner paths described above; the continuous runtime adds
-no public runner/control API or panic-capture constructor.
+task and supervisor paths; public job controls are checkpoint, shutdown,
+cancel, wait, and payload-safe status observation.
 
 Crate-private: the message representation and the four control constructors,
 the compiled-operator representation, the late-row recorder, source cursor and
 binding types, the channel-backed operator collector, source/operator/sink
 tasks and progress snapshots, scoped task contexts, whole-job preflight, the
-task supervisor, checkpoint configuration/coordinator/transaction/status,
-transactional sink lifecycle, private status/metrics, `ContinuousRunner`,
-`ContinuousJob`, and the runner-scoped reaper.
+task supervisor, checkpoint coordinator/transaction internals, raw status and
+metrics, and the runner-scoped reaper.
 
 The envelope, private checkpoint control, and private transactional sink
 lifecycle do not appear in the current project-v2 or checkpoint-v2 document
@@ -561,9 +548,9 @@ without replacing those v2 surfaces.
 
 Non-goals:
 
-- **No public runner control API.** Runners accept formed `Batch` values
-  only; no public surface injects watermarks, barriers, idle, or
-  end-of-input messages.
+- **No public control-message injection.** Connectors yield data, watermark,
+  and idle events, but barriers and end-of-input construction remain
+  runtime-owned.
 - **No executable-object serialization.** Operator configurations carry
   only `UdfReference` values — never source text, callables, or import
   paths — and checkpoint state carries JSON metadata and byte segments,
@@ -627,10 +614,10 @@ canonical `CheckpointManifest` v3 data model. The local backend stages,
 syncs, re-reads, checksum-validates, and atomically publishes segments before
 a manifest can reference them. Manifest selection is the sole recovery truth;
 cleanup is reachability-based and fails closed on links or unexpected files.
-The private continuous runtime uses this backend and manifest as its production
+The continuous runtime uses this backend and manifest as its production
 checkpoint transaction and durable recovery truth.
 
-## M5 private checkpoint boundary
+## Managed checkpoint implementation boundary
 
 The private M5 contract is documented by the
 [epoch checkpoint specification](../.codex/artifacts/specs/m5-epoch-checkpoint.md),
@@ -658,8 +645,8 @@ end cut. No barrier follows `EndOfInput`. Recovery from a terminal manifest
 finishes any sink commit and returns terminal success without reopening
 sources or re-emitting final windows. Exactly-once is proved per output over
 every reachable source, operator, edge policy, and sink before lifecycle work.
-The implementation remains crate-private; public v2 checkpoint/runner APIs,
-project/checkpoint formats, Python binding, and Studio routes are unchanged.
+The coordinator implementation remains crate-private behind
+`ManagedCheckpointRuntime`; project format v2 and Studio routes are unchanged.
 
 The Linux-only M5 soak contract is an ignored parent test that launches exactly
 three sequential child OS processes using the current test executable. The
@@ -699,16 +686,12 @@ performance, soak, review, or CI evidence has run.
 
 The current tree does not provide these public surfaces:
 
-- **Public A6 integration** — no public source-driven runner/job, source and
-  sink bindings, status/control methods, or v2 runner replacement is exposed.
-- **Python and Studio** — neither surface projects the private continuous
-  runtime.
+- **Control internals** — barrier construction, supervisors, coordinator
+  transactions, raw diagnostics, and reaper ownership remain crate-private.
+- **Studio execution** — Studio keeps its existing batch run and checkpoint
+  inspection routes; it does not add a continuous-job REST surface.
 
-The reviewed design snapshot for the pending public boundary is recorded in
-the Public A6
+The reviewed design snapshot for this public boundary is recorded in the A6
 [specification](../.codex/artifacts/specs/a6-public-continuous-runtime.md),
 [API note](../.codex/artifacts/api-notes/a6-public-continuous-runtime.md), and
 [critique](../.codex/artifacts/critiques/a6-public-continuous-runtime.md).
-The critique reports zero design blockers with caveats; it is not runtime
-implementation evidence or merge approval. These artifacts do not change the
-current public surface described above.
