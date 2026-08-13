@@ -9,13 +9,14 @@ use std::{
 
 use parking_lot::Mutex;
 use pyo3::{
-    create_exception,
+    IntoPyObjectExt,
     prelude::*,
     sync::PyOnceLock,
-    types::{PyAny, PyCFunction, PyDict, PyDictMethods, PyTuple},
+    types::{PyAny, PyCFunction, PyDict, PyDictMethods, PyTuple, PyType},
 };
 
 const SAFE_EXCEPTION_STORAGE: &str = "_calc_flow_safe_fields";
+const NATIVE_EXCEPTION_STORAGE: &str = "_calc_flow_native_safe_fields";
 const SAFE_EXCEPTION_FIELDS: [&str; 9] = [
     "category",
     "message",
@@ -27,18 +28,56 @@ const SAFE_EXCEPTION_FIELDS: [&str; 9] = [
     "diagnostic_id",
     "position",
 ];
-static EXCEPTION_PROPERTIES: PyOnceLock<()> = PyOnceLock::new();
+static STREAMING_RUNTIME_ERROR_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static CHECKPOINT_PUBLICATION_UNKNOWN_ERROR_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 
-create_exception!(
-    calc_flow._native,
-    StreamingRuntimeError,
-    crate::error::CalcFlowError
-);
-create_exception!(
-    calc_flow._native,
-    CheckpointPublicationUnknownError,
-    StreamingRuntimeError
-);
+struct SafeStreamingErrorFields {
+    category: String,
+    message: String,
+    job_id: Option<u64>,
+    epoch: Option<u64>,
+    checkpoint_phase: Option<String>,
+    component_kind: Option<String>,
+    component_id: Option<String>,
+    diagnostic_id: Option<u64>,
+    position: u32,
+}
+
+impl SafeStreamingErrorFields {
+    fn internal(message: &str) -> Self {
+        Self {
+            category: "internal".to_owned(),
+            message: message.to_owned(),
+            job_id: None,
+            epoch: None,
+            checkpoint_phase: None,
+            component_kind: None,
+            component_id: None,
+            diagnostic_id: None,
+            position: 0,
+        }
+    }
+
+    fn from_streaming(error: &calc_flow::continuous::StreamingError) -> Self {
+        Self {
+            category: streaming_error_category_name(error.category()).to_owned(),
+            message: error.message().to_owned(),
+            job_id: error.job_id(),
+            epoch: error.epoch().map(calc_flow::Epoch::as_u64),
+            checkpoint_phase: error
+                .checkpoint_phase()
+                .map(checkpoint_phase_name)
+                .map(str::to_owned),
+            component_kind: error
+                .component_kind()
+                .map(component_kind_name)
+                .map(str::to_owned),
+            component_id: error.component_id().map(str::to_owned),
+            diagnostic_id: error.diagnostic_id(),
+            position: error.position(),
+        }
+    }
+}
 
 #[pyclass(
     name = "_ContinuousStreamingRunner",
@@ -252,78 +291,125 @@ fn streaming_py_err(error: calc_flow::CalcFlowError) -> PyErr {
 }
 
 fn streaming_error_to_py_err(error: &calc_flow::continuous::StreamingError) -> PyErr {
-    let exception = if error.category()
-        == calc_flow::continuous::StreamingErrorCategory::CheckpointPublicationUnknown
-    {
-        CheckpointPublicationUnknownError::new_err(error.message().to_owned())
-    } else {
-        StreamingRuntimeError::new_err(error.message().to_owned())
-    };
-    Python::attach(|py| {
-        let value = exception.value(py);
-        let fields = PyDict::new(py);
-        fields.set_item("category", streaming_error_category_name(error.category()))?;
-        fields.set_item("message", error.message())?;
-        fields.set_item("job_id", error.job_id())?;
-        fields.set_item("epoch", error.epoch().map(calc_flow::Epoch::as_u64))?;
-        fields.set_item(
-            "checkpoint_phase",
-            error.checkpoint_phase().map(checkpoint_phase_name),
-        )?;
-        fields.set_item(
-            "component_kind",
-            error.component_kind().map(component_kind_name),
-        )?;
-        fields.set_item("component_id", error.component_id())?;
-        fields.set_item("diagnostic_id", error.diagnostic_id())?;
-        fields.set_item("position", error.position())?;
-        value.setattr(SAFE_EXCEPTION_STORAGE, fields)?;
-        value.setattr("__cause__", py.None())?;
-        value.setattr("__context__", py.None())
-    })
-    .unwrap_or(());
-    exception
+    let fields = SafeStreamingErrorFields::from_streaming(error);
+    let checkpoint_publication_unknown = error.category()
+        == calc_flow::continuous::StreamingErrorCategory::CheckpointPublicationUnknown;
+    structured_streaming_py_err(fields, checkpoint_publication_unknown)
 }
 
 fn internal_streaming_py_err(message: &str) -> PyErr {
-    let exception = StreamingRuntimeError::new_err(message.to_owned());
-    Python::attach(|py| {
-        let value = exception.value(py);
-        let fields = PyDict::new(py);
-        fields.set_item("category", "internal")?;
-        fields.set_item("message", message)?;
-        fields.set_item("job_id", py.None())?;
-        fields.set_item("epoch", py.None())?;
-        fields.set_item("checkpoint_phase", py.None())?;
-        fields.set_item("component_kind", py.None())?;
-        fields.set_item("component_id", py.None())?;
-        fields.set_item("diagnostic_id", py.None())?;
-        fields.set_item("position", 0)?;
-        value.setattr(SAFE_EXCEPTION_STORAGE, fields)?;
-        value.setattr("__cause__", py.None())?;
-        value.setattr("__context__", py.None())
-    })
-    .unwrap_or(());
-    exception
+    structured_streaming_py_err(SafeStreamingErrorFields::internal(message), false)
 }
 
-fn ensure_exception_properties(py: Python<'_>) -> PyResult<()> {
-    EXCEPTION_PROPERTIES.get_or_try_init(py, || {
-        let property = py.import("builtins")?.getattr("property")?;
-        let exception_type = py.get_type::<StreamingRuntimeError>();
-        for field in SAFE_EXCEPTION_FIELDS {
-            let getter = PyCFunction::new_closure(py, None, None, move |args, _kwargs| {
-                let instance = args.get_item(0)?;
-                instance
-                    .getattr(SAFE_EXCEPTION_STORAGE)?
-                    .get_item(field)
-                    .map(Bound::unbind)
-            })?;
-            exception_type.setattr(field, property.call1((getter,))?)?;
+fn structured_streaming_py_err(
+    fields: SafeStreamingErrorFields,
+    checkpoint_publication_unknown: bool,
+) -> PyErr {
+    let fallback_message = fields.message.clone();
+    Python::attach(|py| -> PyResult<PyErr> {
+        let exception_type = if checkpoint_publication_unknown {
+            checkpoint_publication_unknown_error_type(py)?
+        } else {
+            streaming_runtime_error_type(py)?
+        };
+        let exception = PyErr::from_type(exception_type, fallback_message.clone());
+        let values = PyTuple::new(
+            py,
+            [
+                fields.category.into_py_any(py)?,
+                fields.message.into_py_any(py)?,
+                fields.job_id.into_py_any(py)?,
+                fields.epoch.into_py_any(py)?,
+                fields.checkpoint_phase.into_py_any(py)?,
+                fields.component_kind.into_py_any(py)?,
+                fields.component_id.into_py_any(py)?,
+                fields.diagnostic_id.into_py_any(py)?,
+                fields.position.into_py_any(py)?,
+            ],
+        )?;
+        exception
+            .value(py)
+            .setattr(NATIVE_EXCEPTION_STORAGE, values)?;
+        exception.set_cause(py, None);
+        Ok(exception)
+    })
+    .unwrap_or_else(|_| crate::error::CalcFlowError::new_err(fallback_message))
+}
+
+fn streaming_runtime_error_type(py: Python<'_>) -> PyResult<Bound<'_, PyType>> {
+    STREAMING_RUNTIME_ERROR_TYPE
+        .get_or_try_init(py, || {
+            let namespace = structured_exception_namespace(py)?;
+            create_exception_type(
+                py,
+                "StreamingRuntimeError",
+                &py.get_type::<crate::error::CalcFlowError>(),
+                namespace,
+            )
+        })
+        .map(|exception_type| exception_type.bind(py).clone())
+}
+
+fn checkpoint_publication_unknown_error_type(py: Python<'_>) -> PyResult<Bound<'_, PyType>> {
+    CHECKPOINT_PUBLICATION_UNKNOWN_ERROR_TYPE
+        .get_or_try_init(py, || {
+            let namespace = PyDict::new(py);
+            namespace.set_item("__slots__", PyTuple::empty(py))?;
+            create_exception_type(
+                py,
+                "CheckpointPublicationUnknownError",
+                &streaming_runtime_error_type(py)?,
+                namespace,
+            )
+        })
+        .map(|exception_type| exception_type.bind(py).clone())
+}
+
+fn create_exception_type(
+    py: Python<'_>,
+    name: &str,
+    base: &Bound<'_, PyType>,
+    namespace: Bound<'_, PyDict>,
+) -> PyResult<Py<PyType>> {
+    namespace.set_item("__module__", "calc_flow._native")?;
+    let bases = PyTuple::new(py, [base])?;
+    py.import("builtins")?
+        .getattr("type")?
+        .call1((name, bases, namespace))?
+        .cast_into::<PyType>()
+        .map(Bound::unbind)
+        .map_err(Into::into)
+}
+
+fn structured_exception_namespace(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
+    let namespace = PyDict::new(py);
+    namespace.set_item("__slots__", PyTuple::new(py, [NATIVE_EXCEPTION_STORAGE])?)?;
+    let property = py.import("builtins")?.getattr("property")?;
+    for (index, field) in SAFE_EXCEPTION_FIELDS.into_iter().enumerate() {
+        let getter = PyCFunction::new_closure(py, None, None, move |args, _kwargs| {
+            let instance = args.get_item(0)?;
+            instance
+                .getattr(NATIVE_EXCEPTION_STORAGE)?
+                .get_item(index)
+                .map(Bound::unbind)
+        })?;
+        namespace.set_item(field, property.call1((getter,))?)?;
+    }
+    let storage_getter = PyCFunction::new_closure(py, None, None, move |args, _kwargs| {
+        let instance = args.get_item(0)?;
+        let values = instance.getattr(NATIVE_EXCEPTION_STORAGE)?;
+        let fields = PyDict::new(args.py());
+        for (index, field) in SAFE_EXCEPTION_FIELDS.into_iter().enumerate() {
+            fields.set_item(field, values.get_item(index)?)?;
         }
-        Ok::<(), PyErr>(())
+        args.py()
+            .import("types")?
+            .getattr("MappingProxyType")?
+            .call1((fields,))
+            .map(Bound::unbind)
     })?;
-    Ok(())
+    namespace.set_item(SAFE_EXCEPTION_STORAGE, property.call1((storage_getter,))?)?;
+    Ok(namespace)
 }
 
 fn job_outcome_to_py<'py>(
@@ -698,16 +784,14 @@ const fn delivery_guarantee_name(guarantee: calc_flow::DeliveryGuarantee) -> &'s
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = module.py();
-    ensure_exception_properties(py)?;
     module.add_class::<PyContinuousStreamingRunner>()?;
     module.add_class::<PyStreamingJob>()?;
-    module.add(
-        "StreamingRuntimeError",
-        py.get_type::<StreamingRuntimeError>(),
-    )?;
+    let streaming_runtime_error = streaming_runtime_error_type(py)?;
+    module.add("StreamingRuntimeError", streaming_runtime_error)?;
+    let checkpoint_publication_unknown = checkpoint_publication_unknown_error_type(py)?;
     module.add(
         "CheckpointPublicationUnknownError",
-        py.get_type::<CheckpointPublicationUnknownError>(),
+        checkpoint_publication_unknown,
     )?;
     Ok(())
 }
@@ -1252,7 +1336,7 @@ mod tests {
             locals.set_item("runner", runner).unwrap();
             py.run(
                 &CString::new(
-                    "import asyncio, gc\nasync def exercise():\n    owned_runner = runner\n    globals().pop('runner')\n    job = await owned_runner.start_async()\n    del owned_runner\n    dangling_waiter = job.wait_async()\n    del dangling_waiter, job\n    gc.collect()\n    await asyncio.sleep(0)\nasyncio.run(exercise())",
+                    "import asyncio, gc\nasync def exercise():\n    owned_runner = runner\n    globals().pop('runner')\n    job = await owned_runner.start_async()\n    del owned_runner\n    wait_awaitable = job.wait_async()\n    native_waiter = asyncio.ensure_future(wait_awaitable)\n    await asyncio.sleep(0.05)\n    assert not native_waiter.done()\n    try:\n        wait_awaitable.__await__()\n    except RuntimeError as error:\n        assert 'already been awaited' in str(error)\n    else:\n        raise AssertionError('native wait observer was not started')\n    del wait_awaitable, native_waiter, job\n    gc.collect()\nasyncio.run(exercise())\ngc.collect()",
                 )
                 .unwrap(),
                 Some(&locals),
@@ -1403,7 +1487,7 @@ mod tests {
             locals.set_item("runner", runner).unwrap();
             py.run(
                 &CString::new(
-                    "import asyncio, traceback\nasync def exercise():\n    try:\n        await runner.start_async()\n    except Exception as error:\n        assert type(error).__name__ == 'StreamingRuntimeError'\n        assert error.category == 'connector'\n        assert error.message == str(error)\n        assert error.job_id is not None\n        assert error.epoch is None\n        assert error.checkpoint_phase is None\n        assert error.component_kind == 'source'\n        assert error.component_id == 'input'\n        assert error.diagnostic_id is None\n        assert error.position == 0\n        assert error.__cause__ is None\n        assert error.__context__ is None\n        rendered = repr(error) + str(error) + ''.join(traceback.format_exception(error)) + repr(vars(error))\n        for sentinel in ('private-connector-payload-redaction-sentinel', 'python-private-provider', 'private-source', 'private-version'):\n            assert sentinel not in rendered\n        try:\n            error.category = 'tampered'\n        except AttributeError:\n            pass\n        else:\n            raise AssertionError('safe exception fields must be read-only')\n    else:\n        raise AssertionError('start unexpectedly succeeded')\nasyncio.run(exercise())",
+                    "import asyncio, traceback\nasync def exercise():\n    try:\n        await runner.start_async()\n    except Exception as error:\n        assert type(error).__name__ == 'StreamingRuntimeError'\n        assert error.category == 'connector'\n        assert error.message == str(error)\n        assert error.job_id is not None\n        assert error.epoch is None\n        assert error.checkpoint_phase is None\n        assert error.component_kind == 'source'\n        assert error.component_id == 'input'\n        assert error.diagnostic_id is None\n        assert error.position == 0\n        assert error.__cause__ is None\n        assert error.__context__ is None\n        rendered = repr(error) + str(error) + ''.join(traceback.format_exception(error)) + repr(vars(error))\n        for sentinel in ('private-connector-payload-redaction-sentinel', 'python-private-provider', 'private-source', 'private-version'):\n            assert sentinel not in rendered\n        try:\n            error.category = 'tampered'\n        except AttributeError:\n            pass\n        else:\n            raise AssertionError('safe exception fields must be read-only')\n        backing = error._calc_flow_safe_fields\n        try:\n            backing['category'] = 'tampered-through-dict'\n        except TypeError:\n            pass\n        else:\n            raise AssertionError('safe exception backing must be immutable')\n        try:\n            error._calc_flow_safe_fields = {'category': 'tampered-through-replacement'}\n        except AttributeError:\n            pass\n        else:\n            raise AssertionError('safe exception backing must not be replaceable')\n        vars(error)['_calc_flow_safe_fields'] = {'category': 'shadowed'}\n        assert error._calc_flow_safe_fields['category'] == 'connector'\n        assert error.category == 'connector'\n        assert error.message == str(error)\n    else:\n        raise AssertionError('start unexpectedly succeeded')\nasyncio.run(exercise())",
                 )
                 .unwrap(),
                 Some(&locals),
