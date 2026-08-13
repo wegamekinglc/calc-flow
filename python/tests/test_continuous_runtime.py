@@ -34,6 +34,14 @@ def test_public_continuous_type_aliases_are_exported() -> None:
         assert getattr(calc_flow, name) is not None
 
 
+def test_streaming_exceptions_are_exported_from_errors_module() -> None:
+    from calc_flow import errors
+
+    for name in ("StreamingRuntimeError", "CheckpointPublicationUnknownError"):
+        assert name in errors.__all__
+        assert getattr(errors, name) is getattr(calc_flow, name)
+
+
 def test_compile_methods_return_distinct_plan_types() -> None:
     builder = PipelineBuilder("typed-plans").expression("calc", "result = value + 1")
 
@@ -517,6 +525,75 @@ def test_checkpoint_restart_restores_owned_source_cursor(tmp_path: Path) -> None
     asyncio.run(exercise())
     assert opened == [0, 1]
     assert written == [0, 1]
+
+
+def test_checkpoint_completion_does_not_wait_for_next_source_poll(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        polling = asyncio.Event()
+        written = asyncio.Event()
+
+        class Source:
+            def capabilities(self) -> object:
+                from calc_flow import (
+                    NativeWatermarkCapability,
+                    ReplayPositioning,
+                    SourceCapabilities,
+                    SourceDeliveryCapability,
+                )
+
+                return SourceCapabilities(
+                    ReplayPositioning.EXACT_PAUSE_REPORT_AND_SEEK,
+                    SourceDeliveryCapability.LOSSLESS,
+                    max_batch_rows=1,
+                    max_batch_bytes=1024,
+                    native_watermarks=NativeWatermarkCapability.NEVER_EMITS,
+                )
+
+            async def open(self, cursor: Cursor | None) -> None:
+                self.emitted = False
+
+            async def next(self) -> Data | None:
+                if not self.emitted:
+                    self.emitted = True
+                    return Data(
+                        Batch.from_pyarrow(pa.table({"a": [1]})),
+                        Cursor(b"1", {"offset": 1}),
+                    )
+                polling.set()
+                await asyncio.Event().wait()
+
+            async def close(self) -> None:
+                return None
+
+        class Sink:
+            async def open(self) -> None:
+                return None
+
+            async def write(self, batch: Batch) -> None:
+                written.set()
+
+            async def close(self) -> None:
+                return None
+
+        job = await StreamingRunner(
+            PipelineBuilder("checkpoint-long-poll")
+            .expression("copy", "b = a")
+            .compile_stream(),
+            {"input": SourceBinding(Source(), watermark_policy=DisabledWatermarks())},
+            {"output": [SinkBinding.ordinary("archive", Sink())]},
+            ManagedCheckpointRuntime(tmp_path),
+        ).start_async()
+        await asyncio.gather(written.wait(), polling.wait())
+        try:
+            assert (
+                await asyncio.wait_for(job.trigger_checkpoint_async(), timeout=1) == 1
+            )
+        finally:
+            await job.cancel_async()
+
+    asyncio.run(exercise())
 
 
 def test_terminal_job_releases_cyclic_connector_roots(tmp_path: Path) -> None:

@@ -1043,13 +1043,10 @@ impl PyStreamingJobAwaitable {
         let awaits = Arc::clone(&self.awaits);
         let observer = match self.operation {
             JobOperation::TriggerCheckpoint => persistent_future(py, async move {
-                let result = job
-                    .trigger_checkpoint()
+                job.trigger_checkpoint()
                     .await
                     .map(calc_flow::Epoch::as_u64)
-                    .map_err(streaming_py_err);
-                awaits.wait_idle().await;
-                result
+                    .map_err(streaming_py_err)
             })?,
             JobOperation::Shutdown => persistent_future(py, async move {
                 let outcome = job.shutdown().await;

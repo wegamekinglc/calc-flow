@@ -17,10 +17,12 @@ from calc_flow.errors import (
     CalcFlowError,
     CancelledError,
     CheckpointError,
+    CheckpointPublicationUnknownError,
     CompileError,
     ConfigError,
     ExecutionError,
     ProviderError,
+    StreamingRuntimeError,
 )
 from calc_flow.pipeline import (
     BatchExecutionPlan,
@@ -76,9 +78,6 @@ Batch = _native.Batch
 ExecutionOptions = _native.ExecutionOptions
 ProviderContext = _native.ProviderContext
 RunResult = _native.RunResult
-StreamingRuntimeError = _native.StreamingRuntimeError
-CheckpointPublicationUnknownError = _native.CheckpointPublicationUnknownError
-
 __all__ = [
     "Batch",
     "BatchExecutionPlan",

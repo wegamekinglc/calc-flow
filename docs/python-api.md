@@ -478,7 +478,9 @@ exact source-map key. See
 The previous push interface remains temporarily available as
 `LegacyStreamingRunner(plan, checkpoints)` through the A6 atomic cleanup. Its
 `step[_async]`, `reset[_async]`, and `plan_snapshot[_async]` behavior is
-unchanged.
+unchanged. For source compatibility during the same window,
+`StreamingRunner(batch_plan, FileCheckpointStore(...))` selects that legacy
+push interface as well; stream plans always select the source-driven API above.
 
 ## Exceptions
 
