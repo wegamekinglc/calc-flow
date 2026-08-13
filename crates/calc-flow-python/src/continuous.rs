@@ -396,6 +396,7 @@ fn create_exception_type(
 fn structured_exception_namespace(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     let namespace = PyDict::new(py);
     set_exception_storage_slot(py, &namespace)?;
+    set_exception_attribute_guards(py, &namespace)?;
     for (index, field) in SAFE_EXCEPTION_FIELDS.into_iter().enumerate() {
         set_exception_field_property(py, &namespace, field, index)?;
     }
@@ -405,6 +406,12 @@ fn structured_exception_namespace(py: Python<'_>) -> PyResult<Bound<'_, PyDict>>
 
 fn set_exception_storage_slot(py: Python<'_>, namespace: &Bound<'_, PyDict>) -> PyResult<()> {
     namespace.set_item("__slots__", PyTuple::new(py, [NATIVE_EXCEPTION_STORAGE])?)
+}
+
+fn set_exception_attribute_guards(py: Python<'_>, namespace: &Bound<'_, PyDict>) -> PyResult<()> {
+    let property = py.import("builtins")?.getattr("property")?;
+    namespace.set_item("__setattr__", property.call1((exception_setattr(py)?,))?)?;
+    namespace.set_item("__delattr__", property.call1((exception_delattr(py)?,))?)
 }
 
 fn set_exception_field_property(
@@ -430,6 +437,51 @@ fn set_exception_property(
 ) -> PyResult<()> {
     let property = py.import("builtins")?.getattr("property")?;
     namespace.set_item(name, property.call1((getter,))?)
+}
+
+fn exception_setattr(py: Python<'_>) -> PyResult<Bound<'_, PyCFunction>> {
+    PyCFunction::new_closure(py, None, None, move |args, _kwargs| {
+        let instance = args.get_item(0)?.unbind();
+        PyCFunction::new_closure(args.py(), None, None, move |args, _kwargs| {
+            let instance = instance.bind(args.py());
+            let name = args.get_item(0)?;
+            if name.extract::<&str>()? == NATIVE_EXCEPTION_STORAGE
+                && instance.getattr(NATIVE_EXCEPTION_STORAGE).is_ok()
+            {
+                return Err(pyo3::exceptions::PyAttributeError::new_err(
+                    "native safe exception backing is read-only",
+                ));
+            }
+            let value = args.get_item(1)?;
+            args.py()
+                .get_type::<pyo3::exceptions::PyBaseException>()
+                .getattr("__setattr__")?
+                .call1((instance, name, value))
+                .map(Bound::unbind)
+        })
+        .map(Bound::unbind)
+    })
+}
+
+fn exception_delattr(py: Python<'_>) -> PyResult<Bound<'_, PyCFunction>> {
+    PyCFunction::new_closure(py, None, None, move |args, _kwargs| {
+        let instance = args.get_item(0)?.unbind();
+        PyCFunction::new_closure(args.py(), None, None, move |args, _kwargs| {
+            let instance = instance.bind(args.py());
+            let name = args.get_item(0)?;
+            if name.extract::<&str>()? == NATIVE_EXCEPTION_STORAGE {
+                return Err(pyo3::exceptions::PyAttributeError::new_err(
+                    "native safe exception backing is read-only",
+                ));
+            }
+            args.py()
+                .get_type::<pyo3::exceptions::PyBaseException>()
+                .getattr("__delattr__")?
+                .call1((instance, name))
+                .map(Bound::unbind)
+        })
+        .map(Bound::unbind)
+    })
 }
 
 fn exception_field_getter(py: Python<'_>, index: usize) -> PyResult<Bound<'_, PyCFunction>> {
@@ -1494,6 +1546,30 @@ mod tests {
             py.run(
                 &CString::new(
                     "import asyncio, traceback\nasync def exercise():\n    try:\n        await runner.start_async()\n    except Exception as error:\n        assert type(error).__name__ == 'StreamingRuntimeError'\n        assert error.category == 'connector'\n        assert error.message == str(error)\n        assert error.job_id is not None\n        assert error.epoch is None\n        assert error.checkpoint_phase is None\n        assert error.component_kind == 'source'\n        assert error.component_id == 'input'\n        assert error.diagnostic_id is None\n        assert error.position == 0\n        assert error.__cause__ is None\n        assert error.__context__ is None\n        rendered = repr(error) + str(error) + ''.join(traceback.format_exception(error)) + repr(vars(error))\n        for sentinel in ('private-connector-payload-redaction-sentinel', 'python-private-provider', 'private-source', 'private-version'):\n            assert sentinel not in rendered\n        try:\n            error.category = 'tampered'\n        except AttributeError:\n            pass\n        else:\n            raise AssertionError('safe exception fields must be read-only')\n        backing = error._calc_flow_safe_fields\n        try:\n            backing['category'] = 'tampered-through-dict'\n        except TypeError:\n            pass\n        else:\n            raise AssertionError('safe exception backing must be immutable')\n        try:\n            error._calc_flow_safe_fields = {'category': 'tampered-through-replacement'}\n        except AttributeError:\n            pass\n        else:\n            raise AssertionError('safe exception backing must not be replaceable')\n        vars(error)['_calc_flow_safe_fields'] = {'category': 'shadowed'}\n        assert error._calc_flow_safe_fields['category'] == 'connector'\n        assert error.category == 'connector'\n        assert error.message == str(error)\n    else:\n        raise AssertionError('start unexpectedly succeeded')\nasyncio.run(exercise())",
+                )
+                .unwrap(),
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+        });
+    }
+
+    #[test]
+    fn start_error_native_backing_cannot_be_replaced() {
+        Python::initialize();
+        let directory = tempfile::tempdir().unwrap();
+        Python::attach(|py| {
+            let locals = PyDict::new(py);
+            let runner = Py::new(
+                py,
+                PyContinuousStreamingRunner::from_inner(failing_runner(directory.path())),
+            )
+            .unwrap();
+            locals.set_item("runner", runner).unwrap();
+            py.run(
+                &CString::new(
+                    "import asyncio\nasync def exercise():\n    try:\n        await runner.start_async()\n    except Exception as error:\n        original_fields = dict(error._calc_flow_safe_fields)\n        assert error.category == 'connector'\n        try:\n            error._calc_flow_native_safe_fields = ('tampered',) * 9\n        except AttributeError:\n            pass\n        else:\n            raise AssertionError('native safe exception backing must not be replaceable')\n        assert error.category == 'connector'\n        assert dict(error._calc_flow_safe_fields) == original_fields\n    else:\n        raise AssertionError('start unexpectedly succeeded')\nasyncio.run(exercise())",
                 )
                 .unwrap(),
                 Some(&locals),
