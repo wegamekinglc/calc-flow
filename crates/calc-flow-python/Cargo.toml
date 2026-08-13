@@ -27,5 +27,8 @@ pyo3-arrow = "0.17.0"
 serde_json.workspace = true
 tokio.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true
