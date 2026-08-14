@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import gc
 import inspect
+import json
 import weakref
+from collections.abc import Mapping
 from pathlib import Path
 
 import pyarrow as pa
@@ -20,9 +22,14 @@ from calc_flow import (
     DisabledWatermarks,
     Idle,
     ManagedCheckpointRuntime,
+    NativeWatermarkCapability,
     PipelineBuilder,
+    ReplayPositioning,
     SinkBinding,
+    SinkRecovery,
     SourceBinding,
+    SourceCapabilities,
+    SourceDeliveryCapability,
     StreamExecutionPlan,
     StreamingRunner,
     StreamRequirements,
@@ -739,5 +746,358 @@ def test_abandoned_job_reaps_python_connector(tmp_path: Path) -> None:
             asyncio.gather(source_closed.wait(), sink_closed.wait()), timeout=1
         )
         assert reference() is None
+
+    asyncio.run(exercise())
+
+
+def test_shared_restart_vector_is_exactly_once_across_checkpoint_recovery(
+    tmp_path: Path,
+) -> None:
+    fixture = (
+        Path(__file__).parents[2]
+        / "tests"
+        / "fixtures"
+        / "a6"
+        / "continuous_restart_vectors.json"
+    )
+    vector = json.loads(fixture.read_text(encoding="utf-8"))
+    original = json.dumps(vector, sort_keys=True)
+    plan_vector = vector["plan"]
+    records = vector["records"]
+    expected = vector["expected"]
+    managed_root = tmp_path / "managed"
+    sink_root = tmp_path / "sink"
+    opened_offsets: list[int] = []
+    lifecycle = {"source_closes": 0, "sink_closes": 0, "writes": 0}
+
+    def commit_epoch(epoch: int, values: list[int]) -> None:
+        sink_root.mkdir(parents=True, exist_ok=True)
+        target = sink_root / f"visible-{epoch:020}.json"
+        if target.exists():
+            assert json.loads(target.read_text(encoding="utf-8")) == values
+            return
+        temporary = sink_root / f".tmp-{epoch:020}.json"
+        temporary.write_text(json.dumps(values), encoding="utf-8")
+        temporary.replace(target)
+
+    class Source:
+        def __init__(self, pause_at: int | None) -> None:
+            self.pause_at = pause_at
+            self.offset = 0
+
+        def capabilities(self) -> SourceCapabilities:
+            return SourceCapabilities(
+                ReplayPositioning.EXACT_PAUSE_REPORT_AND_SEEK,
+                SourceDeliveryCapability.LOSSLESS,
+                max_batch_rows=1,
+                max_batch_bytes=1024,
+                native_watermarks=NativeWatermarkCapability.NEVER_EMITS,
+            )
+
+        async def open(self, cursor: Cursor | None) -> None:
+            self.offset = 0 if cursor is None else int(cursor.payload["offset"])
+            opened_offsets.append(self.offset)
+
+        async def next(self) -> Data | Idle | None:
+            if self.pause_at == self.offset:
+                await asyncio.sleep(0)
+                return Idle()
+            if self.offset >= len(records):
+                return None
+            record = records[self.offset]
+            assert record["offset"] == self.offset
+            self.offset += 1
+            return Data(
+                Batch.from_pyarrow(pa.table({"value": [record["value"]]})),
+                Cursor(
+                    self.offset.to_bytes(8, "big"),
+                    {"offset": self.offset},
+                ),
+            )
+
+        async def close(self) -> None:
+            lifecycle["source_closes"] += 1
+
+    class Sink:
+        def __init__(self, changed: asyncio.Event) -> None:
+            self.changed = changed
+            self.pending: list[int] = []
+
+        async def open(self) -> None:
+            return None
+
+        async def begin_epoch(self, epoch: int) -> None:
+            self.pending.clear()
+
+        async def write(self, batch: Batch) -> None:
+            values = batch.to_pyarrow()["doubled"].to_pylist()
+            self.pending.extend(values)
+            lifecycle["writes"] += len(values)
+            self.changed.set()
+
+        async def pre_commit(self, epoch: int) -> dict[str, object]:
+            return {"values": list(self.pending)}
+
+        async def commit(self, epoch: int, pre_commit: Mapping[str, object]) -> None:
+            raw_values = pre_commit["values"]
+            assert isinstance(raw_values, list)
+            values = [int(value) for value in raw_values]
+            await asyncio.to_thread(commit_epoch, epoch, values)
+
+        async def abort(
+            self, epoch: int, pre_commit: Mapping[str, object] | None
+        ) -> None:
+            self.pending.clear()
+
+        async def recover(self, recovery: SinkRecovery) -> None:
+            raw_values = recovery.pre_commit["values"]
+            assert isinstance(raw_values, list)
+            await asyncio.to_thread(
+                commit_epoch,
+                recovery.epoch,
+                [int(value) for value in raw_values],
+            )
+
+        async def close(self) -> None:
+            lifecycle["sink_closes"] += 1
+
+    def plan() -> StreamExecutionPlan:
+        return (
+            PipelineBuilder(plan_vector["name"])
+            .expression(plan_vector["operator_id"], plan_vector["expression"])
+            .compile_stream(
+                requirements=StreamRequirements(
+                    {
+                        plan_vector["output_id"]: DeliveryGuarantee.EXACTLY_ONCE,
+                    }
+                )
+            )
+        )
+
+    def runner(pause_at: int | None, changed: asyncio.Event) -> StreamingRunner:
+        return StreamingRunner(
+            plan(),
+            {
+                plan_vector["source_id"]: SourceBinding(
+                    Source(pause_at), watermark_policy=DisabledWatermarks()
+                )
+            },
+            {
+                plan_vector["output_id"]: [
+                    SinkBinding.transactional(plan_vector["sink_id"], Sink(changed))
+                ]
+            },
+            ManagedCheckpointRuntime(managed_root),
+        )
+
+    def charged_edges(status: Mapping[str, object]) -> int:
+        edges = status["edges"]
+        assert isinstance(edges, dict)
+        return sum(
+            isinstance(edge, dict)
+            and (
+                edge["current_envelopes"] != 0
+                or edge["current_rows"] != 0
+                or edge["current_bytes"] != 0
+            )
+            for edge in edges.values()
+        )
+
+    async def exercise() -> None:
+        changed = asyncio.Event()
+        first = await runner(vector["checkpoint_after"], changed).start_async()
+        while lifecycle["writes"] < vector["checkpoint_after"]:
+            await changed.wait()
+            changed.clear()
+        epoch = await first.trigger_checkpoint_async()
+        assert epoch == expected["checkpoint_epoch"]
+        assert (await first.cancel_async()).state == "cancelled"
+        first_status = first.status()
+        assert first_status["task_count"] == expected["terminal_tasks"]
+        assert charged_edges(first_status) == expected["terminal_charged_edges"]
+
+        second = await runner(None, asyncio.Event()).start_async()
+        outcome = await second.wait_async()
+        assert outcome.state == "completed"
+        assert outcome.completed_epoch == expected["terminal_epoch"]
+        second_status = second.status()
+        assert second_status["task_count"] == expected["terminal_tasks"]
+        assert charged_edges(second_status) == expected["terminal_charged_edges"]
+
+    asyncio.run(exercise())
+
+    visible: list[int] = []
+    for path in sorted(sink_root.glob("visible-*.json")):
+        visible.extend(json.loads(path.read_text(encoding="utf-8")))
+    assert visible == expected["values"]
+    assert len(visible) - len(set(visible)) == expected["duplicates"]
+    assert len(set(expected["values"]) - set(visible)) == expected["missing"]
+    assert opened_offsets == expected["opened_offsets"]
+    assert lifecycle["source_closes"] == 2
+    assert lifecycle["sink_closes"] == 2
+    assert (
+        sum(
+            path.is_file() and (".tmp" in path.name or path.name.startswith("tmp"))
+            for path in tmp_path.rglob("*")
+        )
+        == expected["temporary_artifacts"]
+    )
+    assert json.dumps(vector, sort_keys=True) == original
+
+
+@pytest.mark.parametrize(
+    ("method", "expected_state"),
+    (("shutdown_async", "completed"), ("cancel_async", "cancelled")),
+    ids=("shutdown", "cancel"),
+)
+def test_cancelling_terminal_observer_preserves_owner_cleanup(
+    tmp_path: Path, method: str, expected_state: str
+) -> None:
+    async def exercise() -> None:
+        polled = asyncio.Event()
+        close_entered = asyncio.Event()
+        close_release = asyncio.Event()
+
+        class Source:
+            def capabilities(self) -> SourceCapabilities:
+                return SourceCapabilities(
+                    ReplayPositioning.UNSUPPORTED,
+                    SourceDeliveryCapability.LOSSY,
+                    max_batch_rows=1,
+                    max_batch_bytes=1,
+                    native_watermarks=NativeWatermarkCapability.NEVER_EMITS,
+                )
+
+            async def open(self, cursor: Cursor | None) -> None:
+                return None
+
+            async def next(self) -> None:
+                polled.set()
+                await asyncio.Event().wait()
+
+            async def close(self) -> None:
+                close_entered.set()
+                await close_release.wait()
+
+        class Sink:
+            async def open(self) -> None:
+                return None
+
+            async def write(self, batch: Batch) -> None:
+                return None
+
+            async def close(self) -> None:
+                return None
+
+        job = await StreamingRunner(
+            PipelineBuilder(f"cancel-{method}")
+            .expression("copy", "b = a")
+            .compile_stream(),
+            {"input": SourceBinding(Source(), watermark_policy=DisabledWatermarks())},
+            {"output": [SinkBinding.ordinary("archive", Sink())]},
+            ManagedCheckpointRuntime(tmp_path / method),
+        ).start_async()
+        await polled.wait()
+        observer = asyncio.create_task(getattr(job, method)())
+        await close_entered.wait()
+        observer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await observer
+        close_release.set()
+        outcome = await asyncio.wait_for(job.wait_async(), timeout=1)
+        assert outcome.state == expected_state
+        assert job.status()["task_count"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_cancelling_checkpoint_observer_does_not_cancel_checkpoint_or_job(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        polled = asyncio.Event()
+        pre_commit_entered = asyncio.Event()
+        pre_commit_release = asyncio.Event()
+        commit_completed = asyncio.Event()
+        commits: list[int] = []
+
+        class Source:
+            def capabilities(self) -> SourceCapabilities:
+                return SourceCapabilities(
+                    ReplayPositioning.EXACT_PAUSE_REPORT_AND_SEEK,
+                    SourceDeliveryCapability.LOSSLESS,
+                    max_batch_rows=1,
+                    max_batch_bytes=1,
+                    native_watermarks=NativeWatermarkCapability.NEVER_EMITS,
+                )
+
+            async def open(self, cursor: Cursor | None) -> None:
+                return None
+
+            async def next(self) -> None:
+                polled.set()
+                await asyncio.Event().wait()
+
+            async def close(self) -> None:
+                return None
+
+        class Sink:
+            async def open(self) -> None:
+                return None
+
+            async def begin_epoch(self, epoch: int) -> None:
+                return None
+
+            async def write(self, batch: Batch) -> None:
+                return None
+
+            async def pre_commit(self, epoch: int) -> dict[str, object]:
+                pre_commit_entered.set()
+                await pre_commit_release.wait()
+                return {"epoch": epoch}
+
+            async def commit(
+                self, epoch: int, pre_commit: Mapping[str, object]
+            ) -> None:
+                commits.append(epoch)
+                commit_completed.set()
+
+            async def abort(
+                self, epoch: int, pre_commit: Mapping[str, object] | None
+            ) -> None:
+                return None
+
+            async def recover(self, recovery: SinkRecovery) -> None:
+                return None
+
+            async def close(self) -> None:
+                return None
+
+        job = await StreamingRunner(
+            PipelineBuilder("cancel-checkpoint-observer")
+            .expression("copy", "b = a")
+            .compile_stream(
+                requirements=StreamRequirements(
+                    {"output": DeliveryGuarantee.EXACTLY_ONCE}
+                )
+            ),
+            {"input": SourceBinding(Source(), watermark_policy=DisabledWatermarks())},
+            {"output": [SinkBinding.transactional("archive", Sink())]},
+            ManagedCheckpointRuntime(tmp_path),
+        ).start_async()
+        await polled.wait()
+        observer = asyncio.create_task(job.trigger_checkpoint_async())
+        await pre_commit_entered.wait()
+        observer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await observer
+        assert job.status()["state"] == "running"
+        pre_commit_release.set()
+        await asyncio.wait_for(commit_completed.wait(), timeout=1)
+        assert await job.trigger_checkpoint_async() == 2
+        assert job.status()["checkpoint"]["last_completed_epoch"] == 2
+        assert commits == [1, 2]
+        assert (await job.cancel_async()).state == "cancelled"
+        assert job.status()["task_count"] == 0
 
     asyncio.run(exercise())

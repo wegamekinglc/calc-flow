@@ -19,6 +19,9 @@ use calc_flow::{
     StreamingErrorCategory, StreamingJob, StreamingRunner, TransactionalStreamSink, UdfRegistry,
     UnionOperator,
 };
+use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
+use serde::Deserialize;
+use tokio::sync::{oneshot, watch};
 
 const SECRET: &str = "credential-canary-value";
 
@@ -841,4 +844,510 @@ async fn terminal_manifest_recovery_does_not_reopen_sources() {
     assert_eq!(*probe.sink_recoveries.lock().unwrap(), [true]);
     assert_eq!(probe.source_opens.load(Ordering::SeqCst), 1);
     assert_eq!(probe.source_closes.load(Ordering::SeqCst), 1);
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+struct RestartVector {
+    schema_version: u32,
+    plan: RestartPlanVector,
+    checkpoint_after: usize,
+    records: Vec<RestartRecordVector>,
+    expected: RestartExpectedVector,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+struct RestartPlanVector {
+    name: String,
+    operator_id: String,
+    expression: String,
+    source_id: String,
+    output_id: String,
+    sink_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+struct RestartRecordVector {
+    offset: usize,
+    value: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+struct RestartExpectedVector {
+    checkpoint_epoch: u64,
+    terminal_epoch: u64,
+    opened_offsets: Vec<usize>,
+    values: Vec<i64>,
+    duplicates: usize,
+    missing: usize,
+    terminal_tasks: usize,
+    terminal_charged_edges: usize,
+    temporary_artifacts: usize,
+}
+
+fn restart_vector() -> RestartVector {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/a6/continuous_restart_vectors.json");
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+const RESTART_VECTOR_WRITE_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[derive(Clone)]
+struct RestartVectorProbe {
+    opened_offsets: Arc<Mutex<Vec<usize>>>,
+    source_closes: Arc<AtomicUsize>,
+    sink_closes: Arc<AtomicUsize>,
+    writes: watch::Sender<usize>,
+}
+
+impl Default for RestartVectorProbe {
+    fn default() -> Self {
+        let (writes, _) = watch::channel(0);
+        Self {
+            opened_offsets: Arc::default(),
+            source_closes: Arc::default(),
+            sink_closes: Arc::default(),
+            writes,
+        }
+    }
+}
+
+impl RestartVectorProbe {
+    async fn wait_for_writes(&self, expected: usize) {
+        self.wait_for_writes_with_interlock(expected, None).await;
+    }
+
+    async fn wait_for_writes_with_interlock(
+        &self,
+        expected: usize,
+        interlock: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
+    ) {
+        let mut writes = self.writes.subscribe();
+        let mut interlock = interlock;
+        tokio::time::timeout(RESTART_VECTOR_WRITE_WAIT_TIMEOUT, async {
+            loop {
+                if *writes.borrow_and_update() >= expected {
+                    break;
+                }
+                if let Some((checked, resume)) = interlock.take() {
+                    checked.send(()).expect("write-wait test remains active");
+                    resume.await.expect("write-wait test resumes waiter");
+                }
+                writes
+                    .changed()
+                    .await
+                    .expect("restart-vector write counter remains open");
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "restart sink wrote {} of {expected} rows within {:?}",
+                *writes.borrow(),
+                RESTART_VECTOR_WRITE_WAIT_TIMEOUT
+            )
+        });
+    }
+}
+
+#[tokio::test]
+async fn restart_write_wait_preserves_update_between_check_and_await() {
+    let probe = RestartVectorProbe::default();
+    let waiting_probe = probe.clone();
+    let (checked_sender, checked_receiver) = oneshot::channel();
+    let (resume_sender, resume_receiver) = oneshot::channel();
+    let waiter = tokio::spawn(async move {
+        waiting_probe
+            .wait_for_writes_with_interlock(1, Some((checked_sender, resume_receiver)))
+            .await;
+    });
+
+    checked_receiver.await.unwrap();
+    probe.writes.send_modify(|writes| *writes += 1);
+    resume_sender.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_millis(500), waiter)
+        .await
+        .expect("write wait lost an update before registering its await")
+        .unwrap();
+}
+
+struct RestartVectorSource {
+    records: Arc<[RestartRecordVector]>,
+    pause_at: Option<usize>,
+    offset: usize,
+    probe: RestartVectorProbe,
+}
+
+#[async_trait]
+impl StreamSource for RestartVectorSource {
+    fn capabilities(&self) -> SourceCapabilities {
+        SourceCapabilities {
+            replay_positioning: ReplayPositioning::ExactPauseReportAndSeek,
+            delivery: SourceDeliveryCapability::Lossless,
+            max_batch_rows: 1,
+            max_batch_bytes: 1024,
+            schema: SourceSchema::DynamicOrUnknown,
+            native_watermarks: NativeWatermarkCapability::NeverEmits,
+        }
+    }
+
+    async fn open(&mut self, cursor: Option<Cursor>) -> Result<()> {
+        self.offset = match cursor {
+            Some(cursor) => usize::try_from(
+                cursor
+                    .payload()
+                    .get("offset")
+                    .and_then(serde_json::Value::as_u64)
+                    .expect("restart cursor carries an integer offset"),
+            )
+            .unwrap(),
+            None => 0,
+        };
+        self.probe.opened_offsets.lock().unwrap().push(self.offset);
+        Ok(())
+    }
+
+    async fn next(&mut self) -> Result<Option<SourceEvent>> {
+        if self.pause_at == Some(self.offset) {
+            tokio::task::yield_now().await;
+            return Ok(Some(SourceEvent::Idle));
+        }
+        let Some(record) = self.records.get(self.offset).copied() else {
+            return Ok(None);
+        };
+        assert_eq!(record.offset, self.offset);
+        self.offset += 1;
+        let batch = RecordBatch::try_from_iter(vec![(
+            "value",
+            Arc::new(Int64Array::from(vec![record.value])) as _,
+        )])
+        .unwrap();
+        Ok(Some(SourceEvent::Data {
+            batch: Batch::table(
+                vec![batch],
+                BatchMetadata::new("a6-vector", record.offset as u64, BTreeMap::new())?,
+            )?,
+            cursor: Cursor::unbound(
+                u64::try_from(self.offset).unwrap().to_be_bytes().to_vec(),
+                BTreeMap::from([("offset".into(), self.offset.into())]),
+            )?,
+        }))
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        self.probe.source_closes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+struct RestartVectorSink {
+    root: PathBuf,
+    pending: Vec<i64>,
+    probe: RestartVectorProbe,
+}
+
+impl RestartVectorSink {
+    fn values(pre_commit: &JsonMap) -> Vec<i64> {
+        pre_commit["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_i64().unwrap())
+            .collect()
+    }
+
+    async fn commit_values(&self, epoch: calc_flow::Epoch, values: &[i64]) -> Result<()> {
+        tokio::fs::create_dir_all(&self.root)
+            .await
+            .map_err(|source| CalcFlowError::Io {
+                path: self.root.to_string_lossy().into_owned(),
+                source,
+            })?;
+        let target = self
+            .root
+            .join(format!("visible-{:020}.json", epoch.as_u64()));
+        if target.exists() {
+            let observed: Vec<i64> =
+                serde_json::from_slice(&tokio::fs::read(&target).await.map_err(|source| {
+                    CalcFlowError::Io {
+                        path: target.to_string_lossy().into_owned(),
+                        source,
+                    }
+                })?)
+                .unwrap();
+            assert_eq!(observed, values);
+            return Ok(());
+        }
+        let temporary = self.root.join(format!(".tmp-{:020}.json", epoch.as_u64()));
+        tokio::fs::write(&temporary, serde_json::to_vec(values).unwrap())
+            .await
+            .map_err(|source| CalcFlowError::Io {
+                path: temporary.to_string_lossy().into_owned(),
+                source,
+            })?;
+        tokio::fs::rename(&temporary, &target)
+            .await
+            .map_err(|source| CalcFlowError::Io {
+                path: target.to_string_lossy().into_owned(),
+                source,
+            })
+    }
+}
+
+#[async_trait]
+impl TransactionalStreamSink for RestartVectorSink {
+    async fn open(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn begin_epoch(&mut self, _epoch: calc_flow::Epoch) -> Result<()> {
+        self.pending.clear();
+        Ok(())
+    }
+
+    async fn write(&mut self, batch: &Batch) -> Result<()> {
+        for record in batch.table_payload()?.batches() {
+            let values = record
+                .column_by_name("doubled")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            self.pending.extend(values.values());
+            self.probe
+                .writes
+                .send_modify(|writes| *writes += values.len());
+        }
+        Ok(())
+    }
+
+    async fn pre_commit(&mut self, _epoch: calc_flow::Epoch) -> Result<JsonMap> {
+        Ok(BTreeMap::from([(
+            "values".into(),
+            serde_json::json!(self.pending),
+        )]))
+    }
+
+    async fn commit(&mut self, epoch: calc_flow::Epoch, pre_commit: &JsonMap) -> Result<()> {
+        self.commit_values(epoch, &Self::values(pre_commit)).await
+    }
+
+    async fn abort(
+        &mut self,
+        _epoch: calc_flow::Epoch,
+        _pre_commit: Option<&JsonMap>,
+    ) -> Result<()> {
+        self.pending.clear();
+        Ok(())
+    }
+
+    async fn recover(&mut self, recovery: &SinkRecovery) -> Result<()> {
+        self.commit_values(recovery.epoch(), &Self::values(recovery.pre_commit()))
+            .await
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        self.probe.sink_closes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+fn restart_vector_plan(vector: &RestartVector) -> calc_flow::StreamExecutionPlan {
+    let requirements = StreamRequirements {
+        delivery: BTreeMap::from([(
+            vector.plan.output_id.clone(),
+            DeliveryGuarantee::ExactlyOnce,
+        )]),
+    };
+    PipelineBuilder::new(&vector.plan.name)
+        .unwrap()
+        .add_node(
+            &vector.plan.operator_id,
+            Box::new(
+                ExpressionOperator::new(
+                    &vector.plan.operator_id,
+                    &vector.plan.expression,
+                    Vec::new(),
+                    None,
+                    Vec::new(),
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap()
+        .compile_stream(&UdfRegistry::new().snapshot(), &requirements)
+        .unwrap()
+}
+
+fn restart_vector_runner(
+    vector: &RestartVector,
+    managed_root: &Path,
+    sink_root: &Path,
+    pause_at: Option<usize>,
+    probe: RestartVectorProbe,
+) -> StreamingRunner {
+    StreamingRunner::new(
+        restart_vector_plan(vector),
+        BTreeMap::from([(
+            vector.plan.source_id.clone(),
+            SourceBinding::new(RestartVectorSource {
+                records: vector.records.clone().into(),
+                pause_at,
+                offset: 0,
+                probe: probe.clone(),
+            })
+            .with_watermark_policy(calc_flow::WatermarkPolicy::Disabled { idle_timeout: None }),
+        )]),
+        BTreeMap::from([(
+            vector.plan.output_id.clone(),
+            vec![
+                SinkBinding::transactional(
+                    &vector.plan.sink_id,
+                    RestartVectorSink {
+                        root: sink_root.to_owned(),
+                        pending: Vec::new(),
+                        probe,
+                    },
+                )
+                .unwrap(),
+            ],
+        )]),
+        ManagedCheckpointRuntime::new(managed_root).unwrap(),
+    )
+    .unwrap()
+}
+
+async fn restart_vector_visible_values(root: &Path) -> Vec<i64> {
+    let mut entries = tokio::fs::read_dir(root).await.unwrap();
+    let mut paths = Vec::new();
+    while let Some(entry) = entries.next_entry().await.unwrap() {
+        if entry.file_name().to_str().is_some_and(|name| {
+            name.starts_with("visible-")
+                && Path::new(name)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        }) {
+            paths.push(entry.path());
+        }
+    }
+    paths.sort();
+    let mut values = Vec::new();
+    for path in paths {
+        values.extend(
+            serde_json::from_slice::<Vec<i64>>(&tokio::fs::read(path).await.unwrap()).unwrap(),
+        );
+    }
+    values
+}
+
+fn restart_vector_temporary_artifacts(root: &Path) -> usize {
+    let mut pending = vec![root.to_owned()];
+    let mut count = 0;
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.map(std::result::Result::unwrap) {
+            if entry.file_type().unwrap().is_dir() {
+                pending.push(entry.path());
+            } else if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.contains(".tmp") || name.starts_with("tmp"))
+            {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+#[tokio::test]
+async fn shared_restart_vector_is_exactly_once_across_checkpoint_recovery() {
+    let vector = restart_vector();
+    let original = vector.clone();
+    let directory = tempfile::tempdir().unwrap();
+    let managed_root = directory.path().join("managed");
+    let sink_root = directory.path().join("sink");
+    let probe = RestartVectorProbe::default();
+
+    let first = restart_vector_runner(
+        &vector,
+        &managed_root,
+        &sink_root,
+        Some(vector.checkpoint_after),
+        probe.clone(),
+    )
+    .start()
+    .await
+    .unwrap();
+    probe.wait_for_writes(vector.checkpoint_after).await;
+    let epoch = first.trigger_checkpoint().await.unwrap();
+    assert_eq!(epoch.as_u64(), vector.expected.checkpoint_epoch);
+    let first_outcome = first.cancel().await;
+    assert_eq!(first_outcome.state, JobState::Cancelled);
+    assert_eq!(first.status().task_count, vector.expected.terminal_tasks);
+    assert_eq!(
+        first
+            .status()
+            .edges
+            .values()
+            .filter(|edge| {
+                edge.current_envelopes != 0 || edge.current_rows != 0 || edge.current_bytes != 0
+            })
+            .count(),
+        vector.expected.terminal_charged_edges
+    );
+
+    let second = restart_vector_runner(&vector, &managed_root, &sink_root, None, probe.clone())
+        .start()
+        .await
+        .unwrap();
+    let second_outcome = second.wait().await;
+    assert_eq!(second_outcome.state, JobState::Completed);
+    assert_eq!(
+        second_outcome.completed_epoch.map(calc_flow::Epoch::as_u64),
+        Some(vector.expected.terminal_epoch)
+    );
+    let status = second.status();
+    assert_eq!(status.task_count, vector.expected.terminal_tasks);
+    assert_eq!(
+        status
+            .edges
+            .values()
+            .filter(|edge| {
+                edge.current_envelopes != 0 || edge.current_rows != 0 || edge.current_bytes != 0
+            })
+            .count(),
+        vector.expected.terminal_charged_edges
+    );
+
+    let values = restart_vector_visible_values(&sink_root).await;
+    let unique = values
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected = vector
+        .expected
+        .values
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(values, vector.expected.values);
+    assert_eq!(values.len() - unique.len(), vector.expected.duplicates);
+    assert_eq!(
+        expected.difference(&unique).count(),
+        vector.expected.missing
+    );
+    assert_eq!(
+        *probe.opened_offsets.lock().unwrap(),
+        vector.expected.opened_offsets
+    );
+    assert_eq!(probe.source_closes.load(Ordering::SeqCst), 2);
+    assert_eq!(probe.sink_closes.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        restart_vector_temporary_artifacts(directory.path()),
+        vector.expected.temporary_artifacts
+    );
+    assert_eq!(vector, original);
 }
