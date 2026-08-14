@@ -1,3 +1,6 @@
+#[path = "support/restart_vector.rs"]
+mod restart_vector;
+
 use std::{
     any::Any,
     collections::BTreeMap,
@@ -20,7 +23,7 @@ use calc_flow::{
     UnionOperator,
 };
 use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
-use serde::Deserialize;
+use restart_vector::{RestartRecordVector, RestartVector, restart_vector};
 use tokio::sync::{oneshot, watch};
 
 const SECRET: &str = "credential-canary-value";
@@ -846,50 +849,6 @@ async fn terminal_manifest_recovery_does_not_reopen_sources() {
     assert_eq!(probe.source_closes.load(Ordering::SeqCst), 1);
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-struct RestartVector {
-    schema_version: u32,
-    plan: RestartPlanVector,
-    checkpoint_after: usize,
-    records: Vec<RestartRecordVector>,
-    expected: RestartExpectedVector,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-struct RestartPlanVector {
-    name: String,
-    operator_id: String,
-    expression: String,
-    source_id: String,
-    output_id: String,
-    sink_id: String,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-struct RestartRecordVector {
-    offset: usize,
-    value: i64,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-struct RestartExpectedVector {
-    checkpoint_epoch: u64,
-    terminal_epoch: u64,
-    opened_offsets: Vec<usize>,
-    values: Vec<i64>,
-    duplicates: usize,
-    missing: usize,
-    terminal_tasks: usize,
-    terminal_charged_edges: usize,
-    temporary_artifacts: usize,
-}
-
-fn restart_vector() -> RestartVector {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/a6/continuous_restart_vectors.json");
-    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
-}
-
 const RESTART_VECTOR_WRITE_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Clone)]
@@ -1264,7 +1223,7 @@ fn restart_vector_temporary_artifacts(root: &Path) -> usize {
 
 #[tokio::test]
 async fn shared_restart_vector_is_exactly_once_across_checkpoint_recovery() {
-    let vector = restart_vector();
+    let vector = restart_vector().await;
     let original = vector.clone();
     let directory = tempfile::tempdir().unwrap();
     let managed_root = directory.path().join("managed");

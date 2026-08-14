@@ -1,3 +1,6 @@
+#[path = "support/restart_vector.rs"]
+mod restart_vector;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
@@ -22,6 +25,7 @@ use calc_flow::{
 };
 use command_group::{CommandGroup, GroupChild};
 use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
+use restart_vector::{RestartRecordVector, RestartVector, restart_vector};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, watch};
 
@@ -34,44 +38,6 @@ const WORKER_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const WORKER_PROCESS_TIMEOUT: Duration = Duration::from_secs(120);
 const WORKER_PROCESS_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const WORKER_LOG_EXCERPT_BYTES: usize = 8 * 1_024;
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-struct RestartVector {
-    schema_version: u32,
-    plan: RestartPlanVector,
-    checkpoint_after: usize,
-    records: Vec<RestartRecordVector>,
-    expected: RestartExpectedVector,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-struct RestartPlanVector {
-    name: String,
-    operator_id: String,
-    expression: String,
-    source_id: String,
-    output_id: String,
-    sink_id: String,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-struct RestartRecordVector {
-    offset: usize,
-    value: i64,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-struct RestartExpectedVector {
-    checkpoint_epoch: u64,
-    terminal_epoch: u64,
-    opened_offsets: Vec<usize>,
-    values: Vec<i64>,
-    duplicates: usize,
-    missing: usize,
-    terminal_tasks: usize,
-    terminal_charged_edges: usize,
-    temporary_artifacts: usize,
-}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct WorkerReport {
@@ -87,12 +53,6 @@ struct WorkerReport {
     sink_closes: usize,
     visible_values: Vec<i64>,
     temporary_artifacts: usize,
-}
-
-async fn restart_vector() -> RestartVector {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/a6/continuous_restart_vectors.json");
-    serde_json::from_slice(&tokio::fs::read(path).await.unwrap()).unwrap()
 }
 
 #[derive(Clone)]
@@ -721,6 +681,16 @@ fn uv_python_command() -> Command {
     command
 }
 
+fn uv_is_available() -> bool {
+    Command::new("uv")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 fn worker_log_paths(report: &Path) -> (PathBuf, PathBuf) {
     (
         report.with_extension("stdout.log"),
@@ -769,6 +739,11 @@ fn worker_process_failure(
 
 #[test]
 fn worker_timeout_terminates_uv_python_process_tree() {
+    if !uv_is_available() {
+        eprintln!("skipping process-tree cleanup test because uv is unavailable");
+        return;
+    }
+
     let temporary = tempfile::tempdir().unwrap();
     let pid_path = temporary.path().join("python-worker.pid");
     let script = "import os, pathlib, sys, time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8'); time.sleep(60)";
