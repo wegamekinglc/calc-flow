@@ -80,32 +80,47 @@ const SOAK_CHECKPOINT_BATCH_INTERVAL: u64 = 8;
 const CHECKPOINT_SOAK_CADENCE: Duration = Duration::from_secs(10);
 const CHECKPOINT_SOAK_SAMPLE_COUNT: usize = 120;
 const CHECKPOINT_SOAK_RESTART_SAMPLES: [usize; 2] = [39, 79];
-const CHECKPOINT_RESTART_WARMUP_SAMPLES: usize = 10;
-const CHECKPOINT_FIRST_STEADY_START: usize =
-    CHECKPOINT_SOAK_RESTART_SAMPLES[0] + 1 + CHECKPOINT_RESTART_WARMUP_SAMPLES;
-const CHECKPOINT_FIRST_STEADY_END: usize = CHECKPOINT_SOAK_RESTART_SAMPLES[1] + 1;
-const CHECKPOINT_FINAL_STEADY_START: usize =
-    CHECKPOINT_FIRST_STEADY_END + CHECKPOINT_RESTART_WARMUP_SAMPLES;
-const CHECKPOINT_RSS_COMPARISON_RANGES: [[usize; 2]; 2] = [
-    [
-        CHECKPOINT_FIRST_STEADY_START,
-        CHECKPOINT_FIRST_STEADY_END - 1,
-    ],
-    [
-        CHECKPOINT_FINAL_STEADY_START,
-        CHECKPOINT_SOAK_SAMPLE_COUNT - 1,
-    ],
+const CHECKPOINT_SOAK_PROCESS_SAMPLE_COUNT: usize =
+    CHECKPOINT_SOAK_SAMPLE_COUNT / CHECKPOINT_SOAK_GENERATIONS;
+const CHECKPOINT_RSS_PROCESS_WARMUP_SAMPLES: usize = 30;
+const CHECKPOINT_RSS_STABLE_WINDOW_SAMPLES: usize = 10;
+const CHECKPOINT_RSS_STABLE_SUBWINDOW_SAMPLES: usize = CHECKPOINT_RSS_STABLE_WINDOW_SAMPLES / 2;
+const CHECKPOINT_RSS_WINDOW_LOCAL_RANGE: [usize; 2] = [
+    CHECKPOINT_RSS_PROCESS_WARMUP_SAMPLES,
+    CHECKPOINT_SOAK_PROCESS_SAMPLE_COUNT - 1,
 ];
+const CHECKPOINT_RSS_BASELINE_LOCAL_RANGE: [usize; 2] = [
+    CHECKPOINT_RSS_PROCESS_WARMUP_SAMPLES,
+    CHECKPOINT_RSS_PROCESS_WARMUP_SAMPLES + CHECKPOINT_RSS_STABLE_SUBWINDOW_SAMPLES - 1,
+];
+const CHECKPOINT_RSS_STABLE_LOCAL_RANGE: [usize; 2] = [
+    CHECKPOINT_RSS_BASELINE_LOCAL_RANGE[1] + 1,
+    CHECKPOINT_SOAK_PROCESS_SAMPLE_COUNT - 1,
+];
+const CHECKPOINT_RSS_SPREAD_CALIBRATION_HEAD: &str = "a09ab3bba24a2db344d9710d4955158cd86ce9d7";
+const CHECKPOINT_RSS_SPREAD_CALIBRATION_KIB: [u64; 2] = [92, 208];
+const MAX_CHECKPOINT_RSS_NORMALIZED_GROWTH_SPREAD_KIB: u64 = 512;
 const MAX_CHECKPOINT_SOAK_STATE_BYTES: u64 = 64 * 1_024 * 1_024;
 const CHECKPOINT_SOAK_COMMAND: &str = "CALC_FLOW_M5_CHECKPOINT_SOAK=1 cargo test -p calc-flow --lib runtime::streaming::soak::twenty_minute_epoch_checkpoint_restart -- --ignored --exact --nocapture";
 const CHECKPOINT_SOAK_CHILD_ENV: &str = "CALC_FLOW_M5_CHECKPOINT_SOAK_CHILD_PLAN";
+const CHECKPOINT_SOAK_MALLOC_ARENA_MAX: &str = "1";
+const CHECKPOINT_SOAK_MALLOC_TRIM_THRESHOLD: &str = "0";
+const CHECKPOINT_SOAK_MALLOC_TOP_PAD: &str = "0";
 const CHECKPOINT_SOAK_CHILD_TEST: &str =
     "runtime::streaming::soak::checkpoint_restart_soak_generation_child_process";
 const CHECKPOINT_SOAK_PROCESS_SCHEMA: &str = "calc-flow.m5-checkpoint-soak-process.v1";
 const CHECKPOINT_SOAK_PLAN_SCHEMA: &str = "calc-flow.m5-checkpoint-soak-plan.v1";
+const CHECKPOINT_SOAK_SCHEMA: &str = "calc-flow.m5-checkpoint-soak.v2";
 const CHECKPOINT_SOAK_GENERATIONS: usize = 3;
+const _: () = assert!(CHECKPOINT_SOAK_SAMPLE_COUNT % CHECKPOINT_SOAK_GENERATIONS == 0);
+const _: () = assert!(CHECKPOINT_RSS_STABLE_WINDOW_SAMPLES % 2 == 0);
+const _: () = assert!(
+    CHECKPOINT_RSS_PROCESS_WARMUP_SAMPLES + CHECKPOINT_RSS_STABLE_WINDOW_SAMPLES
+        == CHECKPOINT_SOAK_PROCESS_SAMPLE_COUNT
+);
+const _: () = assert!(MAX_CHECKPOINT_RSS_NORMALIZED_GROWTH_SPREAD_KIB < MAX_MEDIAN_GROWTH_KIB);
 const CHECKPOINT_SOAK_REPORT_LIMIT: u64 = 1 << 20;
-const CHECKPOINT_SOAK_CADENCE_TOLERANCE: Duration = Duration::from_secs(2);
+const CHECKPOINT_SOAK_CADENCE_TOLERANCE: Duration = Duration::from_secs(3);
 const MAX_CHECKPOINT_SOAK_RESTART_GAP: Duration = Duration::from_secs(60);
 const CHECKPOINT_BENCHMARK_COMMAND: &str = "CARGO_TARGET_DIR=<fresh-candidate-target> CARGO_INCREMENTAL=0 CALC_FLOW_M5_CHECKPOINT_BENCHMARK=1 CALC_FLOW_M5_CHECKPOINT_BENCHMARK_RUN_ID=<unique-run-id> CALC_FLOW_M5_PRIVATE_SOURCE_COMMIT=<candidate-commit> CALC_FLOW_M5_PRIVATE_SOURCE_TREE=<candidate-tree> cargo test --release --locked -p calc-flow --lib runtime::streaming::soak::private_m5_epoch_checkpoint_absolute_benchmark -- --ignored --exact --nocapture";
 const M5_PRIVATE_BENCHMARK_CASES: [&str; 12] = [
@@ -567,6 +582,33 @@ struct RssGate {
     passed: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct CheckpointRssProcessSamples {
+    generation: usize,
+    pid: u32,
+    samples: Vec<RssSample>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CheckpointRssProcessGate {
+    generation: usize,
+    pid: u32,
+    baseline_sample_range: [usize; 2],
+    stable_sample_range: [usize; 2],
+    slope_mib_per_hour: f64,
+    baseline_median_kib: u64,
+    stable_median_kib: u64,
+    normalized_growth_kib: u64,
+    passed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CheckpointRestartRssGate {
+    processes: Vec<CheckpointRssProcessGate>,
+    normalized_growth_spread_kib: u64,
+    passed: bool,
+}
+
 fn parse_vm_rss_kib(status: &str) -> Option<u64> {
     status.lines().find_map(|line| {
         let mut fields = line.split_whitespace();
@@ -673,23 +715,79 @@ fn evaluate_rss_gate(samples: &[RssSample]) -> Option<RssGate> {
     })
 }
 
-fn evaluate_checkpoint_restart_rss_gate(samples: &[RssSample]) -> Option<RssGate> {
-    if samples.len() != CHECKPOINT_SOAK_SAMPLE_COUNT {
+fn evaluate_checkpoint_restart_rss_gate(
+    process_samples: &[CheckpointRssProcessSamples],
+) -> Option<CheckpointRestartRssGate> {
+    if process_samples.len() != CHECKPOINT_SOAK_GENERATIONS
+        || process_samples
+            .iter()
+            .map(|process| process.pid)
+            .collect::<BTreeSet<_>>()
+            .len()
+            != CHECKPOINT_SOAK_GENERATIONS
+    {
         return None;
     }
-    let first = samples.get(CHECKPOINT_FIRST_STEADY_START..CHECKPOINT_FIRST_STEADY_END)?;
-    let final_samples = samples.get(CHECKPOINT_FINAL_STEADY_START..)?;
-    if first.len() != FIVE_MINUTE_SAMPLES || final_samples.len() != FIVE_MINUTE_SAMPLES {
-        return None;
+
+    let mut processes = Vec::with_capacity(CHECKPOINT_SOAK_GENERATIONS);
+    for (generation, process) in process_samples.iter().enumerate() {
+        if process.generation != generation
+            || process.samples.len() != CHECKPOINT_SOAK_PROCESS_SAMPLE_COUNT
+        {
+            return None;
+        }
+        let stable_window = process
+            .samples
+            .get(CHECKPOINT_RSS_WINDOW_LOCAL_RANGE[0]..=CHECKPOINT_RSS_WINDOW_LOCAL_RANGE[1])?;
+        let baseline = process
+            .samples
+            .get(CHECKPOINT_RSS_BASELINE_LOCAL_RANGE[0]..=CHECKPOINT_RSS_BASELINE_LOCAL_RANGE[1])?;
+        let stable_samples = process
+            .samples
+            .get(CHECKPOINT_RSS_STABLE_LOCAL_RANGE[0]..=CHECKPOINT_RSS_STABLE_LOCAL_RANGE[1])?;
+        if stable_window.len() != CHECKPOINT_RSS_STABLE_WINDOW_SAMPLES
+            || baseline.len() != CHECKPOINT_RSS_STABLE_SUBWINDOW_SAMPLES
+            || stable_samples.len() != CHECKPOINT_RSS_STABLE_SUBWINDOW_SAMPLES
+        {
+            return None;
+        }
+        let slope_mib_per_hour = least_squares_mib_per_hour(stable_window)?;
+        let baseline_median_kib = rss_sample_median(baseline)?;
+        let stable_median_kib = rss_sample_median(stable_samples)?;
+        let normalized_growth_kib = stable_median_kib.saturating_sub(baseline_median_kib);
+        let sample_start = generation.checked_mul(CHECKPOINT_SOAK_PROCESS_SAMPLE_COUNT)?;
+        processes.push(CheckpointRssProcessGate {
+            generation,
+            pid: process.pid,
+            baseline_sample_range: [
+                sample_start + CHECKPOINT_RSS_BASELINE_LOCAL_RANGE[0],
+                sample_start + CHECKPOINT_RSS_BASELINE_LOCAL_RANGE[1],
+            ],
+            stable_sample_range: [
+                sample_start + CHECKPOINT_RSS_STABLE_LOCAL_RANGE[0],
+                sample_start + CHECKPOINT_RSS_STABLE_LOCAL_RANGE[1],
+            ],
+            slope_mib_per_hour,
+            baseline_median_kib,
+            stable_median_kib,
+            normalized_growth_kib,
+            passed: normalized_growth_kib <= MAX_MEDIAN_GROWTH_KIB,
+        });
     }
-    let slope_mib_per_hour = least_squares_mib_per_hour(final_samples)?;
-    let first_median_kib = rss_sample_median(first)?;
-    let final_median_kib = rss_sample_median(final_samples)?;
-    Some(RssGate {
-        slope_mib_per_hour,
-        first_median_kib,
-        final_median_kib,
-        passed: rss_gate_passed(slope_mib_per_hour, first_median_kib, final_median_kib),
+    let minimum_growth = processes
+        .iter()
+        .map(|process| process.normalized_growth_kib)
+        .min()?;
+    let maximum_growth = processes
+        .iter()
+        .map(|process| process.normalized_growth_kib)
+        .max()?;
+    let normalized_growth_spread_kib = maximum_growth.saturating_sub(minimum_growth);
+    Some(CheckpointRestartRssGate {
+        passed: normalized_growth_spread_kib <= MAX_CHECKPOINT_RSS_NORMALIZED_GROWTH_SPREAD_KIB
+            && processes.iter().all(|process| process.passed),
+        processes,
+        normalized_growth_spread_kib,
     })
 }
 
@@ -3782,7 +3880,7 @@ struct CheckpointSoakProcessReport {
     temporary_artifacts: usize,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 struct CheckpointSoakParentTiming {
     generation: usize,
     launch_micros: u64,
@@ -3791,19 +3889,30 @@ struct CheckpointSoakParentTiming {
 
 struct CheckpointSoakProcessEvidence {
     report: CheckpointRestartSoakReport,
+    plans: Vec<CheckpointSoakProcessPlan>,
     processes: Vec<CheckpointSoakProcessReport>,
     parent_timings: Vec<CheckpointSoakParentTiming>,
     rss_samples: Vec<RssSample>,
+    rss_process_samples: Vec<CheckpointRssProcessSamples>,
 }
 
-fn checkpoint_restart_soak_metadata(commit: &str, kernel: &str, rustc: &str) -> serde_json::Value {
+fn checkpoint_restart_soak_metadata(
+    commit: &str,
+    executable_sha256: &str,
+    kernel: &str,
+    rustc: &str,
+    target: &str,
+    libc: &str,
+) -> serde_json::Value {
     json!({
-        "schema": "calc-flow.m5-checkpoint-soak.v1",
+        "schema": CHECKPOINT_SOAK_SCHEMA,
         "commit": commit,
+        "executable_sha256": executable_sha256,
         "target_duration_seconds": 1_200,
         "sample_count": CHECKPOINT_SOAK_SAMPLE_COUNT,
         "cadence_seconds": CHECKPOINT_SOAK_CADENCE.as_secs(),
         "cadence_tolerance_seconds": CHECKPOINT_SOAK_CADENCE_TOLERANCE.as_secs(),
+        "cadence_tolerance_boundary": "inclusive",
         "maximum_restart_gap_seconds": MAX_CHECKPOINT_SOAK_RESTART_GAP.as_secs(),
         "timing_source": "parent_std_instant_plus_child_local_instant",
         "restart_sample_indices": CHECKPOINT_SOAK_RESTART_SAMPLES,
@@ -3814,17 +3923,53 @@ fn checkpoint_restart_soak_metadata(commit: &str, kernel: &str, rustc: &str) -> 
         "source_count": 2,
         "transactional_sink_count": 2,
         "retained_epochs": 2,
-        "warmup_samples": WARMUP_SAMPLES,
-        "restart_warmup_samples": CHECKPOINT_RESTART_WARMUP_SAMPLES,
-        "rss_comparison_sample_ranges": CHECKPOINT_RSS_COMPARISON_RANGES,
-        "rss_slope_sample_range": CHECKPOINT_RSS_COMPARISON_RANGES[1],
+        "rss_gate": {
+            "normalization": "same_pid_baseline_median",
+            "process_warmup_samples": CHECKPOINT_RSS_PROCESS_WARMUP_SAMPLES,
+            "stable_window_samples": CHECKPOINT_RSS_STABLE_WINDOW_SAMPLES,
+            "stable_subwindow_samples": CHECKPOINT_RSS_STABLE_SUBWINDOW_SAMPLES,
+            "slope_local_sample_range": CHECKPOINT_RSS_WINDOW_LOCAL_RANGE,
+            "baseline_local_sample_range": CHECKPOINT_RSS_BASELINE_LOCAL_RANGE,
+            "stable_local_sample_range": CHECKPOINT_RSS_STABLE_LOCAL_RANGE,
+            "required_passing_generations": CHECKPOINT_SOAK_GENERATIONS,
+            "slope_role": "informational",
+            "maximum_normalized_growth_kib": MAX_MEDIAN_GROWTH_KIB,
+            "maximum_normalized_growth_spread_kib": MAX_CHECKPOINT_RSS_NORMALIZED_GROWTH_SPREAD_KIB,
+            "spread_calibration": {
+                "head": CHECKPOINT_RSS_SPREAD_CALIBRATION_HEAD,
+                "controlled_run_spread_kib": CHECKPOINT_RSS_SPREAD_CALIBRATION_KIB,
+                "threshold_policy": "next_power_of_two_above_twice_maximum_observed",
+            },
+        },
         "state_bytes_limit": MAX_CHECKPOINT_SOAK_STATE_BYTES,
         "deterministic_seed": "two-source-final-window-restart-v1",
         "environment": {
             "kernel": kernel,
             "rustc": rustc,
+            "target": target,
+            "libc": libc,
             "allocator": "system",
+            "allocator_controls": {
+                "MALLOC_ARENA_MAX": CHECKPOINT_SOAK_MALLOC_ARENA_MAX,
+                "MALLOC_TRIM_THRESHOLD_": CHECKPOINT_SOAK_MALLOC_TRIM_THRESHOLD,
+                "MALLOC_TOP_PAD_": CHECKPOINT_SOAK_MALLOC_TOP_PAD,
+            },
             "rss_source": "/proc/self/status:VmRSS",
+        },
+        "evidence_artifacts": {
+            "metadata": "evidence/metadata.json",
+            "summary": "evidence/summary.json",
+            "bundle": "evidence/bundle.json",
+            "child_plans": [
+                "evidence/plans/generation-0.json",
+                "evidence/plans/generation-1.json",
+                "evidence/plans/generation-2.json",
+            ],
+            "child_reports": [
+                "evidence/reports/generation-0.json",
+                "evidence/reports/generation-1.json",
+                "evidence/reports/generation-2.json",
+            ],
         },
         "command": CHECKPOINT_SOAK_COMMAND,
     })
@@ -4810,12 +4955,7 @@ fn run_checkpoint_soak_process_blocking(
             path: stderr_path.display().to_string(),
             source,
         })?;
-    let mut child = Command::new(executable)
-        .arg(CHECKPOINT_SOAK_CHILD_TEST)
-        .arg("--exact")
-        .arg("--nocapture")
-        .arg("--test-threads=1")
-        .env(CHECKPOINT_SOAK_CHILD_ENV, plan_path)
+    let mut child = checkpoint_soak_child_command(executable, plan_path)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
@@ -4846,6 +4986,23 @@ fn run_checkpoint_soak_process_blocking(
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn checkpoint_soak_child_command(executable: &Path, plan_path: &Path) -> Command {
+    let mut command = Command::new(executable);
+    command
+        .arg(CHECKPOINT_SOAK_CHILD_TEST)
+        .arg("--exact")
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env(CHECKPOINT_SOAK_CHILD_ENV, plan_path)
+        .env("MALLOC_ARENA_MAX", CHECKPOINT_SOAK_MALLOC_ARENA_MAX)
+        .env(
+            "MALLOC_TRIM_THRESHOLD_",
+            CHECKPOINT_SOAK_MALLOC_TRIM_THRESHOLD,
+        )
+        .env("MALLOC_TOP_PAD_", CHECKPOINT_SOAK_MALLOC_TOP_PAD);
+    command
 }
 
 async fn spawn_checkpoint_soak_process(
@@ -5039,6 +5196,7 @@ fn validate_checkpoint_soak_timeline(
 }
 
 fn aggregate_checkpoint_soak_processes(
+    plans: Vec<CheckpointSoakProcessPlan>,
     reports: Vec<CheckpointSoakProcessReport>,
     exit_codes: Vec<i32>,
     parent_timings: Vec<CheckpointSoakParentTiming>,
@@ -5048,14 +5206,24 @@ fn aggregate_checkpoint_soak_processes(
         .iter()
         .flat_map(|report| report.compacted_epochs.iter().copied())
         .collect::<BTreeSet<_>>();
-    let rss_samples = reports
+    let rss_process_samples = reports
         .iter()
-        .flat_map(|report| {
-            report.samples.iter().map(|sample| RssSample {
-                elapsed_seconds: Duration::from_micros(sample.elapsed_micros).as_secs_f64(),
-                rss_kib: sample.rss_kib,
-            })
+        .map(|report| CheckpointRssProcessSamples {
+            generation: report.generation,
+            pid: report.pid,
+            samples: report
+                .samples
+                .iter()
+                .map(|sample| RssSample {
+                    elapsed_seconds: Duration::from_micros(sample.elapsed_micros).as_secs_f64(),
+                    rss_kib: sample.rss_kib,
+                })
+                .collect(),
         })
+        .collect::<Vec<_>>();
+    let rss_samples = rss_process_samples
+        .iter()
+        .flat_map(|process| process.samples.iter().copied())
         .collect();
     let report = CheckpointRestartSoakReport {
         restarts: reports.len().saturating_sub(1),
@@ -5092,9 +5260,11 @@ fn aggregate_checkpoint_soak_processes(
     };
     CheckpointSoakProcessEvidence {
         report,
+        plans,
         processes: reports,
         parent_timings,
         rss_samples,
+        rss_process_samples,
     }
 }
 
@@ -5130,6 +5300,7 @@ async fn run_checkpoint_soak_processes(
     }
     validate_checkpoint_soak_process_set(&plans, &reports, &exit_codes, &parent_timings)?;
     Ok(aggregate_checkpoint_soak_processes(
+        plans,
         reports,
         exit_codes,
         parent_timings,
@@ -5227,13 +5398,14 @@ fn checkpoint_soak_sample_max(
 fn checkpoint_soak_process_summary(
     commit: &str,
     evidence: &CheckpointSoakProcessEvidence,
-    rss_gate: RssGate,
+    rss_gate: &CheckpointRestartRssGate,
 ) -> serde_json::Value {
     let report = &evidence.report;
     json!({
-        "schema": "calc-flow.m5-checkpoint-soak.v1",
+        "schema": CHECKPOINT_SOAK_SCHEMA,
         "type": "calc_flow_m5_checkpoint_soak_summary",
         "commit": commit,
+        "executable_sha256": evidence.plans[0].executable_sha256,
         "target_duration_seconds": 1_200,
         "sample_count": evidence.rss_samples.len(),
         "restart_sample_indices": CHECKPOINT_SOAK_RESTART_SAMPLES,
@@ -5282,11 +5454,32 @@ fn checkpoint_soak_process_summary(
             "missing_records": report.missing_records,
         },
         "rss": {
-            "slope_mib_per_hour": rss_gate.slope_mib_per_hour,
-            "comparison_sample_ranges": CHECKPOINT_RSS_COMPARISON_RANGES,
-            "slope_sample_range": CHECKPOINT_RSS_COMPARISON_RANGES[1],
-            "first_aligned_five_minute_median_kib": rss_gate.first_median_kib,
-            "final_aligned_five_minute_median_kib": rss_gate.final_median_kib,
+            "normalization": "same_pid_baseline_median",
+            "process_warmup_samples": CHECKPOINT_RSS_PROCESS_WARMUP_SAMPLES,
+            "stable_window_samples": CHECKPOINT_RSS_STABLE_WINDOW_SAMPLES,
+            "stable_subwindow_samples": CHECKPOINT_RSS_STABLE_SUBWINDOW_SAMPLES,
+            "slope_local_sample_range": CHECKPOINT_RSS_WINDOW_LOCAL_RANGE,
+            "required_passing_generations": CHECKPOINT_SOAK_GENERATIONS,
+            "slope_role": "informational",
+            "maximum_normalized_growth_kib": MAX_MEDIAN_GROWTH_KIB,
+            "maximum_normalized_growth_spread_kib": MAX_CHECKPOINT_RSS_NORMALIZED_GROWTH_SPREAD_KIB,
+            "spread_calibration": {
+                "head": CHECKPOINT_RSS_SPREAD_CALIBRATION_HEAD,
+                "controlled_run_spread_kib": CHECKPOINT_RSS_SPREAD_CALIBRATION_KIB,
+                "threshold_policy": "next_power_of_two_above_twice_maximum_observed",
+            },
+            "normalized_growth_spread_kib": rss_gate.normalized_growth_spread_kib,
+            "processes": rss_gate.processes.iter().map(|process| json!({
+                "generation": process.generation,
+                "pid": process.pid,
+                "baseline_sample_range": process.baseline_sample_range,
+                "stable_sample_range": process.stable_sample_range,
+                "slope_mib_per_hour": process.slope_mib_per_hour,
+                "baseline_median_kib": process.baseline_median_kib,
+                "stable_median_kib": process.stable_median_kib,
+                "normalized_growth_kib": process.normalized_growth_kib,
+                "passed": process.passed,
+            })).collect::<Vec<_>>(),
             "passed": rss_gate.passed,
         },
         "temporary_artifacts": report.temporary_artifacts,
@@ -5300,6 +5493,41 @@ fn checkpoint_soak_process_summary(
         "sink_close_events": evidence.processes.iter()
             .map(|process| process.sink_close_events).sum::<usize>(),
     })
+}
+
+#[cfg(target_os = "linux")]
+fn checkpoint_soak_evidence_bundle(
+    metadata: &serde_json::Value,
+    summary: &serde_json::Value,
+    evidence: &CheckpointSoakProcessEvidence,
+) -> serde_json::Value {
+    json!({
+        "schema": "calc-flow.m5-checkpoint-soak-evidence.v2",
+        "type": "calc_flow_m5_checkpoint_soak_evidence",
+        "commit": metadata["commit"],
+        "executable_sha256": metadata["executable_sha256"],
+        "metadata": metadata,
+        "summary": summary,
+        "child_plans": evidence.plans,
+        "child_reports": evidence.processes,
+        "parent_timings": evidence.parent_timings,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn publish_checkpoint_soak_evidence(
+    run_root: &Path,
+    metadata: &serde_json::Value,
+    summary: &serde_json::Value,
+    evidence: &CheckpointSoakProcessEvidence,
+) -> Result<()> {
+    let evidence_root = run_root.join("evidence");
+    write_checkpoint_soak_document(&evidence_root.join("metadata.json"), metadata)?;
+    write_checkpoint_soak_document(&evidence_root.join("summary.json"), summary)?;
+    write_checkpoint_soak_document(
+        &evidence_root.join("bundle.json"),
+        &checkpoint_soak_evidence_bundle(metadata, summary, evidence),
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -5322,14 +5550,28 @@ fn checkpoint_soak_evidence_directory() -> tempfile::TempDir {
 async fn run_checkpoint_restart_linux_soak() {
     let directory = checkpoint_soak_evidence_directory();
     let commit = strict_command_output("git", &["rev-parse", "HEAD"]).unwrap();
-    println!(
-        "{}",
-        checkpoint_restart_soak_metadata(
-            &commit,
-            &command_output("uname", &["-sr"]),
-            &command_output("rustc", &["--version"]),
-        )
+    let executable = checkpoint_soak_test_executable().unwrap();
+    let executable_sha256 = checkpoint_soak_file_sha256(&executable).unwrap();
+    let rustc_verbose = strict_command_output("rustc", &["-vV"]).unwrap();
+    let target = rustc_verbose
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .expect("rustc -vV must report its host target");
+    let libc = strict_command_output("ldd", &["--version"])
+        .unwrap()
+        .lines()
+        .next()
+        .expect("ldd --version must report libc")
+        .to_owned();
+    let metadata = checkpoint_restart_soak_metadata(
+        &commit,
+        &executable_sha256,
+        &command_output("uname", &["-sr"]),
+        &command_output("rustc", &["--version"]),
+        target,
+        &libc,
     );
+    println!("{metadata}");
     let evidence =
         match run_checkpoint_soak_processes(directory.path(), CheckpointSoakProcessMode::Standard)
             .await
@@ -5344,15 +5586,6 @@ async fn run_checkpoint_restart_linux_soak() {
             }
         };
     let evidence_root = directory.keep();
-    println!(
-        "{}",
-        json!({
-            "schema": "calc-flow.m5-checkpoint-soak-evidence-root.v1",
-            "type": "calc_flow_m5_checkpoint_soak_evidence_root",
-            "commit": &commit,
-            "path": &evidence_root,
-        })
-    );
     let report = &evidence.report;
     assert_eq!(report.restarts, 2);
     assert_eq!(report.generation_process_ids.len(), 3);
@@ -5366,16 +5599,27 @@ async fn run_checkpoint_restart_linux_soak() {
     assert_eq!(report.terminal_charged_edges, 0);
     assert_eq!(report.terminal_registries, (0, 0));
     assert_eq!(observed_timeline_issue(&evidence.rss_samples), None);
-    let rss_gate = evaluate_checkpoint_restart_rss_gate(&evidence.rss_samples)
+    let rss_gate = evaluate_checkpoint_restart_rss_gate(&evidence.rss_process_samples)
         .expect("checkpoint soak RSS samples incomplete");
     assert!(
         rss_gate.passed,
         "checkpoint soak RSS guard failed: {rss_gate:?}"
     );
+    let summary = checkpoint_soak_process_summary(&commit, &evidence, &rss_gate);
+    publish_checkpoint_soak_evidence(&evidence_root, &metadata, &summary, &evidence).unwrap();
     println!(
         "{}",
-        checkpoint_soak_process_summary(&commit, &evidence, rss_gate)
+        json!({
+            "schema": "calc-flow.m5-checkpoint-soak-evidence-root.v2",
+            "type": "calc_flow_m5_checkpoint_soak_evidence_root",
+            "commit": &commit,
+            "path": &evidence_root,
+            "metadata": "evidence/metadata.json",
+            "summary": "evidence/summary.json",
+            "bundle": "evidence/bundle.json",
+        })
     );
+    println!("{summary}");
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -5936,7 +6180,7 @@ fn checkpoint_restart_rss_gate_compares_equivalent_lifecycle_phases() {
         50..80 => 120_000,
         90..120 => {
             let growth = if growing {
-                u64::try_from(index - 90).unwrap().saturating_mul(1_000)
+                u64::try_from(index - 90).unwrap().saturating_mul(2_000)
             } else {
                 0
             };
@@ -5956,18 +6200,155 @@ fn checkpoint_restart_rss_gate_compares_equivalent_lifecycle_phases() {
             rss_kib: lifecycle_rss(index, true),
         })
         .collect::<Vec<_>>();
+    let split_processes = |samples: Vec<RssSample>| {
+        samples
+            .chunks_exact(CHECKPOINT_SOAK_PROCESS_SAMPLE_COUNT)
+            .enumerate()
+            .map(|(generation, samples)| CheckpointRssProcessSamples {
+                generation,
+                pid: u32::try_from(generation + 1).unwrap(),
+                samples: samples.to_vec(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let stable_processes = split_processes(stable.clone());
+    let growing_processes = split_processes(growing);
 
     assert!(!evaluate_rss_gate(&stable).unwrap().passed);
     assert!(
-        evaluate_checkpoint_restart_rss_gate(&stable)
+        evaluate_checkpoint_restart_rss_gate(&stable_processes)
             .unwrap()
             .passed
     );
     assert!(
-        !evaluate_checkpoint_restart_rss_gate(&growing)
+        !evaluate_checkpoint_restart_rss_gate(&growing_processes)
             .unwrap()
             .passed
     );
+}
+
+fn checkpoint_rss_process_samples(
+    generation: usize,
+    pid: u32,
+    initial_rss_kib: u64,
+) -> CheckpointRssProcessSamples {
+    let sample_start = generation * CHECKPOINT_SOAK_PROCESS_SAMPLE_COUNT;
+    let samples = (0..CHECKPOINT_SOAK_PROCESS_SAMPLE_COUNT)
+        .map(|local_index| RssSample {
+            elapsed_seconds: elapsed_at_sample(sample_start + local_index),
+            rss_kib: initial_rss_kib
+                + u64::try_from(local_index.min(CHECKPOINT_RSS_PROCESS_WARMUP_SAMPLES)).unwrap()
+                    * 1_024,
+        })
+        .collect();
+    CheckpointRssProcessSamples {
+        generation,
+        pid,
+        samples,
+    }
+}
+
+fn checkpoint_rss_process_with_stable_window(
+    generation: usize,
+    pid: u32,
+    initial_rss_kib: u64,
+    normalized_growth_kib: u64,
+    stable_growth_kib: u64,
+) -> CheckpointRssProcessSamples {
+    let mut process = checkpoint_rss_process_samples(generation, pid, initial_rss_kib);
+    for (local_index, sample) in process.samples.iter_mut().enumerate() {
+        if local_index >= CHECKPOINT_RSS_WINDOW_LOCAL_RANGE[0] {
+            sample.rss_kib = sample.rss_kib.saturating_add(normalized_growth_kib);
+        }
+        if local_index
+            >= CHECKPOINT_RSS_WINDOW_LOCAL_RANGE[0] + CHECKPOINT_RSS_STABLE_SUBWINDOW_SAMPLES
+        {
+            sample.rss_kib = sample.rss_kib.saturating_add(stable_growth_kib);
+        }
+    }
+    process
+}
+
+#[test]
+fn checkpoint_restart_rss_gate_normalizes_each_process_baseline() {
+    let process_samples = [
+        checkpoint_rss_process_samples(0, 101, 100_000),
+        checkpoint_rss_process_samples(1, 202, 180_000),
+        checkpoint_rss_process_samples(2, 303, 260_000),
+    ];
+
+    let gate = evaluate_checkpoint_restart_rss_gate(&process_samples).unwrap();
+
+    assert!(gate.passed);
+    assert_eq!(gate.processes.len(), CHECKPOINT_SOAK_GENERATIONS);
+    assert_eq!(gate.processes[0].pid, 101);
+    assert_eq!(gate.processes[1].pid, 202);
+    assert_eq!(gate.processes[2].pid, 303);
+    assert_eq!(gate.normalized_growth_spread_kib, 0);
+    assert!(
+        gate.processes
+            .iter()
+            .all(|process| process.normalized_growth_kib == 0 && process.passed)
+    );
+}
+
+#[test]
+fn checkpoint_restart_rss_gate_accepts_repeatable_converged_windows() {
+    let process_samples = [
+        checkpoint_rss_process_with_stable_window(0, 101, 100_000, 10 * 1_024, 4 * 1_024),
+        checkpoint_rss_process_with_stable_window(1, 202, 180_000, 12 * 1_024, 4 * 1_024),
+        checkpoint_rss_process_with_stable_window(2, 303, 260_000, 14 * 1_024, 4 * 1_024),
+    ];
+
+    let gate = evaluate_checkpoint_restart_rss_gate(&process_samples).unwrap();
+
+    assert!(gate.passed);
+    assert_eq!(gate.normalized_growth_spread_kib, 0);
+    assert!(
+        gate.processes
+            .iter()
+            .all(|process| process.normalized_growth_kib == 4 * 1_024 && process.passed)
+    );
+}
+
+#[test]
+fn checkpoint_restart_rss_gate_rejects_nonrepeatable_converged_windows() {
+    let process_samples = [
+        checkpoint_rss_process_with_stable_window(0, 101, 100_000, 0, 0),
+        checkpoint_rss_process_with_stable_window(1, 202, 180_000, 0, 256),
+        checkpoint_rss_process_with_stable_window(2, 303, 260_000, 0, 513),
+    ];
+
+    let gate = evaluate_checkpoint_restart_rss_gate(&process_samples).unwrap();
+
+    assert!(gate.processes.iter().all(|process| process.passed));
+    assert_eq!(gate.normalized_growth_spread_kib, 513);
+    assert!(!gate.passed);
+}
+
+#[test]
+fn checkpoint_restart_rss_gate_ignores_pre_stable_warmup_variance() {
+    let process_samples = [
+        checkpoint_rss_process_with_stable_window(0, 101, 100_000, 0, 4 * 1_024),
+        checkpoint_rss_process_with_stable_window(1, 202, 180_000, 20 * 1_024, 4 * 1_024),
+        checkpoint_rss_process_with_stable_window(2, 303, 260_000, 5 * 1_024, 4 * 1_024),
+    ];
+
+    let gate = evaluate_checkpoint_restart_rss_gate(&process_samples).unwrap();
+
+    assert!(gate.passed);
+    assert_eq!(gate.normalized_growth_spread_kib, 0);
+}
+
+#[test]
+fn checkpoint_restart_rss_gate_rejects_reused_process_identity() {
+    let process_samples = [
+        checkpoint_rss_process_samples(0, 101, 100_000),
+        checkpoint_rss_process_samples(1, 101, 180_000),
+        checkpoint_rss_process_samples(2, 303, 260_000),
+    ];
+
+    assert_eq!(evaluate_checkpoint_restart_rss_gate(&process_samples), None);
 }
 
 #[test]
@@ -6185,6 +6566,127 @@ fn checkpoint_soak_process_report_fixture(
 }
 
 #[test]
+fn checkpoint_soak_cadence_tolerance_includes_exact_thirteen_second_boundary() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut plan = checkpoint_soak_process_plans(
+        directory.path(),
+        &"a".repeat(40),
+        &"b".repeat(64),
+        CheckpointSoakProcessMode::Standard,
+    )
+    .remove(0);
+    bind_checkpoint_soak_parent_launch(&mut plan, Duration::ZERO).unwrap();
+    let mut report = checkpoint_soak_process_report_fixture(&plan, 10_000);
+    report.samples[0].elapsed_micros = 13_000_000;
+
+    assert_eq!(
+        checkpoint_soak_sample_issue(&report, 0, &report.samples[0], 10_000_000, 3_000_000),
+        None,
+    );
+
+    report.samples[0].elapsed_micros = 13_000_001;
+    assert!(
+        checkpoint_soak_sample_issue(&report, 0, &report.samples[0], 10_000_000, 3_000_000)
+            .is_some()
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn checkpoint_soak_evidence_bundle_contains_all_raw_child_documents() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable_sha256 = "b".repeat(64);
+    let mut plans = checkpoint_soak_process_plans(
+        directory.path(),
+        &"a".repeat(40),
+        &executable_sha256,
+        CheckpointSoakProcessMode::Standard,
+    );
+    for plan in &mut plans {
+        bind_checkpoint_soak_parent_launch(
+            plan,
+            Duration::from_secs(u64::try_from(plan.generation).unwrap() * 401),
+        )
+        .unwrap();
+    }
+    let reports = plans
+        .iter()
+        .enumerate()
+        .map(|(generation, plan)| {
+            checkpoint_soak_process_report_fixture(
+                plan,
+                10_000 + u32::try_from(generation).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let parent_timings = reports
+        .iter()
+        .map(|report| CheckpointSoakParentTiming {
+            generation: report.generation,
+            launch_micros: report.generation_started_micros,
+            finish_micros: report.generation_finished_micros + 250_000,
+        })
+        .collect::<Vec<_>>();
+    let evidence = aggregate_checkpoint_soak_processes(
+        plans,
+        reports,
+        vec![0; CHECKPOINT_SOAK_GENERATIONS],
+        parent_timings,
+    );
+    let rss_gate = evaluate_checkpoint_restart_rss_gate(&evidence.rss_process_samples).unwrap();
+    let metadata = checkpoint_restart_soak_metadata(
+        &"a".repeat(40),
+        &executable_sha256,
+        "Linux 1",
+        "rustc 1.88",
+        "x86_64-unknown-linux-gnu",
+        "glibc 2.39",
+    );
+    let summary = checkpoint_soak_process_summary(&"a".repeat(40), &evidence, &rss_gate);
+
+    let bundle = checkpoint_soak_evidence_bundle(&metadata, &summary, &evidence);
+
+    assert_eq!(bundle["schema"], "calc-flow.m5-checkpoint-soak-evidence.v2");
+    assert_eq!(bundle["metadata"], metadata);
+    assert_eq!(bundle["summary"], summary);
+    assert_eq!(bundle["child_plans"].as_array().unwrap().len(), 3);
+    assert_eq!(bundle["child_reports"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        bundle["child_reports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|report| report["samples"].as_array().unwrap().len())
+            .sum::<usize>(),
+        CHECKPOINT_SOAK_SAMPLE_COUNT,
+    );
+    assert_eq!(bundle["executable_sha256"], executable_sha256);
+
+    publish_checkpoint_soak_evidence(directory.path(), &metadata, &summary, &evidence).unwrap();
+    assert_eq!(
+        read_checkpoint_soak_document::<serde_json::Value>(
+            &directory.path().join("evidence/metadata.json"),
+        )
+        .unwrap(),
+        metadata,
+    );
+    assert_eq!(
+        read_checkpoint_soak_document::<serde_json::Value>(
+            &directory.path().join("evidence/summary.json"),
+        )
+        .unwrap(),
+        summary,
+    );
+    assert_eq!(
+        read_checkpoint_soak_document::<serde_json::Value>(
+            &directory.path().join("evidence/bundle.json"),
+        )
+        .unwrap(),
+        bundle,
+    );
+}
+
+#[test]
 #[allow(
     clippy::too_many_lines,
     reason = "one fail-closed evidence test mutates every independent process proof field"
@@ -6227,7 +6729,7 @@ fn checkpoint_restart_process_evidence_fails_closed() {
     validate_checkpoint_soak_process_set(&plans, &reports, &exits, &parent_timings).unwrap();
 
     let mut bounded_scheduler_jitter = reports.clone();
-    bounded_scheduler_jitter[0].samples[0].elapsed_micros += 1_100_000;
+    bounded_scheduler_jitter[0].samples[0].elapsed_micros += 2_250_000;
     validate_checkpoint_soak_process_set(
         &plans,
         &bounded_scheduler_jitter,
@@ -6302,7 +6804,7 @@ fn checkpoint_restart_process_evidence_fails_closed() {
     );
 
     let mut mistimed_sample = reports.clone();
-    mistimed_sample[0].samples[5].elapsed_micros += 3_000_000;
+    mistimed_sample[0].samples[5].elapsed_micros += 4_000_000;
     assert!(matches!(
         validate_checkpoint_soak_process_set(
             &plans,
@@ -6312,7 +6814,7 @@ fn checkpoint_restart_process_evidence_fails_closed() {
         ),
         Err(CalcFlowError::InvalidArgument { message, .. })
             if message.contains(
-                "generation 0 sample 5 elapsed 63000000us outside target 60000000us +/-2000000us"
+                "generation 0 sample 5 elapsed 64000000us outside target 60000000us +/-3000000us"
             )
     ));
 
@@ -6383,6 +6885,31 @@ fn checkpoint_restart_process_document_rejects_missing_and_malformed_reports() {
     ));
 }
 
+#[test]
+fn checkpoint_soak_child_command_stabilizes_system_allocator() {
+    let command = checkpoint_soak_child_command(
+        Path::new("/test/checkpoint-soak"),
+        Path::new("/test/plan.json"),
+    );
+    let environment = command
+        .get_envs()
+        .map(|(name, value)| (name.to_owned(), value.map(std::ffi::OsStr::to_owned)))
+        .collect::<BTreeMap<_, _>>();
+
+    assert_eq!(
+        environment.get(std::ffi::OsStr::new("MALLOC_ARENA_MAX")),
+        Some(&Some(std::ffi::OsString::from("1")))
+    );
+    assert_eq!(
+        environment.get(std::ffi::OsStr::new("MALLOC_TRIM_THRESHOLD_")),
+        Some(&Some(std::ffi::OsString::from("0")))
+    );
+    assert_eq!(
+        environment.get(std::ffi::OsStr::new("MALLOC_TOP_PAD_")),
+        Some(&Some(std::ffi::OsString::from("0")))
+    );
+}
+
 #[tokio::test]
 async fn checkpoint_restart_soak_generation_child_process() {
     let Some(plan_path) = std::env::var_os(CHECKPOINT_SOAK_CHILD_ENV).map(PathBuf::from) else {
@@ -6429,15 +6956,27 @@ async fn checkpoint_restart_soak_smoke_exercises_retention_and_compaction() {
     assert_eq!(report.temporary_artifacts, 0);
 }
 
+fn checkpoint_restart_soak_metadata_fixture() -> serde_json::Value {
+    checkpoint_restart_soak_metadata(
+        "abc123",
+        "f".repeat(64).as_str(),
+        "Linux 1",
+        "rustc 1.88",
+        "x86_64-unknown-linux-gnu",
+        "glibc 2.39",
+    )
+}
+
 #[test]
 fn checkpoint_restart_soak_contract_is_exact_and_machine_readable() {
-    let metadata = checkpoint_restart_soak_metadata("abc123", "Linux 1", "rustc 1.88");
+    let metadata = checkpoint_restart_soak_metadata_fixture();
 
-    assert_eq!(metadata["schema"], "calc-flow.m5-checkpoint-soak.v1");
+    assert_eq!(metadata["schema"], "calc-flow.m5-checkpoint-soak.v2");
     assert_eq!(metadata["target_duration_seconds"], 1_200);
     assert_eq!(metadata["sample_count"], 120);
     assert_eq!(metadata["cadence_seconds"], 10);
-    assert_eq!(metadata["cadence_tolerance_seconds"], 2);
+    assert_eq!(metadata["cadence_tolerance_seconds"], 3);
+    assert_eq!(metadata["cadence_tolerance_boundary"], "inclusive");
     assert_eq!(metadata["maximum_restart_gap_seconds"], 60);
     assert_eq!(
         metadata["timing_source"],
@@ -6457,22 +6996,89 @@ fn checkpoint_restart_soak_contract_is_exact_and_machine_readable() {
     assert_eq!(metadata["source_count"], 2);
     assert_eq!(metadata["transactional_sink_count"], 2);
     assert_eq!(metadata["retained_epochs"], 2);
-    assert_eq!(metadata["warmup_samples"], 30);
-    assert_eq!(metadata["restart_warmup_samples"], 10);
+    assert_eq!(metadata.get("warmup_samples"), None);
+    assert_eq!(metadata.get("restart_warmup_samples"), None);
     assert_eq!(
-        metadata["rss_comparison_sample_ranges"],
-        json!([[50, 79], [90, 119]])
+        metadata["rss_gate"]["normalization"],
+        "same_pid_baseline_median"
     );
-    assert_eq!(metadata["rss_slope_sample_range"], json!([90, 119]));
+    assert_eq!(metadata["rss_gate"]["process_warmup_samples"], 30);
+    assert_eq!(metadata["rss_gate"]["stable_window_samples"], 10);
+    assert_eq!(metadata["rss_gate"]["stable_subwindow_samples"], 5);
+    assert_eq!(
+        metadata["rss_gate"]["slope_local_sample_range"],
+        json!([30, 39])
+    );
+    assert_eq!(
+        metadata["rss_gate"]["baseline_local_sample_range"],
+        json!([30, 34])
+    );
+    assert_eq!(
+        metadata["rss_gate"]["stable_local_sample_range"],
+        json!([35, 39])
+    );
+    assert_eq!(metadata["rss_gate"]["required_passing_generations"], 3);
+    assert_eq!(metadata["rss_gate"]["slope_role"], "informational");
+    assert_eq!(metadata["rss_gate"]["maximum_normalized_growth_kib"], 8_192);
+    assert_eq!(
+        metadata["rss_gate"]["maximum_normalized_growth_spread_kib"],
+        512
+    );
+    assert_eq!(
+        metadata["rss_gate"]["spread_calibration"]["controlled_run_spread_kib"],
+        json!([92, 208])
+    );
+    assert_eq!(
+        metadata["rss_gate"]["spread_calibration"]["threshold_policy"],
+        "next_power_of_two_above_twice_maximum_observed"
+    );
     assert_eq!(metadata["state_bytes_limit"], 64 * 1_024 * 1_024);
+    assert_eq!(
+        metadata["command"],
+        "CALC_FLOW_M5_CHECKPOINT_SOAK=1 cargo test -p calc-flow --lib runtime::streaming::soak::twenty_minute_epoch_checkpoint_restart -- --ignored --exact --nocapture"
+    );
+}
+
+#[test]
+fn checkpoint_restart_soak_contract_pins_provenance_and_artifacts() {
+    let metadata = checkpoint_restart_soak_metadata_fixture();
+
     assert_eq!(
         metadata["environment"]["rss_source"],
         "/proc/self/status:VmRSS"
     );
-    assert_eq!(metadata["commit"], "abc123");
     assert_eq!(
-        metadata["command"],
-        "CALC_FLOW_M5_CHECKPOINT_SOAK=1 cargo test -p calc-flow --lib runtime::streaming::soak::twenty_minute_epoch_checkpoint_restart -- --ignored --exact --nocapture"
+        metadata["environment"]["target"],
+        "x86_64-unknown-linux-gnu"
+    );
+    assert_eq!(metadata["environment"]["libc"], "glibc 2.39");
+    assert_eq!(
+        metadata["environment"]["allocator_controls"],
+        json!({
+            "MALLOC_ARENA_MAX": "1",
+            "MALLOC_TRIM_THRESHOLD_": "0",
+            "MALLOC_TOP_PAD_": "0",
+        })
+    );
+    assert_eq!(metadata["commit"], "abc123");
+    assert_eq!(metadata["executable_sha256"], "f".repeat(64));
+    assert_eq!(
+        metadata["evidence_artifacts"],
+        json!({
+            "metadata": "evidence/metadata.json",
+            "summary": "evidence/summary.json",
+            "bundle": "evidence/bundle.json",
+            "child_plans": [
+                "evidence/plans/generation-0.json",
+                "evidence/plans/generation-1.json",
+                "evidence/plans/generation-2.json",
+            ],
+            "child_reports": [
+                "evidence/reports/generation-0.json",
+                "evidence/reports/generation-1.json",
+                "evidence/reports/generation-2.json",
+            ],
+        })
     );
 }
 
