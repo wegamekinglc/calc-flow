@@ -7152,163 +7152,428 @@ async fn twenty_minute_epoch_checkpoint_restart() {
     run_checkpoint_restart_linux_soak().await;
 }
 
-#[tokio::test]
-async fn partial_sink_commit_fault_preserves_the_second_sink_for_forward_recovery() {
-    for mode in CheckpointFaultMode::ALL {
-        let report =
-            run_checkpoint_restart_fault_case(CheckpointFaultPoint::PartialSinkCommit, mode).await;
-
+#[allow(
+    clippy::too_many_lines,
+    reason = "each named fault case asserts the complete restart and recovery oracle"
+)]
+async fn assert_named_checkpoint_fault_case(
+    case_id: &str,
+    point: CheckpointFaultPoint,
+    mode: CheckpointFaultMode,
+) {
+    let report = run_checkpoint_restart_fault_case(point, mode).await;
+    let durable_before_restart = matches!(
+        point,
+        CheckpointFaultPoint::ManifestRename
+            | CheckpointFaultPoint::ManifestParentSync
+            | CheckpointFaultPoint::PartialSinkCommit
+            | CheckpointFaultPoint::CompletedCommit
+            | CheckpointFaultPoint::Retention
+            | CheckpointFaultPoint::Compaction
+    );
+    assert_eq!(
+        report.selected_before_restart,
+        durable_before_restart.then_some(Epoch::INITIAL),
+        "{case_id}: selected epoch mismatch"
+    );
+    assert_eq!(
+        report.prepared_artifacts_after_failure,
+        match point {
+            CheckpointFaultPoint::ManifestRename => 2,
+            CheckpointFaultPoint::PartialSinkCommit => 1,
+            _ => 0,
+        },
+        "{case_id}: prepared-artifact preservation mismatch"
+    );
+    if point == CheckpointFaultPoint::PartialSinkCommit {
         assert_eq!(
             report.committed_sinks_before_restart,
             BTreeSet::from(["sink-a".into()]),
-            "first sink must commit before the injected fault at {mode:?}"
+            "{case_id}: the first sink must commit before the injected fault"
         );
         assert_eq!(
             report.prepared_sinks_before_restart,
             BTreeSet::from(["sink-b".into()]),
-            "second sink must remain prepared for forward recovery at {mode:?}"
+            "{case_id}: the second sink must remain prepared for forward recovery"
         );
-        assert_eq!(report.restored_epoch, Some(Epoch::INITIAL.next().unwrap()));
-        assert_eq!(
-            report.restart_source_opens,
-            vec![
-                ("left".into(), Some(41_u64.to_be_bytes().to_vec())),
-                ("right".into(), Some(73_u64.to_be_bytes().to_vec())),
-            ]
-        );
-        assert_eq!(
-            report.final_manifest_cursors["left"].order,
-            hex::encode(41_u64.to_be_bytes())
-        );
-        assert!(report.final_manifest_cursors["left"].payload.is_empty());
-        assert_eq!(
-            report.final_manifest_cursors["right"].order,
-            hex::encode(73_u64.to_be_bytes())
-        );
-        assert!(report.final_manifest_cursors["right"].payload.is_empty());
-        assert_eq!(report.visible_records, 4);
-        assert_eq!(report.duplicate_records, 0);
-        assert_eq!(report.missing_records, 0);
     }
+    assert_eq!(
+        report.restored_epoch,
+        Some(if durable_before_restart {
+            Epoch::INITIAL.next().unwrap()
+        } else {
+            Epoch::INITIAL
+        }),
+        "{case_id}: final epoch mismatch"
+    );
+    assert_eq!(
+        report.restart_source_opens,
+        vec![
+            (
+                "left".into(),
+                durable_before_restart.then(|| 41_u64.to_be_bytes().to_vec()),
+            ),
+            (
+                "right".into(),
+                durable_before_restart.then(|| 73_u64.to_be_bytes().to_vec()),
+            ),
+        ],
+        "{case_id}: restart connectors must open once at their exact durable cursors"
+    );
+    assert_eq!(
+        report.restored_cursor_orders,
+        BTreeMap::from([
+            ("left".into(), 41_u64.to_be_bytes().to_vec()),
+            ("right".into(), 73_u64.to_be_bytes().to_vec()),
+        ]),
+        "{case_id}: restored source cursor mismatch"
+    );
+    assert_eq!(
+        report.final_manifest_cursors["left"].order,
+        hex::encode(41_u64.to_be_bytes()),
+        "{case_id}: final left cursor order mismatch"
+    );
+    assert!(report.final_manifest_cursors["left"].payload.is_empty());
+    assert_eq!(
+        report.final_manifest_cursors["right"].order,
+        hex::encode(73_u64.to_be_bytes()),
+        "{case_id}: final right cursor order mismatch"
+    );
+    assert!(report.final_manifest_cursors["right"].payload.is_empty());
+    assert!(report.sources_ended, "{case_id}: sources not ended");
+    assert!(
+        report.watermarks_restored,
+        "{case_id}: watermarks not restored"
+    );
+    assert_eq!(
+        report.window_state_restored, durable_before_restart,
+        "{case_id}: window restore evidence mismatch"
+    );
+    assert_eq!(report.visible_records, 4, "{case_id}: visible record count");
+    assert_eq!(report.duplicate_records, 0, "{case_id}: duplicate records");
+    assert_eq!(report.missing_records, 0, "{case_id}: missing records");
+    assert_eq!(
+        report.temporary_artifacts, 0,
+        "{case_id}: temporary artifacts"
+    );
+    assert_eq!(report.terminal_tasks, 0, "{case_id}: terminal tasks");
+    assert_eq!(
+        report.terminal_charged_edges, 0,
+        "{case_id}: charged terminal edges"
+    );
+    assert_eq!(
+        report.cancellation_requested,
+        mode == CheckpointFaultMode::Cancel,
+        "{case_id}: cancellation token mismatch"
+    );
+    assert!(
+        report.deterministic_terminal_error,
+        "{case_id}: terminal error mismatch"
+    );
 }
 
-#[tokio::test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "the fault matrix asserts every recovery invariant for each point and mode"
-)]
-async fn checkpoint_restart_fault_matrix_preserves_exactly_once_window_output() {
-    for point in CheckpointFaultPoint::ALL {
-        for mode in CheckpointFaultMode::ALL {
-            let report = run_checkpoint_restart_fault_case(point, mode).await;
-            let durable_before_restart = matches!(
-                point,
-                CheckpointFaultPoint::ManifestRename
-                    | CheckpointFaultPoint::ManifestParentSync
-                    | CheckpointFaultPoint::PartialSinkCommit
-                    | CheckpointFaultPoint::CompletedCommit
-                    | CheckpointFaultPoint::Retention
-                    | CheckpointFaultPoint::Compaction
-            );
-            assert_eq!(
-                report.selected_before_restart,
-                durable_before_restart.then_some(Epoch::INITIAL),
-                "selected epoch mismatch at {point:?}/{mode:?}"
-            );
-            assert_eq!(
-                report.prepared_artifacts_after_failure,
-                match point {
-                    CheckpointFaultPoint::ManifestRename => 2,
-                    CheckpointFaultPoint::PartialSinkCommit => 1,
-                    _ => 0,
-                },
-                "prepared-artifact preservation mismatch at {point:?}/{mode:?}"
-            );
-            if point == CheckpointFaultPoint::PartialSinkCommit {
-                assert_eq!(
-                    report.committed_sinks_before_restart,
-                    BTreeSet::from(["sink-a".into()]),
-                    "first sink must commit before the injected fault at {mode:?}"
-                );
-                assert_eq!(
-                    report.prepared_sinks_before_restart,
-                    BTreeSet::from(["sink-b".into()]),
-                    "second sink must remain prepared for forward recovery at {mode:?}"
-                );
-            }
-            assert_eq!(
-                report.restored_epoch,
-                Some(if durable_before_restart {
-                    Epoch::INITIAL.next().unwrap()
-                } else {
-                    Epoch::INITIAL
-                }),
-                "final epoch mismatch at {point:?}/{mode:?}"
-            );
-            assert_eq!(
-                report.restart_source_opens,
-                vec![
-                    (
-                        "left".into(),
-                        durable_before_restart.then(|| 41_u64.to_be_bytes().to_vec()),
-                    ),
-                    (
-                        "right".into(),
-                        durable_before_restart.then(|| 73_u64.to_be_bytes().to_vec()),
-                    ),
-                ],
-                "restart connectors must open once at their exact durable cursors"
-            );
-            assert_eq!(
-                report.restored_cursor_orders,
-                BTreeMap::from([
-                    ("left".into(), 41_u64.to_be_bytes().to_vec()),
-                    ("right".into(), 73_u64.to_be_bytes().to_vec()),
-                ]),
-                "restored source cursor mismatch at {point:?}/{mode:?}"
-            );
-            assert_eq!(
-                report.final_manifest_cursors["left"].order,
-                hex::encode(41_u64.to_be_bytes()),
-                "final left cursor order mismatch at {point:?}/{mode:?}"
-            );
-            assert!(report.final_manifest_cursors["left"].payload.is_empty());
-            assert_eq!(
-                report.final_manifest_cursors["right"].order,
-                hex::encode(73_u64.to_be_bytes()),
-                "final right cursor order mismatch at {point:?}/{mode:?}"
-            );
-            assert!(report.final_manifest_cursors["right"].payload.is_empty());
-            assert!(
-                report.sources_ended,
-                "sources not ended at {point:?}/{mode:?}"
-            );
-            assert!(
-                report.watermarks_restored,
-                "watermarks not restored at {point:?}/{mode:?}"
-            );
-            assert_eq!(
-                report.window_state_restored, durable_before_restart,
-                "window restore evidence mismatch at {point:?}/{mode:?}"
-            );
-            assert_eq!(report.visible_records, 4);
-            assert_eq!(report.duplicate_records, 0);
-            assert_eq!(report.missing_records, 0);
-            assert_eq!(report.temporary_artifacts, 0);
-            assert_eq!(report.terminal_tasks, 0);
-            assert_eq!(report.terminal_charged_edges, 0);
-            assert_eq!(
-                report.cancellation_requested,
-                mode == CheckpointFaultMode::Cancel,
-                "cancellation token mismatch at {point:?}/{mode:?}"
-            );
-            assert!(
-                report.deterministic_terminal_error,
-                "terminal error mismatch at {point:?}/{mode:?}"
-            );
+macro_rules! named_checkpoint_fault_case {
+    ($test_name:ident, $case_id:literal, $point:ident, $mode:ident) => {
+        #[tokio::test]
+        async fn $test_name() {
+            assert_named_checkpoint_fault_case(
+                $case_id,
+                CheckpointFaultPoint::$point,
+                CheckpointFaultMode::$mode,
+            )
+            .await;
         }
-    }
+    };
 }
+
+named_checkpoint_fault_case!(
+    m5_fault_source_admission_io,
+    "m5_fault/source_admission/io",
+    SourceAdmission,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_source_admission_panic,
+    "m5_fault/source_admission/panic",
+    SourceAdmission,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_source_admission_cancel,
+    "m5_fault/source_admission/cancel",
+    SourceAdmission,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_source_admission_restart,
+    "m5_fault/source_admission/restart",
+    SourceAdmission,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_source_cut_io,
+    "m5_fault/source_cut/io",
+    SourceCut,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_source_cut_panic,
+    "m5_fault/source_cut/panic",
+    SourceCut,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_source_cut_cancel,
+    "m5_fault/source_cut/cancel",
+    SourceCut,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_source_cut_restart,
+    "m5_fault/source_cut/restart",
+    SourceCut,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_partial_alignment_io,
+    "m5_fault/partial_alignment/io",
+    PartialAlignment,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_partial_alignment_panic,
+    "m5_fault/partial_alignment/panic",
+    PartialAlignment,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_partial_alignment_cancel,
+    "m5_fault/partial_alignment/cancel",
+    PartialAlignment,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_partial_alignment_restart,
+    "m5_fault/partial_alignment/restart",
+    PartialAlignment,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_state_stage_io,
+    "m5_fault/state_stage/io",
+    StateStage,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_state_stage_panic,
+    "m5_fault/state_stage/panic",
+    StateStage,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_state_stage_cancel,
+    "m5_fault/state_stage/cancel",
+    StateStage,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_state_stage_restart,
+    "m5_fault/state_stage/restart",
+    StateStage,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_sink_pre_commit_io,
+    "m5_fault/sink_pre_commit/io",
+    SinkPreCommit,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_sink_pre_commit_panic,
+    "m5_fault/sink_pre_commit/panic",
+    SinkPreCommit,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_sink_pre_commit_cancel,
+    "m5_fault/sink_pre_commit/cancel",
+    SinkPreCommit,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_sink_pre_commit_restart,
+    "m5_fault/sink_pre_commit/restart",
+    SinkPreCommit,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_write_io,
+    "m5_fault/manifest_write/io",
+    ManifestWrite,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_write_panic,
+    "m5_fault/manifest_write/panic",
+    ManifestWrite,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_write_cancel,
+    "m5_fault/manifest_write/cancel",
+    ManifestWrite,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_write_restart,
+    "m5_fault/manifest_write/restart",
+    ManifestWrite,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_rename_io,
+    "m5_fault/manifest_rename/io",
+    ManifestRename,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_rename_panic,
+    "m5_fault/manifest_rename/panic",
+    ManifestRename,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_rename_cancel,
+    "m5_fault/manifest_rename/cancel",
+    ManifestRename,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_rename_restart,
+    "m5_fault/manifest_rename/restart",
+    ManifestRename,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_parent_sync_io,
+    "m5_fault/manifest_parent_sync/io",
+    ManifestParentSync,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_parent_sync_panic,
+    "m5_fault/manifest_parent_sync/panic",
+    ManifestParentSync,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_parent_sync_cancel,
+    "m5_fault/manifest_parent_sync/cancel",
+    ManifestParentSync,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_parent_sync_restart,
+    "m5_fault/manifest_parent_sync/restart",
+    ManifestParentSync,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_partial_sink_commit_io,
+    "m5_fault/partial_sink_commit/io",
+    PartialSinkCommit,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_partial_sink_commit_panic,
+    "m5_fault/partial_sink_commit/panic",
+    PartialSinkCommit,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_partial_sink_commit_cancel,
+    "m5_fault/partial_sink_commit/cancel",
+    PartialSinkCommit,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_partial_sink_commit_restart,
+    "m5_fault/partial_sink_commit/restart",
+    PartialSinkCommit,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_completed_commit_io,
+    "m5_fault/completed_commit/io",
+    CompletedCommit,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_completed_commit_panic,
+    "m5_fault/completed_commit/panic",
+    CompletedCommit,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_completed_commit_cancel,
+    "m5_fault/completed_commit/cancel",
+    CompletedCommit,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_completed_commit_restart,
+    "m5_fault/completed_commit/restart",
+    CompletedCommit,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_retention_io,
+    "m5_fault/retention/io",
+    Retention,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_retention_panic,
+    "m5_fault/retention/panic",
+    Retention,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_retention_cancel,
+    "m5_fault/retention/cancel",
+    Retention,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_retention_restart,
+    "m5_fault/retention/restart",
+    Retention,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_compaction_io,
+    "m5_fault/compaction/io",
+    Compaction,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_compaction_panic,
+    "m5_fault/compaction/panic",
+    Compaction,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_compaction_cancel,
+    "m5_fault/compaction/cancel",
+    Compaction,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_compaction_restart,
+    "m5_fault/compaction/restart",
+    Compaction,
+    Restart
+);
 
 #[test]
 fn temporary_artifact_oracle_covers_state_manifest_and_both_sinks() {
