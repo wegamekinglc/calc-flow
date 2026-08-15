@@ -13,60 +13,30 @@ concurrency:
   # README CI badge as failing even when every job was healthy.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
 jobs:
-  probe-windows-createdir:
-    name: TEMP probe Windows create_dir_all behavior
+  probe-soak-isolation:
+    name: TEMP isolate soak test failure
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 90
+    env:
+      RUST_TEST_THREADS: 1
     steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
-      - shell: bash
-        run: |
-          probe="$RUNNER_TEMP/createdir-probe"
-          mkdir -p "$probe/src"
-          cat > "$probe/Cargo.toml" <<'TOML'
-          [package]
-          name = "createdir-probe"
-          version = "0.0.0"
-          edition = "2021"
-
-          [dependencies]
-          tempfile = "3"
-          TOML
-          cat > "$probe/src/main.rs" <<'RS'
-          use std::fs;
-          use std::io::Write as _;
-
-          fn main() {
-              for i in 0..20 {
-                  let directory = tempfile::tempdir().unwrap();
-                  let artifact = directory.path().join("m5-checkpoint-benchmark");
-                  match fs::create_dir_all(&artifact) {
-                      Ok(()) => println!("iter {i}: create_dir_all ok"),
-                      Err(error) => println!(
-                          "iter {i}: create_dir_all FAIL raw={:?} kind={:?} path={}",
-                          error.raw_os_error(),
-                          error.kind(),
-                          artifact.display()
-                      ),
-                  }
-                  let report = artifact.join("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-run-1.json");
-                  let written = fs::OpenOptions::new()
-                      .create_new(true)
-                      .write(true)
-                      .open(&report)
-                      .and_then(|mut file| file.write_all(b"{}").and_then(|()| file.sync_all()));
-                  println!("iter {i}: write -> {:?}", written.is_ok());
-              }
-
-              let directory = tempfile::tempdir().unwrap();
-              let canonical = fs::canonicalize(directory.path()).unwrap();
-              let artifact = canonical.join("m5-checkpoint-benchmark");
-              let result = fs::create_dir_all(&artifact);
-              println!("canonical create_dir_all -> {:?}", result.is_ok());
-          }
-          RS
-          cd "$probe"
-          cargo run --release 2>&1 | tail -45
+      - name: Test the failing soak test alone
+        run: >-
+          cargo test -p calc-flow --all-features --lib
+          -- --test-threads=1 --exact
+          runtime::streaming::soak::private_benchmark_report_path_is_validated_and_immutable
+      - name: Test both failing soak tests together
+        run: >-
+          cargo test -p calc-flow --all-features --lib
+          -- --test-threads=1
+          private_absolute_measurement_recomputes private_benchmark_report_path
+      - name: Test the whole soak module
+        run: >-
+          cargo test -p calc-flow --all-features --lib
+          -- --test-threads=1 runtime::streaming::soak
   process-tree:
     name: Windows process-tree cleanup
     runs-on: windows-latest
