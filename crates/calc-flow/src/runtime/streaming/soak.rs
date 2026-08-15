@@ -4008,24 +4008,12 @@ async fn run_checkpoint_restart_fault_case(
                         && matches!(error.component_id(), Some("branch_a" | "branch_b"))
                 })
         }
-        (CheckpointFaultPoint::Compaction, CheckpointFaultMode::Io) => {
-            first_outcome.state == PublicJobState::Failed
-                && first_outcome.cause == PublicTerminalCause::Failure
-                && checkpoint_status_matches
-                && first_status.checkpoint.failure_category
-                    == Some(PublicStreamingErrorCategory::Internal)
-                && exact_error(
-                    PublicStreamingErrorCategory::Internal,
-                    Some(Epoch::INITIAL),
-                    Some(expected_phase),
-                    Some(PublicComponentKind::Checkpoint),
-                    None,
-                )
-        }
-        (
+        (CheckpointFaultPoint::Compaction, CheckpointFaultMode::Io)
+        | (
             CheckpointFaultPoint::ManifestWrite | CheckpointFaultPoint::ManifestParentSync,
             CheckpointFaultMode::Panic,
-        ) => {
+        )
+        | (_, CheckpointFaultMode::Restart) => {
             first_outcome.state == PublicJobState::Failed
                 && first_outcome.cause == PublicTerminalCause::Failure
                 && checkpoint_status_matches
@@ -4063,20 +4051,6 @@ async fn run_checkpoint_restart_fault_case(
                     None,
                     None,
                     None,
-                    None,
-                )
-        }
-        (_, CheckpointFaultMode::Restart) => {
-            first_outcome.state == PublicJobState::Failed
-                && first_outcome.cause == PublicTerminalCause::Failure
-                && checkpoint_status_matches
-                && first_status.checkpoint.failure_category
-                    == Some(PublicStreamingErrorCategory::Internal)
-                && exact_error(
-                    PublicStreamingErrorCategory::Internal,
-                    Some(Epoch::INITIAL),
-                    Some(expected_phase),
-                    Some(PublicComponentKind::Checkpoint),
                     None,
                 )
         }
@@ -5064,7 +5038,6 @@ async fn run_checkpoint_soak_child(
             max_rows: 8,
             max_bytes: 1 << 20,
         },
-        ..StreamRuntimeConfig::default()
     };
     let job = start_checkpoint_restart_generation(
         &plan.run_root,
