@@ -337,17 +337,27 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("name: Windows CI", windows_ci)
         self.assertIn("WINDOWS_PROCESS_TREE_EVIDENCE", runner_tests)
         windows_job = windows_ci.split("  process-tree:\n", 1)[1].split(
-            "  rust-and-python:\n", 1
+            "  rust-tests:\n", 1
         )[0]
         self.assertIn("runs-on: windows-latest", windows_job)
         self.assertIn("timeout-minutes: 10", windows_job)
         self.assertIn("WINDOWS_RUNNER_EVIDENCE", windows_job)
         self.assertIn(windows_test, windows_job)
 
-        rust_python_job = windows_ci.split("  rust-and-python:\n", 1)[1]
-        self.assertIn("runs-on: windows-latest", rust_python_job)
-        self.assertIn("python scripts/run_rust_tests.py", rust_python_job)
-        self.assertIn("uv run pytest", rust_python_job)
+        rust_job = windows_ci.split("  rust-tests:\n", 1)[1].split(
+            "  python-tests:\n", 1
+        )[0]
+        self.assertIn("runs-on: windows-latest", rust_job)
+        self.assertIn('CARGO_PROFILE_DEV_DEBUG: "0"', rust_job)
+        self.assertIn("python scripts/run_rust_tests.py", rust_job)
+        # The harness serializes the embedded-Python lib test itself, so the
+        # core crate must not run with RUST_TEST_THREADS forced to one.
+        self.assertNotIn("RUST_TEST_THREADS", rust_job)
+
+        python_job = windows_ci.split("  python-tests:\n", 1)[1]
+        self.assertIn("runs-on: windows-latest", python_job)
+        self.assertIn('CARGO_PROFILE_DEV_DEBUG: "0"', python_job)
+        self.assertIn("uv run pytest", python_job)
 
     def test_agents_rust_runner_uses_synced_python_dependencies(self) -> None:
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
