@@ -39,44 +39,59 @@ jobs:
 
           const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 
+          fn lock_report(label: &str, result: std::io::Result<()>) {
+              match result {
+                  Ok(()) => println!("{label} -> ok"),
+                  Err(error) => println!(
+                      "{label} -> raw={:?} kind={:?}",
+                      error.raw_os_error(),
+                      error.kind()
+                  ),
+              }
+          }
+
           fn main() {
-              let base = std::env::temp_dir().join("calc-flow-lock-probe");
+              let base = std::env::temp_dir().join("calc-flow-lock-probe-2");
               let _ = fs::remove_dir_all(&base);
-              fs::create_dir_all(base.join("child")).unwrap();
+              fs::create_dir_all(&base).unwrap();
               let canonical = fs::canonicalize(&base).unwrap();
               println!("canonical root: {}", canonical.display());
 
-              let ancestors = canonical.ancestors().collect::<Vec<_>>();
-              for ancestor in ancestors.iter().rev() {
-                  let opened = OpenOptions::new()
-                      .read(true)
-                      .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-                      .open(ancestor);
-                  match opened {
-                      Ok(file) => {
-                          let shared = file.try_lock_shared().map_err(|e| e.raw_os_error());
-                          println!("shared    {:<60} -> {:?}", ancestor.display(), shared);
-                          let _ = FileExt::unlock(&file);
-                          let exclusive = file.try_lock_exclusive().map_err(|e| e.raw_os_error());
-                          println!("exclusive {:<60} -> {:?}", ancestor.display(), exclusive);
-                      }
-                      Err(error) => {
-                          println!("open      {:<60} -> error {:?}", ancestor.display(), error.raw_os_error());
-                      }
-                  }
-              }
+              // read + backup semantics (current implementation)
+              let read_only = OpenOptions::new()
+                  .read(true)
+                  .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                  .open(&canonical)
+                  .unwrap();
+              lock_report("dir read-only  shared   ", read_only.try_lock_shared());
 
-              let plain = File::open(&canonical).map(|_| ()).map_err(|e| e.raw_os_error());
-              println!("plain File::open on directory -> {:?}", plain);
+              // read + write + backup semantics
+              let read_write = OpenOptions::new()
+                  .read(true)
+                  .write(true)
+                  .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                  .open(&canonical)
+                  .unwrap();
+              lock_report("dir read-write shared   ", read_write.try_lock_shared());
+              lock_report("dir read-write exclusive", read_write.try_lock_exclusive());
 
-              let file = OpenOptions::new()
+              // contended regular-file lock: what kind does a conflict map to?
+              let lease = canonical.join("lease-file");
+              let first = OpenOptions::new()
                   .read(true)
                   .write(true)
                   .create(true)
-                  .open(canonical.join("regular-lockfile"))
+                  .open(&lease)
                   .unwrap();
-              let regular = file.try_lock_exclusive().map_err(|e| e.raw_os_error());
-              println!("regular file exclusive lock -> {:?}", regular);
+              lock_report("file first exclusive   ", first.try_lock_exclusive());
+              let second = OpenOptions::new()
+                  .read(true)
+                  .write(true)
+                  .open(&lease)
+                  .unwrap();
+              lock_report("file contended exclusive", second.try_lock_exclusive());
+              let third = File::open(&lease).unwrap();
+              lock_report("file contended shared  ", third.try_lock_shared());
           }
           RS
           cd "$probe"
