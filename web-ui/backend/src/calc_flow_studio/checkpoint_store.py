@@ -5,9 +5,11 @@ import errno
 import hashlib
 import json
 import os
+import secrets
 import stat
 import tempfile
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Iterator, Mapping
+from contextlib import contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -50,7 +52,7 @@ class FileCheckpointDocumentStore:
             await asyncio.to_thread(
                 _atomic_write,
                 self._directory,
-                _path_for(self._directory, copied["pipeline_name"]),
+                _checkpoint_name(copied["pipeline_name"]),
                 document,
             )
 
@@ -60,7 +62,8 @@ class FileCheckpointDocumentStore:
         _require_pipeline_name(pipeline_name)
         document = await asyncio.to_thread(
             _bounded_read,
-            _path_for(self._directory, pipeline_name),
+            self._directory,
+            _checkpoint_name(pipeline_name),
         )
         if document is None:
             return None
@@ -76,7 +79,8 @@ class FileCheckpointDocumentStore:
         _require_pipeline_name(pipeline_name)
         await asyncio.to_thread(
             _delete_file,
-            _path_for(self._directory, pipeline_name),
+            self._directory,
+            _checkpoint_name(pipeline_name),
         )
 
 
@@ -216,15 +220,38 @@ def _reject_constant(value: str) -> Any:
 
 
 def _path_for(directory: Path, pipeline_name: str) -> Path:
+    return directory / _checkpoint_name(pipeline_name)
+
+
+def _checkpoint_name(pipeline_name: str) -> str:
     digest = hashlib.sha256(pipeline_name.encode()).hexdigest()
-    return directory / f"{digest}.json"
+    return f"{digest}.json"
 
 
-def _bounded_read(path: Path) -> bytes | None:
-    opened = _open_checkpoint(path)
+def _bounded_read(directory: Path, checkpoint_name: str) -> bytes | None:
+    with _checkpoint_directory(directory, create=False) as anchor:
+        if anchor is None:
+            return None
+        if os.name == "posix":
+            return _bounded_read_at(anchor, checkpoint_name)
+        return _bounded_read_path(_path_from_name(directory, checkpoint_name))
+
+
+def _bounded_read_at(directory_descriptor: int, checkpoint_name: str) -> bytes | None:
+    opened = _open_checkpoint_at(directory_descriptor, checkpoint_name)
     if opened is None:
         return None
-    descriptor, metadata = opened
+    return _bounded_read_descriptor(*opened)
+
+
+def _bounded_read_path(path: Path) -> bytes | None:
+    opened = _open_checkpoint_path(path)
+    if opened is None:
+        return None
+    return _bounded_read_descriptor(*opened)
+
+
+def _bounded_read_descriptor(descriptor: int, metadata: os.stat_result) -> bytes:
     try:
         if metadata.st_size > MAX_CHECKPOINT_DOCUMENT_BYTES:
             raise CheckpointDocumentError(
@@ -240,24 +267,52 @@ def _bounded_read(path: Path) -> bytes | None:
     return document
 
 
-def _open_checkpoint(path: Path) -> tuple[int, os.stat_result] | None:
+def _open_checkpoint_at(
+    directory_descriptor: int, checkpoint_name: str
+) -> tuple[int, os.stat_result] | None:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | _required_posix_flag("O_NOFOLLOW")
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        descriptor = os.open(checkpoint_name, flags, dir_fd=directory_descriptor)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise CheckpointDocumentError(
+                "checkpoint entry must be a regular file, not a symbolic link"
+            ) from error
+        raise
+    try:
+        metadata = os.fstat(descriptor)
+        _validate_checkpoint_entry(metadata)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor, metadata
+
+
+def _open_checkpoint_path(path: Path) -> tuple[int, os.stat_result] | None:
     try:
         expected = path.lstat()
     except FileNotFoundError:
         return None
-    if _is_symbolic_link(expected):
-        raise CheckpointDocumentError("checkpoint path must not be a symbolic link")
+    _validate_checkpoint_entry(expected)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError as error:
         if error.errno == errno.ELOOP:
             raise CheckpointDocumentError(
-                "checkpoint path must not be a symbolic link"
+                "checkpoint entry must be a regular file, not a symbolic link"
             ) from error
         raise
     try:
         metadata = os.fstat(descriptor)
+        _validate_checkpoint_entry(metadata)
         if not os.path.samestat(expected, metadata):
             raise CheckpointDocumentError(
                 "checkpoint changed while it was being opened"
@@ -266,6 +321,14 @@ def _open_checkpoint(path: Path) -> tuple[int, os.stat_result] | None:
         os.close(descriptor)
         raise
     return descriptor, metadata
+
+
+def _validate_checkpoint_entry(metadata: os.stat_result) -> None:
+    if _is_symbolic_link(metadata) or not stat.S_ISREG(metadata.st_mode):
+        raise CheckpointDocumentError(
+            "checkpoint entry must be a regular file, "
+            "not a symbolic link or reparse point"
+        )
 
 
 def _is_symbolic_link(metadata: os.stat_result) -> bool:
@@ -286,8 +349,56 @@ def _read_descriptor(descriptor: int) -> bytes:
     return b"".join(chunks)
 
 
-def _atomic_write(directory: Path, path: Path, document: bytes) -> None:
-    directory.mkdir(parents=True, exist_ok=True)
+def _atomic_write(directory: Path, checkpoint_name: str, document: bytes) -> None:
+    with _checkpoint_directory(directory, create=True) as anchor:
+        if anchor is None:
+            raise CheckpointDocumentError("checkpoint directory could not be created")
+        if os.name == "posix":
+            _atomic_write_at(anchor, checkpoint_name, document)
+        else:
+            _atomic_write_path(
+                directory,
+                _path_from_name(directory, checkpoint_name),
+                document,
+            )
+            _sync_directory(anchor)
+
+
+def _atomic_write_at(
+    directory_descriptor: int, checkpoint_name: str, document: bytes
+) -> None:
+    temporary_name = f".checkpoint-{secrets.token_hex(16)}"
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | _required_posix_flag("O_NOFOLLOW")
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor = os.open(
+        temporary_name,
+        flags,
+        0o600,
+        dir_fd=directory_descriptor,
+    )
+    try:
+        try:
+            _write_descriptor(descriptor, document)
+        finally:
+            os.close(descriptor)
+        _validate_checkpoint_name_at(directory_descriptor, checkpoint_name)
+        os.replace(
+            temporary_name,
+            checkpoint_name,
+            src_dir_fd=directory_descriptor,
+            dst_dir_fd=directory_descriptor,
+        )
+        _sync_directory(directory_descriptor)
+    finally:
+        _unlink_at(directory_descriptor, temporary_name)
+
+
+def _atomic_write_path(directory: Path, path: Path, document: bytes) -> None:
     descriptor, temporary_name = tempfile.mkstemp(prefix=".checkpoint-", dir=directory)
     temporary = Path(temporary_name)
     try:
@@ -295,25 +406,237 @@ def _atomic_write(directory: Path, path: Path, document: bytes) -> None:
             stream.write(document)
             stream.flush()
             os.fsync(stream.fileno())
+        _validate_checkpoint_path(path)
         os.replace(temporary, path)
-        _sync_directory(directory)
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def _delete_file(path: Path) -> None:
-    try:
+def _write_descriptor(descriptor: int, document: bytes) -> None:
+    remaining = memoryview(document)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written == 0:
+            raise OSError("checkpoint write made no progress")
+        remaining = remaining[written:]
+    os.fsync(descriptor)
+
+
+def _delete_file(directory: Path, checkpoint_name: str) -> None:
+    with _checkpoint_directory(directory, create=False) as anchor:
+        if anchor is None:
+            return
+        if os.name == "posix":
+            if not _validate_checkpoint_name_at(anchor, checkpoint_name):
+                return
+            os.unlink(checkpoint_name, dir_fd=anchor)
+            _sync_directory(anchor)
+            return
+        path = _path_from_name(directory, checkpoint_name)
+        if not _validate_checkpoint_path(path):
+            return
         path.unlink()
+        _sync_directory(anchor)
+
+
+def _validate_checkpoint_name_at(
+    directory_descriptor: int, checkpoint_name: str
+) -> bool:
+    try:
+        metadata = os.stat(
+            checkpoint_name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
     except FileNotFoundError:
+        return False
+    _validate_checkpoint_entry(metadata)
+    return True
+
+
+def _validate_checkpoint_path(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    _validate_checkpoint_entry(metadata)
+    return True
+
+
+def _unlink_at(directory_descriptor: int, name: str) -> None:
+    with suppress(FileNotFoundError):
+        os.unlink(name, dir_fd=directory_descriptor)
+
+
+def _path_from_name(directory: Path, checkpoint_name: str) -> Path:
+    return directory / checkpoint_name
+
+
+@contextmanager
+def _checkpoint_directory(directory: Path, *, create: bool) -> Iterator[int | None]:
+    if create:
+        directory.mkdir(parents=True, exist_ok=True)
+    try:
+        expected = directory.lstat()
+    except FileNotFoundError:
+        yield None
         return
-    _sync_directory(path.parent)
+    _validate_checkpoint_directory(expected)
+    if os.name == "posix":
+        anchor = _open_posix_directory(directory, expected)
+        close = os.close
+    elif os.name == "nt":
+        anchor = _open_windows_directory(directory, expected)
+        close = _close_windows_handle
+    else:
+        raise CheckpointDocumentError(
+            "secure checkpoint directory operations are unsupported on this platform"
+        )
+    try:
+        yield anchor
+    finally:
+        close(anchor)
 
 
-def _sync_directory(directory: Path) -> None:
+def _validate_checkpoint_directory(metadata: os.stat_result) -> None:
+    if _is_symbolic_link(metadata) or not stat.S_ISDIR(metadata.st_mode):
+        raise CheckpointDocumentError(
+            "checkpoint directory must be a real directory, "
+            "not a symbolic link or reparse point"
+        )
+
+
+def _open_posix_directory(directory: Path, expected: os.stat_result) -> int:
+    flags = (
+        os.O_RDONLY
+        | _required_posix_flag("O_DIRECTORY")
+        | _required_posix_flag("O_NOFOLLOW")
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        descriptor = os.open(directory, flags)
+    except OSError as error:
+        if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+            raise CheckpointDocumentError(
+                "checkpoint directory must not be a symbolic link or reparse point"
+            ) from error
+        raise
+    try:
+        metadata = os.fstat(descriptor)
+        _validate_checkpoint_directory(metadata)
+        if not os.path.samestat(expected, metadata):
+            raise CheckpointDocumentError(
+                "checkpoint directory changed while it was being opened"
+            )
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _required_posix_flag(name: str) -> int:
+    flag = getattr(os, name, None)
+    if not isinstance(flag, int):
+        raise CheckpointDocumentError(
+            f"secure checkpoint directory operations require {name}"
+        )
+    return flag
+
+
+def _open_windows_directory(directory: Path, expected: os.stat_result) -> int:
+    handle = _create_windows_directory_handle(directory)
+    try:
+        attributes = _windows_directory_attributes(handle)
+        if attributes & 0x400 or not attributes & 0x10:
+            raise CheckpointDocumentError(
+                "checkpoint directory must be a real directory, not a reparse point"
+            )
+        current = directory.lstat()
+        _validate_checkpoint_directory(current)
+        if not os.path.samestat(expected, current):
+            raise CheckpointDocumentError(
+                "checkpoint directory changed while it was being opened"
+            )
+    except BaseException:
+        _close_windows_handle(handle)
+        raise
+    return handle
+
+
+def _create_windows_directory_handle(directory: Path) -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    path = os.fspath(directory.absolute())
+    handle = create_file(
+        path,
+        0x0080,
+        0x0001,
+        None,
+        3,
+        0x02000000 | 0x00200000,
+        None,
+    )
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(handle)
+
+
+def _windows_directory_attributes(handle: int) -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    class FileAttributeTagInfo(ctypes.Structure):
+        _fields_ = [
+            ("file_attributes", wintypes.DWORD),
+            ("reparse_tag", wintypes.DWORD),
+        ]
+
+    get_information = ctypes.WinDLL(
+        "kernel32", use_last_error=True
+    ).GetFileInformationByHandleEx
+    get_information.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    get_information.restype = wintypes.BOOL
+    information = FileAttributeTagInfo()
+    if not get_information(
+        handle,
+        9,
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(information.file_attributes)
+
+
+def _close_windows_handle(handle: int) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    if not close_handle(handle):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _sync_directory(descriptor: int) -> None:
     if os.name != "posix":
         return
-    descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    os.fsync(descriptor)
