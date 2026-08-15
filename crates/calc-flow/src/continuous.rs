@@ -890,6 +890,7 @@ pub struct StreamingJob {
 pub(crate) struct StreamingJobTestProbe {
     pub(crate) checkpoint_fault_triggers: usize,
     pub(crate) cancellation_triggers: usize,
+    pub(crate) parent_sync_os_failures: usize,
     pub(crate) checkpoint_failures: u64,
     pub(crate) runner_registries: (usize, usize),
 }
@@ -952,6 +953,19 @@ impl StreamingJob {
                 0,
                 crate::runtime::streaming::runner::CheckpointFaultInjector::cancellation_trigger_count,
             ),
+            parent_sync_os_failures: {
+                #[cfg(unix)]
+                {
+                    self.fault_probe.as_ref().map_or(
+                        0,
+                        crate::runtime::streaming::runner::CheckpointFaultInjector::parent_sync_os_failure_count,
+                    )
+                }
+                #[cfg(not(unix))]
+                {
+                    0
+                }
+            },
             checkpoint_failures: self.inner.checkpoint_failure_count_for_test(),
             runner_registries: self.inner.runner_probe_for_test().registry_counts(),
         }

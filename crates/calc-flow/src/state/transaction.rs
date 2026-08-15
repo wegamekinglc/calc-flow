@@ -14,6 +14,9 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(all(test, unix))]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use sha2::{Digest as _, Sha256};
 use tokio::sync::Mutex;
 
@@ -40,6 +43,21 @@ pub(crate) enum ManifestTransactionFaultPoint {
 #[cfg(test)]
 type ManifestTransactionFaultHook =
     Arc<dyn Fn(ManifestTransactionFaultPoint) -> Result<()> + Send + Sync>;
+
+#[cfg(all(test, unix))]
+#[derive(Clone, Default)]
+pub(crate) struct ManifestParentSyncOsFailureProbe(Arc<AtomicUsize>);
+
+#[cfg(all(test, unix))]
+impl ManifestParentSyncOsFailureProbe {
+    fn record(&self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn count(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+}
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,6 +142,10 @@ pub(crate) struct ManifestTransaction {
     fault_hook: Option<ManifestTransactionFaultHook>,
     #[cfg(test)]
     operation_hook: Option<ManifestOperationHook>,
+    #[cfg(test)]
+    real_parent_sync_failure: bool,
+    #[cfg(all(test, unix))]
+    real_parent_sync_failure_probe: Option<ManifestParentSyncOsFailureProbe>,
 }
 
 impl ManifestTransaction {
@@ -220,12 +242,26 @@ impl ManifestTransaction {
             fault_hook: None,
             #[cfg(test)]
             operation_hook: None,
+            #[cfg(test)]
+            real_parent_sync_failure: false,
+            #[cfg(all(test, unix))]
+            real_parent_sync_failure_probe: None,
         })
     }
 
     #[cfg(test)]
     pub(crate) fn with_fault_hook(mut self, hook: ManifestTransactionFaultHook) -> Self {
         self.fault_hook = Some(hook);
+        self
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn with_real_parent_sync_failure_for_test(
+        mut self,
+        probe: ManifestParentSyncOsFailureProbe,
+    ) -> Self {
+        self.real_parent_sync_failure = true;
+        self.real_parent_sync_failure_probe = Some(probe);
         self
     }
 
@@ -307,6 +343,10 @@ impl ManifestTransaction {
         let root = self.manifest_root.clone();
         #[cfg(test)]
         let fault_hook = self.fault_hook.clone();
+        #[cfg(test)]
+        let real_parent_sync_failure = self.real_parent_sync_failure;
+        #[cfg(all(test, unix))]
+        let real_parent_sync_failure_probe = self.real_parent_sync_failure_probe.clone();
         owner_settled_publication(
             cancellation,
             worker(move || {
@@ -316,6 +356,10 @@ impl ManifestTransaction {
                     &bytes,
                     #[cfg(test)]
                     fault_hook.as_ref(),
+                    #[cfg(test)]
+                    real_parent_sync_failure,
+                    #[cfg(all(test, unix))]
+                    real_parent_sync_failure_probe.as_ref(),
                 )
             }),
         )
@@ -959,6 +1003,10 @@ fn publish_manifest(
     epoch: Epoch,
     bytes: &[u8],
     #[cfg(test)] fault_hook: Option<&ManifestTransactionFaultHook>,
+    #[cfg(test)] real_parent_sync_failure: bool,
+    #[cfg(all(test, unix))] real_parent_sync_failure_probe: Option<
+        &ManifestParentSyncOsFailureProbe,
+    >,
 ) -> Result<ManifestPublication> {
     validate_directory(root)?;
     let destination = manifest_path(root, epoch);
@@ -974,6 +1022,10 @@ fn publish_manifest(
             &mut parent_synced,
             #[cfg(test)]
             fault_hook,
+            #[cfg(test)]
+            real_parent_sync_failure,
+            #[cfg(all(test, unix))]
+            real_parent_sync_failure_probe,
         )
     }));
     match publication {
@@ -1024,6 +1076,10 @@ fn install_manifest(
     bytes: &[u8],
     parent_synced: &mut bool,
     #[cfg(test)] fault_hook: Option<&ManifestTransactionFaultHook>,
+    #[cfg(test)] real_parent_sync_failure: bool,
+    #[cfg(all(test, unix))] real_parent_sync_failure_probe: Option<
+        &ManifestParentSyncOsFailureProbe,
+    >,
 ) -> Result<()> {
     let temporary = write_manifest_temporary(
         root,
@@ -1042,6 +1098,10 @@ fn install_manifest(
         parent_synced,
         #[cfg(test)]
         fault_hook,
+        #[cfg(test)]
+        real_parent_sync_failure,
+        #[cfg(all(test, unix))]
+        real_parent_sync_failure_probe,
     )
 }
 
@@ -1088,7 +1148,27 @@ fn sync_manifest_root(
     root: &Path,
     parent_synced: &mut bool,
     #[cfg(test)] fault_hook: Option<&ManifestTransactionFaultHook>,
+    #[cfg(test)] real_parent_sync_failure: bool,
+    #[cfg(all(test, unix))] real_parent_sync_failure_probe: Option<
+        &ManifestParentSyncOsFailureProbe,
+    >,
 ) -> Result<()> {
+    #[cfg(all(test, unix))]
+    if real_parent_sync_failure {
+        let sync_result = sync_directory_with_permission_failure(
+            root,
+            parent_synced,
+            real_parent_sync_failure_probe
+                .expect("real parent sync failure requires an OS failure probe"),
+        );
+        if let Some(hook) = fault_hook {
+            let hook_result = hook(ManifestTransactionFaultPoint::ManifestParentSync);
+            if sync_result.is_ok() {
+                hook_result?;
+            }
+        }
+        return sync_result;
+    }
     sync_directory(root)?;
     *parent_synced = true;
     #[cfg(test)]
@@ -1096,6 +1176,74 @@ fn sync_manifest_root(
         hook(ManifestTransactionFaultPoint::ManifestParentSync)?;
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+fn record_real_parent_sync_attempt(
+    sync_result: Result<()>,
+    parent_synced: &mut bool,
+    probe: &ManifestParentSyncOsFailureProbe,
+) -> Result<()> {
+    match sync_result {
+        Ok(()) => {
+            *parent_synced = true;
+            Ok(())
+        }
+        Err(error) => {
+            probe.record();
+            Err(error)
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn parent_sync_permission_failure_supported_for_test(root: &Path) -> Result<bool> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let probe = tempfile::Builder::new()
+        .prefix("parent-sync-permission-probe-")
+        .tempdir_in(root)
+        .map_err(|source| io_error(root, source))?;
+    let permissions = std::fs::metadata(probe.path())
+        .map_err(|source| io_error(probe.path(), source))?
+        .permissions();
+    let mut restricted = permissions.clone();
+    restricted.set_mode(0o111);
+    std::fs::set_permissions(probe.path(), restricted)
+        .map_err(|source| io_error(probe.path(), source))?;
+    let probe_open = File::open(probe.path());
+    std::fs::set_permissions(probe.path(), permissions)
+        .map_err(|source| io_error(probe.path(), source))?;
+    match probe_open {
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(true),
+        Ok(_) => Ok(false),
+        Err(source) => Err(io_error(probe.path(), source)),
+    }
+}
+
+#[cfg(all(test, unix))]
+fn sync_directory_with_permission_failure(
+    directory: &Path,
+    parent_synced: &mut bool,
+    probe: &ManifestParentSyncOsFailureProbe,
+) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let permissions = std::fs::metadata(directory)
+        .map_err(|source| io_error(directory, source))?
+        .permissions();
+    let mut restricted = permissions.clone();
+    restricted.set_mode(0o111);
+    std::fs::set_permissions(directory, restricted)
+        .map_err(|source| io_error(directory, source))?;
+    let sync_result =
+        record_real_parent_sync_attempt(sync_directory(directory), parent_synced, probe);
+    let restore_result = std::fs::set_permissions(directory, permissions)
+        .map_err(|source| io_error(directory, source));
+    match (sync_result, restore_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (_, Err(error)) => Err(error),
+    }
 }
 
 fn classify_failed_publication(
@@ -1309,6 +1457,18 @@ mod tests {
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const RUNTIME_CONFIG_HASH: &str =
         "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_real_parent_sync_is_recorded_before_fallback_fault() {
+        let mut parent_synced = false;
+        let probe = super::ManifestParentSyncOsFailureProbe::default();
+
+        super::record_real_parent_sync_attempt(Ok(()), &mut parent_synced, &probe).unwrap();
+
+        assert!(parent_synced);
+        assert_eq!(probe.count(), 0);
+    }
 
     fn manifest(epoch: Epoch) -> CheckpointManifest {
         CheckpointManifest::new(CheckpointManifestFields {
