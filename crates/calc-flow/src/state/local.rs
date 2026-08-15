@@ -479,11 +479,29 @@ fn open_lock_path(path: &Path) -> Result<File> {
 }
 
 fn lock_error(path: &Path, lineage_hash: &str, error: std::io::Error) -> CalcFlowError {
-    if error.kind() == std::io::ErrorKind::WouldBlock {
+    if is_lock_contention(&error) {
         lease_conflict(lineage_hash)
     } else {
         io_error(path, error)
     }
+}
+
+#[cfg(not(windows))]
+fn is_lock_contention(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+}
+
+// fs2 surfaces a contended Windows byte-range lock as the raw
+// ERROR_LOCK_VIOLATION/ERROR_IO_PENDING codes, which std maps to
+// ErrorKind::Uncategorized rather than WouldBlock.
+#[cfg(windows)]
+fn is_lock_contention(error: &std::io::Error) -> bool {
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    const ERROR_IO_PENDING: i32 = 997;
+    matches!(
+        error.raw_os_error(),
+        Some(ERROR_LOCK_VIOLATION | ERROR_IO_PENDING)
+    )
 }
 
 fn stage_file(paths: &ManagedSegmentPaths, handle: &StateHandle, bytes: &[u8]) -> Result<()> {

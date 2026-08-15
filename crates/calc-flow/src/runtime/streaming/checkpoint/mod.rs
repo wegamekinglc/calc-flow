@@ -43,8 +43,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(opened.state_root_for_test(), root.join("state"));
-        assert_eq!(opened.manifest_root_for_test(), root.join("manifests"));
+        // The runtime stores canonicalized paths; on Windows the lexical temp
+        // path uses 8.3 short names while the canonical form is verbatim.
+        let canonical_root = std::fs::canonicalize(&root).unwrap();
+        assert_eq!(opened.state_root_for_test(), canonical_root.join("state"));
+        assert_eq!(
+            opened.manifest_root_for_test(),
+            canonical_root.join("manifests")
+        );
         assert!(opened.state_root_for_test().is_dir());
         assert!(opened.manifest_root_for_test().is_dir());
 

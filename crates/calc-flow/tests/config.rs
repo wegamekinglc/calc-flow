@@ -768,11 +768,13 @@ fn missing_and_conflicting_udfs_have_stable_paths() {
 #[test]
 fn project_schema_artifact_matches_generator() {
     let generated = serde_json::to_string_pretty(&project_json_schema().unwrap()).unwrap() + "\n";
+    // Windows checkouts may materialize the artifact with CRLF endings.
     let checked_in = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../schemas/project-v2.schema.json"
     ))
-    .unwrap();
+    .unwrap()
+    .replace("\r\n", "\n");
     assert_eq!(checked_in, generated);
 }
 

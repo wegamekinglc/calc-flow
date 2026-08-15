@@ -2,11 +2,13 @@ use std::{
     fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use async_trait::async_trait;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tokio::sync::Mutex;
 
 use crate::json::{parse_json_value, validate_json_depth, validate_json_depth_at};
 use crate::{
@@ -41,6 +43,10 @@ pub trait ProjectStore: Send + Sync {
 #[derive(Clone, Debug)]
 pub struct FileProjectStore {
     directory: PathBuf,
+    // Serializes create/put/delete through one store instance: Windows
+    // rejects a rename over a destination that another in-flight rename is
+    // still resolving, so concurrent writers must take turns.
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl FileProjectStore {
@@ -57,7 +63,10 @@ impl FileProjectStore {
         let directory = tokio::fs::canonicalize(&requested)
             .await
             .map_err(|source| io_error(&requested, source))?;
-        Ok(Self { directory })
+        Ok(Self {
+            directory,
+            write_lock: Arc::new(Mutex::new(())),
+        })
     }
 
     /// Imports a bounded strict v2 JSON document.
@@ -106,6 +115,7 @@ impl ProjectStore for FileProjectStore {
     async fn create(&self, project: &ProjectSpec) -> Result<()> {
         validate_project_identity(project)?;
         let bytes = export_project_json(project)?.into_bytes();
+        let _write_guard = self.write_lock.lock().await;
         atomic_write(
             self.directory.clone(),
             self.path_for(&project.id),
@@ -120,6 +130,7 @@ impl ProjectStore for FileProjectStore {
     async fn put(&self, project: &ProjectSpec) -> Result<()> {
         validate_project_identity(project)?;
         let bytes = export_project_json(project)?.into_bytes();
+        let _write_guard = self.write_lock.lock().await;
         atomic_write(
             self.directory.clone(),
             self.path_for(&project.id),
@@ -191,6 +202,7 @@ impl ProjectStore for FileProjectStore {
     }
 
     async fn delete(&self, project_id: &str) -> Result<()> {
+        let _write_guard = self.write_lock.lock().await;
         delete_file(
             self.directory.clone(),
             self.path_for(project_id),

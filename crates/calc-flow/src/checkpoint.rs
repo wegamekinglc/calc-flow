@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use async_trait::async_trait;
@@ -8,6 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tokio::sync::Mutex;
 
 use crate::json::{parse_json_value, validate_json_depth, validate_json_depth_at};
 use crate::project_store::{WriteMode, atomic_write, bounded_read, delete_file};
@@ -169,6 +171,10 @@ pub trait CheckpointStore: Send + Sync {
 #[derive(Clone, Debug)]
 pub struct FileCheckpointStore {
     directory: PathBuf,
+    // Serializes save/delete through one store instance: Windows rejects a
+    // replace-rename over a destination that another in-flight replace is
+    // still resolving, and checkpoint semantics assume a single writer.
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl FileCheckpointStore {
@@ -185,7 +191,10 @@ impl FileCheckpointStore {
         let directory = tokio::fs::canonicalize(&requested)
             .await
             .map_err(|source| io_error(&requested, source))?;
-        Ok(Self { directory })
+        Ok(Self {
+            directory,
+            write_lock: Arc::new(Mutex::new(())),
+        })
     }
 
     fn path_for(&self, pipeline_name: &str) -> PathBuf {
@@ -229,6 +238,7 @@ impl CheckpointStore for FileCheckpointStore {
                 "checkpoint exceeds the {MAX_CHECKPOINT_DOCUMENT_BYTES}-byte limit"
             )));
         }
+        let _write_guard = self.write_lock.lock().await;
         atomic_write(
             self.directory.clone(),
             self.path_for(&checkpoint.pipeline_name),
@@ -241,6 +251,7 @@ impl CheckpointStore for FileCheckpointStore {
     }
 
     async fn delete(&self, pipeline_name: &str) -> Result<()> {
+        let _write_guard = self.write_lock.lock().await;
         delete_file(
             self.directory.clone(),
             self.path_for(pipeline_name),

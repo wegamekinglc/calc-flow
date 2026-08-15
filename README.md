@@ -1,6 +1,8 @@
 # Calc Flow
 
-[![CI](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci.yml)
+[![Linux CI](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-linux.yml/badge.svg?branch=main)](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-linux.yml)
+[![Windows CI](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml)
+[![Coverage Status](https://coveralls.io/repos/github/wegamekinglc/calc-flow/badge.svg?branch=main)](https://coveralls.io/github/wegamekinglc/calc-flow?branch=main)
 
 Calc Flow 2.0 is a Rust-native calculation engine for immutable Arrow
 micro-batches and stateful streams. The core crate compiles typed calculation
