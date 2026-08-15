@@ -60,11 +60,11 @@ use crate::{
     SourceDeliveryCapability as PublicSourceDeliveryCapability, SourceEvent as PublicSourceEvent,
     SourceSchema as PublicSourceSchema, SourceWatermarkManifestState, StateBackend,
     StateLineageBackend, StateLineageKey, StreamCollector, StreamOperator, StreamOperatorContext,
-    StreamRequirements, StreamRuntimeConfig, StreamSource as PublicStreamSource,
-    StreamingErrorCategory as PublicStreamingErrorCategory, StreamingJob as PublicStreamingJob,
-    StreamingRunner as PublicStreamingRunner, TerminalCause as PublicTerminalCause,
-    TransactionalStreamSink as PublicTransactionalStreamSink, UdfRegistry, UnionOperator,
-    WindowAggregateOperator, WindowSpec,
+    StreamRequirements, StreamRuntimeConfig, StreamSink as PublicStreamSink,
+    StreamSource as PublicStreamSource, StreamingErrorCategory as PublicStreamingErrorCategory,
+    StreamingJob as PublicStreamingJob, StreamingRunner as PublicStreamingRunner,
+    TerminalCause as PublicTerminalCause, TransactionalStreamSink as PublicTransactionalStreamSink,
+    UdfRegistry, UnionOperator, WindowAggregateOperator, WindowSpec,
     state::{ManifestTransaction, PreparedEpochManifest, PreparedManifestIdentity},
 };
 
@@ -1534,6 +1534,86 @@ struct CheckpointMatrixSink {
     written_records: Arc<AtomicUsize>,
     closed: Arc<AtomicUsize>,
     write_delay: Duration,
+    lifecycle: Arc<CheckpointMatrixOutputProbe>,
+}
+
+#[derive(Default)]
+struct CheckpointMatrixOutputProbe {
+    ordinary_records: Mutex<Vec<String>>,
+    ordinary_closed: AtomicUsize,
+    transactional_commits: AtomicUsize,
+    transactional_aborts: AtomicUsize,
+    transactional_recovers: AtomicUsize,
+}
+
+struct CheckpointMatrixOrdinarySink {
+    probe: Arc<CheckpointMatrixOutputProbe>,
+}
+
+fn checkpoint_matrix_output_records(batch: &Batch) -> Result<Vec<String>> {
+    let mut output = Vec::new();
+    for record in batch
+        .table_payload()
+        .map_err(|error| CalcFlowError::CheckpointMismatch {
+            message: format!("checkpoint matrix sink received a non-table batch: {error}"),
+        })?
+        .batches()
+    {
+        let starts = record
+            .column_by_name("window_start")
+            .and_then(|array| array.as_any().downcast_ref::<TimestampMicrosecondArray>())
+            .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                message: "checkpoint matrix output omitted window_start".into(),
+            })?;
+        let ends = record
+            .column_by_name("window_end")
+            .and_then(|array| array.as_any().downcast_ref::<TimestampMicrosecondArray>())
+            .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                message: "checkpoint matrix output omitted window_end".into(),
+            })?;
+        let groups = record
+            .column_by_name("group")
+            .and_then(|array| array.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                message: "checkpoint matrix output omitted group".into(),
+            })?;
+        let sums = record
+            .column_by_name("sum_value")
+            .and_then(|array| array.as_any().downcast_ref::<Int64Array>())
+            .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                message: "checkpoint matrix output omitted sum_value".into(),
+            })?;
+        output.extend((0..record.num_rows()).map(|row| {
+            format!(
+                "{}|{}|{}|{}",
+                starts.value(row),
+                ends.value(row),
+                groups.value(row),
+                sums.value(row)
+            )
+        }));
+    }
+    Ok(output)
+}
+
+#[async_trait]
+impl PublicStreamSink for CheckpointMatrixOrdinarySink {
+    async fn open(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn write(&mut self, batch: &Batch) -> Result<()> {
+        self.probe
+            .ordinary_records
+            .lock()
+            .extend(checkpoint_matrix_output_records(batch)?);
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        self.probe.ordinary_closed.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 impl CheckpointMatrixSink {
@@ -1671,50 +1751,14 @@ impl TransactionalStreamSink for CheckpointMatrixSink {
         if !self.write_delay.is_zero() {
             tokio::time::sleep(self.write_delay).await;
         }
-        for record in batch
-            .table_payload()
-            .map_err(|error| CalcFlowError::CheckpointMismatch {
-                message: format!("checkpoint matrix sink received a non-table batch: {error}"),
-            })?
-            .batches()
-        {
-            let starts = record
-                .column_by_name("window_start")
-                .and_then(|array| array.as_any().downcast_ref::<TimestampMicrosecondArray>())
-                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
-                    message: "checkpoint matrix output omitted window_start".into(),
-                })?;
-            let ends = record
-                .column_by_name("window_end")
-                .and_then(|array| array.as_any().downcast_ref::<TimestampMicrosecondArray>())
-                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
-                    message: "checkpoint matrix output omitted window_end".into(),
-                })?;
-            let groups = record
-                .column_by_name("group")
-                .and_then(|array| array.as_any().downcast_ref::<StringArray>())
-                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
-                    message: "checkpoint matrix output omitted group".into(),
-                })?;
-            let sums = record
-                .column_by_name("sum_value")
-                .and_then(|array| array.as_any().downcast_ref::<Int64Array>())
-                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
-                    message: "checkpoint matrix output omitted sum_value".into(),
-                })?;
-            for row in 0..record.num_rows() {
-                self.pending.push(format!(
-                    "{}|{}|{}|{}|{}",
-                    self.sink_id,
-                    starts.value(row),
-                    ends.value(row),
-                    groups.value(row),
-                    sums.value(row)
-                ));
-            }
-            self.written_records
-                .fetch_add(record.num_rows(), Ordering::SeqCst);
-        }
+        let records = checkpoint_matrix_output_records(batch)?;
+        self.written_records
+            .fetch_add(records.len(), Ordering::SeqCst);
+        self.pending.extend(
+            records
+                .into_iter()
+                .map(|record| format!("{}|{record}", self.sink_id)),
+        );
         Ok(())
     }
 
@@ -1740,7 +1784,11 @@ impl TransactionalStreamSink for CheckpointMatrixSink {
     }
 
     async fn commit(&mut self, epoch: Epoch, state: &JsonMap) -> Result<()> {
-        self.commit_prepared(epoch, state).await
+        self.commit_prepared(epoch, state).await?;
+        self.lifecycle
+            .transactional_commits
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn abort(&mut self, epoch: Epoch, _state: Option<&JsonMap>) -> Result<()> {
@@ -1755,6 +1803,9 @@ impl TransactionalStreamSink for CheckpointMatrixSink {
         }
         self.pending.clear();
         self.epoch = None;
+        self.lifecycle
+            .transactional_aborts
+            .fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -1766,7 +1817,11 @@ impl TransactionalStreamSink for CheckpointMatrixSink {
             .ok_or_else(|| CalcFlowError::CheckpointMismatch {
                 message: format!("sink {:?} recovery state is missing", self.sink_id),
             })?;
-        self.commit_prepared(manifest.epoch(), &state).await
+        self.commit_prepared(manifest.epoch(), &state).await?;
+        self.lifecycle
+            .transactional_recovers
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn close(&mut self) -> Result<()> {
@@ -1803,7 +1858,11 @@ impl PublicTransactionalStreamSink for CheckpointMatrixSink {
 
     async fn recover(&mut self, recovery: &PublicSinkRecovery) -> Result<()> {
         self.commit_prepared(recovery.epoch(), recovery.pre_commit())
-            .await
+            .await?;
+        self.lifecycle
+            .transactional_recovers
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn close(&mut self) -> Result<()> {
@@ -1833,6 +1892,7 @@ fn checkpoint_matrix_public_runner(
     source_closed: &Arc<AtomicUsize>,
     sink_closed: &Arc<AtomicUsize>,
     sink_writes: &Arc<AtomicUsize>,
+    output_probe: &Arc<CheckpointMatrixOutputProbe>,
     source_poll_delay: Duration,
     pause_before_eof: bool,
     config: StreamRuntimeConfig,
@@ -1867,6 +1927,12 @@ fn checkpoint_matrix_public_runner(
         .unwrap()
         .add_checkpoint_capable_node(
             "branch_a",
+            Box::new(CheckpointMatrixForward::new(window_fields.clone()))
+                as Box<dyn StreamOperator>,
+        )
+        .unwrap()
+        .add_checkpoint_capable_node(
+            "branch_b",
             Box::new(CheckpointMatrixForward::new(window_fields)) as Box<dyn StreamOperator>,
         )
         .unwrap()
@@ -1880,11 +1946,16 @@ fn checkpoint_matrix_public_runner(
             PortEndpoint::new("branch_a", "input").unwrap(),
         ))
         .unwrap()
+        .connect(Edge::new(
+            PortEndpoint::new("window", "output").unwrap(),
+            PortEndpoint::new("branch_b", "input").unwrap(),
+        ))
+        .unwrap()
         .compile_stream(
             &UdfRegistry::new().snapshot(),
             &StreamRequirements {
                 delivery: BTreeMap::from([(
-                    "output".into(),
+                    "branch_a.output".into(),
                     crate::DeliveryGuarantee::ExactlyOnce,
                 )]),
             },
@@ -1908,27 +1979,42 @@ fn checkpoint_matrix_public_runner(
             )
         })
         .collect();
-    let sinks = BTreeMap::from([(
-        "output".into(),
-        ["sink-a", "sink-b"]
-            .into_iter()
-            .map(|sink_id| {
-                PublicSinkBinding::transactional(
-                    sink_id,
-                    CheckpointMatrixSink {
+    let sinks = BTreeMap::from([
+        (
+            "branch_a.output".into(),
+            ["sink-a", "sink-b"]
+                .into_iter()
+                .map(|sink_id| {
+                    PublicSinkBinding::transactional(
                         sink_id,
-                        root: sink_root.join(sink_id),
-                        epoch: None,
-                        pending: Vec::new(),
-                        written_records: Arc::clone(sink_writes),
-                        closed: Arc::clone(sink_closed),
-                        write_delay: Duration::ZERO,
+                        CheckpointMatrixSink {
+                            sink_id,
+                            root: sink_root.join(sink_id),
+                            epoch: None,
+                            pending: Vec::new(),
+                            written_records: Arc::clone(sink_writes),
+                            closed: Arc::clone(sink_closed),
+                            write_delay: Duration::ZERO,
+                            lifecycle: Arc::clone(output_probe),
+                        },
+                    )
+                    .unwrap()
+                })
+                .collect(),
+        ),
+        (
+            "branch_b.output".into(),
+            vec![
+                PublicSinkBinding::ordinary(
+                    "ordinary-sink",
+                    CheckpointMatrixOrdinarySink {
+                        probe: Arc::clone(output_probe),
                     },
                 )
-                .unwrap()
-            })
-            .collect(),
-    )]);
+                .unwrap(),
+            ],
+        ),
+    ]);
     let checkpoints = PublicManagedCheckpointRuntime::new(managed_root).unwrap();
     let checkpoints = match fault {
         Some((point, mode)) => checkpoints.with_fault_for_test(point, mode),
@@ -2047,6 +2133,7 @@ fn checkpoint_matrix_spec(
                 written_records: Arc::clone(sink_writes),
                 closed: Arc::clone(sink_closed),
                 write_delay: Duration::ZERO,
+                lifecycle: Arc::new(CheckpointMatrixOutputProbe::default()),
             })),
         })
         .collect();
@@ -2187,6 +2274,7 @@ fn checkpoint_restart_soak_public_runner(
                             written_records: Arc::clone(&sink_writes),
                             closed: Arc::clone(sink_closed),
                             write_delay: sink_write_delay,
+                            lifecycle: Arc::new(CheckpointMatrixOutputProbe::default()),
                         },
                     )
                     .unwrap(),
@@ -2210,6 +2298,7 @@ fn checkpoint_restart_soak_public_runner(
     reason = "the fault matrix report keeps independently asserted recovery dimensions"
 )]
 struct CheckpointFaultMatrixReport {
+    manual_observation: CheckpointManualObservation,
     selected_before_restart: Option<Epoch>,
     prepared_artifacts_after_failure: usize,
     committed_sinks_before_restart: BTreeSet<String>,
@@ -2220,10 +2309,14 @@ struct CheckpointFaultMatrixReport {
     restored_cursor_orders: BTreeMap<String, Vec<u8>>,
     sources_ended: bool,
     watermarks_restored: bool,
+    final_source_sequences: BTreeMap<String, Option<u64>>,
+    final_source_idle: BTreeMap<String, bool>,
     window_state_restored: bool,
     visible_records: usize,
     duplicate_records: usize,
     missing_records: usize,
+    transactional_output: BTreeSet<String>,
+    ordinary_output: Vec<String>,
     temporary_artifacts: usize,
     terminal_tasks: usize,
     terminal_charged_edges: usize,
@@ -2231,6 +2324,54 @@ struct CheckpointFaultMatrixReport {
     fault_trigger_count: usize,
     cancellation_requested: bool,
     deterministic_terminal_error: bool,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum CheckpointManualObservation {
+    Completed(Epoch),
+    Failed {
+        category: PublicStreamingErrorCategory,
+        epoch: Option<Epoch>,
+        phase: Option<PublicCheckpointPhase>,
+        component_kind: Option<PublicComponentKind>,
+        component_id: Option<String>,
+    },
+}
+
+fn checkpoint_manual_observation(result: Result<Epoch>) -> CheckpointManualObservation {
+    match result {
+        Ok(epoch) => CheckpointManualObservation::Completed(epoch),
+        Err(CalcFlowError::Streaming(error)) => CheckpointManualObservation::Failed {
+            category: error.category(),
+            epoch: error.epoch(),
+            phase: error.checkpoint_phase(),
+            component_kind: error.component_kind(),
+            component_id: error.component_id().map(str::to_owned),
+        },
+        Err(error) => panic!("manual checkpoint escaped the public streaming boundary: {error:?}"),
+    }
+}
+
+async fn wait_for_checkpoint_matrix_sources(
+    job: &PublicStreamingJob,
+    output_probe: &CheckpointMatrixOutputProbe,
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if job
+                .status()
+                .sources
+                .values()
+                .all(|source| source.next_sequence == Some(1))
+                && output_probe.ordinary_records.lock().len() == 2
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("matrix sources did not reach the manual checkpoint cut");
 }
 
 const fn checkpoint_fault_expected_phase(point: CheckpointFaultPoint) -> PublicCheckpointPhase {
@@ -3434,6 +3575,7 @@ async fn prepare_private_sink_commit_benchmark(sink_count: usize) -> PrivateSink
             written_records: Arc::new(AtomicUsize::new(0)),
             closed: Arc::new(AtomicUsize::new(0)),
             write_delay: Duration::ZERO,
+            lifecycle: Arc::new(CheckpointMatrixOutputProbe::default()),
         };
         TransactionalStreamSink::open(&mut sink).await.unwrap();
         TransactionalStreamSink::begin_epoch(&mut sink, Epoch::INITIAL)
@@ -3847,7 +3989,7 @@ async fn run_checkpoint_restart_fault_case(
     let manifest_root = directory.path().join("manifests");
     let sink_root = directory.path().join("sinks");
     let config = StreamRuntimeConfig {
-        checkpoint_interval: Duration::from_millis(10),
+        checkpoint_interval: Duration::from_secs(3_600),
         checkpoint_timeout: Duration::from_secs(5),
         retained_epochs: 2,
         ..StreamRuntimeConfig::default()
@@ -3857,6 +3999,7 @@ async fn run_checkpoint_restart_fault_case(
     let first_source_closed = Arc::new(AtomicUsize::new(0));
     let first_sink_closed = Arc::new(AtomicUsize::new(0));
     let first_sink_writes = Arc::new(AtomicUsize::new(0));
+    let output_probe = Arc::new(CheckpointMatrixOutputProbe::default());
     let first_runner = checkpoint_matrix_public_runner(
         directory.path(),
         &sink_root,
@@ -3864,6 +4007,7 @@ async fn run_checkpoint_restart_fault_case(
         &first_source_closed,
         &first_sink_closed,
         &first_sink_writes,
+        &output_probe,
         if point == CheckpointFaultPoint::PartialAlignment {
             Duration::from_millis(5)
         } else {
@@ -3876,9 +4020,13 @@ async fn run_checkpoint_restart_fault_case(
     let first_job = first_runner.start().await.unwrap_or_else(|failure| {
         panic!("fault case {point:?}/{mode:?} failed to start: {failure:?}")
     });
-    let first_outcome = tokio::time::timeout(Duration::from_secs(5), first_job.wait())
-        .await
-        .unwrap_or_else(|error| panic!("fault case {point:?}/{mode:?} hung: {error}"));
+    wait_for_checkpoint_matrix_sources(&first_job, &output_probe).await;
+    let (manual, first_outcome) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(first_job.trigger_checkpoint(), first_job.wait())
+    })
+    .await
+    .unwrap_or_else(|error| panic!("fault case {point:?}/{mode:?} hung: {error}"));
+    let manual_observation = checkpoint_manual_observation(manual);
     let first_status = first_job.status();
     let first_probe = first_job.test_probe();
     let exact_error = |category, epoch, phase, component_kind, component_id: Option<&str>| {
@@ -3894,7 +4042,8 @@ async fn run_checkpoint_restart_fault_case(
     let checkpoint_status_matches = first_status.checkpoint.current_epoch == Some(Epoch::INITIAL)
         && first_status.checkpoint.phase == Some(expected_phase);
     let deterministic_terminal_error = match (point, mode) {
-        (CheckpointFaultPoint::ManifestRename, _) => {
+        (CheckpointFaultPoint::ManifestRename, _)
+        | (CheckpointFaultPoint::ManifestParentSync, CheckpointFaultMode::Io) => {
             first_outcome.state == PublicJobState::RecoveryRequired
                 && first_outcome.cause
                     == if mode == CheckpointFaultMode::Cancel {
@@ -4115,6 +4264,7 @@ async fn run_checkpoint_restart_fault_case(
         &restart_source_closed,
         &restart_sink_closed,
         &restart_sink_writes,
+        &output_probe,
         Duration::ZERO,
         false,
         StreamRuntimeConfig {
@@ -4180,6 +4330,22 @@ async fn run_checkpoint_restart_fault_case(
             } if watermark == EventTime::from_micros(1)
         )
     });
+    let final_source_sequences = terminal_status
+        .sources
+        .iter()
+        .map(|(source_id, source)| (source_id.clone(), source.next_sequence))
+        .collect();
+    let final_source_idle = manifest
+        .sources()
+        .iter()
+        .map(|(source_id, entry)| {
+            let idle = matches!(
+                entry.watermark_policy,
+                SourceWatermarkManifestState::SourceProvided { idle: true, .. }
+            );
+            (source_id.clone(), idle)
+        })
+        .collect();
     let visible = read_checkpoint_matrix_visible(&sink_root).await;
     let observed = visible.values().flatten().cloned().collect::<Vec<_>>();
     let unique = observed.iter().cloned().collect::<BTreeSet<_>>();
@@ -4194,10 +4360,12 @@ async fn run_checkpoint_restart_fault_case(
         .collect::<BTreeSet<_>>();
     let duplicate_records = observed.len().saturating_sub(unique.len());
     let missing_records = expected.difference(&unique).count();
+    let ordinary_output = output_probe.ordinary_records.lock().clone();
 
     let mut restart_source_open_events = restart_source_opens.lock().clone();
     restart_source_open_events.sort_by(|left, right| left.0.cmp(&right.0));
     CheckpointFaultMatrixReport {
+        manual_observation,
         selected_before_restart,
         prepared_artifacts_after_failure,
         committed_sinks_before_restart,
@@ -4208,10 +4376,14 @@ async fn run_checkpoint_restart_fault_case(
         restored_cursor_orders,
         sources_ended,
         watermarks_restored,
+        final_source_sequences,
+        final_source_idle,
         window_state_restored,
         visible_records: observed.len(),
         duplicate_records,
         missing_records,
+        transactional_output: unique,
+        ordinary_output,
         temporary_artifacts: checkpoint_matrix_temporary_artifacts(
             &state_root,
             &manifest_root,
@@ -8247,6 +8419,160 @@ async fn twenty_minute_epoch_checkpoint_restart() {
     run_checkpoint_restart_linux_soak().await;
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the public proof owns both retained and lost installed-manifest recovery outcomes"
+)]
+async fn public_parent_directory_sync_os_failure_requires_recovery() {
+    for manifest_retained in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let state_root = directory.path().join("state");
+        let manifest_root = directory.path().join("manifests");
+        let sink_root = directory.path().join("sinks");
+        let source_opens = Arc::new(Mutex::new(Vec::new()));
+        let source_closed = Arc::new(AtomicUsize::new(0));
+        let sink_closed = Arc::new(AtomicUsize::new(0));
+        let sink_writes = Arc::new(AtomicUsize::new(0));
+        let output_probe = Arc::new(CheckpointMatrixOutputProbe::default());
+        let config = StreamRuntimeConfig {
+            checkpoint_interval: Duration::from_secs(3_600),
+            checkpoint_timeout: Duration::from_secs(5),
+            retained_epochs: 2,
+            ..StreamRuntimeConfig::default()
+        };
+        let runner = checkpoint_matrix_public_runner(
+            directory.path(),
+            &sink_root,
+            &source_opens,
+            &source_closed,
+            &sink_closed,
+            &sink_writes,
+            &output_probe,
+            Duration::ZERO,
+            true,
+            config,
+            Some((
+                CheckpointFaultPoint::ManifestParentSync,
+                CheckpointFaultMode::Io,
+            )),
+        );
+        let job = runner.start().await.unwrap();
+        wait_for_checkpoint_matrix_sources(&job, &output_probe).await;
+
+        let (manual, outcome) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(job.trigger_checkpoint(), job.wait())
+        })
+        .await
+        .expect("real parent-directory sync failure did not converge");
+
+        let CalcFlowError::Streaming(error) = manual.unwrap_err() else {
+            panic!("manual parent-directory sync failure must use the streaming boundary");
+        };
+        assert_eq!(
+            error.category(),
+            PublicStreamingErrorCategory::CheckpointPublicationUnknown
+        );
+        assert_eq!(error.epoch(), Some(Epoch::INITIAL));
+        assert_eq!(outcome.state, PublicJobState::RecoveryRequired);
+        let status = job.status();
+        assert_eq!(status.state, PublicJobState::RecoveryRequired);
+        assert_eq!(status.checkpoint.last_completed_epoch, None);
+        assert_eq!(
+            status.checkpoint.installed_unknown_epoch,
+            Some(Epoch::INITIAL)
+        );
+        let manifest_path = manifest_root.join("manifest-00000000000000000001.json");
+        assert!(manifest_path.is_file());
+        assert_eq!(output_probe.transactional_commits.load(Ordering::SeqCst), 0);
+        assert_eq!(output_probe.transactional_aborts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            ["sink-a", "sink-b"]
+                .into_iter()
+                .filter(|sink_id| sink_root
+                    .join(sink_id)
+                    .join("prepared-00000000000000000001.json")
+                    .is_file())
+                .count(),
+            2
+        );
+        assert!(
+            ["sink-a", "sink-b"]
+                .into_iter()
+                .all(|sink_id| !checkpoint_matrix_sink_has_visible(&sink_root.join(sink_id)))
+        );
+        drop(job);
+
+        if !manifest_retained {
+            std::fs::remove_file(&manifest_path).unwrap();
+        }
+        let restart_source_opens = Arc::new(Mutex::new(Vec::new()));
+        let restart_source_closed = Arc::new(AtomicUsize::new(0));
+        let restart_sink_closed = Arc::new(AtomicUsize::new(0));
+        let restart_sink_writes = Arc::new(AtomicUsize::new(0));
+        let restart = checkpoint_matrix_public_runner(
+            directory.path(),
+            &sink_root,
+            &restart_source_opens,
+            &restart_source_closed,
+            &restart_sink_closed,
+            &restart_sink_writes,
+            &output_probe,
+            Duration::ZERO,
+            false,
+            config,
+            None,
+        )
+        .start()
+        .await
+        .unwrap();
+        let restarted = tokio::time::timeout(Duration::from_secs(5), restart.wait())
+            .await
+            .expect("rebuilt public runner did not converge");
+        assert_eq!(restarted.state, PublicJobState::Completed);
+        assert_eq!(
+            restarted.completed_epoch,
+            Some(if manifest_retained {
+                Epoch::INITIAL.next().unwrap()
+            } else {
+                Epoch::INITIAL
+            })
+        );
+        let mut opened = restart_source_opens.lock().clone();
+        opened.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            opened,
+            ["left", "right"]
+                .into_iter()
+                .map(|source_id| (
+                    source_id.into(),
+                    manifest_retained.then(|| checkpoint_matrix_cursor_order(source_id)),
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            output_probe.transactional_recovers.load(Ordering::SeqCst),
+            if manifest_retained { 2 } else { 0 }
+        );
+        assert_eq!(output_probe.transactional_commits.load(Ordering::SeqCst), 2);
+        assert_eq!(output_probe.transactional_aborts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            output_probe.ordinary_records.lock().len(),
+            if manifest_retained { 2 } else { 4 }
+        );
+        assert_eq!(
+            checkpoint_matrix_temporary_artifacts(&state_root, &manifest_root, &sink_root),
+            0
+        );
+        assert_eq!(source_closed.load(Ordering::SeqCst), 2);
+        assert_eq!(sink_closed.load(Ordering::SeqCst), 2);
+        assert_eq!(restart_source_closed.load(Ordering::SeqCst), 2);
+        assert_eq!(restart_sink_closed.load(Ordering::SeqCst), 2);
+        assert_eq!(output_probe.ordinary_closed.load(Ordering::SeqCst), 2);
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "each named fault case asserts the complete restart and recovery oracle"
@@ -8266,6 +8592,106 @@ async fn assert_named_checkpoint_fault_case(
             | CheckpointFaultPoint::Retention
             | CheckpointFaultPoint::Compaction
     );
+    let expected_manual = match (point, mode) {
+        (CheckpointFaultPoint::ManifestRename, _)
+        | (CheckpointFaultPoint::ManifestParentSync, CheckpointFaultMode::Io) => {
+            CheckpointManualObservation::Failed {
+                category: PublicStreamingErrorCategory::CheckpointPublicationUnknown,
+                epoch: Some(Epoch::INITIAL),
+                phase: Some(PublicCheckpointPhase::ManifestInstalled),
+                component_kind: Some(PublicComponentKind::Checkpoint),
+                component_id: None,
+            }
+        }
+        (CheckpointFaultPoint::PartialSinkCommit, CheckpointFaultMode::Cancel) => {
+            CheckpointManualObservation::Failed {
+                category: PublicStreamingErrorCategory::Internal,
+                epoch: None,
+                phase: None,
+                component_kind: Some(PublicComponentKind::Checkpoint),
+                component_id: None,
+            }
+        }
+        (CheckpointFaultPoint::PartialSinkCommit, _) => CheckpointManualObservation::Failed {
+            category: PublicStreamingErrorCategory::Connector,
+            epoch: Some(Epoch::INITIAL),
+            phase: Some(PublicCheckpointPhase::ManifestDurable),
+            component_kind: Some(PublicComponentKind::Sink),
+            component_id: Some("sink-a".into()),
+        },
+        (
+            CheckpointFaultPoint::PartialAlignment | CheckpointFaultPoint::StateStage,
+            CheckpointFaultMode::Io | CheckpointFaultMode::Restart,
+        ) => CheckpointManualObservation::Failed {
+            category: PublicStreamingErrorCategory::Operator,
+            epoch: Some(Epoch::INITIAL),
+            phase: Some(PublicCheckpointPhase::SourcesCut),
+            component_kind: Some(PublicComponentKind::Operator),
+            component_id: Some(
+                if point == CheckpointFaultPoint::PartialAlignment {
+                    "merge"
+                } else {
+                    "window"
+                }
+                .into(),
+            ),
+        },
+        (
+            CheckpointFaultPoint::PartialAlignment | CheckpointFaultPoint::StateStage,
+            CheckpointFaultMode::Panic,
+        ) => CheckpointManualObservation::Failed {
+            category: PublicStreamingErrorCategory::TaskPanicked,
+            epoch: Some(Epoch::INITIAL),
+            phase: Some(PublicCheckpointPhase::SourcesCut),
+            component_kind: None,
+            component_id: None,
+        },
+        (
+            CheckpointFaultPoint::SourceAdmission
+            | CheckpointFaultPoint::SourceCut
+            | CheckpointFaultPoint::SinkPreCommit,
+            CheckpointFaultMode::Panic,
+        ) => CheckpointManualObservation::Failed {
+            category: PublicStreamingErrorCategory::Internal,
+            epoch: None,
+            phase: None,
+            component_kind: Some(PublicComponentKind::Checkpoint),
+            component_id: None,
+        },
+        (
+            CheckpointFaultPoint::ManifestParentSync,
+            CheckpointFaultMode::Panic | CheckpointFaultMode::Cancel | CheckpointFaultMode::Restart,
+        )
+        | (
+            CheckpointFaultPoint::CompletedCommit
+            | CheckpointFaultPoint::Retention
+            | CheckpointFaultPoint::Compaction,
+            _,
+        ) => CheckpointManualObservation::Completed(Epoch::INITIAL),
+        _ => CheckpointManualObservation::Failed {
+            category: if mode == CheckpointFaultMode::Io {
+                PublicStreamingErrorCategory::Io
+            } else {
+                PublicStreamingErrorCategory::Internal
+            },
+            epoch: Some(Epoch::INITIAL),
+            phase: Some(match (point, mode) {
+                (CheckpointFaultPoint::PartialAlignment, CheckpointFaultMode::Cancel) => {
+                    PublicCheckpointPhase::Requested
+                }
+                (CheckpointFaultPoint::ManifestParentSync, CheckpointFaultMode::Cancel) => {
+                    PublicCheckpointPhase::SinksCommitted
+                }
+                _ => checkpoint_fault_expected_phase(point),
+            }),
+            component_kind: Some(PublicComponentKind::Checkpoint),
+            component_id: None,
+        },
+    };
+    assert_eq!(
+        report.manual_observation, expected_manual,
+        "{case_id}: public manual observer classification mismatch"
+    );
     assert_eq!(
         report.selected_before_restart,
         durable_before_restart.then_some(Epoch::INITIAL),
@@ -8275,6 +8701,7 @@ async fn assert_named_checkpoint_fault_case(
         report.prepared_artifacts_after_failure,
         match point {
             CheckpointFaultPoint::ManifestRename => 2,
+            CheckpointFaultPoint::ManifestParentSync if mode == CheckpointFaultMode::Io => 2,
             CheckpointFaultPoint::PartialSinkCommit => 1,
             _ => 0,
         },
@@ -8341,12 +8768,43 @@ async fn assert_named_checkpoint_fault_case(
         "{case_id}: watermarks not restored"
     );
     assert_eq!(
+        report.final_source_sequences,
+        BTreeMap::from([("left".into(), Some(1)), ("right".into(), Some(1))]),
+        "{case_id}: frozen public source sequences"
+    );
+    assert_eq!(
+        report.final_source_idle,
+        BTreeMap::from([("left".into(), false), ("right".into(), false)]),
+        "{case_id}: frozen source idle state"
+    );
+    assert_eq!(
         report.window_state_restored, durable_before_restart,
         "{case_id}: window restore evidence mismatch"
     );
     assert_eq!(report.visible_records, 4, "{case_id}: visible record count");
     assert_eq!(report.duplicate_records, 0, "{case_id}: duplicate records");
     assert_eq!(report.missing_records, 0, "{case_id}: missing records");
+    assert_eq!(
+        report.transactional_output,
+        BTreeSet::from([
+            "sink-a|0|1|left|1".into(),
+            "sink-a|0|1|right|10".into(),
+            "sink-b|0|1|left|1".into(),
+            "sink-b|0|1|right|10".into(),
+        ]),
+        "{case_id}: transactional output oracle"
+    );
+    let mut ordinary_output = report.ordinary_output;
+    ordinary_output.sort();
+    let mut expected_ordinary = vec!["0|1|left|1".to_owned(), "0|1|right|10".to_owned()];
+    if !durable_before_restart {
+        expected_ordinary.extend(expected_ordinary.clone());
+        expected_ordinary.sort();
+    }
+    assert_eq!(
+        ordinary_output, expected_ordinary,
+        "{case_id}: ordinary output oracle"
+    );
     assert_eq!(
         report.temporary_artifacts, 0,
         "{case_id}: temporary artifacts"
@@ -8735,6 +9193,7 @@ async fn checkpoint_matrix_sink_commits_bounded_epoch_files() {
         written_records: Arc::new(AtomicUsize::new(0)),
         closed: Arc::new(AtomicUsize::new(0)),
         write_delay: Duration::ZERO,
+        lifecycle: Arc::new(CheckpointMatrixOutputProbe::default()),
     };
     TransactionalStreamSink::open(&mut sink).await.unwrap();
     let epochs = [Epoch::INITIAL, Epoch::INITIAL.next().unwrap()];

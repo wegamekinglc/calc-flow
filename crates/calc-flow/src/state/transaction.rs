@@ -124,6 +124,8 @@ pub(crate) struct ManifestTransaction {
     fault_hook: Option<ManifestTransactionFaultHook>,
     #[cfg(test)]
     operation_hook: Option<ManifestOperationHook>,
+    #[cfg(test)]
+    real_parent_sync_failure: bool,
 }
 
 impl ManifestTransaction {
@@ -220,12 +222,20 @@ impl ManifestTransaction {
             fault_hook: None,
             #[cfg(test)]
             operation_hook: None,
+            #[cfg(test)]
+            real_parent_sync_failure: false,
         })
     }
 
     #[cfg(test)]
     pub(crate) fn with_fault_hook(mut self, hook: ManifestTransactionFaultHook) -> Self {
         self.fault_hook = Some(hook);
+        self
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn with_real_parent_sync_failure_for_test(mut self) -> Self {
+        self.real_parent_sync_failure = true;
         self
     }
 
@@ -307,6 +317,8 @@ impl ManifestTransaction {
         let root = self.manifest_root.clone();
         #[cfg(test)]
         let fault_hook = self.fault_hook.clone();
+        #[cfg(test)]
+        let real_parent_sync_failure = self.real_parent_sync_failure;
         owner_settled_publication(
             cancellation,
             worker(move || {
@@ -316,6 +328,8 @@ impl ManifestTransaction {
                     &bytes,
                     #[cfg(test)]
                     fault_hook.as_ref(),
+                    #[cfg(test)]
+                    real_parent_sync_failure,
                 )
             }),
         )
@@ -959,6 +973,7 @@ fn publish_manifest(
     epoch: Epoch,
     bytes: &[u8],
     #[cfg(test)] fault_hook: Option<&ManifestTransactionFaultHook>,
+    #[cfg(test)] real_parent_sync_failure: bool,
 ) -> Result<ManifestPublication> {
     validate_directory(root)?;
     let destination = manifest_path(root, epoch);
@@ -974,6 +989,8 @@ fn publish_manifest(
             &mut parent_synced,
             #[cfg(test)]
             fault_hook,
+            #[cfg(test)]
+            real_parent_sync_failure,
         )
     }));
     match publication {
@@ -1024,6 +1041,7 @@ fn install_manifest(
     bytes: &[u8],
     parent_synced: &mut bool,
     #[cfg(test)] fault_hook: Option<&ManifestTransactionFaultHook>,
+    #[cfg(test)] real_parent_sync_failure: bool,
 ) -> Result<()> {
     let temporary = write_manifest_temporary(
         root,
@@ -1042,6 +1060,8 @@ fn install_manifest(
         parent_synced,
         #[cfg(test)]
         fault_hook,
+        #[cfg(test)]
+        real_parent_sync_failure,
     )
 }
 
@@ -1088,7 +1108,19 @@ fn sync_manifest_root(
     root: &Path,
     parent_synced: &mut bool,
     #[cfg(test)] fault_hook: Option<&ManifestTransactionFaultHook>,
+    #[cfg(test)] real_parent_sync_failure: bool,
 ) -> Result<()> {
+    #[cfg(all(test, unix))]
+    if real_parent_sync_failure {
+        let sync_result = sync_directory_with_permission_failure(root);
+        if let Some(hook) = fault_hook {
+            let hook_result = hook(ManifestTransactionFaultPoint::ManifestParentSync);
+            if sync_result.is_ok() {
+                hook_result?;
+            }
+        }
+        return sync_result;
+    }
     sync_directory(root)?;
     *parent_synced = true;
     #[cfg(test)]
@@ -1096,6 +1128,26 @@ fn sync_manifest_root(
         hook(ManifestTransactionFaultPoint::ManifestParentSync)?;
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+fn sync_directory_with_permission_failure(directory: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let permissions = std::fs::metadata(directory)
+        .map_err(|source| io_error(directory, source))?
+        .permissions();
+    let mut restricted = permissions.clone();
+    restricted.set_mode(0o111);
+    std::fs::set_permissions(directory, restricted)
+        .map_err(|source| io_error(directory, source))?;
+    let sync_result = sync_directory(directory);
+    let restore_result = std::fs::set_permissions(directory, permissions)
+        .map_err(|source| io_error(directory, source));
+    match (sync_result, restore_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (_, Err(error)) => Err(error),
+    }
 }
 
 fn classify_failed_publication(

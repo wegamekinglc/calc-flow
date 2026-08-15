@@ -197,6 +197,14 @@ impl CheckpointFaultInjector {
         }
     }
 
+    #[cfg(unix)]
+    fn is_armed(&self, point: CheckpointFaultPoint, mode: CheckpointFaultMode) -> bool {
+        self.0
+            .lock()
+            .armed
+            .is_some_and(|fault| fault.point == point && fault.mode == mode)
+    }
+
     pub(crate) fn trigger_count(&self) -> usize {
         self.0.lock().trigger_count
     }
@@ -2922,6 +2930,8 @@ async fn open_checkpoint_runtime(
     )
     .await
     .map_err(|error| sanitize_managed_preflight_error(error, managed, false))?;
+    #[cfg(all(test, unix))]
+    let transaction = configure_test_manifest_transaction(transaction, &spec.faults);
     let selected = transaction
         .select_latest_cancellable(&identity, cancellation)
         .await
@@ -2980,6 +2990,21 @@ async fn open_checkpoint_runtime(
         #[cfg(test)]
         started_gate: spec.started_gate,
     })
+}
+
+#[cfg(all(test, unix))]
+fn configure_test_manifest_transaction(
+    transaction: ManifestTransaction,
+    faults: &CheckpointFaultInjector,
+) -> ManifestTransaction {
+    if faults.is_armed(
+        CheckpointFaultPoint::ManifestParentSync,
+        CheckpointFaultMode::Io,
+    ) {
+        transaction.with_real_parent_sync_failure_for_test()
+    } else {
+        transaction
+    }
 }
 
 fn sanitize_managed_preflight_error(
