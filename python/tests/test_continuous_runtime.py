@@ -754,24 +754,32 @@ def test_blocking_start_async_terminal_closes_owned_event_loop(
     assert job._blocking_loop is None
 
 
+@pytest.mark.parametrize("cancel_count", (1, 3), ids=("single", "multiple"))
 def test_blocking_start_native_terminal_outcome_wins_cleanup_cancellation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel_count: int
 ) -> None:
     job = _blocking_started_job(tmp_path, finite=True)
     blocking_loop = job._blocking_loop
     thread = blocking_loop._thread
     original_close_async = runtime_module._BlockingEventLoop.close_async
+    cleanup_completions = 0
 
-    async def exercise() -> runtime_module.JobOutcome:
+    async def exercise() -> tuple[runtime_module.JobOutcome, int]:
         cleanup_entered = asyncio.Event()
         cleanup_release = asyncio.Event()
 
         async def controlled_close_async(
             self: runtime_module._BlockingEventLoop,
         ) -> None:
+            nonlocal cleanup_completions
             cleanup_entered.set()
             await cleanup_release.wait()
             await original_close_async(self)
+            cleanup_completions += 1
+
+        async def observe_event_loop_progress() -> bool:
+            await asyncio.sleep(0)
+            return True
 
         monkeypatch.setattr(
             runtime_module._BlockingEventLoop,
@@ -780,15 +788,20 @@ def test_blocking_start_native_terminal_outcome_wins_cleanup_cancellation(
         )
         observer = asyncio.create_task(job.wait_async())
         await cleanup_entered.wait()
-        observer.cancel()
-        await asyncio.sleep(0)
+        for _ in range(cancel_count):
+            observer.cancel()
+        progress = asyncio.create_task(observe_event_loop_progress())
+        assert await asyncio.wait_for(progress, timeout=1)
         cleanup_release.set()
-        return await observer
+        outcome = await asyncio.wait_for(observer, timeout=1)
+        return outcome, observer.cancelling()
 
-    outcome = asyncio.run(exercise())
+    outcome, observer_cancellation_count = asyncio.run(exercise())
 
     thread.join(timeout=2)
     assert outcome.state == "completed"
+    assert cleanup_completions == 1
+    assert observer_cancellation_count == 0
     assert not thread.is_alive()
     assert job._blocking_loop is None
 

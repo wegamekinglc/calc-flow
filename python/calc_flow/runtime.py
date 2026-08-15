@@ -45,6 +45,8 @@ async def _raise_after_cancellation_cleanup(
 async def _finish_cleanup(cleanup: Awaitable[object]) -> None:
     """Finish already-linearized terminal cleanup despite observer cancellation."""
 
+    owner = asyncio.current_task()
+
     async def run_cleanup() -> None:
         await cleanup
 
@@ -53,6 +55,9 @@ async def _finish_cleanup(cleanup: Awaitable[object]) -> None:
         try:
             await asyncio.shield(cleanup_task)
         except asyncio.CancelledError:
+            if owner is not None:
+                while owner.cancelling():
+                    owner.uncancel()
             continue
     cleanup_task.result()
 
