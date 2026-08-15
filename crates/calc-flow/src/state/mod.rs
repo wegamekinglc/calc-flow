@@ -12,6 +12,10 @@ mod transaction;
 
 #[cfg(test)]
 pub(crate) use transaction::ManifestTransactionFaultPoint;
+#[cfg(all(test, unix))]
+pub(crate) use transaction::{
+    ManifestParentSyncOsFailureProbe, parent_sync_permission_failure_supported_for_test,
+};
 #[allow(
     unused_imports,
     reason = "M5 state transaction types are consumed by the private checkpoint runtime"

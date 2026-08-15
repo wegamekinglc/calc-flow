@@ -8426,6 +8426,15 @@ async fn twenty_minute_epoch_checkpoint_restart() {
     reason = "the public proof owns both retained and lost installed-manifest recovery outcomes"
 )]
 async fn public_parent_directory_sync_os_failure_requires_recovery() {
+    let capability_root = tempfile::tempdir().unwrap();
+    if !crate::state::parent_sync_permission_failure_supported_for_test(capability_root.path())
+        .unwrap()
+    {
+        eprintln!(
+            "skipping public parent-directory sync OS failure proof: this process bypasses mode 0111"
+        );
+        return;
+    }
     for manifest_retained in [true, false] {
         let directory = tempfile::tempdir().unwrap();
         let state_root = directory.path().join("state");
@@ -8482,6 +8491,11 @@ async fn public_parent_directory_sync_os_failure_requires_recovery() {
         assert_eq!(
             status.checkpoint.installed_unknown_epoch,
             Some(Epoch::INITIAL)
+        );
+        assert_eq!(
+            job.test_probe().parent_sync_os_failures,
+            1,
+            "the public recovery result must be caused by a real parent-directory sync OS failure"
         );
         let manifest_path = manifest_root.join("manifest-00000000000000000001.json");
         assert!(manifest_path.is_file());

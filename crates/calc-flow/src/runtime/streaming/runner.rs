@@ -66,6 +66,8 @@ use crate::pipeline::{
     OperatorCheckpointCapability, RuntimeSinkRoute, RuntimeSourceRoute, RuntimeStreamNode,
     StreamRuntimePlanParts,
 };
+#[cfg(all(test, unix))]
+use crate::state::ManifestParentSyncOsFailureProbe;
 #[cfg(test)]
 use crate::state::ManifestTransactionFaultPoint;
 use crate::{
@@ -142,6 +144,8 @@ struct CheckpointFaultState {
     armed: Option<CheckpointFault>,
     trigger_count: usize,
     cancellation_trigger_count: usize,
+    #[cfg(unix)]
+    parent_sync_os_failure_probe: ManifestParentSyncOsFailureProbe,
 }
 
 #[cfg(test)]
@@ -155,6 +159,8 @@ impl CheckpointFaultInjector {
             armed: Some(CheckpointFault { point, mode }),
             trigger_count: 0,
             cancellation_trigger_count: 0,
+            #[cfg(unix)]
+            parent_sync_os_failure_probe: ManifestParentSyncOsFailureProbe::default(),
         })))
     }
 
@@ -203,6 +209,16 @@ impl CheckpointFaultInjector {
             .lock()
             .armed
             .is_some_and(|fault| fault.point == point && fault.mode == mode)
+    }
+
+    #[cfg(unix)]
+    fn parent_sync_os_failure_probe(&self) -> ManifestParentSyncOsFailureProbe {
+        self.0.lock().parent_sync_os_failure_probe.clone()
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn parent_sync_os_failure_count(&self) -> usize {
+        self.0.lock().parent_sync_os_failure_probe.count()
     }
 
     pub(crate) fn trigger_count(&self) -> usize {
@@ -3001,7 +3017,7 @@ fn configure_test_manifest_transaction(
         CheckpointFaultPoint::ManifestParentSync,
         CheckpointFaultMode::Io,
     ) {
-        transaction.with_real_parent_sync_failure_for_test()
+        transaction.with_real_parent_sync_failure_for_test(faults.parent_sync_os_failure_probe())
     } else {
         transaction
     }
