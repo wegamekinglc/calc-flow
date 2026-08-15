@@ -160,6 +160,28 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(workflow.count("maturin-version: v1.14.1"), action_count)
         self.assertEqual(workflow.count('rust-toolchain: "1.88.0"'), action_count)
 
+    def test_workflow_actions_are_sha_pinned(self) -> None:
+        for name in (
+            "benchmarks.yml",
+            "ci-linux.yml",
+            "ci-windows.yml",
+            "release.yml",
+        ):
+            workflow = (ROOT / ".github" / "workflows" / name).read_text(
+                encoding="utf-8"
+            )
+            for line in workflow.splitlines():
+                step = line.strip()
+                if not step.startswith("uses:") or "@" not in step:
+                    continue
+                action, _, reference = step.removeprefix("uses:").strip().partition("@")
+                reference = reference.split()[0]
+                with self.subTest(workflow=name, action=action):
+                    self.assertEqual(len(reference), 40)
+                    self.assertTrue(
+                        all(character in "0123456789abcdef" for character in reference)
+                    )
+
     def test_rust_core_ci_sets_python_313_before_all_features(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
         rust_core = workflow.split("  rust-core:\n", 1)[1].split(
