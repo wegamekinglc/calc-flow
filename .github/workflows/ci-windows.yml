@@ -13,6 +13,60 @@ concurrency:
   # README CI badge as failing even when every job was healthy.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
 jobs:
+  probe-windows-createdir:
+    name: TEMP probe Windows create_dir_all behavior
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+      - shell: bash
+        run: |
+          probe="$RUNNER_TEMP/createdir-probe"
+          mkdir -p "$probe/src"
+          cat > "$probe/Cargo.toml" <<'TOML'
+          [package]
+          name = "createdir-probe"
+          version = "0.0.0"
+          edition = "2021"
+
+          [dependencies]
+          tempfile = "3"
+          TOML
+          cat > "$probe/src/main.rs" <<'RS'
+          use std::fs;
+          use std::io::Write as _;
+
+          fn main() {
+              for i in 0..20 {
+                  let directory = tempfile::tempdir().unwrap();
+                  let artifact = directory.path().join("m5-checkpoint-benchmark");
+                  match fs::create_dir_all(&artifact) {
+                      Ok(()) => println!("iter {i}: create_dir_all ok"),
+                      Err(error) => println!(
+                          "iter {i}: create_dir_all FAIL raw={:?} kind={:?} path={}",
+                          error.raw_os_error(),
+                          error.kind(),
+                          artifact.display()
+                      ),
+                  }
+                  let report = artifact.join("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-run-1.json");
+                  let written = fs::OpenOptions::new()
+                      .create_new(true)
+                      .write(true)
+                      .open(&report)
+                      .and_then(|mut file| file.write_all(b"{}").and_then(|()| file.sync_all()));
+                  println!("iter {i}: write -> {:?}", written.is_ok());
+              }
+
+              let directory = tempfile::tempdir().unwrap();
+              let canonical = fs::canonicalize(directory.path()).unwrap();
+              let artifact = canonical.join("m5-checkpoint-benchmark");
+              let result = fs::create_dir_all(&artifact);
+              println!("canonical create_dir_all -> {:?}", result.is_ok());
+          }
+          RS
+          cd "$probe"
+          cargo run --release 2>&1 | tail -45
   process-tree:
     name: Windows process-tree cleanup
     runs-on: windows-latest

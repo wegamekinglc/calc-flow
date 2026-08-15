@@ -6895,12 +6895,12 @@ fn private_absolute_measurement_recomputes_raw_statistics_and_hashes_inputs() {
     assert!(confidence[0].as_f64().unwrap() <= 104.5);
     assert!(confidence[1].as_f64().unwrap() >= 104.5);
     assert_eq!(measurement["decision"], "absolute_only");
-    assert!(
-        measurement["artifacts"]["sample"]["path"]
-            .as_str()
-            .unwrap()
-            .ends_with("candidate-sha/sample.json")
-    );
+    // The recorded artifact path uses platform separators.
+    let sample_path = measurement["artifacts"]["sample"]["path"]
+        .as_str()
+        .unwrap()
+        .replace('\\', "/");
+    assert!(sample_path.ends_with("candidate-sha/sample.json"));
     assert_eq!(
         measurement["artifacts"]["sample"]["sha256"],
         sha256_bytes(&sample_bytes)
