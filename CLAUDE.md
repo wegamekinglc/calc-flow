@@ -197,13 +197,11 @@ The frontend talks to the backend over the `/api/v2` REST contract only.
 - `UdfRegistry` owns trusted native implementations;
   `UdfRegistrySnapshot` is captured at compile time; configurations carry only
   `UdfReference` values — never source, callables, or import paths.
-- `StreamingRunner` owns public async `StreamSource`/`StreamSink` bindings and
-  `ManagedCheckpointRuntime`. `CheckpointManifest` v3 is the managed continuous
-  runtime's durable recovery truth; checkpoints publish the manifest before
-  sink commit, and per-output proof distinguishes at-least-once from
-  exactly-once behavior. The old v2 `Source`/`Sink`, `MicroBatchRunner`,
-  formed-batch push runner, and public `FileCheckpointStore` are removed.
-  `FileProjectStore` remains the bounded atomic project-document store.
+- Continuous ownership and compatibility follow the canonical [Rust core
+  guidance](AGENTS.md#rust-core): the crate-root facade is public and uses
+  managed v3 recovery, while control, coordination, and reaping stay internal.
+  The old v2 runners and public checkpoint store are removed with no
+  compatibility layer.
 - The canonical project format is a strict data-only `ProjectDocument` with
   `format_version: 2`. The Rust `ProjectSpec`, generated JSON Schema, Python
   `ProjectDocument`, FastAPI request models, and generated TypeScript contract
