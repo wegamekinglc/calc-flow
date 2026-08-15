@@ -1,4 +1,4 @@
-name: CI
+name: Linux CI
 on:
   pull_request:
   push:
@@ -44,26 +44,14 @@ jobs:
           path: coverage.xml
           if-no-files-found: error
           retention-days: 14
-  windows-process-tree:
-    name: Windows process-tree cleanup
-    if: github.event_name == 'pull_request'
-    runs-on: windows-latest
-    timeout-minutes: 10
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - name: Report Python coverage to Coveralls
+        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
         with:
-          python-version-file: .python-version
-      - name: Report Windows runner
-        shell: pwsh
-        run: |
-          Write-Output "WINDOWS_RUNNER_EVIDENCE runner_os=$env:RUNNER_OS image_os=$env:ImageOS image_version=$env:ImageVersion"
-      - name: Run Windows process-tree cleanup test
-        run: >-
-          python -W error::ResourceWarning -m unittest -v
-          scripts.test_run_rust_tests.RustTestHarnessTests.test_timeout_cleans_up_the_test_binary_process_tree_on_windows
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          flag-name: python
+          format: cobertura
+          file: coverage.xml
+          parallel: true
   frontend:
     name: Studio build + tests
     runs-on: ubuntu-latest
@@ -128,6 +116,14 @@ jobs:
           path: web-ui/backend/coverage.xml
           if-no-files-found: error
           retention-days: 14
+      - name: Report studio coverage to Coveralls
+        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          flag-name: studio
+          format: cobertura
+          file: web-ui/backend/coverage.xml
+          parallel: true
   browser-e2e:
     name: Studio browser workflow
     runs-on: ubuntu-latest
@@ -414,6 +410,13 @@ jobs:
           path: rust-lcov.info
           if-no-files-found: error
           retention-days: 14
+      - name: Report Rust coverage to Coveralls
+        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          flag-name: rust
+          file: rust-lcov.info
+          parallel: true
       - name: Reclaim coverage build disk before docs
         run: cargo llvm-cov clean --workspace
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
@@ -434,3 +437,16 @@ jobs:
           --ignore RUSTSEC-2026-0177
       - name: Check licenses, sources, advisories, and duplicate policy
         run: cargo deny --locked check
+  coveralls-finish:
+    name: Coveralls finish
+    needs:
+      - lint-and-test
+      - studio-backend
+      - rust-core
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close the parallel Coveralls build
+        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          parallel-finished: true
