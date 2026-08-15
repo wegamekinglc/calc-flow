@@ -168,6 +168,177 @@ fn required_item<'py>(mapping: &Bound<'py, PyDict>, key: &str) -> PyResult<Bound
         .ok_or_else(|| PyTypeError::new_err(format!("missing required field {key:?}")))
 }
 
+fn replay_positioning(value: &Bound<'_, PyDict>) -> PyResult<calc_flow::ReplayPositioning> {
+    match required_item(value, "replay_positioning")?
+        .extract::<String>()?
+        .as_str()
+    {
+        "exact_pause_report_and_seek" => Ok(calc_flow::ReplayPositioning::ExactPauseReportAndSeek),
+        "unsupported" => Ok(calc_flow::ReplayPositioning::Unsupported),
+        other => Err(PyTypeError::new_err(format!(
+            "unsupported replay positioning {other:?}"
+        ))),
+    }
+}
+
+fn source_delivery(value: &Bound<'_, PyDict>) -> PyResult<calc_flow::SourceDeliveryCapability> {
+    match required_item(value, "delivery")?
+        .extract::<String>()?
+        .as_str()
+    {
+        "lossless" => Ok(calc_flow::SourceDeliveryCapability::Lossless),
+        "lossy" => Ok(calc_flow::SourceDeliveryCapability::Lossy),
+        other => Err(PyTypeError::new_err(format!(
+            "unsupported source delivery {other:?}"
+        ))),
+    }
+}
+
+fn source_schema(value: &Bound<'_, PyDict>) -> PyResult<calc_flow::SourceSchema> {
+    let schema = required_item(value, "schema")?;
+    if schema.is_none() {
+        return Ok(calc_flow::SourceSchema::DynamicOrUnknown);
+    }
+    let capsule = schema
+        .call_method0("__arrow_c_schema__")?
+        .cast_into::<PyCapsule>()?;
+    let schema = pyo3_arrow::PySchema::from_arrow_pycapsule(&capsule)?;
+    Ok(calc_flow::SourceSchema::Exact(schema.into()))
+}
+
+fn native_watermarks(value: &Bound<'_, PyDict>) -> PyResult<calc_flow::NativeWatermarkCapability> {
+    match required_item(value, "native_watermarks")?
+        .extract::<String>()?
+        .as_str()
+    {
+        "never_emits" => Ok(calc_flow::NativeWatermarkCapability::NeverEmits),
+        "emits_native" => Ok(calc_flow::NativeWatermarkCapability::EmitsNative),
+        "runtime_toggleable" => Ok(calc_flow::NativeWatermarkCapability::RuntimeToggleable),
+        "unknown" => Ok(calc_flow::NativeWatermarkCapability::Unknown),
+        other => Err(PyTypeError::new_err(format!(
+            "unsupported native watermark capability {other:?}"
+        ))),
+    }
+}
+
+fn parse_source_capabilities(value: &Bound<'_, PyDict>) -> PyResult<calc_flow::SourceCapabilities> {
+    let (max_batch_rows, max_batch_bytes) = source_batch_bounds(value)?;
+    Ok(calc_flow::SourceCapabilities {
+        replay_positioning: replay_positioning(value)?,
+        delivery: source_delivery(value)?,
+        max_batch_rows,
+        max_batch_bytes,
+        schema: source_schema(value)?,
+        native_watermarks: native_watermarks(value)?,
+    })
+}
+
+fn source_batch_bounds(value: &Bound<'_, PyDict>) -> PyResult<(usize, usize)> {
+    Ok((
+        required_item(value, "max_batch_rows")?.extract()?,
+        required_item(value, "max_batch_bytes")?.extract()?,
+    ))
+}
+
+fn source_cursor_arguments(
+    cursor: Option<calc_flow::Cursor>,
+) -> PyResult<(Py<PyAny>, Py<PyAny>, Py<PyAny>)> {
+    Python::attach(|py| {
+        let Some(cursor) = cursor else {
+            return Ok((py.None(), py.None(), py.None()));
+        };
+        let payload = serde_json::to_string(cursor.payload())
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        Ok((
+            cursor.source_id().into_py_any(py)?,
+            cursor.order().into_py_any(py)?,
+            crate::config::json_to_python(py, &payload)?.unbind(),
+        ))
+    })
+}
+
+fn source_event_batch(
+    py: Python<'_>,
+    value: &Bound<'_, PyTuple>,
+) -> calc_flow::Result<calc_flow::Batch> {
+    value
+        .get_item(1)
+        .map_err(|error| connector_error("source.next", error))?
+        .extract::<PyRef<'_, PyBatch>>()
+        .map_err(|error| connector_error("source.next", error))?
+        .clone_inner()
+        .and_then(|batch| crate::batch::rehome_python_payload(py, batch))
+        .map_err(|error| connector_error("source.next", error))
+}
+
+fn source_event_cursor(value: &Bound<'_, PyTuple>) -> calc_flow::Result<calc_flow::Cursor> {
+    let source_id = value
+        .get_item(2)
+        .and_then(|item| item.extract::<Option<String>>())
+        .map_err(|error| connector_error("source.next", error))?;
+    let order = value
+        .get_item(3)
+        .and_then(|item| item.extract::<Vec<u8>>())
+        .map_err(|error| connector_error("source.next", error))?;
+    let payload = value
+        .get_item(4)
+        .map_err(|error| connector_error("source.next", error))?;
+    let payload = json_map(&payload, "source.next cursor")?;
+    match source_id {
+        Some(source_id) => calc_flow::Cursor::new(source_id, order, payload),
+        None => calc_flow::Cursor::unbound(order, payload),
+    }
+}
+
+fn data_source_event(
+    py: Python<'_>,
+    value: &Bound<'_, PyTuple>,
+) -> calc_flow::Result<calc_flow::SourceEvent> {
+    Ok(calc_flow::SourceEvent::Data {
+        batch: source_event_batch(py, value)?,
+        cursor: source_event_cursor(value)?,
+    })
+}
+
+fn watermark_source_event(value: &Bound<'_, PyTuple>) -> calc_flow::Result<calc_flow::SourceEvent> {
+    let micros = value
+        .get_item(1)
+        .and_then(|item| item.extract::<i64>())
+        .map_err(|error| connector_error("source.next", error))?;
+    Ok(calc_flow::SourceEvent::Watermark(
+        calc_flow::EventTime::from_micros(micros),
+    ))
+}
+
+fn source_event_from_tuple(
+    py: Python<'_>,
+    value: &Bound<'_, PyTuple>,
+) -> calc_flow::Result<calc_flow::SourceEvent> {
+    let tag = value
+        .get_item(0)
+        .and_then(|item| item.extract::<String>())
+        .map_err(|error| connector_error("source.next", error))?;
+    match tag.as_str() {
+        "data" if value.len() == 5 => data_source_event(py, value),
+        "watermark" if value.len() == 2 => watermark_source_event(value),
+        "idle" if value.len() == 1 => Ok(calc_flow::SourceEvent::Idle),
+        _ => Err(connector_error("source.next", "invalid source event")),
+    }
+}
+
+fn decode_source_event(value: &Py<PyAny>) -> calc_flow::Result<Option<calc_flow::SourceEvent>> {
+    Python::attach(|py| {
+        let value = value.bind(py);
+        if value.is_none() {
+            return Ok(None);
+        }
+        let value = value
+            .cast::<PyTuple>()
+            .map_err(|_| connector_error("source.next", "invalid source event"))?;
+        source_event_from_tuple(py, value).map(Some)
+    })
+}
+
 fn json_map(value: &Bound<'_, PyAny>, label: &str) -> calc_flow::Result<calc_flow::JsonMap> {
     let value = python_json(value, label)?;
     serde_json::from_value(value).map_err(|error| connector_error(label, error))
@@ -253,64 +424,7 @@ impl PythonContinuousSource {
                 .bind(py)
                 .call_method0("_native_capabilities")?;
             let value = value.cast::<PyDict>()?;
-            let replay_positioning = match required_item(value, "replay_positioning")?
-                .extract::<String>()?
-                .as_str()
-            {
-                "exact_pause_report_and_seek" => {
-                    calc_flow::ReplayPositioning::ExactPauseReportAndSeek
-                }
-                "unsupported" => calc_flow::ReplayPositioning::Unsupported,
-                other => {
-                    return Err(PyTypeError::new_err(format!(
-                        "unsupported replay positioning {other:?}"
-                    )));
-                }
-            };
-            let delivery = match required_item(value, "delivery")?
-                .extract::<String>()?
-                .as_str()
-            {
-                "lossless" => calc_flow::SourceDeliveryCapability::Lossless,
-                "lossy" => calc_flow::SourceDeliveryCapability::Lossy,
-                other => {
-                    return Err(PyTypeError::new_err(format!(
-                        "unsupported source delivery {other:?}"
-                    )));
-                }
-            };
-            let schema = required_item(value, "schema")?;
-            let schema = if schema.is_none() {
-                calc_flow::SourceSchema::DynamicOrUnknown
-            } else {
-                let capsule = schema
-                    .call_method0("__arrow_c_schema__")?
-                    .cast_into::<PyCapsule>()?;
-                let schema = pyo3_arrow::PySchema::from_arrow_pycapsule(&capsule)?;
-                calc_flow::SourceSchema::Exact(schema.into())
-            };
-            let native_watermarks = match required_item(value, "native_watermarks")?
-                .extract::<String>()?
-                .as_str()
-            {
-                "never_emits" => calc_flow::NativeWatermarkCapability::NeverEmits,
-                "emits_native" => calc_flow::NativeWatermarkCapability::EmitsNative,
-                "runtime_toggleable" => calc_flow::NativeWatermarkCapability::RuntimeToggleable,
-                "unknown" => calc_flow::NativeWatermarkCapability::Unknown,
-                other => {
-                    return Err(PyTypeError::new_err(format!(
-                        "unsupported native watermark capability {other:?}"
-                    )));
-                }
-            };
-            Ok(calc_flow::SourceCapabilities {
-                replay_positioning,
-                delivery,
-                max_batch_rows: required_item(value, "max_batch_rows")?.extract()?,
-                max_batch_bytes: required_item(value, "max_batch_bytes")?.extract()?,
-                schema,
-                native_watermarks,
-            })
+            parse_source_capabilities(value)
         })
     }
 }
@@ -335,19 +449,8 @@ impl calc_flow::StreamSource for PythonContinuousSource {
         if let Some(error) = self.capability_error.lock().take() {
             return Err(connector_error("source.capabilities", error));
         }
-        let (source_id, order, payload) = Python::attach(|py| -> PyResult<_> {
-            let Some(cursor) = cursor else {
-                return Ok((py.None(), py.None(), py.None()));
-            };
-            let payload = serde_json::to_string(cursor.payload())
-                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-            Ok((
-                cursor.source_id().into_py_any(py)?,
-                cursor.order().into_py_any(py)?,
-                crate::config::json_to_python(py, &payload)?.unbind(),
-            ))
-        })
-        .map_err(|error| connector_error("source.open", error))?;
+        let (source_id, order, payload) = source_cursor_arguments(cursor)
+            .map_err(|error| connector_error("source.open", error))?;
         let value = Python::attach(|py| {
             self.binding
                 .object()
@@ -370,58 +473,7 @@ impl calc_flow::StreamSource for PythonContinuousSource {
         })
         .map_err(|error| connector_error("source.next", error))?;
         let value = resolve_connector(value, "source.next", &self.awaits, &self.context).await?;
-        Python::attach(|py| {
-            let value = value.bind(py);
-            if value.is_none() {
-                return Ok(None);
-            }
-            let value = value
-                .cast::<PyTuple>()
-                .map_err(|_| connector_error("source.next", "invalid source event"))?;
-            let tag = value
-                .get_item(0)
-                .and_then(|item| item.extract::<String>())
-                .map_err(|error| connector_error("source.next", error))?;
-            let event = match tag.as_str() {
-                "data" if value.len() == 5 => {
-                    let batch = value
-                        .get_item(1)
-                        .map_err(|error| connector_error("source.next", error))?
-                        .extract::<PyRef<'_, PyBatch>>()
-                        .map_err(|error| connector_error("source.next", error))?
-                        .clone_inner()
-                        .and_then(|batch| crate::batch::rehome_python_payload(py, batch))
-                        .map_err(|error| connector_error("source.next", error))?;
-                    let source_id = value
-                        .get_item(2)
-                        .and_then(|item| item.extract::<Option<String>>())
-                        .map_err(|error| connector_error("source.next", error))?;
-                    let order = value
-                        .get_item(3)
-                        .and_then(|item| item.extract::<Vec<u8>>())
-                        .map_err(|error| connector_error("source.next", error))?;
-                    let payload = value
-                        .get_item(4)
-                        .map_err(|error| connector_error("source.next", error))?;
-                    let payload = json_map(&payload, "source.next cursor")?;
-                    let cursor = match source_id {
-                        Some(source_id) => calc_flow::Cursor::new(source_id, order, payload)?,
-                        None => calc_flow::Cursor::unbound(order, payload)?,
-                    };
-                    calc_flow::SourceEvent::Data { batch, cursor }
-                }
-                "watermark" if value.len() == 2 => {
-                    let micros = value
-                        .get_item(1)
-                        .and_then(|item| item.extract::<i64>())
-                        .map_err(|error| connector_error("source.next", error))?;
-                    calc_flow::SourceEvent::Watermark(calc_flow::EventTime::from_micros(micros))
-                }
-                "idle" if value.len() == 1 => calc_flow::SourceEvent::Idle,
-                _ => return Err(connector_error("source.next", "invalid source event")),
-            };
-            Ok(Some(event))
-        })
+        decode_source_event(&value)
     }
 
     async fn close(&mut self) -> calc_flow::Result<()> {
@@ -629,28 +681,33 @@ impl PyManagedCheckpointRuntime {
     }
 }
 
+fn optional_duration(value: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<Duration>> {
+    required_item(value, key)?
+        .extract::<Option<u64>>()
+        .map(|value| value.map(Duration::from_micros))
+}
+
+fn bounded_watermark_policy(value: &Bound<'_, PyDict>) -> PyResult<calc_flow::WatermarkPolicy> {
+    Ok(calc_flow::WatermarkPolicy::BoundedOutOfOrderness {
+        event_time_column: required_item(value, "event_time_column")?.extract()?,
+        max_out_of_orderness: Duration::from_micros(
+            required_item(value, "max_out_of_orderness_micros")?.extract()?,
+        ),
+        emit_interval: Duration::from_micros(
+            required_item(value, "emit_interval_micros")?.extract()?,
+        ),
+        idle_timeout: optional_duration(value, "idle_timeout_micros")?,
+    })
+}
+
 fn source_policy(binding: &Bound<'_, PyAny>) -> PyResult<calc_flow::WatermarkPolicy> {
     let value = binding.call_method0("_native_policy")?;
     let value = value.cast::<PyDict>()?;
-    let optional_duration = |key: &str| -> PyResult<Option<Duration>> {
-        required_item(value, key)?
-            .extract::<Option<u64>>()
-            .map(|value| value.map(Duration::from_micros))
-    };
     match required_item(value, "kind")?.extract::<String>()?.as_str() {
         "source_provided" => Ok(calc_flow::WatermarkPolicy::SourceProvided),
-        "bounded_out_of_orderness" => Ok(calc_flow::WatermarkPolicy::BoundedOutOfOrderness {
-            event_time_column: required_item(value, "event_time_column")?.extract()?,
-            max_out_of_orderness: Duration::from_micros(
-                required_item(value, "max_out_of_orderness_micros")?.extract()?,
-            ),
-            emit_interval: Duration::from_micros(
-                required_item(value, "emit_interval_micros")?.extract()?,
-            ),
-            idle_timeout: optional_duration("idle_timeout_micros")?,
-        }),
+        "bounded_out_of_orderness" => bounded_watermark_policy(value),
         "disabled" => Ok(calc_flow::WatermarkPolicy::Disabled {
-            idle_timeout: optional_duration("idle_timeout_micros")?,
+            idle_timeout: optional_duration(value, "idle_timeout_micros")?,
         }),
         kind => Err(PyTypeError::new_err(format!(
             "unsupported watermark policy {kind:?}"
@@ -695,6 +752,46 @@ fn sink_descriptor<'py>(binding: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDi
         .map_err(Into::into)
 }
 
+fn sink_retention(descriptor: &Bound<'_, PyDict>) -> PyResult<calc_flow::RetentionClass> {
+    match required_item(descriptor, "retention")?
+        .extract::<String>()?
+        .as_str()
+    {
+        "bounded" => Ok(calc_flow::RetentionClass::Bounded),
+        "unbounded" => Ok(calc_flow::RetentionClass::Unbounded),
+        value => Err(PyTypeError::new_err(format!(
+            "unsupported retention {value:?}"
+        ))),
+    }
+}
+
+fn native_sink_binding(
+    kind: &str,
+    descriptor: &Bound<'_, PyDict>,
+    sink_id: &str,
+    sink: PythonContinuousSink,
+) -> PyResult<calc_flow::SinkBinding> {
+    let binding = match kind {
+        "ordinary" => calc_flow::SinkBinding::ordinary(sink_id, sink),
+        "transactional" => calc_flow::SinkBinding::transactional(sink_id, sink),
+        "epoch_idempotent" => {
+            let mechanism = required_item(descriptor, "mechanism")?.extract::<String>()?;
+            calc_flow::SinkBinding::epoch_idempotent(
+                sink_id,
+                sink,
+                &mechanism,
+                sink_retention(descriptor)?,
+            )
+        }
+        value => {
+            return Err(PyTypeError::new_err(format!(
+                "unsupported sink delivery {value:?}"
+            )));
+        }
+    };
+    binding.map_err(crate::error::to_py_err)
+}
+
 fn build_one_sink(
     binding: Bound<'_, PyAny>,
     awaits: &Arc<PythonAwaitRegistry>,
@@ -711,32 +808,7 @@ fn build_one_sink(
         context: Arc::clone(context),
         _ownership: ownership.retain(),
     };
-    let binding = match kind.as_str() {
-        "ordinary" => calc_flow::SinkBinding::ordinary(&sink_id, sink),
-        "transactional" => calc_flow::SinkBinding::transactional(&sink_id, sink),
-        "epoch_idempotent" => {
-            let mechanism = required_item(&descriptor, "mechanism")?.extract::<String>()?;
-            let retention = match required_item(&descriptor, "retention")?
-                .extract::<String>()?
-                .as_str()
-            {
-                "bounded" => calc_flow::RetentionClass::Bounded,
-                "unbounded" => calc_flow::RetentionClass::Unbounded,
-                value => {
-                    return Err(PyTypeError::new_err(format!(
-                        "unsupported retention {value:?}"
-                    )));
-                }
-            };
-            calc_flow::SinkBinding::epoch_idempotent(&sink_id, sink, &mechanism, retention)
-        }
-        value => {
-            return Err(PyTypeError::new_err(format!(
-                "unsupported sink delivery {value:?}"
-            )));
-        }
-    }
-    .map_err(crate::error::to_py_err)?;
+    let binding = native_sink_binding(&kind, &descriptor, &sink_id, sink)?;
     Ok((binding, root))
 }
 
@@ -772,19 +844,25 @@ fn build_sinks(
     Ok((native, roots))
 }
 
+fn duration_config(config: &Bound<'_, PyDict>, key: &str) -> PyResult<Duration> {
+    required_item(config, key)?
+        .extract::<u64>()
+        .map(Duration::from_micros)
+}
+
+fn edge_budget_config(config: &Bound<'_, PyDict>) -> PyResult<calc_flow::EdgeBudget> {
+    calc_flow::EdgeBudget::new(
+        required_item(config, "edge_max_rows")?.extract()?,
+        required_item(config, "edge_max_bytes")?.extract()?,
+    )
+    .map_err(crate::error::to_py_err)
+}
+
 fn runtime_config(config: &Bound<'_, PyDict>) -> PyResult<calc_flow::StreamRuntimeConfig> {
     Ok(calc_flow::StreamRuntimeConfig {
-        checkpoint_interval: Duration::from_micros(
-            required_item(config, "checkpoint_interval_micros")?.extract()?,
-        ),
-        checkpoint_timeout: Duration::from_micros(
-            required_item(config, "checkpoint_timeout_micros")?.extract()?,
-        ),
-        edge_budget: calc_flow::EdgeBudget::new(
-            required_item(config, "edge_max_rows")?.extract()?,
-            required_item(config, "edge_max_bytes")?.extract()?,
-        )
-        .map_err(crate::error::to_py_err)?,
+        checkpoint_interval: duration_config(config, "checkpoint_interval_micros")?,
+        checkpoint_timeout: duration_config(config, "checkpoint_timeout_micros")?,
+        edge_budget: edge_budget_config(config)?,
         retained_epochs: required_item(config, "retained_epochs")?.extract()?,
     })
 }

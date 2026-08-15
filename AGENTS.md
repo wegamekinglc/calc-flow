@@ -181,10 +181,6 @@ dashes span the full column width, including cell spaces.
 - `UdfRegistry` owns trusted native implementations.
   `UdfRegistrySnapshot` is captured at compile time; configurations contain
   only `UdfReference` values.
-- `StreamingRunner` owns public async `StreamSource`/`StreamSink` bindings and
-  `ManagedCheckpointRuntime`. Checkpoints publish the v3 manifest before sink
-  commit; per-output delivery proof distinguishes at-least-once from
-  exactly-once behavior.
 - `StateBackend` opens lineage-exclusive state sessions.
   `LocalStateBackend` publishes immutable, checksum-verified segments, while
   `CheckpointManifest` is the strict v3 state-manifest contract and the managed

@@ -819,6 +819,42 @@ class StreamingJob:
             loop.close()
 
 
+def _runner_sources(
+    sources: Mapping[str, SourceBinding],
+) -> dict[str, SourceBinding]:
+    if not isinstance(sources, Mapping):
+        raise TypeError("sources must be a mapping of source bindings")
+    copied = dict(sources)
+    if not all(
+        isinstance(name, str) and isinstance(binding, SourceBinding)
+        for name, binding in copied.items()
+    ):
+        raise TypeError("sources must map strings to SourceBinding values")
+    return copied
+
+
+def _runner_sinks(
+    sinks: Mapping[str, Sequence[SinkBinding]],
+) -> dict[str, tuple[SinkBinding, ...]]:
+    if not isinstance(sinks, Mapping):
+        raise TypeError("sinks must be a mapping of sink bindings")
+    copied = {output: tuple(bindings) for output, bindings in sinks.items()}
+    if not all(
+        isinstance(output, str)
+        and all(isinstance(binding, SinkBinding) for binding in bindings)
+        for output, bindings in copied.items()
+    ):
+        raise TypeError("sinks must map strings to SinkBinding sequences")
+    return copied
+
+
+def _runner_config(config: StreamRuntimeConfig | None) -> StreamRuntimeConfig:
+    selected = StreamRuntimeConfig() if config is None else config
+    if not isinstance(selected, StreamRuntimeConfig):
+        raise TypeError("config must be a calc_flow.StreamRuntimeConfig or None")
+    return selected
+
+
 class StreamingRunner:
     """One-shot source-driven continuous runner owning all bindings."""
 
@@ -843,28 +879,12 @@ class StreamingRunner:
             raise TypeError("sinks must be a mapping of sink bindings")
         if not isinstance(checkpoints, ManagedCheckpointRuntime):
             raise TypeError("checkpoints must be a calc_flow.ManagedCheckpointRuntime")
-        copied_sources = dict(sources)
-        if not all(
-            isinstance(name, str) and isinstance(binding, SourceBinding)
-            for name, binding in copied_sources.items()
-        ):
-            raise TypeError("sources must map strings to SourceBinding values")
-        copied_sinks = {output: tuple(bindings) for output, bindings in sinks.items()}
-        if not all(
-            isinstance(output, str)
-            and all(isinstance(binding, SinkBinding) for binding in bindings)
-            for output, bindings in copied_sinks.items()
-        ):
-            raise TypeError("sinks must map strings to SinkBinding sequences")
-        selected = StreamRuntimeConfig() if config is None else config
-        if not isinstance(selected, StreamRuntimeConfig):
-            raise TypeError("config must be a calc_flow.StreamRuntimeConfig or None")
         self._inner = _native._StreamingRunner(
             plan._inner,
-            copied_sources,
-            copied_sinks,
+            _runner_sources(sources),
+            _runner_sinks(sinks),
             checkpoints._inner,
-            selected._native(),
+            _runner_config(config)._native(),
         )
 
     async def start_async(self) -> StreamingJob:

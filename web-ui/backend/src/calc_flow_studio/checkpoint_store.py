@@ -85,6 +85,20 @@ def _require_pipeline_name(value: object) -> str:
 
 
 def _validate_checkpoint(checkpoint: Mapping[str, object]) -> dict[str, object]:
+    _validate_checkpoint_fields(checkpoint)
+    pipeline_name = _require_pipeline_name(checkpoint["pipeline_name"])
+    _validate_format_version(checkpoint["format_version"])
+    _validate_fingerprint(checkpoint["pipeline_fingerprint"])
+    _validate_sequence(checkpoint["sequence"])
+    _validate_state(checkpoint["state"])
+    _validate_created_at(checkpoint["created_at"])
+    _validate_json_depth(checkpoint)
+    copied = _copy_checkpoint(checkpoint)
+    copied["pipeline_name"] = pipeline_name
+    return copied
+
+
+def _validate_checkpoint_fields(checkpoint: Mapping[str, object]) -> None:
     if type(checkpoint) is not dict:
         raise CheckpointDocumentError("checkpoint must be a strict JSON object")
     if any(not isinstance(key, str) for key in checkpoint):
@@ -99,31 +113,40 @@ def _validate_checkpoint(checkpoint: Mapping[str, object]) -> dict[str, object]:
         raise CheckpointDocumentError(
             f"checkpoint is missing required field {min(missing)!r}"
         )
-    if (
-        type(checkpoint["format_version"]) is not int
-        or checkpoint["format_version"] != CHECKPOINT_FORMAT_VERSION
-    ):
+
+
+def _validate_format_version(value: object) -> None:
+    if type(value) is not int or value != CHECKPOINT_FORMAT_VERSION:
         raise CheckpointDocumentError(
             "checkpoint format version is unsupported; expected 2"
         )
-    pipeline_name = _require_pipeline_name(checkpoint["pipeline_name"])
-    fingerprint = checkpoint["pipeline_fingerprint"]
-    if not isinstance(fingerprint, str) or not fingerprint:
+
+
+def _validate_fingerprint(value: object) -> None:
+    if not isinstance(value, str) or not value:
         raise CheckpointDocumentError("pipeline_fingerprint must be a non-empty string")
-    sequence = checkpoint["sequence"]
-    if type(sequence) is not int or not 0 <= sequence <= 2**64 - 1:
+
+
+def _validate_sequence(value: object) -> None:
+    if type(value) is not int or not 0 <= value <= 2**64 - 1:
         raise CheckpointDocumentError("sequence must be a non-negative u64 integer")
-    state = checkpoint["state"]
-    if type(state) is not dict or any(
-        not isinstance(node_id, str) or not node_id for node_id in state
+
+
+def _validate_state(value: object) -> None:
+    if type(value) is not dict or any(
+        not isinstance(node_id, str) or not node_id for node_id in value
     ):
         raise CheckpointDocumentError(
             "state must be an object with non-empty string node IDs"
         )
-    created_at = checkpoint["created_at"]
-    if not isinstance(created_at, str) or not _is_offset_datetime(created_at):
+
+
+def _validate_created_at(value: object) -> None:
+    if not isinstance(value, str) or not _is_offset_datetime(value):
         raise CheckpointDocumentError("created_at must be an offset-aware timestamp")
-    _validate_json_depth(checkpoint)
+
+
+def _copy_checkpoint(checkpoint: Mapping[str, object]) -> dict[str, object]:
     try:
         encoded = json.dumps(
             checkpoint,
@@ -136,8 +159,8 @@ def _validate_checkpoint(checkpoint: Mapping[str, object]) -> dict[str, object]:
             "checkpoint must contain strict JSON-compatible data"
         ) from error
     copied = json.loads(encoded)
-    assert type(copied) is dict
-    copied["pipeline_name"] = pipeline_name
+    if type(copied) is not dict:
+        raise CheckpointDocumentError("checkpoint must be a strict JSON object")
     return copied
 
 

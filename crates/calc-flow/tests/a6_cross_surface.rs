@@ -579,9 +579,14 @@ fn cross_surface_timeout_probe_worker() {
     thread::sleep(Duration::from_secs(60));
 }
 
+fn current_test_executable() -> PathBuf {
+    // This path only relaunches the current test harness; it is not a security boundary.
+    std::env::current_exe().unwrap() // nosemgrep: rust.lang.security.current-exe.current-exe
+}
+
 #[test]
 fn worker_timeout_terminates_and_reaps_process() {
-    let child = Command::new(std::env::current_exe().unwrap())
+    let child = Command::new(current_test_executable())
         .args([
             "cross_surface_timeout_probe_worker",
             "--ignored",
@@ -774,7 +779,7 @@ fn worker_timeout_terminates_uv_python_process_tree() {
 }
 
 async fn run_rust_worker(mode: &str, managed_root: &Path, sink_root: &Path, report: &Path) {
-    let executable = std::env::current_exe().unwrap();
+    let executable = current_test_executable();
     let mode = mode.to_owned();
     let managed_root = managed_root.to_owned();
     let sink_root = sink_root.to_owned();

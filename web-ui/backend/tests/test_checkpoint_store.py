@@ -8,7 +8,10 @@ from types import SimpleNamespace
 import pytest
 
 import calc_flow_studio.checkpoint_store as checkpoint_store_module
-from calc_flow_studio.checkpoint_store import FileCheckpointDocumentStore
+from calc_flow_studio.checkpoint_store import (
+    CheckpointDocumentError,
+    FileCheckpointDocumentStore,
+)
 
 
 def _checkpoint() -> dict[str, object]:
@@ -89,3 +92,12 @@ def test_directory_sync_is_a_noop_off_posix(
     )
 
     checkpoint_store_module._sync_directory(tmp_path)
+
+
+def test_checkpoint_copy_rejects_non_object_decoder_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(checkpoint_store_module.json, "loads", lambda _value: [])
+
+    with pytest.raises(CheckpointDocumentError, match="strict JSON object"):
+        checkpoint_store_module._validate_checkpoint(_checkpoint())

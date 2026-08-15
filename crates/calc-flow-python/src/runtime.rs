@@ -321,37 +321,43 @@ pub(crate) async fn resolve_python_in_context(
     resolve_python_with_context(value, callback_name, awaits, Some(context)).await
 }
 
-async fn resolve_python_with_context(
-    value: Py<PyAny>,
-    callback_name: &str,
-    awaits: &Arc<PythonAwaitRegistry>,
-    context: Option<&Arc<PythonAsyncContext>>,
-) -> calc_flow::Result<Py<PyAny>> {
-    let is_awaitable = Python::attach(|py| {
+type PythonAwaitReceiver = tokio::sync::oneshot::Receiver<PyResult<Py<PyAny>>>;
+
+fn is_python_awaitable(value: &Py<PyAny>) -> PyResult<bool> {
+    Python::attach(|py| {
         py.import(pyo3::intern!(py, "inspect"))?
             .getattr(pyo3::intern!(py, "isawaitable"))?
             .call1((value.bind(py),))?
             .is_truthy()
     })
-    .map_err(|error| provider_error(callback_name, error))?;
-    if !is_awaitable {
-        return Ok(value);
+}
+
+fn python_async_context(
+    py: Python<'_>,
+    context: Option<&Arc<PythonAsyncContext>>,
+) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
+    if let Some(context) = context {
+        return Ok((
+            context.event_loop.object().clone_ref(py),
+            context
+                .context
+                .object()
+                .bind(py)
+                .call_method0(pyo3::intern!(py, "copy"))?
+                .unbind(),
+        ));
     }
-    let scheduled = Python::attach(|py| -> PyResult<_> {
-        let (event_loop, python_context) = if let Some(context) = context {
-            (
-                context.event_loop.object().clone_ref(py),
-                context
-                    .context
-                    .object()
-                    .bind(py)
-                    .call_method0(pyo3::intern!(py, "copy"))?
-                    .unbind(),
-            )
-        } else {
-            let locals = pyo3_async_runtimes::tokio::get_current_locals(py)?;
-            (locals.event_loop(py).unbind(), locals.context(py).unbind())
-        };
+    let locals = pyo3_async_runtimes::tokio::get_current_locals(py)?;
+    Ok((locals.event_loop(py).unbind(), locals.context(py).unbind()))
+}
+
+fn schedule_python_await(
+    value: Py<PyAny>,
+    awaits: &Arc<PythonAwaitRegistry>,
+    context: Option<&Arc<PythonAsyncContext>>,
+) -> PyResult<(PythonAwaitReceiver, PythonAwaitCancelGuard)> {
+    Python::attach(|py| {
+        let (event_loop, python_context) = python_async_context(py, context)?;
         let state = Arc::new(PythonAwaitState::new(event_loop.clone_ref(py)));
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let completion = Arc::new(PythonAwaitCompletion {
@@ -376,16 +382,33 @@ async fn resolve_python_with_context(
         )?;
         Ok((receiver, PythonAwaitCancelGuard { state: Some(state) }))
     })
-    .map_err(|error| provider_error(callback_name, error))?;
-    let (receiver, mut cancellation) = scheduled;
-    let result = if let Ok(result) = receiver.await {
-        result
-    } else {
-        cancellation.cancel();
-        Err(PyRuntimeError::new_err(
-            "Python awaitable completion channel closed unexpectedly",
-        ))
-    };
+}
+
+async fn await_python_result(
+    receiver: PythonAwaitReceiver,
+    cancellation: &mut PythonAwaitCancelGuard,
+) -> PyResult<Py<PyAny>> {
+    if let Ok(result) = receiver.await {
+        return result;
+    }
+    cancellation.cancel();
+    Err(PyRuntimeError::new_err(
+        "Python awaitable completion channel closed unexpectedly",
+    ))
+}
+
+async fn resolve_python_with_context(
+    value: Py<PyAny>,
+    callback_name: &str,
+    awaits: &Arc<PythonAwaitRegistry>,
+    context: Option<&Arc<PythonAsyncContext>>,
+) -> calc_flow::Result<Py<PyAny>> {
+    if !is_python_awaitable(&value).map_err(|error| provider_error(callback_name, error))? {
+        return Ok(value);
+    }
+    let (receiver, mut cancellation) = schedule_python_await(value, awaits, context)
+        .map_err(|error| provider_error(callback_name, error))?;
+    let result = await_python_result(receiver, &mut cancellation).await;
     cancellation.disarm();
     result.map_err(|error| provider_error(callback_name, error))
 }

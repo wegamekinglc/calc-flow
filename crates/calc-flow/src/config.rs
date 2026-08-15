@@ -295,70 +295,29 @@ fn build_project_builder(
     providers: &ProviderRegistry,
     mode: CompileMode,
 ) -> Result<PipelineBuilder> {
-    let mut builder = PipelineBuilder::new(&project.pipeline.name)?
+    let builder = PipelineBuilder::new(&project.pipeline.name)?
         .with_datafusion_config(project.pipeline.datafusion);
+    let builder = add_project_nodes(builder, project, providers, mode)?;
+    add_project_edges(builder, project)
+}
+
+fn add_project_nodes(
+    mut builder: PipelineBuilder,
+    project: &ProjectSpec,
+    providers: &ProviderRegistry,
+    mode: CompileMode,
+) -> Result<PipelineBuilder> {
     for node in &project.pipeline.nodes {
-        let inputs = configured_ports(node, true)?;
-        let outputs = configured_ports(node, false)?;
-        let operator = match &node.operator {
-            OperatorSpec::Expression {
-                expression,
-                select,
-                filter,
-                udfs: references,
-            } => {
-                let (inputs, outputs) =
-                    builtin_ports(inputs, outputs, &["input"], &["output"], BatchKind::Table)?;
-                NodeOperator::Expression(
-                    ExpressionOperator::new(
-                        &node.id,
-                        expression,
-                        select.clone(),
-                        filter.clone(),
-                        references.clone(),
-                    )?
-                    .with_ports(
-                        inputs.into_iter().next().unwrap(),
-                        outputs.into_iter().next().unwrap(),
-                    )?,
-                )
-            }
-            OperatorSpec::Sql {
-                query,
-                aliases,
-                udfs: references,
-            } => {
-                let expected = aliases.iter().map(String::as_str).collect::<Vec<_>>();
-                let (inputs, outputs) =
-                    builtin_ports(inputs, outputs, &expected, &["output"], BatchKind::Table)?;
-                NodeOperator::Sql(
-                    SqlOperator::new(&node.id, query, aliases.clone(), references.clone())?
-                        .with_ports(inputs, outputs.into_iter().next().unwrap())?,
-                )
-            }
-            OperatorSpec::External {
-                provider,
-                name,
-                version,
-                options,
-            } => {
-                let spec = ExternalOperatorSpec::new(provider, name, version, options.clone())?;
-                match mode {
-                    CompileMode::Batch => NodeOperator::Batch(
-                        providers
-                            .resolve_batch(provider, name, version)?
-                            .create(&spec, inputs, outputs)?,
-                    ),
-                    CompileMode::Stream => NodeOperator::Stream(
-                        providers
-                            .resolve_stream(provider, name, version)?
-                            .create(&spec, inputs, outputs)?,
-                    ),
-                }
-            }
-        };
+        let operator = project_node_operator(node, providers, mode)?;
         builder = builder.add_node(&node.id, operator)?;
     }
+    Ok(builder)
+}
+
+fn add_project_edges(
+    mut builder: PipelineBuilder,
+    project: &ProjectSpec,
+) -> Result<PipelineBuilder> {
     for edge in &project.pipeline.edges {
         builder = builder.connect(Edge::new(
             PortEndpoint::new(&edge.source_node, &edge.source_port)?,
@@ -366,6 +325,116 @@ fn build_project_builder(
         ))?;
     }
     Ok(builder)
+}
+
+fn project_node_operator(
+    node: &NodeSpec,
+    providers: &ProviderRegistry,
+    mode: CompileMode,
+) -> Result<NodeOperator> {
+    let inputs = configured_ports(node, true)?;
+    let outputs = configured_ports(node, false)?;
+    match &node.operator {
+        OperatorSpec::Expression {
+            expression,
+            select,
+            filter,
+            udfs: references,
+        } => expression_node(
+            node,
+            inputs,
+            outputs,
+            expression,
+            select,
+            filter.as_deref(),
+            references,
+        ),
+        OperatorSpec::Sql {
+            query,
+            aliases,
+            udfs: references,
+        } => sql_node(node, inputs, outputs, query, aliases, references),
+        OperatorSpec::External {
+            provider,
+            name,
+            version,
+            options,
+        } => external_node(
+            providers,
+            mode,
+            inputs,
+            outputs,
+            (provider, name, version),
+            options,
+        ),
+    }
+}
+
+fn expression_node(
+    node: &NodeSpec,
+    inputs: Vec<Port>,
+    outputs: Vec<Port>,
+    expression: &str,
+    select: &[String],
+    filter: Option<&str>,
+    references: &[UdfReference],
+) -> Result<NodeOperator> {
+    let (inputs, outputs) =
+        builtin_ports(inputs, outputs, &["input"], &["output"], BatchKind::Table)?;
+    Ok(NodeOperator::Expression(
+        ExpressionOperator::new(
+            &node.id,
+            expression,
+            select.to_vec(),
+            filter.map(str::to_owned),
+            references.to_vec(),
+        )?
+        .with_ports(
+            inputs.into_iter().next().unwrap(),
+            outputs.into_iter().next().unwrap(),
+        )?,
+    ))
+}
+
+fn sql_node(
+    node: &NodeSpec,
+    inputs: Vec<Port>,
+    outputs: Vec<Port>,
+    query: &str,
+    aliases: &[String],
+    references: &[UdfReference],
+) -> Result<NodeOperator> {
+    let expected = aliases.iter().map(String::as_str).collect::<Vec<_>>();
+    let (inputs, outputs) =
+        builtin_ports(inputs, outputs, &expected, &["output"], BatchKind::Table)?;
+    Ok(NodeOperator::Sql(
+        SqlOperator::new(&node.id, query, aliases.to_vec(), references.to_vec())?
+            .with_ports(inputs, outputs.into_iter().next().unwrap())?,
+    ))
+}
+
+fn external_node(
+    providers: &ProviderRegistry,
+    mode: CompileMode,
+    inputs: Vec<Port>,
+    outputs: Vec<Port>,
+    identity: (&str, &str, &str),
+    options: &JsonMap,
+) -> Result<NodeOperator> {
+    let (provider, name, version) = identity;
+    let spec = ExternalOperatorSpec::new(provider, name, version, options.clone())?;
+    match mode {
+        CompileMode::Batch => Ok(NodeOperator::Batch(
+            providers
+                .resolve_batch(provider, name, version)?
+                .create(&spec, inputs, outputs)?,
+        )),
+        CompileMode::Stream => Ok(NodeOperator::Stream(
+            providers
+                .resolve_stream(provider, name, version)?
+                .create(&spec, inputs, outputs)?,
+        )),
+    }
 }
 
 fn configured_ports(node: &NodeSpec, inputs: bool) -> Result<Vec<Port>> {

@@ -5,7 +5,8 @@ use calc_flow::{
     Batch, BatchMetadata, Cursor, ExpressionOperator, ManagedCheckpointRuntime,
     NativeWatermarkCapability, PipelineBuilder, ReplayPositioning, Result, SinkBinding,
     SourceBinding, SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema,
-    StreamRequirements, StreamSink, StreamSource, StreamingRunner, UdfRegistry, WatermarkPolicy,
+    StreamExecutionPlan, StreamRequirements, StreamSink, StreamSource, StreamingRunner,
+    UdfRegistry, WatermarkPolicy,
 };
 use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
 use tokio::sync::Mutex;
@@ -93,9 +94,8 @@ impl StreamSink for CollectSink {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let plan = PipelineBuilder::new("continuous-example")?
+fn example_plan() -> Result<StreamExecutionPlan> {
+    PipelineBuilder::new("continuous-example")?
         .add_node(
             "calculate",
             Box::new(ExpressionOperator::new(
@@ -109,15 +109,17 @@ async fn main() -> Result<()> {
         .compile_stream(
             &UdfRegistry::new().snapshot(),
             &StreamRequirements::default(),
-        )?;
+        )
+}
+
+fn example_runner(
+    plan: StreamExecutionPlan,
+    values: &Arc<Mutex<Vec<i64>>>,
+    checkpoints: ManagedCheckpointRuntime,
+) -> Result<StreamingRunner> {
     let source_id = plan.source_binding_ids()[0].to_owned();
     let output_id = plan.sink_binding_ids()[0].to_owned();
-    let values = Arc::new(Mutex::new(Vec::new()));
-    let directory = tempfile::tempdir().map_err(|source| calc_flow::CalcFlowError::Io {
-        path: "temporary checkpoint directory".into(),
-        source,
-    })?;
-    let runner = StreamingRunner::new(
+    StreamingRunner::new(
         plan,
         BTreeMap::from([(
             source_id,
@@ -132,12 +134,23 @@ async fn main() -> Result<()> {
             vec![SinkBinding::ordinary(
                 "collector",
                 CollectSink {
-                    values: Arc::clone(&values),
+                    values: Arc::clone(values),
                 },
             )?],
         )]),
-        ManagedCheckpointRuntime::new(directory.path())?,
-    )?;
+        checkpoints,
+    )
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let directory = tempfile::tempdir().map_err(|source| calc_flow::CalcFlowError::Io {
+        path: "temporary checkpoint directory".into(),
+        source,
+    })?;
+    let checkpoints = ManagedCheckpointRuntime::new(directory.path())?;
+    let runner = example_runner(example_plan()?, &values, checkpoints)?;
     let job = runner.start().await?;
     let outcome = job.wait().await;
 
