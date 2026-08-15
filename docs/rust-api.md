@@ -210,8 +210,10 @@ primary outcome.
 `StreamingJob` owner. The job exposes synchronous status plus async checkpoint,
 shutdown, cancel, and wait operations. The old formed-batch push runner,
 `MicroBatchRunner`, v2 source/sink traits, and checkpoint-document store are
-removed without aliases. Task panics surface through the non-exhaustive
-`CalcFlowError::TaskPanicked { task_id, message }` variant.
+removed without aliases. Public continuous lifecycle failures surface as
+`CalcFlowError::Streaming(StreamingError)`. Contained task panics use
+`StreamingErrorCategory::TaskPanicked`; internal task IDs and panic messages
+never cross the facade.
 
 `edge_channel` retains its public signature and `EdgeBudget` retains the fields
 `max_rows` and `max_bytes`. For `EdgeBudget::new(R, B)`, envelope count and
@@ -293,12 +295,16 @@ canonical project schema with
 
 ## Errors and cancellation
 
-Public operations return `calc_flow::Result<T>`. `CalcFlowError` preserves
-invalid arguments/documents, compilation errors, execution/provider failures,
-checkpoint errors, I/O paths, cancellation, closed stream edges, and supervised
-task panics. Private runtime panic capture keeps `TaskPanicked.message` valid
-UTF-8 and at most 1,024 bytes including its ellipsis; non-string panic payloads
-use a fixed message.
+Public operations return `calc_flow::Result<T>`. `CalcFlowError` defines typed
+variants for invalid arguments/documents, compilation errors,
+execution/provider failures, checkpoint errors, I/O paths, cancellation,
+closed stream edges, and private runtime task-panic capture. Private capture
+keeps `TaskPanicked.message` valid UTF-8 and at most 1,024 bytes including its
+ellipsis; non-string panic payloads use a fixed message. Fallible
+`ManagedCheckpointRuntime`, `StreamingRunner`, and `StreamingJob` operations
+expose only `CalcFlowError::Streaming(StreamingError)`; contained panics use
+`StreamingErrorCategory::TaskPanicked` and retain neither the internal task ID
+nor the panic message.
 
 `ExecutionOptions` carries cancellation/deadline controls. Operators receive a
 `RunContext` and must check cancellation at safe work boundaries.
