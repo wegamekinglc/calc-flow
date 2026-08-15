@@ -2322,6 +2322,7 @@ struct CheckpointFaultMatrixReport {
     terminal_charged_edges: usize,
     terminal_registries: (usize, usize),
     fault_trigger_count: usize,
+    parent_sync_os_failures: usize,
     cancellation_requested: bool,
     deterministic_terminal_error: bool,
 }
@@ -4393,6 +4394,7 @@ async fn run_checkpoint_restart_fault_case(
         terminal_charged_edges,
         terminal_registries: terminal_probe.runner_registries,
         fault_trigger_count: first_probe.checkpoint_fault_triggers,
+        parent_sync_os_failures: first_probe.parent_sync_os_failures,
         cancellation_requested: first_probe.cancellation_triggers == 1,
         deterministic_terminal_error,
     }
@@ -8419,6 +8421,61 @@ async fn twenty_minute_epoch_checkpoint_restart() {
     run_checkpoint_restart_linux_soak().await;
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ManifestParentSyncIoSupport {
+    Supported,
+    Unsupported(&'static str),
+}
+
+const fn classify_manifest_parent_sync_io_support(
+    is_unix: bool,
+    permission_denied: bool,
+) -> ManifestParentSyncIoSupport {
+    if !is_unix {
+        ManifestParentSyncIoSupport::Unsupported("requires Unix directory permission semantics")
+    } else if !permission_denied {
+        ManifestParentSyncIoSupport::Unsupported(
+            "this process bypasses mode 0111 directory restrictions",
+        )
+    } else {
+        ManifestParentSyncIoSupport::Supported
+    }
+}
+
+fn manifest_parent_sync_io_support() -> ManifestParentSyncIoSupport {
+    #[cfg(unix)]
+    {
+        let capability_root = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("parent-sync capability root failed: {error}"));
+        let permission_denied =
+            crate::state::parent_sync_permission_failure_supported_for_test(capability_root.path())
+                .unwrap_or_else(|error| panic!("parent-sync capability probe failed: {error}"));
+        classify_manifest_parent_sync_io_support(true, permission_denied)
+    }
+    #[cfg(not(unix))]
+    {
+        classify_manifest_parent_sync_io_support(false, false)
+    }
+}
+
+#[test]
+fn manifest_parent_sync_io_support_classifies_platform_and_permission_capability() {
+    assert_eq!(
+        classify_manifest_parent_sync_io_support(true, true),
+        ManifestParentSyncIoSupport::Supported
+    );
+    assert_eq!(
+        classify_manifest_parent_sync_io_support(false, false),
+        ManifestParentSyncIoSupport::Unsupported("requires Unix directory permission semantics")
+    );
+    assert_eq!(
+        classify_manifest_parent_sync_io_support(true, false),
+        ManifestParentSyncIoSupport::Unsupported(
+            "this process bypasses mode 0111 directory restrictions"
+        )
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 #[allow(
@@ -8426,13 +8483,8 @@ async fn twenty_minute_epoch_checkpoint_restart() {
     reason = "the public proof owns both retained and lost installed-manifest recovery outcomes"
 )]
 async fn public_parent_directory_sync_os_failure_requires_recovery() {
-    let capability_root = tempfile::tempdir().unwrap();
-    if !crate::state::parent_sync_permission_failure_supported_for_test(capability_root.path())
-        .unwrap()
-    {
-        eprintln!(
-            "skipping public parent-directory sync OS failure proof: this process bypasses mode 0111"
-        );
+    if let ManifestParentSyncIoSupport::Unsupported(reason) = manifest_parent_sync_io_support() {
+        eprintln!("skipping public parent-directory sync OS failure proof: {reason}");
         return;
     }
     for manifest_retained in [true, false] {
@@ -8596,6 +8648,13 @@ async fn assert_named_checkpoint_fault_case(
     point: CheckpointFaultPoint,
     mode: CheckpointFaultMode,
 ) {
+    if point == CheckpointFaultPoint::ManifestParentSync
+        && mode == CheckpointFaultMode::Io
+        && let ManifestParentSyncIoSupport::Unsupported(reason) = manifest_parent_sync_io_support()
+    {
+        eprintln!("skipping named checkpoint fault case {case_id}: {reason}");
+        return;
+    }
     let report = run_checkpoint_restart_fault_case(point, mode).await;
     let durable_before_restart = matches!(
         point,
@@ -8836,6 +8895,13 @@ async fn assert_named_checkpoint_fault_case(
     assert_eq!(
         report.fault_trigger_count, 1,
         "{case_id}: injected fault trigger count"
+    );
+    assert_eq!(
+        report.parent_sync_os_failures,
+        usize::from(
+            point == CheckpointFaultPoint::ManifestParentSync && mode == CheckpointFaultMode::Io
+        ),
+        "{case_id}: real parent-directory sync OS failure count"
     );
     assert_eq!(
         report.cancellation_requested,
