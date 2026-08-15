@@ -726,7 +726,7 @@ impl ManagedCheckpointRuntime {
     }
 
     #[cfg(test)]
-    fn with_fault_for_test(
+    pub(crate) fn with_fault_for_test(
         mut self,
         point: crate::runtime::streaming::runner::CheckpointFaultPoint,
         mode: crate::runtime::streaming::runner::CheckpointFaultMode,
@@ -841,19 +841,25 @@ impl StreamingRunner {
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
         };
         #[cfg(test)]
-        let start = match checkpoints.fault {
-            Some((point, mode)) => OneShotContinuousRunner::new()
-                .start_checkpointed_with_config_and_fault(
+        let (start, fault_probe) = match checkpoints.fault {
+            Some((point, mode)) => {
+                let (start, probe) = OneShotContinuousRunner::new()
+                    .start_checkpointed_with_config_and_fault_probe(
+                        spec,
+                        checkpoints.inner,
+                        config,
+                        point,
+                        mode,
+                    );
+                (start, Some(probe))
+            }
+            None => (
+                OneShotContinuousRunner::new().start_checkpointed_with_config(
                     spec,
                     checkpoints.inner,
                     config,
-                    point,
-                    mode,
                 ),
-            None => OneShotContinuousRunner::new().start_checkpointed_with_config(
-                spec,
-                checkpoints.inner,
-                config,
+                None,
             ),
         };
         #[cfg(not(test))]
@@ -864,7 +870,11 @@ impl StreamingRunner {
         );
         start
             .await
-            .map(|inner| StreamingJob { inner })
+            .map(|inner| StreamingJob {
+                inner,
+                #[cfg(test)]
+                fault_probe,
+            })
             .map_err(|failure| start_error(job_id, &failure))
     }
 }
@@ -872,6 +882,16 @@ impl StreamingRunner {
 /// Sole owning handle for one running continuous job.
 pub struct StreamingJob {
     inner: OwningContinuousJob,
+    #[cfg(test)]
+    fault_probe: Option<crate::runtime::streaming::runner::CheckpointFaultInjector>,
+}
+
+#[cfg(test)]
+pub(crate) struct StreamingJobTestProbe {
+    pub(crate) checkpoint_fault_triggers: usize,
+    pub(crate) cancellation_triggers: usize,
+    pub(crate) checkpoint_failures: u64,
+    pub(crate) runner_registries: (usize, usize),
 }
 
 impl fmt::Debug for StreamingJob {
@@ -919,6 +939,22 @@ impl StreamingJob {
     pub async fn wait(&self) -> JobOutcome {
         let outcome = self.inner.wait().await;
         self.inner.public_outcome(&outcome)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_probe(&self) -> StreamingJobTestProbe {
+        StreamingJobTestProbe {
+            checkpoint_fault_triggers: self
+                .fault_probe
+                .as_ref()
+                .map_or(0, crate::runtime::streaming::runner::CheckpointFaultInjector::trigger_count),
+            cancellation_triggers: self.fault_probe.as_ref().map_or(
+                0,
+                crate::runtime::streaming::runner::CheckpointFaultInjector::cancellation_trigger_count,
+            ),
+            checkpoint_failures: self.inner.checkpoint_failure_count_for_test(),
+            runner_registries: self.inner.runner_probe_for_test().registry_counts(),
+        }
     }
 }
 

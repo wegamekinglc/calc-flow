@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import inspect
 import os
 import threading
@@ -39,6 +40,21 @@ async def _raise_after_cancellation_cleanup(
     except BaseException as cleanup_error:
         raise cleanup_error from cancellation
     raise cancellation
+
+
+async def _finish_cleanup(cleanup: Awaitable[object]) -> None:
+    """Finish already-linearized terminal cleanup despite observer cancellation."""
+
+    async def run_cleanup() -> None:
+        await cleanup
+
+    cleanup_task = asyncio.create_task(run_cleanup())
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            continue
+    cleanup_task.result()
 
 
 class ReplayPositioning(StrEnum):
@@ -616,10 +632,11 @@ def _reject_active_loop(method: str) -> None:
 
 
 class _BlockingEventLoop:
-    __slots__ = ("_loop", "_ready", "_thread")
+    __slots__ = ("_closed", "_loop", "_ready", "_thread")
 
     def __init__(self) -> None:
         self._loop = asyncio.new_event_loop()
+        self._closed = threading.Event()
         self._ready = threading.Event()
         self._thread = threading.Thread(
             target=self._run,
@@ -632,20 +649,73 @@ class _BlockingEventLoop:
     def _run(self) -> None:
         asyncio.set_event_loop(self._loop)
         self._ready.set()
-        self._loop.run_forever()
-        self._loop.close()
+        try:
+            self._loop.run_forever()
+        finally:
+            self._loop.close()
+            self._closed.set()
 
-    def run[T](self, awaitable: Awaitable[T]) -> T:
-        async def invoke() -> T:
-            return await awaitable
+    async def _invoke[T](self, factory: Callable[[], Awaitable[T]]) -> T:
+        return await factory()
 
-        return asyncio.run_coroutine_threadsafe(invoke(), self._loop).result()
+    def _submit[T](
+        self, factory: Callable[[], Awaitable[T]]
+    ) -> concurrent.futures.Future[T]:
+        if self._closed.is_set():
+            raise RuntimeError("the calc-flow continuous event loop is closed")
+        return asyncio.run_coroutine_threadsafe(self._invoke(factory), self._loop)
+
+    def run[T](self, factory: Callable[[], Awaitable[T]]) -> T:
+        return self._submit(factory).result()
+
+    async def run_async[T](self, factory: Callable[[], Awaitable[T]]) -> T:
+        if self.owns_current_thread():
+            return await factory()
+        return await asyncio.wrap_future(self._submit(factory))
+
+    def close_after(
+        self,
+        factory: Callable[[], Awaitable[object]],
+        release: Callable[[], object],
+    ) -> None:
+        async def invoke() -> object:
+            try:
+                await factory()
+            finally:
+                release()
+
+        try:
+            future = self._submit(invoke)
+        except RuntimeError:
+            release()
+            return
+        future.add_done_callback(lambda _future: self._request_stop())
+
+    def owns_current_thread(self) -> bool:
+        return threading.current_thread() is self._thread
+
+    def _request_stop(self) -> None:
+        if self._closed.is_set():
+            return
+        try:
+            if self.owns_current_thread():
+                self._loop.stop()
+            else:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+        except RuntimeError:
+            if not self._closed.is_set():
+                raise
 
     def close(self) -> None:
-        if self._loop.is_closed():
+        self._request_stop()
+        if not self.owns_current_thread():
+            self._thread.join()
+
+    async def close_async(self) -> None:
+        if self.owns_current_thread():
+            self._request_stop()
             return
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join()
+        await asyncio.to_thread(self.close)
 
 
 class StreamingJob:
@@ -673,11 +743,29 @@ class StreamingJob:
         if loop is None:
             return asyncio.run(factory())
         try:
-            return loop.run(factory())
+            return loop.run(factory)
         finally:
             if terminal:
                 loop.close()
                 self._blocking_loop = None
+
+    async def _run_terminal_async(
+        self, factory: Callable[[], Awaitable[Mapping[str, object]]]
+    ) -> JobOutcome:
+        loop = self._blocking_loop
+        if loop is None or loop.owns_current_thread():
+            value = await factory()
+        else:
+            try:
+                value = await loop.run_async(factory)
+            except asyncio.CancelledError:
+                loop.close_after(self._inner.wait_async, self._inner._release_roots)
+                raise
+        self._inner._release_roots()
+        if loop is not None and not loop.owns_current_thread():
+            self._blocking_loop = None
+            await _finish_cleanup(loop.close_async())
+        return _outcome(value)
 
     @property
     def id(self) -> int:
@@ -696,30 +784,34 @@ class StreamingJob:
 
     async def shutdown_async(self) -> JobOutcome:
         """Drain the job, publish terminal progress, and await cleanup."""
-        value = await self._inner.shutdown_async()
-        self._inner._release_roots()
-        return _outcome(value)
+        return await self._run_terminal_async(self._inner.shutdown_async)
 
     def shutdown(self) -> JobOutcome:
         return self._run_blocking(self.shutdown_async, "shutdown", terminal=True)
 
     async def cancel_async(self) -> JobOutcome:
         """Cancel the job and await bounded connector cleanup."""
-        value = await self._inner.cancel_async()
-        self._inner._release_roots()
-        return _outcome(value)
+        return await self._run_terminal_async(self._inner.cancel_async)
 
     def cancel(self) -> JobOutcome:
         return self._run_blocking(self.cancel_async, "cancel", terminal=True)
 
     async def wait_async(self) -> JobOutcome:
         """Observe terminal completion without changing job state."""
-        value = await self._inner.wait_async()
-        self._inner._release_roots()
-        return _outcome(value)
+        return await self._run_terminal_async(self._inner.wait_async)
 
     def wait(self) -> JobOutcome:
         return self._run_blocking(self.wait_async, "wait", terminal=True)
+
+    def __del__(self) -> None:
+        loop = self._blocking_loop
+        if loop is None:
+            return
+        self._blocking_loop = None
+        try:
+            loop.close_after(self._inner.cancel_async, self._inner._release_roots)
+        except BaseException:
+            loop.close()
 
 
 class StreamingRunner:
@@ -787,7 +879,7 @@ class StreamingRunner:
         _reject_active_loop("start")
         loop = _BlockingEventLoop()
         try:
-            job = loop.run(self.start_async())
+            job = loop.run(self.start_async)
         except BaseException:
             loop.close()
             raise

@@ -6,14 +6,16 @@ messages from one producer to one consumer. This document is the normative
 contract for that envelope: the message type, its typed `EventTime` and
 `Epoch` values, the job and operator contexts, the emission boundary stream
 operators see, the compiled stream plan, and the delivery invariants the
-runtime guarantees today. The source-driven runtime remains an internal
-vertical slice: it is runnable inside the crate, but is not yet a public
-continuous runner.
+runtime guarantees today. The source-driven runtime is public through the
+crate-root `StreamingRunner` and owning `StreamingJob`; control construction,
+checkpoint coordination, supervision, and reaper ownership remain internal
+implementation details.
 
-The implementation lives in `crates/calc-flow/src/runtime/streaming/` (the
-message, bounded channel, job and task contexts, whole-job preflight, source,
-operator, and sink tasks, the job-scoped progress driver, checkpoint
-coordinator, supervisor, private runner/job/reaper, metrics, and soak),
+The public facade lives in `crates/calc-flow/src/continuous.rs`. Its runtime
+implementation lives in `crates/calc-flow/src/runtime/streaming/` (the message,
+bounded channel, job and task contexts, whole-job preflight, source, operator,
+and sink tasks, the job-scoped progress driver, checkpoint coordinator,
+supervisor, internal runner/reaper, metrics, and soak),
 `crates/calc-flow/src/state/` (the v3 manifest, segments, state backends, and
 production manifest transaction), `crates/calc-flow/src/time/` (event time and
 epoch),
@@ -23,7 +25,7 @@ declarations and execution), and `crates/calc-flow/src/pipeline/stream.rs`
 (the compiled stream plan). The frozen semantics behind the contract are
 recorded in the [continuous streaming runtime
 specification](../.codex/artifacts/specs/continuous-streaming-runtime.md),
-cited below as S and D items. The implemented private M5 checkpoint delta is
+cited below as S and D items. The implemented M5 checkpoint contract is
 defined by the [epoch checkpoint
 specification](../.codex/artifacts/specs/m5-epoch-checkpoint.md), its [API
 note](../.codex/artifacts/api-notes/m5-epoch-checkpoint.md), and its
@@ -59,10 +61,10 @@ control values — watermark monotonicity and epoch consistency — belongs to
 the runtime paths that construct and enqueue them and runs before enqueue,
 before any downstream side effect (S1.3, S5.4). The job-scoped progress driver
 validates source-provided watermark monotonicity and owns generated
-watermark/timer ordering. A checkpoint-enabled private job validates the
+watermark/timer ordering. A checkpoint-enabled job validates the
 single-flight epoch at its source cut, operator alignment, sink pre-commit,
-manifest publication, and sink finalization boundaries. A private job started
-without checkpoint wiring still fails closed if it receives a barrier.
+manifest publication, and sink finalization boundaries. An internal job path
+started without checkpoint wiring still fails closed if it receives a barrier.
 
 Inspection goes through the message kind and typed accessors:
 
@@ -278,7 +280,7 @@ of the plan. Compilation applies the deterministic-UDF rule above. Before a
 checkpointed job starts, whole-job preflight proves every reachable
 source, operator, bounded edge, and bound sink for each exactly-once output.
 It reports the output and first incompatible stable component before connector
-lifecycle work. A private job without checkpoint wiring rejects every
+lifecycle work. An internal job path without checkpoint wiring rejects every
 exactly-once request. The frozen requested/effective proof is kept for every
 output; an at-least-once request is never silently upgraded.
 
@@ -320,6 +322,13 @@ admits only operators explicitly classified as stateless or versioned
 checkpointed-stateful; an unproven third-party stream operator fails before
 task registration. The compiled graph node ID is the stable operator ID and
 must be unique and portable.
+
+Public diagnostic projection also treats source identity as untrusted. If a
+validation path contains a non-portable source ID, projection fails closed to
+the generic validation error `source ID is not a portable identifier`, with
+`Source` as the component kind and no `component_id`. The original ID,
+underlying message, and source chain never enter `Display`, `Debug`, or serde
+output, so an invalid identifier cannot smuggle a secret into diagnostics.
 
 A source binding owns two supervised tasks (D3):
 
@@ -451,9 +460,9 @@ source and operator ingress entries are ended. Recovery from it opens only
 sinks, completes any commit, closes resources, and returns natural completion;
 it does not reopen sources or repeat `on_end`/final-window emission.
 
-The crate-private `ContinuousRunner` and `ContinuousJob` own three-stage
-launch, status, terminal arbitration, cancellation, graceful drain, joining,
-and a runner-scoped reaper. Operator entry completes before connector open;
+The public `StreamingRunner` and `StreamingJob` own three-stage launch, status,
+terminal arbitration, cancellation, graceful drain, and joining over an
+internal runner-scoped reaper. Operator entry completes before connector open;
 all connector opens complete before the data gate is released. A dropped start
 observer cancels the provisional launch. A dropped job transfers convergence
 ownership to the reaper, and a later start or runner shutdown joins it. Task
@@ -476,7 +485,7 @@ timeout becomes a typed bounded secondary diagnostic without replacing the
 primary failure. Cleanup continues through later resources and converges task,
 queue, state-lease, transaction, provisional-launch, and reaper ownership.
 
-Private deterministic status and metrics cover task/terminal state,
+Public deterministic status and metrics projections cover task/terminal state,
 source/operator/sink progress, per-edge accounting, and checkpoint request,
 completion, failure, phase/alignment/total latency, state/manifest bytes,
 restore latency, sink retries, orphan cleanup, and terminal outcome. The
@@ -534,17 +543,17 @@ task and supervisor paths; public job controls are checkpoint, shutdown,
 cancel, wait, and payload-safe status observation.
 
 Crate-private: the message representation and the four control constructors,
-the compiled-operator representation, the late-row recorder, source cursor and
-binding types, the channel-backed operator collector, source/operator/sink
-tasks and progress snapshots, scoped task contexts, whole-job preflight, the
-task supervisor, checkpoint coordinator/transaction internals, raw status and
-metrics, and the runner-scoped reaper.
+the compiled-operator representation, the late-row recorder, internal source
+cursor/binding representations, the channel-backed operator collector,
+source/operator/sink tasks and progress snapshots, scoped task contexts,
+whole-job preflight, the task supervisor, checkpoint coordinator/transaction
+internals, raw status and metrics, and the runner-scoped reaper.
 
-The envelope, private checkpoint control, and private transactional sink
-lifecycle do not appear in the current project-v2 or checkpoint-v2 document
-formats, the Python binding, or Studio routes. The standalone public v3
-manifest model and state backend support the private production transaction
-without replacing those v2 surfaces.
+Runtime-owned checkpoint control and transactional internals do not appear in
+the current project-v2 or Studio checkpoint-inspection document formats.
+Python binds the public continuous facade, while Studio adds no continuous-job
+route. The public v3 manifest model and state backend support the production
+transaction without replacing those existing document surfaces.
 
 Non-goals:
 
@@ -555,10 +564,11 @@ Non-goals:
   only `UdfReference` values — never source text, callables, or import
   paths — and checkpoint state carries JSON metadata and byte segments,
   never operator instances.
-- **No partial public continuous API.** The internal continuous runtime is not
-  exported through aliases or a provisional runner. The existing v2 push
-  runners and v2 project/checkpoint documents remain the current public
-  surfaces.
+- **No alternate continuous compatibility API.** The crate-root
+  `StreamingRunner`/`StreamingJob` facade is the sole public continuous
+  lifecycle. The v2 micro-batch and formed-batch push runners are removed,
+  with no aliases or provisional runners; project format v2 and Studio's
+  checkpoint-inspection documents remain unchanged.
 - **No payload leakage in diagnostics.** Debug output and metrics show
   kinds and typed business values only; row payloads, metadata, and
   attributes never appear (I4).
@@ -619,11 +629,11 @@ checkpoint transaction and durable recovery truth.
 
 ## Managed checkpoint implementation boundary
 
-The private M5 contract is documented by the
+The M5 checkpoint contract is documented by the
 [epoch checkpoint specification](../.codex/artifacts/specs/m5-epoch-checkpoint.md),
 its [API note](../.codex/artifacts/api-notes/m5-epoch-checkpoint.md), and its
 [adversarial critique](../.codex/artifacts/critiques/m5-epoch-checkpoint.md).
-The private runtime reuses the `CheckpointManifest` v3 as the single durable
+The continuous runtime reuses the `CheckpointManifest` v3 as the single durable
 truth and implements segment/manifest publication, strict latest-completed
 selection, retention, orphan cleanup, and complete-job restore. Semantic
 identity includes the pipeline fingerprint and exact participant sets. The
@@ -647,6 +657,14 @@ sources or re-emitting final windows. Exactly-once is proved per output over
 every reachable source, operator, edge policy, and sink before lifecycle work.
 The coordinator implementation remains crate-private behind
 `ManagedCheckpointRuntime`; project format v2 and Studio routes are unchanged.
+
+The 48-case checkpoint fault/restart matrix and the three-process checkpoint
+soak both construct jobs through the crate-root public `StreamingRunner`,
+`StreamingJob`, connector bindings, and `ManagedCheckpointRuntime`. Their
+oracles read the real injected fault and cancellation trigger counts,
+checkpoint-failure metric, and live/reaper registry probe; they do not replace
+those observations with a parallel private-runner model. This section records
+the harness contract only, not a transient result from any particular run.
 
 The Linux-only M5 soak contract is an ignored parent test that launches exactly
 three sequential child OS processes using the current test executable. The

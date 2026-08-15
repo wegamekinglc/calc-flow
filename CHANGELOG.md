@@ -5,6 +5,17 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-15: Harden the public continuous-runtime delivery. Python blocking
+  start now reclaims its dedicated event-loop thread after blocking or async
+  terminal operations, observer cancellation during cleanup, and abandoned-job
+  GC; a native terminal outcome that has already linearized retains precedence.
+  Studio POSIX checkpoint replace and unlink paths fsync the parent directory.
+  Public diagnostics fail closed and redact non-portable source IDs. The
+  48-case fault matrix and three-process soak now run through the crate-root
+  public facade and read real fault, cancellation, checkpoint-failure, and
+  registry probes, while a real POSIX directory-sync failure test strengthens
+  indeterminate manifest-publication evidence.
+
 - 2026-08-14: Complete the A6 continuous-runtime cutover. Rust now exports the
   source-driven connector, binding, managed-checkpoint, one-shot
   `StreamingRunner`, and owning `StreamingJob` surface at the crate root.

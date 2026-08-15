@@ -1,6 +1,6 @@
 #![allow(
     dead_code,
-    reason = "M5 manifest transactions are wired into private checkpoint coordination incrementally"
+    reason = "manifest transactions are owned internally by the public continuous checkpoint runtime"
 )]
 
 use std::{
@@ -1919,6 +1919,118 @@ mod tests {
                 .manifest
                 .epoch(),
             Epoch::INITIAL
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn real_directory_sync_failure_preserves_indeterminate_manifest_outcomes() {
+        use std::{
+            fs::{File, Permissions},
+            os::unix::fs::PermissionsExt as _,
+            path::{Path, PathBuf},
+            sync::Mutex,
+        };
+
+        struct PermissionRestore {
+            path: PathBuf,
+            permissions: Permissions,
+        }
+
+        impl PermissionRestore {
+            fn restrict(path: &Path) -> std::io::Result<Self> {
+                let permissions = std::fs::metadata(path)?.permissions();
+                let mut restricted = permissions.clone();
+                restricted.set_mode(0o111);
+                std::fs::set_permissions(path, restricted)?;
+                Ok(Self {
+                    path: path.to_owned(),
+                    permissions,
+                })
+            }
+        }
+
+        impl Drop for PermissionRestore {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.path, self.permissions.clone());
+            }
+        }
+
+        let directory = TempDir::new().unwrap();
+        let backend = LocalStateBackend::new(directory.path().join("state"))
+            .await
+            .unwrap();
+        let key = StateLineageKey::new("orders", PIPELINE_FINGERPRINT).unwrap();
+        let lineage: Arc<dyn StateLineageBackend> =
+            Arc::from(backend.open_lineage(&key).await.unwrap());
+        let manifest_root = directory.path().join("manifests");
+        std::fs::create_dir(&manifest_root).unwrap();
+        let permission_probe = manifest_root.join("permission-probe");
+        std::fs::create_dir(&permission_probe).unwrap();
+        let probe_restore = PermissionRestore::restrict(&permission_probe).unwrap();
+        let probe_open = File::open(&permission_probe);
+        drop(probe_restore);
+        std::fs::remove_dir(&permission_probe).unwrap();
+        match probe_open {
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {}
+            Ok(_) => {
+                eprintln!(
+                    "skipping directory-sync permission test: this process bypasses mode 0111"
+                );
+                return;
+            }
+            Err(error) => panic!("directory-sync capability probe failed unexpectedly: {error}"),
+        }
+
+        let restricted_root = manifest_root.clone();
+        let permission_restore = Arc::new(Mutex::new(None));
+        let hook_permission_restore = Arc::clone(&permission_restore);
+        let transaction = ManifestTransaction::open(lineage, &key, &manifest_root, 2)
+            .await
+            .unwrap()
+            .with_fault_hook(Arc::new(move |point| {
+                if point == ManifestTransactionFaultPoint::ManifestRename {
+                    let restore = PermissionRestore::restrict(&restricted_root)
+                        .map_err(|source| super::io_error(&restricted_root, source))?;
+                    *hook_permission_restore.lock().unwrap() = Some(restore);
+                }
+                Ok(())
+            }));
+
+        let publication = transaction
+            .publish(PreparedEpochManifest {
+                manifest: manifest(Epoch::INITIAL),
+                staged_segments: BTreeMap::new(),
+            })
+            .await
+            .unwrap();
+        drop(permission_restore.lock().unwrap().take());
+
+        assert!(matches!(
+            publication,
+            ManifestPublication::Installed {
+                parent_synced: false,
+                error: CalcFlowError::Io { .. },
+            }
+        ));
+        assert_eq!(
+            transaction
+                .select_latest(&identity())
+                .await
+                .unwrap()
+                .unwrap()
+                .manifest
+                .epoch(),
+            Epoch::INITIAL
+        );
+
+        std::fs::remove_file(transaction.manifest_path(Epoch::INITIAL)).unwrap();
+        assert!(
+            transaction
+                .select_latest(&identity())
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 

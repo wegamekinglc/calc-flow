@@ -689,6 +689,124 @@ def test_terminal_job_releases_cyclic_connector_roots(tmp_path: Path) -> None:
     assert [reference() for reference in references] == [None, None, None, None]
 
 
+def _blocking_started_job(tmp_path: Path, *, finite: bool) -> object:
+    class Source:
+        def capabilities(self) -> SourceCapabilities:
+            return SourceCapabilities(
+                ReplayPositioning.UNSUPPORTED,
+                SourceDeliveryCapability.LOSSY,
+                max_batch_rows=1,
+                max_batch_bytes=1,
+                native_watermarks=NativeWatermarkCapability.NEVER_EMITS,
+            )
+
+        async def open(self, cursor: Cursor | None) -> None:
+            return None
+
+        async def next(self) -> None:
+            if finite:
+                return None
+            await asyncio.Event().wait()
+
+        async def close(self) -> None:
+            return None
+
+    class Sink:
+        async def open(self) -> None:
+            return None
+
+        async def write(self, batch: Batch) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    return StreamingRunner(
+        PipelineBuilder(f"blocking-loop-{finite}")
+        .expression("copy", "b = a")
+        .compile_stream(),
+        {"input": SourceBinding(Source(), watermark_policy=DisabledWatermarks())},
+        {"output": [SinkBinding.ordinary("archive", Sink())]},
+        ManagedCheckpointRuntime(tmp_path),
+    ).start()
+
+
+@pytest.mark.parametrize(
+    ("method", "finite", "expected_state"),
+    (
+        ("shutdown_async", False, "completed"),
+        ("cancel_async", False, "cancelled"),
+        ("wait_async", True, "completed"),
+    ),
+)
+def test_blocking_start_async_terminal_closes_owned_event_loop(
+    tmp_path: Path, method: str, finite: bool, expected_state: str
+) -> None:
+    job = _blocking_started_job(tmp_path / method, finite=finite)
+    blocking_loop = job._blocking_loop
+    thread = blocking_loop._thread
+
+    outcome = asyncio.run(getattr(job, method)())
+
+    thread.join(timeout=2)
+    assert outcome.state == expected_state
+    assert not thread.is_alive()
+    assert job._blocking_loop is None
+
+
+def test_blocking_start_native_terminal_outcome_wins_cleanup_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = _blocking_started_job(tmp_path, finite=True)
+    blocking_loop = job._blocking_loop
+    thread = blocking_loop._thread
+    original_close_async = runtime_module._BlockingEventLoop.close_async
+
+    async def exercise() -> runtime_module.JobOutcome:
+        cleanup_entered = asyncio.Event()
+        cleanup_release = asyncio.Event()
+
+        async def controlled_close_async(
+            self: runtime_module._BlockingEventLoop,
+        ) -> None:
+            cleanup_entered.set()
+            await cleanup_release.wait()
+            await original_close_async(self)
+
+        monkeypatch.setattr(
+            runtime_module._BlockingEventLoop,
+            "close_async",
+            controlled_close_async,
+        )
+        observer = asyncio.create_task(job.wait_async())
+        await cleanup_entered.wait()
+        observer.cancel()
+        await asyncio.sleep(0)
+        cleanup_release.set()
+        return await observer
+
+    outcome = asyncio.run(exercise())
+
+    thread.join(timeout=2)
+    assert outcome.state == "completed"
+    assert not thread.is_alive()
+    assert job._blocking_loop is None
+
+
+def test_blocking_started_job_gc_reaps_owned_event_loop(tmp_path: Path) -> None:
+    job = _blocking_started_job(tmp_path, finite=False)
+    blocking_loop = job._blocking_loop
+    thread = blocking_loop._thread
+    reference = weakref.ref(job)
+
+    del job
+    gc.collect()
+    thread.join(timeout=2)
+
+    assert reference() is None
+    assert not thread.is_alive()
+
+
 def test_abandoned_job_reaps_python_connector(tmp_path: Path) -> None:
     async def exercise() -> None:
         source_closed = asyncio.Event()

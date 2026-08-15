@@ -237,6 +237,15 @@ runner and returns a `StreamingJob`; use `trigger_checkpoint_async()`,
 Guarded blocking forms are available outside an event loop. Connector methods
 must be declared with `async def`.
 
+Blocking `start()` owns a dedicated event-loop thread for the lifetime of its
+job. Blocking terminal calls execute on that loop, and async terminal calls
+from another loop are marshalled to it. Terminal `shutdown`, `cancel`, and
+`wait`, whether async or blocking, release connector roots and stop and join
+the owned thread; dropping the job schedules cancellation and settlement
+before reclaiming it. Observer cancellation during terminal cleanup cannot
+strand the thread. Once the native terminal outcome has linearized, it wins
+over cancellation that arrives while the thread is being reclaimed.
+
 ## Local HTTP API
 
 The separate Studio service exposes its supported API under `/api/v2`.
@@ -294,7 +303,8 @@ The checked contract is [web-ui/openapi.json](../web-ui/openapi.json).
 
 Rust returns `CalcFlowError` variants. Python exposes the stable hierarchy:
 `CalcFlowError`, `ConfigError`, `CompileError`, `ExecutionError`,
-`ProviderError`, `CheckpointError`, and `CancelledError`.
+`ProviderError`, `CheckpointError`, `CancelledError`,
+`StreamingRuntimeError`, and `CheckpointPublicationUnknownError`.
 
 Invalid user documents and graph definitions are configuration/compile errors;
 execution, callbacks, source/sink failures, cancellation, and checkpoint
@@ -303,8 +313,9 @@ storage preserve their more specific categories.
 `CalcFlowError::TaskPanicked { task_id, message }` reports a captured private
 runtime task panic. Internally captured panic text is valid UTF-8 and at most
 1,024 bytes including the ellipsis. Python maps an unexpected native panic
-through its existing `ExecutionError` category; the private source-driven
-continuous runtime adds no Python API.
+through its existing `ExecutionError` category. Public continuous lifecycle
+failures use payload-safe `StreamingRuntimeError` projections; indeterminate
+manifest publication uses `CheckpointPublicationUnknownError`.
 
 ## Version and compatibility
 
