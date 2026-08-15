@@ -23,20 +23,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
-      - name: Test the failing soak test alone
+      - name: Run instrumented soak test
         run: >-
           cargo test -p calc-flow --all-features --lib
-          -- --test-threads=1 --exact
+          -- --test-threads=1 --exact --nocapture
           runtime::streaming::soak::private_benchmark_report_path_is_validated_and_immutable
-      - name: Test both failing soak tests together
-        run: >-
-          cargo test -p calc-flow --all-features --lib
-          -- --test-threads=1
-          private_absolute_measurement_recomputes private_benchmark_report_path
-      - name: Test the whole soak module
-        run: >-
-          cargo test -p calc-flow --all-features --lib
-          -- --test-threads=1 runtime::streaming::soak
   process-tree:
     name: Windows process-tree cleanup
     runs-on: windows-latest
