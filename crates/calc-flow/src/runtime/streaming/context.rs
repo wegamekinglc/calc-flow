@@ -111,7 +111,7 @@ impl StreamJobContext {
 
 #[allow(
     dead_code,
-    reason = "M2 task scopes remain crate-private until the post-M5 public A6 gate"
+    reason = "task-scope variants are retained for crate-owned connector diagnostics"
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StreamTaskKind {
@@ -133,7 +133,7 @@ impl StreamTaskKind {
 /// Immutable task scope derived from one job context.
 #[allow(
     dead_code,
-    reason = "M2 task scopes remain crate-private until the post-M5 public A6 gate"
+    reason = "task scopes preserve crate-owned cancellation and diagnostic identity"
 )]
 #[derive(Clone, Debug)]
 pub(crate) struct StreamTaskContext {
@@ -144,7 +144,7 @@ pub(crate) struct StreamTaskContext {
 
 #[allow(
     dead_code,
-    reason = "M2 task scopes remain crate-private until the post-M5 public A6 gate"
+    reason = "task-scope accessors are reserved for crate-owned connector diagnostics"
 )]
 impl StreamTaskContext {
     pub(crate) const fn job(&self) -> &StreamJobContext {

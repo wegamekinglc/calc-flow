@@ -38,8 +38,7 @@ use super::{
     },
     runner::{
         CheckpointFaultMode, CheckpointFaultPoint, CheckpointRuntimeSpec,
-        CheckpointStartedTestGate, ContinuousJob, ContinuousJobState, ContinuousRunner,
-        TerminalCause,
+        CheckpointStartedTestGate, ContinuousJobState, ContinuousRunner, TerminalCause,
     },
     source_task::{
         AcceptedSequenceRecorder, Cursor, SourceBinding, SourceCapabilities, SourceEvent,
@@ -49,12 +48,23 @@ use super::{
 use crate::{
     AggregateFunction, Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken,
     CheckpointManifest as BenchmarkCheckpointManifest, CheckpointManifestFields,
-    CursorManifestEntry, Edge, EdgeBudget, Epoch, EventTime, JsonMap, LocalStateBackend,
-    OperatorManifestEntry, OperatorMetadata, OperatorStateSnapshot, PipelineBuilder, Port,
-    PortEndpoint, RecoveryStatus, Result, SourceWatermarkManifestState, StateBackend,
+    CheckpointPhase as PublicCheckpointPhase, ComponentKind as PublicComponentKind,
+    Cursor as PublicCursor, CursorManifestEntry, Edge, EdgeBudget, Epoch, EventTime,
+    JobState as PublicJobState, JsonMap, LocalStateBackend,
+    ManagedCheckpointRuntime as PublicManagedCheckpointRuntime,
+    NativeWatermarkCapability as PublicNativeWatermarkCapability, OperatorManifestEntry,
+    OperatorMetadata, OperatorStateSnapshot, PipelineBuilder, Port, PortEndpoint, RecoveryStatus,
+    ReplayPositioning as PublicReplayPositioning, Result, SinkBinding as PublicSinkBinding,
+    SinkRecovery as PublicSinkRecovery, SourceBinding as PublicSourceBinding,
+    SourceCapabilities as PublicSourceCapabilities,
+    SourceDeliveryCapability as PublicSourceDeliveryCapability, SourceEvent as PublicSourceEvent,
+    SourceSchema as PublicSourceSchema, SourceWatermarkManifestState, StateBackend,
     StateLineageBackend, StateLineageKey, StreamCollector, StreamOperator, StreamOperatorContext,
-    StreamRequirements, StreamRuntimeConfig, UdfRegistry, UnionOperator, WindowAggregateOperator,
-    WindowSpec,
+    StreamRequirements, StreamRuntimeConfig, StreamSource as PublicStreamSource,
+    StreamingErrorCategory as PublicStreamingErrorCategory, StreamingJob as PublicStreamingJob,
+    StreamingRunner as PublicStreamingRunner, TerminalCause as PublicTerminalCause,
+    TransactionalStreamSink as PublicTransactionalStreamSink, UdfRegistry, UnionOperator,
+    WindowAggregateOperator, WindowSpec,
     state::{ManifestTransaction, PreparedEpochManifest, PreparedManifestIdentity},
 };
 
@@ -887,6 +897,20 @@ fn assert_edge_budgets(status: &super::runner::ContinuousJobStatus) {
     }
 }
 
+fn assert_public_edge_budgets(status: &crate::JobStatus) {
+    for (edge, metrics) in &status.edges {
+        assert!(
+            metrics.current_envelopes <= metrics.envelope_limit
+                && metrics.high_water_envelopes <= metrics.envelope_limit
+                && metrics.current_rows <= metrics.row_limit
+                && metrics.current_bytes <= metrics.byte_limit
+                && metrics.high_water_rows <= metrics.row_limit
+                && metrics.high_water_bytes <= metrics.byte_limit,
+            "public edge {edge:?} exceeded its budget: {metrics:?}"
+        );
+    }
+}
+
 fn soak_queue_sample(
     edge: &str,
     channel: &super::ChannelMetrics,
@@ -1197,6 +1221,76 @@ impl StreamSource for CheckpointMatrixSource {
     }
 }
 
+#[async_trait]
+impl PublicStreamSource for CheckpointMatrixSource {
+    fn capabilities(&self) -> PublicSourceCapabilities {
+        PublicSourceCapabilities {
+            replay_positioning: PublicReplayPositioning::ExactPauseReportAndSeek,
+            delivery: PublicSourceDeliveryCapability::Lossless,
+            max_batch_rows: 1,
+            max_batch_bytes: 1 << 20,
+            schema: PublicSourceSchema::Exact(soak_schema()),
+            native_watermarks: PublicNativeWatermarkCapability::EmitsNative,
+        }
+    }
+
+    async fn open(&mut self, cursor: Option<PublicCursor>) -> Result<()> {
+        self.opened_with.lock().push((
+            self.source_id.into(),
+            cursor.as_ref().map(|cursor| cursor.order().to_vec()),
+        ));
+        if let Some(cursor) = cursor {
+            let bytes: [u8; 8] =
+                cursor
+                    .order()
+                    .try_into()
+                    .map_err(|_| CalcFlowError::CheckpointMismatch {
+                        message: "checkpoint matrix cursor order is not a u64".into(),
+                    })?;
+            self.next_sequence = u64::from_be_bytes(bytes).checked_add(1).ok_or_else(|| {
+                CalcFlowError::CheckpointMismatch {
+                    message: "checkpoint matrix cursor exhausted u64".into(),
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    async fn next(&mut self) -> Result<Option<PublicSourceEvent>> {
+        if self.next_sequence != 0 && !self.poll_delay.is_zero() {
+            tokio::time::sleep(self.poll_delay).await;
+        }
+        if self.pending_watermark {
+            self.pending_watermark = false;
+            return Ok(Some(PublicSourceEvent::Watermark(EventTime::from_micros(
+                1,
+            ))));
+        }
+        if self.next_sequence != 0 && self.pause_before_eof {
+            return std::future::pending().await;
+        }
+        if self.next_sequence == 0 {
+            self.next_sequence = 1;
+            self.pending_watermark = true;
+            return Ok(Some(PublicSourceEvent::Data {
+                batch: checkpoint_matrix_batch(self.source_id)?,
+                cursor: PublicCursor::new(
+                    self.source_id,
+                    checkpoint_matrix_cursor_order(self.source_id),
+                    JsonMap::new(),
+                )?,
+            }));
+        }
+        self.ended = true;
+        Ok(None)
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        self.closed.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 struct CheckpointRestartSoakSource {
     source_id: &'static str,
     next_sequence: u64,
@@ -1297,6 +1391,76 @@ impl StreamSource for CheckpointRestartSoakSource {
             max_batch_rows: 1,
             max_batch_bytes: 1 << 20,
         }
+    }
+}
+
+#[async_trait]
+impl PublicStreamSource for CheckpointRestartSoakSource {
+    fn capabilities(&self) -> PublicSourceCapabilities {
+        PublicSourceCapabilities {
+            replay_positioning: PublicReplayPositioning::ExactPauseReportAndSeek,
+            delivery: PublicSourceDeliveryCapability::Lossless,
+            max_batch_rows: 1,
+            max_batch_bytes: 1 << 20,
+            schema: PublicSourceSchema::Exact(soak_schema()),
+            native_watermarks: PublicNativeWatermarkCapability::EmitsNative,
+        }
+    }
+
+    async fn open(&mut self, cursor: Option<PublicCursor>) -> Result<()> {
+        self.opened_with.lock().push((
+            self.source_id.into(),
+            cursor.as_ref().map(|cursor| cursor.order().to_vec()),
+        ));
+        if let Some(cursor) = cursor {
+            let bytes: [u8; 8] =
+                cursor
+                    .order()
+                    .try_into()
+                    .map_err(|_| CalcFlowError::CheckpointMismatch {
+                        message: "checkpoint soak cursor order is not a u64".into(),
+                    })?;
+            self.next_sequence = u64::from_be_bytes(bytes).checked_add(1).ok_or_else(|| {
+                CalcFlowError::CheckpointMismatch {
+                    message: "checkpoint soak cursor exhausted u64".into(),
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    async fn next(&mut self) -> Result<Option<PublicSourceEvent>> {
+        if let Some(watermark) = self.pending_watermark.take() {
+            return Ok(Some(PublicSourceEvent::Watermark(watermark)));
+        }
+        if self.stop.load(Ordering::SeqCst) != 0 {
+            return Ok(None);
+        }
+        tokio::time::sleep(self.poll_delay).await;
+        let sequence = self.next_sequence;
+        self.next_sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| CalcFlowError::Internal {
+                message: "checkpoint soak source exhausted u64".into(),
+            })?;
+        let watermark_micros =
+            i64::try_from(self.next_sequence).map_err(|_| CalcFlowError::Internal {
+                message: "checkpoint soak watermark exhausted i64".into(),
+            })?;
+        self.pending_watermark = Some(EventTime::from_micros(watermark_micros));
+        Ok(Some(PublicSourceEvent::Data {
+            batch: checkpoint_restart_soak_batch(self.source_id, sequence)?,
+            cursor: PublicCursor::new(
+                self.source_id,
+                sequence.to_be_bytes().to_vec(),
+                JsonMap::new(),
+            )?,
+        }))
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        self.closed.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -1611,6 +1775,42 @@ impl TransactionalStreamSink for CheckpointMatrixSink {
     }
 }
 
+#[async_trait]
+impl PublicTransactionalStreamSink for CheckpointMatrixSink {
+    async fn open(&mut self) -> Result<()> {
+        <Self as TransactionalStreamSink>::open(self).await
+    }
+
+    async fn begin_epoch(&mut self, epoch: Epoch) -> Result<()> {
+        <Self as TransactionalStreamSink>::begin_epoch(self, epoch).await
+    }
+
+    async fn write(&mut self, batch: &Batch) -> Result<()> {
+        <Self as TransactionalStreamSink>::write(self, batch).await
+    }
+
+    async fn pre_commit(&mut self, epoch: Epoch) -> Result<JsonMap> {
+        <Self as TransactionalStreamSink>::pre_commit(self, epoch).await
+    }
+
+    async fn commit(&mut self, epoch: Epoch, state: &JsonMap) -> Result<()> {
+        <Self as TransactionalStreamSink>::commit(self, epoch, state).await
+    }
+
+    async fn abort(&mut self, epoch: Epoch, state: Option<&JsonMap>) -> Result<()> {
+        <Self as TransactionalStreamSink>::abort(self, epoch, state).await
+    }
+
+    async fn recover(&mut self, recovery: &PublicSinkRecovery) -> Result<()> {
+        self.commit_prepared(recovery.epoch(), recovery.pre_commit())
+            .await
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        <Self as TransactionalStreamSink>::close(self).await
+    }
+}
+
 fn checkpoint_matrix_window() -> WindowAggregateOperator {
     let spec = WindowSpec::tumbling("event_time", Duration::from_micros(1))
         .unwrap()
@@ -1619,6 +1819,125 @@ fn checkpoint_matrix_window() -> WindowAggregateOperator {
         .aggregate(AggregateFunction::Sum, "value", "sum_value")
         .unwrap();
     WindowAggregateOperator::new("window", soak_schema(), spec).unwrap()
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the public restart matrix owns its complete connector and durability probes"
+)]
+fn checkpoint_matrix_public_runner(
+    managed_root: &Path,
+    sink_root: &Path,
+    source_opened_with: &SourceOpenHistory,
+    source_closed: &Arc<AtomicUsize>,
+    sink_closed: &Arc<AtomicUsize>,
+    sink_writes: &Arc<AtomicUsize>,
+    source_poll_delay: Duration,
+    pause_before_eof: bool,
+    config: StreamRuntimeConfig,
+    fault: Option<(CheckpointFaultPoint, CheckpointFaultMode)>,
+) -> PublicStreamingRunner {
+    let input_fields = soak_schema()
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    let union = UnionOperator::new(
+        "merge",
+        vec![
+            Port::new("left", BatchKind::Table, true, Some(input_fields.clone())).unwrap(),
+            Port::new("right", BatchKind::Table, true, Some(input_fields)).unwrap(),
+        ],
+    )
+    .unwrap();
+    let window = checkpoint_matrix_window();
+    let window_fields = window.output_ports()[0]
+        .schema()
+        .unwrap()
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    let plan = PipelineBuilder::new("checkpoint-restart-fault-matrix")
+        .unwrap()
+        .add_node("merge", Box::new(union))
+        .unwrap()
+        .add_node("window", Box::new(window))
+        .unwrap()
+        .add_checkpoint_capable_node(
+            "branch_a",
+            Box::new(CheckpointMatrixForward::new(window_fields)) as Box<dyn StreamOperator>,
+        )
+        .unwrap()
+        .connect(Edge::new(
+            PortEndpoint::new("merge", "output").unwrap(),
+            PortEndpoint::new("window", "input").unwrap(),
+        ))
+        .unwrap()
+        .connect(Edge::new(
+            PortEndpoint::new("window", "output").unwrap(),
+            PortEndpoint::new("branch_a", "input").unwrap(),
+        ))
+        .unwrap()
+        .compile_stream(
+            &UdfRegistry::new().snapshot(),
+            &StreamRequirements {
+                delivery: BTreeMap::from([(
+                    "output".into(),
+                    crate::DeliveryGuarantee::ExactlyOnce,
+                )]),
+            },
+        )
+        .unwrap();
+    let sources = ["left", "right"]
+        .into_iter()
+        .map(|source_id| {
+            (
+                source_id.into(),
+                PublicSourceBinding::new(CheckpointMatrixSource {
+                    source_id,
+                    next_sequence: 0,
+                    pending_watermark: false,
+                    ended: false,
+                    pause_before_eof,
+                    poll_delay: source_poll_delay,
+                    opened_with: Arc::clone(source_opened_with),
+                    closed: Arc::clone(source_closed),
+                }),
+            )
+        })
+        .collect();
+    let sinks = BTreeMap::from([(
+        "output".into(),
+        ["sink-a", "sink-b"]
+            .into_iter()
+            .map(|sink_id| {
+                PublicSinkBinding::transactional(
+                    sink_id,
+                    CheckpointMatrixSink {
+                        sink_id,
+                        root: sink_root.join(sink_id),
+                        epoch: None,
+                        pending: Vec::new(),
+                        written_records: Arc::clone(sink_writes),
+                        closed: Arc::clone(sink_closed),
+                        write_delay: Duration::ZERO,
+                    },
+                )
+                .unwrap()
+            })
+            .collect(),
+    )]);
+    let checkpoints = PublicManagedCheckpointRuntime::new(managed_root).unwrap();
+    let checkpoints = match fault {
+        Some((point, mode)) => checkpoints.with_fault_for_test(point, mode),
+        None => checkpoints,
+    };
+    PublicStreamingRunner::new(plan, sources, sinks, checkpoints)
+        .unwrap()
+        .with_runtime_config(config)
+        .unwrap()
 }
 
 #[allow(
@@ -1753,17 +2072,18 @@ fn checkpoint_matrix_spec(
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
-    reason = "the soak spec owns its exact graph, durable roots, and lifecycle probes"
+    reason = "each public soak generation owns the same durable and lifecycle probes"
 )]
-fn checkpoint_restart_soak_spec(
-    job_id: u64,
+fn checkpoint_restart_soak_public_runner(
+    managed_root: &Path,
     sink_root: &Path,
     stop: &Arc<AtomicUsize>,
     source_opened_with: &SourceOpenHistory,
     source_closed: &Arc<AtomicUsize>,
     sink_closed: &Arc<AtomicUsize>,
+    config: StreamRuntimeConfig,
     sink_write_delay: Duration,
-) -> ContinuousJobSpec {
+) -> PublicStreamingRunner {
     let input_fields = soak_schema()
         .fields()
         .iter()
@@ -1835,10 +2155,10 @@ fn checkpoint_restart_soak_spec(
         .unwrap();
     let sources = ["left", "right"]
         .into_iter()
-        .map(|source_id| NamedSourceBinding {
-            binding_id: source_id.into(),
-            binding: SourceBinding::new(
-                Box::new(CheckpointRestartSoakSource {
+        .map(|source_id| {
+            (
+                source_id.into(),
+                PublicSourceBinding::new(CheckpointRestartSoakSource {
                     source_id,
                     next_sequence: 0,
                     pending_watermark: None,
@@ -1847,46 +2167,42 @@ fn checkpoint_restart_soak_spec(
                     opened_with: Arc::clone(source_opened_with),
                     closed: Arc::clone(source_closed),
                 }),
-                None,
-                0,
             )
-            .unwrap(),
         })
         .collect();
     let sink_writes = Arc::new(AtomicUsize::new(0));
     let sinks = [("branch_a.output", "sink-a"), ("branch_b.output", "sink-b")]
         .into_iter()
-        .map(|(output_id, sink_id)| NamedSinkBinding {
-            output_id: output_id.into(),
-            sink_id: sink_id.into(),
-            binding: OrdinarySinkBinding::new_transactional(Box::new(CheckpointMatrixSink {
-                sink_id,
-                root: sink_root.join(sink_id),
-                epoch: None,
-                pending: Vec::new(),
-                written_records: Arc::clone(&sink_writes),
-                closed: Arc::clone(sink_closed),
-                write_delay: sink_write_delay,
-            })),
+        .map(|(output_id, sink_id)| {
+            (
+                output_id.into(),
+                vec![
+                    PublicSinkBinding::transactional(
+                        sink_id,
+                        CheckpointMatrixSink {
+                            sink_id,
+                            root: sink_root.join(sink_id),
+                            epoch: None,
+                            pending: Vec::new(),
+                            written_records: Arc::clone(&sink_writes),
+                            closed: Arc::clone(sink_closed),
+                            write_delay: sink_write_delay,
+                        },
+                    )
+                    .unwrap(),
+                ],
+            )
         })
         .collect();
-    ContinuousJobSpec {
-        context: StreamJobContext::new(
-            job_id,
-            plan.fingerprint(),
-            JsonMap::new(),
-            None,
-            CancellationToken::new(),
-        ),
+    PublicStreamingRunner::new(
         plan,
         sources,
         sinks,
-        edge_budget: EdgeBudget {
-            max_rows: 8,
-            max_bytes: 1 << 20,
-        },
-        delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
-    }
+        PublicManagedCheckpointRuntime::new(managed_root).unwrap(),
+    )
+    .unwrap()
+    .with_runtime_config(config)
+    .unwrap()
 }
 
 #[allow(
@@ -1911,8 +2227,31 @@ struct CheckpointFaultMatrixReport {
     temporary_artifacts: usize,
     terminal_tasks: usize,
     terminal_charged_edges: usize,
+    terminal_registries: (usize, usize),
+    fault_trigger_count: usize,
     cancellation_requested: bool,
     deterministic_terminal_error: bool,
+}
+
+const fn checkpoint_fault_expected_phase(point: CheckpointFaultPoint) -> PublicCheckpointPhase {
+    match point {
+        CheckpointFaultPoint::SourceAdmission | CheckpointFaultPoint::SourceCut => {
+            PublicCheckpointPhase::Requested
+        }
+        CheckpointFaultPoint::PartialAlignment | CheckpointFaultPoint::StateStage => {
+            PublicCheckpointPhase::SourcesCut
+        }
+        CheckpointFaultPoint::SinkPreCommit => PublicCheckpointPhase::OperatorsSnapshotted,
+        CheckpointFaultPoint::ManifestWrite | CheckpointFaultPoint::ManifestRename => {
+            PublicCheckpointPhase::SinksPrecommitted
+        }
+        CheckpointFaultPoint::ManifestParentSync
+        | CheckpointFaultPoint::PartialSinkCommit
+        | CheckpointFaultPoint::CompletedCommit => PublicCheckpointPhase::ManifestDurable,
+        CheckpointFaultPoint::Retention | CheckpointFaultPoint::Compaction => {
+            PublicCheckpointPhase::SinksCommitted
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -3096,10 +3435,14 @@ async fn prepare_private_sink_commit_benchmark(sink_count: usize) -> PrivateSink
             closed: Arc::new(AtomicUsize::new(0)),
             write_delay: Duration::ZERO,
         };
-        sink.open().await.unwrap();
-        sink.begin_epoch(Epoch::INITIAL).await.unwrap();
+        TransactionalStreamSink::open(&mut sink).await.unwrap();
+        TransactionalStreamSink::begin_epoch(&mut sink, Epoch::INITIAL)
+            .await
+            .unwrap();
         sink.pending.push(format!("{sink_id}|0|1|left|1"));
-        let state = sink.pre_commit(Epoch::INITIAL).await.unwrap();
+        let state = TransactionalStreamSink::pre_commit(&mut sink, Epoch::INITIAL)
+            .await
+            .unwrap();
         sinks.push((sink, state));
     }
     PrivateSinkCommitFixture {
@@ -3112,7 +3455,9 @@ impl PrivateSinkCommitFixture {
     async fn measure(mut self) -> usize {
         let sink_count = self.sinks.len();
         for (sink, state) in &mut self.sinks {
-            sink.commit(Epoch::INITIAL, state).await.unwrap();
+            TransactionalStreamSink::commit(sink, Epoch::INITIAL, state)
+                .await
+                .unwrap();
         }
         let mut visible = 0;
         for (sink, _) in &self.sinks {
@@ -3501,7 +3846,6 @@ async fn run_checkpoint_restart_fault_case(
     let state_root = directory.path().join("state");
     let manifest_root = directory.path().join("manifests");
     let sink_root = directory.path().join("sinks");
-    let backend = Arc::new(LocalStateBackend::new(&state_root).await.unwrap());
     let config = StreamRuntimeConfig {
         checkpoint_interval: Duration::from_millis(10),
         checkpoint_timeout: Duration::from_secs(5),
@@ -3513,9 +3857,8 @@ async fn run_checkpoint_restart_fault_case(
     let first_source_closed = Arc::new(AtomicUsize::new(0));
     let first_sink_closed = Arc::new(AtomicUsize::new(0));
     let first_sink_writes = Arc::new(AtomicUsize::new(0));
-    let first_cancellation = CancellationToken::new();
-    let first_spec = checkpoint_matrix_spec(
-        20_000,
+    let first_runner = checkpoint_matrix_public_runner(
+        directory.path(),
         &sink_root,
         &first_source_opens,
         &first_source_closed,
@@ -3527,79 +3870,196 @@ async fn run_checkpoint_restart_fault_case(
             Duration::ZERO
         },
         true,
-        first_cancellation.clone(),
-        true,
+        config,
+        Some((point, mode)),
     );
-    let (first_checkpoint, fault_probe) =
-        CheckpointRuntimeSpec::new(backend.clone(), &manifest_root, config)
-            .unwrap()
-            .with_fault_probe(point, mode);
-    let mut first_runner = ContinuousRunner::new();
-    let first_job = first_runner
-        .start_checkpointed(first_spec, first_checkpoint)
-        .await
-        .unwrap_or_else(|failure| {
-            panic!("fault case {point:?}/{mode:?} failed to start: {failure:?}")
-        });
+    let first_job = first_runner.start().await.unwrap_or_else(|failure| {
+        panic!("fault case {point:?}/{mode:?} failed to start: {failure:?}")
+    });
     let first_outcome = tokio::time::timeout(Duration::from_secs(5), first_job.wait())
         .await
         .unwrap_or_else(|error| panic!("fault case {point:?}/{mode:?} hung: {error}"));
-    let first_error = format!("{:?}", first_outcome.errors);
+    let first_status = first_job.status();
+    let first_probe = first_job.test_probe();
+    let exact_error = |category, epoch, phase, component_kind, component_id: Option<&str>| {
+        first_outcome.errors.iter().any(|error| {
+            error.category() == category
+                && error.epoch() == epoch
+                && error.checkpoint_phase() == phase
+                && error.component_kind() == component_kind
+                && error.component_id() == component_id
+        })
+    };
+    let expected_phase = checkpoint_fault_expected_phase(point);
+    let checkpoint_status_matches = first_status.checkpoint.current_epoch == Some(Epoch::INITIAL)
+        && first_status.checkpoint.phase == Some(expected_phase);
     let deterministic_terminal_error = match (point, mode) {
         (CheckpointFaultPoint::ManifestRename, _) => {
-            first_outcome.state == ContinuousJobState::RecoveryRequired
-                && first_outcome.errors.iter().any(|failure| {
-                    matches!(
-                        &failure.error,
-                        CalcFlowError::RecoveryRequired {
-                            pipeline_name,
-                            message,
-                        } if pipeline_name == "checkpoint-restart-fault-matrix"
-                            && message.contains("checkpoint epoch 1")
-                            && message.contains("publication durability is unknown")
-                    )
-                })
+            first_outcome.state == PublicJobState::RecoveryRequired
+                && first_outcome.cause
+                    == if mode == CheckpointFaultMode::Cancel {
+                        PublicTerminalCause::ExplicitCancel
+                    } else {
+                        PublicTerminalCause::Failure
+                    }
+                && exact_error(
+                    PublicStreamingErrorCategory::CheckpointPublicationUnknown,
+                    Some(Epoch::INITIAL),
+                    Some(PublicCheckpointPhase::ManifestInstalled),
+                    Some(PublicComponentKind::Checkpoint),
+                    None,
+                )
+                && first_status.checkpoint.installed_unknown_epoch == Some(Epoch::INITIAL)
         }
         (CheckpointFaultPoint::PartialSinkCommit, CheckpointFaultMode::Cancel) => {
-            first_outcome.state == ContinuousJobState::RecoveryRequired
-                && !first_outcome.errors.is_empty()
-                && first_cancellation.is_cancelled()
+            first_outcome.state == PublicJobState::RecoveryRequired
+                && first_outcome.cause == PublicTerminalCause::ExplicitCancel
+                && checkpoint_status_matches
+                && exact_error(
+                    PublicStreamingErrorCategory::Internal,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
         }
-        (
-            CheckpointFaultPoint::PartialSinkCommit,
-            CheckpointFaultMode::Io | CheckpointFaultMode::Panic | CheckpointFaultMode::Restart,
-        ) => {
-            first_outcome.state == ContinuousJobState::RecoveryRequired
-                && first_outcome.errors.iter().any(|failure| {
-                    matches!(
-                        &failure.error,
-                        CalcFlowError::RecoveryRequired {
-                            pipeline_name,
-                            message,
-                        } if pipeline_name == "checkpoint-restart-fault-matrix"
-                            && message.contains("sink \"sink-a\"")
-                            && message.contains("epoch 1")
-                    )
-                })
+        (CheckpointFaultPoint::PartialSinkCommit, _) => {
+            first_outcome.state == PublicJobState::RecoveryRequired
+                && first_outcome.cause == PublicTerminalCause::Failure
+                && checkpoint_status_matches
+                && exact_error(
+                    PublicStreamingErrorCategory::Connector,
+                    Some(Epoch::INITIAL),
+                    Some(PublicCheckpointPhase::ManifestDurable),
+                    Some(PublicComponentKind::Sink),
+                    Some("sink-a"),
+                )
         }
         (_, CheckpointFaultMode::Cancel) => {
-            first_outcome.state == ContinuousJobState::Cancelled
+            let cancel_phase = match point {
+                CheckpointFaultPoint::PartialAlignment => PublicCheckpointPhase::Requested,
+                CheckpointFaultPoint::ManifestParentSync => PublicCheckpointPhase::SinksCommitted,
+                _ => expected_phase,
+            };
+            first_outcome.state == PublicJobState::Cancelled
+                && first_outcome.cause == PublicTerminalCause::ExplicitCancel
                 && first_outcome.errors.is_empty()
-                && first_cancellation.is_cancelled()
+                && first_status.checkpoint.current_epoch == Some(Epoch::INITIAL)
+                && first_status.checkpoint.phase == Some(cancel_phase)
+                && first_status.checkpoint.failure_category
+                    == Some(PublicStreamingErrorCategory::Internal)
+                && first_probe.cancellation_triggers == 1
+        }
+        (CheckpointFaultPoint::StateStage, CheckpointFaultMode::Panic) => {
+            first_outcome.state == PublicJobState::Failed
+                && first_outcome.cause == PublicTerminalCause::Failure
+                && checkpoint_status_matches
+                && first_status.checkpoint.failure_category
+                    == Some(PublicStreamingErrorCategory::Internal)
+                && exact_error(
+                    PublicStreamingErrorCategory::TaskPanicked,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+        }
+        (CheckpointFaultPoint::StateStage, _) => {
+            first_outcome.state == PublicJobState::Failed
+                && first_outcome.cause == PublicTerminalCause::Failure
+                && checkpoint_status_matches
+                && first_status.checkpoint.failure_category
+                    == Some(PublicStreamingErrorCategory::Internal)
+                && first_outcome.errors.iter().any(|error| {
+                    error.category() == PublicStreamingErrorCategory::Operator
+                        && error.epoch().is_none()
+                        && error.checkpoint_phase().is_none()
+                        && error.component_kind() == Some(PublicComponentKind::Operator)
+                        && matches!(error.component_id(), Some("window" | "branch_a"))
+                })
+                && first_outcome.errors.iter().any(|error| {
+                    error.category() == PublicStreamingErrorCategory::Internal
+                        && error.epoch().is_none()
+                        && error.checkpoint_phase().is_none()
+                        && error.component_kind() == Some(PublicComponentKind::Edge)
+                })
+        }
+        (CheckpointFaultPoint::PartialAlignment, CheckpointFaultMode::Panic) => {
+            first_outcome.state == PublicJobState::Failed
+                && first_outcome.cause == PublicTerminalCause::Failure
+                && checkpoint_status_matches
+                && exact_error(
+                    PublicStreamingErrorCategory::TaskPanicked,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+        }
+        (CheckpointFaultPoint::PartialAlignment, _) => {
+            first_outcome.state == PublicJobState::Failed
+                && first_outcome.cause == PublicTerminalCause::Failure
+                && checkpoint_status_matches
+                && first_outcome.errors.iter().any(|error| {
+                    error.category() == PublicStreamingErrorCategory::Operator
+                        && error.epoch().is_none()
+                        && error.checkpoint_phase().is_none()
+                        && error.component_kind() == Some(PublicComponentKind::Operator)
+                        && matches!(error.component_id(), Some("branch_a" | "branch_b"))
+                })
+        }
+        (CheckpointFaultPoint::Compaction, CheckpointFaultMode::Io)
+        | (
+            CheckpointFaultPoint::ManifestWrite | CheckpointFaultPoint::ManifestParentSync,
+            CheckpointFaultMode::Panic,
+        )
+        | (_, CheckpointFaultMode::Restart) => {
+            first_outcome.state == PublicJobState::Failed
+                && first_outcome.cause == PublicTerminalCause::Failure
+                && checkpoint_status_matches
+                && first_status.checkpoint.failure_category
+                    == Some(PublicStreamingErrorCategory::Internal)
+                && exact_error(
+                    PublicStreamingErrorCategory::Internal,
+                    Some(Epoch::INITIAL),
+                    Some(expected_phase),
+                    Some(PublicComponentKind::Checkpoint),
+                    None,
+                )
         }
         (_, CheckpointFaultMode::Io) => {
-            first_outcome.state == ContinuousJobState::Failed
-                && first_error.contains("injected checkpoint I/O fault")
+            first_outcome.state == PublicJobState::Failed
+                && first_outcome.cause == PublicTerminalCause::Failure
+                && checkpoint_status_matches
+                && first_status.checkpoint.failure_category
+                    == Some(PublicStreamingErrorCategory::Io)
+                && exact_error(
+                    PublicStreamingErrorCategory::Io,
+                    Some(Epoch::INITIAL),
+                    Some(expected_phase),
+                    Some(PublicComponentKind::Checkpoint),
+                    None,
+                )
         }
         (_, CheckpointFaultMode::Panic) => {
-            first_outcome.state == ContinuousJobState::Failed
-                && first_error.contains("injected checkpoint panic")
-        }
-        (_, CheckpointFaultMode::Restart) => {
-            first_outcome.state == ContinuousJobState::Failed
-                && first_error.contains("injected checkpoint restart")
+            first_outcome.state == PublicJobState::Failed
+                && first_outcome.cause == PublicTerminalCause::Failure
+                && first_status.checkpoint.current_epoch == Some(Epoch::INITIAL)
+                && first_status.checkpoint.phase == Some(expected_phase)
+                && exact_error(
+                    PublicStreamingErrorCategory::TaskPanicked,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
         }
     };
+    assert!(
+        deterministic_terminal_error,
+        "fault case {point:?}/{mode:?} had an unexpected public terminal oracle: outcome={first_outcome:?}, status={first_status:?}, fault_triggers={}, cancellation_triggers={}",
+        first_probe.checkpoint_fault_triggers, first_probe.cancellation_triggers,
+    );
     let manifest_path = manifest_root.join("manifest-00000000000000000001.json");
     let selected_before_restart_manifest = if manifest_path.exists() {
         Some(
@@ -3617,8 +4077,6 @@ async fn run_checkpoint_restart_fault_case(
         .and_then(|manifest| manifest.operators().get("window"))
         .is_some_and(|entry| !entry.segments.is_empty());
     drop(first_job);
-    first_runner.shutdown().await.unwrap();
-    assert_eq!(first_runner.registry_counts(), (0, 0));
     assert_eq!(first_source_closed.load(Ordering::SeqCst), 2);
     assert_eq!(first_sink_closed.load(Ordering::SeqCst), 2);
     let prepared_artifacts_after_failure = ["sink-a", "sink-b"]
@@ -3650,8 +4108,8 @@ async fn run_checkpoint_restart_fault_case(
     let restart_source_closed = Arc::new(AtomicUsize::new(0));
     let restart_sink_closed = Arc::new(AtomicUsize::new(0));
     let restart_sink_writes = Arc::new(AtomicUsize::new(0));
-    let restart_spec = checkpoint_matrix_spec(
-        20_001,
+    let restart_runner = checkpoint_matrix_public_runner(
+        directory.path(),
         &sink_root,
         &restart_source_opens,
         &restart_source_closed,
@@ -3659,43 +4117,34 @@ async fn run_checkpoint_restart_fault_case(
         &restart_sink_writes,
         Duration::ZERO,
         false,
-        CancellationToken::new(),
-        true,
-    );
-    let restart_checkpoint = CheckpointRuntimeSpec::new(
-        backend,
-        &manifest_root,
         StreamRuntimeConfig {
             checkpoint_interval: Duration::from_secs(3_600),
             ..config
         },
-    )
-    .unwrap();
-    let mut restart_runner = ContinuousRunner::new();
-    let restart_job = restart_runner
-        .start_checkpointed(restart_spec, restart_checkpoint)
-        .await
-        .unwrap_or_else(|failure| {
-            panic!("restart case {point:?}/{mode:?} failed to start: {failure:?}")
-        });
+        None,
+    );
+    let restart_job = restart_runner.start().await.unwrap_or_else(|failure| {
+        panic!("restart case {point:?}/{mode:?} failed to start: {failure:?}")
+    });
     let restart_outcome = tokio::time::timeout(Duration::from_secs(5), restart_job.wait())
         .await
         .unwrap_or_else(|error| panic!("restart case {point:?}/{mode:?} hung: {error}"));
     assert_eq!(
         restart_outcome.state,
-        ContinuousJobState::Completed,
+        PublicJobState::Completed,
         "restart case {point:?}/{mode:?} failed: {restart_outcome:?}"
     );
     let terminal_status = restart_job.status();
-    let terminal_tasks = terminal_status.tasks.len();
+    let terminal_probe = restart_job.test_probe();
+    let terminal_tasks = terminal_status.task_count;
     let terminal_charged_edges = terminal_status
         .edges
         .values()
-        .filter(|edge| edge.queue_depth != 0 || edge.charged_rows != 0 || edge.charged_bytes != 0)
+        .filter(|edge| {
+            edge.current_envelopes != 0 || edge.current_rows != 0 || edge.current_bytes != 0
+        })
         .count();
     drop(restart_job);
-    restart_runner.shutdown().await.unwrap();
-    assert_eq!(restart_runner.registry_counts(), (0, 0));
 
     let manifests = checkpoint_manifest_documents(&manifest_root).await;
     let manifest = manifests
@@ -3770,7 +4219,9 @@ async fn run_checkpoint_restart_fault_case(
         ),
         terminal_tasks,
         terminal_charged_edges,
-        cancellation_requested: fault_probe.cancellation_trigger_count() == 1,
+        terminal_registries: terminal_probe.runner_registries,
+        fault_trigger_count: first_probe.checkpoint_fault_triggers,
+        cancellation_requested: first_probe.cancellation_triggers == 1,
         deterministic_terminal_error,
     }
 }
@@ -4265,9 +4716,7 @@ fn validate_checkpoint_soak_plan(plan: &CheckpointSoakProcessPlan) -> Result<()>
     reason = "each soak generation receives the same explicit durable and lifecycle state"
 )]
 async fn start_checkpoint_restart_generation(
-    job_id: u64,
-    backend: Arc<LocalStateBackend>,
-    manifest_root: &Path,
+    managed_root: &Path,
     sink_root: &Path,
     stop: &Arc<AtomicUsize>,
     opened_with: &SourceOpenHistory,
@@ -4275,36 +4724,45 @@ async fn start_checkpoint_restart_generation(
     sink_closed: &Arc<AtomicUsize>,
     config: StreamRuntimeConfig,
     sink_write_delay: Duration,
-) -> (ContinuousRunner, ContinuousJob) {
-    let spec = checkpoint_restart_soak_spec(
-        job_id,
+) -> PublicStreamingJob {
+    checkpoint_restart_soak_public_runner(
+        managed_root,
         sink_root,
         stop,
         opened_with,
         source_closed,
         sink_closed,
+        config,
         sink_write_delay,
-    );
-    let checkpoint = CheckpointRuntimeSpec::new(backend, manifest_root, config).unwrap();
-    let runner = ContinuousRunner::new();
-    let job = runner
-        .start_checkpointed(spec, checkpoint)
-        .await
-        .unwrap_or_else(|failure| panic!("checkpoint soak generation failed: {failure:?}"));
-    (runner, job)
+    )
+    .start()
+    .await
+    .unwrap_or_else(|failure| panic!("checkpoint soak generation failed: {failure:?}"))
 }
 
-async fn wait_for_completed_checkpoints(job: &ContinuousJob, expected: u64) {
+async fn wait_for_completed_checkpoints(job: &PublicStreamingJob, expected: u64) {
+    let baseline = job
+        .status()
+        .checkpoint
+        .last_completed_epoch
+        .map_or(0, Epoch::as_u64);
+    let target = baseline
+        .checked_add(expected)
+        .expect("checkpoint soak smoke target epoch overflowed");
     let completed = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let status = job.status();
             assert_eq!(
                 status.state,
-                ContinuousJobState::Running,
+                PublicJobState::Running,
                 "checkpoint soak generation terminated before {expected} checkpoints: {:?}",
                 job.wait().await
             );
-            if status.metrics.checkpoints.completed >= expected {
+            if status
+                .checkpoint
+                .last_completed_epoch
+                .is_some_and(|epoch| epoch.as_u64() >= target)
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(1)).await;
@@ -4392,47 +4850,53 @@ async fn checkpoint_soak_process_rss_kib() -> Result<u64> {
 }
 
 async fn checkpoint_soak_process_sample(
-    job: &ContinuousJob,
+    job: &PublicStreamingJob,
     state_root: &Path,
     manifest_root: &Path,
     index: usize,
     elapsed_micros: u64,
+    completed_baseline: u64,
 ) -> Result<CheckpointSoakProcessSample> {
     let status = job.status();
-    if status.state != ContinuousJobState::Running || status.metrics.checkpoints.failed != 0 {
+    if status.state != PublicJobState::Running || status.task_errors != 0 {
         return Err(checkpoint_soak_process_error(format!(
             "checkpoint soak child terminated before sample {index}"
         )));
     }
-    assert_edge_budgets(&status);
+    assert_public_edge_budgets(&status);
     let maximum_queue_depth = status
         .edges
         .values()
-        .map(|edge| edge.queue_depth)
+        .map(|edge| edge.current_envelopes)
         .max()
         .unwrap_or(0);
     let maximum_charged_rows = status
         .edges
         .values()
-        .map(|edge| edge.charged_rows)
+        .map(|edge| edge.current_rows)
         .max()
         .unwrap_or(0);
     let maximum_charged_bytes = status
         .edges
         .values()
-        .map(|edge| edge.charged_bytes)
+        .map(|edge| edge.current_bytes)
         .max()
         .unwrap_or(0);
+    let completed_checkpoints = status
+        .checkpoint
+        .last_completed_epoch
+        .map_or(0, Epoch::as_u64)
+        .saturating_sub(completed_baseline);
     Ok(CheckpointSoakProcessSample {
         index,
         elapsed_micros,
         rss_kib: checkpoint_soak_process_rss_kib().await?,
-        task_count: status.tasks.len(),
+        task_count: status.task_count,
         maximum_queue_depth,
         maximum_charged_rows,
         maximum_charged_bytes,
-        completed_checkpoints: status.metrics.checkpoints.completed,
-        failed_checkpoints: status.metrics.checkpoints.failed,
+        completed_checkpoints,
+        failed_checkpoints: job.test_probe().checkpoint_failures,
         manifest_count: checkpoint_manifest_documents(manifest_root).await.len(),
         state_bytes: directory_regular_file_bytes(state_root).await,
     })
@@ -4448,10 +4912,10 @@ struct CheckpointSoakTerminalEvidence {
 }
 
 async fn settle_checkpoint_soak_process(
-    mut runner: ContinuousRunner,
-    job: ContinuousJob,
+    job: PublicStreamingJob,
     stop: &AtomicUsize,
     final_generation: bool,
+    completed_baseline: u64,
 ) -> Result<CheckpointSoakTerminalEvidence> {
     let outcome = if final_generation {
         stop.store(1, Ordering::SeqCst);
@@ -4462,14 +4926,14 @@ async fn settle_checkpoint_soak_process(
         job.cancel().await
     };
     let expected_state = if final_generation {
-        ContinuousJobState::Completed
+        PublicJobState::Completed
     } else {
-        ContinuousJobState::Cancelled
+        PublicJobState::Cancelled
     };
     let expected_cause = if final_generation {
-        TerminalCause::NaturalEnd
+        PublicTerminalCause::NaturalEnd
     } else {
-        TerminalCause::ExplicitCancel
+        PublicTerminalCause::ExplicitCancel
     };
     if outcome.state != expected_state || outcome.cause != expected_cause {
         return Err(checkpoint_soak_process_error(format!(
@@ -4477,17 +4941,22 @@ async fn settle_checkpoint_soak_process(
         )));
     }
     let status = job.status();
-    let terminal_tasks = status.tasks.len();
+    let terminal_tasks = status.task_count;
     let terminal_charged_edges = status
         .edges
         .values()
-        .filter(|edge| edge.queue_depth != 0 || edge.charged_rows != 0 || edge.charged_bytes != 0)
+        .filter(|edge| {
+            edge.current_envelopes != 0 || edge.current_rows != 0 || edge.current_bytes != 0
+        })
         .count();
-    let completed_checkpoints = status.metrics.checkpoints.completed;
-    let failed_checkpoints = status.metrics.checkpoints.failed;
+    let completed_checkpoints = status
+        .checkpoint
+        .last_completed_epoch
+        .map_or(0, Epoch::as_u64)
+        .saturating_sub(completed_baseline);
+    let probe = job.test_probe();
+    let failed_checkpoints = probe.checkpoint_failures;
     drop(job);
-    runner.shutdown().await?;
-    let terminal_registries = runner.registry_counts();
     Ok(CheckpointSoakTerminalEvidence {
         cause: if final_generation {
             "natural_end"
@@ -4498,7 +4967,7 @@ async fn settle_checkpoint_soak_process(
         failed_checkpoints,
         terminal_tasks,
         terminal_charged_edges,
-        terminal_registries,
+        terminal_registries: probe.runner_registries,
     })
 }
 
@@ -4557,7 +5026,6 @@ async fn run_checkpoint_soak_child(
     );
     let (restored_window_state, restored_watermarks, restored_progress) =
         checkpoint_soak_restore_evidence(selected);
-    let backend = Arc::new(LocalStateBackend::new(&state_root).await?);
     let stop = Arc::new(AtomicUsize::new(0));
     let opened_with = Arc::new(Mutex::new(Vec::new()));
     let source_closed = Arc::new(AtomicUsize::new(0));
@@ -4566,12 +5034,13 @@ async fn run_checkpoint_soak_child(
         checkpoint_interval: Duration::from_millis(plan.checkpoint_interval_millis),
         checkpoint_timeout: Duration::from_millis(plan.checkpoint_timeout_millis),
         retained_epochs: plan.retained_epochs,
-        ..StreamRuntimeConfig::default()
+        edge_budget: EdgeBudget {
+            max_rows: 8,
+            max_bytes: 1 << 20,
+        },
     };
-    let (runner, job) = start_checkpoint_restart_generation(
-        50_000 + u64::try_from(plan.generation).unwrap(),
-        backend,
-        &manifest_root,
+    let job = start_checkpoint_restart_generation(
+        &plan.run_root,
         &sink_root,
         &stop,
         &opened_with,
@@ -4582,14 +5051,18 @@ async fn run_checkpoint_soak_child(
     )
     .await;
     let initial_status = job.status();
-    if initial_status.tasks.is_empty()
+    let completed_baseline = initial_status
+        .checkpoint
+        .last_completed_epoch
+        .map_or(0, Epoch::as_u64);
+    if initial_status.task_count == 0
         || checkpoint_soak_open_cursors(&opened_with) != restored_cursor_orders
     {
         return Err(checkpoint_soak_process_error(
             "checkpoint soak child did not restore the durable source cursors",
         ));
     }
-    assert_edge_budgets(&initial_status);
+    assert_public_edge_budgets(&initial_status);
 
     let mut samples = Vec::with_capacity(plan.sample_end - plan.sample_start);
     if plan.mode == CheckpointSoakProcessMode::Smoke {
@@ -4613,22 +5086,24 @@ async fn run_checkpoint_soak_child(
                     &manifest_root,
                     index,
                     elapsed_micros,
+                    completed_baseline,
                 )
                 .await?,
             );
         }
     }
     let before_terminal = job.status();
-    let steady_task_count = initial_status.tasks.len();
-    if before_terminal.tasks.len() != steady_task_count
-        || before_terminal.metrics.checkpoints.failed != 0
+    let steady_task_count = initial_status.task_count;
+    if before_terminal.task_count != steady_task_count
+        || before_terminal.checkpoint.failure_category.is_some()
     {
         return Err(checkpoint_soak_process_error(
             "checkpoint soak child task or checkpoint metrics drifted",
         ));
     }
     let terminal =
-        settle_checkpoint_soak_process(runner, job, &stop, plan.final_generation).await?;
+        settle_checkpoint_soak_process(job, &stop, plan.final_generation, completed_baseline)
+            .await?;
     let manifests = checkpoint_manifest_documents(&manifest_root).await;
     let selected_terminal = manifests.last().ok_or_else(|| {
         checkpoint_soak_process_error("checkpoint soak child published no terminal manifest")
@@ -4890,9 +5365,23 @@ fn validate_checkpoint_soak_report(
         || report.terminal_charged_edges != 0
         || report.terminal_registries != (0, 0)
     {
-        return Err(checkpoint_soak_process_error(
-            "checkpoint soak child report identity, exit, or terminal bounds are invalid",
-        ));
+        return Err(checkpoint_soak_process_error(format!(
+            "checkpoint soak child report identity, exit, or terminal bounds are invalid: \
+             exit={exit_code}, generation={}, cause={}, opens={}, source_closes={}, \
+             sink_closes={}, failed={}, manifests={}, state_bytes={}, tasks={}, charged_edges={}, \
+             registries={:?}",
+            report.generation,
+            report.terminal_cause,
+            report.source_open_events,
+            report.source_close_events,
+            report.sink_close_events,
+            report.failed_checkpoints,
+            report.maximum_manifest_count,
+            report.maximum_state_bytes,
+            report.terminal_tasks,
+            report.terminal_charged_edges,
+            report.terminal_registries,
+        )));
     }
     if plan.final_generation && report.temporary_artifacts != 0 {
         return Err(checkpoint_soak_process_error(format!(
@@ -7868,6 +8357,15 @@ async fn assert_named_checkpoint_fault_case(
         "{case_id}: charged terminal edges"
     );
     assert_eq!(
+        report.terminal_registries,
+        (0, 0),
+        "{case_id}: terminal one-shot registries"
+    );
+    assert_eq!(
+        report.fault_trigger_count, 1,
+        "{case_id}: injected fault trigger count"
+    );
+    assert_eq!(
         report.cancellation_requested,
         mode == CheckpointFaultMode::Cancel,
         "{case_id}: cancellation token mismatch"
@@ -8238,13 +8736,19 @@ async fn checkpoint_matrix_sink_commits_bounded_epoch_files() {
         closed: Arc::new(AtomicUsize::new(0)),
         write_delay: Duration::ZERO,
     };
-    sink.open().await.unwrap();
+    TransactionalStreamSink::open(&mut sink).await.unwrap();
     let epochs = [Epoch::INITIAL, Epoch::INITIAL.next().unwrap()];
     for (epoch, record) in epochs.into_iter().zip(["first", "second"]) {
-        sink.begin_epoch(epoch).await.unwrap();
+        TransactionalStreamSink::begin_epoch(&mut sink, epoch)
+            .await
+            .unwrap();
         sink.pending.push(record.into());
-        let state = sink.pre_commit(epoch).await.unwrap();
-        sink.commit(epoch, &state).await.unwrap();
+        let state = TransactionalStreamSink::pre_commit(&mut sink, epoch)
+            .await
+            .unwrap();
+        TransactionalStreamSink::commit(&mut sink, epoch, &state)
+            .await
+            .unwrap();
     }
 
     assert!(!root.join("visible.json").exists());

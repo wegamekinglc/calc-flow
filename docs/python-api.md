@@ -444,6 +444,18 @@ guarded blocking forms for callers outside an event loop. Cancelling a
 `wait_async()` observer leaves the job running; explicit cancellation uses
 `cancel_async()`.
 
+Blocking `start()` creates a dedicated event-loop thread and keeps it for the
+job's async connectors. Later blocking job operations run on that owning loop;
+terminal async operations called from another event loop are marshalled back
+to it. Blocking or async `shutdown`, `cancel`, and `wait` release connector
+roots and stop and join the thread after the native terminal outcome. Dropping
+the last job owner schedules cancellation and settlement on the owning loop,
+then reclaims the thread. Cancelling an async terminal observer before native
+termination leaves cleanup running to convergence, so observer cancellation
+does not strand the loop thread. If the native terminal outcome has already
+linearized and cancellation arrives during thread cleanup, that outcome wins
+and cleanup still completes.
+
 `Cursor` payloads, capability/config mappings, pre-commit values, recovery
 values, status, and outcomes cross the boundary as defensive copies. Managed
 checkpoint recovery reopens a replayable source with a cursor bound to the

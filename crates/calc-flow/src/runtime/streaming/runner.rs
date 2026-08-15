@@ -197,7 +197,7 @@ impl CheckpointFaultInjector {
         }
     }
 
-    fn trigger_count(&self) -> usize {
+    pub(crate) fn trigger_count(&self) -> usize {
         self.0.lock().trigger_count
     }
 
@@ -1486,7 +1486,7 @@ impl RunnerLifecycleProbe {
     }
 }
 
-/// Crate-private one-shot ownership boundary for the future public runner.
+/// Crate-private one-shot ownership boundary used by the public continuous facade.
 pub(crate) struct OneShotContinuousRunner {
     runner: ContinuousRunner,
 }
@@ -1545,6 +1545,29 @@ impl OneShotContinuousRunner {
             Err(error) => preflight_error_observer(error),
         };
         OneShotStartObserver::new(runner, start)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_checkpointed_with_config_and_fault_probe(
+        self,
+        spec: ContinuousJobSpec,
+        checkpoint: ManagedCheckpointRuntime,
+        config: StreamRuntimeConfig,
+        point: CheckpointFaultPoint,
+        mode: CheckpointFaultMode,
+    ) -> (OneShotStartObserver, CheckpointFaultInjector) {
+        let runner = self.runner;
+        let (start, probe) = match CheckpointRuntimeSpec::managed(checkpoint, config) {
+            Ok(checkpoint) => {
+                let (checkpoint, probe) = checkpoint.with_fault_probe(point, mode);
+                (runner.start_checkpointed(spec, checkpoint), probe)
+            }
+            Err(error) => (
+                preflight_error_observer(error),
+                CheckpointFaultInjector::armed(point, mode),
+            ),
+        };
+        (OneShotStartObserver::new(runner, start), probe)
     }
 
     #[cfg(test)]

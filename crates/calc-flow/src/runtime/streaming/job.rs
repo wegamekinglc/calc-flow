@@ -355,6 +355,11 @@ impl OwningContinuousJob {
     pub(crate) fn runner_probe_for_test(&self) -> RunnerLifecycleProbe {
         self.owner.runner.clone()
     }
+
+    #[cfg(test)]
+    pub(crate) fn checkpoint_failure_count_for_test(&self) -> u64 {
+        self.job.status().metrics.checkpoints.failed
+    }
 }
 
 pub(crate) struct OwningOutcomeObserver {

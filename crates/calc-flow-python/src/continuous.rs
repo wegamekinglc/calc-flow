@@ -593,7 +593,7 @@ fn python_epoch_json_args(
 impl PyContinuousStreamingRunner {
     #[allow(
         dead_code,
-        reason = "constructed by the native connector bindings added in downstream A6-11"
+        reason = "unit tests construct already-validated runners without Python binding assembly"
     )]
     pub(crate) fn from_inner(inner: calc_flow::StreamingRunner) -> Self {
         Self {

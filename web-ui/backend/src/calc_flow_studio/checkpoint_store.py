@@ -222,9 +222,24 @@ def _atomic_write(directory: Path, path: Path, document: bytes) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        _sync_directory(directory)
     finally:
         temporary.unlink(missing_ok=True)
 
 
 def _delete_file(path: Path) -> None:
-    path.unlink(missing_ok=True)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    _sync_directory(path.parent)
+
+
+def _sync_directory(directory: Path) -> None:
+    if os.name != "posix":
+        return
+    descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
