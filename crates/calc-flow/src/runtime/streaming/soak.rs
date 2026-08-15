@@ -6919,27 +6919,6 @@ fn private_absolute_measurement_recomputes_raw_statistics_and_hashes_inputs() {
 #[test]
 fn private_benchmark_report_path_is_validated_and_immutable() {
     let directory = tempfile::tempdir().unwrap();
-    // TEMP Windows diagnostics: create_dir_all fails with ERROR_ACCESS_DENIED
-    // for this test only, so probe each step inside the real test binary.
-    for name in ["m5-checkpoint-benchmark", "plain-child"] {
-        let target = directory.path().join(name);
-        match std::fs::create_dir_all(&target) {
-            Ok(()) => eprintln!("DIAG create_dir_all {name}: ok"),
-            Err(error) => eprintln!(
-                "DIAG create_dir_all {name}: FAIL raw={:?} kind={:?}",
-                error.raw_os_error(),
-                error.kind()
-            ),
-        }
-    }
-    eprintln!(
-        "DIAG tempdir metadata: {:?}",
-        directory.path().metadata().map(|m| (m.is_dir(), m.readonly()))
-    );
-    eprintln!(
-        "DIAG canonical: {:?}",
-        std::fs::canonicalize(directory.path()).map(|p| p.display().to_string())
-    );
     let metadata = json!({"schema": "calc-flow.m5-checkpoint-absolute-benchmark.v1"});
     assert!(
         write_private_checkpoint_benchmark_metadata(

@@ -13,21 +13,6 @@ concurrency:
   # README CI badge as failing even when every job was healthy.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
 jobs:
-  probe-soak-isolation:
-    name: TEMP isolate soak test failure
-    runs-on: windows-latest
-    timeout-minutes: 90
-    env:
-      RUST_TEST_THREADS: 1
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
-      - name: Run instrumented soak test
-        run: >-
-          cargo test -p calc-flow --all-features --lib
-          -- --test-threads=1 --exact --nocapture
-          runtime::streaming::soak::private_benchmark_report_path_is_validated_and_immutable
   process-tree:
     name: Windows process-tree cleanup
     runs-on: windows-latest
