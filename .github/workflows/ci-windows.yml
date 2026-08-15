@@ -13,6 +13,74 @@ concurrency:
   # README CI badge as failing even when every job was healthy.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
 jobs:
+  probe-windows-locking:
+    name: TEMP probe Windows directory locking
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+      - shell: bash
+        run: |
+          probe="$RUNNER_TEMP/lock-probe"
+          mkdir -p "$probe/src"
+          cat > "$probe/Cargo.toml" <<'TOML'
+          [package]
+          name = "lock-probe"
+          version = "0.0.0"
+          edition = "2021"
+
+          [dependencies]
+          fs2 = "=0.4.3"
+          TOML
+          cat > "$probe/src/main.rs" <<'RS'
+          use fs2::FileExt;
+          use std::fs::{self, File, OpenOptions};
+          use std::os::windows::fs::OpenOptionsExt as _;
+
+          const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+          fn main() {
+              let base = std::env::temp_dir().join("calc-flow-lock-probe");
+              let _ = fs::remove_dir_all(&base);
+              fs::create_dir_all(base.join("child")).unwrap();
+              let canonical = fs::canonicalize(&base).unwrap();
+              println!("canonical root: {}", canonical.display());
+
+              let ancestors = canonical.ancestors().collect::<Vec<_>>();
+              for ancestor in ancestors.iter().rev() {
+                  let opened = OpenOptions::new()
+                      .read(true)
+                      .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                      .open(ancestor);
+                  match opened {
+                      Ok(file) => {
+                          let shared = file.try_lock_shared().map_err(|e| e.raw_os_error());
+                          println!("shared    {:<60} -> {:?}", ancestor.display(), shared);
+                          let _ = FileExt::unlock(&file);
+                          let exclusive = file.try_lock_exclusive().map_err(|e| e.raw_os_error());
+                          println!("exclusive {:<60} -> {:?}", ancestor.display(), exclusive);
+                      }
+                      Err(error) => {
+                          println!("open      {:<60} -> error {:?}", ancestor.display(), error.raw_os_error());
+                      }
+                  }
+              }
+
+              let plain = File::open(&canonical).map(|_| ()).map_err(|e| e.raw_os_error());
+              println!("plain File::open on directory -> {:?}", plain);
+
+              let file = OpenOptions::new()
+                  .read(true)
+                  .write(true)
+                  .create(true)
+                  .open(canonical.join("regular-lockfile"))
+                  .unwrap();
+              let regular = file.try_lock_exclusive().map_err(|e| e.raw_os_error());
+              println!("regular file exclusive lock -> {:?}", regular);
+          }
+          RS
+          cd "$probe"
+          cargo run --release 2>&1 | tail -30
   process-tree:
     name: Windows process-tree cleanup
     runs-on: windows-latest
