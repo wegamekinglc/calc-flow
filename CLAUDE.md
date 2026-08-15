@@ -169,15 +169,15 @@ The frontend talks to the backend over the `/api/v2` REST contract only.
   record batches; external batches contain an explicitly registered provider
   payload. Raw tables and arrays never cross a graph, plan, or runner boundary.
 - The stream message and context types (`StreamMessage`, `EventTime`, `Epoch`,
-  `StreamJobContext`) do not expand those public boundaries or expose a runner
-  control API; control messages are constructed only through crate-private
-  constructors. The crate-private source-driven continuous runtime consumes
-  `StreamExecutionPlan` with whole-job preflight, bounded
-  source/operator/sink tasks, job-scoped event-time progress, aligned epoch
-  checkpoints, manifest-last recovery, per-output delivery proof, private
-  runner/job/reaper ownership, and deterministic metrics. Existing public v2
-  runners remain unchanged. The full contract is documented in the [stream
-  message envelope](docs/runtime-envelope.md).
+  `StreamJobContext`) expose no runner control-injection API; control messages
+  are constructed only through crate-private constructors. The crate-root
+  public `StreamingRunner` consumes a `StreamExecutionPlan` and returns an
+  owning `StreamingJob` with whole-job preflight, bounded source/operator/sink
+  tasks, job-scoped event-time progress, aligned epoch checkpoints, managed v3
+  manifest recovery for durable restart, per-output delivery proof, and
+  deterministic metrics. Control construction, task/coordinator/supervisor
+  internals, and reaper ownership remain crate-private. The full contract is
+  documented in the [stream message envelope](docs/runtime-envelope.md).
 - Apache DataFusion 54 is the sole table engine. Table operations accept one
   expression/projection/filter node or one read-only `SELECT`/CTE SQL node.
   DDL, DML, utility statements, multiple statements, and table backend
@@ -197,9 +197,13 @@ The frontend talks to the backend over the `/api/v2` REST contract only.
 - `UdfRegistry` owns trusted native implementations;
   `UdfRegistrySnapshot` is captured at compile time; configurations carry only
   `UdfReference` values — never source, callables, or import paths.
-- `MicroBatchRunner` and `StreamingRunner` deliver sinks before committing
-  checkpoints, giving at-least-once delivery. `FileProjectStore` and
-  `FileCheckpointStore` write bounded documents atomically under hashed names.
+- `StreamingRunner` owns public async `StreamSource`/`StreamSink` bindings and
+  `ManagedCheckpointRuntime`. `CheckpointManifest` v3 is the managed continuous
+  runtime's durable recovery truth; checkpoints publish the manifest before
+  sink commit, and per-output proof distinguishes at-least-once from
+  exactly-once behavior. The old v2 `Source`/`Sink`, `MicroBatchRunner`,
+  formed-batch push runner, and public `FileCheckpointStore` are removed.
+  `FileProjectStore` remains the bounded atomic project-document store.
 - The canonical project format is a strict data-only `ProjectDocument` with
   `format_version: 2`. The Rust `ProjectSpec`, generated JSON Schema, Python
   `ProjectDocument`, FastAPI request models, and generated TypeScript contract
