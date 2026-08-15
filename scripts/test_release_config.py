@@ -95,7 +95,10 @@ class ReleaseConfigTests(unittest.TestCase):
 
         release_text = "\n".join(
             (ROOT / path).read_text(encoding="utf-8")
-            for path in (".github/workflows/ci.yml", ".github/workflows/release.yml")
+            for path in (
+                ".github/workflows/ci-linux.yml",
+                ".github/workflows/release.yml",
+            )
         )
         self.assertNotIn(">=2.0.0a1", release_text)
         self.assertIn(">=2.0.0", release_text)
@@ -134,7 +137,7 @@ class ReleaseConfigTests(unittest.TestCase):
             ).exists()
         )
         for path in (
-            ".github/workflows/ci.yml",
+            ".github/workflows/ci-linux.yml",
             "crates/calc-flow/Cargo.toml",
             harness_path,
         ):
@@ -157,8 +160,30 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(workflow.count("maturin-version: v1.14.1"), action_count)
         self.assertEqual(workflow.count('rust-toolchain: "1.88.0"'), action_count)
 
+    def test_workflow_actions_are_sha_pinned(self) -> None:
+        for name in (
+            "benchmarks.yml",
+            "ci-linux.yml",
+            "ci-windows.yml",
+            "release.yml",
+        ):
+            workflow = (ROOT / ".github" / "workflows" / name).read_text(
+                encoding="utf-8"
+            )
+            for line in workflow.splitlines():
+                step = line.strip()
+                if not step.startswith("uses:") or "@" not in step:
+                    continue
+                action, _, reference = step.removeprefix("uses:").strip().partition("@")
+                reference = reference.split()[0]
+                with self.subTest(workflow=name, action=action):
+                    self.assertEqual(len(reference), 40)
+                    self.assertTrue(
+                        all(character in "0123456789abcdef" for character in reference)
+                    )
+
     def test_rust_core_ci_sets_python_313_before_all_features(self) -> None:
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
         rust_core = workflow.split("  rust-core:\n", 1)[1].split(
             "  rust-supply-chain:\n", 1
         )[0]
@@ -192,7 +217,7 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn(f"run: {rust_test_command}", rust_test_step)
 
     def test_rust_core_ci_reclaims_disk_around_coverage(self) -> None:
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
         rust_core = workflow.split("  rust-core:\n", 1)[1].split(
             "  rust-supply-chain:\n", 1
         )[0]
@@ -217,7 +242,7 @@ class ReleaseConfigTests(unittest.TestCase):
         )
 
     def test_rust_core_ci_isolates_frozen_allocation_harness(self) -> None:
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
         rust_core = workflow.split("  rust-core:\n", 1)[1].split(
             "  rust-supply-chain:\n", 1
         )[0]
@@ -295,24 +320,34 @@ class ReleaseConfigTests(unittest.TestCase):
             "test_timeout_cleans_up_the_test_binary_process_tree_on_windows"
         )
 
-        for path in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+        for path in (
+            ".github/workflows/ci-linux.yml",
+            ".github/workflows/release.yml",
+        ):
             with self.subTest(path=path):
                 workflow = (ROOT / path).read_text(encoding="utf-8")
                 self.assertIn(command, workflow)
 
-        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        windows_ci = (ROOT / ".github/workflows/ci-windows.yml").read_text(
+            encoding="utf-8"
+        )
         runner_tests = (ROOT / "scripts/test_run_rust_tests.py").read_text(
             encoding="utf-8"
         )
+        self.assertIn("name: Windows CI", windows_ci)
         self.assertIn("WINDOWS_PROCESS_TREE_EVIDENCE", runner_tests)
-        windows_job = ci.split("  windows-process-tree:\n", 1)[1].split(
-            "  frontend:\n", 1
+        windows_job = windows_ci.split("  process-tree:\n", 1)[1].split(
+            "  rust-and-python:\n", 1
         )[0]
-        self.assertIn("if: github.event_name == 'pull_request'", windows_job)
         self.assertIn("runs-on: windows-latest", windows_job)
         self.assertIn("timeout-minutes: 10", windows_job)
         self.assertIn("WINDOWS_RUNNER_EVIDENCE", windows_job)
         self.assertIn(windows_test, windows_job)
+
+        rust_python_job = windows_ci.split("  rust-and-python:\n", 1)[1]
+        self.assertIn("runs-on: windows-latest", rust_python_job)
+        self.assertIn("python scripts/run_rust_tests.py", rust_python_job)
+        self.assertIn("uv run pytest", rust_python_job)
 
     def test_agents_rust_runner_uses_synced_python_dependencies(self) -> None:
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
@@ -339,7 +374,7 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIsInstance(scales_assignment.value, ast.Dict)
         scales = [ast.literal_eval(key) for key in scales_assignment.value.keys]
 
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
         benchmark_job = workflow.split("  benchmark-smoke:\n", 1)[1].split(
             "  rust-core:\n", 1
         )[0]
@@ -355,6 +390,27 @@ class ReleaseConfigTests(unittest.TestCase):
         )
         self.assertIn("name: benchmark-smoke-${{ matrix.scale }}", benchmark_job)
         self.assertIn("path: benchmark-results/${{ matrix.scale }}.json", benchmark_job)
+
+    def test_linux_ci_reports_parallel_coverage_to_coveralls(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
+
+        self.assertEqual(workflow.count("uses: coverallsapp/github-action@"), 4)
+        self.assertEqual(workflow.count("parallel: true"), 3)
+        self.assertEqual(workflow.count("format: cobertura"), 2)
+        for flag, report in (
+            ("python", "file: coverage.xml"),
+            ("studio", "file: web-ui/backend/coverage.xml"),
+            ("rust", "file: rust-lcov.info"),
+        ):
+            with self.subTest(flag=flag):
+                self.assertIn(f"flag-name: {flag}", workflow)
+                self.assertIn(report, workflow)
+
+        finish = workflow.split("  coveralls-finish:\n", 1)[1]
+        self.assertIn("- lint-and-test", finish)
+        self.assertIn("- studio-backend", finish)
+        self.assertIn("- rust-core", finish)
+        self.assertIn("parallel-finished: true", finish)
 
     def test_scheduled_rust_benchmark_targets_only_core_harness(self) -> None:
         workflow = (ROOT / ".github/workflows/benchmarks.yml").read_text(

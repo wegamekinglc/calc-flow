@@ -2963,13 +2963,26 @@ fn write_private_checkpoint_benchmark_metadata(
         path: digest_path.display().to_string(),
         source,
     })?;
-    File::open(&artifact_root)
+    sync_directory(&artifact_root)?;
+    Ok(path)
+}
+
+// Directory fsync durability is a Unix idiom; plain File::open on a Windows
+// directory fails with ERROR_ACCESS_DENIED, so non-Unix platforms skip the
+// directory flush after the file-level sync_all calls above.
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<()> {
+    File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|source| CalcFlowError::Io {
-            path: artifact_root.display().to_string(),
+            path: path.display().to_string(),
             source,
-        })?;
-    Ok(path)
+        })
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn validate_private_checkpoint_benchmark_report(path: &Path) -> Result<serde_json::Value> {
@@ -8164,12 +8177,12 @@ fn private_absolute_measurement_recomputes_raw_statistics_and_hashes_inputs() {
     assert!(confidence[0].as_f64().unwrap() <= 104.5);
     assert!(confidence[1].as_f64().unwrap() >= 104.5);
     assert_eq!(measurement["decision"], "absolute_only");
-    assert!(
-        measurement["artifacts"]["sample"]["path"]
-            .as_str()
-            .unwrap()
-            .ends_with("candidate-sha/sample.json")
-    );
+    // The recorded artifact path uses platform separators.
+    let sample_path = measurement["artifacts"]["sample"]["path"]
+        .as_str()
+        .unwrap()
+        .replace('\\', "/");
+    assert!(sample_path.ends_with("candidate-sha/sample.json"));
     assert_eq!(
         measurement["artifacts"]["sample"]["sha256"],
         sha256_bytes(&sample_bytes)

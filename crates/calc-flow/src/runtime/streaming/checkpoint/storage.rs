@@ -18,6 +18,8 @@ use crate::{CalcFlowError, CancellationToken, LocalStateBackend};
 const STATE_CHILD: &str = "state";
 const MANIFEST_CHILD: &str = "manifests";
 const PREFLIGHT_PROBE_PREFIX: &str = ".tmp-checkpoint-preflight";
+#[cfg(windows)]
+const WINDOWS_LEASE_FILE: &str = ".calc-flow-managed-lease";
 
 static PROCESS_LEASES: LazyLock<Mutex<BTreeSet<PathBuf>>> =
     LazyLock::new(|| Mutex::new(BTreeSet::new()));
@@ -283,6 +285,7 @@ fn unregister_process_lease(root: &Path) {
     PROCESS_LEASES.lock().remove(root);
 }
 
+#[cfg(not(windows))]
 fn acquire_directory_locks(root: &Path) -> crate::Result<Vec<File>> {
     let ancestors = root.ancestors().collect::<Vec<_>>();
     let mut files = Vec::with_capacity(ancestors.len());
@@ -294,22 +297,73 @@ fn acquire_directory_locks(root: &Path) -> crate::Result<Vec<File>> {
     Ok(files)
 }
 
+// Windows cannot byte-range lock directory handles: LockFileEx fails with
+// ERROR_INVALID_PARAMETER on them. The lease therefore holds every ancestor
+// open with delete sharing revoked so no process can rename or remove the
+// leased path, and takes an exclusive byte-range lock on one regular lease
+// file inside the root so a second calc-flow process leasing the same root
+// still conflicts.
+#[cfg(windows)]
+fn acquire_directory_locks(root: &Path) -> crate::Result<Vec<File>> {
+    let ancestors = root.ancestors().collect::<Vec<_>>();
+    let mut files = Vec::with_capacity(ancestors.len() + 1);
+    for ancestor in ancestors.iter().rev() {
+        let file = open_deny_delete_directory(ancestor).map_err(|_| initialization_error())?;
+        files.push(file);
+    }
+    files.push(acquire_root_lease_file(root)?);
+    Ok(files)
+}
+
+#[cfg(windows)]
+fn open_deny_delete_directory(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    // FILE_SHARE_READ | FILE_SHARE_WRITE without FILE_SHARE_DELETE.
+    const SHARE_READ_WRITE: u32 = 0x0000_0003;
+    OpenOptions::new()
+        .read(true)
+        .share_mode(SHARE_READ_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn acquire_root_lease_file(root: &Path) -> crate::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join(WINDOWS_LEASE_FILE))
+        .map_err(|_| initialization_error())?;
+    match FileExt::try_lock_exclusive(&file) {
+        Ok(()) => Ok(file),
+        Err(error) if is_windows_lock_contention(&error) => Err(lease_conflict()),
+        Err(_) => Err(initialization_error()),
+    }
+}
+
+// fs2 surfaces a contended Windows byte-range lock as the raw
+// ERROR_LOCK_VIOLATION/ERROR_IO_PENDING codes, which std maps to
+// ErrorKind::Uncategorized rather than WouldBlock.
+#[cfg(windows)]
+fn is_windows_lock_contention(error: &std::io::Error) -> bool {
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    const ERROR_IO_PENDING: i32 = 997;
+    matches!(
+        error.raw_os_error(),
+        Some(ERROR_LOCK_VIOLATION | ERROR_IO_PENDING)
+    )
+}
+
 #[cfg(not(windows))]
 fn open_directory_for_lock(path: &Path) -> std::io::Result<File> {
     File::open(path)
 }
 
-#[cfg(windows)]
-fn open_directory_for_lock(path: &Path) -> std::io::Result<File> {
-    use std::os::windows::fs::OpenOptionsExt as _;
-
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)
-}
-
+#[cfg(not(windows))]
 fn try_lock_directory(file: &File, exclusive: bool) -> crate::Result<()> {
     let result = if exclusive {
         FileExt::try_lock_exclusive(file)
