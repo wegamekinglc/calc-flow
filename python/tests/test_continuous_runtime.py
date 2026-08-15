@@ -104,6 +104,12 @@ def test_stream_plan_exposes_immutable_binding_metadata() -> None:
     assert plan.requirements.delivery == {"output": DeliveryGuarantee.EXACTLY_ONCE}
 
 
+@pytest.mark.parametrize("delivery", ([], 1))
+def test_stream_requirements_reject_non_mapping_delivery(delivery: object) -> None:
+    with pytest.raises(TypeError, match="delivery must be a mapping"):
+        StreamRequirements(delivery)  # type: ignore[arg-type]
+
+
 def test_public_continuous_signatures_are_async_first() -> None:
     assert str(inspect.signature(ManagedCheckpointRuntime)) == (
         "(directory: 'os.PathLike[str] | str', /) -> 'None'"

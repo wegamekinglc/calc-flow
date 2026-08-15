@@ -421,15 +421,18 @@ class StreamRequirements:
     delivery: Mapping[str, DeliveryGuarantee] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        copied: dict[str, DeliveryGuarantee] = {}
-        for output, guarantee in self.delivery.items():
+        if not isinstance(self.delivery, Mapping):
+            raise TypeError(
+                "delivery must be a mapping of output names to DeliveryGuarantee values"
+            )
+        copied = dict(self.delivery)
+        for output, guarantee in copied.items():
             if not isinstance(output, str) or not output:
                 raise TypeError("delivery output names must be non-empty strings")
             if not isinstance(guarantee, DeliveryGuarantee):
                 raise TypeError(
                     "delivery guarantees must be calc_flow.DeliveryGuarantee values"
                 )
-            copied[output] = guarantee
         object.__setattr__(self, "delivery", MappingProxyType(copied))
 
 

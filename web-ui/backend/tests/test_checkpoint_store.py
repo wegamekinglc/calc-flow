@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -101,3 +103,23 @@ def test_checkpoint_copy_rejects_non_object_decoder_result(
 
     with pytest.raises(CheckpointDocumentError, match="strict JSON object"):
         checkpoint_store_module._validate_checkpoint(_checkpoint())
+
+
+def test_load_rejects_checkpoint_symlink(tmp_path: Path) -> None:
+    store_directory = tmp_path / "store"
+    store_directory.mkdir()
+    outside_checkpoint = tmp_path / "outside-checkpoint.json"
+    leaked = {**_checkpoint(), "state": {"secret": "outside-store"}}
+    outside_checkpoint.write_text(json.dumps(leaked), encoding="utf-8")
+    checkpoint_path = checkpoint_store_module._path_for(store_directory, "orders")
+    try:
+        checkpoint_path.symlink_to(outside_checkpoint)
+    except OSError as error:
+        if os.name == "nt" and error.winerror == 1314:
+            pytest.skip("Windows host does not permit unprivileged symlinks")
+        raise
+
+    store = FileCheckpointDocumentStore(store_directory)
+
+    with pytest.raises(CheckpointDocumentError, match="symbolic link"):
+        asyncio.run(store.load("orders"))

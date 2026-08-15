@@ -215,7 +215,11 @@ pub fn validate_project(
     let mut fingerprint = None;
     match build_project(project, providers, udfs) {
         Ok(plan) => {
-            validate_source_coverage(project, &plan, &mut issues);
+            validate_source_coverage(
+                project,
+                plan.external_inputs().keys().map(String::as_str),
+                &mut issues,
+            );
             fingerprint = issues.is_empty().then(|| plan.fingerprint().into());
         }
         Err(error) => issues.push(issue(
@@ -249,7 +253,11 @@ pub fn compile_project(
     let plan =
         build_project_builder(project, providers, CompileMode::Batch)?.compile_batch(udfs)?;
     let mut coverage = Vec::new();
-    validate_source_coverage(project, &plan, &mut coverage);
+    validate_source_coverage(
+        project,
+        plan.external_inputs().keys().map(String::as_str),
+        &mut coverage,
+    );
     if let Some(first) = coverage.first() {
         return Err(validation_error(first));
     }
@@ -272,8 +280,14 @@ pub fn compile_stream_project(
     if let Some(first) = issues.first() {
         return Err(validation_error(first));
     }
-    build_project_builder(project, providers, CompileMode::Stream)?
-        .compile_stream(udfs, requirements)
+    let plan = build_project_builder(project, providers, CompileMode::Stream)?
+        .compile_stream(udfs, requirements)?;
+    let mut coverage = Vec::new();
+    validate_source_coverage(project, plan.source_binding_ids(), &mut coverage);
+    if let Some(first) = coverage.first() {
+        return Err(validation_error(first));
+    }
+    Ok(plan)
 }
 
 #[derive(Clone, Copy)]
@@ -925,16 +939,16 @@ fn validate_sources(project: &ProjectSpec, issues: &mut Vec<ValidationIssue>) {
     }
 }
 
-fn validate_source_coverage(
+fn validate_source_coverage<'a>(
     project: &ProjectSpec,
-    plan: &BatchExecutionPlan,
+    expected: impl IntoIterator<Item = &'a str>,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    let expected = plan.external_inputs().keys().collect::<BTreeSet<_>>();
+    let expected = expected.into_iter().collect::<BTreeSet<_>>();
     let configured = project
         .data_sources
         .iter()
-        .map(|source| &source.input)
+        .map(|source| source.input.as_str())
         .collect::<BTreeSet<_>>();
     if expected != configured || project.data_sources.len() != expected.len() {
         issues.push(issue(

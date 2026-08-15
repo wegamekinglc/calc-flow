@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
 import os
+import stat
 import tempfile
 from collections.abc import Awaitable, Mapping
 from datetime import datetime
@@ -219,20 +221,69 @@ def _path_for(directory: Path, pipeline_name: str) -> Path:
 
 
 def _bounded_read(path: Path) -> bytes | None:
-    try:
-        size = path.stat().st_size
-    except FileNotFoundError:
+    opened = _open_checkpoint(path)
+    if opened is None:
         return None
-    if size > MAX_CHECKPOINT_DOCUMENT_BYTES:
-        raise CheckpointDocumentError(
-            f"checkpoint exceeds the {MAX_CHECKPOINT_DOCUMENT_BYTES}-byte limit"
-        )
-    document = path.read_bytes()
+    descriptor, metadata = opened
+    try:
+        if metadata.st_size > MAX_CHECKPOINT_DOCUMENT_BYTES:
+            raise CheckpointDocumentError(
+                f"checkpoint exceeds the {MAX_CHECKPOINT_DOCUMENT_BYTES}-byte limit"
+            )
+        document = _read_descriptor(descriptor)
+    finally:
+        os.close(descriptor)
     if len(document) > MAX_CHECKPOINT_DOCUMENT_BYTES:
         raise CheckpointDocumentError(
             f"checkpoint exceeds the {MAX_CHECKPOINT_DOCUMENT_BYTES}-byte limit"
         )
     return document
+
+
+def _open_checkpoint(path: Path) -> tuple[int, os.stat_result] | None:
+    try:
+        expected = path.lstat()
+    except FileNotFoundError:
+        return None
+    if _is_symbolic_link(expected):
+        raise CheckpointDocumentError("checkpoint path must not be a symbolic link")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise CheckpointDocumentError(
+                "checkpoint path must not be a symbolic link"
+            ) from error
+        raise
+    try:
+        metadata = os.fstat(descriptor)
+        if not os.path.samestat(expected, metadata):
+            raise CheckpointDocumentError(
+                "checkpoint changed while it was being opened"
+            )
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor, metadata
+
+
+def _is_symbolic_link(metadata: os.stat_result) -> bool:
+    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    file_attributes = getattr(metadata, "st_file_attributes", 0)
+    return stat.S_ISLNK(metadata.st_mode) or bool(file_attributes & reparse_point)
+
+
+def _read_descriptor(descriptor: int) -> bytes:
+    remaining = MAX_CHECKPOINT_DOCUMENT_BYTES + 1
+    chunks: list[bytes] = []
+    while remaining:
+        chunk = os.read(descriptor, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
 
 
 def _atomic_write(directory: Path, path: Path, document: bytes) -> None:
