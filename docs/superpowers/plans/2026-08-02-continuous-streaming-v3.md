@@ -1,10 +1,12 @@
 # Calc-Flow 3.0 持续流计算详细开发计划
 
-> **状态：** M0-M5 internal complete; Public A6 pending
-> 现有 public v2 runner 保持不变。`a6-public-continuous-runtime` specification、
-> API note 与 critique 已冻结并复核待实现的 Public A6 设计边界；该设计结论不是
-> 运行时实现证据或合并批准。只有原子实现及其 exact-head/latest-main 评审通过后，
-> 才能标记为 public complete。
+> **状态：** M0-M5 internal complete; Public A6 complete; M6-M7 pending
+> `a6-public-continuous-runtime` 已通过 Rust、PyO3、Python、Studio 私有持久化、
+> 48-case fault catalog、跨语言恢复和 exact-head 20-minute soak 的集成门禁，并由
+> PR #129 合入 `main`。完成证据和获准的非原子交付偏差记录在
+> [Public A6 implementation evidence](../../../.codex/artifacts/analysis/a6-public-continuous-runtime-implementation-evidence.md)。
+> A6 完成不代表 `3.0.0` 发布：当前 package version、project v2 与 Studio
+> `/api/v2` 按 A6 non-goal 保持不变，分别由 M6/M7 后续替换或发布。
 >
 > **依据：**
 > [`Arroyo / RisingWave 独立调研与 Calc-Flow 流式演进建议`](../../research/2026-08-02-arroyo-risingwave-streaming-research.md)
@@ -371,22 +373,26 @@ M4 state backend / window
 M5 epoch checkpoint / exactly-once
         │
         ▼
+A6 public Rust / PyO3 / Python runtime
+        │
+        ▼
 M6 connector / project v3 / Python / Studio
         │
         ▼
 M7 hardening / 3.0 release
 ```
 
-| 里程碑    | 核心产出                                                          | 单工程师估算       | 前置依赖     |
-| ------ | ------------------------------------------------------------- | ------------ | -------- |
-| M0     | 通过评审的语义、API、故障模型                                              | 2 至 3 周      | 无        |
-| M1     | v3 trait、plan、compiler、message、channel                        | 4 至 6 周      | M0       |
-| M2     | crate-private source-driven runtime internals                 | 5 至 7 周      | M1       |
-| M3     | progress driver、watermark、idle、transient replay               | 3 至 5 周      | M2       |
-| M4     | 增量本地状态、final-only window、late policy                          | 6 至 9 周      | M3       |
-| M5     | epoch checkpoint 与 transactional sink                         | 8 至 11 周     | M4       |
-| M6     | connector、project v3、Python、Studio                            | 16 至 24 周    | M5       |
-| M7     | soak、性能、安全、打包与发布                                              | 3 至 5 周      | M6       |
+| 里程碑 | 核心产出                                             | 单工程师估算 | 前置依赖 |
+| ------ | ---------------------------------------------------- | ------------ | -------- |
+| M0     | 通过评审的语义、API、故障模型                        | 2 至 3 周    | 无       |
+| M1     | v3 trait、plan、compiler、message、channel           | 4 至 6 周    | M0       |
+| M2     | crate-private source-driven runtime internals        | 5 至 7 周    | M1       |
+| M3     | progress driver、watermark、idle、transient replay   | 3 至 5 周    | M2       |
+| M4     | 增量本地状态、final-only window、late policy         | 6 至 9 周    | M3       |
+| M5     | epoch checkpoint 与 transactional sink               | 8 至 11 周   | M4       |
+| A6     | public Rust、PyO3、Python continuous runtime cutover | 已完成       | M5       |
+| M6     | connector、project v3、Python、Studio                | 16 至 24 周  | A6       |
+| M7     | soak、性能、安全、打包与发布                         | 3 至 5 周    | M6       |
 
 顺序总量约 47 至 70 engineer-weeks，与调研报告 §9.1 给出的“单工程师 11 至 16 个月”
 量级一致。两名熟练工程师可并行数据库 connector、其他 connector、Python、Studio、
@@ -400,12 +406,16 @@ M7 hardening / 3.0 release
 
 - M1.1 与 M1.2 是一个原子 PR：trait 和 plan 公共名称必须一起切换。
 - M1.3、M1.4 可在其后分别合入。
-- M2.1 至 M2.5 以 crate-private 模块完成。public runner 不在 M2.4 公开；它作为
-  post-M5 A6，在 M4/M5 状态与 checkpoint 语义完整后另行评审并原子集成。
+- M2.1 至 M2.5 以 crate-private 模块完成。public runner 未在 M2.4 公开；它在
+  M4/M5 状态与 checkpoint 语义完整后通过 Public A6 交付。
 - M5.1 至 M5.4 使用一个 milestone integration branch 接受 stacked PR，完整协议通过
   后一次合入 `main`，避免暴露半套 checkpoint 公共 API。
-- M6.7 至 M6.9 同样使用 stacked PR：Rust project v3、Python、Studio、生成文件全部
-  green 后再完成公共 v2 删除。
+- Public A6 原计划采用单次原子 cutover，实际先合入 Rust facade PR #119，再由 PR #129
+  完成集成。该非原子历史已获 Cheng Li 明确接受，并记录在 A6 implementation
+  evidence 中。
+- M6.7 至 M6.9 使用 stacked PR：project v3、connector integration、Studio v3 与
+  生成文件全部 green 后再完成 project/REST v2 删除。旧 continuous runner 的删除已由
+  Public A6 完成，不再属于 M6 剩余范围。
 - 临时并存只能是开发分支内部脚手架，不是 3.0 产品兼容承诺。
 - 不建立贯穿 M1 到 M7 的超长 feature branch。
 
@@ -740,8 +750,8 @@ soak 均有实现和证据。所有新增 runner/control surface 仍为 crate-pr
 
 ### Task M2.2：实现 stream source binding 与 source task
 
-**状态：** 已在 crate-private runtime 完成；public A4 source surface 仍与 A6 一起
-延后到 post-M5。
+**状态：** 已在 crate-private runtime 完成。该 task 合入时 public source surface
+仍延后到 post-M5；后续 Public A6 已完成该公开边界。
 
 **文件：**
 
@@ -816,9 +826,9 @@ task；per-ingress FIFO、bounded fan-out、unary watermark/idle 的 runtime-own
 
 ### Task M2.4：实现 crate-private sink task、runner 与 job handle
 
-**状态：** 已完成 private M2.4。该 task 不公开或替换任何 runner；现有 public v2
-`StreamingRunner` 与 `MicroBatchRunner` 保持不变，public source-driven A6 延后到
-post-M5 的独立评审与原子集成。
+**状态：** 已完成 private M2.4。该 task 合入时未公开或替换任何 runner；后续
+Public A6 已在 M5 完成后公开 source-driven `StreamingRunner`，并删除旧
+`MicroBatchRunner` 与 push runner。
 
 **文件：**
 
@@ -894,7 +904,8 @@ RSS slope。raw log SHA-256 为
 本节按 PR #85 的 M3 delta specification、API note 和 critique 执行。M3 的交付语义是
 “snapshot-ready and deterministically replayable progress state”：快照只在同进程内存中
 使用，不是 checkpoint，不承诺 crash recovery。late-row 分类、drop 与指标移至 M4；
-durable progress recovery 仍属于 M5；public A6 仍在 post-M5 独立 gate。
+durable progress recovery 仍属于 M5。该 M3 delta 合入时 Public A6 仍是 post-M5
+独立 gate；该 gate 现已完成。
 
 ### Task M3.1：实现 source watermark policy
 
@@ -1211,8 +1222,9 @@ private harness 冒充。
 M5 从 `main@a5fc2c395e347041f8d16384be99af7e23d2ebff` 开始。实现以
 `.codex/artifacts/specs/m5-epoch-checkpoint.md` 和配套 API note 为准；这组 delta
 已经把历史计划与 M3/M4 当前实现对齐。M5 复用 M4 已定型的 manifest v3，保留 public
-checkpoint/runner v2 直到 post-M5 A6，不在本阶段顺带暴露 Python、Studio、project v3
-或 production connector。
+checkpoint/runner v2 在该阶段保留到 post-M5 A6；Public A6 后续已完成 Rust/Python
+runner cutover。Studio `/api/v2`、project v2 与 production connector 仍不属于 M5
+或 A6。
 
 M5 实现使用 `feature/continuous-streaming-m5-epoch-checkpoint` 作为 milestone
 integration branch。M5.1–M5.5 可以分别准备 stacked review PR，但只能合入 integration
@@ -1853,49 +1865,59 @@ WebSocket。
 **验收门：** 单个 project v3 可以无 executable object/secret 地定义
 PostgreSQL CDC -> window -> ClickHouse/Parquet stream。
 
-### Task M6.8：替换 PyO3 与 Python API
+### Task M6.8：接入 Project v3、Connector 与 Python Capability
 
 **文件：**
 
-- 修改：`crates/calc-flow-python/src/{lib,pipeline,runtime,config,store}.rs`
-- 替换：`python/calc_flow/runtime.py`
+- 修改：`crates/calc-flow-python/src/{lib,pipeline,config,store}.rs`
 - 修改：`python/calc_flow/{__init__,pipeline,config,store,capabilities}.py`
-- 替换相关：`python/tests/`
+- 按需扩展：`python/calc_flow/runtime.py`
+- 修改相关：`python/tests/`
 - 更新：`python/calc_flow/_native.pyi`
 
-**目标行为：**
+**Public A6 已完成的基线：**
 
 - `PipelineBuilder.compile_batch()` / `compile_stream()`；
-- async source protocol；
-- ordinary/transactional sink protocol；
+- async source protocol 与 ordinary/transactional sink protocol；
 - `StreamingRunner.start_async()` 返回 owning job；
 - `status()`、`checkpoint_async()`、`shutdown_async()`、`cancel()`、
   `wait_async()`；
 - blocking convenience 在 active event loop 中拒绝；
-- cancel 等待 native/Python task 清理。
+- cancel、drop 与 Python GC 等待 native/Python ownership 清理；
+- 删除 Python `MicroBatchRunner` 与 push `step()` adapter。
+
+这些行为是 M6 的受保护起点，不得作为 project v3 或 connector 工作重复实现。
+
+**M6 剩余目标：**
+
+- project v3 data-only document 编译为现有 `StreamExecutionPlan` 和 source/sink
+  bindings；
+- connector 注册、format、secret reference 与 capability 枚举在 Rust/Python 间一致；
+- wheel 只暴露实际携带或可注册的 connector capability；
+- project v3 validation error 保留稳定 field path，且不泄漏 secret。
 
 **先写 RED：**
 
-- [ ] source/sink input 校验并 defensive copy。
-- [ ] async cancel 后无 pending Python task/native lease。
-- [ ] job 参与 GC cycle 时正确释放。
-- [ ] Python error 保留 source/sink identity 且不泄漏 secret。
+- [ ] project v3 connector options 校验并 defensive copy。
+- [ ] project v3 secret value 在 native factory 或 connector open 前被拒绝。
+- [ ] Python capability 枚举不宣告 wheel 中不可达的 connector。
+- [ ] project v3 Python error 保留 connector/source/sink identity 且不泄漏 secret。
 - [ ] custom Python transactional sink 未实现完整 protocol 时不能声称能力。
-- [ ] stub 与 runtime member 精确一致。
+- [ ] project-v3 binding、stub 与 runtime member 精确一致。
 
 **实现：**
 
-- [ ] 删除 Python `MicroBatchRunner` 与 push `step()` adapter。
-- [ ] 围绕 v3 native job handle 重建 PyO3 ownership。
-- [ ] 保持明确 GIL boundary，不阻塞 Tokio thread。
-- [ ] NumPy/JAX payload 保持 immutable 并能 byte-account。
+- [ ] 将 project v3 document 编译到现有 A6 native job handle，不新增第二套 owner。
+- [ ] 保持现有 GIL、Tokio、cancel、drop 与 GC ownership 边界。
+- [ ] NumPy/JAX payload 与 connector options 保持 immutable 并能 byte-account。
 - [ ] capability schema version 与 project format list 改为 v3 only。
 - [ ] 按 M6.1 的依赖边决定，实现 Python 侧可用 connector 的注册与能力枚举；若
   wheel 不携带原生 connector，`capabilities.py` 必须如实反映这一点，而不是宣告
   project v3 中不可达的 connector。
 
-**验收门：** Python 与 Rust 能运行相同 start/status/checkpoint/stop/recover 场景，
-重复 cancellation stress 通过。
+**验收门：** Python 与 Rust 从同一 project v3 得到一致的 connector、capability、
+delivery guarantee 与现有 A6 start/status/checkpoint/stop/recover 行为；重复
+cancellation stress 保持通过。
 
 ### Task M6.9：替换 Studio API 并实现持续 job UI
 
@@ -2027,7 +2049,7 @@ PostgreSQL CDC -> window -> ClickHouse/Parquet stream。
 - slow sink 能反压到 source。
 - graceful shutdown drain；cancel join 全部 task。
 - two-source union 通过 stress 与 universal 20-minute soak。
-- public v2 runner 保持不变；public A6 仍为 post-M5 独立 gate。
+- M2 合入时 public v2 runner 保持不变；后续 Public A6 已完成独立 gate 与 cutover。
 
 ### M3
 
@@ -2049,10 +2071,20 @@ PostgreSQL CDC -> window -> ClickHouse/Parquet stream。
 - file sink 通过完整 exactly-once fault matrix。
 - capability-invalid plan 编译失败。
 
+### Public A6
+
+- crate-root Rust `StreamingRunner`、owning `StreamingJob` 与 managed checkpoint
+  owner 已公开。
+- PyO3/Python 使用同一 async-only connector lifecycle 与 one-owner job contract。
+- 旧 micro-batch、push runner 和 public checkpoint document store 已删除。
+- 48-case fault catalog、Rust/Python 双向恢复 E2E 与 exact-head 20-minute soak 已通过。
+- PR #119 的非原子先行历史已获明确接受，最终集成由 PR #129 完成。
+
 ### M6
 
 - file/Kafka/PostgreSQL/ClickHouse 可从严格 project v3 运行。
-- Rust/Python/Studio 暴露一致生命周期和 delivery guarantee。
+- project v3、connector capability 与既有 Rust/Python A6 lifecycle 一致。
+- Studio 暴露与 Rust/Python 一致的 job lifecycle 和 delivery guarantee。
 - schema/OpenAPI/client 与源码一致。
 
 ### M7
