@@ -15,8 +15,9 @@ use std::path::{Component, Path, PathBuf};
 
 use async_trait::async_trait;
 use calc_flow::{
-    ArrowFieldSpec, ConnectorError, ConnectorIdentity, ConnectorOperation, Cursor, DecodeBounds,
-    FormatDecoder, Result, SourceCapabilities, SourceEvent, SourceSchema, StreamSource,
+    ArrowFieldSpec, Batch, ConnectorError, ConnectorIdentity, ConnectorOperation, Cursor,
+    DecodeBounds, FormatDecoder, Result, SourceCapabilities, SourceEvent, SourceSchema,
+    StreamSource,
 };
 use serde_json::Value;
 
@@ -97,34 +98,15 @@ impl FileSourceConfig {
     /// offending option for an unknown key, a missing path or format, a
     /// path containing `..` traversal, or a non-positive bound.
     pub fn from_options(options: &calc_flow::JsonMap) -> Result<Self> {
-        let path = string_option(options, "path")?;
-        let path = PathBuf::from(path);
-        if path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
-        {
-            return Err(calc_flow::CalcFlowError::InvalidArgument {
-                field: "path".into(),
-                message: "file source paths must name a file or directory without traversal".into(),
-            });
-        }
+        let path = parse_path(options)?;
         let format = FileFormat::parse(
             string_option(options, "format")?,
             bool_option(options, "header")?.unwrap_or(true),
         )?;
-        let schema =
-            match options.get("schema") {
-                None => Vec::new(),
-                Some(value) => serde_json::from_value::<Vec<ArrowFieldSpec>>(value.clone())
-                    .map_err(|error| calc_flow::CalcFlowError::InvalidArgument {
-                        field: "schema".into(),
-                        message: format!("schema must be a field list: {error}"),
-                    })?,
-            };
         Ok(Self {
             path,
             format,
-            schema,
+            schema: parse_schema(options)?,
             max_batch_rows: u64_option(options, "max_batch_rows")?
                 .unwrap_or(DEFAULT_MAX_BATCH_ROWS),
             max_batch_bytes: u64_option(options, "max_batch_bytes")?
@@ -136,6 +118,34 @@ impl FileSourceConfig {
 
     fn bounds(&self) -> Result<DecodeBounds> {
         DecodeBounds::new(self.max_batch_rows, self.max_batch_bytes)
+    }
+}
+
+fn parse_path(options: &calc_flow::JsonMap) -> Result<PathBuf> {
+    let path = PathBuf::from(string_option(options, "path")?);
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
+        return Err(calc_flow::CalcFlowError::InvalidArgument {
+            field: "path".into(),
+            message: "file source paths must name a file or directory without traversal".into(),
+        });
+    }
+    Ok(path)
+}
+
+fn parse_schema(options: &calc_flow::JsonMap) -> Result<Vec<ArrowFieldSpec>> {
+    match options.get("schema") {
+        None => Ok(Vec::new()),
+        Some(value) => {
+            serde_json::from_value::<Vec<ArrowFieldSpec>>(value.clone()).map_err(|error| {
+                calc_flow::CalcFlowError::InvalidArgument {
+                    field: "schema".into(),
+                    message: format!("schema must be a field list: {error}"),
+                }
+            })
+        }
     }
 }
 
@@ -242,7 +252,7 @@ impl FileSource {
         ))
     }
 
-    async fn discover(&mut self) -> Result<()> {
+    fn discover(&mut self) -> Result<()> {
         let path = self.config.path.clone();
         let metadata = std::fs::symlink_metadata(&path)
             .map_err(|error| Self::fail("open", &path, &error.to_string()))?;
@@ -355,25 +365,28 @@ impl FileSource {
         .map_err(|error| Self::fail("read", path, &error.to_string()))?
     }
 
+    async fn decode_current_file(&self, path: &Path) -> Result<Batch> {
+        let bytes = self.read_file(path).await?;
+        let bounds = self.config.bounds()?;
+        match &self.config.format {
+            FileFormat::Csv { header } => {
+                let codec = CsvCodec::new(crate::csv::IDENTITY_VERSION, *header)?;
+                codec.decode(&bytes, &bounds, &self.config.schema)
+            }
+            FileFormat::Parquet => {
+                let codec = crate::parquet::ParquetCodec::new(crate::parquet::IDENTITY_VERSION)?;
+                codec.decode(&bytes, &bounds, &self.config.schema)
+            }
+            FileFormat::JsonLines => unreachable!("json advances through the line cache"),
+        }
+    }
+
     async fn next_csv_or_parquet(&mut self) -> Result<Option<SourceEvent>> {
         loop {
             let Some(path) = self.files.get(self.file_index).cloned() else {
                 return Ok(None);
             };
-            let bytes = self.read_file(&path).await?;
-            let bounds = self.config.bounds()?;
-            let batch = match &self.config.format {
-                FileFormat::Csv { header } => {
-                    let codec = CsvCodec::new(crate::csv::IDENTITY_VERSION, *header)?;
-                    codec.decode(&bytes, &bounds, &self.config.schema)?
-                }
-                FileFormat::Parquet => {
-                    let codec =
-                        crate::parquet::ParquetCodec::new(crate::parquet::IDENTITY_VERSION)?;
-                    codec.decode(&bytes, &bounds, &self.config.schema)?
-                }
-                FileFormat::JsonLines => unreachable!("json advances through the line cache"),
-            };
+            let batch = self.decode_current_file(&path).await?;
             let rows = u64::try_from(batch.num_rows()).unwrap_or(u64::MAX);
             if rows <= self.row_offset {
                 // Replaying past a checkpointed file boundary: the cursor
@@ -391,61 +404,75 @@ impl FileSource {
         }
     }
 
+    /// Loads the line cache for the current file, advancing past empty
+    /// files until one yields lines or the directory is exhausted.
+    async fn ensure_json_lines(&mut self) -> Result<bool> {
+        while self.line_cache.is_none() {
+            let Some(path) = self.files.get(self.file_index).cloned() else {
+                return Ok(false);
+            };
+            let bytes = self.read_file(&path).await?;
+            let lines = split_lines(&bytes);
+            if lines.is_empty() {
+                self.file_index += 1;
+                self.row_offset = 0;
+                continue;
+            }
+            self.line_cache = Some(lines);
+        }
+        Ok(true)
+    }
+
+    /// Builds the next bounded chunk of remaining lines.
+    fn next_json_chunk(&self, bounds: &DecodeBounds) -> Result<(Vec<u8>, u64)> {
+        let lines = self
+            .line_cache
+            .as_ref()
+            .expect("the caller ensured the line cache");
+        let mut chunk: Vec<u8> = Vec::new();
+        let mut taken = 0u64;
+        for line in lines
+            .iter()
+            .skip(usize::try_from(self.row_offset).unwrap_or(usize::MAX))
+        {
+            if taken >= bounds.max_rows
+                || u64::try_from(chunk.len() + line.len() + 1).unwrap_or(u64::MAX)
+                    > bounds.max_bytes
+            {
+                break;
+            }
+            chunk.extend_from_slice(line);
+            chunk.push(b'\n');
+            taken += 1;
+        }
+        if chunk.is_empty() {
+            return Err(Self::fail(
+                "read",
+                self.files.get(self.file_index).unwrap_or(&self.config.path),
+                "a single line exceeds the batch byte limit",
+            ));
+        }
+        Ok((chunk, taken))
+    }
+
     async fn next_json_lines(&mut self) -> Result<Option<SourceEvent>> {
         loop {
-            if self.line_cache.is_none() {
-                let Some(path) = self.files.get(self.file_index).cloned() else {
-                    return Ok(None);
-                };
-                let bytes = self.read_file(&path).await?;
-                let lines: Vec<Vec<u8>> = split_lines(&bytes);
-                if lines.is_empty() {
-                    self.file_index += 1;
-                    self.row_offset = 0;
-                    continue;
-                }
-                self.line_cache = Some(lines);
+            if !self.ensure_json_lines().await? {
+                return Ok(None);
             }
             let total_lines = self
                 .line_cache
                 .as_ref()
-                .expect("the line cache was just populated")
+                .expect("the caller ensured the line cache")
                 .len();
-            let remaining: Vec<Vec<u8>> = self
-                .line_cache
-                .as_ref()
-                .expect("the line cache was just populated")
-                .iter()
-                .skip(usize::try_from(self.row_offset).unwrap_or(usize::MAX))
-                .cloned()
-                .collect();
-            if remaining.is_empty() {
+            if usize::try_from(self.row_offset).unwrap_or(usize::MAX) >= total_lines {
                 self.line_cache = None;
                 self.file_index += 1;
                 self.row_offset = 0;
                 continue;
             }
             let bounds = self.config.bounds()?;
-            let mut chunk: Vec<u8> = Vec::new();
-            let mut taken = 0u64;
-            for line in &remaining {
-                if taken >= bounds.max_rows
-                    || u64::try_from(chunk.len() + line.len() + 1).unwrap_or(u64::MAX)
-                        > bounds.max_bytes
-                {
-                    break;
-                }
-                chunk.extend_from_slice(line);
-                chunk.push(b'\n');
-                taken += 1;
-            }
-            if chunk.is_empty() {
-                return Err(Self::fail(
-                    "read",
-                    self.files.get(self.file_index).unwrap_or(&self.config.path),
-                    "a single line exceeds the batch byte limit",
-                ));
-            }
+            let (chunk, taken) = self.next_json_chunk(&bounds)?;
             let codec = JsonLinesCodec::new(crate::json_lines::IDENTITY_VERSION)?;
             let batch = codec.decode(&chunk, &bounds, &self.config.schema)?;
             let consumed = self.row_offset + taken;
@@ -491,7 +518,7 @@ impl StreamSource for FileSource {
     }
 
     async fn open(&mut self, cursor: Option<Cursor>) -> Result<()> {
-        self.discover().await?;
+        self.discover()?;
         self.file_index = 0;
         self.row_offset = 0;
         self.line_cache = None;

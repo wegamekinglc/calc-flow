@@ -12,6 +12,7 @@ all-features = true
 ignore = [
     { id = "RUSTSEC-2026-0176", reason = "Temporary: DataFusion 54 requires Arrow 58 and the only Arrow 58 pyo3-arrow line requires PyO3 0.28; Calc Flow never calls BoundListIterator or BoundTupleIterator nth/nth_back. Remove when an Arrow 58-compatible patched bridge exists or DataFusion is upgraded." },
     { id = "RUSTSEC-2026-0177", reason = "Temporary: DataFusion 54 requires Arrow 58 and the only Arrow 58 pyo3-arrow line requires PyO3 0.28; Calc Flow never constructs PyCFunction closures. Remove when an Arrow 58-compatible patched bridge exists or DataFusion is upgraded." },
+    { id = "RUSTSEC-2024-0436", reason = "Temporary: parquet 58 (the M6 file connector's columnar codec) still derives on the unmaintained paste proc-macro; the dependency expands at compile time only and ships no runtime code. Remove when parquet drops paste or the connector upgrades." },
 ]
 
 [licenses]

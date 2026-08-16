@@ -212,6 +212,56 @@ fn sync_directory(directory: &Path) -> std::result::Result<(), calc_flow::CalcFl
     Ok(())
 }
 
+/// Commits one staged epoch: replays idempotently when the final
+/// directory already carries matching manifest evidence, otherwise
+/// renames the staged directory into place atomically.
+fn commit_staged(staging: &Path, final_dir: &Path, evidence: &JsonMap) -> Result<()> {
+    if final_dir.exists() {
+        replay_committed_epoch(staging, final_dir, evidence)
+    } else {
+        rename_staged_epoch(staging, final_dir)
+    }
+}
+
+fn replay_committed_epoch(staging: &Path, final_dir: &Path, evidence: &JsonMap) -> Result<()> {
+    let committed = read_manifest(final_dir).ok_or_else(|| {
+        TransactionalParquetSink::fail(
+            "commit",
+            final_dir,
+            "committed epoch is missing its manifest",
+        )
+    })?;
+    if committed != *evidence {
+        return Err(TransactionalParquetSink::fail(
+            "commit",
+            final_dir,
+            "committed epoch manifest disagrees with the replayed pre-commit evidence",
+        ));
+    }
+    if staging.exists() {
+        std::fs::remove_dir_all(staging).map_err(TransactionalParquetSink::map_io(
+            "commit",
+            staging.to_path_buf(),
+        ))?;
+    }
+    Ok(())
+}
+
+fn rename_staged_epoch(staging: &Path, final_dir: &Path) -> Result<()> {
+    if !staging.exists() {
+        return Err(TransactionalParquetSink::fail(
+            "commit",
+            staging,
+            "staged epoch is missing; nothing to commit",
+        ));
+    }
+    std::fs::rename(staging, final_dir).map_err(TransactionalParquetSink::map_io(
+        "commit",
+        final_dir.to_path_buf(),
+    ))?;
+    sync_directory(final_dir.parent().unwrap_or(final_dir))
+}
+
 fn read_manifest(dir: &Path) -> Option<JsonMap> {
     let bytes = std::fs::read(dir.join("manifest.json")).ok()?;
     serde_json::from_slice(&bytes).ok()
@@ -307,41 +357,9 @@ impl TransactionalStreamSink for TransactionalParquetSink {
     async fn commit(&mut self, epoch: Epoch, pre_commit: &JsonMap) -> Result<()> {
         let staging = self.config.staging_dir(epoch);
         let final_dir = self.config.final_dir(epoch);
-        let output_dir = self.config.output_dir();
         let evidence = pre_commit.clone();
         self.blocking(final_dir.clone(), "commit", move || {
-            if final_dir.exists() {
-                let committed = read_manifest(&final_dir).ok_or_else(|| {
-                    TransactionalParquetSink::fail(
-                        "commit",
-                        &final_dir,
-                        "committed epoch is missing its manifest",
-                    )
-                })?;
-                if committed != evidence {
-                    return Err(TransactionalParquetSink::fail(
-                        "commit",
-                        &final_dir,
-                        "committed epoch manifest disagrees with the replayed pre-commit evidence",
-                    ));
-                }
-                if staging.exists() {
-                    std::fs::remove_dir_all(&staging)
-                        .map_err(Self::map_io("commit", staging.clone()))?;
-                }
-                return Ok(());
-            }
-            if !staging.exists() {
-                return Err(TransactionalParquetSink::fail(
-                    "commit",
-                    &staging,
-                    "staged epoch is missing; nothing to commit",
-                ));
-            }
-            std::fs::rename(&staging, &final_dir)
-                .map_err(Self::map_io("commit", final_dir.clone()))?;
-            sync_directory(&output_dir)?;
-            Ok(())
+            commit_staged(&staging, &final_dir, &evidence)
         })
         .await
     }

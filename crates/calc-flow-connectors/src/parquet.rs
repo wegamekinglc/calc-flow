@@ -62,36 +62,8 @@ impl FormatDecoder for ParquetCodec {
     ) -> Result<Batch> {
         let builder = ParquetRecordBatchReaderBuilder::try_new(Bytes::copy_from_slice(bytes))
             .map_err(|error| codec_error(&self.identity, "decode", &error.to_string()))?;
-        let stored = builder.schema().clone();
-        if !schema.is_empty() {
-            let expected = schema_from_spec(schema)?;
-            let fields_agree = expected.fields().len() == stored.fields().len()
-                && expected
-                    .fields()
-                    .iter()
-                    .zip(stored.fields())
-                    .all(|(left, right)| left.name() == right.name());
-            if !fields_agree {
-                return Err(codec_error(
-                    &self.identity,
-                    "decode",
-                    "stored schema does not match the explicit schema",
-                ));
-            }
-        }
-        for (index, row_group) in builder.metadata().row_groups().iter().enumerate() {
-            let rows = u64::try_from(row_group.num_rows()).unwrap_or(u64::MAX);
-            if rows > bounds.max_rows {
-                return Err(codec_error(
-                    &self.identity,
-                    "decode",
-                    &format!(
-                        "row group {index} carries {rows} rows above the {} row limit",
-                        bounds.max_rows
-                    ),
-                ));
-            }
-        }
+        verify_stored_schema(&self.identity, builder.schema(), schema)?;
+        verify_row_groups(&self.identity, builder.metadata(), bounds)?;
         let batch_rows = usize::try_from(bounds.max_rows).unwrap_or(usize::MAX);
         let reader = builder
             .with_batch_size(batch_rows.max(1))
@@ -102,6 +74,54 @@ impl FormatDecoder for ParquetCodec {
             .map_err(|error| codec_error(&self.identity, "decode", &error.to_string()))?;
         bounded_table_batch(&self.identity, batches, bounds, IDENTITY, 0)
     }
+}
+
+/// Compares the file's stored Arrow schema with an explicit expectation.
+fn verify_stored_schema(
+    identity: &FormatIdentity,
+    stored: &arrow::datatypes::SchemaRef,
+    schema: &[ArrowFieldSpec],
+) -> Result<()> {
+    if schema.is_empty() {
+        return Ok(());
+    }
+    let expected = schema_from_spec(schema)?;
+    let fields_agree = expected.fields().len() == stored.fields().len()
+        && expected
+            .fields()
+            .iter()
+            .zip(stored.fields())
+            .all(|(left, right)| left.name() == right.name());
+    if !fields_agree {
+        return Err(codec_error(
+            identity,
+            "decode",
+            "stored schema does not match the explicit schema",
+        ));
+    }
+    Ok(())
+}
+
+/// Rejects any single row group whose row count exceeds the bound.
+fn verify_row_groups(
+    identity: &FormatIdentity,
+    metadata: &parquet::file::metadata::ParquetMetaData,
+    bounds: &DecodeBounds,
+) -> Result<()> {
+    for (index, row_group) in metadata.row_groups().iter().enumerate() {
+        let rows = u64::try_from(row_group.num_rows()).unwrap_or(u64::MAX);
+        if rows > bounds.max_rows {
+            return Err(codec_error(
+                identity,
+                "decode",
+                &format!(
+                    "row group {index} carries {rows} rows above the {} row limit",
+                    bounds.max_rows
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl FormatEncoder for ParquetCodec {
