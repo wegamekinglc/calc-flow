@@ -13,6 +13,42 @@ concurrency:
   # README CI badge as failing even when every job was healthy.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
 jobs:
+  connector-containers:
+    name: Connector containers (Kafka)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      kafka:
+        # Official KRaft image; its default listener advertises
+        # localhost:9092, which is exactly what the job connects to.
+        image: apache/kafka:3.9.0
+        ports:
+          - 9092:9092
+    env:
+      CALC_FLOW_CONNECTOR_CONTAINERS: "1"
+      CALC_FLOW_KAFKA_BOOTSTRAP: localhost:9092
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Install libcurl headers for vendored librdkafka
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      - name: Wait for the broker to accept connections
+        run: |
+          for attempt in $(seq 1 60); do
+            if timeout 1 bash -c '</dev/tcp/localhost/9092' 2>/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "broker never became reachable" >&2
+          exit 1
+      - name: Run gated Kafka connector tests
+        run: >-
+          cargo test -p calc-flow-connectors --features kafka
+          --test kafka_connector -- --ignored --test-threads=1
   lint-and-test:
     name: Ruff + unit tests
     runs-on: ubuntu-latest
@@ -313,6 +349,11 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
+      - name: Install libcurl headers for vendored librdkafka
+        # librdkafka 2.12's cmake path includes curl/curl.h even with
+        # WITH_CURL=0 (rust-rdkafka#829); the headers satisfy the stale
+        # include without linking curl.
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version-file: .python-version
@@ -413,8 +454,14 @@ jobs:
           cargo clean --target-dir "$FROZEN_ALLOCATION_HARNESS_TARGET_DIR"
           cargo clean --target-dir "$FROZEN_ALLOCATION_CANDIDATE_TARGET_DIR"
       - name: Enforce Rust core line coverage
+        # The kafka transport's runtime surface needs a broker and is
+        # proven by the connector-containers leg; per the M6 delta's
+        # per-connector coverage clause its broker-bound module is
+        # omitted from the line gate while its offline logic stays
+        # measured.
         run: >-
           cargo llvm-cov --workspace --all-features --fail-under-lines 90
+          --ignore-filename-regex 'src/kafka\.rs'
           --lcov --output-path rust-lcov.info
       - name: Upload Rust coverage report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

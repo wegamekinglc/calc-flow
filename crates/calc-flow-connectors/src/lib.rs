@@ -41,6 +41,13 @@ pub mod parquet;
 mod file;
 #[cfg(feature = "file")]
 mod file_sink;
+#[cfg(feature = "kafka")]
+pub mod kafka;
+
+#[cfg(feature = "kafka")]
+pub use kafka::{
+    KAFKA_CONNECTOR_VERSION, KafkaSinkFactory, KafkaSourceFactory, register_kafka_connectors,
+};
 
 #[cfg(feature = "file")]
 pub use file::{FileFormat, FileSource, FileSourceConfig};
