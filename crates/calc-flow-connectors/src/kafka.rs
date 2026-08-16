@@ -255,6 +255,16 @@ impl KafkaSource {
     }
 }
 
+/// Whether a poll error reflects a broker outage rather than a
+/// protocol failure.
+fn is_transient_transport_error(error: &rdkafka::error::KafkaError) -> bool {
+    matches!(
+        error.rdkafka_error_code(),
+        Some(rdkafka::types::RDKafkaErrorCode::BrokerTransportFailure)
+            | Some(rdkafka::types::RDKafkaErrorCode::AllBrokersDown)
+    )
+}
+
 fn source_capabilities(schema: SourceSchema, bounds: DecodeBounds) -> SourceCapabilities {
     SourceCapabilities {
         replay_positioning: calc_flow::ReplayPositioning::ExactPauseReportAndSeek,
@@ -286,6 +296,12 @@ impl StreamSource for KafkaSource {
         let message = match self.consumer.poll(POLL_TIMEOUT) {
             None => return Ok(Some(SourceEvent::Idle)),
             Some(Ok(message)) => message.detach(),
+            Some(Err(error)) if is_transient_transport_error(&error) => {
+                // A broker that is down or restarting must surface as
+                // idleness so the job outlives the outage; protocol
+                // and decode failures still fail closed.
+                return Ok(Some(SourceEvent::Idle));
+            }
             Some(Err(error)) => return Err(fail("poll", &error.to_string())),
         };
         let partition = message.partition();
