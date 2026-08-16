@@ -136,7 +136,6 @@ fn kafka_roundtrip_and_transactional_exactly_once() {
         .expect("runtime");
 
     rt.block_on(async move {
-        use calc_flow::{FormatDecoder as _, FormatEncoder as _};
         let batch = sample_batch();
         let mut sink =
             calc_flow_connectors::kafka::TransactionalKafkaSink::new(sink_config.clone())

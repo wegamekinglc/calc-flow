@@ -18,17 +18,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
-      redpanda:
-        image: redpandadata/redpanda:v24.3.3
+      kafka:
+        # Official KRaft image; its default listener advertises
+        # localhost:9092, which is exactly what the job connects to.
+        image: apache/kafka:3.9.0
         ports:
           - 9092:9092
-        options: >-
-          redpanda start
-          --overprovisioned
-          --smp 1
-          --memory 1G
-          --kafka-addr PLAINTEXT://0.0.0.0:9092
-          --advertise-kafka-addr PLAINTEXT://localhost:9092
     env:
       CALC_FLOW_CONNECTOR_CONTAINERS: "1"
       CALC_FLOW_KAFKA_BOOTSTRAP: localhost:9092
