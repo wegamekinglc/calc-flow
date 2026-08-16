@@ -268,6 +268,132 @@ fn duplicate_format_identity_fails() {
 }
 
 #[test]
+fn factory_descriptor_identity_must_match_registration() {
+    let mut registry = ConnectorRegistry::new();
+    let mismatched = FakeSourceFactory {
+        descriptor: descriptor("other", ConnectorKind::Source, source_capabilities()),
+    };
+    let error = registry
+        .register_connector(
+            descriptor("file", ConnectorKind::Source, source_capabilities()),
+            ConnectorFactories::source_only(Arc::new(mismatched)),
+        )
+        .expect_err("source factory naming another identity rejected");
+    match error {
+        CalcFlowError::InvalidArgument { field, message } => {
+            assert!(field.contains("factories"), "field: {field}");
+            assert!(
+                message.contains("source factory descriptor identity"),
+                "message names the direction: {message}"
+            );
+        }
+        other => panic!("expected InvalidArgument, got {other:?}"),
+    }
+
+    let mismatched_sink = FakeSinkFactory {
+        descriptor: descriptor(
+            "other",
+            ConnectorKind::Sink,
+            transactional_sink_capabilities(),
+        ),
+    };
+    let error = registry
+        .register_connector(
+            descriptor(
+                "kafka",
+                ConnectorKind::Sink,
+                transactional_sink_capabilities(),
+            ),
+            ConnectorFactories::sink_only(Arc::new(mismatched_sink)),
+        )
+        .expect_err("sink factory naming another identity rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("sink factory descriptor identity"),
+        "message names the direction"
+    );
+    assert!(
+        registry.snapshot().identities().is_empty(),
+        "failed registrations leave the registry empty"
+    );
+}
+
+#[test]
+fn registry_debug_lists_registered_identities() {
+    let mut registry = registry_with_file_connector();
+    registry
+        .register_format(FormatDescriptor {
+            identity: format_identity("csv"),
+        })
+        .expect("format registration succeeds");
+    let rendered = format!("{registry:?}");
+    assert!(
+        rendered.contains("calc-flow-connectors/file/2.0.0"),
+        "debug lists connector identities: {rendered}"
+    );
+    assert!(
+        rendered.contains("csv/1"),
+        "debug lists format identities: {rendered}"
+    );
+}
+
+#[test]
+fn sink_factory_resolves_and_default_transactional_open_is_none() {
+    let mut registry = ConnectorRegistry::new();
+    let sink_factory = Arc::new(FakeSinkFactory {
+        descriptor: descriptor(
+            "kafka",
+            ConnectorKind::Sink,
+            transactional_sink_capabilities(),
+        ),
+    });
+    registry
+        .register_connector(
+            descriptor(
+                "kafka",
+                ConnectorKind::Sink,
+                transactional_sink_capabilities(),
+            ),
+            ConnectorFactories::sink_only(sink_factory.clone()),
+        )
+        .expect("sink registration succeeds");
+    registry
+        .register_format(FormatDescriptor {
+            identity: format_identity("csv"),
+        })
+        .expect("format registration succeeds");
+    let snapshot = registry.snapshot();
+    assert!(
+        snapshot.resolve_sink(&identity("kafka")).is_ok(),
+        "sink direction resolves for a sink-kind connector"
+    );
+    assert_eq!(
+        snapshot
+            .format_identities()
+            .iter()
+            .map(|identity| identity.name.to_string())
+            .collect::<Vec<String>>(),
+        vec!["csv"],
+        "format identities list deterministically"
+    );
+
+    let resolver = StaticResolver {
+        value: b"token-value".to_vec(),
+    };
+    let options = BTreeMap::new();
+    let outcome = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("test runtime builds")
+        .block_on(sink_factory.open_transactional(&options, &resolver));
+    match outcome {
+        Ok(None) => {}
+        Ok(Some(_)) => panic!("default transactional open must not fabricate a sink"),
+        Err(error) => panic!("default transactional open must succeed: {error}"),
+    }
+}
+
+#[test]
 fn unknown_connector_fails_resolution_before_construction() {
     let snapshot = registry_with_file_connector().snapshot();
     let error = match snapshot.resolve_source(&identity("kafka")) {
@@ -357,6 +483,49 @@ fn connector_identity_rejects_empty_components() {
     assert!(ConnectorIdentity::new("", "file", "1").is_err());
     assert!(ConnectorIdentity::new(PROVIDER, "", "1").is_err());
     assert!(ConnectorIdentity::new(PROVIDER, "file", "").is_err());
+}
+
+#[test]
+fn format_identity_rejects_empty_components() {
+    assert!(FormatIdentity::new("", "1").is_err());
+    assert!(FormatIdentity::new("csv", "").is_err());
+}
+
+#[test]
+fn both_kind_connector_registers_and_resolves_both_directions() {
+    let mut registry = ConnectorRegistry::new();
+    registry
+        .register_connector(
+            descriptor("http", ConnectorKind::Both, source_capabilities()),
+            ConnectorFactories::both(
+                Arc::new(FakeSourceFactory {
+                    descriptor: descriptor("http", ConnectorKind::Both, source_capabilities()),
+                }),
+                Arc::new(FakeSinkFactory {
+                    descriptor: descriptor("http", ConnectorKind::Both, source_capabilities()),
+                }),
+            ),
+        )
+        .expect("both-kind registration with both factories succeeds");
+    let snapshot = registry.snapshot();
+    assert!(snapshot.resolve_source(&identity("http")).is_ok());
+    assert!(snapshot.resolve_sink(&identity("http")).is_ok());
+
+    let missing_sink = ConnectorFactories::source_only(Arc::new(FakeSourceFactory {
+        descriptor: descriptor("websocket", ConnectorKind::Both, source_capabilities()),
+    }));
+    let error = registry
+        .register_connector(
+            descriptor("websocket", ConnectorKind::Both, source_capabilities()),
+            missing_sink,
+        )
+        .expect_err("both-kind connector needs both factories");
+    assert!(
+        error
+            .to_string()
+            .contains("both-kind connector registers source and sink factories"),
+        "guidance names the expected shape: {error}"
+    );
 }
 
 #[test]
