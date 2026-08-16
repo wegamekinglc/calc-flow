@@ -821,7 +821,7 @@ fn config_parsing_rejects_invalid_options() {
         ("output".to_string(), json!("a/b")),
     ]);
     let error = FileSinkConfig::from_options(&nested_output).expect_err("output shape");
-    assert!(error.to_string().contains("single directory"), "{error}");
+    assert!(error.to_string().contains("directory name"), "{error}");
 
     let dot_output = BTreeMap::from([
         ("path".to_string(), json!(root.display().to_string())),
@@ -1386,4 +1386,14 @@ async fn file_ceiling_fails_closed() {
         .await
         .expect_err("file above the ceiling fails");
     assert!(error.to_string().contains("ceiling"), "{error}");
+}
+
+#[tokio::test]
+async fn sink_rejects_empty_output_name() {
+    let options = BTreeMap::from([
+        ("path".to_string(), json!("/tmp/nowhere")),
+        ("output".to_string(), json!("")),
+    ]);
+    let error = FileSinkConfig::from_options(&options).expect_err("empty output rejected");
+    assert!(error.to_string().contains("directory name"), "{error}");
 }

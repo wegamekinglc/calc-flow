@@ -42,10 +42,15 @@ impl FileSinkConfig {
     pub fn from_options(options: &JsonMap) -> Result<Self> {
         let root = required_string(options, "path")?;
         let output = required_string(options, "output")?;
-        if output.contains('/') || output.contains('\\') || output == "." || output == ".." {
+        if output.is_empty()
+            || output.contains('/')
+            || output.contains('\\')
+            || output == "."
+            || output == ".."
+        {
             return Err(calc_flow::CalcFlowError::InvalidArgument {
                 field: "output".into(),
-                message: "output must be a single directory name".into(),
+                message: "output must be one non-empty directory name".into(),
             });
         }
         Ok(Self {
