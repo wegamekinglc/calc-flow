@@ -331,7 +331,8 @@ async fn symlinked_entries_fail_closed() {
     let error = source.open(None).await.expect_err("symlink fails closed");
     assert!(error.to_string().contains("symlink"), "{error}");
 
-    let direct = csv_options(&target);
+    let link = root.join("link.csv");
+    let direct = csv_options(&link);
     let mut source = FileSource::new(FileSourceConfig::from_options(&direct).unwrap()).unwrap();
     let error = source
         .open(None)
