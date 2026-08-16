@@ -461,7 +461,7 @@ jobs:
         # measured.
         run: >-
           cargo llvm-cov --workspace --all-features --fail-under-lines 90
-          --omit-files 'crates/calc-flow-connectors/src/kafka.rs'
+          --ignore-filename-path 'src/kafka.rs'
           --lcov --output-path rust-lcov.info
       - name: Upload Rust coverage report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
