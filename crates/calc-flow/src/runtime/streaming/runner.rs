@@ -66,6 +66,8 @@ use crate::pipeline::{
     OperatorCheckpointCapability, RuntimeSinkRoute, RuntimeSourceRoute, RuntimeStreamNode,
     StreamRuntimePlanParts,
 };
+#[cfg(all(test, unix))]
+use crate::state::ManifestParentSyncOsFailureProbe;
 #[cfg(test)]
 use crate::state::ManifestTransactionFaultPoint;
 use crate::{
@@ -142,6 +144,8 @@ struct CheckpointFaultState {
     armed: Option<CheckpointFault>,
     trigger_count: usize,
     cancellation_trigger_count: usize,
+    #[cfg(unix)]
+    parent_sync_os_failure_probe: ManifestParentSyncOsFailureProbe,
 }
 
 #[cfg(test)]
@@ -155,6 +159,8 @@ impl CheckpointFaultInjector {
             armed: Some(CheckpointFault { point, mode }),
             trigger_count: 0,
             cancellation_trigger_count: 0,
+            #[cfg(unix)]
+            parent_sync_os_failure_probe: ManifestParentSyncOsFailureProbe::default(),
         })))
     }
 
@@ -197,7 +203,25 @@ impl CheckpointFaultInjector {
         }
     }
 
-    fn trigger_count(&self) -> usize {
+    #[cfg(unix)]
+    fn is_armed(&self, point: CheckpointFaultPoint, mode: CheckpointFaultMode) -> bool {
+        self.0
+            .lock()
+            .armed
+            .is_some_and(|fault| fault.point == point && fault.mode == mode)
+    }
+
+    #[cfg(unix)]
+    fn parent_sync_os_failure_probe(&self) -> ManifestParentSyncOsFailureProbe {
+        self.0.lock().parent_sync_os_failure_probe.clone()
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn parent_sync_os_failure_count(&self) -> usize {
+        self.0.lock().parent_sync_os_failure_probe.count()
+    }
+
+    pub(crate) fn trigger_count(&self) -> usize {
         self.0.lock().trigger_count
     }
 
@@ -1486,7 +1510,7 @@ impl RunnerLifecycleProbe {
     }
 }
 
-/// Crate-private one-shot ownership boundary for the future public runner.
+/// Crate-private one-shot ownership boundary used by the public continuous facade.
 pub(crate) struct OneShotContinuousRunner {
     runner: ContinuousRunner,
 }
@@ -1545,6 +1569,29 @@ impl OneShotContinuousRunner {
             Err(error) => preflight_error_observer(error),
         };
         OneShotStartObserver::new(runner, start)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_checkpointed_with_config_and_fault_probe(
+        self,
+        spec: ContinuousJobSpec,
+        checkpoint: ManagedCheckpointRuntime,
+        config: StreamRuntimeConfig,
+        point: CheckpointFaultPoint,
+        mode: CheckpointFaultMode,
+    ) -> (OneShotStartObserver, CheckpointFaultInjector) {
+        let runner = self.runner;
+        let (start, probe) = match CheckpointRuntimeSpec::managed(checkpoint, config) {
+            Ok(checkpoint) => {
+                let (checkpoint, probe) = checkpoint.with_fault_probe(point, mode);
+                (runner.start_checkpointed(spec, checkpoint), probe)
+            }
+            Err(error) => (
+                preflight_error_observer(error),
+                CheckpointFaultInjector::armed(point, mode),
+            ),
+        };
+        (OneShotStartObserver::new(runner, start), probe)
     }
 
     #[cfg(test)]
@@ -2899,6 +2946,8 @@ async fn open_checkpoint_runtime(
     )
     .await
     .map_err(|error| sanitize_managed_preflight_error(error, managed, false))?;
+    #[cfg(all(test, unix))]
+    let transaction = configure_test_manifest_transaction(transaction, &spec.faults);
     let selected = transaction
         .select_latest_cancellable(&identity, cancellation)
         .await
@@ -2957,6 +3006,21 @@ async fn open_checkpoint_runtime(
         #[cfg(test)]
         started_gate: spec.started_gate,
     })
+}
+
+#[cfg(all(test, unix))]
+fn configure_test_manifest_transaction(
+    transaction: ManifestTransaction,
+    faults: &CheckpointFaultInjector,
+) -> ManifestTransaction {
+    if faults.is_armed(
+        CheckpointFaultPoint::ManifestParentSync,
+        CheckpointFaultMode::Io,
+    ) {
+        transaction.with_real_parent_sync_failure_for_test(faults.parent_sync_os_failure_probe())
+    } else {
+        transaction
+    }
 }
 
 fn sanitize_managed_preflight_error(

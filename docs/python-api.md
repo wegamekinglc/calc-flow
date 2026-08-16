@@ -411,55 +411,73 @@ schema. `project_json_schema()` returns the generated schema;
 
 `FileProjectStore` has async `create`, `put`, `get`, `list`, and `delete`
 methods and explicit `*_blocking` variants. Safe JSON/YAML import/export helpers
-live in `calc_flow.store`. `FileCheckpointStore` exposes async and blocking
-`save`, `load`, and `delete` operations.
-
-## Micro-batch runner
-
-A Python source owns replay state:
-
-```python
-class Source:
-    def open(self, cursor: object) -> None:
-        self.offset = 0 if cursor is None else int(cursor["offset"])
-
-    def next(self):
-        if self.offset == len(self.values):
-            return None
-        value = self.values[self.offset]
-        self.offset += 1
-        return (
-            Batch.from_pyarrow(pa.table({"value": [value]})),
-            {"offset": self.offset},
-            self.offset,
-        )
-```
-
-Construct `MicroBatchRunner(plan, source, checkpoints, sinks=...,
-checkpoint_every=...)`. Call `next_async()` until it returns `None`, or use
-blocking `next()` outside an event loop. Recovery opens a new source with the
-last committed cursor.
+live in `calc_flow.store`. Continuous checkpoint documents are internal to
+`ManagedCheckpointRuntime`; the package has no public checkpoint-document
+store.
 
 ## Streaming runner
 
-`StreamingRunner(plan, checkpoints)` processes a formed batch through
-`step_async(batch, sinks=...)` or blocking `step`. Sink mappings are
-`dict[str, Sequence[Callable[[Batch], object]]]`; callbacks may be sync or
-async. All routes are validated before delivery.
+`PipelineBuilder.compile_stream()` returns a distinct `StreamExecutionPlan`.
+The plan records immutable source/sink binding IDs and optional per-output
+`StreamRequirements`; it cannot execute as a batch plan. A
+`StreamingRunner` owns that plan, all connector bindings, one
+`ManagedCheckpointRuntime`, and optional `StreamRuntimeConfig`:
 
-Both runner modes checkpoint only after all sinks succeed and provide
-at-least-once delivery. `reset[_async]` clears recovery state and
-`plan_snapshot[_async]` returns a defensive state document.
+```python
+plan = PipelineBuilder("orders").expression("total", "total = a + b").compile_stream()
+runner = StreamingRunner(
+    plan,
+    {"input": SourceBinding(source, watermark_policy=DisabledWatermarks())},
+    {"output": [SinkBinding.ordinary("archive", sink)]},
+    ManagedCheckpointRuntime(".calc-flow-continuous"),
+)
+job = await runner.start_async()
+print(job.status())  # synchronous and safe inside the event loop
+outcome = await job.wait_async()
+```
+
+Source `open`, `next`, and `close` and every sink lifecycle method must be
+declared with `async def`; binding construction rejects invalid method shapes
+without invoking the connector. `start_async()` consumes its runner exactly
+once. Jobs expose async checkpoint, shutdown, cancel, and wait operations plus
+guarded blocking forms for callers outside an event loop. Cancelling a
+`wait_async()` observer leaves the job running; explicit cancellation uses
+`cancel_async()`.
+
+Blocking `start()` creates a dedicated event-loop thread and keeps it for the
+job's async connectors. Later blocking job operations run on that owning loop;
+terminal async operations called from another event loop are marshalled back
+to it. Blocking or async `shutdown`, `cancel`, and `wait` release connector
+roots and stop and join the thread after the native terminal outcome. Dropping
+the last job owner schedules cancellation and settlement on the owning loop,
+then reclaims the thread. Cancelling an async terminal observer before native
+termination leaves cleanup running to convergence, so observer cancellation
+does not strand the loop thread. If the native terminal outcome has already
+linearized and cancellation arrives during thread cleanup, that outcome wins
+and cleanup still completes.
+
+`Cursor` payloads, capability/config mappings, pre-commit values, recovery
+values, status, and outcomes cross the boundary as defensive copies. Managed
+checkpoint recovery reopens a replayable source with a cursor bound to the
+exact source-map key. See
+[`examples/04_continuous_runtime.py`](../examples/04_continuous_runtime.py).
+
+The A6 cutover has no compatibility aliases: `MicroBatchRunner`,
+`LegacyStreamingRunner`, the batch-plan `StreamingRunner` overload, and
+`FileCheckpointStore` are removed. Compile a `StreamExecutionPlan` and migrate
+connectors to the async `StreamSource`/`StreamSink` protocols.
 
 ## Exceptions
 
 Catch the narrowest exported class: `ConfigError`, `CompileError`,
 `ExecutionError`, `ProviderError`, `CheckpointError`, or `CancelledError`.
 All derive from `CalcFlowError`; provider/cancellation errors are execution
-errors. The crate-private source-driven runtime adds no Python exception type
-or runner surface. If its public non-exhaustive Rust `TaskPanicked` variant
-reaches the binding through a future public path, the existing wildcard
-mapping reports it as `ExecutionError`.
+errors. Continuous lifecycle failures use payload-safe
+`StreamingRuntimeError`; an indeterminate manifest publication uses its
+`CheckpointPublicationUnknownError` subclass. These exceptions expose only
+structured category, job/epoch/phase/component identifiers, diagnostic ID,
+and deterministic position fields—never connector values, cursor payloads,
+paths, callback representations, or raw source chains.
 
 ## More examples
 

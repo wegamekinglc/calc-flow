@@ -12,8 +12,8 @@ use calc_flow::{
     DataFusionConfig, DataSourceSpec, Edge, EdgeSpec, ExpressionOperator, ExternalOperatorSpec,
     JsonMap, NodeSpec, OperatorMetadata, OperatorSpec, PROJECT_FORMAT_VERSION, PipelineBuilder,
     PipelineSpec, Port, PortEndpoint, PortSpec, PositionSpec, ProjectSpec, ProviderRegistry,
-    Result, RunOptions, UdfKind, UdfReference, UdfRegistry, ValidationReport, compile_project,
-    project_json_schema, validate_project,
+    Result, RunOptions, StreamRequirements, UdfKind, UdfReference, UdfRegistry, ValidationReport,
+    compile_project, compile_stream_project, project_json_schema, validate_project,
 };
 use datafusion::arrow::datatypes::DataType;
 use parking_lot::Mutex;
@@ -345,6 +345,31 @@ fn validate_requires_exact_supported_data_source_coverage() {
         "unsupported_source_format",
     );
     assert!(report.fingerprint.is_none());
+}
+
+#[test]
+fn compile_stream_requires_exact_supported_data_source_coverage() {
+    let (providers, udfs) = empty_registries();
+    let mut value = project(expression_node("node"));
+    for data_sources in [
+        Vec::new(),
+        vec![DataSourceSpec {
+            id: "source".into(),
+            input: "wrong".into(),
+            format: "json".into(),
+            data: Value::Null,
+        }],
+    ] {
+        value.data_sources = data_sources;
+        let error =
+            compile_stream_project(&value, &providers, &udfs, &StreamRequirements::default())
+                .expect_err("stream compilation must reject incomplete source coverage");
+        assert!(
+            error
+                .to_string()
+                .contains("data_sources [source_input_mismatch]")
+        );
+    }
 }
 
 #[test]

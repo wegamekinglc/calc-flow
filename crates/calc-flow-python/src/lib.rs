@@ -2,6 +2,7 @@
 
 mod batch;
 mod config;
+mod continuous;
 mod error;
 mod execution_options;
 mod pipeline;
@@ -25,9 +26,9 @@ fn calc_flow_python(module: &Bound<'_, PyModule>) -> PyResult<()> {
     batch::register(module)?;
     execution_options::register(module)?;
     config::register(module)?;
+    continuous::register(module)?;
     pipeline::register(module)?;
     store::register(module)?;
-    runtime::register(module)?;
     Ok(())
 }
 
@@ -76,6 +77,31 @@ mod tests {
                         .unwrap(),
                     "calc_flow._native"
                 );
+            }
+        });
+    }
+
+    #[test]
+    fn registers_the_continuous_owning_job_bridge() {
+        Python::initialize();
+        Python::attach(|py| {
+            let module = PyModule::new(py, "_native").unwrap();
+            calc_flow_python(&module).unwrap();
+
+            for name in [
+                "_StreamingRunner",
+                "_StreamingJob",
+                "StreamingRuntimeError",
+                "CheckpointPublicationUnknownError",
+            ] {
+                assert!(module.getattr(name).is_ok(), "missing native {name}");
+            }
+            for name in [
+                "_ContinuousStreamingRunner",
+                "_FileCheckpointStore",
+                "_MicroBatchRunner",
+            ] {
+                assert!(module.getattr(name).is_err(), "unexpected native {name}");
             }
         });
     }

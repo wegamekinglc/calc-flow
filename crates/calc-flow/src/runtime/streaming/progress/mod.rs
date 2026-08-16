@@ -22,7 +22,7 @@ pub(crate) use trace::RawUpstreamPosition;
 
 #[allow(
     unused_imports,
-    reason = "M3 preparation exports are consumed incrementally by the private runtime"
+    reason = "preflight preparation exports are shared internally by the public continuous facade"
 )]
 pub(crate) use prepare::{
     DeclaredSchema, ExistingPrivateToggleRoute, NativeWatermarkCapability, PreparedSourceBinding,

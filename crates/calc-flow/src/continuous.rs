@@ -1,8 +1,6 @@
 //! Source-driven continuous streaming lifecycle.
 //!
-//! This module is the integration-only Rust façade for the A6 continuous
-//! runtime. It intentionally lives below `calc_flow::continuous` while the
-//! crate-root breaking cutover remains deferred.
+//! This module implements the crate-root A6 continuous runtime façade.
 //!
 //! The complete lifecycle owns connectors from binding through terminal
 //! cleanup:
@@ -12,13 +10,10 @@
 //! use async_trait::async_trait;
 //! use calc_flow::{
 //!     Batch, ExpressionOperator, JsonMap, PipelineBuilder, Result, StreamRequirements,
-//!     UdfRegistry,
-//!     continuous::{
-//!         Cursor, ManagedCheckpointRuntime, NativeWatermarkCapability, ReplayPositioning,
-//!         SinkBinding, SinkRecovery, SourceBinding, SourceCapabilities,
-//!         SourceDeliveryCapability, SourceEvent, SourceSchema, StreamSource, StreamingRunner,
-//!         TransactionalStreamSink,
-//!     },
+//!     Cursor, ManagedCheckpointRuntime, NativeWatermarkCapability, ReplayPositioning,
+//!     SinkBinding, SinkRecovery, SourceBinding, SourceCapabilities,
+//!     SourceDeliveryCapability, SourceEvent, SourceSchema, StreamSource, StreamingRunner,
+//!     TransactionalStreamSink, UdfRegistry,
 //! };
 //!
 //! struct Orders;
@@ -92,7 +87,7 @@
 //! it and returns the sole [`StreamingJob`] lifecycle owner.
 //!
 //! ```compile_fail
-//! # async fn reuse(runner: calc_flow::continuous::StreamingRunner) {
+//! # async fn reuse(runner: calc_flow::StreamingRunner) {
 //! let _first = runner.start().await;
 //! let _second = runner.start().await; // the runner was moved
 //! # }
@@ -101,7 +96,7 @@
 //! A job is likewise the sole lifecycle owner and cannot be cloned.
 //!
 //! ```compile_fail
-//! # fn clone_job(job: calc_flow::continuous::StreamingJob) {
+//! # fn clone_job(job: calc_flow::StreamingJob) {
 //! let _second_owner = job.clone();
 //! # }
 //! ```
@@ -112,7 +107,7 @@
 //! ```compile_fail
 //! use std::rc::Rc;
 //! use async_trait::async_trait;
-//! use calc_flow::continuous::{Cursor, SourceCapabilities, SourceEvent, StreamSource};
+//! use calc_flow::{Cursor, SourceCapabilities, SourceEvent, StreamSource};
 //!
 //! struct LocalOnly(Rc<()>);
 //!
@@ -731,7 +726,7 @@ impl ManagedCheckpointRuntime {
     }
 
     #[cfg(test)]
-    fn with_fault_for_test(
+    pub(crate) fn with_fault_for_test(
         mut self,
         point: crate::runtime::streaming::runner::CheckpointFaultPoint,
         mode: crate::runtime::streaming::runner::CheckpointFaultMode,
@@ -846,19 +841,25 @@ impl StreamingRunner {
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
         };
         #[cfg(test)]
-        let start = match checkpoints.fault {
-            Some((point, mode)) => OneShotContinuousRunner::new()
-                .start_checkpointed_with_config_and_fault(
+        let (start, fault_probe) = match checkpoints.fault {
+            Some((point, mode)) => {
+                let (start, probe) = OneShotContinuousRunner::new()
+                    .start_checkpointed_with_config_and_fault_probe(
+                        spec,
+                        checkpoints.inner,
+                        config,
+                        point,
+                        mode,
+                    );
+                (start, Some(probe))
+            }
+            None => (
+                OneShotContinuousRunner::new().start_checkpointed_with_config(
                     spec,
                     checkpoints.inner,
                     config,
-                    point,
-                    mode,
                 ),
-            None => OneShotContinuousRunner::new().start_checkpointed_with_config(
-                spec,
-                checkpoints.inner,
-                config,
+                None,
             ),
         };
         #[cfg(not(test))]
@@ -869,7 +870,11 @@ impl StreamingRunner {
         );
         start
             .await
-            .map(|inner| StreamingJob { inner })
+            .map(|inner| StreamingJob {
+                inner,
+                #[cfg(test)]
+                fault_probe,
+            })
             .map_err(|failure| start_error(job_id, &failure))
     }
 }
@@ -877,6 +882,17 @@ impl StreamingRunner {
 /// Sole owning handle for one running continuous job.
 pub struct StreamingJob {
     inner: OwningContinuousJob,
+    #[cfg(test)]
+    fault_probe: Option<crate::runtime::streaming::runner::CheckpointFaultInjector>,
+}
+
+#[cfg(test)]
+pub(crate) struct StreamingJobTestProbe {
+    pub(crate) checkpoint_fault_triggers: usize,
+    pub(crate) cancellation_triggers: usize,
+    pub(crate) parent_sync_os_failures: usize,
+    pub(crate) checkpoint_failures: u64,
+    pub(crate) runner_registries: (usize, usize),
 }
 
 impl fmt::Debug for StreamingJob {
@@ -924,6 +940,35 @@ impl StreamingJob {
     pub async fn wait(&self) -> JobOutcome {
         let outcome = self.inner.wait().await;
         self.inner.public_outcome(&outcome)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_probe(&self) -> StreamingJobTestProbe {
+        StreamingJobTestProbe {
+            checkpoint_fault_triggers: self
+                .fault_probe
+                .as_ref()
+                .map_or(0, crate::runtime::streaming::runner::CheckpointFaultInjector::trigger_count),
+            cancellation_triggers: self.fault_probe.as_ref().map_or(
+                0,
+                crate::runtime::streaming::runner::CheckpointFaultInjector::cancellation_trigger_count,
+            ),
+            parent_sync_os_failures: {
+                #[cfg(unix)]
+                {
+                    self.fault_probe.as_ref().map_or(
+                        0,
+                        crate::runtime::streaming::runner::CheckpointFaultInjector::parent_sync_os_failure_count,
+                    )
+                }
+                #[cfg(not(unix))]
+                {
+                    0
+                }
+            },
+            checkpoint_failures: self.inner.checkpoint_failure_count_for_test(),
+            runner_registries: self.inner.runner_probe_for_test().registry_counts(),
+        }
     }
 }
 

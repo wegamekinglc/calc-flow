@@ -64,8 +64,8 @@ is normalized to UTC. Settings may be nested mappings/lists; `settings=None`
 means empty settings.
 
 See [the Python API guide](docs/python-api.md) and the executable
-[examples](examples/README.md) for SQL, Python scalar UDFs, micro-batch
-recovery, asyncio, and NumPy.
+[examples](examples/README.md) for SQL, Python scalar UDFs, continuous
+execution, asyncio, and NumPy.
 
 ## Rust quickstart
 
@@ -134,7 +134,7 @@ Run the checked examples:
 ```bash
 cargo run -p calc-flow --example expression_pipeline
 cargo run -p calc-flow --example sql_join
-cargo run -p calc-flow --example micro_batch_recovery
+cargo run -p calc-flow --example continuous_runtime
 ```
 
 See [the Rust API guide](docs/rust-api.md) for paired source examples and links
@@ -184,18 +184,13 @@ Python package is not a second engine.
 - Python executions accept reusable frozen `ExecutionOptions` with
   deep-copied strict-JSON settings and a cooperative, timezone-aware deadline
   normalized to UTC.
-- Micro-batch and streaming runners deliver sinks before committing
-  checkpoints. Delivery is at least once, and failed delivery restores owned
-  in-memory state.
-- The crate-private source-driven runtime consumes `StreamExecutionPlan`
-  values with bounded source/operator/sink tasks, job-scoped event-time
-  progress, and tumbling/hopping window aggregation. It does not replace the
-  public v2 runners and does not yet wire `LocalStateBackend` or
-  `CheckpointManifest` into continuous execution.
-- `LocalStateBackend` and `CheckpointManifest` are public state primitives
-  available independently of that runtime. Barrier-to-manifest coordination,
-  durable continuous restart, and a public source-driven runner remain
-  separately reviewed work.
+- The source-driven `StreamingRunner` consumes a `StreamExecutionPlan`, owns
+  async source/sink bindings, and returns a one-owner `StreamingJob`.
+- Managed epoch checkpoints use `LocalStateBackend` segments and strict v3
+  `CheckpointManifest` documents. Exactly-once compatibility is proved per
+  requested output; ordinary sinks remain at least once.
+- The v2 micro-batch runner, formed-batch push runner, and public checkpoint
+  document store are removed without aliases.
 
 The canonical architecture is described in
 [docs/introduction.md](docs/introduction.md).

@@ -31,6 +31,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 allocation-counter = "=0.8.1"
+command-group.workspace = true
 criterion.workspace = true
 proptest.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

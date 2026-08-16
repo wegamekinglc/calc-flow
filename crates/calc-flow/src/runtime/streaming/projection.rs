@@ -690,6 +690,14 @@ fn invalid_argument_failure_fields(
                 ".watermark",
             ],
         );
+        if crate::json::validate_portable_identifier("source", source_id).is_err() {
+            return (
+                StreamingErrorCategory::Validation,
+                "source ID is not a portable identifier".into(),
+                Some(ComponentKind::Source),
+                None,
+            );
+        }
         return (
             StreamingErrorCategory::Validation,
             format!("source {source_id:?} capability validation failed"),
@@ -1664,6 +1672,36 @@ mod tests {
             assert_eq!(projected.component_kind(), Some(kind));
             assert_eq!(projected.component_id(), Some(id));
         }
+    }
+
+    #[test]
+    fn validation_projection_rejects_nonportable_source_id_without_leaking_it() {
+        let malicious_id = format!("customer\n{SECRET}\u{0}source");
+        let projected = super::project_public_error(
+            None,
+            &CalcFlowError::InvalidArgument {
+                field: format!("sources.{malicious_id}.capabilities.max_batch_rows"),
+                message: format!("invalid capability contains {SECRET}"),
+            },
+        );
+
+        assert_eq!(projected.category(), StreamingErrorCategory::Validation);
+        assert_eq!(projected.component_kind(), Some(ComponentKind::Source));
+        assert_eq!(projected.component_id(), None);
+        assert_eq!(
+            projected.to_string(),
+            "source ID is not a portable identifier"
+        );
+        let rendered = [
+            projected.to_string(),
+            format!("{projected:?}"),
+            format!("{projected:#?}"),
+            serde_json::to_string(&projected).unwrap(),
+        ]
+        .join("\n");
+        assert!(!rendered.contains(SECRET));
+        assert!(!rendered.contains(&malicious_id));
+        assert!(projected.source().is_none());
     }
 
     #[test]

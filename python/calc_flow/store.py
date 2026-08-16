@@ -81,15 +81,6 @@ def export_project_yaml(
     return _native.export_project_yaml(document.canonical_json())
 
 
-def _checkpoint_document(
-    checkpoint: Mapping[str, object],
-) -> tuple[dict[str, Any], str]:
-    if type(checkpoint) is not dict:
-        raise TypeError("checkpoint must be a strict JSON-compatible dict")
-    copied = _copy_json_value(checkpoint, root_mapping=True, label="checkpoint")
-    return copied, json.dumps(copied, separators=(",", ":"), sort_keys=True)
-
-
 class FileProjectStore:
     __slots__ = ("_inner",)
 
@@ -145,41 +136,3 @@ class FileProjectStore:
 
     def delete_blocking(self, project_id: str) -> None:
         return _run_blocking(lambda: self.delete(project_id), "delete")
-
-
-class FileCheckpointStore:
-    __slots__ = ("_inner",)
-
-    def __init__(self, directory: os.PathLike[str] | str) -> None:
-        self._inner = _native._FileCheckpointStore(os.fspath(directory))
-
-    def save(self, checkpoint: Mapping[str, object]) -> Awaitable[None]:
-        _, encoded = _checkpoint_document(checkpoint)
-
-        async def save() -> None:
-            await self._inner.save(encoded)
-
-        return save()
-
-    async def load(self, pipeline_name: str) -> dict[str, Any] | None:
-        if not isinstance(pipeline_name, str):
-            raise TypeError("pipeline_name must be a string")
-        encoded = await self._inner.load(pipeline_name)
-        if encoded is None:
-            return None
-        parsed = json.loads(encoded)
-        return _copy_json_value(parsed, root_mapping=True, label="checkpoint")
-
-    async def delete(self, pipeline_name: str) -> None:
-        if not isinstance(pipeline_name, str):
-            raise TypeError("pipeline_name must be a string")
-        await self._inner.delete(pipeline_name)
-
-    def save_blocking(self, checkpoint: Mapping[str, object]) -> None:
-        return _run_blocking(lambda: self.save(checkpoint), "save")
-
-    def load_blocking(self, pipeline_name: str) -> dict[str, Any] | None:
-        return _run_blocking(lambda: self.load(pipeline_name), "load")
-
-    def delete_blocking(self, pipeline_name: str) -> None:
-        return _run_blocking(lambda: self.delete(pipeline_name), "delete")

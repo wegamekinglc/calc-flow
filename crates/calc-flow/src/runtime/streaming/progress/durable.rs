@@ -1,6 +1,6 @@
 #![allow(
     dead_code,
-    reason = "M5 durable restore primitives are wired into checkpoint recovery incrementally"
+    reason = "durable restore primitives are owned internally by public continuous checkpoint recovery"
 )]
 
 use std::collections::{BTreeMap, BTreeSet};

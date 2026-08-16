@@ -155,14 +155,14 @@ dashes span the full column width, including cell spaces.
   edge under `crates/calc-flow/src/runtime/streaming/`, with typed `EventTime`
   and `Epoch` values under `crates/calc-flow/src/time/`. Only the data variant
   wrapping an immutable `Batch` is publicly constructable; control messages are
-  created through crate-private constructors, so the public boundaries do not
-  expand and there is no public runner control API. The crate-private
-  source-driven continuous runtime consumes `StreamExecutionPlan` with
-  whole-job preflight, bounded source/operator/sink tasks, job-scoped
-  event-time progress, aligned epoch checkpoints, manifest-last recovery,
-  per-output delivery proof, private runner/job/reaper ownership, and
-  deterministic metrics. Existing public v2 runners remain unchanged. See
-  `docs/runtime-envelope.md`.
+  created through crate-private constructors, so there is no public runner
+  control-injection API. The crate-root public `StreamingRunner` consumes a
+  `StreamExecutionPlan` and returns an owning `StreamingJob` with whole-job
+  preflight, bounded source/operator/sink tasks, job-scoped event-time progress,
+  aligned epoch checkpoints, managed v3 manifest recovery for durable restart,
+  per-output delivery proof, and deterministic metrics. Control construction,
+  task/coordinator/supervisor internals, and reaper ownership remain
+  crate-private. See `docs/runtime-envelope.md`.
 - `Port` declares name, `BatchKind`, required flag, and optional exact Arrow
   schema.
 - `OperatorMetadata` owns shared graph metadata. `BatchOperator` and
@@ -181,14 +181,13 @@ dashes span the full column width, including cell spaces.
 - `UdfRegistry` owns trusted native implementations.
   `UdfRegistrySnapshot` is captured at compile time; configurations contain
   only `UdfReference` values.
-- `Source`, `Sink`, `MicroBatchRunner`, and `StreamingRunner` provide
-  at-least-once delivery. Checkpoints commit only after all sinks succeed.
 - `StateBackend` opens lineage-exclusive state sessions.
   `LocalStateBackend` publishes immutable, checksum-verified segments, while
-  `CheckpointManifest` is the strict v3 state-manifest contract. The private
-  continuous runtime does not yet use that manifest for durable restart.
-- `FileProjectStore` and `FileCheckpointStore` write bounded documents
-  atomically under hashed names.
+  `CheckpointManifest` is the strict v3 state-manifest contract and the managed
+  continuous runtime's durable recovery truth.
+- The old v2 `Source`/`Sink`, `MicroBatchRunner`, formed-batch push runner, and
+  public `FileCheckpointStore` are removed. `FileProjectStore` remains the
+  bounded atomic project-document store.
 
 Apache DataFusion 54 is the sole table engine. Table operations accept one
 expression/projection/filter node or one read-only `SELECT`/CTE SQL node.

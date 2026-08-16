@@ -3,6 +3,41 @@
 Calc Flow v0.2 intentionally breaks the prototype API to establish explicit
 batch ownership and DataFusion-only table execution.
 
+## A6 continuous-runtime cutover
+
+The 2.0 A6 cutover replaces the later v2 continuous compatibility surface
+described historically below. There are no aliases or deprecation shims.
+
+Remove imports and uses of `MicroBatchRunner`, `LegacyStreamingRunner`, the
+formed-batch `StreamingRunner` constructor, `Source`, `SourceItem`, `Sink`,
+`BatchingSource`, `SinkRouter`, `CheckpointStore`, and `FileCheckpointStore`.
+Compile a stream plan and bind async lifecycle connectors instead:
+
+```python
+plan = PipelineBuilder("orders").expression("total", "total = a + b").compile_stream()
+runner = StreamingRunner(
+    plan,
+    {"input": SourceBinding(source, watermark_policy=DisabledWatermarks())},
+    {"output": [SinkBinding.ordinary("archive", sink)]},
+    ManagedCheckpointRuntime(".calc-flow-continuous"),
+)
+job = await runner.start_async()
+outcome = await job.wait_async()
+```
+
+In Rust, import `StreamSource`, `StreamSink` or
+`TransactionalStreamSink`, their binding types, `ManagedCheckpointRuntime`,
+`StreamingRunner`, and `StreamingJob` from the crate root. The old
+`calc_flow::continuous` integration path is private after cutover.
+
+Continuous recovery now uses managed v3 manifests and state segments. Do not
+read or write the old v2 checkpoint document from application code. Studio's
+existing checkpoint inspection routes retain their REST/OpenAPI contract via
+a Studio-private v2 document reader. Project documents remain format v2.
+
+The remainder of this guide records the earlier prototype-to-v0.2 migration;
+its legacy runner names are historical, not current APIs.
+
 ## Wrap all pipeline data in Batch
 
 Raw Arrow tables, record batches, and arrays are no longer accepted by engines,

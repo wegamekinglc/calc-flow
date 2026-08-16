@@ -10,7 +10,6 @@ from urllib.parse import quote
 
 from calc_flow import (
     CalcFlowError,
-    FileCheckpointStore,
     FileProjectStore,
     ProjectDocument,
     Runtime,
@@ -29,6 +28,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import TypeAdapter, ValidationError
 from starlette.concurrency import run_in_threadpool
 
+from calc_flow_studio.checkpoint_store import (
+    CheckpointDocumentError,
+    FileCheckpointDocumentStore,
+)
 from calc_flow_studio.models import (
     CapabilitiesResponse,
     CheckpointSummary,
@@ -171,7 +174,7 @@ def create_app(
 ) -> FastAPI:
     """Create the local-only v2 API without opening a network listener."""
     projects = project_store or FileProjectStore(project_directory)
-    checkpoints = checkpoint_store or FileCheckpointStore(checkpoint_directory)
+    checkpoints = checkpoint_store or FileCheckpointDocumentStore(checkpoint_directory)
     selected_runtime = runtime or Runtime()
     selected_run_manager = (
         run_manager
@@ -397,7 +400,7 @@ def create_app(
         fingerprint = str(plan.fingerprint)
         try:
             checkpoint = await checkpoints.load(pipeline_name)
-        except CalcFlowError as error:
+        except CheckpointDocumentError as error:
             raise _native_error(error, operation="checkpoint") from error
         if checkpoint is None:
             return CheckpointSummary(pipeline_name=pipeline_name, exists=False)
@@ -434,7 +437,7 @@ def create_app(
         pipeline_name = str(plan.name)
         try:
             await checkpoints.delete(pipeline_name)
-        except CalcFlowError as error:
+        except CheckpointDocumentError as error:
             raise _native_error(error, operation="checkpoint") from error
         return CheckpointSummary(pipeline_name=pipeline_name, exists=False)
 

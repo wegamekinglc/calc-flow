@@ -4,7 +4,9 @@ import asyncio
 import json
 from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 from threading import RLock
+from types import MappingProxyType
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -279,14 +281,35 @@ class Runtime:
             raise TypeError("project_json must be a string")
         return self._inner.validation_report(project_json)
 
-    def compile_project(self, project_json: str) -> ExecutionPlan:
+    def compile_project(self, project_json: str) -> BatchExecutionPlan:
         if not isinstance(project_json, str):
             raise TypeError("project_json must be a string")
-        return ExecutionPlan(self._inner.compile_project(project_json))
+        return BatchExecutionPlan(self._inner.compile_project(project_json))
+
+    def compile_stream_project(
+        self,
+        project_json: str,
+        *,
+        requirements: StreamRequirements | None = None,
+    ) -> StreamExecutionPlan:
+        """Compile project JSON into a continuous plan owned by this runtime."""
+        if not isinstance(project_json, str):
+            raise TypeError("project_json must be a string")
+        selected = StreamRequirements() if requirements is None else requirements
+        if not isinstance(selected, StreamRequirements):
+            raise TypeError(
+                "requirements must be a calc_flow.StreamRequirements or None"
+            )
+        delivery = {
+            output: guarantee.value for output, guarantee in selected.delivery.items()
+        }
+        return StreamExecutionPlan(
+            self._inner.compile_stream_project(project_json, delivery)
+        )
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutionPlan:
+class BatchExecutionPlan:
     _inner: _native.ExecutionPlan = field(repr=False)
 
     @property
@@ -379,6 +402,70 @@ class ExecutionPlan:
 
     def reset(self) -> None:
         return _run_blocking(self.reset_async, "reset_async")
+
+
+ExecutionPlan = BatchExecutionPlan
+
+
+class DeliveryGuarantee(StrEnum):
+    """Delivery guarantee requested for one external stream output."""
+
+    AT_LEAST_ONCE = "at_least_once"
+    EXACTLY_ONCE = "exactly_once"
+
+
+@dataclass(frozen=True, slots=True)
+class StreamRequirements:
+    """Immutable per-output delivery requirements for stream compilation."""
+
+    delivery: Mapping[str, DeliveryGuarantee] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.delivery, Mapping):
+            raise TypeError(
+                "delivery must be a mapping of output names to DeliveryGuarantee values"
+            )
+        copied = dict(self.delivery)
+        for output, guarantee in copied.items():
+            if not isinstance(output, str) or not output:
+                raise TypeError("delivery output names must be non-empty strings")
+            if not isinstance(guarantee, DeliveryGuarantee):
+                raise TypeError(
+                    "delivery guarantees must be calc_flow.DeliveryGuarantee values"
+                )
+        object.__setattr__(self, "delivery", MappingProxyType(copied))
+
+
+@dataclass(frozen=True, slots=True)
+class StreamExecutionPlan:
+    """Compiled immutable continuous plan consumed by ``StreamingRunner``."""
+
+    _inner: _native.StreamExecutionPlan = field(repr=False)
+
+    @property
+    def name(self) -> str:
+        return self._inner.name
+
+    @property
+    def fingerprint(self) -> str:
+        return self._inner.fingerprint
+
+    @property
+    def requirements(self) -> StreamRequirements:
+        return StreamRequirements(
+            {
+                output: DeliveryGuarantee(value)
+                for output, value in self._inner.requirements.items()
+            }
+        )
+
+    @property
+    def source_binding_ids(self) -> tuple[str, ...]:
+        return self._inner.source_binding_ids
+
+    @property
+    def sink_binding_ids(self) -> tuple[str, ...]:
+        return self._inner.sink_binding_ids
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -574,7 +661,7 @@ class PipelineBuilder:
 
         return self._from_json(_updated_project(self._project_json, add))
 
-    def compile(self, runtime: Runtime | None = None) -> ExecutionPlan:
+    def compile(self, runtime: Runtime | None = None) -> BatchExecutionPlan:
         from calc_flow.array import _validate_provider_options
 
         for node in self.project["pipeline"]["nodes"]:
@@ -590,6 +677,23 @@ class PipelineBuilder:
         if not isinstance(selected, Runtime):
             raise TypeError("runtime must be a calc_flow.Runtime")
         return selected.compile_project(self._project_json)
+
+    def compile_batch(self, runtime: Runtime | None = None) -> BatchExecutionPlan:
+        return self.compile(runtime)
+
+    def compile_stream(
+        self,
+        *,
+        requirements: StreamRequirements | None = None,
+        runtime: Runtime | None = None,
+    ) -> StreamExecutionPlan:
+        """Compile a continuous plan with explicit delivery requirements."""
+        selected = Runtime() if runtime is None else runtime
+        if not isinstance(selected, Runtime):
+            raise TypeError("runtime must be a calc_flow.Runtime")
+        return selected.compile_stream_project(
+            self._project_json, requirements=requirements
+        )
 
 
 def project_json_schema() -> str:

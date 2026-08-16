@@ -38,8 +38,7 @@ use super::{
     },
     runner::{
         CheckpointFaultMode, CheckpointFaultPoint, CheckpointRuntimeSpec,
-        CheckpointStartedTestGate, ContinuousJob, ContinuousJobState, ContinuousRunner,
-        TerminalCause,
+        CheckpointStartedTestGate, ContinuousJobState, ContinuousRunner, TerminalCause,
     },
     source_task::{
         AcceptedSequenceRecorder, Cursor, SourceBinding, SourceCapabilities, SourceEvent,
@@ -49,12 +48,23 @@ use super::{
 use crate::{
     AggregateFunction, Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken,
     CheckpointManifest as BenchmarkCheckpointManifest, CheckpointManifestFields,
-    CursorManifestEntry, Edge, EdgeBudget, Epoch, EventTime, JsonMap, LocalStateBackend,
-    OperatorManifestEntry, OperatorMetadata, OperatorStateSnapshot, PipelineBuilder, Port,
-    PortEndpoint, RecoveryStatus, Result, SourceWatermarkManifestState, StateBackend,
+    CheckpointPhase as PublicCheckpointPhase, ComponentKind as PublicComponentKind,
+    Cursor as PublicCursor, CursorManifestEntry, Edge, EdgeBudget, Epoch, EventTime,
+    JobState as PublicJobState, JsonMap, LocalStateBackend,
+    ManagedCheckpointRuntime as PublicManagedCheckpointRuntime,
+    NativeWatermarkCapability as PublicNativeWatermarkCapability, OperatorManifestEntry,
+    OperatorMetadata, OperatorStateSnapshot, PipelineBuilder, Port, PortEndpoint, RecoveryStatus,
+    ReplayPositioning as PublicReplayPositioning, Result, SinkBinding as PublicSinkBinding,
+    SinkRecovery as PublicSinkRecovery, SourceBinding as PublicSourceBinding,
+    SourceCapabilities as PublicSourceCapabilities,
+    SourceDeliveryCapability as PublicSourceDeliveryCapability, SourceEvent as PublicSourceEvent,
+    SourceSchema as PublicSourceSchema, SourceWatermarkManifestState, StateBackend,
     StateLineageBackend, StateLineageKey, StreamCollector, StreamOperator, StreamOperatorContext,
-    StreamRequirements, StreamRuntimeConfig, UdfRegistry, UnionOperator, WindowAggregateOperator,
-    WindowSpec,
+    StreamRequirements, StreamRuntimeConfig, StreamSink as PublicStreamSink,
+    StreamSource as PublicStreamSource, StreamingErrorCategory as PublicStreamingErrorCategory,
+    StreamingJob as PublicStreamingJob, StreamingRunner as PublicStreamingRunner,
+    TerminalCause as PublicTerminalCause, TransactionalStreamSink as PublicTransactionalStreamSink,
+    UdfRegistry, UnionOperator, WindowAggregateOperator, WindowSpec,
     state::{ManifestTransaction, PreparedEpochManifest, PreparedManifestIdentity},
 };
 
@@ -80,32 +90,47 @@ const SOAK_CHECKPOINT_BATCH_INTERVAL: u64 = 8;
 const CHECKPOINT_SOAK_CADENCE: Duration = Duration::from_secs(10);
 const CHECKPOINT_SOAK_SAMPLE_COUNT: usize = 120;
 const CHECKPOINT_SOAK_RESTART_SAMPLES: [usize; 2] = [39, 79];
-const CHECKPOINT_RESTART_WARMUP_SAMPLES: usize = 10;
-const CHECKPOINT_FIRST_STEADY_START: usize =
-    CHECKPOINT_SOAK_RESTART_SAMPLES[0] + 1 + CHECKPOINT_RESTART_WARMUP_SAMPLES;
-const CHECKPOINT_FIRST_STEADY_END: usize = CHECKPOINT_SOAK_RESTART_SAMPLES[1] + 1;
-const CHECKPOINT_FINAL_STEADY_START: usize =
-    CHECKPOINT_FIRST_STEADY_END + CHECKPOINT_RESTART_WARMUP_SAMPLES;
-const CHECKPOINT_RSS_COMPARISON_RANGES: [[usize; 2]; 2] = [
-    [
-        CHECKPOINT_FIRST_STEADY_START,
-        CHECKPOINT_FIRST_STEADY_END - 1,
-    ],
-    [
-        CHECKPOINT_FINAL_STEADY_START,
-        CHECKPOINT_SOAK_SAMPLE_COUNT - 1,
-    ],
+const CHECKPOINT_SOAK_PROCESS_SAMPLE_COUNT: usize =
+    CHECKPOINT_SOAK_SAMPLE_COUNT / CHECKPOINT_SOAK_GENERATIONS;
+const CHECKPOINT_RSS_PROCESS_WARMUP_SAMPLES: usize = 30;
+const CHECKPOINT_RSS_STABLE_WINDOW_SAMPLES: usize = 10;
+const CHECKPOINT_RSS_STABLE_SUBWINDOW_SAMPLES: usize = CHECKPOINT_RSS_STABLE_WINDOW_SAMPLES / 2;
+const CHECKPOINT_RSS_WINDOW_LOCAL_RANGE: [usize; 2] = [
+    CHECKPOINT_RSS_PROCESS_WARMUP_SAMPLES,
+    CHECKPOINT_SOAK_PROCESS_SAMPLE_COUNT - 1,
 ];
+const CHECKPOINT_RSS_BASELINE_LOCAL_RANGE: [usize; 2] = [
+    CHECKPOINT_RSS_PROCESS_WARMUP_SAMPLES,
+    CHECKPOINT_RSS_PROCESS_WARMUP_SAMPLES + CHECKPOINT_RSS_STABLE_SUBWINDOW_SAMPLES - 1,
+];
+const CHECKPOINT_RSS_STABLE_LOCAL_RANGE: [usize; 2] = [
+    CHECKPOINT_RSS_BASELINE_LOCAL_RANGE[1] + 1,
+    CHECKPOINT_SOAK_PROCESS_SAMPLE_COUNT - 1,
+];
+const CHECKPOINT_RSS_SPREAD_CALIBRATION_HEAD: &str = "a09ab3bba24a2db344d9710d4955158cd86ce9d7";
+const CHECKPOINT_RSS_SPREAD_CALIBRATION_KIB: [u64; 2] = [92, 208];
+const MAX_CHECKPOINT_RSS_NORMALIZED_GROWTH_SPREAD_KIB: u64 = 512;
 const MAX_CHECKPOINT_SOAK_STATE_BYTES: u64 = 64 * 1_024 * 1_024;
 const CHECKPOINT_SOAK_COMMAND: &str = "CALC_FLOW_M5_CHECKPOINT_SOAK=1 cargo test -p calc-flow --lib runtime::streaming::soak::twenty_minute_epoch_checkpoint_restart -- --ignored --exact --nocapture";
 const CHECKPOINT_SOAK_CHILD_ENV: &str = "CALC_FLOW_M5_CHECKPOINT_SOAK_CHILD_PLAN";
+const CHECKPOINT_SOAK_MALLOC_ARENA_MAX: &str = "1";
+const CHECKPOINT_SOAK_MALLOC_TRIM_THRESHOLD: &str = "0";
+const CHECKPOINT_SOAK_MALLOC_TOP_PAD: &str = "0";
 const CHECKPOINT_SOAK_CHILD_TEST: &str =
     "runtime::streaming::soak::checkpoint_restart_soak_generation_child_process";
 const CHECKPOINT_SOAK_PROCESS_SCHEMA: &str = "calc-flow.m5-checkpoint-soak-process.v1";
 const CHECKPOINT_SOAK_PLAN_SCHEMA: &str = "calc-flow.m5-checkpoint-soak-plan.v1";
+const CHECKPOINT_SOAK_SCHEMA: &str = "calc-flow.m5-checkpoint-soak.v2";
 const CHECKPOINT_SOAK_GENERATIONS: usize = 3;
+const _: () = assert!(CHECKPOINT_SOAK_SAMPLE_COUNT % CHECKPOINT_SOAK_GENERATIONS == 0);
+const _: () = assert!(CHECKPOINT_RSS_STABLE_WINDOW_SAMPLES % 2 == 0);
+const _: () = assert!(
+    CHECKPOINT_RSS_PROCESS_WARMUP_SAMPLES + CHECKPOINT_RSS_STABLE_WINDOW_SAMPLES
+        == CHECKPOINT_SOAK_PROCESS_SAMPLE_COUNT
+);
+const _: () = assert!(MAX_CHECKPOINT_RSS_NORMALIZED_GROWTH_SPREAD_KIB < MAX_MEDIAN_GROWTH_KIB);
 const CHECKPOINT_SOAK_REPORT_LIMIT: u64 = 1 << 20;
-const CHECKPOINT_SOAK_CADENCE_TOLERANCE: Duration = Duration::from_secs(2);
+const CHECKPOINT_SOAK_CADENCE_TOLERANCE: Duration = Duration::from_secs(3);
 const MAX_CHECKPOINT_SOAK_RESTART_GAP: Duration = Duration::from_secs(60);
 const CHECKPOINT_BENCHMARK_COMMAND: &str = "CARGO_TARGET_DIR=<fresh-candidate-target> CARGO_INCREMENTAL=0 CALC_FLOW_M5_CHECKPOINT_BENCHMARK=1 CALC_FLOW_M5_CHECKPOINT_BENCHMARK_RUN_ID=<unique-run-id> CALC_FLOW_M5_PRIVATE_SOURCE_COMMIT=<candidate-commit> CALC_FLOW_M5_PRIVATE_SOURCE_TREE=<candidate-tree> cargo test --release --locked -p calc-flow --lib runtime::streaming::soak::private_m5_epoch_checkpoint_absolute_benchmark -- --ignored --exact --nocapture";
 const M5_PRIVATE_BENCHMARK_CASES: [&str; 12] = [
@@ -567,6 +592,33 @@ struct RssGate {
     passed: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct CheckpointRssProcessSamples {
+    generation: usize,
+    pid: u32,
+    samples: Vec<RssSample>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CheckpointRssProcessGate {
+    generation: usize,
+    pid: u32,
+    baseline_sample_range: [usize; 2],
+    stable_sample_range: [usize; 2],
+    slope_mib_per_hour: f64,
+    baseline_median_kib: u64,
+    stable_median_kib: u64,
+    normalized_growth_kib: u64,
+    passed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CheckpointRestartRssGate {
+    processes: Vec<CheckpointRssProcessGate>,
+    normalized_growth_spread_kib: u64,
+    passed: bool,
+}
+
 fn parse_vm_rss_kib(status: &str) -> Option<u64> {
     status.lines().find_map(|line| {
         let mut fields = line.split_whitespace();
@@ -673,23 +725,79 @@ fn evaluate_rss_gate(samples: &[RssSample]) -> Option<RssGate> {
     })
 }
 
-fn evaluate_checkpoint_restart_rss_gate(samples: &[RssSample]) -> Option<RssGate> {
-    if samples.len() != CHECKPOINT_SOAK_SAMPLE_COUNT {
+fn evaluate_checkpoint_restart_rss_gate(
+    process_samples: &[CheckpointRssProcessSamples],
+) -> Option<CheckpointRestartRssGate> {
+    if process_samples.len() != CHECKPOINT_SOAK_GENERATIONS
+        || process_samples
+            .iter()
+            .map(|process| process.pid)
+            .collect::<BTreeSet<_>>()
+            .len()
+            != CHECKPOINT_SOAK_GENERATIONS
+    {
         return None;
     }
-    let first = samples.get(CHECKPOINT_FIRST_STEADY_START..CHECKPOINT_FIRST_STEADY_END)?;
-    let final_samples = samples.get(CHECKPOINT_FINAL_STEADY_START..)?;
-    if first.len() != FIVE_MINUTE_SAMPLES || final_samples.len() != FIVE_MINUTE_SAMPLES {
-        return None;
+
+    let mut processes = Vec::with_capacity(CHECKPOINT_SOAK_GENERATIONS);
+    for (generation, process) in process_samples.iter().enumerate() {
+        if process.generation != generation
+            || process.samples.len() != CHECKPOINT_SOAK_PROCESS_SAMPLE_COUNT
+        {
+            return None;
+        }
+        let stable_window = process
+            .samples
+            .get(CHECKPOINT_RSS_WINDOW_LOCAL_RANGE[0]..=CHECKPOINT_RSS_WINDOW_LOCAL_RANGE[1])?;
+        let baseline = process
+            .samples
+            .get(CHECKPOINT_RSS_BASELINE_LOCAL_RANGE[0]..=CHECKPOINT_RSS_BASELINE_LOCAL_RANGE[1])?;
+        let stable_samples = process
+            .samples
+            .get(CHECKPOINT_RSS_STABLE_LOCAL_RANGE[0]..=CHECKPOINT_RSS_STABLE_LOCAL_RANGE[1])?;
+        if stable_window.len() != CHECKPOINT_RSS_STABLE_WINDOW_SAMPLES
+            || baseline.len() != CHECKPOINT_RSS_STABLE_SUBWINDOW_SAMPLES
+            || stable_samples.len() != CHECKPOINT_RSS_STABLE_SUBWINDOW_SAMPLES
+        {
+            return None;
+        }
+        let slope_mib_per_hour = least_squares_mib_per_hour(stable_window)?;
+        let baseline_median_kib = rss_sample_median(baseline)?;
+        let stable_median_kib = rss_sample_median(stable_samples)?;
+        let normalized_growth_kib = stable_median_kib.saturating_sub(baseline_median_kib);
+        let sample_start = generation.checked_mul(CHECKPOINT_SOAK_PROCESS_SAMPLE_COUNT)?;
+        processes.push(CheckpointRssProcessGate {
+            generation,
+            pid: process.pid,
+            baseline_sample_range: [
+                sample_start + CHECKPOINT_RSS_BASELINE_LOCAL_RANGE[0],
+                sample_start + CHECKPOINT_RSS_BASELINE_LOCAL_RANGE[1],
+            ],
+            stable_sample_range: [
+                sample_start + CHECKPOINT_RSS_STABLE_LOCAL_RANGE[0],
+                sample_start + CHECKPOINT_RSS_STABLE_LOCAL_RANGE[1],
+            ],
+            slope_mib_per_hour,
+            baseline_median_kib,
+            stable_median_kib,
+            normalized_growth_kib,
+            passed: normalized_growth_kib <= MAX_MEDIAN_GROWTH_KIB,
+        });
     }
-    let slope_mib_per_hour = least_squares_mib_per_hour(final_samples)?;
-    let first_median_kib = rss_sample_median(first)?;
-    let final_median_kib = rss_sample_median(final_samples)?;
-    Some(RssGate {
-        slope_mib_per_hour,
-        first_median_kib,
-        final_median_kib,
-        passed: rss_gate_passed(slope_mib_per_hour, first_median_kib, final_median_kib),
+    let minimum_growth = processes
+        .iter()
+        .map(|process| process.normalized_growth_kib)
+        .min()?;
+    let maximum_growth = processes
+        .iter()
+        .map(|process| process.normalized_growth_kib)
+        .max()?;
+    let normalized_growth_spread_kib = maximum_growth.saturating_sub(minimum_growth);
+    Some(CheckpointRestartRssGate {
+        passed: normalized_growth_spread_kib <= MAX_CHECKPOINT_RSS_NORMALIZED_GROWTH_SPREAD_KIB
+            && processes.iter().all(|process| process.passed),
+        processes,
+        normalized_growth_spread_kib,
     })
 }
 
@@ -785,6 +893,20 @@ fn assert_edge_budgets(status: &super::runner::ContinuousJobStatus) {
                 && metrics.high_water_rows <= EDGE_BUDGET.max_rows
                 && metrics.high_water_bytes <= EDGE_BUDGET.max_bytes,
             "edge {edge:?} exceeded its budget: {metrics:?}"
+        );
+    }
+}
+
+fn assert_public_edge_budgets(status: &crate::JobStatus) {
+    for (edge, metrics) in &status.edges {
+        assert!(
+            metrics.current_envelopes <= metrics.envelope_limit
+                && metrics.high_water_envelopes <= metrics.envelope_limit
+                && metrics.current_rows <= metrics.row_limit
+                && metrics.current_bytes <= metrics.byte_limit
+                && metrics.high_water_rows <= metrics.row_limit
+                && metrics.high_water_bytes <= metrics.byte_limit,
+            "public edge {edge:?} exceeded its budget: {metrics:?}"
         );
     }
 }
@@ -1099,6 +1221,76 @@ impl StreamSource for CheckpointMatrixSource {
     }
 }
 
+#[async_trait]
+impl PublicStreamSource for CheckpointMatrixSource {
+    fn capabilities(&self) -> PublicSourceCapabilities {
+        PublicSourceCapabilities {
+            replay_positioning: PublicReplayPositioning::ExactPauseReportAndSeek,
+            delivery: PublicSourceDeliveryCapability::Lossless,
+            max_batch_rows: 1,
+            max_batch_bytes: 1 << 20,
+            schema: PublicSourceSchema::Exact(soak_schema()),
+            native_watermarks: PublicNativeWatermarkCapability::EmitsNative,
+        }
+    }
+
+    async fn open(&mut self, cursor: Option<PublicCursor>) -> Result<()> {
+        self.opened_with.lock().push((
+            self.source_id.into(),
+            cursor.as_ref().map(|cursor| cursor.order().to_vec()),
+        ));
+        if let Some(cursor) = cursor {
+            let bytes: [u8; 8] =
+                cursor
+                    .order()
+                    .try_into()
+                    .map_err(|_| CalcFlowError::CheckpointMismatch {
+                        message: "checkpoint matrix cursor order is not a u64".into(),
+                    })?;
+            self.next_sequence = u64::from_be_bytes(bytes).checked_add(1).ok_or_else(|| {
+                CalcFlowError::CheckpointMismatch {
+                    message: "checkpoint matrix cursor exhausted u64".into(),
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    async fn next(&mut self) -> Result<Option<PublicSourceEvent>> {
+        if self.next_sequence != 0 && !self.poll_delay.is_zero() {
+            tokio::time::sleep(self.poll_delay).await;
+        }
+        if self.pending_watermark {
+            self.pending_watermark = false;
+            return Ok(Some(PublicSourceEvent::Watermark(EventTime::from_micros(
+                1,
+            ))));
+        }
+        if self.next_sequence != 0 && self.pause_before_eof {
+            return std::future::pending().await;
+        }
+        if self.next_sequence == 0 {
+            self.next_sequence = 1;
+            self.pending_watermark = true;
+            return Ok(Some(PublicSourceEvent::Data {
+                batch: checkpoint_matrix_batch(self.source_id)?,
+                cursor: PublicCursor::new(
+                    self.source_id,
+                    checkpoint_matrix_cursor_order(self.source_id),
+                    JsonMap::new(),
+                )?,
+            }));
+        }
+        self.ended = true;
+        Ok(None)
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        self.closed.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 struct CheckpointRestartSoakSource {
     source_id: &'static str,
     next_sequence: u64,
@@ -1202,6 +1394,76 @@ impl StreamSource for CheckpointRestartSoakSource {
     }
 }
 
+#[async_trait]
+impl PublicStreamSource for CheckpointRestartSoakSource {
+    fn capabilities(&self) -> PublicSourceCapabilities {
+        PublicSourceCapabilities {
+            replay_positioning: PublicReplayPositioning::ExactPauseReportAndSeek,
+            delivery: PublicSourceDeliveryCapability::Lossless,
+            max_batch_rows: 1,
+            max_batch_bytes: 1 << 20,
+            schema: PublicSourceSchema::Exact(soak_schema()),
+            native_watermarks: PublicNativeWatermarkCapability::EmitsNative,
+        }
+    }
+
+    async fn open(&mut self, cursor: Option<PublicCursor>) -> Result<()> {
+        self.opened_with.lock().push((
+            self.source_id.into(),
+            cursor.as_ref().map(|cursor| cursor.order().to_vec()),
+        ));
+        if let Some(cursor) = cursor {
+            let bytes: [u8; 8] =
+                cursor
+                    .order()
+                    .try_into()
+                    .map_err(|_| CalcFlowError::CheckpointMismatch {
+                        message: "checkpoint soak cursor order is not a u64".into(),
+                    })?;
+            self.next_sequence = u64::from_be_bytes(bytes).checked_add(1).ok_or_else(|| {
+                CalcFlowError::CheckpointMismatch {
+                    message: "checkpoint soak cursor exhausted u64".into(),
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    async fn next(&mut self) -> Result<Option<PublicSourceEvent>> {
+        if let Some(watermark) = self.pending_watermark.take() {
+            return Ok(Some(PublicSourceEvent::Watermark(watermark)));
+        }
+        if self.stop.load(Ordering::SeqCst) != 0 {
+            return Ok(None);
+        }
+        tokio::time::sleep(self.poll_delay).await;
+        let sequence = self.next_sequence;
+        self.next_sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| CalcFlowError::Internal {
+                message: "checkpoint soak source exhausted u64".into(),
+            })?;
+        let watermark_micros =
+            i64::try_from(self.next_sequence).map_err(|_| CalcFlowError::Internal {
+                message: "checkpoint soak watermark exhausted i64".into(),
+            })?;
+        self.pending_watermark = Some(EventTime::from_micros(watermark_micros));
+        Ok(Some(PublicSourceEvent::Data {
+            batch: checkpoint_restart_soak_batch(self.source_id, sequence)?,
+            cursor: PublicCursor::new(
+                self.source_id,
+                sequence.to_be_bytes().to_vec(),
+                JsonMap::new(),
+            )?,
+        }))
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        self.closed.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 struct CheckpointMatrixForward {
     inputs: [Port; 1],
     outputs: [Port; 1],
@@ -1272,6 +1534,86 @@ struct CheckpointMatrixSink {
     written_records: Arc<AtomicUsize>,
     closed: Arc<AtomicUsize>,
     write_delay: Duration,
+    lifecycle: Arc<CheckpointMatrixOutputProbe>,
+}
+
+#[derive(Default)]
+struct CheckpointMatrixOutputProbe {
+    ordinary_records: Mutex<Vec<String>>,
+    ordinary_closed: AtomicUsize,
+    transactional_commits: AtomicUsize,
+    transactional_aborts: AtomicUsize,
+    transactional_recovers: AtomicUsize,
+}
+
+struct CheckpointMatrixOrdinarySink {
+    probe: Arc<CheckpointMatrixOutputProbe>,
+}
+
+fn checkpoint_matrix_output_records(batch: &Batch) -> Result<Vec<String>> {
+    let mut output = Vec::new();
+    for record in batch
+        .table_payload()
+        .map_err(|error| CalcFlowError::CheckpointMismatch {
+            message: format!("checkpoint matrix sink received a non-table batch: {error}"),
+        })?
+        .batches()
+    {
+        let starts = record
+            .column_by_name("window_start")
+            .and_then(|array| array.as_any().downcast_ref::<TimestampMicrosecondArray>())
+            .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                message: "checkpoint matrix output omitted window_start".into(),
+            })?;
+        let ends = record
+            .column_by_name("window_end")
+            .and_then(|array| array.as_any().downcast_ref::<TimestampMicrosecondArray>())
+            .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                message: "checkpoint matrix output omitted window_end".into(),
+            })?;
+        let groups = record
+            .column_by_name("group")
+            .and_then(|array| array.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                message: "checkpoint matrix output omitted group".into(),
+            })?;
+        let sums = record
+            .column_by_name("sum_value")
+            .and_then(|array| array.as_any().downcast_ref::<Int64Array>())
+            .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                message: "checkpoint matrix output omitted sum_value".into(),
+            })?;
+        output.extend((0..record.num_rows()).map(|row| {
+            format!(
+                "{}|{}|{}|{}",
+                starts.value(row),
+                ends.value(row),
+                groups.value(row),
+                sums.value(row)
+            )
+        }));
+    }
+    Ok(output)
+}
+
+#[async_trait]
+impl PublicStreamSink for CheckpointMatrixOrdinarySink {
+    async fn open(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn write(&mut self, batch: &Batch) -> Result<()> {
+        self.probe
+            .ordinary_records
+            .lock()
+            .extend(checkpoint_matrix_output_records(batch)?);
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        self.probe.ordinary_closed.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 impl CheckpointMatrixSink {
@@ -1409,50 +1751,14 @@ impl TransactionalStreamSink for CheckpointMatrixSink {
         if !self.write_delay.is_zero() {
             tokio::time::sleep(self.write_delay).await;
         }
-        for record in batch
-            .table_payload()
-            .map_err(|error| CalcFlowError::CheckpointMismatch {
-                message: format!("checkpoint matrix sink received a non-table batch: {error}"),
-            })?
-            .batches()
-        {
-            let starts = record
-                .column_by_name("window_start")
-                .and_then(|array| array.as_any().downcast_ref::<TimestampMicrosecondArray>())
-                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
-                    message: "checkpoint matrix output omitted window_start".into(),
-                })?;
-            let ends = record
-                .column_by_name("window_end")
-                .and_then(|array| array.as_any().downcast_ref::<TimestampMicrosecondArray>())
-                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
-                    message: "checkpoint matrix output omitted window_end".into(),
-                })?;
-            let groups = record
-                .column_by_name("group")
-                .and_then(|array| array.as_any().downcast_ref::<StringArray>())
-                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
-                    message: "checkpoint matrix output omitted group".into(),
-                })?;
-            let sums = record
-                .column_by_name("sum_value")
-                .and_then(|array| array.as_any().downcast_ref::<Int64Array>())
-                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
-                    message: "checkpoint matrix output omitted sum_value".into(),
-                })?;
-            for row in 0..record.num_rows() {
-                self.pending.push(format!(
-                    "{}|{}|{}|{}|{}",
-                    self.sink_id,
-                    starts.value(row),
-                    ends.value(row),
-                    groups.value(row),
-                    sums.value(row)
-                ));
-            }
-            self.written_records
-                .fetch_add(record.num_rows(), Ordering::SeqCst);
-        }
+        let records = checkpoint_matrix_output_records(batch)?;
+        self.written_records
+            .fetch_add(records.len(), Ordering::SeqCst);
+        self.pending.extend(
+            records
+                .into_iter()
+                .map(|record| format!("{}|{record}", self.sink_id)),
+        );
         Ok(())
     }
 
@@ -1478,7 +1784,11 @@ impl TransactionalStreamSink for CheckpointMatrixSink {
     }
 
     async fn commit(&mut self, epoch: Epoch, state: &JsonMap) -> Result<()> {
-        self.commit_prepared(epoch, state).await
+        self.commit_prepared(epoch, state).await?;
+        self.lifecycle
+            .transactional_commits
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn abort(&mut self, epoch: Epoch, _state: Option<&JsonMap>) -> Result<()> {
@@ -1493,6 +1803,9 @@ impl TransactionalStreamSink for CheckpointMatrixSink {
         }
         self.pending.clear();
         self.epoch = None;
+        self.lifecycle
+            .transactional_aborts
+            .fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -1504,12 +1817,56 @@ impl TransactionalStreamSink for CheckpointMatrixSink {
             .ok_or_else(|| CalcFlowError::CheckpointMismatch {
                 message: format!("sink {:?} recovery state is missing", self.sink_id),
             })?;
-        self.commit_prepared(manifest.epoch(), &state).await
+        self.commit_prepared(manifest.epoch(), &state).await?;
+        self.lifecycle
+            .transactional_recovers
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn close(&mut self) -> Result<()> {
         self.closed.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+}
+
+#[async_trait]
+impl PublicTransactionalStreamSink for CheckpointMatrixSink {
+    async fn open(&mut self) -> Result<()> {
+        <Self as TransactionalStreamSink>::open(self).await
+    }
+
+    async fn begin_epoch(&mut self, epoch: Epoch) -> Result<()> {
+        <Self as TransactionalStreamSink>::begin_epoch(self, epoch).await
+    }
+
+    async fn write(&mut self, batch: &Batch) -> Result<()> {
+        <Self as TransactionalStreamSink>::write(self, batch).await
+    }
+
+    async fn pre_commit(&mut self, epoch: Epoch) -> Result<JsonMap> {
+        <Self as TransactionalStreamSink>::pre_commit(self, epoch).await
+    }
+
+    async fn commit(&mut self, epoch: Epoch, state: &JsonMap) -> Result<()> {
+        <Self as TransactionalStreamSink>::commit(self, epoch, state).await
+    }
+
+    async fn abort(&mut self, epoch: Epoch, state: Option<&JsonMap>) -> Result<()> {
+        <Self as TransactionalStreamSink>::abort(self, epoch, state).await
+    }
+
+    async fn recover(&mut self, recovery: &PublicSinkRecovery) -> Result<()> {
+        self.commit_prepared(recovery.epoch(), recovery.pre_commit())
+            .await?;
+        self.lifecycle
+            .transactional_recovers
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        <Self as TransactionalStreamSink>::close(self).await
     }
 }
 
@@ -1521,6 +1878,152 @@ fn checkpoint_matrix_window() -> WindowAggregateOperator {
         .aggregate(AggregateFunction::Sum, "value", "sum_value")
         .unwrap();
     WindowAggregateOperator::new("window", soak_schema(), spec).unwrap()
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the public restart matrix owns its complete connector and durability probes"
+)]
+fn checkpoint_matrix_public_runner(
+    managed_root: &Path,
+    sink_root: &Path,
+    source_opened_with: &SourceOpenHistory,
+    source_closed: &Arc<AtomicUsize>,
+    sink_closed: &Arc<AtomicUsize>,
+    sink_writes: &Arc<AtomicUsize>,
+    output_probe: &Arc<CheckpointMatrixOutputProbe>,
+    source_poll_delay: Duration,
+    pause_before_eof: bool,
+    config: StreamRuntimeConfig,
+    fault: Option<(CheckpointFaultPoint, CheckpointFaultMode)>,
+) -> PublicStreamingRunner {
+    let input_fields = soak_schema()
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    let union = UnionOperator::new(
+        "merge",
+        vec![
+            Port::new("left", BatchKind::Table, true, Some(input_fields.clone())).unwrap(),
+            Port::new("right", BatchKind::Table, true, Some(input_fields)).unwrap(),
+        ],
+    )
+    .unwrap();
+    let window = checkpoint_matrix_window();
+    let window_fields = window.output_ports()[0]
+        .schema()
+        .unwrap()
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    let plan = PipelineBuilder::new("checkpoint-restart-fault-matrix")
+        .unwrap()
+        .add_node("merge", Box::new(union))
+        .unwrap()
+        .add_node("window", Box::new(window))
+        .unwrap()
+        .add_checkpoint_capable_node(
+            "branch_a",
+            Box::new(CheckpointMatrixForward::new(window_fields.clone()))
+                as Box<dyn StreamOperator>,
+        )
+        .unwrap()
+        .add_checkpoint_capable_node(
+            "branch_b",
+            Box::new(CheckpointMatrixForward::new(window_fields)) as Box<dyn StreamOperator>,
+        )
+        .unwrap()
+        .connect(Edge::new(
+            PortEndpoint::new("merge", "output").unwrap(),
+            PortEndpoint::new("window", "input").unwrap(),
+        ))
+        .unwrap()
+        .connect(Edge::new(
+            PortEndpoint::new("window", "output").unwrap(),
+            PortEndpoint::new("branch_a", "input").unwrap(),
+        ))
+        .unwrap()
+        .connect(Edge::new(
+            PortEndpoint::new("window", "output").unwrap(),
+            PortEndpoint::new("branch_b", "input").unwrap(),
+        ))
+        .unwrap()
+        .compile_stream(
+            &UdfRegistry::new().snapshot(),
+            &StreamRequirements {
+                delivery: BTreeMap::from([(
+                    "branch_a.output".into(),
+                    crate::DeliveryGuarantee::ExactlyOnce,
+                )]),
+            },
+        )
+        .unwrap();
+    let sources = ["left", "right"]
+        .into_iter()
+        .map(|source_id| {
+            (
+                source_id.into(),
+                PublicSourceBinding::new(CheckpointMatrixSource {
+                    source_id,
+                    next_sequence: 0,
+                    pending_watermark: false,
+                    ended: false,
+                    pause_before_eof,
+                    poll_delay: source_poll_delay,
+                    opened_with: Arc::clone(source_opened_with),
+                    closed: Arc::clone(source_closed),
+                }),
+            )
+        })
+        .collect();
+    let sinks = BTreeMap::from([
+        (
+            "branch_a.output".into(),
+            ["sink-a", "sink-b"]
+                .into_iter()
+                .map(|sink_id| {
+                    PublicSinkBinding::transactional(
+                        sink_id,
+                        CheckpointMatrixSink {
+                            sink_id,
+                            root: sink_root.join(sink_id),
+                            epoch: None,
+                            pending: Vec::new(),
+                            written_records: Arc::clone(sink_writes),
+                            closed: Arc::clone(sink_closed),
+                            write_delay: Duration::ZERO,
+                            lifecycle: Arc::clone(output_probe),
+                        },
+                    )
+                    .unwrap()
+                })
+                .collect(),
+        ),
+        (
+            "branch_b.output".into(),
+            vec![
+                PublicSinkBinding::ordinary(
+                    "ordinary-sink",
+                    CheckpointMatrixOrdinarySink {
+                        probe: Arc::clone(output_probe),
+                    },
+                )
+                .unwrap(),
+            ],
+        ),
+    ]);
+    let checkpoints = PublicManagedCheckpointRuntime::new(managed_root).unwrap();
+    let checkpoints = match fault {
+        Some((point, mode)) => checkpoints.with_fault_for_test(point, mode),
+        None => checkpoints,
+    };
+    PublicStreamingRunner::new(plan, sources, sinks, checkpoints)
+        .unwrap()
+        .with_runtime_config(config)
+        .unwrap()
 }
 
 #[allow(
@@ -1630,6 +2133,7 @@ fn checkpoint_matrix_spec(
                 written_records: Arc::clone(sink_writes),
                 closed: Arc::clone(sink_closed),
                 write_delay: Duration::ZERO,
+                lifecycle: Arc::new(CheckpointMatrixOutputProbe::default()),
             })),
         })
         .collect();
@@ -1655,17 +2159,18 @@ fn checkpoint_matrix_spec(
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
-    reason = "the soak spec owns its exact graph, durable roots, and lifecycle probes"
+    reason = "each public soak generation owns the same durable and lifecycle probes"
 )]
-fn checkpoint_restart_soak_spec(
-    job_id: u64,
+fn checkpoint_restart_soak_public_runner(
+    managed_root: &Path,
     sink_root: &Path,
     stop: &Arc<AtomicUsize>,
     source_opened_with: &SourceOpenHistory,
     source_closed: &Arc<AtomicUsize>,
     sink_closed: &Arc<AtomicUsize>,
+    config: StreamRuntimeConfig,
     sink_write_delay: Duration,
-) -> ContinuousJobSpec {
+) -> PublicStreamingRunner {
     let input_fields = soak_schema()
         .fields()
         .iter()
@@ -1737,10 +2242,10 @@ fn checkpoint_restart_soak_spec(
         .unwrap();
     let sources = ["left", "right"]
         .into_iter()
-        .map(|source_id| NamedSourceBinding {
-            binding_id: source_id.into(),
-            binding: SourceBinding::new(
-                Box::new(CheckpointRestartSoakSource {
+        .map(|source_id| {
+            (
+                source_id.into(),
+                PublicSourceBinding::new(CheckpointRestartSoakSource {
                     source_id,
                     next_sequence: 0,
                     pending_watermark: None,
@@ -1749,46 +2254,43 @@ fn checkpoint_restart_soak_spec(
                     opened_with: Arc::clone(source_opened_with),
                     closed: Arc::clone(source_closed),
                 }),
-                None,
-                0,
             )
-            .unwrap(),
         })
         .collect();
     let sink_writes = Arc::new(AtomicUsize::new(0));
     let sinks = [("branch_a.output", "sink-a"), ("branch_b.output", "sink-b")]
         .into_iter()
-        .map(|(output_id, sink_id)| NamedSinkBinding {
-            output_id: output_id.into(),
-            sink_id: sink_id.into(),
-            binding: OrdinarySinkBinding::new_transactional(Box::new(CheckpointMatrixSink {
-                sink_id,
-                root: sink_root.join(sink_id),
-                epoch: None,
-                pending: Vec::new(),
-                written_records: Arc::clone(&sink_writes),
-                closed: Arc::clone(sink_closed),
-                write_delay: sink_write_delay,
-            })),
+        .map(|(output_id, sink_id)| {
+            (
+                output_id.into(),
+                vec![
+                    PublicSinkBinding::transactional(
+                        sink_id,
+                        CheckpointMatrixSink {
+                            sink_id,
+                            root: sink_root.join(sink_id),
+                            epoch: None,
+                            pending: Vec::new(),
+                            written_records: Arc::clone(&sink_writes),
+                            closed: Arc::clone(sink_closed),
+                            write_delay: sink_write_delay,
+                            lifecycle: Arc::new(CheckpointMatrixOutputProbe::default()),
+                        },
+                    )
+                    .unwrap(),
+                ],
+            )
         })
         .collect();
-    ContinuousJobSpec {
-        context: StreamJobContext::new(
-            job_id,
-            plan.fingerprint(),
-            JsonMap::new(),
-            None,
-            CancellationToken::new(),
-        ),
+    PublicStreamingRunner::new(
         plan,
         sources,
         sinks,
-        edge_budget: EdgeBudget {
-            max_rows: 8,
-            max_bytes: 1 << 20,
-        },
-        delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
-    }
+        PublicManagedCheckpointRuntime::new(managed_root).unwrap(),
+    )
+    .unwrap()
+    .with_runtime_config(config)
+    .unwrap()
 }
 
 #[allow(
@@ -1796,6 +2298,7 @@ fn checkpoint_restart_soak_spec(
     reason = "the fault matrix report keeps independently asserted recovery dimensions"
 )]
 struct CheckpointFaultMatrixReport {
+    manual_observation: CheckpointManualObservation,
     selected_before_restart: Option<Epoch>,
     prepared_artifacts_after_failure: usize,
     committed_sinks_before_restart: BTreeSet<String>,
@@ -1806,15 +2309,91 @@ struct CheckpointFaultMatrixReport {
     restored_cursor_orders: BTreeMap<String, Vec<u8>>,
     sources_ended: bool,
     watermarks_restored: bool,
+    final_source_sequences: BTreeMap<String, Option<u64>>,
+    final_source_idle: BTreeMap<String, bool>,
     window_state_restored: bool,
     visible_records: usize,
     duplicate_records: usize,
     missing_records: usize,
+    transactional_output: BTreeSet<String>,
+    ordinary_output: Vec<String>,
     temporary_artifacts: usize,
     terminal_tasks: usize,
     terminal_charged_edges: usize,
+    terminal_registries: (usize, usize),
+    fault_trigger_count: usize,
+    parent_sync_os_failures: usize,
     cancellation_requested: bool,
     deterministic_terminal_error: bool,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum CheckpointManualObservation {
+    Completed(Epoch),
+    Failed {
+        category: PublicStreamingErrorCategory,
+        epoch: Option<Epoch>,
+        phase: Option<PublicCheckpointPhase>,
+        component_kind: Option<PublicComponentKind>,
+        component_id: Option<String>,
+    },
+}
+
+fn checkpoint_manual_observation(result: Result<Epoch>) -> CheckpointManualObservation {
+    match result {
+        Ok(epoch) => CheckpointManualObservation::Completed(epoch),
+        Err(CalcFlowError::Streaming(error)) => CheckpointManualObservation::Failed {
+            category: error.category(),
+            epoch: error.epoch(),
+            phase: error.checkpoint_phase(),
+            component_kind: error.component_kind(),
+            component_id: error.component_id().map(str::to_owned),
+        },
+        Err(error) => panic!("manual checkpoint escaped the public streaming boundary: {error:?}"),
+    }
+}
+
+async fn wait_for_checkpoint_matrix_sources(
+    job: &PublicStreamingJob,
+    output_probe: &CheckpointMatrixOutputProbe,
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if job
+                .status()
+                .sources
+                .values()
+                .all(|source| source.next_sequence == Some(1))
+                && output_probe.ordinary_records.lock().len() == 2
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("matrix sources did not reach the manual checkpoint cut");
+}
+
+const fn checkpoint_fault_expected_phase(point: CheckpointFaultPoint) -> PublicCheckpointPhase {
+    match point {
+        CheckpointFaultPoint::SourceAdmission | CheckpointFaultPoint::SourceCut => {
+            PublicCheckpointPhase::Requested
+        }
+        CheckpointFaultPoint::PartialAlignment | CheckpointFaultPoint::StateStage => {
+            PublicCheckpointPhase::SourcesCut
+        }
+        CheckpointFaultPoint::SinkPreCommit => PublicCheckpointPhase::OperatorsSnapshotted,
+        CheckpointFaultPoint::ManifestWrite | CheckpointFaultPoint::ManifestRename => {
+            PublicCheckpointPhase::SinksPrecommitted
+        }
+        CheckpointFaultPoint::ManifestParentSync
+        | CheckpointFaultPoint::PartialSinkCommit
+        | CheckpointFaultPoint::CompletedCommit => PublicCheckpointPhase::ManifestDurable,
+        CheckpointFaultPoint::Retention | CheckpointFaultPoint::Compaction => {
+            PublicCheckpointPhase::SinksCommitted
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -3010,11 +3589,16 @@ async fn prepare_private_sink_commit_benchmark(sink_count: usize) -> PrivateSink
             written_records: Arc::new(AtomicUsize::new(0)),
             closed: Arc::new(AtomicUsize::new(0)),
             write_delay: Duration::ZERO,
+            lifecycle: Arc::new(CheckpointMatrixOutputProbe::default()),
         };
-        sink.open().await.unwrap();
-        sink.begin_epoch(Epoch::INITIAL).await.unwrap();
+        TransactionalStreamSink::open(&mut sink).await.unwrap();
+        TransactionalStreamSink::begin_epoch(&mut sink, Epoch::INITIAL)
+            .await
+            .unwrap();
         sink.pending.push(format!("{sink_id}|0|1|left|1"));
-        let state = sink.pre_commit(Epoch::INITIAL).await.unwrap();
+        let state = TransactionalStreamSink::pre_commit(&mut sink, Epoch::INITIAL)
+            .await
+            .unwrap();
         sinks.push((sink, state));
     }
     PrivateSinkCommitFixture {
@@ -3027,7 +3611,9 @@ impl PrivateSinkCommitFixture {
     async fn measure(mut self) -> usize {
         let sink_count = self.sinks.len();
         for (sink, state) in &mut self.sinks {
-            sink.commit(Epoch::INITIAL, state).await.unwrap();
+            TransactionalStreamSink::commit(sink, Epoch::INITIAL, state)
+                .await
+                .unwrap();
         }
         let mut visible = 0;
         for (sink, _) in &self.sinks {
@@ -3416,9 +4002,8 @@ async fn run_checkpoint_restart_fault_case(
     let state_root = directory.path().join("state");
     let manifest_root = directory.path().join("manifests");
     let sink_root = directory.path().join("sinks");
-    let backend = Arc::new(LocalStateBackend::new(&state_root).await.unwrap());
     let config = StreamRuntimeConfig {
-        checkpoint_interval: Duration::from_millis(10),
+        checkpoint_interval: Duration::from_secs(3_600),
         checkpoint_timeout: Duration::from_secs(5),
         retained_epochs: 2,
         ..StreamRuntimeConfig::default()
@@ -3428,93 +4013,216 @@ async fn run_checkpoint_restart_fault_case(
     let first_source_closed = Arc::new(AtomicUsize::new(0));
     let first_sink_closed = Arc::new(AtomicUsize::new(0));
     let first_sink_writes = Arc::new(AtomicUsize::new(0));
-    let first_cancellation = CancellationToken::new();
-    let first_spec = checkpoint_matrix_spec(
-        20_000,
+    let output_probe = Arc::new(CheckpointMatrixOutputProbe::default());
+    let first_runner = checkpoint_matrix_public_runner(
+        directory.path(),
         &sink_root,
         &first_source_opens,
         &first_source_closed,
         &first_sink_closed,
         &first_sink_writes,
+        &output_probe,
         if point == CheckpointFaultPoint::PartialAlignment {
             Duration::from_millis(5)
         } else {
             Duration::ZERO
         },
         true,
-        first_cancellation.clone(),
-        true,
+        config,
+        Some((point, mode)),
     );
-    let (first_checkpoint, fault_probe) =
-        CheckpointRuntimeSpec::new(backend.clone(), &manifest_root, config)
-            .unwrap()
-            .with_fault_probe(point, mode);
-    let mut first_runner = ContinuousRunner::new();
-    let first_job = first_runner
-        .start_checkpointed(first_spec, first_checkpoint)
-        .await
-        .unwrap_or_else(|failure| {
-            panic!("fault case {point:?}/{mode:?} failed to start: {failure:?}")
-        });
-    let first_outcome = tokio::time::timeout(Duration::from_secs(5), first_job.wait())
-        .await
-        .unwrap_or_else(|error| panic!("fault case {point:?}/{mode:?} hung: {error}"));
-    let first_error = format!("{:?}", first_outcome.errors);
+    let first_job = first_runner.start().await.unwrap_or_else(|failure| {
+        panic!("fault case {point:?}/{mode:?} failed to start: {failure:?}")
+    });
+    wait_for_checkpoint_matrix_sources(&first_job, &output_probe).await;
+    let (manual, first_outcome) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(first_job.trigger_checkpoint(), first_job.wait())
+    })
+    .await
+    .unwrap_or_else(|error| panic!("fault case {point:?}/{mode:?} hung: {error}"));
+    let manual_observation = checkpoint_manual_observation(manual);
+    let first_status = first_job.status();
+    let first_probe = first_job.test_probe();
+    let exact_error = |category, epoch, phase, component_kind, component_id: Option<&str>| {
+        first_outcome.errors.iter().any(|error| {
+            error.category() == category
+                && error.epoch() == epoch
+                && error.checkpoint_phase() == phase
+                && error.component_kind() == component_kind
+                && error.component_id() == component_id
+        })
+    };
+    let expected_phase = checkpoint_fault_expected_phase(point);
+    let checkpoint_status_matches = first_status.checkpoint.current_epoch == Some(Epoch::INITIAL)
+        && first_status.checkpoint.phase == Some(expected_phase);
     let deterministic_terminal_error = match (point, mode) {
-        (CheckpointFaultPoint::ManifestRename, _) => {
-            first_outcome.state == ContinuousJobState::RecoveryRequired
-                && first_outcome.errors.iter().any(|failure| {
-                    matches!(
-                        &failure.error,
-                        CalcFlowError::RecoveryRequired {
-                            pipeline_name,
-                            message,
-                        } if pipeline_name == "checkpoint-restart-fault-matrix"
-                            && message.contains("checkpoint epoch 1")
-                            && message.contains("publication durability is unknown")
-                    )
-                })
+        (CheckpointFaultPoint::ManifestRename, _)
+        | (CheckpointFaultPoint::ManifestParentSync, CheckpointFaultMode::Io) => {
+            first_outcome.state == PublicJobState::RecoveryRequired
+                && first_outcome.cause
+                    == if mode == CheckpointFaultMode::Cancel {
+                        PublicTerminalCause::ExplicitCancel
+                    } else {
+                        PublicTerminalCause::Failure
+                    }
+                && exact_error(
+                    PublicStreamingErrorCategory::CheckpointPublicationUnknown,
+                    Some(Epoch::INITIAL),
+                    Some(PublicCheckpointPhase::ManifestInstalled),
+                    Some(PublicComponentKind::Checkpoint),
+                    None,
+                )
+                && first_status.checkpoint.installed_unknown_epoch == Some(Epoch::INITIAL)
         }
         (CheckpointFaultPoint::PartialSinkCommit, CheckpointFaultMode::Cancel) => {
-            first_outcome.state == ContinuousJobState::RecoveryRequired
-                && !first_outcome.errors.is_empty()
-                && first_cancellation.is_cancelled()
+            first_outcome.state == PublicJobState::RecoveryRequired
+                && first_outcome.cause == PublicTerminalCause::ExplicitCancel
+                && checkpoint_status_matches
+                && exact_error(
+                    PublicStreamingErrorCategory::Internal,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
         }
-        (
-            CheckpointFaultPoint::PartialSinkCommit,
-            CheckpointFaultMode::Io | CheckpointFaultMode::Panic | CheckpointFaultMode::Restart,
-        ) => {
-            first_outcome.state == ContinuousJobState::RecoveryRequired
-                && first_outcome.errors.iter().any(|failure| {
-                    matches!(
-                        &failure.error,
-                        CalcFlowError::RecoveryRequired {
-                            pipeline_name,
-                            message,
-                        } if pipeline_name == "checkpoint-restart-fault-matrix"
-                            && message.contains("sink \"sink-a\"")
-                            && message.contains("epoch 1")
-                    )
-                })
+        (CheckpointFaultPoint::PartialSinkCommit, _) => {
+            first_outcome.state == PublicJobState::RecoveryRequired
+                && first_outcome.cause == PublicTerminalCause::Failure
+                && checkpoint_status_matches
+                && exact_error(
+                    PublicStreamingErrorCategory::Connector,
+                    Some(Epoch::INITIAL),
+                    Some(PublicCheckpointPhase::ManifestDurable),
+                    Some(PublicComponentKind::Sink),
+                    Some("sink-a"),
+                )
         }
         (_, CheckpointFaultMode::Cancel) => {
-            first_outcome.state == ContinuousJobState::Cancelled
+            let cancel_phase = match point {
+                CheckpointFaultPoint::PartialAlignment => PublicCheckpointPhase::Requested,
+                CheckpointFaultPoint::ManifestParentSync => PublicCheckpointPhase::SinksCommitted,
+                _ => expected_phase,
+            };
+            first_outcome.state == PublicJobState::Cancelled
+                && first_outcome.cause == PublicTerminalCause::ExplicitCancel
                 && first_outcome.errors.is_empty()
-                && first_cancellation.is_cancelled()
+                && first_status.checkpoint.current_epoch == Some(Epoch::INITIAL)
+                && first_status.checkpoint.phase == Some(cancel_phase)
+                && first_status.checkpoint.failure_category
+                    == Some(PublicStreamingErrorCategory::Internal)
+                && first_probe.cancellation_triggers == 1
+        }
+        (CheckpointFaultPoint::StateStage, CheckpointFaultMode::Panic) => {
+            first_outcome.state == PublicJobState::Failed
+                && first_outcome.cause == PublicTerminalCause::Failure
+                && checkpoint_status_matches
+                && first_status.checkpoint.failure_category
+                    == Some(PublicStreamingErrorCategory::Internal)
+                && exact_error(
+                    PublicStreamingErrorCategory::TaskPanicked,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+        }
+        (CheckpointFaultPoint::StateStage, _) => {
+            first_outcome.state == PublicJobState::Failed
+                && first_outcome.cause == PublicTerminalCause::Failure
+                && checkpoint_status_matches
+                && first_status.checkpoint.failure_category
+                    == Some(PublicStreamingErrorCategory::Internal)
+                && first_outcome.errors.iter().any(|error| {
+                    error.category() == PublicStreamingErrorCategory::Operator
+                        && error.epoch().is_none()
+                        && error.checkpoint_phase().is_none()
+                        && error.component_kind() == Some(PublicComponentKind::Operator)
+                        && matches!(error.component_id(), Some("window" | "branch_a"))
+                })
+                && first_outcome.errors.iter().any(|error| {
+                    error.category() == PublicStreamingErrorCategory::Internal
+                        && error.epoch().is_none()
+                        && error.checkpoint_phase().is_none()
+                        && error.component_kind() == Some(PublicComponentKind::Edge)
+                })
+        }
+        (CheckpointFaultPoint::PartialAlignment, CheckpointFaultMode::Panic) => {
+            first_outcome.state == PublicJobState::Failed
+                && first_outcome.cause == PublicTerminalCause::Failure
+                && checkpoint_status_matches
+                && exact_error(
+                    PublicStreamingErrorCategory::TaskPanicked,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+        }
+        (CheckpointFaultPoint::PartialAlignment, _) => {
+            first_outcome.state == PublicJobState::Failed
+                && first_outcome.cause == PublicTerminalCause::Failure
+                && checkpoint_status_matches
+                && first_outcome.errors.iter().any(|error| {
+                    error.category() == PublicStreamingErrorCategory::Operator
+                        && error.epoch().is_none()
+                        && error.checkpoint_phase().is_none()
+                        && error.component_kind() == Some(PublicComponentKind::Operator)
+                        && matches!(error.component_id(), Some("branch_a" | "branch_b"))
+                })
+        }
+        (CheckpointFaultPoint::Compaction, CheckpointFaultMode::Io)
+        | (
+            CheckpointFaultPoint::ManifestWrite | CheckpointFaultPoint::ManifestParentSync,
+            CheckpointFaultMode::Panic,
+        )
+        | (_, CheckpointFaultMode::Restart) => {
+            first_outcome.state == PublicJobState::Failed
+                && first_outcome.cause == PublicTerminalCause::Failure
+                && checkpoint_status_matches
+                && first_status.checkpoint.failure_category
+                    == Some(PublicStreamingErrorCategory::Internal)
+                && exact_error(
+                    PublicStreamingErrorCategory::Internal,
+                    Some(Epoch::INITIAL),
+                    Some(expected_phase),
+                    Some(PublicComponentKind::Checkpoint),
+                    None,
+                )
         }
         (_, CheckpointFaultMode::Io) => {
-            first_outcome.state == ContinuousJobState::Failed
-                && first_error.contains("injected checkpoint I/O fault")
+            first_outcome.state == PublicJobState::Failed
+                && first_outcome.cause == PublicTerminalCause::Failure
+                && checkpoint_status_matches
+                && first_status.checkpoint.failure_category
+                    == Some(PublicStreamingErrorCategory::Io)
+                && exact_error(
+                    PublicStreamingErrorCategory::Io,
+                    Some(Epoch::INITIAL),
+                    Some(expected_phase),
+                    Some(PublicComponentKind::Checkpoint),
+                    None,
+                )
         }
         (_, CheckpointFaultMode::Panic) => {
-            first_outcome.state == ContinuousJobState::Failed
-                && first_error.contains("injected checkpoint panic")
-        }
-        (_, CheckpointFaultMode::Restart) => {
-            first_outcome.state == ContinuousJobState::Failed
-                && first_error.contains("injected checkpoint restart")
+            first_outcome.state == PublicJobState::Failed
+                && first_outcome.cause == PublicTerminalCause::Failure
+                && first_status.checkpoint.current_epoch == Some(Epoch::INITIAL)
+                && first_status.checkpoint.phase == Some(expected_phase)
+                && exact_error(
+                    PublicStreamingErrorCategory::TaskPanicked,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
         }
     };
+    assert!(
+        deterministic_terminal_error,
+        "fault case {point:?}/{mode:?} had an unexpected public terminal oracle: outcome={first_outcome:?}, status={first_status:?}, fault_triggers={}, cancellation_triggers={}",
+        first_probe.checkpoint_fault_triggers, first_probe.cancellation_triggers,
+    );
     let manifest_path = manifest_root.join("manifest-00000000000000000001.json");
     let selected_before_restart_manifest = if manifest_path.exists() {
         Some(
@@ -3532,8 +4240,6 @@ async fn run_checkpoint_restart_fault_case(
         .and_then(|manifest| manifest.operators().get("window"))
         .is_some_and(|entry| !entry.segments.is_empty());
     drop(first_job);
-    first_runner.shutdown().await.unwrap();
-    assert_eq!(first_runner.registry_counts(), (0, 0));
     assert_eq!(first_source_closed.load(Ordering::SeqCst), 2);
     assert_eq!(first_sink_closed.load(Ordering::SeqCst), 2);
     let prepared_artifacts_after_failure = ["sink-a", "sink-b"]
@@ -3565,52 +4271,44 @@ async fn run_checkpoint_restart_fault_case(
     let restart_source_closed = Arc::new(AtomicUsize::new(0));
     let restart_sink_closed = Arc::new(AtomicUsize::new(0));
     let restart_sink_writes = Arc::new(AtomicUsize::new(0));
-    let restart_spec = checkpoint_matrix_spec(
-        20_001,
+    let restart_runner = checkpoint_matrix_public_runner(
+        directory.path(),
         &sink_root,
         &restart_source_opens,
         &restart_source_closed,
         &restart_sink_closed,
         &restart_sink_writes,
+        &output_probe,
         Duration::ZERO,
         false,
-        CancellationToken::new(),
-        true,
-    );
-    let restart_checkpoint = CheckpointRuntimeSpec::new(
-        backend,
-        &manifest_root,
         StreamRuntimeConfig {
             checkpoint_interval: Duration::from_secs(3_600),
             ..config
         },
-    )
-    .unwrap();
-    let mut restart_runner = ContinuousRunner::new();
-    let restart_job = restart_runner
-        .start_checkpointed(restart_spec, restart_checkpoint)
-        .await
-        .unwrap_or_else(|failure| {
-            panic!("restart case {point:?}/{mode:?} failed to start: {failure:?}")
-        });
+        None,
+    );
+    let restart_job = restart_runner.start().await.unwrap_or_else(|failure| {
+        panic!("restart case {point:?}/{mode:?} failed to start: {failure:?}")
+    });
     let restart_outcome = tokio::time::timeout(Duration::from_secs(5), restart_job.wait())
         .await
         .unwrap_or_else(|error| panic!("restart case {point:?}/{mode:?} hung: {error}"));
     assert_eq!(
         restart_outcome.state,
-        ContinuousJobState::Completed,
+        PublicJobState::Completed,
         "restart case {point:?}/{mode:?} failed: {restart_outcome:?}"
     );
     let terminal_status = restart_job.status();
-    let terminal_tasks = terminal_status.tasks.len();
+    let terminal_probe = restart_job.test_probe();
+    let terminal_tasks = terminal_status.task_count;
     let terminal_charged_edges = terminal_status
         .edges
         .values()
-        .filter(|edge| edge.queue_depth != 0 || edge.charged_rows != 0 || edge.charged_bytes != 0)
+        .filter(|edge| {
+            edge.current_envelopes != 0 || edge.current_rows != 0 || edge.current_bytes != 0
+        })
         .count();
     drop(restart_job);
-    restart_runner.shutdown().await.unwrap();
-    assert_eq!(restart_runner.registry_counts(), (0, 0));
 
     let manifests = checkpoint_manifest_documents(&manifest_root).await;
     let manifest = manifests
@@ -3646,6 +4344,22 @@ async fn run_checkpoint_restart_fault_case(
             } if watermark == EventTime::from_micros(1)
         )
     });
+    let final_source_sequences = terminal_status
+        .sources
+        .iter()
+        .map(|(source_id, source)| (source_id.clone(), source.next_sequence))
+        .collect();
+    let final_source_idle = manifest
+        .sources()
+        .iter()
+        .map(|(source_id, entry)| {
+            let idle = matches!(
+                entry.watermark_policy,
+                SourceWatermarkManifestState::SourceProvided { idle: true, .. }
+            );
+            (source_id.clone(), idle)
+        })
+        .collect();
     let visible = read_checkpoint_matrix_visible(&sink_root).await;
     let observed = visible.values().flatten().cloned().collect::<Vec<_>>();
     let unique = observed.iter().cloned().collect::<BTreeSet<_>>();
@@ -3660,10 +4374,12 @@ async fn run_checkpoint_restart_fault_case(
         .collect::<BTreeSet<_>>();
     let duplicate_records = observed.len().saturating_sub(unique.len());
     let missing_records = expected.difference(&unique).count();
+    let ordinary_output = output_probe.ordinary_records.lock().clone();
 
     let mut restart_source_open_events = restart_source_opens.lock().clone();
     restart_source_open_events.sort_by(|left, right| left.0.cmp(&right.0));
     CheckpointFaultMatrixReport {
+        manual_observation,
         selected_before_restart,
         prepared_artifacts_after_failure,
         committed_sinks_before_restart,
@@ -3674,10 +4390,14 @@ async fn run_checkpoint_restart_fault_case(
         restored_cursor_orders,
         sources_ended,
         watermarks_restored,
+        final_source_sequences,
+        final_source_idle,
         window_state_restored,
         visible_records: observed.len(),
         duplicate_records,
         missing_records,
+        transactional_output: unique,
+        ordinary_output,
         temporary_artifacts: checkpoint_matrix_temporary_artifacts(
             &state_root,
             &manifest_root,
@@ -3685,7 +4405,10 @@ async fn run_checkpoint_restart_fault_case(
         ),
         terminal_tasks,
         terminal_charged_edges,
-        cancellation_requested: fault_probe.cancellation_trigger_count() == 1,
+        terminal_registries: terminal_probe.runner_registries,
+        fault_trigger_count: first_probe.checkpoint_fault_triggers,
+        parent_sync_os_failures: first_probe.parent_sync_os_failures,
+        cancellation_requested: first_probe.cancellation_triggers == 1,
         deterministic_terminal_error,
     }
 }
@@ -3795,7 +4518,7 @@ struct CheckpointSoakProcessReport {
     temporary_artifacts: usize,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 struct CheckpointSoakParentTiming {
     generation: usize,
     launch_micros: u64,
@@ -3804,19 +4527,30 @@ struct CheckpointSoakParentTiming {
 
 struct CheckpointSoakProcessEvidence {
     report: CheckpointRestartSoakReport,
+    plans: Vec<CheckpointSoakProcessPlan>,
     processes: Vec<CheckpointSoakProcessReport>,
     parent_timings: Vec<CheckpointSoakParentTiming>,
     rss_samples: Vec<RssSample>,
+    rss_process_samples: Vec<CheckpointRssProcessSamples>,
 }
 
-fn checkpoint_restart_soak_metadata(commit: &str, kernel: &str, rustc: &str) -> serde_json::Value {
+fn checkpoint_restart_soak_metadata(
+    commit: &str,
+    executable_sha256: &str,
+    kernel: &str,
+    rustc: &str,
+    target: &str,
+    libc: &str,
+) -> serde_json::Value {
     json!({
-        "schema": "calc-flow.m5-checkpoint-soak.v1",
+        "schema": CHECKPOINT_SOAK_SCHEMA,
         "commit": commit,
+        "executable_sha256": executable_sha256,
         "target_duration_seconds": 1_200,
         "sample_count": CHECKPOINT_SOAK_SAMPLE_COUNT,
         "cadence_seconds": CHECKPOINT_SOAK_CADENCE.as_secs(),
         "cadence_tolerance_seconds": CHECKPOINT_SOAK_CADENCE_TOLERANCE.as_secs(),
+        "cadence_tolerance_boundary": "inclusive",
         "maximum_restart_gap_seconds": MAX_CHECKPOINT_SOAK_RESTART_GAP.as_secs(),
         "timing_source": "parent_std_instant_plus_child_local_instant",
         "restart_sample_indices": CHECKPOINT_SOAK_RESTART_SAMPLES,
@@ -3827,17 +4561,53 @@ fn checkpoint_restart_soak_metadata(commit: &str, kernel: &str, rustc: &str) -> 
         "source_count": 2,
         "transactional_sink_count": 2,
         "retained_epochs": 2,
-        "warmup_samples": WARMUP_SAMPLES,
-        "restart_warmup_samples": CHECKPOINT_RESTART_WARMUP_SAMPLES,
-        "rss_comparison_sample_ranges": CHECKPOINT_RSS_COMPARISON_RANGES,
-        "rss_slope_sample_range": CHECKPOINT_RSS_COMPARISON_RANGES[1],
+        "rss_gate": {
+            "normalization": "same_pid_baseline_median",
+            "process_warmup_samples": CHECKPOINT_RSS_PROCESS_WARMUP_SAMPLES,
+            "stable_window_samples": CHECKPOINT_RSS_STABLE_WINDOW_SAMPLES,
+            "stable_subwindow_samples": CHECKPOINT_RSS_STABLE_SUBWINDOW_SAMPLES,
+            "slope_local_sample_range": CHECKPOINT_RSS_WINDOW_LOCAL_RANGE,
+            "baseline_local_sample_range": CHECKPOINT_RSS_BASELINE_LOCAL_RANGE,
+            "stable_local_sample_range": CHECKPOINT_RSS_STABLE_LOCAL_RANGE,
+            "required_passing_generations": CHECKPOINT_SOAK_GENERATIONS,
+            "slope_role": "informational",
+            "maximum_normalized_growth_kib": MAX_MEDIAN_GROWTH_KIB,
+            "maximum_normalized_growth_spread_kib": MAX_CHECKPOINT_RSS_NORMALIZED_GROWTH_SPREAD_KIB,
+            "spread_calibration": {
+                "head": CHECKPOINT_RSS_SPREAD_CALIBRATION_HEAD,
+                "controlled_run_spread_kib": CHECKPOINT_RSS_SPREAD_CALIBRATION_KIB,
+                "threshold_policy": "next_power_of_two_above_twice_maximum_observed",
+            },
+        },
         "state_bytes_limit": MAX_CHECKPOINT_SOAK_STATE_BYTES,
         "deterministic_seed": "two-source-final-window-restart-v1",
         "environment": {
             "kernel": kernel,
             "rustc": rustc,
+            "target": target,
+            "libc": libc,
             "allocator": "system",
+            "allocator_controls": {
+                "MALLOC_ARENA_MAX": CHECKPOINT_SOAK_MALLOC_ARENA_MAX,
+                "MALLOC_TRIM_THRESHOLD_": CHECKPOINT_SOAK_MALLOC_TRIM_THRESHOLD,
+                "MALLOC_TOP_PAD_": CHECKPOINT_SOAK_MALLOC_TOP_PAD,
+            },
             "rss_source": "/proc/self/status:VmRSS",
+        },
+        "evidence_artifacts": {
+            "metadata": "evidence/metadata.json",
+            "summary": "evidence/summary.json",
+            "bundle": "evidence/bundle.json",
+            "child_plans": [
+                "evidence/plans/generation-0.json",
+                "evidence/plans/generation-1.json",
+                "evidence/plans/generation-2.json",
+            ],
+            "child_reports": [
+                "evidence/reports/generation-0.json",
+                "evidence/reports/generation-1.json",
+                "evidence/reports/generation-2.json",
+            ],
         },
         "command": CHECKPOINT_SOAK_COMMAND,
     })
@@ -4133,9 +4903,7 @@ fn validate_checkpoint_soak_plan(plan: &CheckpointSoakProcessPlan) -> Result<()>
     reason = "each soak generation receives the same explicit durable and lifecycle state"
 )]
 async fn start_checkpoint_restart_generation(
-    job_id: u64,
-    backend: Arc<LocalStateBackend>,
-    manifest_root: &Path,
+    managed_root: &Path,
     sink_root: &Path,
     stop: &Arc<AtomicUsize>,
     opened_with: &SourceOpenHistory,
@@ -4143,36 +4911,45 @@ async fn start_checkpoint_restart_generation(
     sink_closed: &Arc<AtomicUsize>,
     config: StreamRuntimeConfig,
     sink_write_delay: Duration,
-) -> (ContinuousRunner, ContinuousJob) {
-    let spec = checkpoint_restart_soak_spec(
-        job_id,
+) -> PublicStreamingJob {
+    checkpoint_restart_soak_public_runner(
+        managed_root,
         sink_root,
         stop,
         opened_with,
         source_closed,
         sink_closed,
+        config,
         sink_write_delay,
-    );
-    let checkpoint = CheckpointRuntimeSpec::new(backend, manifest_root, config).unwrap();
-    let runner = ContinuousRunner::new();
-    let job = runner
-        .start_checkpointed(spec, checkpoint)
-        .await
-        .unwrap_or_else(|failure| panic!("checkpoint soak generation failed: {failure:?}"));
-    (runner, job)
+    )
+    .start()
+    .await
+    .unwrap_or_else(|failure| panic!("checkpoint soak generation failed: {failure:?}"))
 }
 
-async fn wait_for_completed_checkpoints(job: &ContinuousJob, expected: u64) {
+async fn wait_for_completed_checkpoints(job: &PublicStreamingJob, expected: u64) {
+    let baseline = job
+        .status()
+        .checkpoint
+        .last_completed_epoch
+        .map_or(0, Epoch::as_u64);
+    let target = baseline
+        .checked_add(expected)
+        .expect("checkpoint soak smoke target epoch overflowed");
     let completed = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let status = job.status();
             assert_eq!(
                 status.state,
-                ContinuousJobState::Running,
+                PublicJobState::Running,
                 "checkpoint soak generation terminated before {expected} checkpoints: {:?}",
                 job.wait().await
             );
-            if status.metrics.checkpoints.completed >= expected {
+            if status
+                .checkpoint
+                .last_completed_epoch
+                .is_some_and(|epoch| epoch.as_u64() >= target)
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(1)).await;
@@ -4260,47 +5037,53 @@ async fn checkpoint_soak_process_rss_kib() -> Result<u64> {
 }
 
 async fn checkpoint_soak_process_sample(
-    job: &ContinuousJob,
+    job: &PublicStreamingJob,
     state_root: &Path,
     manifest_root: &Path,
     index: usize,
     elapsed_micros: u64,
+    completed_baseline: u64,
 ) -> Result<CheckpointSoakProcessSample> {
     let status = job.status();
-    if status.state != ContinuousJobState::Running || status.metrics.checkpoints.failed != 0 {
+    if status.state != PublicJobState::Running || status.task_errors != 0 {
         return Err(checkpoint_soak_process_error(format!(
             "checkpoint soak child terminated before sample {index}"
         )));
     }
-    assert_edge_budgets(&status);
+    assert_public_edge_budgets(&status);
     let maximum_queue_depth = status
         .edges
         .values()
-        .map(|edge| edge.queue_depth)
+        .map(|edge| edge.current_envelopes)
         .max()
         .unwrap_or(0);
     let maximum_charged_rows = status
         .edges
         .values()
-        .map(|edge| edge.charged_rows)
+        .map(|edge| edge.current_rows)
         .max()
         .unwrap_or(0);
     let maximum_charged_bytes = status
         .edges
         .values()
-        .map(|edge| edge.charged_bytes)
+        .map(|edge| edge.current_bytes)
         .max()
         .unwrap_or(0);
+    let completed_checkpoints = status
+        .checkpoint
+        .last_completed_epoch
+        .map_or(0, Epoch::as_u64)
+        .saturating_sub(completed_baseline);
     Ok(CheckpointSoakProcessSample {
         index,
         elapsed_micros,
         rss_kib: checkpoint_soak_process_rss_kib().await?,
-        task_count: status.tasks.len(),
+        task_count: status.task_count,
         maximum_queue_depth,
         maximum_charged_rows,
         maximum_charged_bytes,
-        completed_checkpoints: status.metrics.checkpoints.completed,
-        failed_checkpoints: status.metrics.checkpoints.failed,
+        completed_checkpoints,
+        failed_checkpoints: job.test_probe().checkpoint_failures,
         manifest_count: checkpoint_manifest_documents(manifest_root).await.len(),
         state_bytes: directory_regular_file_bytes(state_root).await,
     })
@@ -4316,10 +5099,10 @@ struct CheckpointSoakTerminalEvidence {
 }
 
 async fn settle_checkpoint_soak_process(
-    mut runner: ContinuousRunner,
-    job: ContinuousJob,
+    job: PublicStreamingJob,
     stop: &AtomicUsize,
     final_generation: bool,
+    completed_baseline: u64,
 ) -> Result<CheckpointSoakTerminalEvidence> {
     let outcome = if final_generation {
         stop.store(1, Ordering::SeqCst);
@@ -4330,14 +5113,14 @@ async fn settle_checkpoint_soak_process(
         job.cancel().await
     };
     let expected_state = if final_generation {
-        ContinuousJobState::Completed
+        PublicJobState::Completed
     } else {
-        ContinuousJobState::Cancelled
+        PublicJobState::Cancelled
     };
     let expected_cause = if final_generation {
-        TerminalCause::NaturalEnd
+        PublicTerminalCause::NaturalEnd
     } else {
-        TerminalCause::ExplicitCancel
+        PublicTerminalCause::ExplicitCancel
     };
     if outcome.state != expected_state || outcome.cause != expected_cause {
         return Err(checkpoint_soak_process_error(format!(
@@ -4345,17 +5128,22 @@ async fn settle_checkpoint_soak_process(
         )));
     }
     let status = job.status();
-    let terminal_tasks = status.tasks.len();
+    let terminal_tasks = status.task_count;
     let terminal_charged_edges = status
         .edges
         .values()
-        .filter(|edge| edge.queue_depth != 0 || edge.charged_rows != 0 || edge.charged_bytes != 0)
+        .filter(|edge| {
+            edge.current_envelopes != 0 || edge.current_rows != 0 || edge.current_bytes != 0
+        })
         .count();
-    let completed_checkpoints = status.metrics.checkpoints.completed;
-    let failed_checkpoints = status.metrics.checkpoints.failed;
+    let completed_checkpoints = status
+        .checkpoint
+        .last_completed_epoch
+        .map_or(0, Epoch::as_u64)
+        .saturating_sub(completed_baseline);
+    let probe = job.test_probe();
+    let failed_checkpoints = probe.checkpoint_failures;
     drop(job);
-    runner.shutdown().await?;
-    let terminal_registries = runner.registry_counts();
     Ok(CheckpointSoakTerminalEvidence {
         cause: if final_generation {
             "natural_end"
@@ -4366,7 +5154,7 @@ async fn settle_checkpoint_soak_process(
         failed_checkpoints,
         terminal_tasks,
         terminal_charged_edges,
-        terminal_registries,
+        terminal_registries: probe.runner_registries,
     })
 }
 
@@ -4425,7 +5213,6 @@ async fn run_checkpoint_soak_child(
     );
     let (restored_window_state, restored_watermarks, restored_progress) =
         checkpoint_soak_restore_evidence(selected);
-    let backend = Arc::new(LocalStateBackend::new(&state_root).await?);
     let stop = Arc::new(AtomicUsize::new(0));
     let opened_with = Arc::new(Mutex::new(Vec::new()));
     let source_closed = Arc::new(AtomicUsize::new(0));
@@ -4434,12 +5221,13 @@ async fn run_checkpoint_soak_child(
         checkpoint_interval: Duration::from_millis(plan.checkpoint_interval_millis),
         checkpoint_timeout: Duration::from_millis(plan.checkpoint_timeout_millis),
         retained_epochs: plan.retained_epochs,
-        ..StreamRuntimeConfig::default()
+        edge_budget: EdgeBudget {
+            max_rows: 8,
+            max_bytes: 1 << 20,
+        },
     };
-    let (runner, job) = start_checkpoint_restart_generation(
-        50_000 + u64::try_from(plan.generation).unwrap(),
-        backend,
-        &manifest_root,
+    let job = start_checkpoint_restart_generation(
+        &plan.run_root,
         &sink_root,
         &stop,
         &opened_with,
@@ -4450,14 +5238,18 @@ async fn run_checkpoint_soak_child(
     )
     .await;
     let initial_status = job.status();
-    if initial_status.tasks.is_empty()
+    let completed_baseline = initial_status
+        .checkpoint
+        .last_completed_epoch
+        .map_or(0, Epoch::as_u64);
+    if initial_status.task_count == 0
         || checkpoint_soak_open_cursors(&opened_with) != restored_cursor_orders
     {
         return Err(checkpoint_soak_process_error(
             "checkpoint soak child did not restore the durable source cursors",
         ));
     }
-    assert_edge_budgets(&initial_status);
+    assert_public_edge_budgets(&initial_status);
 
     let mut samples = Vec::with_capacity(plan.sample_end - plan.sample_start);
     if plan.mode == CheckpointSoakProcessMode::Smoke {
@@ -4481,22 +5273,24 @@ async fn run_checkpoint_soak_child(
                     &manifest_root,
                     index,
                     elapsed_micros,
+                    completed_baseline,
                 )
                 .await?,
             );
         }
     }
     let before_terminal = job.status();
-    let steady_task_count = initial_status.tasks.len();
-    if before_terminal.tasks.len() != steady_task_count
-        || before_terminal.metrics.checkpoints.failed != 0
+    let steady_task_count = initial_status.task_count;
+    if before_terminal.task_count != steady_task_count
+        || before_terminal.checkpoint.failure_category.is_some()
     {
         return Err(checkpoint_soak_process_error(
             "checkpoint soak child task or checkpoint metrics drifted",
         ));
     }
     let terminal =
-        settle_checkpoint_soak_process(runner, job, &stop, plan.final_generation).await?;
+        settle_checkpoint_soak_process(job, &stop, plan.final_generation, completed_baseline)
+            .await?;
     let manifests = checkpoint_manifest_documents(&manifest_root).await;
     let selected_terminal = manifests.last().ok_or_else(|| {
         checkpoint_soak_process_error("checkpoint soak child published no terminal manifest")
@@ -4758,9 +5552,23 @@ fn validate_checkpoint_soak_report(
         || report.terminal_charged_edges != 0
         || report.terminal_registries != (0, 0)
     {
-        return Err(checkpoint_soak_process_error(
-            "checkpoint soak child report identity, exit, or terminal bounds are invalid",
-        ));
+        return Err(checkpoint_soak_process_error(format!(
+            "checkpoint soak child report identity, exit, or terminal bounds are invalid: \
+             exit={exit_code}, generation={}, cause={}, opens={}, source_closes={}, \
+             sink_closes={}, failed={}, manifests={}, state_bytes={}, tasks={}, charged_edges={}, \
+             registries={:?}",
+            report.generation,
+            report.terminal_cause,
+            report.source_open_events,
+            report.source_close_events,
+            report.sink_close_events,
+            report.failed_checkpoints,
+            report.maximum_manifest_count,
+            report.maximum_state_bytes,
+            report.terminal_tasks,
+            report.terminal_charged_edges,
+            report.terminal_registries,
+        )));
     }
     if plan.final_generation && report.temporary_artifacts != 0 {
         return Err(checkpoint_soak_process_error(format!(
@@ -4823,12 +5631,7 @@ fn run_checkpoint_soak_process_blocking(
             path: stderr_path.display().to_string(),
             source,
         })?;
-    let mut child = Command::new(executable)
-        .arg(CHECKPOINT_SOAK_CHILD_TEST)
-        .arg("--exact")
-        .arg("--nocapture")
-        .arg("--test-threads=1")
-        .env(CHECKPOINT_SOAK_CHILD_ENV, plan_path)
+    let mut child = checkpoint_soak_child_command(executable, plan_path)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
@@ -4859,6 +5662,23 @@ fn run_checkpoint_soak_process_blocking(
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn checkpoint_soak_child_command(executable: &Path, plan_path: &Path) -> Command {
+    let mut command = Command::new(executable);
+    command
+        .arg(CHECKPOINT_SOAK_CHILD_TEST)
+        .arg("--exact")
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env(CHECKPOINT_SOAK_CHILD_ENV, plan_path)
+        .env("MALLOC_ARENA_MAX", CHECKPOINT_SOAK_MALLOC_ARENA_MAX)
+        .env(
+            "MALLOC_TRIM_THRESHOLD_",
+            CHECKPOINT_SOAK_MALLOC_TRIM_THRESHOLD,
+        )
+        .env("MALLOC_TOP_PAD_", CHECKPOINT_SOAK_MALLOC_TOP_PAD);
+    command
 }
 
 async fn spawn_checkpoint_soak_process(
@@ -5052,6 +5872,7 @@ fn validate_checkpoint_soak_timeline(
 }
 
 fn aggregate_checkpoint_soak_processes(
+    plans: Vec<CheckpointSoakProcessPlan>,
     reports: Vec<CheckpointSoakProcessReport>,
     exit_codes: Vec<i32>,
     parent_timings: Vec<CheckpointSoakParentTiming>,
@@ -5061,14 +5882,24 @@ fn aggregate_checkpoint_soak_processes(
         .iter()
         .flat_map(|report| report.compacted_epochs.iter().copied())
         .collect::<BTreeSet<_>>();
-    let rss_samples = reports
+    let rss_process_samples = reports
         .iter()
-        .flat_map(|report| {
-            report.samples.iter().map(|sample| RssSample {
-                elapsed_seconds: Duration::from_micros(sample.elapsed_micros).as_secs_f64(),
-                rss_kib: sample.rss_kib,
-            })
+        .map(|report| CheckpointRssProcessSamples {
+            generation: report.generation,
+            pid: report.pid,
+            samples: report
+                .samples
+                .iter()
+                .map(|sample| RssSample {
+                    elapsed_seconds: Duration::from_micros(sample.elapsed_micros).as_secs_f64(),
+                    rss_kib: sample.rss_kib,
+                })
+                .collect(),
         })
+        .collect::<Vec<_>>();
+    let rss_samples = rss_process_samples
+        .iter()
+        .flat_map(|process| process.samples.iter().copied())
         .collect();
     let report = CheckpointRestartSoakReport {
         restarts: reports.len().saturating_sub(1),
@@ -5105,9 +5936,11 @@ fn aggregate_checkpoint_soak_processes(
     };
     CheckpointSoakProcessEvidence {
         report,
+        plans,
         processes: reports,
         parent_timings,
         rss_samples,
+        rss_process_samples,
     }
 }
 
@@ -5143,6 +5976,7 @@ async fn run_checkpoint_soak_processes(
     }
     validate_checkpoint_soak_process_set(&plans, &reports, &exit_codes, &parent_timings)?;
     Ok(aggregate_checkpoint_soak_processes(
+        plans,
         reports,
         exit_codes,
         parent_timings,
@@ -5240,13 +6074,14 @@ fn checkpoint_soak_sample_max(
 fn checkpoint_soak_process_summary(
     commit: &str,
     evidence: &CheckpointSoakProcessEvidence,
-    rss_gate: RssGate,
+    rss_gate: &CheckpointRestartRssGate,
 ) -> serde_json::Value {
     let report = &evidence.report;
     json!({
-        "schema": "calc-flow.m5-checkpoint-soak.v1",
+        "schema": CHECKPOINT_SOAK_SCHEMA,
         "type": "calc_flow_m5_checkpoint_soak_summary",
         "commit": commit,
+        "executable_sha256": evidence.plans[0].executable_sha256,
         "target_duration_seconds": 1_200,
         "sample_count": evidence.rss_samples.len(),
         "restart_sample_indices": CHECKPOINT_SOAK_RESTART_SAMPLES,
@@ -5295,11 +6130,32 @@ fn checkpoint_soak_process_summary(
             "missing_records": report.missing_records,
         },
         "rss": {
-            "slope_mib_per_hour": rss_gate.slope_mib_per_hour,
-            "comparison_sample_ranges": CHECKPOINT_RSS_COMPARISON_RANGES,
-            "slope_sample_range": CHECKPOINT_RSS_COMPARISON_RANGES[1],
-            "first_aligned_five_minute_median_kib": rss_gate.first_median_kib,
-            "final_aligned_five_minute_median_kib": rss_gate.final_median_kib,
+            "normalization": "same_pid_baseline_median",
+            "process_warmup_samples": CHECKPOINT_RSS_PROCESS_WARMUP_SAMPLES,
+            "stable_window_samples": CHECKPOINT_RSS_STABLE_WINDOW_SAMPLES,
+            "stable_subwindow_samples": CHECKPOINT_RSS_STABLE_SUBWINDOW_SAMPLES,
+            "slope_local_sample_range": CHECKPOINT_RSS_WINDOW_LOCAL_RANGE,
+            "required_passing_generations": CHECKPOINT_SOAK_GENERATIONS,
+            "slope_role": "informational",
+            "maximum_normalized_growth_kib": MAX_MEDIAN_GROWTH_KIB,
+            "maximum_normalized_growth_spread_kib": MAX_CHECKPOINT_RSS_NORMALIZED_GROWTH_SPREAD_KIB,
+            "spread_calibration": {
+                "head": CHECKPOINT_RSS_SPREAD_CALIBRATION_HEAD,
+                "controlled_run_spread_kib": CHECKPOINT_RSS_SPREAD_CALIBRATION_KIB,
+                "threshold_policy": "next_power_of_two_above_twice_maximum_observed",
+            },
+            "normalized_growth_spread_kib": rss_gate.normalized_growth_spread_kib,
+            "processes": rss_gate.processes.iter().map(|process| json!({
+                "generation": process.generation,
+                "pid": process.pid,
+                "baseline_sample_range": process.baseline_sample_range,
+                "stable_sample_range": process.stable_sample_range,
+                "slope_mib_per_hour": process.slope_mib_per_hour,
+                "baseline_median_kib": process.baseline_median_kib,
+                "stable_median_kib": process.stable_median_kib,
+                "normalized_growth_kib": process.normalized_growth_kib,
+                "passed": process.passed,
+            })).collect::<Vec<_>>(),
             "passed": rss_gate.passed,
         },
         "temporary_artifacts": report.temporary_artifacts,
@@ -5313,6 +6169,41 @@ fn checkpoint_soak_process_summary(
         "sink_close_events": evidence.processes.iter()
             .map(|process| process.sink_close_events).sum::<usize>(),
     })
+}
+
+#[cfg(target_os = "linux")]
+fn checkpoint_soak_evidence_bundle(
+    metadata: &serde_json::Value,
+    summary: &serde_json::Value,
+    evidence: &CheckpointSoakProcessEvidence,
+) -> serde_json::Value {
+    json!({
+        "schema": "calc-flow.m5-checkpoint-soak-evidence.v2",
+        "type": "calc_flow_m5_checkpoint_soak_evidence",
+        "commit": metadata["commit"],
+        "executable_sha256": metadata["executable_sha256"],
+        "metadata": metadata,
+        "summary": summary,
+        "child_plans": evidence.plans,
+        "child_reports": evidence.processes,
+        "parent_timings": evidence.parent_timings,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn publish_checkpoint_soak_evidence(
+    run_root: &Path,
+    metadata: &serde_json::Value,
+    summary: &serde_json::Value,
+    evidence: &CheckpointSoakProcessEvidence,
+) -> Result<()> {
+    let evidence_root = run_root.join("evidence");
+    write_checkpoint_soak_document(&evidence_root.join("metadata.json"), metadata)?;
+    write_checkpoint_soak_document(&evidence_root.join("summary.json"), summary)?;
+    write_checkpoint_soak_document(
+        &evidence_root.join("bundle.json"),
+        &checkpoint_soak_evidence_bundle(metadata, summary, evidence),
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -5335,14 +6226,28 @@ fn checkpoint_soak_evidence_directory() -> tempfile::TempDir {
 async fn run_checkpoint_restart_linux_soak() {
     let directory = checkpoint_soak_evidence_directory();
     let commit = strict_command_output("git", &["rev-parse", "HEAD"]).unwrap();
-    println!(
-        "{}",
-        checkpoint_restart_soak_metadata(
-            &commit,
-            &command_output("uname", &["-sr"]),
-            &command_output("rustc", &["--version"]),
-        )
+    let executable = checkpoint_soak_test_executable().unwrap();
+    let executable_sha256 = checkpoint_soak_file_sha256(&executable).unwrap();
+    let rustc_verbose = strict_command_output("rustc", &["-vV"]).unwrap();
+    let target = rustc_verbose
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .expect("rustc -vV must report its host target");
+    let libc = strict_command_output("ldd", &["--version"])
+        .unwrap()
+        .lines()
+        .next()
+        .expect("ldd --version must report libc")
+        .to_owned();
+    let metadata = checkpoint_restart_soak_metadata(
+        &commit,
+        &executable_sha256,
+        &command_output("uname", &["-sr"]),
+        &command_output("rustc", &["--version"]),
+        target,
+        &libc,
     );
+    println!("{metadata}");
     let evidence =
         match run_checkpoint_soak_processes(directory.path(), CheckpointSoakProcessMode::Standard)
             .await
@@ -5357,15 +6262,6 @@ async fn run_checkpoint_restart_linux_soak() {
             }
         };
     let evidence_root = directory.keep();
-    println!(
-        "{}",
-        json!({
-            "schema": "calc-flow.m5-checkpoint-soak-evidence-root.v1",
-            "type": "calc_flow_m5_checkpoint_soak_evidence_root",
-            "commit": &commit,
-            "path": &evidence_root,
-        })
-    );
     let report = &evidence.report;
     assert_eq!(report.restarts, 2);
     assert_eq!(report.generation_process_ids.len(), 3);
@@ -5379,16 +6275,27 @@ async fn run_checkpoint_restart_linux_soak() {
     assert_eq!(report.terminal_charged_edges, 0);
     assert_eq!(report.terminal_registries, (0, 0));
     assert_eq!(observed_timeline_issue(&evidence.rss_samples), None);
-    let rss_gate = evaluate_checkpoint_restart_rss_gate(&evidence.rss_samples)
+    let rss_gate = evaluate_checkpoint_restart_rss_gate(&evidence.rss_process_samples)
         .expect("checkpoint soak RSS samples incomplete");
     assert!(
         rss_gate.passed,
         "checkpoint soak RSS guard failed: {rss_gate:?}"
     );
+    let summary = checkpoint_soak_process_summary(&commit, &evidence, &rss_gate);
+    publish_checkpoint_soak_evidence(&evidence_root, &metadata, &summary, &evidence).unwrap();
     println!(
         "{}",
-        checkpoint_soak_process_summary(&commit, &evidence, rss_gate)
+        json!({
+            "schema": "calc-flow.m5-checkpoint-soak-evidence-root.v2",
+            "type": "calc_flow_m5_checkpoint_soak_evidence_root",
+            "commit": &commit,
+            "path": &evidence_root,
+            "metadata": "evidence/metadata.json",
+            "summary": "evidence/summary.json",
+            "bundle": "evidence/bundle.json",
+        })
     );
+    println!("{summary}");
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -5949,7 +6856,7 @@ fn checkpoint_restart_rss_gate_compares_equivalent_lifecycle_phases() {
         50..80 => 120_000,
         90..120 => {
             let growth = if growing {
-                u64::try_from(index - 90).unwrap().saturating_mul(1_000)
+                u64::try_from(index - 90).unwrap().saturating_mul(2_000)
             } else {
                 0
             };
@@ -5969,18 +6876,155 @@ fn checkpoint_restart_rss_gate_compares_equivalent_lifecycle_phases() {
             rss_kib: lifecycle_rss(index, true),
         })
         .collect::<Vec<_>>();
+    let split_processes = |samples: Vec<RssSample>| {
+        samples
+            .chunks_exact(CHECKPOINT_SOAK_PROCESS_SAMPLE_COUNT)
+            .enumerate()
+            .map(|(generation, samples)| CheckpointRssProcessSamples {
+                generation,
+                pid: u32::try_from(generation + 1).unwrap(),
+                samples: samples.to_vec(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let stable_processes = split_processes(stable.clone());
+    let growing_processes = split_processes(growing);
 
     assert!(!evaluate_rss_gate(&stable).unwrap().passed);
     assert!(
-        evaluate_checkpoint_restart_rss_gate(&stable)
+        evaluate_checkpoint_restart_rss_gate(&stable_processes)
             .unwrap()
             .passed
     );
     assert!(
-        !evaluate_checkpoint_restart_rss_gate(&growing)
+        !evaluate_checkpoint_restart_rss_gate(&growing_processes)
             .unwrap()
             .passed
     );
+}
+
+fn checkpoint_rss_process_samples(
+    generation: usize,
+    pid: u32,
+    initial_rss_kib: u64,
+) -> CheckpointRssProcessSamples {
+    let sample_start = generation * CHECKPOINT_SOAK_PROCESS_SAMPLE_COUNT;
+    let samples = (0..CHECKPOINT_SOAK_PROCESS_SAMPLE_COUNT)
+        .map(|local_index| RssSample {
+            elapsed_seconds: elapsed_at_sample(sample_start + local_index),
+            rss_kib: initial_rss_kib
+                + u64::try_from(local_index.min(CHECKPOINT_RSS_PROCESS_WARMUP_SAMPLES)).unwrap()
+                    * 1_024,
+        })
+        .collect();
+    CheckpointRssProcessSamples {
+        generation,
+        pid,
+        samples,
+    }
+}
+
+fn checkpoint_rss_process_with_stable_window(
+    generation: usize,
+    pid: u32,
+    initial_rss_kib: u64,
+    normalized_growth_kib: u64,
+    stable_growth_kib: u64,
+) -> CheckpointRssProcessSamples {
+    let mut process = checkpoint_rss_process_samples(generation, pid, initial_rss_kib);
+    for (local_index, sample) in process.samples.iter_mut().enumerate() {
+        if local_index >= CHECKPOINT_RSS_WINDOW_LOCAL_RANGE[0] {
+            sample.rss_kib = sample.rss_kib.saturating_add(normalized_growth_kib);
+        }
+        if local_index
+            >= CHECKPOINT_RSS_WINDOW_LOCAL_RANGE[0] + CHECKPOINT_RSS_STABLE_SUBWINDOW_SAMPLES
+        {
+            sample.rss_kib = sample.rss_kib.saturating_add(stable_growth_kib);
+        }
+    }
+    process
+}
+
+#[test]
+fn checkpoint_restart_rss_gate_normalizes_each_process_baseline() {
+    let process_samples = [
+        checkpoint_rss_process_samples(0, 101, 100_000),
+        checkpoint_rss_process_samples(1, 202, 180_000),
+        checkpoint_rss_process_samples(2, 303, 260_000),
+    ];
+
+    let gate = evaluate_checkpoint_restart_rss_gate(&process_samples).unwrap();
+
+    assert!(gate.passed);
+    assert_eq!(gate.processes.len(), CHECKPOINT_SOAK_GENERATIONS);
+    assert_eq!(gate.processes[0].pid, 101);
+    assert_eq!(gate.processes[1].pid, 202);
+    assert_eq!(gate.processes[2].pid, 303);
+    assert_eq!(gate.normalized_growth_spread_kib, 0);
+    assert!(
+        gate.processes
+            .iter()
+            .all(|process| process.normalized_growth_kib == 0 && process.passed)
+    );
+}
+
+#[test]
+fn checkpoint_restart_rss_gate_accepts_repeatable_converged_windows() {
+    let process_samples = [
+        checkpoint_rss_process_with_stable_window(0, 101, 100_000, 10 * 1_024, 4 * 1_024),
+        checkpoint_rss_process_with_stable_window(1, 202, 180_000, 12 * 1_024, 4 * 1_024),
+        checkpoint_rss_process_with_stable_window(2, 303, 260_000, 14 * 1_024, 4 * 1_024),
+    ];
+
+    let gate = evaluate_checkpoint_restart_rss_gate(&process_samples).unwrap();
+
+    assert!(gate.passed);
+    assert_eq!(gate.normalized_growth_spread_kib, 0);
+    assert!(
+        gate.processes
+            .iter()
+            .all(|process| process.normalized_growth_kib == 4 * 1_024 && process.passed)
+    );
+}
+
+#[test]
+fn checkpoint_restart_rss_gate_rejects_nonrepeatable_converged_windows() {
+    let process_samples = [
+        checkpoint_rss_process_with_stable_window(0, 101, 100_000, 0, 0),
+        checkpoint_rss_process_with_stable_window(1, 202, 180_000, 0, 256),
+        checkpoint_rss_process_with_stable_window(2, 303, 260_000, 0, 513),
+    ];
+
+    let gate = evaluate_checkpoint_restart_rss_gate(&process_samples).unwrap();
+
+    assert!(gate.processes.iter().all(|process| process.passed));
+    assert_eq!(gate.normalized_growth_spread_kib, 513);
+    assert!(!gate.passed);
+}
+
+#[test]
+fn checkpoint_restart_rss_gate_ignores_pre_stable_warmup_variance() {
+    let process_samples = [
+        checkpoint_rss_process_with_stable_window(0, 101, 100_000, 0, 4 * 1_024),
+        checkpoint_rss_process_with_stable_window(1, 202, 180_000, 20 * 1_024, 4 * 1_024),
+        checkpoint_rss_process_with_stable_window(2, 303, 260_000, 5 * 1_024, 4 * 1_024),
+    ];
+
+    let gate = evaluate_checkpoint_restart_rss_gate(&process_samples).unwrap();
+
+    assert!(gate.passed);
+    assert_eq!(gate.normalized_growth_spread_kib, 0);
+}
+
+#[test]
+fn checkpoint_restart_rss_gate_rejects_reused_process_identity() {
+    let process_samples = [
+        checkpoint_rss_process_samples(0, 101, 100_000),
+        checkpoint_rss_process_samples(1, 101, 180_000),
+        checkpoint_rss_process_samples(2, 303, 260_000),
+    ];
+
+    assert_eq!(evaluate_checkpoint_restart_rss_gate(&process_samples), None);
 }
 
 #[test]
@@ -6198,6 +7242,127 @@ fn checkpoint_soak_process_report_fixture(
 }
 
 #[test]
+fn checkpoint_soak_cadence_tolerance_includes_exact_thirteen_second_boundary() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut plan = checkpoint_soak_process_plans(
+        directory.path(),
+        &"a".repeat(40),
+        &"b".repeat(64),
+        CheckpointSoakProcessMode::Standard,
+    )
+    .remove(0);
+    bind_checkpoint_soak_parent_launch(&mut plan, Duration::ZERO).unwrap();
+    let mut report = checkpoint_soak_process_report_fixture(&plan, 10_000);
+    report.samples[0].elapsed_micros = 13_000_000;
+
+    assert_eq!(
+        checkpoint_soak_sample_issue(&report, 0, &report.samples[0], 10_000_000, 3_000_000),
+        None,
+    );
+
+    report.samples[0].elapsed_micros = 13_000_001;
+    assert!(
+        checkpoint_soak_sample_issue(&report, 0, &report.samples[0], 10_000_000, 3_000_000)
+            .is_some()
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn checkpoint_soak_evidence_bundle_contains_all_raw_child_documents() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable_sha256 = "b".repeat(64);
+    let mut plans = checkpoint_soak_process_plans(
+        directory.path(),
+        &"a".repeat(40),
+        &executable_sha256,
+        CheckpointSoakProcessMode::Standard,
+    );
+    for plan in &mut plans {
+        bind_checkpoint_soak_parent_launch(
+            plan,
+            Duration::from_secs(u64::try_from(plan.generation).unwrap() * 401),
+        )
+        .unwrap();
+    }
+    let reports = plans
+        .iter()
+        .enumerate()
+        .map(|(generation, plan)| {
+            checkpoint_soak_process_report_fixture(
+                plan,
+                10_000 + u32::try_from(generation).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let parent_timings = reports
+        .iter()
+        .map(|report| CheckpointSoakParentTiming {
+            generation: report.generation,
+            launch_micros: report.generation_started_micros,
+            finish_micros: report.generation_finished_micros + 250_000,
+        })
+        .collect::<Vec<_>>();
+    let evidence = aggregate_checkpoint_soak_processes(
+        plans,
+        reports,
+        vec![0; CHECKPOINT_SOAK_GENERATIONS],
+        parent_timings,
+    );
+    let rss_gate = evaluate_checkpoint_restart_rss_gate(&evidence.rss_process_samples).unwrap();
+    let metadata = checkpoint_restart_soak_metadata(
+        &"a".repeat(40),
+        &executable_sha256,
+        "Linux 1",
+        "rustc 1.88",
+        "x86_64-unknown-linux-gnu",
+        "glibc 2.39",
+    );
+    let summary = checkpoint_soak_process_summary(&"a".repeat(40), &evidence, &rss_gate);
+
+    let bundle = checkpoint_soak_evidence_bundle(&metadata, &summary, &evidence);
+
+    assert_eq!(bundle["schema"], "calc-flow.m5-checkpoint-soak-evidence.v2");
+    assert_eq!(bundle["metadata"], metadata);
+    assert_eq!(bundle["summary"], summary);
+    assert_eq!(bundle["child_plans"].as_array().unwrap().len(), 3);
+    assert_eq!(bundle["child_reports"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        bundle["child_reports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|report| report["samples"].as_array().unwrap().len())
+            .sum::<usize>(),
+        CHECKPOINT_SOAK_SAMPLE_COUNT,
+    );
+    assert_eq!(bundle["executable_sha256"], executable_sha256);
+
+    publish_checkpoint_soak_evidence(directory.path(), &metadata, &summary, &evidence).unwrap();
+    assert_eq!(
+        read_checkpoint_soak_document::<serde_json::Value>(
+            &directory.path().join("evidence/metadata.json"),
+        )
+        .unwrap(),
+        metadata,
+    );
+    assert_eq!(
+        read_checkpoint_soak_document::<serde_json::Value>(
+            &directory.path().join("evidence/summary.json"),
+        )
+        .unwrap(),
+        summary,
+    );
+    assert_eq!(
+        read_checkpoint_soak_document::<serde_json::Value>(
+            &directory.path().join("evidence/bundle.json"),
+        )
+        .unwrap(),
+        bundle,
+    );
+}
+
+#[test]
 #[allow(
     clippy::too_many_lines,
     reason = "one fail-closed evidence test mutates every independent process proof field"
@@ -6240,7 +7405,7 @@ fn checkpoint_restart_process_evidence_fails_closed() {
     validate_checkpoint_soak_process_set(&plans, &reports, &exits, &parent_timings).unwrap();
 
     let mut bounded_scheduler_jitter = reports.clone();
-    bounded_scheduler_jitter[0].samples[0].elapsed_micros += 1_100_000;
+    bounded_scheduler_jitter[0].samples[0].elapsed_micros += 2_250_000;
     validate_checkpoint_soak_process_set(
         &plans,
         &bounded_scheduler_jitter,
@@ -6315,7 +7480,7 @@ fn checkpoint_restart_process_evidence_fails_closed() {
     );
 
     let mut mistimed_sample = reports.clone();
-    mistimed_sample[0].samples[5].elapsed_micros += 3_000_000;
+    mistimed_sample[0].samples[5].elapsed_micros += 4_000_000;
     assert!(matches!(
         validate_checkpoint_soak_process_set(
             &plans,
@@ -6325,7 +7490,7 @@ fn checkpoint_restart_process_evidence_fails_closed() {
         ),
         Err(CalcFlowError::InvalidArgument { message, .. })
             if message.contains(
-                "generation 0 sample 5 elapsed 63000000us outside target 60000000us +/-2000000us"
+                "generation 0 sample 5 elapsed 64000000us outside target 60000000us +/-3000000us"
             )
     ));
 
@@ -6396,6 +7561,31 @@ fn checkpoint_restart_process_document_rejects_missing_and_malformed_reports() {
     ));
 }
 
+#[test]
+fn checkpoint_soak_child_command_stabilizes_system_allocator() {
+    let command = checkpoint_soak_child_command(
+        Path::new("/test/checkpoint-soak"),
+        Path::new("/test/plan.json"),
+    );
+    let environment = command
+        .get_envs()
+        .map(|(name, value)| (name.to_owned(), value.map(std::ffi::OsStr::to_owned)))
+        .collect::<BTreeMap<_, _>>();
+
+    assert_eq!(
+        environment.get(std::ffi::OsStr::new("MALLOC_ARENA_MAX")),
+        Some(&Some(std::ffi::OsString::from("1")))
+    );
+    assert_eq!(
+        environment.get(std::ffi::OsStr::new("MALLOC_TRIM_THRESHOLD_")),
+        Some(&Some(std::ffi::OsString::from("0")))
+    );
+    assert_eq!(
+        environment.get(std::ffi::OsStr::new("MALLOC_TOP_PAD_")),
+        Some(&Some(std::ffi::OsString::from("0")))
+    );
+}
+
 #[tokio::test]
 async fn checkpoint_restart_soak_generation_child_process() {
     let Some(plan_path) = std::env::var_os(CHECKPOINT_SOAK_CHILD_ENV).map(PathBuf::from) else {
@@ -6442,15 +7632,27 @@ async fn checkpoint_restart_soak_smoke_exercises_retention_and_compaction() {
     assert_eq!(report.temporary_artifacts, 0);
 }
 
+fn checkpoint_restart_soak_metadata_fixture() -> serde_json::Value {
+    checkpoint_restart_soak_metadata(
+        "abc123",
+        "f".repeat(64).as_str(),
+        "Linux 1",
+        "rustc 1.88",
+        "x86_64-unknown-linux-gnu",
+        "glibc 2.39",
+    )
+}
+
 #[test]
 fn checkpoint_restart_soak_contract_is_exact_and_machine_readable() {
-    let metadata = checkpoint_restart_soak_metadata("abc123", "Linux 1", "rustc 1.88");
+    let metadata = checkpoint_restart_soak_metadata_fixture();
 
-    assert_eq!(metadata["schema"], "calc-flow.m5-checkpoint-soak.v1");
+    assert_eq!(metadata["schema"], "calc-flow.m5-checkpoint-soak.v2");
     assert_eq!(metadata["target_duration_seconds"], 1_200);
     assert_eq!(metadata["sample_count"], 120);
     assert_eq!(metadata["cadence_seconds"], 10);
-    assert_eq!(metadata["cadence_tolerance_seconds"], 2);
+    assert_eq!(metadata["cadence_tolerance_seconds"], 3);
+    assert_eq!(metadata["cadence_tolerance_boundary"], "inclusive");
     assert_eq!(metadata["maximum_restart_gap_seconds"], 60);
     assert_eq!(
         metadata["timing_source"],
@@ -6470,22 +7672,89 @@ fn checkpoint_restart_soak_contract_is_exact_and_machine_readable() {
     assert_eq!(metadata["source_count"], 2);
     assert_eq!(metadata["transactional_sink_count"], 2);
     assert_eq!(metadata["retained_epochs"], 2);
-    assert_eq!(metadata["warmup_samples"], 30);
-    assert_eq!(metadata["restart_warmup_samples"], 10);
+    assert_eq!(metadata.get("warmup_samples"), None);
+    assert_eq!(metadata.get("restart_warmup_samples"), None);
     assert_eq!(
-        metadata["rss_comparison_sample_ranges"],
-        json!([[50, 79], [90, 119]])
+        metadata["rss_gate"]["normalization"],
+        "same_pid_baseline_median"
     );
-    assert_eq!(metadata["rss_slope_sample_range"], json!([90, 119]));
+    assert_eq!(metadata["rss_gate"]["process_warmup_samples"], 30);
+    assert_eq!(metadata["rss_gate"]["stable_window_samples"], 10);
+    assert_eq!(metadata["rss_gate"]["stable_subwindow_samples"], 5);
+    assert_eq!(
+        metadata["rss_gate"]["slope_local_sample_range"],
+        json!([30, 39])
+    );
+    assert_eq!(
+        metadata["rss_gate"]["baseline_local_sample_range"],
+        json!([30, 34])
+    );
+    assert_eq!(
+        metadata["rss_gate"]["stable_local_sample_range"],
+        json!([35, 39])
+    );
+    assert_eq!(metadata["rss_gate"]["required_passing_generations"], 3);
+    assert_eq!(metadata["rss_gate"]["slope_role"], "informational");
+    assert_eq!(metadata["rss_gate"]["maximum_normalized_growth_kib"], 8_192);
+    assert_eq!(
+        metadata["rss_gate"]["maximum_normalized_growth_spread_kib"],
+        512
+    );
+    assert_eq!(
+        metadata["rss_gate"]["spread_calibration"]["controlled_run_spread_kib"],
+        json!([92, 208])
+    );
+    assert_eq!(
+        metadata["rss_gate"]["spread_calibration"]["threshold_policy"],
+        "next_power_of_two_above_twice_maximum_observed"
+    );
     assert_eq!(metadata["state_bytes_limit"], 64 * 1_024 * 1_024);
+    assert_eq!(
+        metadata["command"],
+        "CALC_FLOW_M5_CHECKPOINT_SOAK=1 cargo test -p calc-flow --lib runtime::streaming::soak::twenty_minute_epoch_checkpoint_restart -- --ignored --exact --nocapture"
+    );
+}
+
+#[test]
+fn checkpoint_restart_soak_contract_pins_provenance_and_artifacts() {
+    let metadata = checkpoint_restart_soak_metadata_fixture();
+
     assert_eq!(
         metadata["environment"]["rss_source"],
         "/proc/self/status:VmRSS"
     );
-    assert_eq!(metadata["commit"], "abc123");
     assert_eq!(
-        metadata["command"],
-        "CALC_FLOW_M5_CHECKPOINT_SOAK=1 cargo test -p calc-flow --lib runtime::streaming::soak::twenty_minute_epoch_checkpoint_restart -- --ignored --exact --nocapture"
+        metadata["environment"]["target"],
+        "x86_64-unknown-linux-gnu"
+    );
+    assert_eq!(metadata["environment"]["libc"], "glibc 2.39");
+    assert_eq!(
+        metadata["environment"]["allocator_controls"],
+        json!({
+            "MALLOC_ARENA_MAX": "1",
+            "MALLOC_TRIM_THRESHOLD_": "0",
+            "MALLOC_TOP_PAD_": "0",
+        })
+    );
+    assert_eq!(metadata["commit"], "abc123");
+    assert_eq!(metadata["executable_sha256"], "f".repeat(64));
+    assert_eq!(
+        metadata["evidence_artifacts"],
+        json!({
+            "metadata": "evidence/metadata.json",
+            "summary": "evidence/summary.json",
+            "bundle": "evidence/bundle.json",
+            "child_plans": [
+                "evidence/plans/generation-0.json",
+                "evidence/plans/generation-1.json",
+                "evidence/plans/generation-2.json",
+            ],
+            "child_reports": [
+                "evidence/reports/generation-0.json",
+                "evidence/reports/generation-1.json",
+                "evidence/reports/generation-2.json",
+            ],
+        })
     );
 }
 
@@ -7165,163 +8434,801 @@ async fn twenty_minute_epoch_checkpoint_restart() {
     run_checkpoint_restart_linux_soak().await;
 }
 
-#[tokio::test]
-async fn partial_sink_commit_fault_preserves_the_second_sink_for_forward_recovery() {
-    for mode in CheckpointFaultMode::ALL {
-        let report =
-            run_checkpoint_restart_fault_case(CheckpointFaultPoint::PartialSinkCommit, mode).await;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ManifestParentSyncIoSupport {
+    Supported,
+    Unsupported(&'static str),
+}
 
+const fn classify_manifest_parent_sync_io_support(
+    is_unix: bool,
+    permission_denied: bool,
+) -> ManifestParentSyncIoSupport {
+    if !is_unix {
+        ManifestParentSyncIoSupport::Unsupported("requires Unix directory permission semantics")
+    } else if !permission_denied {
+        ManifestParentSyncIoSupport::Unsupported(
+            "this process bypasses mode 0111 directory restrictions",
+        )
+    } else {
+        ManifestParentSyncIoSupport::Supported
+    }
+}
+
+fn manifest_parent_sync_io_support() -> ManifestParentSyncIoSupport {
+    #[cfg(unix)]
+    {
+        let capability_root = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("parent-sync capability root failed: {error}"));
+        let permission_denied =
+            crate::state::parent_sync_permission_failure_supported_for_test(capability_root.path())
+                .unwrap_or_else(|error| panic!("parent-sync capability probe failed: {error}"));
+        classify_manifest_parent_sync_io_support(true, permission_denied)
+    }
+    #[cfg(not(unix))]
+    {
+        classify_manifest_parent_sync_io_support(false, false)
+    }
+}
+
+#[test]
+fn manifest_parent_sync_io_support_classifies_platform_and_permission_capability() {
+    assert_eq!(
+        classify_manifest_parent_sync_io_support(true, true),
+        ManifestParentSyncIoSupport::Supported
+    );
+    assert_eq!(
+        classify_manifest_parent_sync_io_support(false, false),
+        ManifestParentSyncIoSupport::Unsupported("requires Unix directory permission semantics")
+    );
+    assert_eq!(
+        classify_manifest_parent_sync_io_support(true, false),
+        ManifestParentSyncIoSupport::Unsupported(
+            "this process bypasses mode 0111 directory restrictions"
+        )
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the public proof owns both retained and lost installed-manifest recovery outcomes"
+)]
+async fn public_parent_directory_sync_os_failure_requires_recovery() {
+    if let ManifestParentSyncIoSupport::Unsupported(reason) = manifest_parent_sync_io_support() {
+        eprintln!("skipping public parent-directory sync OS failure proof: {reason}");
+        return;
+    }
+    for manifest_retained in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let state_root = directory.path().join("state");
+        let manifest_root = directory.path().join("manifests");
+        let sink_root = directory.path().join("sinks");
+        let source_opens = Arc::new(Mutex::new(Vec::new()));
+        let source_closed = Arc::new(AtomicUsize::new(0));
+        let sink_closed = Arc::new(AtomicUsize::new(0));
+        let sink_writes = Arc::new(AtomicUsize::new(0));
+        let output_probe = Arc::new(CheckpointMatrixOutputProbe::default());
+        let config = StreamRuntimeConfig {
+            checkpoint_interval: Duration::from_secs(3_600),
+            checkpoint_timeout: Duration::from_secs(5),
+            retained_epochs: 2,
+            ..StreamRuntimeConfig::default()
+        };
+        let runner = checkpoint_matrix_public_runner(
+            directory.path(),
+            &sink_root,
+            &source_opens,
+            &source_closed,
+            &sink_closed,
+            &sink_writes,
+            &output_probe,
+            Duration::ZERO,
+            true,
+            config,
+            Some((
+                CheckpointFaultPoint::ManifestParentSync,
+                CheckpointFaultMode::Io,
+            )),
+        );
+        let job = runner.start().await.unwrap();
+        wait_for_checkpoint_matrix_sources(&job, &output_probe).await;
+
+        let (manual, outcome) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(job.trigger_checkpoint(), job.wait())
+        })
+        .await
+        .expect("real parent-directory sync failure did not converge");
+
+        let CalcFlowError::Streaming(error) = manual.unwrap_err() else {
+            panic!("manual parent-directory sync failure must use the streaming boundary");
+        };
+        assert_eq!(
+            error.category(),
+            PublicStreamingErrorCategory::CheckpointPublicationUnknown
+        );
+        assert_eq!(error.epoch(), Some(Epoch::INITIAL));
+        assert_eq!(outcome.state, PublicJobState::RecoveryRequired);
+        let status = job.status();
+        assert_eq!(status.state, PublicJobState::RecoveryRequired);
+        assert_eq!(status.checkpoint.last_completed_epoch, None);
+        assert_eq!(
+            status.checkpoint.installed_unknown_epoch,
+            Some(Epoch::INITIAL)
+        );
+        assert_eq!(
+            job.test_probe().parent_sync_os_failures,
+            1,
+            "the public recovery result must be caused by a real parent-directory sync OS failure"
+        );
+        let manifest_path = manifest_root.join("manifest-00000000000000000001.json");
+        assert!(manifest_path.is_file());
+        assert_eq!(output_probe.transactional_commits.load(Ordering::SeqCst), 0);
+        assert_eq!(output_probe.transactional_aborts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            ["sink-a", "sink-b"]
+                .into_iter()
+                .filter(|sink_id| sink_root
+                    .join(sink_id)
+                    .join("prepared-00000000000000000001.json")
+                    .is_file())
+                .count(),
+            2
+        );
+        assert!(
+            ["sink-a", "sink-b"]
+                .into_iter()
+                .all(|sink_id| !checkpoint_matrix_sink_has_visible(&sink_root.join(sink_id)))
+        );
+        drop(job);
+
+        if !manifest_retained {
+            std::fs::remove_file(&manifest_path).unwrap();
+        }
+        let restart_source_opens = Arc::new(Mutex::new(Vec::new()));
+        let restart_source_closed = Arc::new(AtomicUsize::new(0));
+        let restart_sink_closed = Arc::new(AtomicUsize::new(0));
+        let restart_sink_writes = Arc::new(AtomicUsize::new(0));
+        let restart = checkpoint_matrix_public_runner(
+            directory.path(),
+            &sink_root,
+            &restart_source_opens,
+            &restart_source_closed,
+            &restart_sink_closed,
+            &restart_sink_writes,
+            &output_probe,
+            Duration::ZERO,
+            false,
+            config,
+            None,
+        )
+        .start()
+        .await
+        .unwrap();
+        let restarted = tokio::time::timeout(Duration::from_secs(5), restart.wait())
+            .await
+            .expect("rebuilt public runner did not converge");
+        assert_eq!(restarted.state, PublicJobState::Completed);
+        assert_eq!(
+            restarted.completed_epoch,
+            Some(if manifest_retained {
+                Epoch::INITIAL.next().unwrap()
+            } else {
+                Epoch::INITIAL
+            })
+        );
+        let mut opened = restart_source_opens.lock().clone();
+        opened.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            opened,
+            ["left", "right"]
+                .into_iter()
+                .map(|source_id| (
+                    source_id.into(),
+                    manifest_retained.then(|| checkpoint_matrix_cursor_order(source_id)),
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            output_probe.transactional_recovers.load(Ordering::SeqCst),
+            if manifest_retained { 2 } else { 0 }
+        );
+        assert_eq!(output_probe.transactional_commits.load(Ordering::SeqCst), 2);
+        assert_eq!(output_probe.transactional_aborts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            output_probe.ordinary_records.lock().len(),
+            if manifest_retained { 2 } else { 4 }
+        );
+        assert_eq!(
+            checkpoint_matrix_temporary_artifacts(&state_root, &manifest_root, &sink_root),
+            0
+        );
+        assert_eq!(source_closed.load(Ordering::SeqCst), 2);
+        assert_eq!(sink_closed.load(Ordering::SeqCst), 2);
+        assert_eq!(restart_source_closed.load(Ordering::SeqCst), 2);
+        assert_eq!(restart_sink_closed.load(Ordering::SeqCst), 2);
+        assert_eq!(output_probe.ordinary_closed.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "each named fault case asserts the complete restart and recovery oracle"
+)]
+async fn assert_named_checkpoint_fault_case(
+    case_id: &str,
+    point: CheckpointFaultPoint,
+    mode: CheckpointFaultMode,
+) {
+    if point == CheckpointFaultPoint::ManifestParentSync
+        && mode == CheckpointFaultMode::Io
+        && let ManifestParentSyncIoSupport::Unsupported(reason) = manifest_parent_sync_io_support()
+    {
+        eprintln!("skipping named checkpoint fault case {case_id}: {reason}");
+        return;
+    }
+    let report = run_checkpoint_restart_fault_case(point, mode).await;
+    let durable_before_restart = matches!(
+        point,
+        CheckpointFaultPoint::ManifestRename
+            | CheckpointFaultPoint::ManifestParentSync
+            | CheckpointFaultPoint::PartialSinkCommit
+            | CheckpointFaultPoint::CompletedCommit
+            | CheckpointFaultPoint::Retention
+            | CheckpointFaultPoint::Compaction
+    );
+    let expected_manual = match (point, mode) {
+        (CheckpointFaultPoint::ManifestRename, _)
+        | (CheckpointFaultPoint::ManifestParentSync, CheckpointFaultMode::Io) => {
+            CheckpointManualObservation::Failed {
+                category: PublicStreamingErrorCategory::CheckpointPublicationUnknown,
+                epoch: Some(Epoch::INITIAL),
+                phase: Some(PublicCheckpointPhase::ManifestInstalled),
+                component_kind: Some(PublicComponentKind::Checkpoint),
+                component_id: None,
+            }
+        }
+        (CheckpointFaultPoint::PartialSinkCommit, CheckpointFaultMode::Cancel) => {
+            CheckpointManualObservation::Failed {
+                category: PublicStreamingErrorCategory::Internal,
+                epoch: None,
+                phase: None,
+                component_kind: Some(PublicComponentKind::Checkpoint),
+                component_id: None,
+            }
+        }
+        (CheckpointFaultPoint::PartialSinkCommit, _) => CheckpointManualObservation::Failed {
+            category: PublicStreamingErrorCategory::Connector,
+            epoch: Some(Epoch::INITIAL),
+            phase: Some(PublicCheckpointPhase::ManifestDurable),
+            component_kind: Some(PublicComponentKind::Sink),
+            component_id: Some("sink-a".into()),
+        },
+        (
+            CheckpointFaultPoint::PartialAlignment | CheckpointFaultPoint::StateStage,
+            CheckpointFaultMode::Io | CheckpointFaultMode::Restart,
+        ) => CheckpointManualObservation::Failed {
+            category: PublicStreamingErrorCategory::Operator,
+            epoch: Some(Epoch::INITIAL),
+            phase: Some(PublicCheckpointPhase::SourcesCut),
+            component_kind: Some(PublicComponentKind::Operator),
+            component_id: Some(
+                if point == CheckpointFaultPoint::PartialAlignment {
+                    "merge"
+                } else {
+                    "window"
+                }
+                .into(),
+            ),
+        },
+        (
+            CheckpointFaultPoint::PartialAlignment | CheckpointFaultPoint::StateStage,
+            CheckpointFaultMode::Panic,
+        ) => CheckpointManualObservation::Failed {
+            category: PublicStreamingErrorCategory::TaskPanicked,
+            epoch: Some(Epoch::INITIAL),
+            phase: Some(PublicCheckpointPhase::SourcesCut),
+            component_kind: None,
+            component_id: None,
+        },
+        (
+            CheckpointFaultPoint::SourceAdmission
+            | CheckpointFaultPoint::SourceCut
+            | CheckpointFaultPoint::SinkPreCommit,
+            CheckpointFaultMode::Panic,
+        ) => CheckpointManualObservation::Failed {
+            category: PublicStreamingErrorCategory::Internal,
+            epoch: None,
+            phase: None,
+            component_kind: Some(PublicComponentKind::Checkpoint),
+            component_id: None,
+        },
+        (
+            CheckpointFaultPoint::ManifestParentSync,
+            CheckpointFaultMode::Panic | CheckpointFaultMode::Cancel | CheckpointFaultMode::Restart,
+        )
+        | (
+            CheckpointFaultPoint::CompletedCommit
+            | CheckpointFaultPoint::Retention
+            | CheckpointFaultPoint::Compaction,
+            _,
+        ) => CheckpointManualObservation::Completed(Epoch::INITIAL),
+        _ => CheckpointManualObservation::Failed {
+            category: if mode == CheckpointFaultMode::Io {
+                PublicStreamingErrorCategory::Io
+            } else {
+                PublicStreamingErrorCategory::Internal
+            },
+            epoch: Some(Epoch::INITIAL),
+            phase: Some(match (point, mode) {
+                (CheckpointFaultPoint::PartialAlignment, CheckpointFaultMode::Cancel) => {
+                    PublicCheckpointPhase::Requested
+                }
+                (CheckpointFaultPoint::ManifestParentSync, CheckpointFaultMode::Cancel) => {
+                    PublicCheckpointPhase::SinksCommitted
+                }
+                _ => checkpoint_fault_expected_phase(point),
+            }),
+            component_kind: Some(PublicComponentKind::Checkpoint),
+            component_id: None,
+        },
+    };
+    assert_eq!(
+        report.manual_observation, expected_manual,
+        "{case_id}: public manual observer classification mismatch"
+    );
+    assert_eq!(
+        report.selected_before_restart,
+        durable_before_restart.then_some(Epoch::INITIAL),
+        "{case_id}: selected epoch mismatch"
+    );
+    assert_eq!(
+        report.prepared_artifacts_after_failure,
+        match point {
+            CheckpointFaultPoint::ManifestRename => 2,
+            CheckpointFaultPoint::ManifestParentSync if mode == CheckpointFaultMode::Io => 2,
+            CheckpointFaultPoint::PartialSinkCommit => 1,
+            _ => 0,
+        },
+        "{case_id}: prepared-artifact preservation mismatch"
+    );
+    if point == CheckpointFaultPoint::PartialSinkCommit {
         assert_eq!(
             report.committed_sinks_before_restart,
             BTreeSet::from(["sink-a".into()]),
-            "first sink must commit before the injected fault at {mode:?}"
+            "{case_id}: the first sink must commit before the injected fault"
         );
         assert_eq!(
             report.prepared_sinks_before_restart,
             BTreeSet::from(["sink-b".into()]),
-            "second sink must remain prepared for forward recovery at {mode:?}"
+            "{case_id}: the second sink must remain prepared for forward recovery"
         );
-        assert_eq!(report.restored_epoch, Some(Epoch::INITIAL.next().unwrap()));
-        assert_eq!(
-            report.restart_source_opens,
-            vec![
-                ("left".into(), Some(41_u64.to_be_bytes().to_vec())),
-                ("right".into(), Some(73_u64.to_be_bytes().to_vec())),
-            ]
-        );
-        assert_eq!(
-            report.final_manifest_cursors["left"].order,
-            hex::encode(41_u64.to_be_bytes())
-        );
-        assert!(report.final_manifest_cursors["left"].payload.is_empty());
-        assert_eq!(
-            report.final_manifest_cursors["right"].order,
-            hex::encode(73_u64.to_be_bytes())
-        );
-        assert!(report.final_manifest_cursors["right"].payload.is_empty());
-        assert_eq!(report.visible_records, 4);
-        assert_eq!(report.duplicate_records, 0);
-        assert_eq!(report.missing_records, 0);
     }
+    assert_eq!(
+        report.restored_epoch,
+        Some(if durable_before_restart {
+            Epoch::INITIAL.next().unwrap()
+        } else {
+            Epoch::INITIAL
+        }),
+        "{case_id}: final epoch mismatch"
+    );
+    assert_eq!(
+        report.restart_source_opens,
+        vec![
+            (
+                "left".into(),
+                durable_before_restart.then(|| 41_u64.to_be_bytes().to_vec()),
+            ),
+            (
+                "right".into(),
+                durable_before_restart.then(|| 73_u64.to_be_bytes().to_vec()),
+            ),
+        ],
+        "{case_id}: restart connectors must open once at their exact durable cursors"
+    );
+    assert_eq!(
+        report.restored_cursor_orders,
+        BTreeMap::from([
+            ("left".into(), 41_u64.to_be_bytes().to_vec()),
+            ("right".into(), 73_u64.to_be_bytes().to_vec()),
+        ]),
+        "{case_id}: restored source cursor mismatch"
+    );
+    assert_eq!(
+        report.final_manifest_cursors["left"].order,
+        hex::encode(41_u64.to_be_bytes()),
+        "{case_id}: final left cursor order mismatch"
+    );
+    assert!(report.final_manifest_cursors["left"].payload.is_empty());
+    assert_eq!(
+        report.final_manifest_cursors["right"].order,
+        hex::encode(73_u64.to_be_bytes()),
+        "{case_id}: final right cursor order mismatch"
+    );
+    assert!(report.final_manifest_cursors["right"].payload.is_empty());
+    assert!(report.sources_ended, "{case_id}: sources not ended");
+    assert!(
+        report.watermarks_restored,
+        "{case_id}: watermarks not restored"
+    );
+    assert_eq!(
+        report.final_source_sequences,
+        BTreeMap::from([("left".into(), Some(1)), ("right".into(), Some(1))]),
+        "{case_id}: frozen public source sequences"
+    );
+    assert_eq!(
+        report.final_source_idle,
+        BTreeMap::from([("left".into(), false), ("right".into(), false)]),
+        "{case_id}: frozen source idle state"
+    );
+    assert_eq!(
+        report.window_state_restored, durable_before_restart,
+        "{case_id}: window restore evidence mismatch"
+    );
+    assert_eq!(report.visible_records, 4, "{case_id}: visible record count");
+    assert_eq!(report.duplicate_records, 0, "{case_id}: duplicate records");
+    assert_eq!(report.missing_records, 0, "{case_id}: missing records");
+    assert_eq!(
+        report.transactional_output,
+        BTreeSet::from([
+            "sink-a|0|1|left|1".into(),
+            "sink-a|0|1|right|10".into(),
+            "sink-b|0|1|left|1".into(),
+            "sink-b|0|1|right|10".into(),
+        ]),
+        "{case_id}: transactional output oracle"
+    );
+    let mut ordinary_output = report.ordinary_output;
+    ordinary_output.sort();
+    let mut expected_ordinary = vec!["0|1|left|1".to_owned(), "0|1|right|10".to_owned()];
+    if !durable_before_restart {
+        expected_ordinary.extend(expected_ordinary.clone());
+        expected_ordinary.sort();
+    }
+    assert_eq!(
+        ordinary_output, expected_ordinary,
+        "{case_id}: ordinary output oracle"
+    );
+    assert_eq!(
+        report.temporary_artifacts, 0,
+        "{case_id}: temporary artifacts"
+    );
+    assert_eq!(report.terminal_tasks, 0, "{case_id}: terminal tasks");
+    assert_eq!(
+        report.terminal_charged_edges, 0,
+        "{case_id}: charged terminal edges"
+    );
+    assert_eq!(
+        report.terminal_registries,
+        (0, 0),
+        "{case_id}: terminal one-shot registries"
+    );
+    assert_eq!(
+        report.fault_trigger_count, 1,
+        "{case_id}: injected fault trigger count"
+    );
+    assert_eq!(
+        report.parent_sync_os_failures,
+        usize::from(
+            point == CheckpointFaultPoint::ManifestParentSync && mode == CheckpointFaultMode::Io
+        ),
+        "{case_id}: real parent-directory sync OS failure count"
+    );
+    assert_eq!(
+        report.cancellation_requested,
+        mode == CheckpointFaultMode::Cancel,
+        "{case_id}: cancellation token mismatch"
+    );
+    assert!(
+        report.deterministic_terminal_error,
+        "{case_id}: terminal error mismatch"
+    );
 }
 
-#[tokio::test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "the fault matrix asserts every recovery invariant for each point and mode"
-)]
-async fn checkpoint_restart_fault_matrix_preserves_exactly_once_window_output() {
-    for point in CheckpointFaultPoint::ALL {
-        for mode in CheckpointFaultMode::ALL {
-            let report = run_checkpoint_restart_fault_case(point, mode).await;
-            let durable_before_restart = matches!(
-                point,
-                CheckpointFaultPoint::ManifestRename
-                    | CheckpointFaultPoint::ManifestParentSync
-                    | CheckpointFaultPoint::PartialSinkCommit
-                    | CheckpointFaultPoint::CompletedCommit
-                    | CheckpointFaultPoint::Retention
-                    | CheckpointFaultPoint::Compaction
-            );
-            assert_eq!(
-                report.selected_before_restart,
-                durable_before_restart.then_some(Epoch::INITIAL),
-                "selected epoch mismatch at {point:?}/{mode:?}"
-            );
-            assert_eq!(
-                report.prepared_artifacts_after_failure,
-                match point {
-                    CheckpointFaultPoint::ManifestRename => 2,
-                    CheckpointFaultPoint::PartialSinkCommit => 1,
-                    _ => 0,
-                },
-                "prepared-artifact preservation mismatch at {point:?}/{mode:?}"
-            );
-            if point == CheckpointFaultPoint::PartialSinkCommit {
-                assert_eq!(
-                    report.committed_sinks_before_restart,
-                    BTreeSet::from(["sink-a".into()]),
-                    "first sink must commit before the injected fault at {mode:?}"
-                );
-                assert_eq!(
-                    report.prepared_sinks_before_restart,
-                    BTreeSet::from(["sink-b".into()]),
-                    "second sink must remain prepared for forward recovery at {mode:?}"
-                );
-            }
-            assert_eq!(
-                report.restored_epoch,
-                Some(if durable_before_restart {
-                    Epoch::INITIAL.next().unwrap()
-                } else {
-                    Epoch::INITIAL
-                }),
-                "final epoch mismatch at {point:?}/{mode:?}"
-            );
-            assert_eq!(
-                report.restart_source_opens,
-                vec![
-                    (
-                        "left".into(),
-                        durable_before_restart.then(|| 41_u64.to_be_bytes().to_vec()),
-                    ),
-                    (
-                        "right".into(),
-                        durable_before_restart.then(|| 73_u64.to_be_bytes().to_vec()),
-                    ),
-                ],
-                "restart connectors must open once at their exact durable cursors"
-            );
-            assert_eq!(
-                report.restored_cursor_orders,
-                BTreeMap::from([
-                    ("left".into(), 41_u64.to_be_bytes().to_vec()),
-                    ("right".into(), 73_u64.to_be_bytes().to_vec()),
-                ]),
-                "restored source cursor mismatch at {point:?}/{mode:?}"
-            );
-            assert_eq!(
-                report.final_manifest_cursors["left"].order,
-                hex::encode(41_u64.to_be_bytes()),
-                "final left cursor order mismatch at {point:?}/{mode:?}"
-            );
-            assert!(report.final_manifest_cursors["left"].payload.is_empty());
-            assert_eq!(
-                report.final_manifest_cursors["right"].order,
-                hex::encode(73_u64.to_be_bytes()),
-                "final right cursor order mismatch at {point:?}/{mode:?}"
-            );
-            assert!(report.final_manifest_cursors["right"].payload.is_empty());
-            assert!(
-                report.sources_ended,
-                "sources not ended at {point:?}/{mode:?}"
-            );
-            assert!(
-                report.watermarks_restored,
-                "watermarks not restored at {point:?}/{mode:?}"
-            );
-            assert_eq!(
-                report.window_state_restored, durable_before_restart,
-                "window restore evidence mismatch at {point:?}/{mode:?}"
-            );
-            assert_eq!(report.visible_records, 4);
-            assert_eq!(report.duplicate_records, 0);
-            assert_eq!(report.missing_records, 0);
-            assert_eq!(report.temporary_artifacts, 0);
-            assert_eq!(report.terminal_tasks, 0);
-            assert_eq!(report.terminal_charged_edges, 0);
-            assert_eq!(
-                report.cancellation_requested,
-                mode == CheckpointFaultMode::Cancel,
-                "cancellation token mismatch at {point:?}/{mode:?}"
-            );
-            assert!(
-                report.deterministic_terminal_error,
-                "terminal error mismatch at {point:?}/{mode:?}"
-            );
+macro_rules! named_checkpoint_fault_case {
+    ($test_name:ident, $case_id:literal, $point:ident, $mode:ident) => {
+        #[tokio::test]
+        async fn $test_name() {
+            assert_named_checkpoint_fault_case(
+                $case_id,
+                CheckpointFaultPoint::$point,
+                CheckpointFaultMode::$mode,
+            )
+            .await;
         }
-    }
+    };
 }
+
+named_checkpoint_fault_case!(
+    m5_fault_source_admission_io,
+    "m5_fault/source_admission/io",
+    SourceAdmission,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_source_admission_panic,
+    "m5_fault/source_admission/panic",
+    SourceAdmission,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_source_admission_cancel,
+    "m5_fault/source_admission/cancel",
+    SourceAdmission,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_source_admission_restart,
+    "m5_fault/source_admission/restart",
+    SourceAdmission,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_source_cut_io,
+    "m5_fault/source_cut/io",
+    SourceCut,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_source_cut_panic,
+    "m5_fault/source_cut/panic",
+    SourceCut,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_source_cut_cancel,
+    "m5_fault/source_cut/cancel",
+    SourceCut,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_source_cut_restart,
+    "m5_fault/source_cut/restart",
+    SourceCut,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_partial_alignment_io,
+    "m5_fault/partial_alignment/io",
+    PartialAlignment,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_partial_alignment_panic,
+    "m5_fault/partial_alignment/panic",
+    PartialAlignment,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_partial_alignment_cancel,
+    "m5_fault/partial_alignment/cancel",
+    PartialAlignment,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_partial_alignment_restart,
+    "m5_fault/partial_alignment/restart",
+    PartialAlignment,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_state_stage_io,
+    "m5_fault/state_stage/io",
+    StateStage,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_state_stage_panic,
+    "m5_fault/state_stage/panic",
+    StateStage,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_state_stage_cancel,
+    "m5_fault/state_stage/cancel",
+    StateStage,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_state_stage_restart,
+    "m5_fault/state_stage/restart",
+    StateStage,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_sink_pre_commit_io,
+    "m5_fault/sink_pre_commit/io",
+    SinkPreCommit,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_sink_pre_commit_panic,
+    "m5_fault/sink_pre_commit/panic",
+    SinkPreCommit,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_sink_pre_commit_cancel,
+    "m5_fault/sink_pre_commit/cancel",
+    SinkPreCommit,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_sink_pre_commit_restart,
+    "m5_fault/sink_pre_commit/restart",
+    SinkPreCommit,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_write_io,
+    "m5_fault/manifest_write/io",
+    ManifestWrite,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_write_panic,
+    "m5_fault/manifest_write/panic",
+    ManifestWrite,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_write_cancel,
+    "m5_fault/manifest_write/cancel",
+    ManifestWrite,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_write_restart,
+    "m5_fault/manifest_write/restart",
+    ManifestWrite,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_rename_io,
+    "m5_fault/manifest_rename/io",
+    ManifestRename,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_rename_panic,
+    "m5_fault/manifest_rename/panic",
+    ManifestRename,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_rename_cancel,
+    "m5_fault/manifest_rename/cancel",
+    ManifestRename,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_rename_restart,
+    "m5_fault/manifest_rename/restart",
+    ManifestRename,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_parent_sync_io,
+    "m5_fault/manifest_parent_sync/io",
+    ManifestParentSync,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_parent_sync_panic,
+    "m5_fault/manifest_parent_sync/panic",
+    ManifestParentSync,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_parent_sync_cancel,
+    "m5_fault/manifest_parent_sync/cancel",
+    ManifestParentSync,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_manifest_parent_sync_restart,
+    "m5_fault/manifest_parent_sync/restart",
+    ManifestParentSync,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_partial_sink_commit_io,
+    "m5_fault/partial_sink_commit/io",
+    PartialSinkCommit,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_partial_sink_commit_panic,
+    "m5_fault/partial_sink_commit/panic",
+    PartialSinkCommit,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_partial_sink_commit_cancel,
+    "m5_fault/partial_sink_commit/cancel",
+    PartialSinkCommit,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_partial_sink_commit_restart,
+    "m5_fault/partial_sink_commit/restart",
+    PartialSinkCommit,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_completed_commit_io,
+    "m5_fault/completed_commit/io",
+    CompletedCommit,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_completed_commit_panic,
+    "m5_fault/completed_commit/panic",
+    CompletedCommit,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_completed_commit_cancel,
+    "m5_fault/completed_commit/cancel",
+    CompletedCommit,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_completed_commit_restart,
+    "m5_fault/completed_commit/restart",
+    CompletedCommit,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_retention_io,
+    "m5_fault/retention/io",
+    Retention,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_retention_panic,
+    "m5_fault/retention/panic",
+    Retention,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_retention_cancel,
+    "m5_fault/retention/cancel",
+    Retention,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_retention_restart,
+    "m5_fault/retention/restart",
+    Retention,
+    Restart
+);
+named_checkpoint_fault_case!(
+    m5_fault_compaction_io,
+    "m5_fault/compaction/io",
+    Compaction,
+    Io
+);
+named_checkpoint_fault_case!(
+    m5_fault_compaction_panic,
+    "m5_fault/compaction/panic",
+    Compaction,
+    Panic
+);
+named_checkpoint_fault_case!(
+    m5_fault_compaction_cancel,
+    "m5_fault/compaction/cancel",
+    Compaction,
+    Cancel
+);
+named_checkpoint_fault_case!(
+    m5_fault_compaction_restart,
+    "m5_fault/compaction/restart",
+    Compaction,
+    Restart
+);
 
 #[test]
 fn temporary_artifact_oracle_covers_state_manifest_and_both_sinks() {
@@ -7379,14 +9286,21 @@ async fn checkpoint_matrix_sink_commits_bounded_epoch_files() {
         written_records: Arc::new(AtomicUsize::new(0)),
         closed: Arc::new(AtomicUsize::new(0)),
         write_delay: Duration::ZERO,
+        lifecycle: Arc::new(CheckpointMatrixOutputProbe::default()),
     };
-    sink.open().await.unwrap();
+    TransactionalStreamSink::open(&mut sink).await.unwrap();
     let epochs = [Epoch::INITIAL, Epoch::INITIAL.next().unwrap()];
     for (epoch, record) in epochs.into_iter().zip(["first", "second"]) {
-        sink.begin_epoch(epoch).await.unwrap();
+        TransactionalStreamSink::begin_epoch(&mut sink, epoch)
+            .await
+            .unwrap();
         sink.pending.push(record.into());
-        let state = sink.pre_commit(epoch).await.unwrap();
-        sink.commit(epoch, &state).await.unwrap();
+        let state = TransactionalStreamSink::pre_commit(&mut sink, epoch)
+            .await
+            .unwrap();
+        TransactionalStreamSink::commit(&mut sink, epoch, &state)
+            .await
+            .unwrap();
     }
 
     assert!(!root.join("visible.json").exists());

@@ -4,16 +4,33 @@
 //! section 1.3): [`BatchOperator`] and [`BatchExecutionPlan`] run finite
 //! one-shot graphs; [`StreamOperator`] and [`StreamExecutionPlan`] compile
 //! continuously running graphs executed by the streaming runtime.
+//!
+//! The removed v2 continuous-runtime owners and checkpoint store are not
+//! available after the A6 cutover.
+//!
+//! ```compile_fail
+//! use calc_flow::MicroBatchRunner;
+//! ```
+//!
+//! ```compile_fail
+//! use calc_flow::FileCheckpointStore;
+//! ```
+//!
+//! ```compile_fail
+//! use calc_flow::StreamingRunner;
+//!
+//! fn removed_push_step() {
+//!     let _ = StreamingRunner::step;
+//! }
+//! ```
 
 mod batch;
-mod checkpoint;
 mod config;
 mod context;
-pub mod continuous;
+mod continuous;
 mod datafusion;
 mod error;
 mod expression;
-mod io;
 mod json;
 mod operator;
 mod pipeline;
@@ -24,19 +41,23 @@ mod time;
 mod udf;
 
 pub use batch::{Batch, BatchKind, BatchMetadata, ExternalPayload, TableBatch};
-pub use checkpoint::{
-    CHECKPOINT_FORMAT_VERSION, Checkpoint, CheckpointStore, FileCheckpointStore,
-    MAX_CHECKPOINT_DOCUMENT_BYTES,
-};
 pub use config::{
     ArrowFieldSpec, DataSourceSpec, EdgeSpec, NodeSpec, OperatorSpec, PROJECT_FORMAT_VERSION,
     PipelineSpec, PortSpec, PositionSpec, ProjectSpec, RunOptions, ValidationIssue,
-    ValidationReport, compile_project, project_json_schema, validate_project,
+    ValidationReport, compile_project, compile_stream_project, project_json_schema,
+    validate_project,
 };
 pub use context::{CancellationToken, RunContext};
+pub use continuous::{
+    CheckpointPhase, CheckpointStatus, ComponentKind, Cursor, EdgeStatus, JobOutcome, JobState,
+    JobStatus, ManagedCheckpointRuntime, NativeWatermarkCapability, OperatorStatus,
+    OutputDeliveryStatus, ReplayPositioning, SinkBinding, SinkDelivery, SinkRecovery, SinkStatus,
+    SourceBinding, SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema,
+    SourceStatus, StreamSink, StreamSource, StreamingError, StreamingErrorCategory, StreamingJob,
+    StreamingRunner, TerminalCause, TransactionalStreamSink, WatermarkPolicy,
+};
 pub use datafusion::{DataFusionConfig, DataFusionQueryMetric, DataFusionRuntime};
 pub use error::{CalcFlowError, Result};
-pub use io::{BatchingSource, Sink, Source, SourceItem};
 pub use json::{JsonMap, MAX_JSON_DEPTH, canonical_json};
 pub use operator::{
     AggregateFunction, AggregateSpec, BatchOperator, BatchOperatorContext, BatchOperatorFactory,
@@ -56,8 +77,8 @@ pub use project_store::{
     import_project_yaml_with_limit,
 };
 pub use runtime::{
-    ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, MicroBatchRunner, SinkRouter,
-    StreamJobContext, StreamMessage, StreamMessageKind, StreamingRunner, edge_channel,
+    ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, StreamJobContext, StreamMessage,
+    StreamMessageKind, edge_channel,
 };
 pub use state::{
     CheckpointManifest, CheckpointManifestFields, CursorManifestEntry, LocalStateBackend,

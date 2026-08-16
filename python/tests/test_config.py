@@ -7,7 +7,13 @@ from types import MappingProxyType
 import pytest
 from pydantic import ValidationError
 
-from calc_flow import PipelineBuilder, ProjectDocument, Runtime, project_json_schema
+from calc_flow import (
+    ConfigError,
+    PipelineBuilder,
+    ProjectDocument,
+    Runtime,
+    project_json_schema,
+)
 
 
 def _minimal_project() -> dict[str, object]:
@@ -164,6 +170,14 @@ def test_runtime_validation_report_uses_runtime_snapshots_defensively() -> None:
     assert valid["valid"] is True
     assert valid["issues"] == []
     assert valid["fingerprint"]
+
+
+def test_runtime_compile_stream_project_requires_source_coverage() -> None:
+    project = _minimal_project()
+    project["data_sources"] = []
+
+    with pytest.raises(ConfigError, match=r"data_sources \[source_input_mismatch\]"):
+        Runtime().compile_stream_project(json.dumps(project))
 
 
 def test_runtime_validation_report_uses_current_udf_snapshot() -> None:

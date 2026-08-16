@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "plan": {
+    "name": "a6_cross_surface_restart",
+    "operator_id": "double_value",
+    "expression": "doubled = value * 2",
+    "source_id": "input",
+    "output_id": "output",
+    "sink_id": "transactional"
+  },
+  "checkpoint_after": 2,
+  "records": [
+    {
+      "offset": 0,
+      "value": 3
+    },
+    {
+      "offset": 1,
+      "value": 7
+    },
+    {
+      "offset": 2,
+      "value": 11
+    },
+    {
+      "offset": 3,
+      "value": 13
+    }
+  ],
+  "expected": {
+    "checkpoint_epoch": 1,
+    "terminal_epoch": 2,
+    "opened_offsets": [
+      0,
+      2
+    ],
+    "values": [
+      6,
+      14,
+      22,
+      26
+    ],
+    "duplicates": 0,
+    "missing": 0,
+    "terminal_tasks": 0,
+    "terminal_charged_edges": 0,
+    "temporary_artifacts": 0
+  }
+}

@@ -9,8 +9,8 @@ use crate::operator::expression_query;
 use crate::{
     BatchExecutionPlan, BatchKind, CalcFlowError, DataFusionConfig, Edge, ExpressionOperator,
     ExternalOperatorSpec, JsonMap, NodeOperator, PipelineBuilder, Port, PortEndpoint,
-    ProviderRegistry, Result, SqlOperator, UdfKind, UdfReference, UdfRegistrySnapshot,
-    validate_selected_udfs,
+    ProviderRegistry, Result, SqlOperator, StreamExecutionPlan, StreamRequirements, UdfKind,
+    UdfReference, UdfRegistrySnapshot, validate_selected_udfs,
 };
 
 pub const PROJECT_FORMAT_VERSION: u32 = 2;
@@ -203,7 +203,7 @@ pub fn validate_project(
     providers: &ProviderRegistry,
     udfs: &UdfRegistrySnapshot,
 ) -> ValidationReport {
-    let issues = semantic_issues(project, providers, udfs);
+    let issues = semantic_issues(project, providers, udfs, CompileMode::Batch);
     if !issues.is_empty() {
         return ValidationReport {
             valid: false,
@@ -215,7 +215,11 @@ pub fn validate_project(
     let mut fingerprint = None;
     match build_project(project, providers, udfs) {
         Ok(plan) => {
-            validate_source_coverage(project, &plan, &mut issues);
+            validate_source_coverage(
+                project,
+                plan.external_inputs().keys().map(String::as_str),
+                &mut issues,
+            );
             fingerprint = issues.is_empty().then(|| plan.fingerprint().into());
         }
         Err(error) => issues.push(issue(
@@ -242,17 +246,54 @@ pub fn compile_project(
     providers: &ProviderRegistry,
     udfs: &UdfRegistrySnapshot,
 ) -> Result<BatchExecutionPlan> {
-    let issues = semantic_issues(project, providers, udfs);
+    let issues = semantic_issues(project, providers, udfs, CompileMode::Batch);
     if let Some(first) = issues.first() {
         return Err(validation_error(first));
     }
-    let plan = build_project(project, providers, udfs)?;
+    let plan =
+        build_project_builder(project, providers, CompileMode::Batch)?.compile_batch(udfs)?;
     let mut coverage = Vec::new();
-    validate_source_coverage(project, &plan, &mut coverage);
+    validate_source_coverage(
+        project,
+        plan.external_inputs().keys().map(String::as_str),
+        &mut coverage,
+    );
     if let Some(first) = coverage.first() {
         return Err(validation_error(first));
     }
     Ok(plan)
+}
+
+/// Compiles a strict, data-only project into a continuous stream plan.
+///
+/// # Errors
+///
+/// Returns a stable validation error or the underlying stream graph
+/// compilation failure. External operators must provide a stream factory.
+pub fn compile_stream_project(
+    project: &ProjectSpec,
+    providers: &ProviderRegistry,
+    udfs: &UdfRegistrySnapshot,
+    requirements: &StreamRequirements,
+) -> Result<StreamExecutionPlan> {
+    let issues = semantic_issues(project, providers, udfs, CompileMode::Stream);
+    if let Some(first) = issues.first() {
+        return Err(validation_error(first));
+    }
+    let plan = build_project_builder(project, providers, CompileMode::Stream)?
+        .compile_stream(udfs, requirements)?;
+    let mut coverage = Vec::new();
+    validate_source_coverage(project, plan.source_binding_ids(), &mut coverage);
+    if let Some(first) = coverage.first() {
+        return Err(validation_error(first));
+    }
+    Ok(plan)
+}
+
+#[derive(Clone, Copy)]
+enum CompileMode {
+    Batch,
+    Stream,
 }
 
 fn build_project(
@@ -260,70 +301,154 @@ fn build_project(
     providers: &ProviderRegistry,
     udfs: &UdfRegistrySnapshot,
 ) -> Result<BatchExecutionPlan> {
-    let mut builder = PipelineBuilder::new(&project.pipeline.name)?
+    build_project_builder(project, providers, CompileMode::Batch)?.compile_batch(udfs)
+}
+
+fn build_project_builder(
+    project: &ProjectSpec,
+    providers: &ProviderRegistry,
+    mode: CompileMode,
+) -> Result<PipelineBuilder> {
+    let builder = PipelineBuilder::new(&project.pipeline.name)?
         .with_datafusion_config(project.pipeline.datafusion);
+    let builder = add_project_nodes(builder, project, providers, mode)?;
+    add_project_edges(builder, project)
+}
+
+fn add_project_nodes(
+    mut builder: PipelineBuilder,
+    project: &ProjectSpec,
+    providers: &ProviderRegistry,
+    mode: CompileMode,
+) -> Result<PipelineBuilder> {
     for node in &project.pipeline.nodes {
-        let inputs = configured_ports(node, true)?;
-        let outputs = configured_ports(node, false)?;
-        let operator = match &node.operator {
-            OperatorSpec::Expression {
-                expression,
-                select,
-                filter,
-                udfs: references,
-            } => {
-                let (inputs, outputs) =
-                    builtin_ports(inputs, outputs, &["input"], &["output"], BatchKind::Table)?;
-                NodeOperator::Expression(
-                    ExpressionOperator::new(
-                        &node.id,
-                        expression,
-                        select.clone(),
-                        filter.clone(),
-                        references.clone(),
-                    )?
-                    .with_ports(
-                        inputs.into_iter().next().unwrap(),
-                        outputs.into_iter().next().unwrap(),
-                    )?,
-                )
-            }
-            OperatorSpec::Sql {
-                query,
-                aliases,
-                udfs: references,
-            } => {
-                let expected = aliases.iter().map(String::as_str).collect::<Vec<_>>();
-                let (inputs, outputs) =
-                    builtin_ports(inputs, outputs, &expected, &["output"], BatchKind::Table)?;
-                NodeOperator::Sql(
-                    SqlOperator::new(&node.id, query, aliases.clone(), references.clone())?
-                        .with_ports(inputs, outputs.into_iter().next().unwrap())?,
-                )
-            }
-            OperatorSpec::External {
-                provider,
-                name,
-                version,
-                options,
-            } => {
-                let spec = ExternalOperatorSpec::new(provider, name, version, options.clone())?;
-                NodeOperator::Batch(
-                    providers
-                        .resolve_batch(provider, name, version)?
-                        .create(&spec, inputs, outputs)?,
-                )
-            }
-        };
+        let operator = project_node_operator(node, providers, mode)?;
         builder = builder.add_node(&node.id, operator)?;
     }
+    Ok(builder)
+}
+
+fn add_project_edges(
+    mut builder: PipelineBuilder,
+    project: &ProjectSpec,
+) -> Result<PipelineBuilder> {
     for edge in &project.pipeline.edges {
         builder = builder.connect(Edge::new(
             PortEndpoint::new(&edge.source_node, &edge.source_port)?,
             PortEndpoint::new(&edge.target_node, &edge.target_port)?,
         ))?;
     }
-    builder.compile_batch(udfs)
+    Ok(builder)
+}
+
+fn project_node_operator(
+    node: &NodeSpec,
+    providers: &ProviderRegistry,
+    mode: CompileMode,
+) -> Result<NodeOperator> {
+    let inputs = configured_ports(node, true)?;
+    let outputs = configured_ports(node, false)?;
+    match &node.operator {
+        OperatorSpec::Expression {
+            expression,
+            select,
+            filter,
+            udfs: references,
+        } => expression_node(
+            node,
+            inputs,
+            outputs,
+            expression,
+            select,
+            filter.as_deref(),
+            references,
+        ),
+        OperatorSpec::Sql {
+            query,
+            aliases,
+            udfs: references,
+        } => sql_node(node, inputs, outputs, query, aliases, references),
+        OperatorSpec::External {
+            provider,
+            name,
+            version,
+            options,
+        } => external_node(
+            providers,
+            mode,
+            inputs,
+            outputs,
+            (provider, name, version),
+            options,
+        ),
+    }
+}
+
+fn expression_node(
+    node: &NodeSpec,
+    inputs: Vec<Port>,
+    outputs: Vec<Port>,
+    expression: &str,
+    select: &[String],
+    filter: Option<&str>,
+    references: &[UdfReference],
+) -> Result<NodeOperator> {
+    let (inputs, outputs) =
+        builtin_ports(inputs, outputs, &["input"], &["output"], BatchKind::Table)?;
+    Ok(NodeOperator::Expression(
+        ExpressionOperator::new(
+            &node.id,
+            expression,
+            select.to_vec(),
+            filter.map(str::to_owned),
+            references.to_vec(),
+        )?
+        .with_ports(
+            inputs.into_iter().next().unwrap(),
+            outputs.into_iter().next().unwrap(),
+        )?,
+    ))
+}
+
+fn sql_node(
+    node: &NodeSpec,
+    inputs: Vec<Port>,
+    outputs: Vec<Port>,
+    query: &str,
+    aliases: &[String],
+    references: &[UdfReference],
+) -> Result<NodeOperator> {
+    let expected = aliases.iter().map(String::as_str).collect::<Vec<_>>();
+    let (inputs, outputs) =
+        builtin_ports(inputs, outputs, &expected, &["output"], BatchKind::Table)?;
+    Ok(NodeOperator::Sql(
+        SqlOperator::new(&node.id, query, aliases.to_vec(), references.to_vec())?
+            .with_ports(inputs, outputs.into_iter().next().unwrap())?,
+    ))
+}
+
+fn external_node(
+    providers: &ProviderRegistry,
+    mode: CompileMode,
+    inputs: Vec<Port>,
+    outputs: Vec<Port>,
+    identity: (&str, &str, &str),
+    options: &JsonMap,
+) -> Result<NodeOperator> {
+    let (provider, name, version) = identity;
+    let spec = ExternalOperatorSpec::new(provider, name, version, options.clone())?;
+    match mode {
+        CompileMode::Batch => Ok(NodeOperator::Batch(
+            providers
+                .resolve_batch(provider, name, version)?
+                .create(&spec, inputs, outputs)?,
+        )),
+        CompileMode::Stream => Ok(NodeOperator::Stream(
+            providers
+                .resolve_stream(provider, name, version)?
+                .create(&spec, inputs, outputs)?,
+        )),
+    }
 }
 
 fn configured_ports(node: &NodeSpec, inputs: bool) -> Result<Vec<Port>> {
@@ -386,6 +511,7 @@ fn semantic_issues(
     project: &ProjectSpec,
     providers: &ProviderRegistry,
     udfs: &UdfRegistrySnapshot,
+    mode: CompileMode,
 ) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
     if project.format_version != PROJECT_FORMAT_VERSION {
@@ -435,7 +561,7 @@ fn semantic_issues(
         );
     }
     validate_run_options(&project.run_options, &mut issues);
-    validate_nodes(project, providers, udfs, &mut issues);
+    validate_nodes(project, providers, udfs, mode, &mut issues);
     validate_edges(project, &mut issues);
     validate_sources(project, &mut issues);
     issues
@@ -454,6 +580,7 @@ fn validate_nodes(
     project: &ProjectSpec,
     providers: &ProviderRegistry,
     udfs: &UdfRegistrySnapshot,
+    mode: CompileMode,
     issues: &mut Vec<ValidationIssue>,
 ) {
     let mut node_ids = BTreeSet::new();
@@ -481,7 +608,7 @@ fn validate_nodes(
         }
         validate_ports(&node.input_ports, &format!("{base}.input_ports"), issues);
         validate_ports(&node.output_ports, &format!("{base}.output_ports"), issues);
-        validate_operator(node, node_index, providers, udfs, issues);
+        validate_operator(node, node_index, providers, udfs, mode, issues);
         selected_udfs.extend(operator_udfs(&node.operator).iter().cloned());
     }
     if validate_selected_udfs(&selected_udfs).is_err() {
@@ -508,6 +635,7 @@ fn validate_operator(
     index: usize,
     providers: &ProviderRegistry,
     udfs: &UdfRegistrySnapshot,
+    mode: CompileMode,
     issues: &mut Vec<ValidationIssue>,
 ) {
     let base = format!("pipeline.nodes[{index}].operator");
@@ -572,7 +700,7 @@ fn validate_operator(
         } => {
             match ExternalOperatorSpec::new(provider, name, version, BTreeMap::new()) {
                 Ok(_) => {
-                    if providers.resolve_batch(provider, name, version).is_err() {
+                    if !provider_available(providers, mode, provider, name, version) {
                         issues.push(issue(
                             &base,
                             "missing_provider",
@@ -602,6 +730,19 @@ fn validate_operator(
             false,
             issues,
         );
+    }
+}
+
+fn provider_available(
+    providers: &ProviderRegistry,
+    mode: CompileMode,
+    provider: &str,
+    name: &str,
+    version: &str,
+) -> bool {
+    match mode {
+        CompileMode::Batch => providers.resolve_batch(provider, name, version).is_ok(),
+        CompileMode::Stream => providers.resolve_stream(provider, name, version).is_ok(),
     }
 }
 
@@ -798,16 +939,16 @@ fn validate_sources(project: &ProjectSpec, issues: &mut Vec<ValidationIssue>) {
     }
 }
 
-fn validate_source_coverage(
+fn validate_source_coverage<'a>(
     project: &ProjectSpec,
-    plan: &BatchExecutionPlan,
+    expected: impl IntoIterator<Item = &'a str>,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    let expected = plan.external_inputs().keys().collect::<BTreeSet<_>>();
+    let expected = expected.into_iter().collect::<BTreeSet<_>>();
     let configured = project
         .data_sources
         .iter()
-        .map(|source| &source.input)
+        .map(|source| source.input.as_str())
         .collect::<BTreeSet<_>>();
     if expected != configured || project.data_sources.len() != expected.len() {
         issues.push(issue(

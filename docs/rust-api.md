@@ -170,14 +170,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Stream compilation and the private continuous runtime
+## Stream compilation and continuous runtime
 
 `PipelineBuilder::compile_stream` produces an immutable
 `StreamExecutionPlan`. The plan records stable edges, source and sink binding
-slots, stream requirements, and the semantic fingerprint, but it does not
-execute directly through a public source-driven runner.
+slots, stream requirements, and the semantic fingerprint. Pass it to the
+crate-root `StreamingRunner` with `SourceBinding`, `SinkBinding`, and
+`ManagedCheckpointRuntime` values.
 
-The crate-private source-driven runtime consumes that plan after a whole-job
+The source-driven runtime consumes that plan after a whole-job
 preflight. It runs one task per source, compiled operator, and graph output;
 preserves per-ingress FIFO; routes source control through a job-scoped progress
 driver; and converges source, operator, sink, queue, reservation, driver, and
@@ -205,11 +206,14 @@ progress, state, checkpoint transaction, and reaper ownership. Cleanup
 failures and panics remain typed secondary diagnostics and do not replace the
 primary outcome.
 
-This runtime is not exported. The existing public v2 `StreamingRunner` and
-`MicroBatchRunner` retain their signatures and formed-batch behavior. Public
-source-driven runner integration is not available. The private checkpoint
-work adds no public API. Private task panics surface through the non-exhaustive
-`CalcFlowError::TaskPanicked { task_id, message }` variant.
+`StreamingRunner::start(self)` is one-shot and returns the sole
+`StreamingJob` owner. The job exposes synchronous status plus async checkpoint,
+shutdown, cancel, and wait operations. The old formed-batch push runner,
+`MicroBatchRunner`, v2 source/sink traits, and checkpoint-document store are
+removed without aliases. Public continuous lifecycle failures surface as
+`CalcFlowError::Streaming(StreamingError)`. Contained task panics use
+`StreamingErrorCategory::TaskPanicked`; internal task IDs and panic messages
+never cross the facade.
 
 `edge_channel` retains its public signature and `EdgeBudget` retains the fields
 `max_rows` and `max_bytes`. For `EdgeBudget::new(R, B)`, envelope count and
@@ -227,10 +231,8 @@ capped at `B`. Direct callers must choose
 - `Batch::with_metadata` returns a new envelope.
 
 `BatchMetadata::new(source, sequence, attributes)` validates the source and stores
-JSON-compatible attributes. Its sequence is descriptive batch metadata.
-`MicroBatchRunner` checkpoint ordering uses `SourceItem.sequence`, while
-`StreamingRunner` maintains its own sequence counter; both are distinct from
-`BatchMetadata.sequence`.
+JSON-compatible attributes. Its sequence is descriptive batch metadata and is
+independent of continuous source cursors and checkpoint epochs.
 
 ## UDFs and external providers
 
@@ -244,48 +246,38 @@ separate `register_batch`/`resolve_batch` and `register_stream`/`resolve_stream`
 paths. External provider state and payloads must satisfy Rust's `Send + Sync`
 boundaries.
 
-## Micro-batch recovery
+## Continuous execution and recovery
 
 The complete checked example is
-[`micro_batch_recovery.rs`](../crates/calc-flow/examples/micro_batch_recovery.rs).
+[`continuous_runtime.rs`](../crates/calc-flow/examples/continuous_runtime.rs).
 Its central lifecycle is:
 
 ```rust
-let mut first = MicroBatchRunner::new(
-    Arc::clone(&plan),
-    Box::new(ReplaySource::new()?),
-    sink_router(&delivered)?,
-    Arc::clone(&store) as Arc<dyn CheckpointStore>,
-    1,
+let runner = StreamingRunner::new(
+    plan,
+    BTreeMap::from([(source_id, SourceBinding::new(source))]),
+    BTreeMap::from([(
+        output_id,
+        vec![SinkBinding::ordinary("archive", sink)?],
+    )]),
+    ManagedCheckpointRuntime::new(".calc-flow-continuous")?,
 )?;
-first.next().await?.expect("first source item");
-drop(first);
-
-let mut recovered = MicroBatchRunner::new(
-    Arc::clone(&plan),
-    Box::new(ReplaySource::new()?),
-    sink_router(&delivered)?,
-    Arc::clone(&store) as Arc<dyn CheckpointStore>,
-    1,
-)?;
-recovered.next().await?.expect("replayed second item");
+let job = runner.start().await?;
+let outcome = job.wait().await;
 ```
 
-A `Source` implements async `open(cursor)` and `next()`. Each `SourceItem`
-contains a formed batch, next JSON cursor, and sequence. A `Sink` writes a batch
-with its `RunContext`. `SinkRouter` maps graph output names to sinks.
-
-The runner restores the committed cursor when opening a source. It executes the
-plan, delivers all sinks, and only then commits state/cursor/sequence. Failures
-roll back owned state and retain the current item for retry, giving at-least-once
-delivery.
+A `StreamSource` declares replay, delivery, schema, watermark, and batch-bound
+capabilities, then implements async `open`, `next`, and `close`. An ordinary
+`StreamSink` implements async `open`, `write`, and `close`; transactional sinks
+also expose epoch commit and recovery. Managed checkpoints bind source cursors,
+operator state, and sink evidence to the plan fingerprint.
 
 Run the checked examples:
 
 ```bash
 cargo run -p calc-flow --example expression_pipeline
 cargo run -p calc-flow --example sql_join
-cargo run -p calc-flow --example micro_batch_recovery
+cargo run -p calc-flow --example continuous_runtime
 ```
 
 ## Projects and stores
@@ -294,20 +286,25 @@ cargo run -p calc-flow --example micro_batch_recovery
 `ValidationReport`, `compile_project` for a `BatchExecutionPlan`, and
 `project_json_schema` for the generated schema.
 
-`FileProjectStore` and `FileCheckpointStore` are async atomic local stores.
-Project JSON is canonical; YAML is safe import/export only. Document-size,
-JSON-depth, and path rules are enforced before persistence. Print the canonical
-schema with
+`FileProjectStore` is the public async atomic local project store. Project JSON
+is canonical; YAML is safe import/export only. Continuous recovery storage is
+owned by `ManagedCheckpointRuntime`, while `LocalStateBackend` and
+`CheckpointManifest` expose the data-only v3 state contract. Print the
+canonical project schema with
 [`crates/calc-flow/examples/export_schema.rs`](../crates/calc-flow/examples/export_schema.rs).
 
 ## Errors and cancellation
 
-Public operations return `calc_flow::Result<T>`. `CalcFlowError` preserves
-invalid arguments/documents, compilation errors, execution/provider failures,
-checkpoint errors, I/O paths, cancellation, closed stream edges, and supervised
-task panics. Private runtime panic capture keeps `TaskPanicked.message` valid
-UTF-8 and at most 1,024 bytes including its ellipsis; non-string panic payloads
-use a fixed message.
+Public operations return `calc_flow::Result<T>`. `CalcFlowError` defines typed
+variants for invalid arguments/documents, compilation errors,
+execution/provider failures, checkpoint errors, I/O paths, cancellation,
+closed stream edges, and private runtime task-panic capture. Private capture
+keeps `TaskPanicked.message` valid UTF-8 and at most 1,024 bytes including its
+ellipsis; non-string panic payloads use a fixed message. Fallible
+`ManagedCheckpointRuntime`, `StreamingRunner`, and `StreamingJob` operations
+expose only `CalcFlowError::Streaming(StreamingError)`; contained panics use
+`StreamingErrorCategory::TaskPanicked` and retain neither the internal task ID
+nor the panic message.
 
 `ExecutionOptions` carries cancellation/deadline controls. Operators receive a
 `RunContext` and must check cancellation at safe work boundaries.
