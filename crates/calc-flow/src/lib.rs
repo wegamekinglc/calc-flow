@@ -26,6 +26,7 @@
 
 mod batch;
 mod config;
+mod connector;
 mod context;
 mod continuous;
 mod datafusion;
@@ -46,6 +47,15 @@ pub use config::{
     PipelineSpec, PortSpec, PositionSpec, ProjectSpec, RunOptions, ValidationIssue,
     ValidationReport, compile_project, compile_stream_project, project_json_schema,
     validate_project,
+};
+pub use connector::{
+    ConnectorCapabilities, ConnectorDescriptor, ConnectorFactories, ConnectorIdentity,
+    ConnectorKind, ConnectorRegistry, ConnectorRegistrySnapshot, ConnectorSinkFactory,
+    ConnectorSourceFactory, DecodeBounds, DeliveryCapability, DeliveryParticipant, DeliveryProof,
+    EnvironmentSecretResolver, FormatDecoder, FormatDescriptor, FormatEncoder, FormatIdentity,
+    ParticipantRole, ReplayCapability, SecretHandle, SecretReference, SecretResolver,
+    SecretResolverKind, TransactionSupport, WatermarkSupport, validate_connector_options,
+    validate_delivery_guarantee,
 };
 pub use context::{CancellationToken, RunContext};
 pub use continuous::{
