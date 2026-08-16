@@ -98,6 +98,8 @@ fn file_connector_descriptor() -> ConnectorDescriptor {
             ("max_batch_rows".to_string(), serde_json::json!("u64")),
             ("max_batch_bytes".to_string(), serde_json::json!("u64")),
             ("max_file_bytes".to_string(), serde_json::json!("u64")),
+            // Sink-side option naming the output directory under `path`.
+            ("output".to_string(), serde_json::json!("string")),
         ]),
         secret_slots: BTreeSet::new(),
     }

@@ -77,6 +77,10 @@ impl FormatDecoder for ParquetCodec {
 }
 
 /// Compares the file's stored Arrow schema with an explicit expectation.
+///
+/// Unlike the text codecs — where the explicit schema drives parsing —
+/// a Parquet file is already typed, so both the column names and the
+/// data types must agree.
 fn verify_stored_schema(
     identity: &FormatIdentity,
     stored: &arrow::datatypes::SchemaRef,
@@ -86,13 +90,15 @@ fn verify_stored_schema(
         return Ok(());
     }
     let expected = schema_from_spec(schema)?;
-    let fields_agree = expected.fields().len() == stored.fields().len()
-        && expected
+    let mismatched = expected.fields().len() != stored.fields().len()
+        || expected
             .fields()
             .iter()
             .zip(stored.fields())
-            .all(|(left, right)| left.name() == right.name());
-    if !fields_agree {
+            .any(|(left, right)| {
+                left.name() != right.name() || left.data_type() != right.data_type()
+            });
+    if mismatched {
         return Err(codec_error(
             identity,
             "decode",

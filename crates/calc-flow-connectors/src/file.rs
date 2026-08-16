@@ -94,9 +94,12 @@ impl FileSourceConfig {
     ///
     /// # Errors
     ///
+    /// Option-key admission against the registered descriptor happens in
+    /// the core registry; this parser validates the values it reads.
+    ///
     /// Returns [`calc_flow::CalcFlowError::InvalidArgument`] naming the
-    /// offending option for an unknown key, a missing path or format, a
-    /// path containing `..` traversal, or a non-positive bound.
+    /// offending option for a missing path or format, a path containing
+    /// `..` traversal, or a non-positive bound.
     pub fn from_options(options: &calc_flow::JsonMap) -> Result<Self> {
         let path = parse_path(options)?;
         let format = FileFormat::parse(

@@ -23,6 +23,8 @@ bytes = "1.12.1"
 # Selects the pure-Rust backend for parquet's gzip codec; the direct
 # flate2 dependency keeps feature unification on rust_backend.
 flate2 = { version = "1.1.9", default-features = false, features = ["rust_backend"] }
+# "flate2-rust_backened" is parquet's own (misspelled) feature name;
+# selecting it keeps parquet's gzip codec on the pure-Rust backend.
 parquet = { version = "=58.3.0", default-features = false, features = [
     "arrow",
     "flate2-rust_backened",

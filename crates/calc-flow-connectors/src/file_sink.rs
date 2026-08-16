@@ -271,9 +271,9 @@ fn read_manifest(dir: &Path) -> Option<JsonMap> {
 impl TransactionalStreamSink for TransactionalParquetSink {
     async fn open(&mut self) -> Result<()> {
         let staging_root = self.config.staging_root();
-        let output_dir = self.config.output_dir();
         self.blocking(staging_root.clone(), "open", move || {
-            std::fs::create_dir_all(&staging_root).map_err(Self::map_io("open", output_dir))?;
+            std::fs::create_dir_all(&staging_root)
+                .map_err(Self::map_io("open", staging_root.clone()))?;
             Ok(())
         })
         .await
