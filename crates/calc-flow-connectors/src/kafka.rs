@@ -121,9 +121,8 @@ impl KafkaSourceConfig {
     /// Returns [`CalcFlowError::InvalidArgument`] naming the offending
     /// option for a missing or malformed value.
     pub fn from_options(options: &JsonMap) -> Result<Self> {
-        let bootstrap_servers = required_string(options, "bootstrap_servers")?;
-        let topic = required_string(options, "topic")?;
-        let format = KafkaFormat::parse(&required_string(options, "format")?)?;
+        let (bootstrap_servers, topic, format) = parse_kafka_endpoint(options)?;
+        let (max_batch_rows, max_batch_bytes) = parse_kafka_bounds(options)?;
         Ok(Self {
             bootstrap_servers,
             topic,
@@ -131,8 +130,8 @@ impl KafkaSourceConfig {
             auto_offset_reset: parse_offset_reset(options)?,
             format,
             schema: parse_kafka_schema(options)?,
-            max_batch_rows: u64_option(options, "max_batch_rows")?.unwrap_or(8192),
-            max_batch_bytes: u64_option(options, "max_batch_bytes")?.unwrap_or(8 * 1024 * 1024),
+            max_batch_rows,
+            max_batch_bytes,
         })
     }
 
@@ -359,6 +358,21 @@ impl KafkaSinkConfig {
 }
 
 /// Parses and normalizes the explicit partition assignment.
+fn parse_kafka_bounds(options: &JsonMap) -> Result<(u64, u64)> {
+    Ok((
+        u64_option(options, "max_batch_rows")?.unwrap_or(8192),
+        u64_option(options, "max_batch_bytes")?.unwrap_or(8 * 1024 * 1024),
+    ))
+}
+
+fn parse_kafka_endpoint(options: &JsonMap) -> Result<(String, String, KafkaFormat)> {
+    Ok((
+        required_string(options, "bootstrap_servers")?,
+        required_string(options, "topic")?,
+        KafkaFormat::parse(&required_string(options, "format")?)?,
+    ))
+}
+
 fn parse_partitions(options: &JsonMap) -> Result<Vec<i32>> {
     let partitions = match options.get("partitions") {
         None => vec![0],
