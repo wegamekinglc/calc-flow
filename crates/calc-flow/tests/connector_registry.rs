@@ -6,14 +6,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use calc_flow::{
-    CalcFlowError, ConnectorCapabilities, ConnectorDescriptor, ConnectorFactories,
-    ConnectorIdentity, ConnectorKind, ConnectorRegistry, ConnectorSinkFactory,
-    ConnectorSourceFactory, DecodeBounds, DeliveryCapability, DeliveryGuarantee,
-    DeliveryParticipant, FormatDescriptor, FormatIdentity, NativeWatermarkCapability,
-    ParticipantRole, ReplayCapability, ReplayPositioning, RetentionClass, SecretHandle,
-    SecretReference, SecretResolver, SecretResolverKind, SinkDelivery, SourceDeliveryCapability,
-    StreamSink, StreamSource, TransactionSupport, WatermarkSupport, validate_connector_options,
-    validate_delivery_guarantee,
+    CalcFlowError, ConnectorCapabilities, ConnectorDescriptor, ConnectorError, ConnectorFactories,
+    ConnectorIdentity, ConnectorKind, ConnectorOperation, ConnectorRegistry,
+    ConnectorRegistrySnapshot, ConnectorSinkFactory, ConnectorSourceFactory, DecodeBounds,
+    DeliveryCapability, DeliveryGuarantee, DeliveryParticipant, FormatDescriptor, FormatIdentity,
+    NativeWatermarkCapability, ParticipantRole, ReplayCapability, ReplayPositioning,
+    RetentionClass, SecretHandle, SecretReference, SecretResolver, SecretResolverKind,
+    SinkDelivery, SourceDeliveryCapability, StreamSink, StreamSource, TransactionSupport,
+    WatermarkSupport, validate_connector_options, validate_delivery_guarantee,
 };
 use serde_json::Value;
 
@@ -528,4 +528,53 @@ fn at_least_once_never_upgrades_silently() {
     .expect("at-least-once request validates");
     assert_eq!(proof.requested, DeliveryGuarantee::AtLeastOnce);
     assert_eq!(proof.effective, DeliveryGuarantee::AtLeastOnce);
+}
+
+#[test]
+fn registry_snapshot_is_send_and_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<ConnectorRegistrySnapshot>();
+}
+
+#[test]
+fn connector_operation_rejects_empty_names() {
+    let error = ConnectorOperation::new("").expect_err("empty operation name rejected");
+    assert!(matches!(error, CalcFlowError::InvalidArgument { .. }));
+    let operation = ConnectorOperation::new("open_source").expect("valid operation name");
+    assert_eq!(operation.as_str(), "open_source");
+}
+
+#[test]
+fn connector_error_display_carries_identity_operation_and_detail() {
+    let error = ConnectorError::new(
+        identity("kafka"),
+        ConnectorOperation::new("open_source").expect("valid operation name"),
+        "broker handshake timed out",
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains(PROVIDER) && message.contains("kafka"),
+        "display carries the connector identity: {message}"
+    );
+    assert!(
+        message.contains("open_source"),
+        "display carries the stable operation name: {message}"
+    );
+    assert!(
+        message.contains("broker handshake timed out"),
+        "display carries the payload-free detail: {message}"
+    );
+
+    let projected = CalcFlowError::from(error);
+    match &projected {
+        CalcFlowError::Connector(inner) => {
+            assert_eq!(inner.identity, identity("kafka"));
+            assert_eq!(inner.operation.as_str(), "open_source");
+        }
+        other => panic!("expected Connector, got {other:?}"),
+    }
+    assert!(
+        projected.to_string().contains("kafka"),
+        "the public error keeps identity and operation visible"
+    );
 }

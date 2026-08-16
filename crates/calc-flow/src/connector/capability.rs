@@ -7,6 +7,7 @@
 //! preflight already validates.
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::sync::Arc;
 
 use crate::continuous::{
@@ -63,6 +64,16 @@ impl ConnectorIdentity {
             name: Arc::from(name),
             version: Arc::from(version),
         })
+    }
+}
+
+impl fmt::Display for ConnectorIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}/{}/{}",
+            self.provider, self.name, self.version
+        )
     }
 }
 

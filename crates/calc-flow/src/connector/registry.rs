@@ -29,7 +29,9 @@ pub trait ConnectorSourceFactory: Send + Sync {
     /// # Errors
     ///
     /// Returns a safe error that carries the connector identity and
-    /// operation; it must not include secret values.
+    /// operation, preferably as [`crate::connector::ConnectorError`]; it must
+    /// not include secret values, credentialed URLs, raw frames, or query
+    /// bodies.
     async fn open(
         &self,
         options: &JsonMap,
@@ -48,7 +50,9 @@ pub trait ConnectorSinkFactory: Send + Sync {
     /// # Errors
     ///
     /// Returns a safe error that carries the connector identity and
-    /// operation; it must not include secret values.
+    /// operation, preferably as [`crate::connector::ConnectorError`]; it must
+    /// not include secret values, credentialed URLs, raw frames, or query
+    /// bodies.
     async fn open(
         &self,
         options: &JsonMap,

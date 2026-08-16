@@ -49,13 +49,13 @@ pub use config::{
     validate_project,
 };
 pub use connector::{
-    ConnectorCapabilities, ConnectorDescriptor, ConnectorFactories, ConnectorIdentity,
-    ConnectorKind, ConnectorRegistry, ConnectorRegistrySnapshot, ConnectorSinkFactory,
-    ConnectorSourceFactory, DecodeBounds, DeliveryCapability, DeliveryParticipant, DeliveryProof,
-    EnvironmentSecretResolver, FormatDecoder, FormatDescriptor, FormatEncoder, FormatIdentity,
-    ParticipantRole, ReplayCapability, SecretHandle, SecretReference, SecretResolver,
-    SecretResolverKind, TransactionSupport, WatermarkSupport, validate_connector_options,
-    validate_delivery_guarantee,
+    ConnectorCapabilities, ConnectorDescriptor, ConnectorError, ConnectorFactories,
+    ConnectorIdentity, ConnectorKind, ConnectorOperation, ConnectorRegistry,
+    ConnectorRegistrySnapshot, ConnectorSinkFactory, ConnectorSourceFactory, DecodeBounds,
+    DeliveryCapability, DeliveryParticipant, DeliveryProof, EnvironmentSecretResolver,
+    FormatDecoder, FormatDescriptor, FormatEncoder, FormatIdentity, ParticipantRole,
+    ReplayCapability, SecretHandle, SecretReference, SecretResolver, SecretResolverKind,
+    TransactionSupport, WatermarkSupport, validate_connector_options, validate_delivery_guarantee,
 };
 pub use context::{CancellationToken, RunContext};
 pub use continuous::{
