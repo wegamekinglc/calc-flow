@@ -13,6 +13,45 @@ concurrency:
   # README CI badge as failing even when every job was healthy.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
 jobs:
+  connector-containers:
+    name: Connector containers (Kafka)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      redpanda:
+        image: ghcr.io/redpanda-data/redpanda:v24.3.3
+        ports:
+          - 9092:9092
+        options: >-
+          redpanda start
+          --overprovisioned
+          --smp 1
+          --memory 1G
+          --kafka-addr PLAINTEXT://0.0.0.0:9092
+          --advertise-kafka-addr PLAINTEXT://localhost:9092
+    env:
+      CALC_FLOW_CONNECTOR_CONTAINERS: "1"
+      CALC_FLOW_KAFKA_BOOTSTRAP: localhost:9092
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      - name: Wait for the broker to accept connections
+        run: |
+          for attempt in $(seq 1 60); do
+            if timeout 1 bash -c '</dev/tcp/localhost/9092' 2>/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "broker never became reachable" >&2
+          exit 1
+      - name: Run gated Kafka connector tests
+        run: >-
+          cargo test -p calc-flow-connectors --features kafka
+          --test kafka_connector -- --ignored --test-threads=1
   lint-and-test:
     name: Ruff + unit tests
     runs-on: ubuntu-latest
