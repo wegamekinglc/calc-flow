@@ -204,6 +204,19 @@ def main(arguments: Sequence[str] | None = None) -> int:
     if core_status != 0:
         return core_status
 
+    connectors_status = _run(
+        [
+            options.cargo,
+            "test",
+            "--locked",
+            "-p",
+            "calc-flow-connectors",
+            "--all-features",
+        ]
+    )
+    if connectors_status != 0:
+        return connectors_status
+
     benchmark_status = _run(
         [
             options.cargo,

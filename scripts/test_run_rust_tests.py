@@ -183,6 +183,13 @@ if arguments[:3] == ["test", "-p", "calc-flow-python"]:
                         "test",
                         "--locked",
                         "-p",
+                        "calc-flow-connectors",
+                        "--all-features",
+                    ],
+                    [
+                        "test",
+                        "--locked",
+                        "-p",
                         "calc-flow",
                         "--bench",
                         "core",
