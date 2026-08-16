@@ -1,6 +1,6 @@
-//! Shared Arrow/PostgreSQL type mapping (feature `postgresql`).
+//! Shared Arrow/`PostgreSQL` type mapping (feature `postgresql`).
 //!
-//! Only the reviewed mapping pairs live here; unknown PostgreSQL types
+//! Only the reviewed mapping pairs live here; unknown `PostgreSQL` types
 //! fail closed at conversion time instead of degrading silently. The
 //! module stores no client or pool types.
 
@@ -13,15 +13,16 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use calc_flow::{ArrowFieldSpec, CalcFlowError, Result};
+use tokio_postgres::Error as PgError;
 use tokio_postgres::Row;
-use tokio_postgres::types::Type as PgType;
+use tokio_postgres::types::{ToSql, Type as PgType};
 
 /// One discovered relation column.
 #[derive(Clone, Debug)]
 pub struct PgColumn {
     /// Column name.
     pub name: String,
-    /// Resolved PostgreSQL type.
+    /// Resolved `PostgreSQL` type.
     pub data_type: PgType,
     /// Nullability from the catalog.
     pub nullable: bool,
@@ -32,7 +33,7 @@ pub struct PgColumn {
 /// # Errors
 ///
 /// Returns [`CalcFlowError::InvalidArgument`] when a column's
-/// PostgreSQL type is outside the reviewed matrix.
+/// `PostgreSQL` type is outside the reviewed matrix.
 pub fn arrow_schema(columns: &[PgColumn]) -> Result<SchemaRef> {
     let mut fields = Vec::with_capacity(columns.len());
     for column in columns {
@@ -45,7 +46,7 @@ pub fn arrow_schema(columns: &[PgColumn]) -> Result<SchemaRef> {
     Ok(Arc::new(arrow::datatypes::Schema::new(fields)))
 }
 
-/// Maps a PostgreSQL type onto the reviewed Arrow type matrix; NUMERIC
+/// Maps a `PostgreSQL` type onto the reviewed Arrow type matrix; NUMERIC
 /// travels as its exact text form.
 ///
 /// # Errors
@@ -60,9 +61,10 @@ pub fn arrow_data_type(data_type: &PgType) -> Result<DataType> {
         PgType::INT8 => DataType::Int64,
         PgType::FLOAT4 => DataType::Float32,
         PgType::FLOAT8 => DataType::Float64,
-        PgType::TEXT | PgType::VARCHAR | PgType::BPCHAR | PgType::NAME => DataType::Utf8,
+        PgType::TEXT | PgType::VARCHAR | PgType::BPCHAR | PgType::NAME | PgType::NUMERIC => {
+            DataType::Utf8
+        }
         PgType::BYTEA => DataType::Binary,
-        PgType::NUMERIC => DataType::Utf8,
         PgType::TIMESTAMP => DataType::Timestamp(TimeUnit::Microsecond, None),
         PgType::TIMESTAMPTZ => DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into())),
         PgType::DATE => DataType::Date32,
@@ -71,7 +73,7 @@ pub fn arrow_data_type(data_type: &PgType) -> Result<DataType> {
             return Err(CalcFlowError::InvalidArgument {
                 field: "column type".into(),
                 message: format!(
-                    "PostgreSQL type {} is outside the reviewed matrix",
+                    "`PostgreSQL` type {} is outside the reviewed matrix",
                     other.name()
                 ),
             });
@@ -99,10 +101,6 @@ pub fn record_batch(columns: &[PgColumn], rows: &[Row]) -> Result<RecordBatch> {
 
 fn column_array(column: &PgColumn, rows: &[Row], index: usize) -> Result<ArrayRef> {
     let name = &column.name;
-    let get = |row: &Row| -> Option<tokio_postgres::types::Type> {
-        row.columns().get(index).map(|c| c.type_().clone())
-    };
-    let _ = get;
     macro_rules! typed {
         ($variant:ident, $builder:ty, $cast:ty) => {{
             let mut values = Vec::with_capacity(rows.len());
@@ -143,8 +141,11 @@ fn column_array(column: &PgColumn, rows: &[Row], index: usize) -> Result<ArrayRe
                     .try_get::<_, Option<chrono::NaiveDate>>(index)
                     .map_err(cell_error(name))?;
                 values.push(value.map(|date| {
-                    (date - chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch")).num_days()
-                        as i32
+                    i32::try_from(
+                        (date - chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch"))
+                            .num_days(),
+                    )
+                    .unwrap_or(i32::MAX)
                 }));
             }
             Ok(Arc::new(Date32Array::from(values)) as ArrayRef)
@@ -182,7 +183,7 @@ fn column_array(column: &PgColumn, rows: &[Row], index: usize) -> Result<ArrayRe
             for value in converted {
                 match value {
                     Some(bytes) => {
-                        builder.append_value(&bytes);
+                        builder.append_value(bytes.as_slice());
                     }
                     None => builder.append_null(),
                 }
@@ -192,7 +193,7 @@ fn column_array(column: &PgColumn, rows: &[Row], index: usize) -> Result<ArrayRe
         other => Err(CalcFlowError::InvalidArgument {
             field: format!("column {name}"),
             message: format!(
-                "PostgreSQL type {} is outside the reviewed matrix",
+                "`PostgreSQL` type {} is outside the reviewed matrix",
                 other.name()
             ),
         }),
@@ -204,6 +205,140 @@ fn cell_error(column: &str) -> impl Fn(tokio_postgres::Error) -> CalcFlowError +
         field: format!("column {column}"),
         message: error.to_string(),
     }
+}
+
+/// One cell extracted from an Arrow array, ready for parameterized
+/// insertion.
+#[derive(Debug)]
+pub enum PgValue {
+    /// SQL NULL.
+    Null,
+    /// A boolean cell.
+    Boolean(bool),
+    /// A 16-bit integer cell.
+    Int16(i16),
+    /// A 32-bit integer cell.
+    Int32(i32),
+    /// A 64-bit integer cell.
+    Int64(i64),
+    /// A 32-bit float cell.
+    Float32(f32),
+    /// A 64-bit float cell.
+    Float64(f64),
+    /// A text cell (also carries NUMERIC exact text).
+    Text(String),
+    /// A binary cell.
+    Bytes(Vec<u8>),
+}
+
+type ToSqlResult =
+    std::result::Result<tokio_postgres::types::IsNull, Box<dyn std::error::Error + Send + Sync>>;
+
+impl ToSql for PgValue {
+    fn to_sql(
+        &self,
+        _ty: &PgType,
+        out: &mut tokio_postgres::types::private::BytesMut,
+    ) -> ToSqlResult {
+        use tokio_postgres::types::IsNull;
+        match self {
+            PgValue::Null => Ok(IsNull::Yes),
+            PgValue::Boolean(v) => v.to_sql(&PgType::BOOL, out),
+            PgValue::Int16(v) => v.to_sql(&PgType::INT2, out),
+            PgValue::Int32(v) => v.to_sql(&PgType::INT4, out),
+            PgValue::Int64(v) => v.to_sql(&PgType::INT8, out),
+            PgValue::Float32(v) => v.to_sql(&PgType::FLOAT4, out),
+            PgValue::Float64(v) => v.to_sql(&PgType::FLOAT8, out),
+            PgValue::Text(v) => v.to_sql(&PgType::TEXT, out),
+            PgValue::Bytes(v) => v.to_sql(&PgType::BYTEA, out),
+        }
+    }
+
+    fn accepts(_ty: &PgType) -> bool {
+        true
+    }
+
+    tokio_postgres::types::to_sql_checked!();
+}
+
+/// Extracts one cell from a record batch column at the given row.
+///
+/// # Errors
+///
+/// Returns [`CalcFlowError::InvalidArgument`] when the column's Arrow
+/// type has no reviewed `PostgreSQL` mapping.
+pub fn cell_value(column: &dyn arrow::array::Array, row: usize) -> Result<PgValue> {
+    use arrow::array::{
+        BinaryArray, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
+        StringArray,
+    };
+    if column.is_null(row) {
+        return Ok(PgValue::Null);
+    }
+    let value = match column.data_type() {
+        DataType::Boolean => PgValue::Boolean(
+            column
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .is_some_and(|a| a.value(row)),
+        ),
+        DataType::Int16 => PgValue::Int16(
+            column
+                .as_any()
+                .downcast_ref::<Int16Array>()
+                .map(|a| a.value(row))
+                .unwrap_or_default(),
+        ),
+        DataType::Int32 => PgValue::Int32(
+            column
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .map(|a| a.value(row))
+                .unwrap_or_default(),
+        ),
+        DataType::Int64 => PgValue::Int64(
+            column
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .map(|a| a.value(row))
+                .unwrap_or_default(),
+        ),
+        DataType::Float32 => PgValue::Float32(
+            column
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .map(|a| a.value(row))
+                .unwrap_or_default(),
+        ),
+        DataType::Float64 => PgValue::Float64(
+            column
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .map(|a| a.value(row))
+                .unwrap_or_default(),
+        ),
+        DataType::Utf8 => PgValue::Text(
+            column
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .map(|a| a.value(row).to_string())
+                .unwrap_or_default(),
+        ),
+        DataType::Binary => PgValue::Bytes(
+            column
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .map(|a| a.value(row).to_vec())
+                .unwrap_or_default(),
+        ),
+        other => {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "column".into(),
+                message: format!("Arrow type {other:?} has no reviewed `PostgreSQL` mapping"),
+            });
+        }
+    };
+    Ok(value)
 }
 
 /// Validates an SQL identifier against the lowercase vocabulary.
@@ -225,7 +360,7 @@ pub fn pg_identifier(name: &str) -> Result<String> {
     if !valid {
         return Err(CalcFlowError::InvalidArgument {
             field: "identifier".into(),
-            message: format!("{name:?} is not a lowercase PostgreSQL identifier"),
+            message: format!("{name:?} is not a lowercase `PostgreSQL` identifier"),
         });
     }
     Ok(name.to_string())

@@ -1,4 +1,4 @@
-//! The PostgreSQL connector (feature `postgresql`).
+//! The `PostgreSQL` connector (feature `postgresql`).
 //!
 //! The source reads a repeatable-read consistent snapshot or polls a
 //! strictly monotonic composite cursor; both use bound parameters and
@@ -16,8 +16,9 @@ use calc_flow::{
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use tokio_postgres::types::ToSql;
-use tokio_postgres::{Client, NoTls};
+use tokio_postgres::{Client, NoTls, Row};
 
 use crate::database_types::{PgColumn, arrow_schema, pg_identifier, record_batch};
 
@@ -79,7 +80,7 @@ pub struct PostgresSourceConfig {
     pub poll_interval: std::time::Duration,
 }
 
-/// The two PostgreSQL source modes shipped in this task.
+/// The two `PostgreSQL` source modes shipped in this task.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PgSourceMode {
     /// One repeatable-read consistent snapshot.
@@ -121,7 +122,7 @@ impl PostgresSourceConfig {
                                 message: "entries must be strings".into(),
                             })
                         },
-                        |name| pg_identifier(name),
+                        pg_identifier,
                     )
                 })
                 .collect::<Result<Vec<_>>>()?,
@@ -161,7 +162,7 @@ impl PostgresSourceConfig {
     }
 }
 
-/// The PostgreSQL source over a private connection.
+/// The `PostgreSQL` source over a private connection.
 pub struct PostgresSource {
     capabilities: SourceCapabilities,
     config: PostgresSourceConfig,
@@ -270,17 +271,58 @@ impl PostgresSource {
     }
 
     async fn fetch_batch(&mut self, url: &str) -> Result<Option<SourceEvent>> {
-        if self.exhausted || self.client.is_none() {
-            if self.client.is_none() {
-                self.connect(url).await?;
-            }
+        if self.client.is_none() {
+            self.connect(url).await?;
         }
-        let client = self
-            .client
-            .as_ref()
-            .expect("connection established")
-            .clone();
-        let sql = match self.config.mode {
+        let rows = self.query_batch().await?;
+        if rows.is_empty() {
+            if self.config.mode == PgSourceMode::Snapshot {
+                self.exhausted = true;
+                return Ok(None);
+            }
+            tokio::time::sleep(self.config.poll_interval).await;
+            return Ok(Some(SourceEvent::Idle));
+        }
+        let batch =
+            record_batch(&self.columns, &rows).map_err(|error| fail("read", &error.to_string()))?;
+        self.advance_cursor(&rows);
+        self.sequence += 1;
+        let cursor = self.cursor_from_values()?;
+        let metadata = BatchMetadata::new(
+            "postgresql",
+            self.sequence,
+            BTreeMap::from([(
+                "table".to_string(),
+                Value::String(self.config.table.clone()),
+            )]),
+        )
+        .map_err(|error| fail("read", &error.to_string()))?;
+        let batch = Batch::table(vec![batch], metadata)
+            .map_err(|error| fail("read", &error.to_string()))?;
+        if self.config.mode == PgSourceMode::Snapshot
+            && (rows.len() as u64) < self.config.max_batch_rows
+        {
+            self.exhausted = true;
+        }
+        Ok(Some(SourceEvent::Data { batch, cursor }))
+    }
+
+    async fn query_batch(&mut self) -> Result<Vec<Row>> {
+        let client = self.client.as_ref().expect("connection established");
+        let sql = self.build_query();
+        let params: Vec<&(dyn ToSql + Sync)> = self
+            .cursor_values
+            .iter()
+            .map(|value| value as &(dyn ToSql + Sync))
+            .collect();
+        client
+            .query(&sql, &params)
+            .await
+            .map_err(|error| fail("read", &error.to_string()))
+    }
+
+    fn build_query(&self) -> String {
+        match self.config.mode {
             PgSourceMode::Snapshot => format!(
                 "SELECT {} FROM {} ORDER BY 1 LIMIT {}",
                 self.selection(),
@@ -300,95 +342,42 @@ impl PostgresSource {
                     sql.push_str(" WHERE ");
                     sql.push_str(&predicates.join(" AND "));
                 }
-                let order: Vec<String> = self
-                    .config
-                    .cursor_columns
-                    .iter()
-                    .map(|column| column.clone())
-                    .collect();
-                sql.push_str(&format!(
+                let order = self.config.cursor_columns.join(", ");
+                let _ = write!(
+                    sql,
                     " ORDER BY {} LIMIT {}",
-                    if order.is_empty() {
-                        "1".to_string()
-                    } else {
-                        order.join(", ")
-                    },
+                    if order.is_empty() { "1" } else { &order },
                     self.config.max_batch_rows
-                ));
+                );
                 sql
             }
-        };
-        let params: Vec<&(dyn ToSql + Sync)> = self
-            .cursor_values
-            .iter()
-            .map(|value| value as &(dyn ToSql + Sync))
-            .collect();
-        let rows = client
-            .query(&sql, &params)
-            .await
-            .map_err(|error| fail("read", &error.to_string()))?;
-        if rows.is_empty() {
-            if self.config.mode == PgSourceMode::Snapshot {
-                self.exhausted = true;
-                return Ok(None);
-            }
-            tokio::time::sleep(self.config.poll_interval).await;
-            return Ok(Some(SourceEvent::Idle));
         }
-        let mut cursor_columns = Vec::new();
-        let batch = if self.config.cursor_columns.is_empty() {
-            record_batch(&self.columns, &rows).map_err(|error| fail("read", &error.to_string()))?
-        } else {
-            let indexes: Vec<usize> = self
+    }
+
+    fn advance_cursor(&mut self, rows: &[Row]) {
+        if self.config.cursor_columns.is_empty() {
+            return;
+        }
+        if let Some(last) = rows.last() {
+            self.cursor_values = self
                 .config
                 .cursor_columns
                 .iter()
                 .map(|name| {
-                    rows[0]
+                    let index = last
                         .columns()
                         .iter()
-                        .position(|column| column.name() == name.as_str())
-                        .unwrap_or(0)
+                        .position(|c| c.name() == name.as_str())
+                        .unwrap_or(0);
+                    last.try_get::<_, String>(index)
+                        .or_else(|_| {
+                            last.try_get::<_, Option<i64>>(index)
+                                .map(|v| v.map(|v| v.to_string()).unwrap_or_default())
+                        })
+                        .unwrap_or_default()
                 })
                 .collect();
-            for (row_index, row) in rows.iter().enumerate() {
-                let _ = row_index;
-                cursor_columns = indexes
-                    .iter()
-                    .map(|index| {
-                        let value: String = row
-                            .try_get::<_, String>(*index)
-                            .or_else(|_| {
-                                row.try_get::<_, Option<i64>>(*index)
-                                    .map(|v| v.map(|v| v.to_string()).unwrap_or_default())
-                            })
-                            .unwrap_or_default();
-                        value
-                    })
-                    .collect();
-            }
-            record_batch(&self.columns, &rows).map_err(|error| fail("read", &error.to_string()))?
-        };
-        self.sequence += 1;
-        self.cursor_values = cursor_columns;
-        let cursor = self.cursor_from_values()?;
-        let metadata = BatchMetadata::new(
-            "postgresql",
-            self.sequence,
-            BTreeMap::from([(
-                "table".to_string(),
-                Value::String(self.config.table.clone()),
-            )]),
-        )
-        .map_err(|error| fail("read", &error.to_string()))?;
-        let batch =
-            Batch::table(vec![batch], metadata).map_err(|e| fail("read", &e.to_string()))?;
-        if self.config.mode == PgSourceMode::Snapshot
-            && (rows.len() as u64) < self.config.max_batch_rows
-        {
-            self.exhausted = true;
         }
-        Ok(Some(SourceEvent::Data { batch, cursor }))
     }
 
     fn cursor_from_values(&self) -> Result<Cursor> {
@@ -423,8 +412,6 @@ fn parse_pg_type(name: &str) -> tokio_postgres::types::Type {
         "bigint" => Type::INT8,
         "real" => Type::FLOAT4,
         "double precision" => Type::FLOAT8,
-        "text" => Type::TEXT,
-        "character varying" | "character" => Type::VARCHAR,
         "bytea" => Type::BYTEA,
         "numeric" => Type::NUMERIC,
         "timestamp without time zone" => Type::TIMESTAMP,
@@ -502,7 +489,7 @@ impl PostgresSource {
     }
 }
 
-/// Data-only configuration for one PostgreSQL sink.
+/// Data-only configuration for one `PostgreSQL` sink.
 #[derive(Clone, Debug)]
 pub struct PostgresSinkConfig {
     /// Secret key holding the `postgresql://` URL.
@@ -511,9 +498,15 @@ pub struct PostgresSinkConfig {
     pub table: String,
     /// Sink write mode.
     pub mode: PgSinkMode,
+    /// Conflict key column names for upserts.
+    pub conflict_columns: Vec<String>,
+    /// Pipeline name recorded in the epoch ledger.
+    pub pipeline: String,
+    /// Output name recorded in the epoch ledger.
+    pub output: String,
 }
 
-/// The three PostgreSQL sink modes.
+/// The three `PostgreSQL` sink modes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PgSinkMode {
     /// Plain parameterized inserts.
@@ -546,7 +539,34 @@ impl PostgresSinkConfig {
                     });
                 }
             },
+            conflict_columns: parse_conflict_columns(options)?,
+            pipeline: required_string(options, "pipeline")?,
+            output: required_string(options, "output")?,
         })
+    }
+}
+
+fn parse_conflict_columns(options: &JsonMap) -> Result<Vec<String>> {
+    match options.get("conflict_columns") {
+        None => Ok(Vec::new()),
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value.as_str().map_or_else(
+                    || {
+                        Err(CalcFlowError::InvalidArgument {
+                            field: "conflict_columns".into(),
+                            message: "entries must be strings".into(),
+                        })
+                    },
+                    pg_identifier,
+                )
+            })
+            .collect::<Result<Vec<_>>>(),
+        Some(_) => Err(CalcFlowError::InvalidArgument {
+            field: "conflict_columns".into(),
+            message: "conflict_columns must be a string array".into(),
+        }),
     }
 }
 
@@ -583,10 +603,15 @@ fn u64_option(options: &JsonMap, key: &str) -> Result<Option<u64>> {
     }
 }
 
-/// The transactional PostgreSQL sink with the epoch ledger.
+/// The transactional `PostgreSQL` sink with the epoch ledger.
 pub struct TransactionalPostgresSink {
     config: PostgresSinkConfig,
     client: Option<Client>,
+    pending_url: Option<String>,
+    /// Parameterized rows staged for the epoch's commit transaction.
+    pending_rows: Vec<Vec<crate::database_types::PgValue>>,
+    /// The compiled SQL for this epoch's rows.
+    pending_sql: Option<String>,
     active: Option<calc_flow::Epoch>,
     rows: u64,
 }
@@ -601,9 +626,26 @@ impl TransactionalPostgresSink {
         Ok(Self {
             config,
             client: None,
+            pending_url: None,
+            pending_rows: Vec::new(),
+            pending_sql: None,
             active: None,
             rows: 0,
         })
+    }
+
+    /// Resolves the connection URL and stages it for `open`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the resolver error when the URL secret is missing.
+    pub async fn open_with_secrets(
+        &mut self,
+        secrets: &dyn calc_flow::SecretResolver,
+    ) -> Result<()> {
+        let url = resolve_connection_url(secrets, &self.config.url_key).await?;
+        self.pending_url = Some(url);
+        Ok(())
     }
 
     async fn connect(&mut self, url: &str) -> Result<()> {
@@ -633,64 +675,152 @@ impl TransactionalPostgresSink {
 #[async_trait]
 impl TransactionalStreamSink for TransactionalPostgresSink {
     async fn open(&mut self) -> Result<()> {
-        Ok(())
+        let url = self.pending_url.take().ok_or_else(|| {
+            fail(
+                "open",
+                "the sink connection URL must be set through open_with_secrets",
+            )
+        })?;
+        self.connect(&url).await
     }
 
-    async fn begin_epoch(&mut self, _epoch: calc_flow::Epoch) -> Result<()> {
-        self.active = Some(_epoch);
+    async fn begin_epoch(&mut self, epoch: calc_flow::Epoch) -> Result<()> {
+        if self.client.is_none() {
+            return Err(fail(
+                "begin_epoch",
+                "begin_epoch before a resolved connection",
+            ));
+        }
+        self.pending_rows.clear();
+        self.pending_sql = None;
+        self.active = Some(epoch);
         self.rows = 0;
         Ok(())
     }
 
     async fn write(&mut self, batch: &Batch) -> Result<()> {
-        let Some(client) = self.client.as_mut() else {
-            return Err(fail("write", "write before a resolved connection"));
-        };
+        if self.active.is_none() {
+            return Err(fail("write", "write before begin_epoch"));
+        }
         let payload = batch
             .table_payload()
             .map_err(|_| fail("write", "the postgresql sink writes table batches only"))?;
         let schema = payload.schema();
-        let statements = client
-            .transaction()
-            .await
-            .map_err(|e| fail("write", &e.to_string()))?;
-        for record in payload.batches() {
-            for row_index in 0..record.num_rows() {
-                let placeholders: Vec<String> = (1..=schema.fields().len())
-                    .map(|i| format!("${i}"))
+        let names: Vec<String> = schema
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect();
+        let placeholders: Vec<String> = (1..=names.len()).map(|i| format!("${i}")).collect();
+        let sql = match self.config.mode {
+            PgSinkMode::Append => format!(
+                "INSERT INTO {} ({}) VALUES ({})",
+                self.config.table,
+                names.join(", "),
+                placeholders.join(", ")
+            ),
+            PgSinkMode::Upsert if !self.config.conflict_columns.is_empty() => {
+                let updates: Vec<String> = names
+                    .iter()
+                    .filter(|name| !self.config.conflict_columns.iter().any(|key| key == *name))
+                    .map(|name| format!("{name} = EXCLUDED.{name}"))
                     .collect();
-                let sql = match self.config.mode {
-                    PgSinkMode::Append => format!(
-                        "INSERT INTO {} VALUES ({})",
-                        self.config.table,
-                        placeholders.join(", ")
-                    ),
-                    PgSinkMode::Upsert | PgSinkMode::Transactional => format!(
-                        "INSERT INTO {} VALUES ({}) ON CONFLICT DO NOTHING",
-                        self.config.table,
-                        placeholders.join(", ")
-                    ),
-                };
-                statements
-                    .execute(&sql, &[])
-                    .await
-                    .map_err(|e| fail("write", &e.to_string()))?;
-                let _ = row_index;
+                format!(
+                    "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}",
+                    self.config.table,
+                    names.join(", "),
+                    placeholders.join(", "),
+                    self.config.conflict_columns.join(", "),
+                    if updates.is_empty() {
+                        "1 = 1".to_string()
+                    } else {
+                        updates.join(", ")
+                    }
+                )
+            }
+            PgSinkMode::Upsert | PgSinkMode::Transactional => format!(
+                "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT DO NOTHING",
+                self.config.table,
+                names.join(", "),
+                placeholders.join(", ")
+            ),
+        };
+        self.pending_sql = Some(sql);
+        for record in payload.batches() {
+            for row in 0..record.num_rows() {
+                let params: Vec<crate::database_types::PgValue> = (0..names.len())
+                    .map(|col| {
+                        let column = record.column(col);
+                        crate::database_types::cell_value(column, row)
+                            .unwrap_or(crate::database_types::PgValue::Null)
+                    })
+                    .collect();
+                self.pending_rows.push(params);
                 self.rows += 1;
             }
         }
         Ok(())
     }
 
-    async fn pre_commit(&mut self, _epoch: calc_flow::Epoch) -> Result<JsonMap> {
+    async fn pre_commit(&mut self, epoch: calc_flow::Epoch) -> Result<JsonMap> {
+        if self.active.is_none() {
+            return Err(fail("pre_commit", "pre_commit before begin_epoch"));
+        }
         Ok(BTreeMap::from([
-            ("pipeline".to_string(), Value::String(String::new())),
-            ("output".to_string(), Value::String(String::new())),
+            (
+                "pipeline".to_string(),
+                Value::String(self.config.pipeline.clone()),
+            ),
+            (
+                "output".to_string(),
+                Value::String(self.config.output.clone()),
+            ),
+            ("epoch".to_string(), Value::from(epoch.as_u64())),
             ("rows".to_string(), Value::from(self.rows)),
         ]))
     }
 
     async fn commit(&mut self, _epoch: calc_flow::Epoch, _pre_commit: &JsonMap) -> Result<()> {
+        let Some(client) = self.client.as_mut() else {
+            return Err(fail("commit", "commit before a resolved connection"));
+        };
+        let epoch_value = i64::try_from(_epoch.as_u64()).unwrap_or(i64::MAX);
+        let rows_written = i64::try_from(self.rows).unwrap_or(i64::MAX);
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| fail("commit", &e.to_string()))?;
+        if let (Some(sql), rows) = (self.pending_sql.as_deref(), &self.pending_rows) {
+            for row_values in rows {
+                let params: Vec<&(dyn ToSql + Sync)> = row_values
+                    .iter()
+                    .map(|v| v as &(dyn ToSql + Sync))
+                    .collect();
+                tx.execute(sql, &params)
+                    .await
+                    .map_err(|e| fail("commit", &e.to_string()))?;
+            }
+        }
+        tx.execute(
+            &format!(
+                "INSERT INTO {LEDGER_TABLE} (pipeline, output, epoch, rows_written) \
+                 VALUES ($1, $2, $3, $4) \
+                 ON CONFLICT (pipeline, output, epoch) DO NOTHING"
+            ),
+            &[
+                &self.config.pipeline,
+                &self.config.output,
+                &epoch_value,
+                &rows_written,
+            ],
+        )
+        .await
+        .map_err(|e| fail("commit", &e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| fail("commit", &e.to_string()))?;
+        self.pending_rows.clear();
+        self.pending_sql = None;
         self.active = None;
         Ok(())
     }
@@ -700,11 +830,22 @@ impl TransactionalStreamSink for TransactionalPostgresSink {
         _epoch: calc_flow::Epoch,
         _pre_commit: Option<&JsonMap>,
     ) -> Result<()> {
+        self.pending_rows.clear();
+        self.pending_sql = None;
         self.active = None;
         Ok(())
     }
 
-    async fn recover(&mut self, _recovery: &SinkRecovery) -> Result<()> {
+    async fn recover(&mut self, recovery: &SinkRecovery) -> Result<()> {
+        let expected = recovery.pre_commit();
+        if expected.get("pipeline").and_then(Value::as_str) != Some(&self.config.pipeline)
+            || expected.get("output").and_then(Value::as_str) != Some(&self.config.output)
+        {
+            return Err(fail(
+                "recover",
+                "recovery evidence names a different pipeline/output identity",
+            ));
+        }
         Ok(())
     }
 
