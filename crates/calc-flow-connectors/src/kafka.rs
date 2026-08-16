@@ -260,8 +260,10 @@ impl KafkaSource {
 fn is_transient_transport_error(error: &rdkafka::error::KafkaError) -> bool {
     matches!(
         error.rdkafka_error_code(),
-        Some(rdkafka::types::RDKafkaErrorCode::BrokerTransportFailure)
-            | Some(rdkafka::types::RDKafkaErrorCode::AllBrokersDown)
+        Some(
+            rdkafka::types::RDKafkaErrorCode::BrokerTransportFailure
+                | rdkafka::types::RDKafkaErrorCode::AllBrokersDown,
+        )
     )
 }
 
