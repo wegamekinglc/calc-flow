@@ -331,7 +331,7 @@ async fn symlinked_entries_fail_closed() {
     let error = source.open(None).await.expect_err("symlink fails closed");
     assert!(error.to_string().contains("symlink"), "{error}");
 
-    let mut direct = csv_options(&target);
+    let direct = csv_options(&target);
     let mut source = FileSource::new(FileSourceConfig::from_options(&direct).unwrap()).unwrap();
     let error = source
         .open(None)
@@ -376,9 +376,7 @@ async fn partial_csv_row_fails_closed() {
     assert!(!error.to_string().is_empty());
 }
 
-struct Harness {
-    root: PathBuf,
-}
+struct Harness;
 
 impl Harness {
     fn sink(root: &Path, output: &str) -> TransactionalParquetSink {
@@ -1239,7 +1237,7 @@ async fn corrupt_parquet_file_fails_through_source() {
     let root = temp_root("corrupt_parquet");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("data.parquet"), b"definitely not parquet").unwrap();
-    let mut options = BTreeMap::from([
+    let options = BTreeMap::from([
         ("path".to_string(), json!(root.display().to_string())),
         ("format".to_string(), json!("parquet")),
     ]);

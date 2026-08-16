@@ -103,22 +103,28 @@ impl FileSourceConfig {
             string_option(options, "format")?,
             bool_option(options, "header")?.unwrap_or(true),
         )?;
+        let (max_batch_rows, max_batch_bytes, max_file_bytes) = parse_bounds(options)?;
         Ok(Self {
             path,
             format,
             schema: parse_schema(options)?,
-            max_batch_rows: u64_option(options, "max_batch_rows")?
-                .unwrap_or(DEFAULT_MAX_BATCH_ROWS),
-            max_batch_bytes: u64_option(options, "max_batch_bytes")?
-                .unwrap_or(DEFAULT_MAX_BATCH_BYTES),
-            max_file_bytes: u64_option(options, "max_file_bytes")?
-                .unwrap_or(DEFAULT_MAX_FILE_BYTES),
+            max_batch_rows,
+            max_batch_bytes,
+            max_file_bytes,
         })
     }
 
     fn bounds(&self) -> Result<DecodeBounds> {
         DecodeBounds::new(self.max_batch_rows, self.max_batch_bytes)
     }
+}
+
+fn parse_bounds(options: &calc_flow::JsonMap) -> Result<(u64, u64, u64)> {
+    Ok((
+        u64_option(options, "max_batch_rows")?.unwrap_or(DEFAULT_MAX_BATCH_ROWS),
+        u64_option(options, "max_batch_bytes")?.unwrap_or(DEFAULT_MAX_BATCH_BYTES),
+        u64_option(options, "max_file_bytes")?.unwrap_or(DEFAULT_MAX_FILE_BYTES),
+    ))
 }
 
 fn parse_path(options: &calc_flow::JsonMap) -> Result<PathBuf> {
@@ -455,38 +461,56 @@ impl FileSource {
         Ok((chunk, taken))
     }
 
+    /// Detects a fully consumed line cache and advances to the next file.
+    fn json_file_exhausted(&mut self) -> bool {
+        let total_lines = self
+            .line_cache
+            .as_ref()
+            .expect("the caller ensured the line cache")
+            .len();
+        if usize::try_from(self.row_offset).unwrap_or(usize::MAX) < total_lines {
+            return false;
+        }
+        self.line_cache = None;
+        self.file_index += 1;
+        self.row_offset = 0;
+        true
+    }
+
+    /// Decodes and emits one bounded chunk of the current line cache.
+    fn emit_json_chunk(&mut self) -> Result<SourceEvent> {
+        let total_lines = self
+            .line_cache
+            .as_ref()
+            .expect("the caller ensured the line cache")
+            .len();
+        let bounds = self.config.bounds()?;
+        let (chunk, taken) = self.next_json_chunk(&bounds)?;
+        let codec = JsonLinesCodec::new(crate::json_lines::IDENTITY_VERSION)?;
+        let batch = codec.decode(&chunk, &bounds, &self.config.schema)?;
+        let consumed = self.row_offset + taken;
+        let cursor = self.cursor_for(self.file_index, consumed)?;
+        self.row_offset = consumed;
+        self.sequence += 1;
+        let path = self.files.get(self.file_index).cloned().unwrap_or_default();
+        let batch = batch.with_metadata(relabel(&path, self.sequence)?);
+        if usize::try_from(consumed).unwrap_or(usize::MAX) >= total_lines {
+            self.line_cache = None;
+            self.file_index += 1;
+            self.row_offset = 0;
+        }
+        Ok(SourceEvent::Data { batch, cursor })
+    }
+
     async fn next_json_lines(&mut self) -> Result<Option<SourceEvent>> {
         loop {
             if !self.ensure_json_lines().await? {
                 return Ok(None);
             }
-            let total_lines = self
-                .line_cache
-                .as_ref()
-                .expect("the caller ensured the line cache")
-                .len();
-            if usize::try_from(self.row_offset).unwrap_or(usize::MAX) >= total_lines {
-                self.line_cache = None;
-                self.file_index += 1;
-                self.row_offset = 0;
+            if self.json_file_exhausted() {
                 continue;
             }
-            let bounds = self.config.bounds()?;
-            let (chunk, taken) = self.next_json_chunk(&bounds)?;
-            let codec = JsonLinesCodec::new(crate::json_lines::IDENTITY_VERSION)?;
-            let batch = codec.decode(&chunk, &bounds, &self.config.schema)?;
-            let consumed = self.row_offset + taken;
-            let cursor = self.cursor_for(self.file_index, consumed)?;
-            self.row_offset = consumed;
-            self.sequence += 1;
-            let path = self.files.get(self.file_index).cloned().unwrap_or_default();
-            let batch = batch.with_metadata(relabel(&path, self.sequence)?);
-            if usize::try_from(consumed).unwrap_or(usize::MAX) >= total_lines {
-                self.line_cache = None;
-                self.file_index += 1;
-                self.row_offset = 0;
-            }
-            return Ok(Some(SourceEvent::Data { batch, cursor }));
+            return Ok(Some(self.emit_json_chunk()?));
         }
     }
 }
