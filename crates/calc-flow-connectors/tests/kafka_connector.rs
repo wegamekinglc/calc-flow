@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use calc_flow::{StreamSource as _, TransactionalStreamSink as _};
+use calc_flow::{StreamSink as _, StreamSource as _, TransactionalStreamSink as _};
 use calc_flow_connectors::kafka::{
     KafkaFormat, KafkaOffsetReset, KafkaSinkConfig, KafkaSourceConfig, transactional_id,
 };
@@ -191,4 +191,83 @@ fn sample_batch() -> calc_flow::Batch {
         calc_flow::BatchMetadata::new("test", 1, BTreeMap::new()).unwrap(),
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn offline_source_reports_idle_and_replays_cursors() {
+    let mut options = source_options();
+    options.insert("bootstrap_servers".to_string(), json!(bootstrap()));
+    let config = KafkaSourceConfig::from_options(&options).expect("parses");
+    let mut source =
+        calc_flow_connectors::kafka::KafkaSource::new(config).expect("offline construction");
+
+    // A broker-less poll must surface Idle, not an error and not data.
+    for _ in 0..3 {
+        match source.next().await.expect("poll stays healthy") {
+            Some(calc_flow::SourceEvent::Idle) => {}
+            Some(calc_flow::SourceEvent::Data { .. }) => panic!("no broker can deliver data"),
+            Some(calc_flow::SourceEvent::Watermark(_)) => panic!("kafka never emits watermarks"),
+            None => panic!("a kafka source never ends"),
+        }
+    }
+
+    // Cursor replay re-assigns partitions at the carried offsets without
+    // contacting a broker.
+    let offsets: serde_json::Map<String, Value> = [("0".to_string(), Value::from(7_i64))]
+        .into_iter()
+        .collect();
+    let cursor = calc_flow::Cursor::unbound(
+        vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7],
+        BTreeMap::from([("offsets".to_string(), Value::Object(offsets))]),
+    )
+    .expect("cursor");
+    source.open(Some(cursor)).await.expect("replay assignment");
+    source.close().await.expect("closes");
+}
+
+#[test]
+fn ordinary_sink_constructs_offline() {
+    let config = KafkaSinkConfig::from_options(&sink_options()).expect("parses");
+    let mut options = sink_options();
+    options.insert("format".to_string(), json!("csv"));
+    let csv_config = KafkaSinkConfig::from_options(&options).expect("csv parses");
+    assert!(matches!(csv_config.format, KafkaFormat::Csv));
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async move {
+        let mut sink = calc_flow_connectors::kafka::OrdinaryKafkaSink::new(config)
+            .expect("idempotent producer constructs offline");
+        sink.open().await.expect("opens");
+    });
+}
+
+#[test]
+fn malformed_options_fail_closed() {
+    let mut bad_partitions = source_options();
+    bad_partitions.insert("partitions".to_string(), json!(["a"]));
+    let error = KafkaSourceConfig::from_options(&bad_partitions).expect_err("string entries");
+    assert!(error.to_string().contains("partitions"), "{error}");
+
+    let mut non_array = source_options();
+    non_array.insert("partitions".to_string(), json!(3));
+    let error = KafkaSourceConfig::from_options(&non_array).expect_err("non-array partitions");
+    assert!(error.to_string().contains("partitions"), "{error}");
+
+    let mut bad_schema = source_options();
+    bad_schema.insert("schema".to_string(), json!("nope"));
+    let error = KafkaSourceConfig::from_options(&bad_schema).expect_err("schema shape");
+    assert!(error.to_string().contains("schema"), "{error}");
+
+    let mut bad_bound = source_options();
+    bad_bound.insert("max_batch_rows".to_string(), json!("many"));
+    let error = KafkaSourceConfig::from_options(&bad_bound).expect_err("bound type");
+    assert!(error.to_string().contains("max_batch_rows"), "{error}");
+
+    let mut missing_servers = sink_options();
+    missing_servers.remove("bootstrap_servers");
+    let error = KafkaSinkConfig::from_options(&missing_servers).expect_err("servers required");
+    assert!(error.to_string().contains("bootstrap_servers"), "{error}");
 }

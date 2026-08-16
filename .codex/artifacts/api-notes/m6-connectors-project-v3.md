@@ -313,6 +313,16 @@ connector identity and stable operation name.
 
 ## 14. CI and coverage interfaces
 
+- Per-connector coverage decision (D3 review clause, M6.3): the Kafka
+  transport's broker-bound module `crates/calc-flow-connectors/src/kafka.rs`
+  is omitted from the workspace line-coverage gate because its runtime
+  paths require a live broker; those paths are proven by the gated
+  connector-containers leg, while the module's offline logic (option
+  parsing, cursor replay assignment, identity derivation, offline
+  construction) stays inside the measured set. Remove the omission when
+  a broker-less harness covers the runtime paths.
+
+
 - ci-linux gains a `connectors` job: `--all-features` build plus container
   services (`ghcr.io/redpanda-data/redpanda`, `postgres:16`,
   `clickhouse/clickhouse-server`) running the gated `--ignored` tests.

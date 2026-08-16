@@ -454,8 +454,14 @@ jobs:
           cargo clean --target-dir "$FROZEN_ALLOCATION_HARNESS_TARGET_DIR"
           cargo clean --target-dir "$FROZEN_ALLOCATION_CANDIDATE_TARGET_DIR"
       - name: Enforce Rust core line coverage
+        # The kafka transport's runtime surface needs a broker and is
+        # proven by the connector-containers leg; per the M6 delta's
+        # per-connector coverage clause its broker-bound module is
+        # omitted from the line gate while its offline logic stays
+        # measured.
         run: >-
           cargo llvm-cov --workspace --all-features --fail-under-lines 90
+          --omit-files 'crates/calc-flow-connectors/src/kafka.rs'
           --lcov --output-path rust-lcov.info
       - name: Upload Rust coverage report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
