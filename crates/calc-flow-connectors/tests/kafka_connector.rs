@@ -97,16 +97,22 @@ fn transactional_ids_are_stable_and_secret_free() {
 }
 
 #[tokio::test]
-async fn kafka_source_cannot_be_created_without_a_broker() {
+async fn unreachable_broker_surfaces_as_idleness() {
     let mut options = source_options();
     options.insert("bootstrap_servers".to_string(), json!("localhost:1"));
     let config = KafkaSourceConfig::from_options(&options).expect("parses");
-    // Consumer creation succeeds lazily; the first poll must fail closed
-    // instead of silently reporting idleness forever.
     let mut source =
         calc_flow_connectors::kafka::KafkaSource::new(config).expect("consumer constructs lazily");
-    let outcome = source.open(None).await;
-    assert!(outcome.is_ok(), "open does not require a broker");
+    source
+        .open(None)
+        .await
+        .expect("open does not require a broker");
+    // The unreachable broker must surface as Idle (outage resilience),
+    // never as data and never as a job-fatal poll error.
+    match source.next().await.expect("poll stays healthy") {
+        Some(calc_flow::SourceEvent::Idle) => {}
+        _ => panic!("an unreachable broker reports idleness"),
+    }
 }
 
 #[test]
@@ -332,4 +338,23 @@ impl calc_flow::SecretResolver for NoSecrets {
             key: reference.key.clone(),
         })
     }
+}
+
+#[test]
+fn transactional_sink_recovery_validates_identity_evidence() {
+    use calc_flow_connectors::kafka::validate_recovery_evidence;
+
+    let matching = BTreeMap::from([("transactional_id".to_string(), json!("calc-flow-test"))]);
+    validate_recovery_evidence("calc-flow-test", &matching)
+        .expect("matching identity evidence recovers");
+
+    let mismatch = BTreeMap::from([("transactional_id".to_string(), json!("other-owner"))]);
+    let error = validate_recovery_evidence("calc-flow-test", &mismatch)
+        .expect_err("a foreign transactional ID fails closed");
+    assert!(error.to_string().contains("other-owner"), "{error}");
+
+    let missing = BTreeMap::new();
+    let error = validate_recovery_evidence("calc-flow-test", &missing)
+        .expect_err("missing identity evidence fails closed");
+    assert!(error.to_string().contains("transactional ID"), "{error}");
 }

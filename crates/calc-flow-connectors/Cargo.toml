@@ -12,7 +12,7 @@ repository.workspace = true
 [features]
 default = ["file"]
 file = ["dep:parquet"]
-kafka = ["dep:rdkafka"]
+kafka = ["dep:hex", "dep:rdkafka", "dep:sha2"]
 
 [dependencies]
 calc-flow = { path = "../calc-flow", version = "=2.0.0" }
@@ -20,8 +20,8 @@ arrow = { version = "=58.3.0", default-features = false }
 arrow-csv = "=58.3.0"
 arrow-json = "=58.3.0"
 async-trait.workspace = true
-hex.workspace = true
-sha2.workspace = true
+hex = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 bytes = "1.12.1"
 # Selects the pure-Rust backend for parquet's gzip codec; the direct
 # flate2 dependency keeps feature unification on rust_backend.

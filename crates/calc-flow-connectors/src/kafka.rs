@@ -332,6 +332,28 @@ impl StreamSource for KafkaSource {
     }
 }
 
+/// Validates that recovery evidence names this sink's transactional ID.
+///
+/// # Errors
+///
+/// Returns the connector error when the evidence names a foreign
+/// transactional ID or omits it entirely.
+pub fn validate_recovery_evidence(expected: &str, evidence: &JsonMap) -> Result<()> {
+    match evidence.get("transactional_id").and_then(Value::as_str) {
+        Some(recorded) if recorded == expected => Ok(()),
+        Some(recorded) => Err(fail(
+            "recover",
+            &format!(
+                "recovery evidence names transactional ID {recorded:?}, not this sink's {expected:?}"
+            ),
+        )),
+        None => Err(fail(
+            "recover",
+            "recovery evidence is missing the transactional ID",
+        )),
+    }
+}
+
 /// Derives the stable, secret-free transactional ID for one sink.
 ///
 /// # Errors
@@ -607,8 +629,7 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
     }
 
     async fn recover(&mut self, recovery: &SinkRecovery) -> Result<()> {
-        let _ = recovery;
-        Ok(())
+        validate_recovery_evidence(&self.config.transactional_id, recovery.pre_commit())
     }
 
     async fn close(&mut self) -> Result<()> {
