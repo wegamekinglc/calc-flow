@@ -1533,6 +1533,13 @@ trait TransactionalSink: StreamSink {
 
 ## 12. M6：Connector、Project v3、Python 与 Studio
 
+M6 从 `main@858199f6df0161801bb6028f37f3ebbeb1684e3e`（Public A6 完成后）
+开始。执行顺序、结构性决策（依赖边、feature gate、CI/覆盖率、版本、交付
+顺序）、issue/PR 映射与集成策略以
+[`2026-08-16-m6-execution-plan.md`](2026-08-16-m6-execution-plan.md) 为准；
+本节保留各 task 的完整 RED/实现/验收细节。M6.0 冻结的 delta package 使用
+`m6-connectors-project-v3` slug，其结论覆盖本节中与其冲突的历史表述。
+
 ### Task M6.1：建立 immutable connector registry 与 format layer
 
 **文件：**
