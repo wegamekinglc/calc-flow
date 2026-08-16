@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 30
     services:
       redpanda:
-        image: ghcr.io/redpanda-data/redpanda:v24.3.3
+        image: redpandadata/redpanda:v24.3.3
         ports:
           - 9092:9092
         options: >-
@@ -35,6 +35,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Install libcurl headers for vendored librdkafka
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
       - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
@@ -352,6 +354,11 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
+      - name: Install libcurl headers for vendored librdkafka
+        # librdkafka 2.12's cmake path includes curl/curl.h even with
+        # WITH_CURL=0 (rust-rdkafka#829); the headers satisfy the stale
+        # include without linking curl.
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version-file: .python-version
