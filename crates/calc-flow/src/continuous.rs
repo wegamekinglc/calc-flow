@@ -492,6 +492,26 @@ impl fmt::Debug for SinkRecovery {
 }
 
 impl SinkRecovery {
+    /// Assembles sink-scoped recovery evidence from its data-only parts.
+    ///
+    /// The runtime builds this value from the durable checkpoint
+    /// manifest; the public constructor lets connector implementers and
+    /// embedders exercise their `recover` contract against explicit
+    /// evidence instead of forging checkpoints.
+    #[must_use]
+    pub fn from_parts(
+        epoch: Epoch,
+        terminal: bool,
+        delivery: SinkDelivery,
+        pre_commit: JsonMap,
+    ) -> Self {
+        Self {
+            epoch,
+            terminal,
+            delivery,
+            pre_commit,
+        }
+    }
     /// Returns the selected recovery epoch.
     pub const fn epoch(&self) -> Epoch {
         self.epoch

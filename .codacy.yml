@@ -19,6 +19,10 @@ exclude_paths:
   - "web-ui/node_modules/**"
   - "web-ui/dist/**"
   - "web-ui/test-results/**"
+  # Generated lockfile: Rust dependency advisories are governed by the
+  # cargo-audit and cargo-deny jobs, which carry the documented RUSTSEC
+  # waivers (parquet 58 still pins thrift ^0.17 until the arrow 59 line).
+  - "Cargo.lock"
   # Test caches and coverage output
   - ".benchmarks/**"
   - ".hypothesis/**"

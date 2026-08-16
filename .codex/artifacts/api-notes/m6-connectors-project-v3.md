@@ -159,7 +159,7 @@ pub struct DecodeBounds { pub max_rows: u64, pub max_bytes: u64 }
 
 pub trait FormatDecoder: Send + Sync {
     fn identity(&self) -> FormatIdentity;
-    fn decode(&self, bytes: &[u8], bounds: &DecodeBounds, schema: Option<&ArrowFieldSpec>)
+    fn decode(&self, bytes: &[u8], bounds: &DecodeBounds, schema: &[ArrowFieldSpec])
         -> Result<Batch>;
 }
 

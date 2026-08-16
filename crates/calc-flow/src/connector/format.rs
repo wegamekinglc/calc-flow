@@ -79,7 +79,9 @@ pub trait FormatDecoder: Send + Sync {
     /// Decodes one payload within `bounds`.
     ///
     /// Decoding is synchronous CPU-local work; transports read bytes
-    /// asynchronously and hand the buffer to the codec.
+    /// asynchronously and hand the buffer to the codec. The optional
+    /// schema is the full ordered field list the payload must match;
+    /// codecs without an explicit schema infer one from the payload.
     ///
     /// # Errors
     ///
@@ -89,7 +91,7 @@ pub trait FormatDecoder: Send + Sync {
         &self,
         bytes: &[u8],
         bounds: &DecodeBounds,
-        schema: Option<&ArrowFieldSpec>,
+        schema: &[ArrowFieldSpec],
     ) -> Result<Batch>;
 }
 
