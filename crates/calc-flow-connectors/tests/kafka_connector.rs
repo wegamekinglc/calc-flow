@@ -271,3 +271,65 @@ fn malformed_options_fail_closed() {
     let error = KafkaSinkConfig::from_options(&missing_servers).expect_err("servers required");
     assert!(error.to_string().contains("bootstrap_servers"), "{error}");
 }
+
+#[tokio::test]
+async fn factories_register_and_resolve_offline() {
+    use calc_flow_connectors::register_kafka_connectors;
+
+    let mut registry = calc_flow::ConnectorRegistry::new();
+    register_kafka_connectors(&mut registry).expect("registers");
+    let snapshot = registry.snapshot();
+    let identity = calc_flow::ConnectorIdentity::new(
+        "calc-flow-connectors",
+        "kafka",
+        calc_flow_connectors::KAFKA_CONNECTOR_VERSION,
+    )
+    .expect("identity");
+    let source = snapshot.resolve_source(&identity).expect("source resolves");
+    let sink = snapshot.resolve_sink(&identity).expect("sink resolves");
+    assert!(!source.descriptor().capabilities.snapshot);
+    assert_eq!(
+        sink.descriptor().capabilities.transaction,
+        calc_flow::TransactionSupport::PreCommitCommit
+    );
+
+    // Duplicate registration conflicts atomically.
+    let error = register_kafka_connectors(&mut registry).expect_err("slot occupied");
+    assert!(
+        matches!(error, calc_flow::CalcFlowError::Conflict { .. }),
+        "{error}"
+    );
+
+    // The source factory validates options without a broker.
+    let outcome = source
+        .open(
+            &BTreeMap::from([("format".to_string(), json!("avro"))]),
+            &NoSecrets,
+        )
+        .await;
+    assert!(outcome.is_err(), "unknown formats are rejected offline");
+
+    // The ordinary sink factory constructs its producer offline.
+    let options = BTreeMap::from([
+        ("bootstrap_servers".to_string(), json!(bootstrap())),
+        ("topic".to_string(), json!("calc-flow-it")),
+        ("transactional_id".to_string(), json!("calc-flow-offline")),
+        ("format".to_string(), json!("json")),
+    ]);
+    let sink_result = sink.open(&options, &NoSecrets).await;
+    assert!(sink_result.is_ok(), "ordinary producer constructs offline");
+}
+
+struct NoSecrets;
+
+impl calc_flow::SecretResolver for NoSecrets {
+    fn resolve(
+        &self,
+        reference: &calc_flow::SecretReference,
+    ) -> calc_flow::Result<calc_flow::SecretHandle> {
+        Err(calc_flow::CalcFlowError::NotFound {
+            resource: "secret".into(),
+            key: reference.key.clone(),
+        })
+    }
+}

@@ -138,16 +138,14 @@ impl KafkaSourceConfig {
     fn decode(&self, payload: &[u8]) -> Result<Batch> {
         let bounds = DecodeBounds::new(self.max_batch_rows, self.max_batch_bytes)?;
         match self.format {
-            KafkaFormat::Json => JsonLinesCodec::new(crate::json_lines::IDENTITY_VERSION)?.decode(
+            KafkaFormat::Json => JsonLinesCodec::new(json_lines::IDENTITY_VERSION)?.decode(
                 payload,
                 &bounds,
                 &self.schema,
             ),
-            KafkaFormat::Csv => CsvCodec::new(crate::csv::IDENTITY_VERSION, true)?.decode(
-                payload,
-                &bounds,
-                &self.schema,
-            ),
+            KafkaFormat::Csv => {
+                CsvCodec::new(csv::IDENTITY_VERSION, true)?.decode(payload, &bounds, &self.schema)
+            }
         }
     }
 }
@@ -524,10 +522,8 @@ impl TransactionalKafkaSink {
     fn encode(&self, batch: &Batch) -> Result<Vec<u8>> {
         use calc_flow::FormatEncoder as _;
         match self.config.format {
-            KafkaFormat::Json => {
-                JsonLinesCodec::new(crate::json_lines::IDENTITY_VERSION)?.encode(batch)
-            }
-            KafkaFormat::Csv => CsvCodec::new(crate::csv::IDENTITY_VERSION, true)?.encode(batch),
+            KafkaFormat::Json => JsonLinesCodec::new(json_lines::IDENTITY_VERSION)?.encode(batch),
+            KafkaFormat::Csv => CsvCodec::new(csv::IDENTITY_VERSION, true)?.encode(batch),
         }
     }
 }
@@ -662,9 +658,9 @@ impl StreamSink for OrdinaryKafkaSink {
         use calc_flow::FormatEncoder as _;
         let payload = match self.config.format {
             KafkaFormat::Json => {
-                JsonLinesCodec::new(crate::json_lines::IDENTITY_VERSION)?.encode(batch)?
+                JsonLinesCodec::new(json_lines::IDENTITY_VERSION)?.encode(batch)?
             }
-            KafkaFormat::Csv => CsvCodec::new(crate::csv::IDENTITY_VERSION, true)?.encode(batch)?,
+            KafkaFormat::Csv => CsvCodec::new(csv::IDENTITY_VERSION, true)?.encode(batch)?,
         };
         self.sequence += 1;
         let record = FutureRecord::<Vec<u8>, Vec<u8>>::to(&self.config.topic).payload(&payload);
@@ -681,4 +677,152 @@ impl StreamSink for OrdinaryKafkaSink {
             .map_err(|error| fail("close", &error.to_string()))?;
         Ok(())
     }
+}
+
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use calc_flow::{
+    ConnectorCapabilities, ConnectorDescriptor, ConnectorFactories, ConnectorKind,
+    ConnectorRegistry, ConnectorSinkFactory, ConnectorSourceFactory, DeliveryCapability,
+    FormatIdentity, SecretResolver, TransactionSupport, WatermarkSupport,
+};
+
+use crate::{csv, json_lines};
+
+/// The connector implementation version re-exported as the transport
+/// identity constant.
+pub const KAFKA_CONNECTOR_VERSION: &str = IDENTITY_VERSION;
+
+/// Trusted source factory for the Kafka transport (feature `kafka`).
+pub struct KafkaSourceFactory {
+    descriptor: ConnectorDescriptor,
+}
+
+impl KafkaSourceFactory {
+    /// Creates the factory.
+    pub fn new() -> Self {
+        Self {
+            descriptor: kafka_connector_descriptor(),
+        }
+    }
+}
+
+impl Default for KafkaSourceFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl ConnectorSourceFactory for KafkaSourceFactory {
+    fn descriptor(&self) -> &ConnectorDescriptor {
+        &self.descriptor
+    }
+
+    async fn open(
+        &self,
+        options: &JsonMap,
+        _secrets: &dyn SecretResolver,
+    ) -> Result<Box<dyn StreamSource>> {
+        let config = KafkaSourceConfig::from_options(options)?;
+        Ok(Box::new(KafkaSource::new(config)?))
+    }
+}
+
+/// Trusted sink factory for the Kafka transport (feature `kafka`).
+pub struct KafkaSinkFactory {
+    descriptor: ConnectorDescriptor,
+}
+
+impl KafkaSinkFactory {
+    /// Creates the factory.
+    pub fn new() -> Self {
+        Self {
+            descriptor: kafka_connector_descriptor(),
+        }
+    }
+}
+
+impl Default for KafkaSinkFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl ConnectorSinkFactory for KafkaSinkFactory {
+    fn descriptor(&self) -> &ConnectorDescriptor {
+        &self.descriptor
+    }
+
+    async fn open(
+        &self,
+        options: &JsonMap,
+        _secrets: &dyn SecretResolver,
+    ) -> Result<Box<dyn StreamSink>> {
+        let config = KafkaSinkConfig::from_options(options)?;
+        Ok(Box::new(OrdinaryKafkaSink::new(config)?))
+    }
+
+    async fn open_transactional(
+        &self,
+        options: &JsonMap,
+        _secrets: &dyn SecretResolver,
+    ) -> Result<Option<Box<dyn TransactionalStreamSink>>> {
+        let config = KafkaSinkConfig::from_options(options)?;
+        Ok(Some(Box::new(TransactionalKafkaSink::new(config)?)))
+    }
+}
+
+fn kafka_connector_descriptor() -> ConnectorDescriptor {
+    ConnectorDescriptor {
+        identity: ConnectorIdentity::new("calc-flow-connectors", "kafka", IDENTITY_VERSION)
+            .expect("the kafka connector identity is valid"),
+        kind: ConnectorKind::Both,
+        capabilities: ConnectorCapabilities {
+            delivery: DeliveryCapability::AtLeastOnce,
+            replay: calc_flow::ReplayCapability::ReplayableExact,
+            watermark: WatermarkSupport::GeneratedOnly,
+            transaction: TransactionSupport::PreCommitCommit,
+            snapshot: false,
+            polling: false,
+            cdc: false,
+            lookup: false,
+        },
+        formats: vec![
+            FormatIdentity::new(json_lines::IDENTITY, json_lines::IDENTITY_VERSION)
+                .expect("json identity"),
+            FormatIdentity::new(csv::IDENTITY, csv::IDENTITY_VERSION).expect("csv identity"),
+        ],
+        config_schema: JsonMap::from([
+            ("bootstrap_servers".to_string(), serde_json::json!("string")),
+            ("topic".to_string(), serde_json::json!("string")),
+            ("partitions".to_string(), serde_json::json!("array")),
+            ("auto_offset_reset".to_string(), serde_json::json!("string")),
+            ("format".to_string(), serde_json::json!("string")),
+            ("schema".to_string(), serde_json::json!("array")),
+            ("max_batch_rows".to_string(), serde_json::json!("u64")),
+            ("max_batch_bytes".to_string(), serde_json::json!("u64")),
+            ("transactional_id".to_string(), serde_json::json!("string")),
+        ]),
+        secret_slots: BTreeSet::new(),
+    }
+}
+
+/// Registers the Kafka connectors into one trusted registry (feature
+/// `kafka`).
+///
+/// # Errors
+///
+/// Returns the registry conflict error when a connector slot or format
+/// identity is already occupied.
+pub fn register_kafka_connectors(registry: &mut ConnectorRegistry) -> Result<()> {
+    registry.register_connector(
+        kafka_connector_descriptor(),
+        ConnectorFactories::both(
+            Arc::new(KafkaSourceFactory::new()),
+            Arc::new(KafkaSinkFactory::new()),
+        ),
+    )
 }
