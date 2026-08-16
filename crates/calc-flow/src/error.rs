@@ -10,6 +10,10 @@ pub enum CalcFlowError {
     /// Safe, data-only failure from the public continuous runtime façade.
     #[error("{0}")]
     Streaming(#[from] crate::continuous::StreamingError),
+    /// Safe connector failure carrying identity, operation, and payload-free
+    /// detail (M6 api-note §12).
+    #[error("{0}")]
+    Connector(#[from] crate::connector::ConnectorError),
     #[error("invalid {field}: {message}")]
     InvalidArgument { field: String, message: String },
     #[error("project format version {found} is unsupported; expected {expected}")]
