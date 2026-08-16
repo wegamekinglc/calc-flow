@@ -185,6 +185,73 @@ fn registration_kind_must_match_factories() {
 }
 
 #[test]
+fn source_kind_rejects_extra_sink_factory() {
+    let mut registry = ConnectorRegistry::new();
+    let error = registry
+        .register_connector(
+            descriptor("file", ConnectorKind::Source, source_capabilities()),
+            ConnectorFactories::both(
+                Arc::new(FakeSourceFactory {
+                    descriptor: descriptor("file", ConnectorKind::Source, source_capabilities()),
+                }),
+                Arc::new(FakeSinkFactory {
+                    descriptor: descriptor("file", ConnectorKind::Source, source_capabilities()),
+                }),
+            ),
+        )
+        .expect_err("source kind must not carry a sink factory");
+    assert!(matches!(error, CalcFlowError::InvalidArgument { .. }));
+    assert!(
+        ConnectorRegistry::new()
+            .snapshot()
+            .resolve_source(&identity("file"))
+            .is_err(),
+        "failed registration leaves no connector behind"
+    );
+}
+
+#[test]
+fn same_connector_slot_with_different_version_conflicts() {
+    let mut registry = registry_with_file_connector();
+    let upgraded = ConnectorDescriptor {
+        identity: ConnectorIdentity::new(PROVIDER, "file", "2.1.0").expect("valid identity"),
+        ..descriptor("file", ConnectorKind::Source, source_capabilities())
+    };
+    let error = registry
+        .register_connector(
+            upgraded,
+            ConnectorFactories::source_only(Arc::new(FakeSourceFactory {
+                descriptor: descriptor("file", ConnectorKind::Source, source_capabilities()),
+            })),
+        )
+        .expect_err("one slot accepts one version label");
+    match error {
+        CalcFlowError::Conflict { resource, key } => {
+            assert!(resource.contains("connector"), "resource: {resource}");
+            assert!(
+                key.contains(PROVIDER) && key.contains("file"),
+                "key names the occupied slot: {key}"
+            );
+        }
+        other => panic!("expected Conflict, got {other:?}"),
+    }
+    let snapshot = registry.snapshot();
+    assert!(
+        snapshot
+            .resolve_source(&ConnectorIdentity::new(PROVIDER, "file", "2.0.0").expect("identity"))
+            .is_ok(),
+        "the originally registered version stays resolvable"
+    );
+    assert!(
+        registry
+            .snapshot()
+            .resolve_source(&ConnectorIdentity::new(PROVIDER, "file", "2.1.0").expect("identity"))
+            .is_err(),
+        "the rejected version never registers"
+    );
+}
+
+#[test]
 fn duplicate_format_identity_fails() {
     let mut registry = ConnectorRegistry::new();
     registry
@@ -474,6 +541,29 @@ fn participants(
             capabilities: sink_caps,
         },
     ]
+}
+
+#[test]
+fn exactly_once_error_names_the_unmet_axis_per_participant() {
+    let mut unreplayable = source_capabilities();
+    unreplayable.replay = ReplayCapability::Unreplayable;
+    unreplayable.delivery = DeliveryCapability::BestEffort;
+    let mut ordinary_sink = transactional_sink_capabilities();
+    ordinary_sink.transaction = TransactionSupport::None;
+    let error = validate_delivery_guarantee(
+        DeliveryGuarantee::ExactlyOnce,
+        &participants(unreplayable, ordinary_sink),
+    )
+    .expect_err("the error reports every unmet axis");
+    let message = error.to_string();
+    assert!(
+        message.contains("replay") && message.contains("delivery"),
+        "source axes are named: {message}"
+    );
+    assert!(
+        message.contains("transaction"),
+        "sink axis is named: {message}"
+    );
 }
 
 #[test]

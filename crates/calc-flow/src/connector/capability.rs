@@ -192,14 +192,24 @@ impl ConnectorCapabilities {
         }
     }
 
-    fn exactly_once_capable(self, role: ParticipantRole) -> bool {
+    fn unmet_exactly_once_axes(self, role: ParticipantRole) -> Vec<&'static str> {
+        let mut axes = Vec::new();
         match role {
             ParticipantRole::Source => {
-                self.replay == ReplayCapability::ReplayableExact
-                    && self.delivery != DeliveryCapability::BestEffort
+                if self.replay != ReplayCapability::ReplayableExact {
+                    axes.push("replay");
+                }
+                if self.delivery == DeliveryCapability::BestEffort {
+                    axes.push("delivery");
+                }
             }
-            ParticipantRole::Sink => self.transaction != TransactionSupport::None,
+            ParticipantRole::Sink => {
+                if self.transaction == TransactionSupport::None {
+                    axes.push("transaction");
+                }
+            }
         }
+        axes
     }
 }
 
@@ -324,17 +334,33 @@ pub struct DeliveryProof {
     pub effective: DeliveryGuarantee,
 }
 
+/// Lists every participant that cannot uphold exactly-once with its unmet
+/// capability axes.
+fn incapable_participants(participants: &[DeliveryParticipant]) -> Vec<String> {
+    participants
+        .iter()
+        .filter_map(|participant| {
+            let axes = participant
+                .capabilities
+                .unmet_exactly_once_axes(participant.role);
+            (!axes.is_empty()).then(|| format!("{} (unmet: {})", participant.path, axes.join(", ")))
+        })
+        .collect()
+}
+
 /// Derives the effective delivery guarantee for a requested level.
 ///
 /// A requested [`DeliveryGuarantee::ExactlyOnce`] fails when any reachable
 /// participant cannot uphold it; the error names every incapable
-/// participant path so compilation stops before any connector lifecycle
-/// side effect. Lower requests record their proof without upgrading.
+/// participant path together with its unmet capability axis so compilation
+/// stops before any connector lifecycle side effect. Lower requests record
+/// their proof without upgrading.
 ///
 /// # Errors
 ///
 /// Returns [`CalcFlowError::Compile`] listing every incapable participant
-/// path when exactly-once was requested and cannot be proven.
+/// path and its unmet axis when exactly-once was requested and cannot be
+/// proven.
 pub fn validate_delivery_guarantee(
     requested: DeliveryGuarantee,
     participants: &[DeliveryParticipant],
@@ -342,15 +368,7 @@ pub fn validate_delivery_guarantee(
     let effective = match requested {
         DeliveryGuarantee::AtLeastOnce => DeliveryGuarantee::AtLeastOnce,
         DeliveryGuarantee::ExactlyOnce => {
-            let incapable: Vec<&str> = participants
-                .iter()
-                .filter(|participant| {
-                    !participant
-                        .capabilities
-                        .exactly_once_capable(participant.role)
-                })
-                .map(|participant| participant.path.as_str())
-                .collect();
+            let incapable = incapable_participants(participants);
             if incapable.is_empty() {
                 DeliveryGuarantee::ExactlyOnce
             } else {

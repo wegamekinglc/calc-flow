@@ -121,6 +121,77 @@ struct RegisteredConnector {
     sink: Option<Arc<dyn ConnectorSinkFactory>>,
 }
 
+/// Requires the declared kind to carry exactly its matching factories.
+///
+/// # Errors
+///
+/// Returns [`CalcFlowError::InvalidArgument`] naming the expected shape
+/// when a factory is missing or an extra direction is supplied.
+fn validate_factory_shape(kind: ConnectorKind, factories: &ConnectorFactories) -> Result<()> {
+    let (wants_source, wants_sink, guidance) = match kind {
+        ConnectorKind::Source => (
+            true,
+            false,
+            "source-kind connector registers exactly one source factory",
+        ),
+        ConnectorKind::Sink => (
+            false,
+            true,
+            "sink-kind connector registers exactly one sink factory",
+        ),
+        ConnectorKind::Both => (
+            true,
+            true,
+            "both-kind connector registers source and sink factories",
+        ),
+    };
+    if (factories.source.is_some(), factories.sink.is_some()) != (wants_source, wants_sink) {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "factories".into(),
+            message: guidance.into(),
+        });
+    }
+    Ok(())
+}
+
+/// Requires every supplied factory to carry the registered identity.
+///
+/// # Errors
+///
+/// Returns [`CalcFlowError::InvalidArgument`] naming the offending
+/// direction when a factory descriptor disagrees with the registration.
+fn validate_factory_identities(
+    descriptor: &ConnectorDescriptor,
+    factories: &ConnectorFactories,
+) -> Result<()> {
+    for (direction, factory_identity) in [
+        (
+            "source",
+            factories
+                .source
+                .as_deref()
+                .map(|factory| &factory.descriptor().identity),
+        ),
+        (
+            "sink",
+            factories
+                .sink
+                .as_deref()
+                .map(|factory| &factory.descriptor().identity),
+        ),
+    ] {
+        if factory_identity.is_some_and(|identity| identity != &descriptor.identity) {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "factories".into(),
+                message: format!(
+                    "{direction} factory descriptor identity does not match the registration"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// The mutable trusted registry connectors register into.
 #[derive(Default)]
 pub struct ConnectorRegistry {
@@ -165,69 +236,30 @@ impl ConnectorRegistry {
 
     /// Registers one connector with its trusted factories.
     ///
-    /// Registration is atomic: a duplicate identity, a kind/factory
-    /// mismatch, or a factory descriptor disagreeing with the registered
-    /// identity leaves the registry unchanged.
+    /// Registration is atomic: an occupied `(provider, name)` slot —
+    /// including the same identity or a different version label — a
+    /// kind/factory shape mismatch, or a factory descriptor disagreeing
+    /// with the registered identity leaves the registry unchanged.
     ///
     /// # Errors
     ///
-    /// Returns [`CalcFlowError::Conflict`] for a duplicate identity and
-    /// [`CalcFlowError::InvalidArgument`] when the declared kind lacks its
-    /// matching factory or a factory carries a different identity.
+    /// Returns [`CalcFlowError::Conflict`] when the connector slot is
+    /// already occupied and [`CalcFlowError::InvalidArgument`] when the
+    /// declared kind does not carry exactly its matching factories or a
+    /// factory carries a different identity.
     pub fn register_connector(
         &mut self,
         descriptor: ConnectorDescriptor,
         factories: ConnectorFactories,
     ) -> Result<()> {
-        if self.connectors.contains_key(&descriptor.identity) {
-            let identity = &descriptor.identity;
+        if let Some(occupied) = self.occupied_connector_slot(&descriptor.identity) {
             return Err(CalcFlowError::Conflict {
                 resource: "connector".into(),
-                key: format!(
-                    "{}/{}/{}",
-                    identity.provider, identity.name, identity.version
-                ),
+                key: occupied,
             });
         }
-        match descriptor.kind {
-            ConnectorKind::Source if factories.source.is_none() => {
-                return Err(CalcFlowError::InvalidArgument {
-                    field: "factories".into(),
-                    message: "source-kind connector requires a source factory".into(),
-                });
-            }
-            ConnectorKind::Sink if factories.sink.is_none() => {
-                return Err(CalcFlowError::InvalidArgument {
-                    field: "factories".into(),
-                    message: "sink-kind connector requires a sink factory".into(),
-                });
-            }
-            ConnectorKind::Both if factories.source.is_none() || factories.sink.is_none() => {
-                return Err(CalcFlowError::InvalidArgument {
-                    field: "factories".into(),
-                    message: "both-kind connector requires source and sink factories".into(),
-                });
-            }
-            ConnectorKind::Source | ConnectorKind::Sink | ConnectorKind::Both => {}
-        }
-        if let Some(source) = &factories.source {
-            if source.descriptor().identity != descriptor.identity {
-                return Err(CalcFlowError::InvalidArgument {
-                    field: "factories".into(),
-                    message: "source factory descriptor identity does not match the registration"
-                        .into(),
-                });
-            }
-        }
-        if let Some(sink) = &factories.sink {
-            if sink.descriptor().identity != descriptor.identity {
-                return Err(CalcFlowError::InvalidArgument {
-                    field: "factories".into(),
-                    message: "sink factory descriptor identity does not match the registration"
-                        .into(),
-                });
-            }
-        }
+        validate_factory_shape(descriptor.kind, &factories)?;
+        validate_factory_identities(&descriptor, &factories)?;
         self.connectors.insert(
             descriptor.identity,
             RegisteredConnector {
@@ -236,6 +268,15 @@ impl ConnectorRegistry {
             },
         );
         Ok(())
+    }
+
+    fn occupied_connector_slot(&self, identity: &ConnectorIdentity) -> Option<String> {
+        self.connectors
+            .keys()
+            .find(|registered| {
+                registered.provider == identity.provider && registered.name == identity.name
+            })
+            .map(ConnectorIdentity::to_string)
     }
 
     /// Registers one format codec descriptor.

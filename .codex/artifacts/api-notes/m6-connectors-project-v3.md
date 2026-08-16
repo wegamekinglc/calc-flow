@@ -95,18 +95,28 @@ pub struct ConnectorRegistry { /* crate-private map keyed by identity */ }
 
 impl ConnectorRegistry {
     pub fn new() -> Self;
-    pub fn register_connector(&mut self, descriptor: ConnectorDescriptor) -> Result<()>;
+    pub fn register_connector(
+        &mut self,
+        descriptor: ConnectorDescriptor,
+        factories: ConnectorFactories,
+    ) -> Result<()>;
     pub fn register_format(&mut self, descriptor: FormatDescriptor) -> Result<()>;
     pub fn snapshot(&self) -> ConnectorRegistrySnapshot;
 }
 
-#[derive(Clone, Debug)]
+// Cloned freely; no `Debug` because the snapshot holds factory trait
+// objects, and plans never observe their contents beyond resolution.
+#[derive(Clone)]
 pub struct ConnectorRegistrySnapshot { /* immutable copy, Send + Sync */ }
 ```
 
-- `register_connector` fails atomically on a duplicate
-  `(provider, name, version)` or `(provider, name)` with a different
-  version label intended for the same slot.
+- `register_connector` binds the trusted factories at registration and
+  fails atomically when the declared kind does not carry exactly its
+  matching factories (`Source` registers one source factory, `Sink` one
+  sink factory, `Both` both), when a factory descriptor names a different
+  identity, or when the `(provider, name)` slot is already occupied —
+  whether by the same `(provider, name, version)` identity or by a
+  different version label.
 - Plans compiled with a snapshot never observe later registrations.
 - `compile_stream()` accepts the snapshot exactly as it accepts
   `UdfRegistrySnapshot` today.
@@ -169,17 +179,17 @@ edge.
 #[async_trait]
 pub trait ConnectorSourceFactory: Send + Sync {
     fn descriptor(&self) -> &ConnectorDescriptor;
-    async fn open(&self, config: JsonMap, secrets: &dyn SecretResolver)
+    async fn open(&self, options: &JsonMap, secrets: &dyn SecretResolver)
         -> Result<Box<dyn StreamSource>>;
 }
 
 #[async_trait]
 pub trait ConnectorSinkFactory: Send + Sync {
     fn descriptor(&self) -> &ConnectorDescriptor;
-    async fn open(&self, config: JsonMap, secrets: &dyn SecretResolver)
+    async fn open(&self, options: &JsonMap, secrets: &dyn SecretResolver)
         -> Result<Box<dyn StreamSink>>;
     async fn open_transactional(
-        &self, config: JsonMap, secrets: &dyn SecretResolver,
+        &self, options: &JsonMap, secrets: &dyn SecretResolver,
     ) -> Result<Option<Box<dyn TransactionalStreamSink>>>;
 }
 ```
