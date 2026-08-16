@@ -116,15 +116,20 @@ fn kafka_roundtrip_and_transactional_exactly_once() {
         return;
     }
     let bootstrap_servers = bootstrap();
-    let mut options = source_options();
-    options.insert(
-        "bootstrap_servers".to_string(),
-        json!(bootstrap_servers.clone()),
-    );
+    let topic = "calc-flow-kafka-it";
+    let options = BTreeMap::from([
+        (
+            "bootstrap_servers".to_string(),
+            json!(bootstrap_servers.clone()),
+        ),
+        ("topic".to_string(), json!(topic)),
+        ("partitions".to_string(), json!([0])),
+        ("format".to_string(), json!("json")),
+    ]);
     let config = KafkaSourceConfig::from_options(&options).expect("parses");
     let sink_config = KafkaSinkConfig::from_options(&BTreeMap::from([
         ("bootstrap_servers".to_string(), json!(bootstrap_servers)),
-        ("topic".to_string(), json!("calc-flow-kafka-it")),
+        ("topic".to_string(), json!(topic)),
         ("transactional_id".to_string(), json!("calc-flow-it-txn")),
         ("format".to_string(), json!("json")),
     ]))
