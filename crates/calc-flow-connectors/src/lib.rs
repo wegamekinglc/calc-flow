@@ -37,12 +37,16 @@ pub mod json_lines;
 #[cfg(feature = "file")]
 pub mod parquet;
 
+#[cfg(feature = "postgresql")]
+pub mod database_types;
 #[cfg(feature = "file")]
 mod file;
 #[cfg(feature = "file")]
 mod file_sink;
 #[cfg(feature = "kafka")]
 pub mod kafka;
+#[cfg(feature = "postgresql")]
+pub mod postgresql;
 
 #[cfg(feature = "kafka")]
 pub use kafka::{
