@@ -123,63 +123,14 @@ impl KafkaSourceConfig {
     pub fn from_options(options: &JsonMap) -> Result<Self> {
         let bootstrap_servers = required_string(options, "bootstrap_servers")?;
         let topic = required_string(options, "topic")?;
-        let partitions = match options.get("partitions") {
-            None => vec![0],
-            Some(Value::Array(values)) => values
-                .iter()
-                .map(|value| {
-                    value
-                        .as_i64()
-                        .and_then(|entry| i32::try_from(entry).ok())
-                        .ok_or_else(|| CalcFlowError::InvalidArgument {
-                            field: "partitions".into(),
-                            message: "partition entries must be integers".into(),
-                        })
-                })
-                .collect::<Result<Vec<_>>>()?,
-            Some(_) => {
-                return Err(CalcFlowError::InvalidArgument {
-                    field: "partitions".into(),
-                    message: "partitions must be an integer array".into(),
-                });
-            }
-        };
-        if partitions.is_empty() {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "partitions".into(),
-                message: "at least one partition must be assigned".into(),
-            });
-        }
-        let mut sorted = partitions;
-        sorted.sort_unstable();
-        sorted.dedup();
-        let auto_offset_reset = match options.get("auto_offset_reset").and_then(Value::as_str) {
-            None | Some("earliest") => KafkaOffsetReset::Earliest,
-            Some("latest") => KafkaOffsetReset::Latest,
-            Some(other) => {
-                return Err(CalcFlowError::InvalidArgument {
-                    field: "auto_offset_reset".into(),
-                    message: format!("unsupported reset offset {other:?}"),
-                });
-            }
-        };
         let format = KafkaFormat::parse(&required_string(options, "format")?)?;
-        let schema =
-            match options.get("schema") {
-                None => Vec::new(),
-                Some(value) => serde_json::from_value::<Vec<ArrowFieldSpec>>(value.clone())
-                    .map_err(|error| CalcFlowError::InvalidArgument {
-                        field: "schema".into(),
-                        message: format!("schema must be a field list: {error}"),
-                    })?,
-            };
         Ok(Self {
             bootstrap_servers,
             topic,
-            partitions: sorted,
-            auto_offset_reset,
+            partitions: parse_partitions(options)?,
+            auto_offset_reset: parse_offset_reset(options)?,
             format,
-            schema,
+            schema: parse_kafka_schema(options)?,
             max_batch_rows: u64_option(options, "max_batch_rows")?.unwrap_or(8192),
             max_batch_bytes: u64_option(options, "max_batch_bytes")?.unwrap_or(8 * 1024 * 1024),
         })
@@ -404,6 +355,68 @@ impl KafkaSinkConfig {
             transactional_id: required_string(options, "transactional_id")?,
             format: KafkaFormat::parse(&required_string(options, "format")?)?,
         })
+    }
+}
+
+/// Parses and normalizes the explicit partition assignment.
+fn parse_partitions(options: &JsonMap) -> Result<Vec<i32>> {
+    let partitions = match options.get("partitions") {
+        None => vec![0],
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_i64()
+                    .and_then(|entry| i32::try_from(entry).ok())
+                    .ok_or_else(|| CalcFlowError::InvalidArgument {
+                        field: "partitions".into(),
+                        message: "partition entries must be integers".into(),
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        Some(_) => {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "partitions".into(),
+                message: "partitions must be an integer array".into(),
+            });
+        }
+    };
+    if partitions.is_empty() {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "partitions".into(),
+            message: "at least one partition must be assigned".into(),
+        });
+    }
+    let mut sorted = partitions;
+    sorted.sort_unstable();
+    sorted.dedup();
+    Ok(sorted)
+}
+
+/// Parses the data-only reset-offset vocabulary.
+fn parse_offset_reset(options: &JsonMap) -> Result<KafkaOffsetReset> {
+    match options.get("auto_offset_reset").and_then(Value::as_str) {
+        None | Some("earliest") => Ok(KafkaOffsetReset::Earliest),
+        Some("latest") => Ok(KafkaOffsetReset::Latest),
+        Some(other) => Err(CalcFlowError::InvalidArgument {
+            field: "auto_offset_reset".into(),
+            message: format!("unsupported reset offset {other:?}"),
+        }),
+    }
+}
+
+/// Parses the optional explicit schema field list.
+fn parse_kafka_schema(options: &JsonMap) -> Result<Vec<ArrowFieldSpec>> {
+    match options.get("schema") {
+        None => Ok(Vec::new()),
+        Some(value) => {
+            serde_json::from_value::<Vec<ArrowFieldSpec>>(value.clone()).map_err(|error| {
+                CalcFlowError::InvalidArgument {
+                    field: "schema".into(),
+                    message: format!("schema must be a field list: {error}"),
+                }
+            })
+        }
     }
 }
 
