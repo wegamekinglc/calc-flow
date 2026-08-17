@@ -18,11 +18,11 @@ use calc_flow::{
     ConnectorDescriptor, ConnectorError, ConnectorFactories, ConnectorIdentity, ConnectorKind,
     ConnectorOperation, ConnectorRegistry, ConnectorSinkFactory, ConnectorSourceFactory, Cursor,
     DeliveryCapability, JsonMap, Result, SecretHandle, SecretReference, SecretResolver,
-    SecretResolverKind, SinkRecovery, SourceCapabilities, SourceEvent, SourceSchema, StreamSink,
-    StreamSource, TransactionSupport, TransactionalStreamSink, WatermarkSupport,
+    SecretResolverKind, SourceCapabilities, SourceEvent, SourceSchema, StreamSink, StreamSource,
+    TransactionSupport, TransactionalStreamSink, WatermarkSupport,
 };
 use serde_json::Value;
-use sha2::{Digest as _, Sha256};
+use sha2::Digest as _;
 
 /// The connector implementation version.
 pub const IDENTITY_VERSION: &str = "2.0.0";
