@@ -35,7 +35,7 @@ impl ClickHouseSinkConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`CalcFlowError::InvalidArgument`] naming the offending
+    /// Returns [`calc_flow::CalcFlowError::InvalidArgument`] naming the offending
     /// option.
     pub fn from_options(options: &JsonMap) -> Result<Self> {
         Ok(Self {
