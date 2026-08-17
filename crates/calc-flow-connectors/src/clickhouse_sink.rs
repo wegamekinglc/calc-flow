@@ -14,8 +14,7 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 use super::clickhouse::{
-    ch_identifier, connector_identity, fail, redact_url_error, required_string,
-    resolve_clickhouse_url,
+    ch_identifier, fail, redact_url_error, required_string, resolve_clickhouse_url,
 };
 
 /// Data-only configuration for one `ClickHouse` sink.

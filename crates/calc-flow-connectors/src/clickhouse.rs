@@ -414,7 +414,7 @@ impl ClickHouseSource {
         let mut fields = Vec::new();
         let mut columns: Vec<Vec<Option<String>>> = Vec::new();
         for (name, _) in obj {
-            let arrow_type = infer_arrow_type(rows, name)?;
+            let arrow_type = infer_arrow_type(rows, name);
             fields.push(Field::new(name.clone(), arrow_type, true));
             let values: Vec<Option<String>> = rows
                 .iter()
@@ -475,19 +475,19 @@ impl ClickHouseSource {
     }
 }
 
-fn infer_arrow_type(rows: &[Value], name: &str) -> Result<arrow::datatypes::DataType> {
+fn infer_arrow_type(rows: &[Value], name: &str) -> arrow::datatypes::DataType {
     use arrow::datatypes::DataType;
     for row in rows {
         if let Some(value) = row.get(name) {
-            return Ok(match value {
+            return match value {
                 Value::Number(n) if n.is_i64() || n.is_u64() => DataType::Int64,
                 Value::Number(n) if n.is_f64() => DataType::Float64,
                 Value::Bool(_) => DataType::Boolean,
                 _ => DataType::Utf8,
-            });
+            };
         }
     }
-    Ok(DataType::Utf8)
+    DataType::Utf8
 }
 
 pub(crate) fn redact_url_error(message: &str) -> String {
