@@ -6,9 +6,8 @@
 
 use std::collections::BTreeMap;
 
-use calc_flow_connectors::clickhouse::{
-    ChSourceMode, ClickHouseSinkConfig, ClickHouseSourceConfig, ch_identifier, dedup_token,
-};
+use calc_flow_connectors::clickhouse::{ChSourceMode, ClickHouseSourceConfig, ch_identifier};
+use calc_flow_connectors::clickhouse_sink::{ClickHouseSinkConfig, dedup_token};
 use serde_json::{Value, json};
 
 fn source_options() -> BTreeMap<String, Value> {
@@ -275,7 +274,7 @@ fn snapshot_reads_and_dedup_sink_commits() {
         let sink_config = ClickHouseSinkConfig::from_options(&sink_options())
             .expect("sink parses");
         let mut sink =
-            calc_flow_connectors::clickhouse::ClickHouseSink::new(sink_config).expect("builds");
+            calc_flow_connectors::clickhouse_sink::ClickHouseSink::new(sink_config).expect("builds");
         sink.open().await.expect("opens");
         sink.begin_epoch(calc_flow::Epoch::INITIAL)
             .await
