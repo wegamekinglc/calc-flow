@@ -280,6 +280,9 @@ impl HttpSource {
         let body = self.read_body(response).await?;
         let batch = self.decode_body(&body)?;
         let cursor = self.cursor_from_state()?;
+        // The poll interval paces both hit and miss paths so the source
+        // never hot-loops a fast endpoint.
+        tokio::time::sleep(self.config.poll_interval).await;
         Ok(Some(SourceEvent::Data { batch, cursor }))
     }
 

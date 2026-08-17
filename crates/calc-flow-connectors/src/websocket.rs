@@ -178,6 +178,11 @@ pub struct WebSocketSource {
     capabilities: SourceCapabilities,
     config: WebSocketSourceConfig,
     sequence: u64,
+    /// Bounded frame buffer; in `DropOldest` mode the oldest frames are
+    /// evicted when the consumer falls behind, making the loss
+    /// observable through the `dropped_frames` counter.
+    buffer: std::collections::VecDeque<Vec<u8>>,
+    dropped_frames: u64,
 }
 
 impl WebSocketSource {
@@ -204,6 +209,8 @@ impl WebSocketSource {
             capabilities,
             config,
             sequence: 0,
+            buffer: std::collections::VecDeque::new(),
+            dropped_frames: 0,
         })
     }
 
@@ -227,10 +234,24 @@ impl WebSocketSource {
             self.config.max_frame_bytes,
         )
         .await?;
-        if lines.is_empty() {
+        if lines.is_empty() && self.buffer.is_empty() {
             return Ok(Some(SourceEvent::Idle));
         }
-        let batch = self.decode_frames(&lines)?;
+        // In DropOldest mode, drain the accumulated buffer plus the new
+        // frames, dropping the oldest when the total exceeds the bound.
+        for line in lines {
+            self.buffer.push_back(line);
+        }
+        while self.buffer.len() as u64 > self.config.max_batch_rows {
+            if self.config.backpressure == BackpressureMode::DropOldest {
+                self.buffer.pop_front();
+                self.dropped_frames += 1;
+            } else {
+                break;
+            }
+        }
+        let drained: Vec<Vec<u8>> = self.buffer.drain(..).collect();
+        let batch = self.decode_frames(&drained)?;
         let cursor = self.build_cursor()?;
         Ok(Some(SourceEvent::Data { batch, cursor }))
     }
