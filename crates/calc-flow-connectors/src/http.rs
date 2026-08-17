@@ -275,25 +275,41 @@ impl HttpSource {
         secrets: &dyn SecretResolver,
     ) -> Result<Option<SourceEvent>> {
         let url = resolve_http_url(secrets, &self.config.url_key)?;
-        let auth = match &self.config.auth_key {
-            Some(key) => resolve_auth_header(secrets, key)?,
-            None => None,
-        };
-        let request = self.build_request(&url, auth.as_deref()).await?;
-        let response = request
-            .send()
-            .await
-            .map_err(|error| fail("poll", &redact_url(&error.to_string())))?;
+        let auth = self.resolve_auth(secrets)?;
+        let response = self.fetch(&url, auth.as_deref()).await?;
         if response.status() == reqwest::StatusCode::NOT_MODIFIED {
             tokio::time::sleep(self.config.poll_interval).await;
             return Ok(Some(SourceEvent::Idle));
         }
+        let body = self.read_body(response).await?;
+        let batch = self.decode_body(&body)?;
+        let cursor = self.cursor_from_state()?;
+        Ok(Some(SourceEvent::Data { batch, cursor }))
+    }
+
+    fn resolve_auth(&self, secrets: &dyn SecretResolver) -> Result<Option<String>> {
+        match &self.config.auth_key {
+            Some(key) => resolve_auth_header(secrets, key),
+            None => Ok(None),
+        }
+    }
+
+    async fn fetch(&self, url: &str, auth: Option<&str>) -> Result<reqwest::Response> {
+        let request = self.build_request(url, auth).await?;
+        let response = request
+            .send()
+            .await
+            .map_err(|error| fail("poll", &redact_url(&error.to_string())))?;
         if !response.status().is_success() {
             return Err(fail(
                 "poll",
                 &format!("endpoint returned status {}", response.status()),
             ));
         }
+        Ok(response)
+    }
+
+    async fn read_body(&mut self, response: reqwest::Response) -> Result<bytes::Bytes> {
         self.etag = response
             .headers()
             .get("etag")
@@ -328,14 +344,17 @@ impl HttpSource {
                 ),
             ));
         }
+        Ok(body)
+    }
+
+    fn decode_body(&mut self, body: &[u8]) -> Result<Batch> {
         let codec = JsonLinesCodec::new(crate::json_lines::IDENTITY_VERSION)?;
         let bounds = calc_flow::DecodeBounds::new(
             self.config.max_batch_rows,
             self.config.max_response_bytes,
         )?;
-        let batch = codec.decode(&body, &bounds, &[])?;
+        let batch = codec.decode(body, &bounds, &[])?;
         self.sequence += 1;
-        let cursor = self.cursor_from_state()?;
         let metadata = BatchMetadata::new(
             "http",
             self.sequence,
@@ -345,8 +364,7 @@ impl HttpSource {
             )]),
         )
         .map_err(|error| fail("poll", &error.to_string()))?;
-        let batch = batch.with_metadata(metadata);
-        Ok(Some(SourceEvent::Data { batch, cursor }))
+        Ok(batch.with_metadata(metadata))
     }
 
     fn cursor_from_state(&self) -> Result<Cursor> {

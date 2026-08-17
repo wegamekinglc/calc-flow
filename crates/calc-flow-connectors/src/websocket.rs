@@ -9,7 +9,6 @@
 //! and emits a warning.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use calc_flow::FormatDecoder as _;
@@ -219,56 +218,24 @@ impl WebSocketSource {
         secrets: &dyn SecretResolver,
     ) -> Result<Option<SourceEvent>> {
         let url = resolve_ws_url(secrets, &self.config.url_key)?;
-        let (stream, _response) = tokio_tungstenite::connect_async(url)
+        let (mut stream, _response) = tokio_tungstenite::connect_async(url)
             .await
             .map_err(|error| fail("open", &error.to_string()))?;
-        let mut stream = stream;
-        let mut lines: Vec<Vec<u8>> = Vec::new();
-        let mut taken: u64 = 0;
-        while let Some(message) = futures_util::StreamExt::next(&mut stream).await {
-            let message = message.map_err(|error| fail("read", &error.to_string()))?;
-            match message {
-                Message::Text(text) => {
-                    if text.len() as u64 > self.config.max_frame_bytes {
-                        return Err(fail(
-                            "read",
-                            &format!(
-                                "frame {} bytes exceeds the {} byte limit",
-                                text.len(),
-                                self.config.max_frame_bytes
-                            ),
-                        ));
-                    }
-                    lines.push(text.as_bytes().to_vec());
-                    taken += 1;
-                    if taken >= self.config.max_batch_rows {
-                        break;
-                    }
-                }
-                Message::Binary(data) => {
-                    if data.len() as u64 > self.config.max_frame_bytes {
-                        return Err(fail(
-                            "read",
-                            &format!(
-                                "frame {} bytes exceeds the {} byte limit",
-                                data.len(),
-                                self.config.max_frame_bytes
-                            ),
-                        ));
-                    }
-                    lines.push(data.to_vec());
-                    taken += 1;
-                    if taken >= self.config.max_batch_rows {
-                        break;
-                    }
-                }
-                Message::Close(_) => break,
-                _ => {}
-            }
-        }
+        let lines = collect_bounded_frames(
+            &mut stream,
+            self.config.max_batch_rows,
+            self.config.max_frame_bytes,
+        )
+        .await?;
         if lines.is_empty() {
             return Ok(Some(SourceEvent::Idle));
         }
+        let batch = self.decode_frames(&lines)?;
+        let cursor = self.build_cursor()?;
+        Ok(Some(SourceEvent::Data { batch, cursor }))
+    }
+
+    fn decode_frames(&mut self, lines: &[Vec<u8>]) -> Result<Batch> {
         let body: Vec<u8> = lines
             .iter()
             .flat_map(|line| line.iter().copied().chain(std::iter::once(b'\n')))
@@ -278,10 +245,6 @@ impl WebSocketSource {
             calc_flow::DecodeBounds::new(self.config.max_batch_rows, self.config.max_batch_bytes)?;
         let batch = codec.decode(&body, &bounds, &[])?;
         self.sequence += 1;
-        let cursor = Cursor::unbound(
-            self.sequence.to_be_bytes().to_vec(),
-            BTreeMap::from([("sequence".to_string(), Value::from(self.sequence))]),
-        )?;
         let metadata = BatchMetadata::new(
             "websocket",
             self.sequence,
@@ -291,8 +254,14 @@ impl WebSocketSource {
             )]),
         )
         .map_err(|error| fail("read", &error.to_string()))?;
-        let batch = batch.with_metadata(metadata);
-        Ok(Some(SourceEvent::Data { batch, cursor }))
+        Ok(batch.with_metadata(metadata))
+    }
+
+    fn build_cursor(&self) -> Result<Cursor> {
+        Cursor::unbound(
+            self.sequence.to_be_bytes().to_vec(),
+            BTreeMap::from([("sequence".to_string(), Value::from(self.sequence))]),
+        )
     }
 }
 
@@ -313,6 +282,47 @@ impl StreamSource for WebSocketSource {
     async fn close(&mut self) -> Result<()> {
         Ok(())
     }
+}
+
+/// Collects bounded frames from a WebSocket stream into newline
+/// JSON lines.
+async fn collect_bounded_frames<S>(
+    stream: &mut S,
+    max_rows: u64,
+    max_frame_bytes: u64,
+) -> Result<Vec<Vec<u8>>>
+where
+    S: futures_util::Stream<
+            Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>,
+        > + Unpin,
+{
+    let mut lines: Vec<Vec<u8>> = Vec::new();
+    let mut taken: u64 = 0;
+    while let Some(message) = futures_util::StreamExt::next(stream).await {
+        let message = message.map_err(|error| fail("read", &error.to_string()))?;
+        let payload = match &message {
+            Message::Text(text) => text.as_bytes().to_vec(),
+            Message::Binary(data) => data.to_vec(),
+            Message::Close(_) => break,
+            _ => continue,
+        };
+        if payload.len() as u64 > max_frame_bytes {
+            return Err(fail(
+                "read",
+                &format!(
+                    "frame {} bytes exceeds the {} byte limit",
+                    payload.len(),
+                    max_frame_bytes
+                ),
+            ));
+        }
+        lines.push(payload);
+        taken += 1;
+        if taken >= max_rows {
+            break;
+        }
+    }
+    Ok(lines)
 }
 
 /// Trusted source factory for the `WebSocket` transport.

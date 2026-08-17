@@ -18,6 +18,7 @@ ignore = [
 [licenses]
 allow = [
     "Apache-2.0",
+    "CDLA-Permissive-2.0",
     "ISC",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
