@@ -302,20 +302,30 @@ impl PostgresSource {
         }
         let rows = self.query_batch().await?;
         if rows.is_empty() {
-            if self.config.mode == PgSourceMode::Snapshot {
-                self.exhausted = true;
-                return Ok(None);
+            if self.config.mode == PgSourceMode::IncrementalQuery {
+                tokio::time::sleep(self.config.poll_interval).await;
             }
-            tokio::time::sleep(self.config.poll_interval).await;
-            return Ok(Some(SourceEvent::Idle));
+            return Ok(self.on_empty_batch());
         }
         let event = self.build_data_event(&rows)?;
+        self.mark_snapshot_exhausted(&rows);
+        Ok(Some(event))
+    }
+
+    fn on_empty_batch(&mut self) -> Option<SourceEvent> {
+        if self.config.mode == PgSourceMode::Snapshot {
+            self.exhausted = true;
+            return None;
+        }
+        Some(SourceEvent::Idle)
+    }
+
+    fn mark_snapshot_exhausted(&mut self, rows: &[Row]) {
         if self.config.mode == PgSourceMode::Snapshot
             && (rows.len() as u64) < self.config.max_batch_rows
         {
             self.exhausted = true;
         }
-        Ok(Some(event))
     }
 
     fn build_data_event(&mut self, rows: &[Row]) -> Result<SourceEvent> {
@@ -559,24 +569,27 @@ impl PostgresSinkConfig {
     /// Returns [`CalcFlowError::InvalidArgument`] naming the offending
     /// option.
     pub fn from_options(options: &JsonMap) -> Result<Self> {
+        let mode = parse_sink_mode(options)?;
         Ok(Self {
             url_key: required_string(options, "url_key")?,
             table: pg_identifier(&required_string(options, "table")?)?,
-            mode: match required_string(options, "mode")?.as_str() {
-                "append" => PgSinkMode::Append,
-                "upsert" => PgSinkMode::Upsert,
-                "transactional" => PgSinkMode::Transactional,
-                other => {
-                    return Err(CalcFlowError::InvalidArgument {
-                        field: "mode".into(),
-                        message: format!("unsupported sink mode {other:?}"),
-                    });
-                }
-            },
+            mode,
             conflict_columns: parse_conflict_columns(options)?,
             pipeline: required_string(options, "pipeline")?,
             output: required_string(options, "output")?,
         })
+    }
+}
+
+fn parse_sink_mode(options: &JsonMap) -> Result<PgSinkMode> {
+    match required_string(options, "mode")?.as_str() {
+        "append" => Ok(PgSinkMode::Append),
+        "upsert" => Ok(PgSinkMode::Upsert),
+        "transactional" => Ok(PgSinkMode::Transactional),
+        other => Err(CalcFlowError::InvalidArgument {
+            field: "mode".into(),
+            message: format!("unsupported sink mode {other:?}"),
+        }),
     }
 }
 
@@ -673,10 +686,7 @@ impl TransactionalPostgresSink {
     /// # Errors
     ///
     /// Returns the resolver error when the URL secret is missing.
-    pub async fn open_with_secrets(
-        &mut self,
-        secrets: &dyn calc_flow::SecretResolver,
-    ) -> Result<()> {
+    pub fn open_with_secrets(&mut self, secrets: &dyn calc_flow::SecretResolver) -> Result<()> {
         let url = resolve_connection_url(secrets, &self.config.url_key)?;
         self.pending_url = Some(url);
         Ok(())

@@ -264,10 +264,7 @@ fn snapshot_reads_and_transactional_sink_commits() {
             PostgresSourceConfig::from_options(&source_options()).expect("source parses");
         let mut source =
             calc_flow_connectors::postgresql::PostgresSource::new(config).expect("builds");
-        source
-            .open_with_secrets(None, &PassUrl)
-            .await
-            .expect("opens");
+        source.open_with_secrets(None, &PassUrl).await.expect("opens");
         let mut total_rows = 0;
         for _ in 0..10 {
             match source.next_with_secrets(&PassUrl).await.expect("reads") {
@@ -288,7 +285,7 @@ fn snapshot_reads_and_transactional_sink_commits() {
             sink_config,
         )
         .expect("builds");
-        sink.open_with_secrets(&PassUrl).await.expect("url set");
+        sink.open_with_secrets(&PassUrl).expect("url set");
         sink.open().await.expect("connects and creates ledger");
         sink.begin_epoch(calc_flow::Epoch::INITIAL)
             .await
