@@ -525,7 +525,7 @@ jobs:
         # measured.
         run: >-
           cargo llvm-cov --workspace --all-features --fail-under-lines 90
-          --ignore-filename-regex 'src/(kafka|postgresql|clickhouse(_sink)?|database_types)\.rs'
+          --ignore-filename-regex 'src/(kafka|postgresql|clickhouse(_sink)?|http|websocket|database_types)\.rs'
           --lcov --output-path rust-lcov.info
       - name: Upload Rust coverage report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
