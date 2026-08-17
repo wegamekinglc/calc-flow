@@ -183,7 +183,7 @@ fn uuid_array(rows: &[Row], index: usize, name: &str) -> Result<ArrayRef> {
     for value in values {
         match value {
             Some(bytes) => {
-                builder.append_value(bytes.as_slice());
+                let _ = builder.append_value(bytes.as_slice());
             }
             None => builder.append_null(),
         }

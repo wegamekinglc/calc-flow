@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use calc_flow::{
     ArrowFieldSpec, Batch, BatchMetadata, CalcFlowError, ConnectorError, ConnectorIdentity,
     ConnectorOperation, Cursor, JsonMap, Result, SecretHandle, SecretReference, SecretResolverKind,
-    SinkRecovery, SourceCapabilities, SourceEvent, SourceSchema, StreamSink, StreamSource,
+    SinkRecovery, SourceCapabilities, SourceEvent, SourceSchema, StreamSource,
     TransactionalStreamSink,
 };
 use serde_json::Value;
@@ -48,7 +48,7 @@ fn fail(operation: &str, detail: &str) -> CalcFlowError {
 ///
 /// Returns the resolver error when the reference cannot be resolved;
 /// the URL value itself never enters the error.
-pub async fn resolve_connection_url(
+pub fn resolve_connection_url(
     secrets: &dyn calc_flow::SecretResolver,
     key: &str,
 ) -> Result<String> {
@@ -98,23 +98,33 @@ impl PostgresSourceConfig {
     /// option for missing or malformed values, or for cursor columns
     /// without incremental mode.
     pub fn from_options(options: &JsonMap) -> Result<Self> {
-        let url_key = required_string(options, "url_key")?;
-        let table = pg_identifier(&required_string(options, "table")?)?;
+        let (url_key, table) = parse_source_endpoint(options)?;
         let mode = parse_source_mode(options)?;
-        let cursor_columns = parse_cursor_columns(options, mode)?;
-        let columns = parse_column_list(options)?;
+        let (max_batch_rows, poll_interval_ms) = parse_source_bounds(options)?;
         Ok(Self {
             url_key,
             table,
             mode,
-            cursor_columns,
-            columns,
-            max_batch_rows: u64_option(options, "max_batch_rows")?.unwrap_or(8192),
-            poll_interval: std::time::Duration::from_millis(
-                u64_option(options, "poll_interval_ms")?.unwrap_or(500),
-            ),
+            cursor_columns: parse_cursor_columns(options, mode)?,
+            columns: parse_column_list(options)?,
+            max_batch_rows,
+            poll_interval: std::time::Duration::from_millis(poll_interval_ms),
         })
     }
+}
+
+fn parse_source_endpoint(options: &JsonMap) -> Result<(String, String)> {
+    Ok((
+        required_string(options, "url_key")?,
+        pg_identifier(&required_string(options, "table")?)?,
+    ))
+}
+
+fn parse_source_bounds(options: &JsonMap) -> Result<(u64, u64)> {
+    Ok((
+        u64_option(options, "max_batch_rows")?.unwrap_or(8192),
+        u64_option(options, "poll_interval_ms")?.unwrap_or(500),
+    ))
 }
 
 fn parse_source_mode(options: &JsonMap) -> Result<PgSourceMode> {
@@ -292,26 +302,26 @@ impl PostgresSource {
         }
         let rows = self.query_batch().await?;
         if rows.is_empty() {
-            return Ok(self.empty_poll());
+            if self.config.mode == PgSourceMode::Snapshot {
+                self.exhausted = true;
+                return Ok(None);
+            }
+            tokio::time::sleep(self.config.poll_interval).await;
+            return Ok(Some(SourceEvent::Idle));
         }
-        let batch = self.assemble_batch(&rows)?;
+        let event = self.build_data_event(&rows)?;
         if self.config.mode == PgSourceMode::Snapshot
             && (rows.len() as u64) < self.config.max_batch_rows
         {
             self.exhausted = true;
         }
-        Ok(Some(SourceEvent::Data {
-            batch,
-            cursor: self.cursor_from_values()?,
-        }))
+        Ok(Some(event))
     }
 
-    fn empty_poll(&mut self) -> Option<SourceEvent> {
-        if self.config.mode == PgSourceMode::Snapshot {
-            self.exhausted = true;
-            return None;
-        }
-        Some(SourceEvent::Idle)
+    fn build_data_event(&mut self, rows: &[Row]) -> Result<SourceEvent> {
+        let batch = self.assemble_batch(rows)?;
+        let cursor = self.cursor_from_values()?;
+        Ok(SourceEvent::Data { batch, cursor })
     }
 
     fn assemble_batch(&mut self, rows: &[Row]) -> Result<Batch> {
@@ -490,7 +500,7 @@ impl PostgresSource {
         &mut self,
         secrets: &dyn calc_flow::SecretResolver,
     ) -> Result<Option<SourceEvent>> {
-        let url = resolve_connection_url(secrets, &self.config.url_key).await?;
+        let url = resolve_connection_url(secrets, &self.config.url_key)?;
         self.fetch_batch(&url).await
     }
 
@@ -508,7 +518,7 @@ impl PostgresSource {
         if let Some(cursor) = cursor {
             self.cursor_values = Self::values_from_cursor(&cursor);
         }
-        let url = resolve_connection_url(secrets, &self.config.url_key).await?;
+        let url = resolve_connection_url(secrets, &self.config.url_key)?;
         self.connect(&url).await
     }
 }
@@ -667,7 +677,7 @@ impl TransactionalPostgresSink {
         &mut self,
         secrets: &dyn calc_flow::SecretResolver,
     ) -> Result<()> {
-        let url = resolve_connection_url(secrets, &self.config.url_key).await?;
+        let url = resolve_connection_url(secrets, &self.config.url_key)?;
         self.pending_url = Some(url);
         Ok(())
     }

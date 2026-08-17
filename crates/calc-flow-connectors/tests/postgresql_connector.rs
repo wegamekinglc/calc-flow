@@ -184,14 +184,10 @@ async fn connection_url_only_from_secrets() {
         }
     }
 
-    let url = resolve_connection_url(&OneUrl, "PG_URL")
-        .await
-        .expect("resolves");
+    let url = resolve_connection_url(&OneUrl, "PG_URL").expect("resolves");
     assert!(url.starts_with("postgresql://"), "{url}");
 
-    let error = resolve_connection_url(&OneUrl, "WRONG_KEY")
-        .await
-        .expect_err("missing key");
+    let error = resolve_connection_url(&OneUrl, "WRONG_KEY").expect_err("missing key");
     assert!(
         error.to_string().contains("could not be resolved"),
         "{error}"
@@ -248,6 +244,13 @@ fn snapshot_reads_and_transactional_sink_commits() {
             )
             .await
             .expect("creates orders");
+        client
+            .execute(
+                "CREATE TABLE orders_out (id BIGINT, amount BIGINT, label TEXT)",
+                &[],
+            )
+            .await
+            .expect("creates output");
         client
             .execute(
                 "INSERT INTO orders (amount, label) VALUES (10, 'a'), (20, 'b'), (30, 'c')",
