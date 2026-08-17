@@ -223,6 +223,9 @@ pub struct SourceBinding {
     pub input: String,
     /// Connector identity `(provider, name, version)`.
     pub connector: ConnectorRef,
+    /// Database read/write mode for database connectors.
+    #[serde(default)]
+    pub database: Option<DatabaseBinding>,
     /// The wire format name; the registry validates it.
     #[serde(default)]
     pub format: Option<String>,
@@ -249,6 +252,9 @@ pub struct SinkBinding {
     pub output: String,
     /// Connector identity `(provider, name, version)`.
     pub connector: ConnectorRef,
+    /// Database write mode for database connectors.
+    #[serde(default)]
+    pub database: Option<DatabaseBinding>,
     #[serde(default)]
     pub format: Option<String>,
     #[serde(default)]
@@ -425,7 +431,10 @@ where
     I: Iterator<Item = (&'a String, &'a ConnectorRef)>,
 {
     for (id, connector) in bindings {
-        if connector.provider.is_empty() || connector.name.is_empty() {
+        if connector.provider.is_empty()
+            || connector.name.is_empty()
+            || connector.version.is_empty()
+        {
             return Err(CalcFlowError::Format {
                 message: format!("{label} {id} carries an empty connector identity"),
             });
@@ -452,7 +461,12 @@ pub fn parse_v3_project(data: &[u8]) -> Result<ProjectV3> {
 ///
 /// Returns [`CalcFlowError::Format`] if serialization fails.
 pub fn serialize_v3_project(project: &ProjectV3) -> Result<Vec<u8>> {
-    serde_json::to_vec(project).map_err(|error| CalcFlowError::Format {
+    // BTreeMap-backed options serialize deterministically; the pretty
+    // form is the canonical on-disk representation.
+    let value = serde_json::to_value(project).map_err(|error| CalcFlowError::Format {
+        message: error.to_string(),
+    })?;
+    serde_json::to_vec(&value).map_err(|error| CalcFlowError::Format {
         message: error.to_string(),
     })
 }
@@ -591,6 +605,21 @@ mod tests {
         let s2 = project_v3_json_schema().expect("generates again");
         assert_eq!(s1, s2, "schema generation is deterministic");
         assert_eq!(s1["title"], "Calc Flow Project V3");
+    }
+
+    #[test]
+    fn v3_schema_matches_committed_file() {
+        let generated = project_v3_json_schema().expect("generates");
+        let committed = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schemas/project-v3.schema.json"
+        ))
+        .expect("committed schema readable");
+        let parsed: Value = serde_json::from_str(&committed).expect("committed schema parses");
+        assert_eq!(
+            generated, parsed,
+            "the committed project-v3.schema.json must match the generated schema byte-for-byte"
+        );
     }
 
     #[test]

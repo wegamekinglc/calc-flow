@@ -59,6 +59,121 @@
       ],
       "type": "object"
     },
+    "DatabaseBinding": {
+      "description": "A database binding's read or write mode declaration.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cursor_column": {
+              "default": "",
+              "type": "string"
+            },
+            "mode": {
+              "const": "snapshot",
+              "type": "string"
+            },
+            "table": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "table"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cursor_column": {
+              "type": "string"
+            },
+            "mode": {
+              "const": "polling",
+              "type": "string"
+            },
+            "poll_interval_ms": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "table": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "table",
+            "cursor_column"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "const": "cdc",
+              "type": "string"
+            },
+            "publication": {
+              "type": "string"
+            },
+            "slot": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "publication",
+            "slot"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "const": "append",
+              "type": "string"
+            },
+            "table": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "table"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "conflict_columns": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "mode": {
+              "const": "upsert",
+              "type": "string"
+            },
+            "table": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "table"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "DeliveryRequest": {
       "description": "The requested delivery guarantee for one output.",
       "enum": [
@@ -407,6 +522,18 @@
           "$ref": "#/$defs/ConnectorRef",
           "description": "Connector identity `(provider, name, version)`."
         },
+        "database": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DatabaseBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Database write mode for database connectors."
+        },
         "delivery": {
           "$ref": "#/$defs/DeliveryRequest",
           "description": "The requested per-output delivery guarantee."
@@ -453,6 +580,18 @@
         "connector": {
           "$ref": "#/$defs/ConnectorRef",
           "description": "Connector identity `(provider, name, version)`."
+        },
+        "database": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DatabaseBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Database read/write mode for database connectors."
         },
         "format": {
           "default": null,
