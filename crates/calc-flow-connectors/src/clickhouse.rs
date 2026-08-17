@@ -500,16 +500,6 @@ fn json_value_to_string(value: Option<&Value>) -> String {
     }
 }
 
-/// Extracts a plain string from a JSON value reference.
-fn json_value_to_string_ref(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        _ => String::new(),
-    }
-}
-
 /// Escapes single quotes for safe SQL literal interpolation.
 fn escape_sql_literal(value: &str) -> String {
     value.replace('\'', "\'\'")

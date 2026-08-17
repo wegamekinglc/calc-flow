@@ -179,7 +179,7 @@ impl TransactionalStreamSink for ClickHouseSink {
         ]))
     }
 
-    async fn commit(&mut self, epoch: calc_flow::Epoch, _pre_commit: &JsonMap) -> Result<()> {
+    async fn commit(&mut self, _epoch: calc_flow::Epoch, _pre_commit: &JsonMap) -> Result<()> {
         // The epoch's staged rows are already written; commit just records
         // the epoch boundary. A real deployment flushes during write.
         self.active_epoch = None;
