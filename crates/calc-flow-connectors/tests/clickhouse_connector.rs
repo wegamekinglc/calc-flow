@@ -203,7 +203,6 @@ fn snapshot_reads_and_dedup_sink_commits() {
 
         // Create tables and seed source data via the HTTP interface.
         let client = reqwest::Client::new();
-        let url = connection_url();
         let client = reqwest::Client::new();
         client
             .post(query_url())
