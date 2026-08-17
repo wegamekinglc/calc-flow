@@ -1446,7 +1446,7 @@ class RunManager:
             handle = self._require(run_id)
             if handle.status not in {RunStatus.PENDING, RunStatus.RUNNING}:
                 return self._response(handle)
-            handle.status = RunStatus.COMPLETED
+            handle.status = RunStatus.CANCELLED
             handle.finished_at = datetime.now(UTC)
             self._event(run_id, "shutdown", "Graceful shutdown")
             worker, output_queue, monitor = self._detach_resources(handle)

@@ -342,3 +342,47 @@ class TestRealManagerJobLifecycle:
         manager = RunManager(use_processes=False)
         self._submit(manager)
         return manager
+
+
+class TestShutdownJobLifecycle:
+    def test_shutdown_real_submitted_job(self):
+        from calc_flow_studio.run_manager import RunManager
+
+        manager = RunManager(use_processes=False)
+        project = {
+            "format_version": 2,
+            "id": "p1",
+            "name": "test",
+            "pipeline": {
+                "name": "pipe",
+                "nodes": [
+                    {
+                        "id": "n1",
+                        "operator": {"kind": "expression", "expression": "x = value"},
+                    }
+                ],
+            },
+            "data_sources": [
+                {
+                    "id": "s",
+                    "input": "input",
+                    "format": "inline_json",
+                    "data": [{"value": 1}],
+                }
+            ],
+        }
+        from calc_flow import ProjectDocument
+
+        from calc_flow_studio.models import RunRequest
+
+        doc = ProjectDocument.model_validate(project)
+        request = RunRequest.model_validate(
+            {
+                "inputs": {"input": {"format": "columns", "data": {"value": [1]}}},
+                "options": {"timeout_seconds": 5},
+            }
+        )
+        manager.submit(doc, request)
+        run_id = manager.list_jobs()[0].model_dump()["id"]
+        response = manager.shutdown_job(run_id)
+        assert response.model_dump()["id"] == run_id
