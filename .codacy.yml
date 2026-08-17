@@ -38,7 +38,7 @@ exclude_paths:
   # balanced-brace file.
   - "crates/calc-flow-connectors/src/clickhouse*.rs"
   # Generated JSON Schema contracts
-  - "schemas/*.schema.json"
+  - "schemas/**"
   # Historical parity evidence, kept verbatim on purpose
   - "tests/fixtures/**"
   # Frozen executable allocation evidence, kept byte-identical to its baseline
