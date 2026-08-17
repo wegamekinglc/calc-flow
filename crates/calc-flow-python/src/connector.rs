@@ -34,14 +34,29 @@ fn connector_to_dict<'py>(
     descriptor: &calc_flow::ConnectorDescriptor,
 ) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
-    dict.set_item("provider", identity.provider.to_string())?;
-    dict.set_item("name", identity.name.to_string())?;
-    dict.set_item("version", identity.version.to_string())?;
-    dict.set_item("kind", format!("{:?}", descriptor.kind).to_lowercase())?;
+    set_identity_fields(&dict, identity)?;
+    dict.set_item("kind", kind_str(descriptor.kind))?;
     dict.set_item(
         "capabilities",
         capabilities_to_dict(py, descriptor.capabilities)?,
     )?;
+    set_payload_fields(&dict, descriptor)?;
+    Ok(dict)
+}
+
+fn set_identity_fields(
+    dict: &Bound<'_, PyDict>,
+    identity: &calc_flow::ConnectorIdentity,
+) -> PyResult<()> {
+    dict.set_item("provider", identity.provider.to_string())?;
+    dict.set_item("name", identity.name.to_string())?;
+    dict.set_item("version", identity.version.to_string())
+}
+
+fn set_payload_fields(
+    dict: &Bound<'_, PyDict>,
+    descriptor: &calc_flow::ConnectorDescriptor,
+) -> PyResult<()> {
     let formats: Vec<String> = descriptor
         .formats
         .iter()
@@ -53,8 +68,11 @@ fn connector_to_dict<'py>(
             message: e.to_string(),
         })
         .map_err(to_py_err)?;
-    dict.set_item("options_schema", options.to_string())?;
-    Ok(dict)
+    dict.set_item("options_schema", options.to_string())
+}
+
+fn kind_str(kind: calc_flow::ConnectorKind) -> String {
+    format!("{kind:?}").to_lowercase()
 }
 
 fn capabilities_to_dict(
@@ -62,15 +80,23 @@ fn capabilities_to_dict(
     caps: calc_flow::ConnectorCapabilities,
 ) -> PyResult<Bound<'_, PyDict>> {
     let dict = PyDict::new(py);
-    dict.set_item("delivery", delivery_str(caps.delivery))?;
-    dict.set_item("replay", replay_str(caps.replay))?;
-    dict.set_item("watermark", watermark_str(caps.watermark))?;
-    dict.set_item("transaction", transaction_str(caps.transaction))?;
+    set_axis_fields(&dict, caps)?;
     dict.set_item("snapshot", caps.snapshot)?;
     dict.set_item("polling", caps.polling)?;
     dict.set_item("cdc", caps.cdc)?;
     dict.set_item("lookup", caps.lookup)?;
     Ok(dict)
+}
+
+fn set_axis_fields(
+    dict: &Bound<'_, PyDict>,
+    caps: calc_flow::ConnectorCapabilities,
+) -> PyResult<()> {
+    dict.set_item("delivery", delivery_str(caps.delivery))?;
+    dict.set_item("replay", replay_str(caps.replay))?;
+    dict.set_item("watermark", watermark_str(caps.watermark))?;
+    dict.set_item("transaction", transaction_str(caps.transaction))?;
+    Ok(())
 }
 
 fn register_builtin_connectors(
