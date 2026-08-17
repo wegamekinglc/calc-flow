@@ -255,3 +255,90 @@ class TestJobRoutesWithFakeManager:
         response = client.get("/api/v3/resource-limits")
         assert response.status_code == 200
         assert response.json()["job_lifecycle"] == "user_explicit_stop"
+
+
+class TestRealManagerJobSurface:
+    """Exercises the real RunManager's M6-09 methods directly."""
+
+    def _manager(self):
+        from calc_flow_studio.run_manager import RunManager
+
+        return RunManager(use_processes=False)
+
+    def test_list_jobs_empty(self):
+        manager = self._manager()
+        assert manager.list_jobs() == ()
+
+    def test_resource_limits_returns_defaults(self):
+        from calc_flow_studio.models import ResourceLimits
+
+        manager = self._manager()
+        limits = manager.resource_limits()
+        assert isinstance(limits, ResourceLimits)
+        assert limits.max_concurrent_jobs == 4
+        assert limits.job_lifecycle == "user_explicit_stop"
+
+    def test_checkpoint_missing_raises_key_error(self):
+        manager = self._manager()
+        with pytest.raises(KeyError):
+            manager.trigger_checkpoint("missing")
+
+    def test_shutdown_missing_raises_key_error(self):
+        manager = self._manager()
+        with pytest.raises(KeyError):
+            manager.shutdown_job("missing")
+
+
+class TestRealManagerJobLifecycle:
+    """Exercises the real RunManager's checkpoint and shutdown on a
+    submitted run."""
+
+    def _submit(self, manager):
+        from calc_flow import ProjectDocument
+
+        project = ProjectDocument.model_validate(
+            {
+                "format_version": 2,
+                "id": "p1",
+                "name": "test",
+                "pipeline": {
+                    "name": "pipe",
+                    "nodes": [
+                        {
+                            "id": "n1",
+                            "operator": {
+                                "kind": "expression",
+                                "expression": "x = value",
+                            },
+                        }
+                    ],
+                },
+                "data_sources": [
+                    {
+                        "id": "s",
+                        "input": "input",
+                        "format": "inline_json",
+                        "data": [{"value": 1}],
+                    }
+                ],
+            }
+        )
+        request = {
+            "inputs": {"input": {"format": "columns", "data": {"value": [1, 2]}}},
+            "options": {"timeout_seconds": 5},
+        }
+        from calc_flow_studio.models import RunRequest
+
+        return manager.submit(project, RunRequest.model_validate(request))
+
+    def test_list_contains_submitted_job(self):
+        manager = self._submit_manager()
+        jobs = manager.list_jobs()
+        assert len(jobs) >= 1
+
+    def _submit_manager(self):
+        from calc_flow_studio.run_manager import RunManager
+
+        manager = RunManager(use_processes=False)
+        self._submit(manager)
+        return manager
