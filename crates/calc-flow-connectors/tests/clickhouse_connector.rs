@@ -69,12 +69,13 @@ fn query_url() -> String {
 #[test]
 fn identifiers_reject_injection() {
     assert_eq!(ch_identifier("events").unwrap(), "events");
+    let long_name = "a".repeat(64);
     for bad in [
         "",
         "DROP",
         "users; DROP TABLE x",
         "col-name",
-        "a".repeat(64).as_str(),
+        long_name.as_str(),
         "1abc",
         "db.table",
         "col with space",
@@ -84,7 +85,7 @@ fn identifiers_reject_injection() {
 }
 
 #[test]
-fn source_config_parses_modes_and_validates() {
+fn source_config_parses_modes_and_validates_identifiers() {
     let config = ClickHouseSourceConfig::from_options(&source_options()).expect("snapshot parses");
     assert_eq!(config.mode, ChSourceMode::Snapshot);
     assert_eq!(config.cursor_column, "updated_at");

@@ -339,7 +339,11 @@ impl ClickHouseSource {
             ));
         }
         if let Some(bound) = &self.upper_bound {
-            conditions.push(format!("{} <= '{}'", self.config.cursor_column, bound));
+            conditions.push(format!(
+                "{} <= '{}'",
+                self.config.cursor_column,
+                escape_sql_literal(bound)
+            ));
         }
         if !conditions.is_empty() {
             sql.push_str(" WHERE ");
@@ -455,14 +459,9 @@ impl ClickHouseSource {
 
     fn cursor_from_last_row(&mut self, rows: &[Value]) -> Result<Cursor> {
         let last = rows.last().expect("caller checked non-empty");
-        let cursor: String = last
-            .get(self.config.cursor_column.as_str())
-            .map(Value::to_string)
-            .unwrap_or_default();
-        let tie_breaker: String = last
-            .get(self.config.tie_breaker_column.as_str())
-            .map(Value::to_string)
-            .unwrap_or_default();
+        let cursor: String = json_value_to_string(last.get(self.config.cursor_column.as_str()));
+        let tie_breaker: String =
+            json_value_to_string(last.get(self.config.tie_breaker_column.as_str()));
         self.cursor_value.clone_from(&cursor);
         self.tie_breaker_value.clone_from(&tie_breaker);
         let payload = BTreeMap::from([
@@ -475,6 +474,7 @@ impl ClickHouseSource {
     }
 }
 
+/// Infers the Arrow type for one column from its JSON values.
 fn infer_arrow_type(rows: &[Value], name: &str) -> arrow::datatypes::DataType {
     use arrow::datatypes::DataType;
     for row in rows {
@@ -488,6 +488,31 @@ fn infer_arrow_type(rows: &[Value], name: &str) -> arrow::datatypes::DataType {
         }
     }
     DataType::Utf8
+}
+
+/// Extracts a plain string from a JSON value without JSON quoting.
+fn json_value_to_string(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::Bool(b)) => b.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Extracts a plain string from a JSON value reference.
+fn json_value_to_string_ref(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Escapes single quotes for safe SQL literal interpolation.
+fn escape_sql_literal(value: &str) -> String {
+    value.replace('\'', "\'\'")
 }
 
 pub(crate) fn redact_url_error(message: &str) -> String {

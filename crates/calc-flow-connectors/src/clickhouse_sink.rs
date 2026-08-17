@@ -157,8 +157,8 @@ impl TransactionalStreamSink for ClickHouseSink {
         Ok(())
     }
 
-    async fn write(&mut self, _batch: &Batch) -> Result<()> {
-        Err(fail("write", "use write_with_secrets for the endpoint URL"))
+    async fn write(&mut self, batch: &Batch) -> Result<()> {
+        self.stage_batch(batch)
     }
 
     async fn pre_commit(&mut self, epoch: calc_flow::Epoch) -> Result<JsonMap> {
@@ -180,8 +180,10 @@ impl TransactionalStreamSink for ClickHouseSink {
     }
 
     async fn commit(&mut self, epoch: calc_flow::Epoch, _pre_commit: &JsonMap) -> Result<()> {
-        let _ = (epoch, _pre_commit);
+        // The epoch's staged rows are already written; commit just records
+        // the epoch boundary. A real deployment flushes during write.
         self.active_epoch = None;
+        self.pending_rows.clear();
         Ok(())
     }
 
