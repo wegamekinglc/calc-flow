@@ -244,7 +244,7 @@ impl HttpSource {
         Ok(())
     }
 
-    fn build_request(&self, url: &str, auth: Option<&str>) -> Result<reqwest::RequestBuilder> {
+    fn build_request(&self, url: &str, auth: Option<&str>) -> reqwest::RequestBuilder {
         let mut request = self.client.get(url);
         if let Some(auth_value) = auth {
             request = request.header("Authorization", auth_value);
@@ -257,7 +257,7 @@ impl HttpSource {
                 request = request.header("If-Modified-Since", last_modified);
             }
         }
-        Ok(request)
+        request
     }
 
     /// Produces the next event; a 304 surfaces as Idle.
@@ -291,7 +291,7 @@ impl HttpSource {
     }
 
     async fn fetch(&self, url: &str, auth: Option<&str>) -> Result<reqwest::Response> {
-        let request = self.build_request(url, auth)?;
+        let request = self.build_request(url, auth);
         let response = request
             .send()
             .await
