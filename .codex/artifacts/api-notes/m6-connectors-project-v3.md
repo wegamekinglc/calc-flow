@@ -315,7 +315,7 @@ connector identity and stable operation name.
 
 - Per-connector coverage decision (D3 review clause, M6.4): the
   `PostgreSQL` transport's broker-bound modules
-  (`src/postgresql.rs`) are omitted from the workspace line-coverage
+  (`src/postgresql.rs`, `src/database_types.rs`) are omitted from the workspace line-coverage
   gate because their runtime paths require a live server; those paths
   are proven by the gated connector-containers-pg leg against
   postgres:16, while the type matrix (`src/database_types.rs`) and all
