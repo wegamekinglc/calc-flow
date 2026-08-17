@@ -764,23 +764,32 @@ impl TransactionalStreamSink for TransactionalPostgresSink {
                 placeholders.join(", ")
             ),
             PgSinkMode::Upsert if !self.config.conflict_columns.is_empty() => {
-                let updates: Vec<String> = names
+                let non_key: Vec<&String> = names
                     .iter()
                     .filter(|name| !self.config.conflict_columns.iter().any(|key| key == *name))
-                    .map(|name| format!("{name} = EXCLUDED.{name}"))
                     .collect();
-                format!(
-                    "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}",
-                    self.config.table,
-                    names.join(", "),
-                    placeholders.join(", "),
-                    self.config.conflict_columns.join(", "),
-                    if updates.is_empty() {
-                        "1 = 1".to_string()
-                    } else {
+                if non_key.is_empty() {
+                    format!(
+                        "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO NOTHING",
+                        self.config.table,
+                        names.join(", "),
+                        placeholders.join(", "),
+                        self.config.conflict_columns.join(", ")
+                    )
+                } else {
+                    let updates: Vec<String> = non_key
+                        .iter()
+                        .map(|name| format!("{name} = EXCLUDED.{name}"))
+                        .collect();
+                    format!(
+                        "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}",
+                        self.config.table,
+                        names.join(", "),
+                        placeholders.join(", "),
+                        self.config.conflict_columns.join(", "),
                         updates.join(", ")
-                    }
-                )
+                    )
+                }
             }
             PgSinkMode::Upsert | PgSinkMode::Transactional => format!(
                 "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT DO NOTHING",
