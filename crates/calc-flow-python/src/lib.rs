@@ -2,6 +2,7 @@
 
 mod batch;
 mod config;
+mod connector;
 mod continuous;
 mod error;
 mod execution_options;
@@ -26,6 +27,7 @@ fn calc_flow_python(module: &Bound<'_, PyModule>) -> PyResult<()> {
     batch::register(module)?;
     execution_options::register(module)?;
     config::register(module)?;
+    connector::register(module)?;
     continuous::register(module)?;
     pipeline::register(module)?;
     store::register(module)?;

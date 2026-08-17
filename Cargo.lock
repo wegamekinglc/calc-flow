@@ -511,6 +511,7 @@ version = "2.0.0"
 dependencies = [
  "async-trait",
  "calc-flow",
+ "calc-flow-connectors",
  "chrono",
  "datafusion",
  "ndarray",
