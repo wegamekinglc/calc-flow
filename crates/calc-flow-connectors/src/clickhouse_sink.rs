@@ -9,10 +9,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use calc_flow::{
-    Batch, CalcFlowError, ConnectorError, ConnectorIdentity, ConnectorOperation, JsonMap, Result,
-    SecretHandle, SecretReference, SecretResolver, SinkRecovery, TransactionalStreamSink,
-};
+use calc_flow::{Batch, JsonMap, Result, SecretResolver, SinkRecovery, TransactionalStreamSink};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 

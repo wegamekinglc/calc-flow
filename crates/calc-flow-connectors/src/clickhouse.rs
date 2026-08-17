@@ -3,10 +3,8 @@
 //! The source reads a bounded snapshot with a startup-fixed upper
 //! cursor bound or polls an event-time/sequence cursor with a unique
 //! tie-breaker; both use identifier-checked table/column names and
-//! parameterized HTTP queries. The sink writes at-least-once batches
-//! with a per-epoch stable `insert_deduplication_token` exposed as
-//! retry-deduplicated, never as unconditional exactly-once.
-//! Connection credentials arrive only through the secret resolver.
+//! parameterized HTTP queries. Connection credentials arrive only
+//! through the secret resolver.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -22,7 +20,6 @@ use calc_flow::{
     TransactionSupport, TransactionalStreamSink, WatermarkSupport,
 };
 use serde_json::Value;
-use sha2::Digest as _;
 
 /// The connector implementation version.
 pub const IDENTITY_VERSION: &str = "2.0.0";

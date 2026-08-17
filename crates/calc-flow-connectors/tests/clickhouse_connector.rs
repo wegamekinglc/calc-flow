@@ -62,6 +62,10 @@ fn connection_url() -> String {
     std::env::var("CH_TEST_URL").unwrap_or_else(|_| "http://localhost:8123".into())
 }
 
+fn query_url() -> String {
+    format!("{}/?user=default", connection_url())
+}
+
 #[test]
 fn identifiers_reject_injection() {
     assert_eq!(ch_identifier("events").unwrap(), "events");
@@ -202,7 +206,7 @@ fn snapshot_reads_and_dedup_sink_commits() {
         let url = connection_url();
         let client = reqwest::Client::new();
         client
-            .post(&url)
+            .post(query_url())
             .body("DROP TABLE IF EXISTS events")
             .send()
             .await
@@ -210,7 +214,7 @@ fn snapshot_reads_and_dedup_sink_commits() {
             .error_for_status()
             .expect("drop ok");
         client
-            .post(&url)
+            .post(query_url())
             .body("DROP TABLE IF EXISTS events_out")
             .send()
             .await
@@ -218,7 +222,7 @@ fn snapshot_reads_and_dedup_sink_commits() {
             .error_for_status()
             .expect("drop ok");
         client
-            .post(&url)
+            .post(query_url())
             .body(
                 "CREATE TABLE events (id UInt64, amount Int64, label String, \
                  updated_at DateTime) ENGINE = MergeTree ORDER BY (updated_at, id)",
@@ -229,7 +233,7 @@ fn snapshot_reads_and_dedup_sink_commits() {
             .error_for_status()
             .expect("create ok");
         client
-            .post(&url)
+            .post(query_url())
             .body(
                 "CREATE TABLE events_out (id UInt64, amount Int64, label String, \
                  updated_at DateTime) ENGINE = MergeTree ORDER BY (updated_at, id)",
@@ -240,7 +244,7 @@ fn snapshot_reads_and_dedup_sink_commits() {
             .error_for_status()
             .expect("create ok");
         client
-            .post(&url)
+            .post(query_url())
             .body(
                 "INSERT INTO events (id, amount, label, updated_at) VALUES \
                  (1, 10, 'a', '2026-01-01 00:00:01'), \
@@ -287,7 +291,7 @@ fn snapshot_reads_and_dedup_sink_commits() {
         let body = rows.to_string();
         let token = dedup_token("ch_test", "out", 1);
         let response = client
-            .post(&url)
+            .post(query_url())
             .header("insert_deduplication_token", &token)
             .body(format!("INSERT INTO events_out FORMAT JSONEachRow {body}"))
             .send()
@@ -298,7 +302,7 @@ fn snapshot_reads_and_dedup_sink_commits() {
 
         // Verify the rows landed.
         let count_text: String = client
-            .post(&url)
+            .post(query_url())
             .body("SELECT COUNT(*) FROM events_out FORMAT TabSeparated")
             .send()
             .await
@@ -311,7 +315,7 @@ fn snapshot_reads_and_dedup_sink_commits() {
 
         // Replaying the same token inserts zero new rows.
         let replay = client
-            .post(&url)
+            .post(query_url())
             .header("insert_deduplication_token", &token)
             .body(format!("INSERT INTO events_out FORMAT JSONEachRow {body}"))
             .send()
@@ -319,7 +323,7 @@ fn snapshot_reads_and_dedup_sink_commits() {
             .expect("replays");
         assert!(replay.status().is_success());
         let count_text: String = client
-            .post(&url)
+            .post(query_url())
             .body("SELECT COUNT(*) FROM events_out FORMAT TabSeparated")
             .send()
             .await
