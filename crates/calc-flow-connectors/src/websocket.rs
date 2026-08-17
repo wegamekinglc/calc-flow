@@ -256,6 +256,22 @@ impl WebSocketSource {
         Ok(Some(SourceEvent::Data { batch, cursor }))
     }
 
+    /// Absorbs new frames into the bounded buffer, evicting the oldest
+    /// in `DropOldest` mode when the bound is exceeded.
+    fn absorb_frames(&mut self, lines: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+        for line in lines {
+            self.buffer.push_back(line);
+        }
+        let bound = self.config.max_batch_rows;
+        if self.config.backpressure == BackpressureMode::DropOldest {
+            while self.buffer.len() as u64 > bound {
+                self.buffer.pop_front();
+                self.dropped_frames += 1;
+            }
+        }
+        self.buffer.drain(..).collect()
+    }
+
     fn decode_frames(&mut self, lines: &[Vec<u8>]) -> Result<Batch> {
         let body: Vec<u8> = lines
             .iter()
