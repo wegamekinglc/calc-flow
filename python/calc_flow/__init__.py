@@ -3,6 +3,8 @@ from __future__ import annotations
 from calc_flow import _native as _native
 from calc_flow.array import register_jax, register_numpy
 from calc_flow.capabilities import (
+    ConnectorCapabilities,
+    ConnectorCapability,
     OperatorCapability,
     ProviderCapability,
     ProviderOption,
@@ -11,6 +13,7 @@ from calc_flow.capabilities import (
     RuntimeCapabilities,
     RuntimeSessionScope,
     UdfCapability,
+    connector_capabilities,
 )
 from calc_flow.config import ProjectDocument
 from calc_flow.errors import (
@@ -107,7 +110,10 @@ __all__ = [
     "ProjectDocument",
     "ExecutionPlan",
     "PipelineBuilder",
+    "ConnectorCapabilities",
+    "ConnectorCapability",
     "OperatorCapability",
+    "connector_capabilities",
     "ProviderCapability",
     "ProviderOption",
     "ProviderOptionsSchema",

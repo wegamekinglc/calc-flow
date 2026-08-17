@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -232,3 +233,106 @@ def runtime_capabilities(
         udfs=udfs,
         providers=providers,
     )
+
+
+# ---------------------------------------------------------------------------
+# Connector capability surface (M6-08)
+# ---------------------------------------------------------------------------
+
+type DeliveryCapabilityKind = Literal["best_effort", "at_least_once", "exactly_once"]
+type ReplayCapabilityKind = Literal["replayable_exact", "unreplayable"]
+type WatermarkSupportKind = Literal["native", "generated_only"]
+type TransactionSupportKind = Literal["none", "pre_commit_commit", "ledger_idempotent"]
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectorCapabilities:
+    delivery: DeliveryCapabilityKind
+    replay: ReplayCapabilityKind
+    watermark: WatermarkSupportKind
+    transaction: TransactionSupportKind
+    snapshot: bool
+    polling: bool
+    cdc: bool
+    lookup: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectorCapability:
+    provider: str
+    name: str
+    version: str
+    kind: Literal["source", "sink", "both"]
+    capabilities: ConnectorCapabilities
+    formats: tuple[str, ...]
+    options_schema: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        if type(self.provider) is not str or not self.provider:
+            raise ValueError("connector capability provider must be a non-empty string")
+        if type(self.name) is not str or not self.name:
+            raise ValueError("connector capability name must be a non-empty string")
+        if type(self.version) is not str or not self.version:
+            raise ValueError("connector capability version must be a non-empty string")
+        if self.kind not in {"source", "sink", "both"}:
+            raise ValueError(
+                f"connector capability kind must be source, sink, or both; "
+                f"found {self.kind}"
+            )
+        if not isinstance(self.capabilities, ConnectorCapabilities):
+            raise TypeError(
+                "connector capability capabilities must be a ConnectorCapabilities; "
+                f"found {type(self.capabilities).__name__}"
+            )
+        if not isinstance(self.formats, tuple):
+            raise TypeError(
+                "connector capability formats must be a tuple of strings; "
+                f"found {type(self.formats).__name__}"
+            )
+        if not isinstance(self.options_schema, Mapping):
+            raise TypeError(
+                "connector capability options_schema must be a Mapping; "
+                f"found {type(self.options_schema).__name__}"
+            )
+
+
+def _parse_options_schema(raw: object) -> dict[str, object]:
+    """Parses the JSON string the native layer serializes into a dict."""
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str):
+        return dict(json.loads(raw))
+    return {}
+
+
+def connector_capabilities(
+    registrations: Sequence[Mapping[str, Any]],
+) -> tuple[ConnectorCapability, ...]:
+    """Builds the sorted tuple of connector capabilities from native data."""
+    parsed: list[ConnectorCapability] = []
+    for registration in registrations:
+        caps_data = registration.get("capabilities", {})
+        caps = ConnectorCapabilities(
+            delivery=str(caps_data.get("delivery", "at_least_once")),
+            replay=str(caps_data.get("replay", "unreplayable")),
+            watermark=str(caps_data.get("watermark", "generated_only")),
+            transaction=str(caps_data.get("transaction", "none")),
+            snapshot=bool(caps_data.get("snapshot", False)),
+            polling=bool(caps_data.get("polling", False)),
+            cdc=bool(caps_data.get("cdc", False)),
+            lookup=bool(caps_data.get("lookup", False)),
+        )
+        parsed.append(
+            ConnectorCapability(
+                provider=str(registration["provider"]),
+                name=str(registration["name"]),
+                version=str(registration["version"]),
+                kind=str(registration.get("kind", "both")),
+                capabilities=caps,
+                formats=tuple(str(f) for f in registration.get("formats", ())),
+                options_schema=_parse_options_schema(
+                    registration.get("options_schema", "{}")
+                ),
+            )
+        )
+    return tuple(sorted(parsed, key=lambda c: (c.provider, c.name, c.version)))
