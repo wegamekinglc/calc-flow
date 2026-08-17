@@ -14,6 +14,12 @@ default = ["file"]
 file = ["dep:parquet"]
 kafka = ["dep:hex", "dep:rdkafka", "dep:sha2"]
 clickhouse = ["dep:hex", "dep:reqwest", "dep:serde", "dep:sha2"]
+http-websocket = [
+    "dep:futures-util",
+    "dep:reqwest",
+    "dep:tokio-tungstenite",
+    "dep:tracing",
+]
 postgresql = [
     "dep:chrono",
     "dep:postgres-types",
@@ -37,11 +43,17 @@ flate2 = { version = "1.1.9", default-features = false, features = ["rust_backen
 # selecting it keeps parquet's gzip codec on the pure-Rust backend.
 chrono = { workspace = true, optional = true }
 postgres-types = { version = "=0.2.14", optional = true }
+futures-util = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
 reqwest = { version = "=0.13.4", default-features = false, features = [
     "json",
     "rustls",
 ], optional = true }
 serde = { workspace = true, optional = true }
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = [
+    "connect",
+    "rustls-tls-webpki-roots",
+], optional = true }
 tokio-postgres = { version = "=0.7.18", features = [
     "with-chrono-0_4",
     "with-uuid-1",

@@ -47,10 +47,14 @@ pub mod database_types;
 mod file;
 #[cfg(feature = "file")]
 mod file_sink;
+#[cfg(feature = "http-websocket")]
+pub mod http;
 #[cfg(feature = "kafka")]
 pub mod kafka;
 #[cfg(feature = "postgresql")]
 pub mod postgresql;
+#[cfg(feature = "http-websocket")]
+pub mod websocket;
 
 #[cfg(feature = "kafka")]
 pub use kafka::{
