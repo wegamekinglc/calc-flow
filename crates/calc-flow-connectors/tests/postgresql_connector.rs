@@ -215,7 +215,7 @@ fn snapshot_reads_and_transactional_sink_commits() {
         .expect("runtime");
 
     rt.block_on(async {
-        use calc_flow::{StreamSource as _, TransactionalStreamSink as _};
+        use calc_flow::TransactionalStreamSink as _;
 
         // Create the test table and insert source data.
         let (client, conn) =
