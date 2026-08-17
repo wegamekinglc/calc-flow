@@ -100,54 +100,9 @@ impl PostgresSourceConfig {
     pub fn from_options(options: &JsonMap) -> Result<Self> {
         let url_key = required_string(options, "url_key")?;
         let table = pg_identifier(&required_string(options, "table")?)?;
-        let mode = match required_string(options, "mode")?.as_str() {
-            "snapshot" => PgSourceMode::Snapshot,
-            "incremental_query" => PgSourceMode::IncrementalQuery,
-            other => {
-                return Err(CalcFlowError::InvalidArgument {
-                    field: "mode".into(),
-                    message: format!("unsupported source mode {other:?}"),
-                });
-            }
-        };
-        let cursor_columns = match options.get("cursor_columns") {
-            None => Vec::new(),
-            Some(Value::Array(values)) => values
-                .iter()
-                .map(|value| {
-                    value.as_str().map_or_else(
-                        || {
-                            Err(CalcFlowError::InvalidArgument {
-                                field: "cursor_columns".into(),
-                                message: "entries must be strings".into(),
-                            })
-                        },
-                        pg_identifier,
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?,
-            Some(_) => {
-                return Err(CalcFlowError::InvalidArgument {
-                    field: "cursor_columns".into(),
-                    message: "cursor_columns must be a string array".into(),
-                });
-            }
-        };
-        if mode == PgSourceMode::IncrementalQuery && cursor_columns.is_empty() {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "cursor_columns".into(),
-                message: "incremental_query requires at least one cursor column".into(),
-            });
-        }
-        let columns =
-            match options.get("columns") {
-                None => Vec::new(),
-                Some(value) => serde_json::from_value::<Vec<ArrowFieldSpec>>(value.clone())
-                    .map_err(|error| CalcFlowError::InvalidArgument {
-                        field: "columns".into(),
-                        message: format!("columns must be a field list: {error}"),
-                    })?,
-            };
+        let mode = parse_source_mode(options)?;
+        let cursor_columns = parse_cursor_columns(options, mode)?;
+        let columns = parse_column_list(options)?;
         Ok(Self {
             url_key,
             table,
@@ -159,6 +114,64 @@ impl PostgresSourceConfig {
                 u64_option(options, "poll_interval_ms")?.unwrap_or(500),
             ),
         })
+    }
+}
+
+fn parse_source_mode(options: &JsonMap) -> Result<PgSourceMode> {
+    match required_string(options, "mode")?.as_str() {
+        "snapshot" => Ok(PgSourceMode::Snapshot),
+        "incremental_query" => Ok(PgSourceMode::IncrementalQuery),
+        other => Err(CalcFlowError::InvalidArgument {
+            field: "mode".into(),
+            message: format!("unsupported source mode {other:?}"),
+        }),
+    }
+}
+
+fn parse_cursor_columns(options: &JsonMap, mode: PgSourceMode) -> Result<Vec<String>> {
+    let columns = match options.get("cursor_columns") {
+        None => Vec::new(),
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value.as_str().map_or_else(
+                    || {
+                        Err(CalcFlowError::InvalidArgument {
+                            field: "cursor_columns".into(),
+                            message: "entries must be strings".into(),
+                        })
+                    },
+                    pg_identifier,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?,
+        Some(_) => {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "cursor_columns".into(),
+                message: "cursor_columns must be a string array".into(),
+            });
+        }
+    };
+    if mode == PgSourceMode::IncrementalQuery && columns.is_empty() {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "cursor_columns".into(),
+            message: "incremental_query requires at least one cursor column".into(),
+        });
+    }
+    Ok(columns)
+}
+
+fn parse_column_list(options: &JsonMap) -> Result<Vec<ArrowFieldSpec>> {
+    match options.get("columns") {
+        None => Ok(Vec::new()),
+        Some(value) => {
+            serde_json::from_value::<Vec<ArrowFieldSpec>>(value.clone()).map_err(|error| {
+                CalcFlowError::InvalidArgument {
+                    field: "columns".into(),
+                    message: format!("columns must be a field list: {error}"),
+                }
+            })
+        }
     }
 }
 
@@ -271,23 +284,41 @@ impl PostgresSource {
     }
 
     async fn fetch_batch(&mut self, url: &str) -> Result<Option<SourceEvent>> {
+        if self.exhausted {
+            return Ok(None);
+        }
         if self.client.is_none() {
             self.connect(url).await?;
         }
         let rows = self.query_batch().await?;
         if rows.is_empty() {
-            if self.config.mode == PgSourceMode::Snapshot {
-                self.exhausted = true;
-                return Ok(None);
-            }
-            tokio::time::sleep(self.config.poll_interval).await;
-            return Ok(Some(SourceEvent::Idle));
+            return Ok(self.empty_poll());
         }
+        let batch = self.assemble_batch(&rows)?;
+        if self.config.mode == PgSourceMode::Snapshot
+            && (rows.len() as u64) < self.config.max_batch_rows
+        {
+            self.exhausted = true;
+        }
+        Ok(Some(SourceEvent::Data {
+            batch,
+            cursor: self.cursor_from_values()?,
+        }))
+    }
+
+    fn empty_poll(&mut self) -> Option<SourceEvent> {
+        if self.config.mode == PgSourceMode::Snapshot {
+            self.exhausted = true;
+            return None;
+        }
+        Some(SourceEvent::Idle)
+    }
+
+    fn assemble_batch(&mut self, rows: &[Row]) -> Result<Batch> {
         let batch =
-            record_batch(&self.columns, &rows).map_err(|error| fail("read", &error.to_string()))?;
-        self.advance_cursor(&rows);
+            record_batch(&self.columns, rows).map_err(|error| fail("read", &error.to_string()))?;
+        self.advance_cursor(rows);
         self.sequence += 1;
-        let cursor = self.cursor_from_values()?;
         let metadata = BatchMetadata::new(
             "postgresql",
             self.sequence,
@@ -297,14 +328,7 @@ impl PostgresSource {
             )]),
         )
         .map_err(|error| fail("read", &error.to_string()))?;
-        let batch = Batch::table(vec![batch], metadata)
-            .map_err(|error| fail("read", &error.to_string()))?;
-        if self.config.mode == PgSourceMode::Snapshot
-            && (rows.len() as u64) < self.config.max_batch_rows
-        {
-            self.exhausted = true;
-        }
-        Ok(Some(SourceEvent::Data { batch, cursor }))
+        Batch::table(vec![batch], metadata).map_err(|error| fail("read", &error.to_string()))
     }
 
     async fn query_batch(&mut self) -> Result<Vec<Row>> {

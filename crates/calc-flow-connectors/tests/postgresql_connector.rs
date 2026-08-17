@@ -276,11 +276,6 @@ fn snapshot_reads_and_transactional_sink_commits() {
             }
         }
 
-        let source_batch = calc_flow_connectors::postgresql::PostgresSource::new(
-            PostgresSourceConfig::from_options(&source_options()).expect("parses"),
-        )
-        .expect("builds");
-        let _ = source_batch;
         assert_eq!(total_rows, 3, "snapshot reads every seeded row");
 
         // Transactional sink writes and commits atomically.

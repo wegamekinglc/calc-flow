@@ -7,13 +7,12 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BinaryArray, BooleanArray, Date32Array, FixedSizeBinaryArray, Float32Array,
-    Float64Array, Int16Array, Int32Array, Int64Array, StringArray, TimestampMicrosecondArray,
+    ArrayRef, BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array,
+    Int32Array, Int64Array, StringArray, TimestampMicrosecondArray,
 };
 use arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use calc_flow::{ArrowFieldSpec, CalcFlowError, Result};
-use tokio_postgres::Error as PgError;
 use tokio_postgres::Row;
 use tokio_postgres::types::{ToSql, Type as PgType};
 
@@ -102,7 +101,7 @@ pub fn record_batch(columns: &[PgColumn], rows: &[Row]) -> Result<RecordBatch> {
 fn column_array(column: &PgColumn, rows: &[Row], index: usize) -> Result<ArrayRef> {
     let name = &column.name;
     macro_rules! typed {
-        ($variant:ident, $builder:ty, $cast:ty) => {{
+        ($builder:ty, $cast:ty) => {{
             let mut values = Vec::with_capacity(rows.len());
             for row in rows {
                 let value: Option<$cast> = row
@@ -114,82 +113,19 @@ fn column_array(column: &PgColumn, rows: &[Row], index: usize) -> Result<ArrayRe
         }};
     }
     match column.data_type.clone() {
-        PgType::BOOL => typed!(BOOL, BooleanArray, bool),
-        PgType::INT2 => typed!(INT2, Int16Array, i16),
-        PgType::INT4 => typed!(INT4, Int32Array, i32),
-        PgType::INT8 => typed!(INT8, Int64Array, i64),
-        PgType::FLOAT4 => typed!(FLOAT4, Float32Array, f32),
-        PgType::FLOAT8 => typed!(FLOAT8, Float64Array, f64),
+        PgType::BOOL => typed!(BooleanArray, bool),
+        PgType::INT2 => typed!(Int16Array, i16),
+        PgType::INT4 => typed!(Int32Array, i32),
+        PgType::INT8 => typed!(Int64Array, i64),
+        PgType::FLOAT4 => typed!(Float32Array, f32),
+        PgType::FLOAT8 => typed!(Float64Array, f64),
         PgType::TEXT | PgType::VARCHAR | PgType::BPCHAR | PgType::NAME | PgType::NUMERIC => {
-            typed!(TEXT, StringArray, String)
+            typed!(StringArray, String)
         }
-        PgType::BYTEA => {
-            let mut values = Vec::with_capacity(rows.len());
-            for row in rows {
-                let value: Option<Vec<u8>> = row
-                    .try_get::<_, Option<Vec<u8>>>(index)
-                    .map_err(cell_error(name))?;
-                values.push(value);
-            }
-            let converted: Vec<Option<&[u8]>> = values.iter().map(|v| v.as_deref()).collect();
-            Ok(Arc::new(BinaryArray::from_opt_vec(converted)) as ArrayRef)
-        }
-        PgType::DATE => {
-            let mut values = Vec::with_capacity(rows.len());
-            for row in rows {
-                let value: Option<chrono::NaiveDate> = row
-                    .try_get::<_, Option<chrono::NaiveDate>>(index)
-                    .map_err(cell_error(name))?;
-                values.push(value.map(|date| {
-                    i32::try_from(
-                        (date - chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch"))
-                            .num_days(),
-                    )
-                    .unwrap_or(i32::MAX)
-                }));
-            }
-            Ok(Arc::new(Date32Array::from(values)) as ArrayRef)
-        }
-        PgType::TIMESTAMP | PgType::TIMESTAMPTZ => {
-            let mut values = Vec::with_capacity(rows.len());
-            for row in rows {
-                let value: Option<chrono::NaiveDateTime> = row
-                    .try_get::<_, Option<chrono::NaiveDateTime>>(index)
-                    .map_err(cell_error(name))?;
-                values.push(value.map(|stamp| stamp.and_utc().timestamp_micros()));
-            }
-            Ok(Arc::new(TimestampMicrosecondArray::from(values)) as ArrayRef)
-        }
-        PgType::UUID => {
-            let mut values = Vec::with_capacity(rows.len());
-            for row in rows {
-                let value: Option<uuid::Uuid> = row
-                    .try_get::<_, Option<uuid::Uuid>>(index)
-                    .map_err(cell_error(name))?;
-                values.push(value.map(|id| id.as_bytes().to_vec()));
-            }
-            let converted: Vec<Option<[u8; 16]>> = values
-                .into_iter()
-                .map(|value| {
-                    value.map(|bytes| {
-                        let mut fixed = [0u8; 16];
-                        fixed.copy_from_slice(&bytes);
-                        fixed
-                    })
-                })
-                .collect();
-            let mut builder =
-                arrow::array::FixedSizeBinaryBuilder::with_capacity(converted.len(), 16);
-            for value in converted {
-                match value {
-                    Some(bytes) => {
-                        builder.append_value(bytes.as_slice());
-                    }
-                    None => builder.append_null(),
-                }
-            }
-            Ok(Arc::new(builder.finish()) as ArrayRef)
-        }
+        PgType::BYTEA => bytea_array(rows, index, name),
+        PgType::DATE => date_array(rows, index, name),
+        PgType::TIMESTAMP | PgType::TIMESTAMPTZ => timestamp_array(rows, index, name),
+        PgType::UUID => uuid_array(rows, index, name),
         other => Err(CalcFlowError::InvalidArgument {
             field: format!("column {name}"),
             message: format!(
@@ -198,6 +134,61 @@ fn column_array(column: &PgColumn, rows: &[Row], index: usize) -> Result<ArrayRe
             ),
         }),
     }
+}
+
+fn bytea_array(rows: &[Row], index: usize, name: &str) -> Result<ArrayRef> {
+    let mut values = Vec::with_capacity(rows.len());
+    for row in rows {
+        let value: Option<Vec<u8>> = row
+            .try_get::<_, Option<Vec<u8>>>(index)
+            .map_err(cell_error(name))?;
+        values.push(value);
+    }
+    let converted: Vec<Option<&[u8]>> = values.iter().map(|v| v.as_deref()).collect();
+    Ok(Arc::new(BinaryArray::from_opt_vec(converted)) as ArrayRef)
+}
+
+fn date_array(rows: &[Row], index: usize, name: &str) -> Result<ArrayRef> {
+    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is valid");
+    let mut values = Vec::with_capacity(rows.len());
+    for row in rows {
+        let value: Option<chrono::NaiveDate> = row
+            .try_get::<_, Option<chrono::NaiveDate>>(index)
+            .map_err(cell_error(name))?;
+        values.push(value.map(|date| i32::try_from((date - epoch).num_days()).unwrap_or(i32::MAX)));
+    }
+    Ok(Arc::new(Date32Array::from(values)) as ArrayRef)
+}
+
+fn timestamp_array(rows: &[Row], index: usize, name: &str) -> Result<ArrayRef> {
+    let mut values = Vec::with_capacity(rows.len());
+    for row in rows {
+        let value: Option<chrono::NaiveDateTime> = row
+            .try_get::<_, Option<chrono::NaiveDateTime>>(index)
+            .map_err(cell_error(name))?;
+        values.push(value.map(|stamp| stamp.and_utc().timestamp_micros()));
+    }
+    Ok(Arc::new(TimestampMicrosecondArray::from(values)) as ArrayRef)
+}
+
+fn uuid_array(rows: &[Row], index: usize, name: &str) -> Result<ArrayRef> {
+    let mut values: Vec<Option<Vec<u8>>> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let value: Option<uuid::Uuid> = row
+            .try_get::<_, Option<uuid::Uuid>>(index)
+            .map_err(cell_error(name))?;
+        values.push(value.map(|id| id.as_bytes().to_vec()));
+    }
+    let mut builder = arrow::array::FixedSizeBinaryBuilder::with_capacity(values.len(), 16);
+    for value in values {
+        match value {
+            Some(bytes) => {
+                builder.append_value(bytes.as_slice());
+            }
+            None => builder.append_null(),
+        }
+    }
+    Ok(Arc::new(builder.finish()) as ArrayRef)
 }
 
 fn cell_error(column: &str) -> impl Fn(tokio_postgres::Error) -> CalcFlowError + '_ {
