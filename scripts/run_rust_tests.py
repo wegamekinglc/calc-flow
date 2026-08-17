@@ -212,7 +212,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
             "-p",
             "calc-flow-connectors",
             "--all-features",
-        ]
+        ],
     )
     if connectors_status != 0:
         return connectors_status
