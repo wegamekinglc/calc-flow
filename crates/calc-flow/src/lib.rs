@@ -26,6 +26,7 @@
 
 mod batch;
 mod config;
+mod config_v3;
 mod connector;
 mod context;
 mod continuous;
@@ -47,6 +48,13 @@ pub use config::{
     PipelineSpec, PortSpec, PositionSpec, ProjectSpec, RunOptions, ValidationIssue,
     ValidationReport, compile_project, compile_stream_project, project_json_schema,
     validate_project,
+};
+pub use config_v3::{
+    BatchRuntimeOptions as BatchRuntimeOptionsV3, ConnectorRef, DatabaseBinding, DeliveryRequest,
+    PROJECT_FORMAT_VERSION_V3, ProjectV3, RuntimeMode, RuntimeSpec, SecretRef,
+    SinkBinding as SinkBindingV3, SourceBinding as SourceBindingV3, StateConfig,
+    StreamRuntimeOptions as StreamRuntimeOptionsV3, WatermarkPolicyV3, parse_v3_project,
+    project_v3_json_schema, serialize_v3_project, v3_fingerprint, validate_v3_project,
 };
 pub use connector::{
     ConnectorCapabilities, ConnectorDescriptor, ConnectorError, ConnectorFactories,
