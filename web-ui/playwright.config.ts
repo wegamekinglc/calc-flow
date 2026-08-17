@@ -15,7 +15,7 @@ export default defineConfig({
   webServer: [
     {
       command: 'UV_CACHE_DIR=../target/playwright-uv-cache uv run --no-sync --package calc-flow-studio python scripts/run_e2e_server.py',
-      url: 'http://127.0.0.1:8765/api/v2/catalog',
+      url: 'http://127.0.0.1:8765/api/v3/catalog',
       reuseExistingServer: !process.env.CI,
       timeout: 30_000,
     },
