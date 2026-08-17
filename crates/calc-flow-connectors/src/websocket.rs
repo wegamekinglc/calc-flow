@@ -237,20 +237,7 @@ impl WebSocketSource {
         if lines.is_empty() && self.buffer.is_empty() {
             return Ok(Some(SourceEvent::Idle));
         }
-        // In DropOldest mode, drain the accumulated buffer plus the new
-        // frames, dropping the oldest when the total exceeds the bound.
-        for line in lines {
-            self.buffer.push_back(line);
-        }
-        while self.buffer.len() as u64 > self.config.max_batch_rows {
-            if self.config.backpressure == BackpressureMode::DropOldest {
-                self.buffer.pop_front();
-                self.dropped_frames += 1;
-            } else {
-                break;
-            }
-        }
-        let drained: Vec<Vec<u8>> = self.buffer.drain(..).collect();
+        let drained = self.absorb_frames(lines);
         let batch = self.decode_frames(&drained)?;
         let cursor = self.build_cursor()?;
         Ok(Some(SourceEvent::Data { batch, cursor }))
