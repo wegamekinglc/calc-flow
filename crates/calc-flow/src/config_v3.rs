@@ -13,7 +13,7 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{BatchKind, CalcFlowError, ProviderRegistry, Result, UdfRegistrySnapshot};
+use crate::{BatchKind, CalcFlowError, ProviderRegistry, Result};
 use sha2::Digest as _;
 
 /// The v3 format version constant.
@@ -396,29 +396,38 @@ pub fn project_v3_json_schema() -> Result<Value> {
 /// # Errors
 ///
 /// Returns the first stable validation issue as a typed error.
-pub fn validate_v3_project(project: &ProjectV3, _providers: &ProviderRegistry) -> Result<()> {
-    if project.sources.is_empty()
-        && project
-            .pipeline
-            .nodes
-            .iter()
-            .any(|n| matches!(n.operator, OperatorV3::External { .. }))
-    {
+pub fn validate_v3_project(project: &ProjectV3, providers: &ProviderRegistry) -> Result<()> {
+    validate_v3_connectors(project)?;
+    let _ = providers;
+    Ok(())
+}
+
+fn validate_v3_connectors(project: &ProjectV3) -> Result<()> {
+    let needs_source = project
+        .pipeline
+        .nodes
+        .iter()
+        .any(|n| matches!(n.operator, OperatorV3::External { .. }));
+    if needs_source && project.sources.is_empty() {
         return Err(CalcFlowError::Format {
             message: "external operators require at least one source binding".into(),
         });
     }
-    for source in &project.sources {
-        if source.connector.provider.is_empty() || source.connector.name.is_empty() {
+    validate_v3_connector_list(
+        project.sources.iter().map(|s| (&s.id, &s.connector)),
+        "source",
+    )?;
+    validate_v3_connector_list(project.sinks.iter().map(|s| (&s.id, &s.connector)), "sink")
+}
+
+fn validate_v3_connector_list<'a, I>(bindings: I, label: &str) -> Result<()>
+where
+    I: Iterator<Item = (&'a String, &'a ConnectorRef)>,
+{
+    for (id, connector) in bindings {
+        if connector.provider.is_empty() || connector.name.is_empty() {
             return Err(CalcFlowError::Format {
-                message: format!("source {} carries an empty connector identity", source.id),
-            });
-        }
-    }
-    for sink in &project.sinks {
-        if sink.connector.provider.is_empty() || sink.connector.name.is_empty() {
-            return Err(CalcFlowError::Format {
-                message: format!("sink {} carries an empty connector identity", sink.id),
+                message: format!("{label} {id} carries an empty connector identity"),
             });
         }
     }
