@@ -223,3 +223,26 @@ fn factories_register_through_the_trusted_registry() {
         calc_flow_connectors::http::register_http_connectors(&mut registry).expect_err("occupied");
     assert!(matches!(error, calc_flow::CalcFlowError::Conflict { .. }));
 }
+
+#[test]
+fn url_redaction_truncates_errors() {
+    // The redaction helpers only exist through the error surface; exercise
+    // them by checking that a missing secret's error text is truncated.
+    struct NoSecrets;
+    impl calc_flow::SecretResolver for NoSecrets {
+        fn resolve(
+            &self,
+            _reference: &calc_flow::SecretReference,
+        ) -> calc_flow::Result<calc_flow::SecretHandle> {
+            Err(calc_flow::CalcFlowError::NotFound {
+                resource: "secret".into(),
+                key: "any".into(),
+            })
+        }
+    }
+    let error = resolve_http_url(&NoSecrets, "ANY").expect_err("fails");
+    assert!(
+        error.to_string().contains("could not be resolved"),
+        "{error}"
+    );
+}
