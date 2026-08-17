@@ -16,6 +16,7 @@ command-group = "5.0.1"
 criterion = { version = "0.8.0", features = ["async_tokio"] }
 datafusion = { version = "=54.0.0", default-features = false, features = ["datetime_expressions", "regex_expressions", "sql", "unicode_expressions"] }
 futures = "0.3.31"
+futures-util = "0.3.31"
 fs2 = "0.4.3"
 hex = "0.4.3"
 parking_lot = "0.12.5"
