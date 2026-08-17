@@ -7,7 +7,7 @@ import {
 } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 
-const projectsUrl = 'http://127.0.0.1:8765/api/v2/projects';
+const projectsUrl = 'http://127.0.0.1:8765/api/v3/projects';
 const twoSourceProjectUrl = `${projectsUrl}/two_source_e2e`;
 
 // The constrained headless renderer otherwise stalls Playwright's stability check.
@@ -377,12 +377,12 @@ test('builds and runs a persisted DataFusion UDF graph without browser code', as
   await expect(page.getByText('No stored checkpoint')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Benchmark comparison' })).toBeVisible();
 
-  const projects = await page.request.get('http://127.0.0.1:8765/api/v2/projects');
+  const projects = await page.request.get('http://127.0.0.1:8765/api/v3/projects');
   expect(projects.ok()).toBeTruthy();
   const [summary] = await projects.json();
   expect(summary.id).toMatch(/^project_[0-9a-f]{32}$/);
   const project = await page.request.get(
-    `http://127.0.0.1:8765/api/v2/projects/${summary.id}`,
+    `http://127.0.0.1:8765/api/v3/projects/${summary.id}`,
   );
   expect(project.ok()).toBeTruthy();
   const document = await project.json();
@@ -398,7 +398,7 @@ test('builds and runs a persisted DataFusion UDF graph without browser code', as
   expect(JSON.stringify(document)).not.toContain('def double_value');
 
   const validation = await page.request.post(
-    `http://127.0.0.1:8765/api/v2/projects/${summary.id}/validate`,
+    `http://127.0.0.1:8765/api/v3/projects/${summary.id}/validate`,
   );
   expect(validation.ok()).toBeTruthy();
   expect(await validation.json()).toMatchObject({ valid: true, issues: [] });
@@ -421,7 +421,7 @@ test('builds and runs a persisted DataFusion UDF graph without browser code', as
   page.once('dialog', (dialog) => dialog.accept());
   await page.getByRole('button', { name: 'Delete', exact: true }).click({ force: true });
   await expect(page.getByText('Project deleted')).toBeVisible();
-  const remaining = await page.request.get('http://127.0.0.1:8765/api/v2/projects');
+  const remaining = await page.request.get('http://127.0.0.1:8765/api/v3/projects');
   expect(await remaining.json()).toEqual([]);
 });
 
