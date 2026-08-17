@@ -4,24 +4,7 @@
  */
 
 export interface paths {
-    "/api/v2/capabilities": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get Capabilities */
-        get: operations["get_capabilities_api_v2_capabilities_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v2/catalog": {
+    "/api/v3/catalog": {
         parameters: {
             query?: never;
             header?: never;
@@ -29,7 +12,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Catalog */
-        get: operations["get_catalog_api_v2_catalog_get"];
+        get: operations["get_catalog_api_v3_catalog_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -38,7 +21,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/projects": {
+    "/api/v3/capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Capabilities */
+        get: operations["get_capabilities_api_v3_capabilities_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v3/schema/project": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Project Schema */
+        get: operations["get_project_schema_api_v3_schema_project_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v3/projects": {
         parameters: {
             query?: never;
             header?: never;
@@ -46,17 +63,17 @@ export interface paths {
             cookie?: never;
         };
         /** List Projects */
-        get: operations["list_projects_api_v2_projects_get"];
+        get: operations["list_projects_api_v3_projects_get"];
         put?: never;
         /** Create Project */
-        post: operations["create_project_api_v2_projects_post"];
+        post: operations["create_project_api_v3_projects_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v2/projects/import": {
+    "/api/v3/projects/import": {
         parameters: {
             query?: never;
             header?: never;
@@ -66,14 +83,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Import Project */
-        post: operations["import_project_api_v2_projects_import_post"];
+        post: operations["import_project_api_v3_projects_import_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v2/projects/{project_id}": {
+    "/api/v3/projects/{project_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -81,36 +98,18 @@ export interface paths {
             cookie?: never;
         };
         /** Get Project */
-        get: operations["get_project_api_v2_projects__project_id__get"];
+        get: operations["get_project_api_v3_projects__project_id__get"];
         /** Put Project */
-        put: operations["put_project_api_v2_projects__project_id__put"];
+        put: operations["put_project_api_v3_projects__project_id__put"];
         post?: never;
         /** Delete Project */
-        delete: operations["delete_project_api_v2_projects__project_id__delete"];
+        delete: operations["delete_project_api_v3_projects__project_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v2/projects/{project_id}/checkpoint": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get Project Checkpoint */
-        get: operations["get_project_checkpoint_api_v2_projects__project_id__checkpoint_get"];
-        put?: never;
-        post?: never;
-        /** Delete Project Checkpoint */
-        delete: operations["delete_project_checkpoint_api_v2_projects__project_id__checkpoint_delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v2/projects/{project_id}/export": {
+    "/api/v3/projects/{project_id}/export": {
         parameters: {
             query?: never;
             header?: never;
@@ -118,7 +117,7 @@ export interface paths {
             cookie?: never;
         };
         /** Export Project */
-        get: operations["export_project_api_v2_projects__project_id__export_get"];
+        get: operations["export_project_api_v3_projects__project_id__export_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -127,24 +126,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/projects/{project_id}/runs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Create Run */
-        post: operations["create_run_api_v2_projects__project_id__runs_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v2/projects/{project_id}/validate": {
+    "/api/v3/projects/{project_id}/validate": {
         parameters: {
             query?: never;
             header?: never;
@@ -154,14 +136,49 @@ export interface paths {
         get?: never;
         put?: never;
         /** Validate Stored Project */
-        post: operations["validate_stored_project_api_v2_projects__project_id__validate_post"];
+        post: operations["validate_stored_project_api_v3_projects__project_id__validate_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v2/runs/{run_id}": {
+    "/api/v3/projects/{project_id}/checkpoint": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Project Checkpoint */
+        get: operations["get_project_checkpoint_api_v3_projects__project_id__checkpoint_get"];
+        put?: never;
+        post?: never;
+        /** Delete Project Checkpoint */
+        delete: operations["delete_project_checkpoint_api_v3_projects__project_id__checkpoint_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v3/projects/{project_id}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Run */
+        post: operations["create_run_api_v3_projects__project_id__runs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v3/runs/{run_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -169,17 +186,17 @@ export interface paths {
             cookie?: never;
         };
         /** Get Run */
-        get: operations["get_run_api_v2_runs__run_id__get"];
+        get: operations["get_run_api_v3_runs__run_id__get"];
         put?: never;
         post?: never;
         /** Cancel Run */
-        delete: operations["cancel_run_api_v2_runs__run_id__delete"];
+        delete: operations["cancel_run_api_v3_runs__run_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v2/runs/{run_id}/events": {
+    "/api/v3/runs/{run_id}/events": {
         parameters: {
             query?: never;
             header?: never;
@@ -187,7 +204,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Run Events */
-        get: operations["get_run_events_api_v2_runs__run_id__events_get"];
+        get: operations["get_run_events_api_v3_runs__run_id__events_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -196,15 +213,117 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/schema/project": {
+    "/api/v3/jobs": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Get Project Schema */
-        get: operations["get_project_schema_api_v2_schema_project_get"];
+        /** List Jobs */
+        get: operations["list_jobs_api_v3_jobs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v3/jobs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Job */
+        get: operations["get_job_api_v3_jobs__run_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v3/jobs/{run_id}/checkpoint": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Trigger Job Checkpoint */
+        post: operations["trigger_job_checkpoint_api_v3_jobs__run_id__checkpoint_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v3/jobs/{run_id}/shutdown": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Shutdown Job */
+        post: operations["shutdown_job_api_v3_jobs__run_id__shutdown_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v3/jobs/{run_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Job */
+        post: operations["cancel_job_api_v3_jobs__run_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v3/jobs/{run_id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Job Events */
+        get: operations["get_job_events_api_v3_jobs__run_id__events_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v3/resource-limits": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Resource Limits */
+        get: operations["get_resource_limits_api_v3_resource_limits_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -219,76 +338,76 @@ export interface components {
     schemas: {
         /** ArrayOutputPreview */
         ArrayOutputPreview: {
-            /** Backend */
-            backend: string;
-            data: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
              */
             kind: "array";
-            /** Metadata */
-            metadata: {
-                [key: string]: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
-            };
+            /** Backend */
+            backend: string;
             /** Total Rows */
             total_rows: number;
             /** Truncated */
             truncated: boolean;
+            data: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
+            /** Metadata */
+            metadata: {
+                [key: string]: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
+            };
         };
         /** CancelledRunResponse */
         CancelledRunResponse: {
+            /** Id */
+            id: string;
+            /** Project Id */
+            project_id: string;
             /**
              * Created At
              * Format: date-time
              */
             created_at: string;
-            /** Error */
-            error?: null;
-            /**
-             * Finished At
-             * Format: date-time
-             */
-            finished_at: string;
-            /** Id */
-            id: string;
-            /** Project Id */
-            project_id: string;
-            /** Result */
-            result?: null;
-            /** Started At */
-            started_at?: string | null;
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
              */
             status: "cancelled";
+            /** Started At */
+            started_at?: string | null;
+            /**
+             * Finished At
+             * Format: date-time
+             */
+            finished_at: string;
+            /** Error */
+            error?: null;
+            /** Result */
+            result?: null;
         };
         /** CapabilitiesResponse */
         CapabilitiesResponse: {
-            preview: components["schemas"]["PreviewCapabilitiesResponse"];
-            runtime: components["schemas"]["RuntimeCapabilitiesResponse"];
             /**
              * Schemaversion
              * @constant
              */
             schemaVersion: 1;
+            runtime: components["schemas"]["RuntimeCapabilitiesResponse"];
+            preview: components["schemas"]["PreviewCapabilitiesResponse"];
         };
         /** CheckpointSummary */
         CheckpointSummary: {
-            /** Compatible */
-            compatible?: boolean | null;
-            /** Created At */
-            created_at?: string | null;
-            /** Exists */
-            exists: boolean;
-            /** Pipeline Fingerprint */
-            pipeline_fingerprint?: string | null;
             /** Pipeline Name */
             pipeline_name: string;
+            /** Exists */
+            exists: boolean;
+            /** Compatible */
+            compatible?: boolean | null;
+            /** Pipeline Fingerprint */
+            pipeline_fingerprint?: string | null;
             /** Sequence */
             sequence?: number | null;
             source_cursor?: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
+            /** Created At */
+            created_at?: string | null;
             /**
              * State Nodes
              * @default []
@@ -297,81 +416,81 @@ export interface components {
         };
         /** CompletedRunResponse */
         CompletedRunResponse: {
+            /** Id */
+            id: string;
+            /** Project Id */
+            project_id: string;
             /**
              * Created At
              * Format: date-time
              */
             created_at: string;
-            /** Error */
-            error?: null;
-            /**
-             * Finished At
-             * Format: date-time
-             */
-            finished_at: string;
-            /** Id */
-            id: string;
-            /** Project Id */
-            project_id: string;
-            result: components["schemas"]["RunResultPreview"];
-            /**
-             * Started At
-             * Format: date-time
-             */
-            started_at: string;
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
              */
             status: "completed";
-        };
-        /** DataFusionMetricPreview */
-        DataFusionMetricPreview: {
-            /** Execution Ns */
-            execution_ns: number;
-            /** Logical Plan */
-            logical_plan: string;
-            /** Node Id */
-            node_id: string | null;
-            /** Output Rows */
-            output_rows: number;
-            /** Physical Plan */
-            physical_plan: string;
-            /** Planning Ns */
-            planning_ns: number;
-            /** Query Id */
-            query_id: number;
-        };
-        /** FailedRunResponse */
-        FailedRunResponse: {
-            /**
-             * Created At
-             * Format: date-time
-             */
-            created_at: string;
-            /** Error */
-            error: string;
-            /**
-             * Finished At
-             * Format: date-time
-             */
-            finished_at: string;
-            /** Id */
-            id: string;
-            /** Project Id */
-            project_id: string;
-            /** Result */
-            result?: null;
             /**
              * Started At
              * Format: date-time
              */
             started_at: string;
             /**
+             * Finished At
+             * Format: date-time
+             */
+            finished_at: string;
+            /** Error */
+            error?: null;
+            result: components["schemas"]["RunResultPreview"];
+        };
+        /** DataFusionMetricPreview */
+        DataFusionMetricPreview: {
+            /** Query Id */
+            query_id: number;
+            /** Node Id */
+            node_id: string | null;
+            /** Planning Ns */
+            planning_ns: number;
+            /** Execution Ns */
+            execution_ns: number;
+            /** Output Rows */
+            output_rows: number;
+            /** Logical Plan */
+            logical_plan: string;
+            /** Physical Plan */
+            physical_plan: string;
+        };
+        /** FailedRunResponse */
+        FailedRunResponse: {
+            /** Id */
+            id: string;
+            /** Project Id */
+            project_id: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
              */
             status: "failed";
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /**
+             * Finished At
+             * Format: date-time
+             */
+            finished_at: string;
+            /** Error */
+            error: string;
+            /** Result */
+            result?: null;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -380,21 +499,17 @@ export interface components {
         };
         /** InputPayload */
         InputPayload: {
-            data: components["schemas"]["calc_flow_studio__models__JSONValue-Input"];
             /**
              * Format
              * @enum {string}
              */
             format: "records" | "columns" | "arrow_ipc";
+            data: components["schemas"]["calc_flow_studio__models__JSONValue-Input"];
             /** Source Id */
             source_id?: string | null;
         };
         /** InvalidValidationReport */
         InvalidValidationReport: {
-            /** Fingerprint */
-            fingerprint?: null;
-            /** Issues */
-            issues: components["schemas"]["ValidationIssue"][];
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -406,13 +521,13 @@ export interface components {
              * @constant
              */
             valid: false;
+            /** Issues */
+            issues: components["schemas"]["ValidationIssue"][];
+            /** Fingerprint */
+            fingerprint?: null;
         };
         /** LazyBuiltinWorkerRegistration */
         LazyBuiltinWorkerRegistration: {
-            /** Name */
-            name: string;
-            /** Provider */
-            provider: string;
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -423,6 +538,10 @@ export interface components {
              * @enum {string}
              */
             registrationKind: "provider" | "dataFusionScalar";
+            /** Provider */
+            provider: string;
+            /** Name */
+            name: string;
             /** Version */
             version: string;
         };
@@ -441,10 +560,10 @@ export interface components {
         };
         /** OperatorCapabilityResponse */
         OperatorCapabilityResponse: {
-            /** Inputkinds */
-            inputKinds: ("table" | "array")[];
             /** Kind */
             kind: string;
+            /** Inputkinds */
+            inputKinds: ("table" | "array")[];
             /** Outputkinds */
             outputKinds: ("table" | "array")[];
             /** Requiresdatafusion */
@@ -454,65 +573,65 @@ export interface components {
         OutputFieldPreview: {
             /** Name */
             name: string;
-            /** Nullable */
-            nullable: boolean;
             /** Type */
             type: string;
+            /** Nullable */
+            nullable: boolean;
         };
         OutputPreview: components["schemas"]["TableOutputPreview"] | components["schemas"]["ArrayOutputPreview"];
         /** PendingRunResponse */
         PendingRunResponse: {
+            /** Id */
+            id: string;
+            /** Project Id */
+            project_id: string;
             /**
              * Created At
              * Format: date-time
              */
             created_at: string;
-            /** Error */
-            error?: null;
-            /** Finished At */
-            finished_at?: null;
-            /** Id */
-            id: string;
-            /** Project Id */
-            project_id: string;
-            /** Result */
-            result?: null;
-            /** Started At */
-            started_at?: null;
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
              */
             status: "pending";
+            /** Started At */
+            started_at?: null;
+            /** Finished At */
+            finished_at?: null;
+            /** Error */
+            error?: null;
+            /** Result */
+            result?: null;
         };
         /** PreviewCapabilitiesResponse */
         PreviewCapabilitiesResponse: {
             /** Inputbatchkinds */
             inputBatchKinds: ("table" | "array")[];
-            limits: components["schemas"]["PreviewLimitsResponse"];
-            /** Projectinputformats */
-            projectInputFormats: ("arrow_ipc" | "csv" | "inline_json" | "json")[];
             /** Requestinputformats */
             requestInputFormats: ("arrow_ipc" | "columns" | "records")[];
+            /** Projectinputformats */
+            projectInputFormats: ("arrow_ipc" | "csv" | "inline_json" | "json")[];
             /** Workerregistrations */
             workerRegistrations: components["schemas"]["WorkerRegistrationCapability"][];
+            limits: components["schemas"]["PreviewLimitsResponse"];
         };
         /** PreviewLimit */
         PreviewLimit: {
             /** Default */
             default: number;
-            /** Maximum */
-            maximum: number;
             /** Minimum */
             minimum: number;
+            /** Maximum */
+            maximum: number;
         };
         /** PreviewLimitsResponse */
         PreviewLimitsResponse: {
             maxInputBytes: components["schemas"]["PreviewLimit"];
             maxRows: components["schemas"]["PreviewLimit"];
+            timeoutSeconds: components["schemas"]["PreviewLimit"];
             memoryLimitMb: components["schemas"]["PreviewLimit"];
             outputRows: components["schemas"]["PreviewLimit"];
-            timeoutSeconds: components["schemas"]["PreviewLimit"];
         };
         /** Calc Flow Project V2 */
         ProjectCreateRequest: {
@@ -830,72 +949,115 @@ export interface components {
         };
         /** ProjectSummary */
         ProjectSummary: {
-            /** Description */
-            description: string;
             /** Id */
             id: string;
             /** Name */
             name: string;
+            /** Description */
+            description: string;
             /** Node Count */
             node_count: number;
         };
         /** ProviderCapabilityResponse */
         ProviderCapabilityResponse: {
-            /** Inputports */
-            inputPorts: components["schemas"]["ProviderPortResponse"][];
-            /** Name */
-            name: string;
-            optionsSchema: components["schemas"]["ProviderOptionsSchemaResponse"] | null;
-            /** Outputports */
-            outputPorts: components["schemas"]["ProviderPortResponse"][];
             /** Provider */
             provider: string;
+            /** Name */
+            name: string;
             /** Version */
             version: string;
+            /** Inputports */
+            inputPorts: components["schemas"]["ProviderPortResponse"][];
+            /** Outputports */
+            outputPorts: components["schemas"]["ProviderPortResponse"][];
+            optionsSchema: components["schemas"]["ProviderOptionsSchemaResponse"] | null;
         };
         /** ProviderOptionResponse */
         ProviderOptionResponse: {
             /** Name */
             name: string;
             /**
-             * Required
-             * @default false
-             */
-            required: boolean;
-            /**
              * Valuetype
              * @enum {string}
              */
             valueType: "string" | "integer" | "number" | "boolean";
+            /**
+             * Required
+             * @default false
+             */
+            required: boolean;
         };
         /** ProviderOptionsSchemaResponse */
         ProviderOptionsSchemaResponse: {
+            /**
+             * Fields
+             * @default []
+             */
+            fields: components["schemas"]["ProviderOptionResponse"][];
             /**
              * Additionalproperties
              * @default false
              * @constant
              */
             additionalProperties: false;
-            /**
-             * Fields
-             * @default []
-             */
-            fields: components["schemas"]["ProviderOptionResponse"][];
         };
         /** ProviderPortResponse */
         ProviderPortResponse: {
+            /** Name */
+            name: string;
             /**
              * Kind
              * @enum {string}
              */
             kind: "table" | "array";
-            /** Name */
-            name: string;
             /** Required */
             required: boolean;
         };
+        /**
+         * ResourceLimits
+         * @description Equivalent resource bounds replacing the v2 worker timeout for
+         *     long-running continuous jobs (M6-09).
+         */
+        ResourceLimits: {
+            /**
+             * Max Concurrent Jobs
+             * @default 4
+             */
+            max_concurrent_jobs: number;
+            /**
+             * Max Job Memory Mb
+             * @default 1024
+             */
+            max_job_memory_mb: number;
+            /**
+             * Max Global Memory Mb
+             * @default 4096
+             */
+            max_global_memory_mb: number;
+            /**
+             * Max Checkpoint Disk Mb
+             * @default 512
+             */
+            max_checkpoint_disk_mb: number;
+            /**
+             * Job Lifecycle
+             * @default user_explicit_stop
+             * @constant
+             */
+            job_lifecycle: "user_explicit_stop";
+        };
         /** RunOptions */
         RunOptions: {
+            /**
+             * Timeout Seconds
+             * @default 30
+             */
+            timeout_seconds: number;
+            /**
+             * Memory Limit Mb
+             * @default 512
+             */
+            memory_limit_mb: number;
             /**
              * Max Input Bytes
              * @default 10485760
@@ -907,20 +1069,10 @@ export interface components {
              */
             max_rows: number;
             /**
-             * Memory Limit Mb
-             * @default 512
-             */
-            memory_limit_mb: number;
-            /**
              * Output Rows
              * @default 1000
              */
             output_rows: number;
-            /**
-             * Timeout Seconds
-             * @default 30
-             */
-            timeout_seconds: number;
         };
         /** RunRequest */
         RunRequest: {
@@ -935,66 +1087,66 @@ export interface components {
         RunResponseVariant: components["schemas"]["PendingRunResponse"] | components["schemas"]["RunningRunResponse"] | components["schemas"]["CompletedRunResponse"] | components["schemas"]["FailedRunResponse"] | components["schemas"]["TimedOutRunResponse"] | components["schemas"]["CancelledRunResponse"];
         /** RunResultPreview */
         RunResultPreview: {
+            /** Outputs */
+            outputs: {
+                [key: string]: components["schemas"]["OutputPreview"];
+            };
+            /** Node Timings */
+            node_timings: {
+                [key: string]: components["schemas"]["NodeTimingPreview"];
+            };
             /** Datafusion Metrics */
             datafusion_metrics: components["schemas"]["DataFusionMetricPreview"][];
             /** Metadata */
             metadata: {
                 [key: string]: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
             };
-            /** Node Timings */
-            node_timings: {
-                [key: string]: components["schemas"]["NodeTimingPreview"];
-            };
-            /** Outputs */
-            outputs: {
-                [key: string]: components["schemas"]["OutputPreview"];
-            };
         };
         /** RunningRunResponse */
         RunningRunResponse: {
+            /** Id */
+            id: string;
+            /** Project Id */
+            project_id: string;
             /**
              * Created At
              * Format: date-time
              */
             created_at: string;
-            /** Error */
-            error?: null;
-            /** Finished At */
-            finished_at?: null;
-            /** Id */
-            id: string;
-            /** Project Id */
-            project_id: string;
-            /** Result */
-            result?: null;
-            /**
-             * Started At
-             * Format: date-time
-             */
-            started_at: string;
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
              */
             status: "running";
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /** Finished At */
+            finished_at?: null;
+            /** Error */
+            error?: null;
+            /** Result */
+            result?: null;
         };
         /** RuntimeCapabilitiesResponse */
         RuntimeCapabilitiesResponse: {
-            /** Batchkinds */
-            batchKinds: ("table" | "array")[];
-            /** Operators */
-            operators: components["schemas"]["OperatorCapabilityResponse"][];
+            scope: components["schemas"]["RuntimeSessionScopeResponse"];
             /** Packageversion */
             packageVersion: string;
-            /** Portablearrowtypes */
-            portableArrowTypes: string[];
             /** Projectformatversions */
             projectFormatVersions: number[];
-            /** Providers */
-            providers: components["schemas"]["ProviderCapabilityResponse"][];
-            scope: components["schemas"]["RuntimeSessionScopeResponse"];
+            /** Batchkinds */
+            batchKinds: ("table" | "array")[];
+            /** Portablearrowtypes */
+            portableArrowTypes: string[];
+            /** Operators */
+            operators: components["schemas"]["OperatorCapabilityResponse"][];
             /** Udfs */
             udfs: components["schemas"]["UdfCapabilityResponse"][];
+            /** Providers */
+            providers: components["schemas"]["ProviderCapabilityResponse"][];
         };
         /** RuntimeSessionScopeResponse */
         RuntimeSessionScopeResponse: {
@@ -1003,17 +1155,13 @@ export interface components {
              * @constant
              */
             kind: "runtimeSession";
-            /** Revision */
-            revision: number;
             /** Sessionid */
             sessionId: string;
+            /** Revision */
+            revision: number;
         };
         /** SerializedWorkerRegistration */
         SerializedWorkerRegistration: {
-            /** Name */
-            name: string;
-            /** Provider */
-            provider: string;
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -1024,6 +1172,10 @@ export interface components {
              * @enum {string}
              */
             registrationKind: "provider" | "dataFusionScalar";
+            /** Provider */
+            provider: string;
+            /** Name */
+            name: string;
             /** Version */
             version: string;
         };
@@ -1034,83 +1186,74 @@ export interface components {
              * @enum {string}
              */
             kind: "table";
-            /** Metadata */
-            metadata: {
-                [key: string]: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
-            };
-            /** Rows */
-            rows: {
-                [key: string]: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
-            }[];
-            /** Schema */
-            schema: components["schemas"]["OutputFieldPreview"][];
             /** Total Rows */
             total_rows: number;
             /** Truncated */
             truncated: boolean;
+            /** Schema */
+            schema: components["schemas"]["OutputFieldPreview"][];
+            /** Rows */
+            rows: {
+                [key: string]: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
+            }[];
+            /** Metadata */
+            metadata: {
+                [key: string]: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
+            };
         };
         /** TimedOutRunResponse */
         TimedOutRunResponse: {
+            /** Id */
+            id: string;
+            /** Project Id */
+            project_id: string;
             /**
              * Created At
              * Format: date-time
              */
             created_at: string;
-            /** Error */
-            error: string;
             /**
-             * Finished At
-             * Format: date-time
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
              */
-            finished_at: string;
-            /** Id */
-            id: string;
-            /** Project Id */
-            project_id: string;
-            /** Result */
-            result?: null;
+            status: "timed_out";
             /**
              * Started At
              * Format: date-time
              */
             started_at: string;
             /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
+             * Finished At
+             * Format: date-time
              */
-            status: "timed_out";
+            finished_at: string;
+            /** Error */
+            error: string;
+            /** Result */
+            result?: null;
         };
         /** UdfCapabilityResponse */
         UdfCapabilityResponse: {
-            /** Inputtypes */
-            inputTypes: string[];
+            /** Provider */
+            provider: string;
+            /** Name */
+            name: string;
+            /** Version */
+            version: string;
             /**
              * Kind
              * @constant
              */
             kind: "data_fusion_scalar";
-            /** Name */
-            name: string;
-            /** Provider */
-            provider: string;
+            /** Inputtypes */
+            inputTypes: string[];
             /** Returntype */
             returnType: string;
-            /** Version */
-            version: string;
             /** Volatility */
             volatility: string;
         };
         /** UnavailableWorkerRegistration */
         UnavailableWorkerRegistration: {
-            /** Name */
-            name: string;
-            /** Provider */
-            provider: string;
-            /**
-             * Reasoncode
-             * @constant
-             */
-            reasonCode: "serializationFailed";
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -1121,18 +1264,20 @@ export interface components {
              * @enum {string}
              */
             registrationKind: "provider" | "dataFusionScalar";
+            /** Provider */
+            provider: string;
+            /** Name */
+            name: string;
             /** Version */
             version: string;
+            /**
+             * Reasoncode
+             * @constant
+             */
+            reasonCode: "serializationFailed";
         };
         /** ValidValidationReport */
         ValidValidationReport: {
-            /** Fingerprint */
-            fingerprint: string;
-            /**
-             * Issues
-             * @default []
-             */
-            issues: components["schemas"]["ValidationIssue"][];
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -1144,28 +1289,35 @@ export interface components {
              * @constant
              */
             valid: true;
+            /**
+             * Issues
+             * @default []
+             */
+            issues: components["schemas"]["ValidationIssue"][];
+            /** Fingerprint */
+            fingerprint: string;
         };
         /** ValidationError */
         ValidationError: {
-            /** Context */
-            ctx?: Record<string, never>;
-            /** Input */
-            input?: unknown;
             /** Location */
             loc: (string | number)[];
             /** Message */
             msg: string;
             /** Error Type */
             type: string;
+            /** Input */
+            input?: unknown;
+            /** Context */
+            ctx?: Record<string, never>;
         };
         /** ValidationIssue */
         ValidationIssue: {
+            /** Path */
+            path: string;
             /** Code */
             code: string;
             /** Message */
             message: string;
-            /** Path */
-            path: string;
         };
         ValidationReport: components["schemas"]["ValidValidationReport"] | components["schemas"]["InvalidValidationReport"];
         WorkerRegistrationCapability: components["schemas"]["SerializedWorkerRegistration"] | components["schemas"]["LazyBuiltinWorkerRegistration"] | components["schemas"]["UnavailableWorkerRegistration"];
@@ -1190,27 +1342,7 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    get_capabilities_api_v2_capabilities_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CapabilitiesResponse"];
-                };
-            };
-        };
-    };
-    get_catalog_api_v2_catalog_get: {
+    get_catalog_api_v3_catalog_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -1232,7 +1364,49 @@ export interface operations {
             };
         };
     };
-    list_projects_api_v2_projects_get: {
+    get_capabilities_api_v3_capabilities_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CapabilitiesResponse"];
+                };
+            };
+        };
+    };
+    get_project_schema_api_v3_schema_project_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    list_projects_api_v3_projects_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -1252,7 +1426,7 @@ export interface operations {
             };
         };
     };
-    create_project_api_v2_projects_post: {
+    create_project_api_v3_projects_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -1285,7 +1459,7 @@ export interface operations {
             };
         };
     };
-    import_project_api_v2_projects_import_post: {
+    import_project_api_v3_projects_import_post: {
         parameters: {
             query: {
                 format: string;
@@ -1317,7 +1491,7 @@ export interface operations {
             };
         };
     };
-    get_project_api_v2_projects__project_id__get: {
+    get_project_api_v3_projects__project_id__get: {
         parameters: {
             query?: never;
             header?: never;
@@ -1348,7 +1522,7 @@ export interface operations {
             };
         };
     };
-    put_project_api_v2_projects__project_id__put: {
+    put_project_api_v3_projects__project_id__put: {
         parameters: {
             query?: never;
             header?: never;
@@ -1383,7 +1557,7 @@ export interface operations {
             };
         };
     };
-    delete_project_api_v2_projects__project_id__delete: {
+    delete_project_api_v3_projects__project_id__delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -1412,69 +1586,7 @@ export interface operations {
             };
         };
     };
-    get_project_checkpoint_api_v2_projects__project_id__checkpoint_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                project_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CheckpointSummary"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    delete_project_checkpoint_api_v2_projects__project_id__checkpoint_delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                project_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CheckpointSummary"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    export_project_api_v2_projects__project_id__export_get: {
+    export_project_api_v3_projects__project_id__export_get: {
         parameters: {
             query?: {
                 format?: string;
@@ -1507,7 +1619,100 @@ export interface operations {
             };
         };
     };
-    create_run_api_v2_projects__project_id__runs_post: {
+    validate_stored_project_api_v3_projects__project_id__validate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ValidationReport"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_project_checkpoint_api_v3_projects__project_id__checkpoint_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CheckpointSummary"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_project_checkpoint_api_v3_projects__project_id__checkpoint_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CheckpointSummary"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_run_api_v3_projects__project_id__runs_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -1542,38 +1747,7 @@ export interface operations {
             };
         };
     };
-    validate_stored_project_api_v2_projects__project_id__validate_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                project_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ValidationReport"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_run_api_v2_runs__run_id__get: {
+    get_run_api_v3_runs__run_id__get: {
         parameters: {
             query?: never;
             header?: never;
@@ -1604,7 +1778,7 @@ export interface operations {
             };
         };
     };
-    cancel_run_api_v2_runs__run_id__delete: {
+    cancel_run_api_v3_runs__run_id__delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -1635,7 +1809,7 @@ export interface operations {
             };
         };
     };
-    get_run_events_api_v2_runs__run_id__events_get: {
+    get_run_events_api_v3_runs__run_id__events_get: {
         parameters: {
             query?: never;
             header?: {
@@ -1668,7 +1842,7 @@ export interface operations {
             };
         };
     };
-    get_project_schema_api_v2_schema_project_get: {
+    list_jobs_api_v3_jobs_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -1683,9 +1857,184 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["RunResponse"][];
+                };
+            };
+        };
+    };
+    get_job_api_v3_jobs__run_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    trigger_job_checkpoint_api_v3_jobs__run_id__checkpoint_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    shutdown_job_api_v3_jobs__run_id__shutdown_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_job_api_v3_jobs__run_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_job_events_api_v3_jobs__run_id__events_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Last-Event-ID"?: number | null;
+            };
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_resource_limits_api_v3_resource_limits_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResourceLimits"];
                 };
             };
         };

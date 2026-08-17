@@ -37,6 +37,7 @@ from calc_flow_studio.models import (
     CheckpointSummary,
     ProjectCreateRequest,
     ProjectSummary,
+    ResourceLimits,
     RunEvent,
     RunRequest,
     RunResponse,
@@ -49,7 +50,7 @@ from calc_flow_studio.run_manager import (
     RunManagerError,
 )
 
-API_PREFIX = "/api/v2"
+API_PREFIX = "/api/v3"
 MAX_PROJECT_IMPORT_BYTES = 10 * 1024 * 1024
 _VALIDATION_REPORT_ADAPTER = TypeAdapter(ValidationReport)
 
@@ -94,6 +95,14 @@ class RunManagerProtocol(Protocol):
     def cancel(self, run_id: str) -> RunResponse: ...
 
     def shutdown(self) -> None: ...
+
+    def list_jobs(self) -> tuple[RunResponse, ...]: ...
+
+    def trigger_checkpoint(self, run_id: str) -> RunResponse: ...
+
+    def shutdown_job(self, run_id: str) -> RunResponse: ...
+
+    def resource_limits(self) -> ResourceLimits: ...
 
 
 def _project_summary(project: ProjectDocument) -> ProjectSummary:
@@ -521,6 +530,69 @@ def create_app(
             return await run_in_threadpool(selected_run_manager.cancel, run_id)
         except KeyError as error:
             raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
+
+    @app.get(f"{API_PREFIX}/jobs", response_model=tuple[RunResponse, ...])
+    async def list_jobs() -> tuple[RunResponse, ...]:
+        return await run_in_threadpool(selected_run_manager.list_jobs)
+
+    @app.get(f"{API_PREFIX}/jobs/{{run_id}}", response_model=RunResponse)
+    async def get_job(run_id: str) -> RunResponse:
+        try:
+            return await run_in_threadpool(selected_run_manager.get, run_id)
+        except KeyError as error:
+            raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
+
+    @app.post(
+        f"{API_PREFIX}/jobs/{{run_id}}/checkpoint",
+        response_model=RunResponse,
+    )
+    async def trigger_job_checkpoint(run_id: str) -> RunResponse:
+        try:
+            return await run_in_threadpool(
+                selected_run_manager.trigger_checkpoint, run_id
+            )
+        except KeyError as error:
+            raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
+        except (RuntimeError, ValueError) as error:
+            raise _http_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)
+            ) from error
+
+    @app.post(
+        f"{API_PREFIX}/jobs/{{run_id}}/shutdown",
+        response_model=RunResponse,
+    )
+    async def shutdown_job(run_id: str) -> RunResponse:
+        try:
+            return await run_in_threadpool(selected_run_manager.shutdown_job, run_id)
+        except KeyError as error:
+            raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
+
+    @app.post(
+        f"{API_PREFIX}/jobs/{{run_id}}/cancel",
+        response_model=RunResponse,
+    )
+    async def cancel_job(run_id: str) -> RunResponse:
+        try:
+            return await run_in_threadpool(selected_run_manager.cancel, run_id)
+        except KeyError as error:
+            raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
+
+    @app.get(
+        f"{API_PREFIX}/jobs/{{run_id}}/events",
+    )
+    async def get_job_events(
+        run_id: str,
+        last_event_id: int | None = Header(default=None, alias="Last-Event-ID"),
+    ) -> StreamingResponse:
+        return await get_run_events(run_id, last_event_id)
+
+    @app.get(
+        f"{API_PREFIX}/resource-limits",
+        response_model=ResourceLimits,
+    )
+    async def get_resource_limits() -> ResourceLimits:
+        return selected_run_manager.resource_limits()
 
     frontend = (
         Path(frontend_directory)

@@ -449,7 +449,7 @@ describe('Calc Flow Studio', () => {
 
     await waitFor(() =>
       expect(FakeEventSource.instances.map(({ url }) => url)).toEqual([
-        '/api/v2/runs/run_1/events',
+        '/api/v3/runs/run_1/events',
       ]),
     );
     const [source] = FakeEventSource.instances;
