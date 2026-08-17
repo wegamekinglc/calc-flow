@@ -37,6 +37,8 @@ exclude_paths:
   # clickhouse module's split files; the function is 20 lines in a
   # balanced-brace file.
   - "crates/calc-flow-connectors/src/clickhouse*.rs"
+  # Generated JSON Schema contracts
+  - "schemas/*.schema.json"
   # Historical parity evidence, kept verbatim on purpose
   - "tests/fixtures/**"
   # Frozen executable allocation evidence, kept byte-identical to its baseline
