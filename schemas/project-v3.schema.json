@@ -1,0 +1,843 @@
+{
+  "$defs": {
+    "BatchKind": {
+      "enum": [
+        "table",
+        "array"
+      ],
+      "type": "string"
+    },
+    "BatchRuntimeOptions": {
+      "additionalProperties": false,
+      "description": "Bounded-batch runtime limits.",
+      "properties": {
+        "max_input_bytes": {
+          "default": 10485760,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_rows": {
+          "default": 100000,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "memory_limit_mb": {
+          "default": 512,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "timeout_seconds": {
+          "default": 30,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "ConnectorRef": {
+      "additionalProperties": false,
+      "description": "A connector identity reference.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "DatabaseBinding": {
+      "description": "A database binding's read or write mode declaration.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cursor_column": {
+              "default": "",
+              "type": "string"
+            },
+            "mode": {
+              "const": "snapshot",
+              "type": "string"
+            },
+            "table": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "table"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cursor_column": {
+              "type": "string"
+            },
+            "mode": {
+              "const": "polling",
+              "type": "string"
+            },
+            "poll_interval_ms": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "table": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "table",
+            "cursor_column"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "const": "cdc",
+              "type": "string"
+            },
+            "publication": {
+              "type": "string"
+            },
+            "slot": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "publication",
+            "slot"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "const": "append",
+              "type": "string"
+            },
+            "table": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "table"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "conflict_columns": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "mode": {
+              "const": "upsert",
+              "type": "string"
+            },
+            "table": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "table"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryRequest": {
+      "description": "The requested delivery guarantee for one output.",
+      "enum": [
+        "at_least_once",
+        "exactly_once"
+      ],
+      "type": "string"
+    },
+    "EdgeV3": {
+      "additionalProperties": false,
+      "description": "One graph edge connecting two node ports.",
+      "properties": {
+        "source_node": {
+          "type": "string"
+        },
+        "source_port": {
+          "default": "output",
+          "type": "string"
+        },
+        "target_node": {
+          "type": "string"
+        },
+        "target_port": {
+          "default": "input",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_node",
+        "target_node"
+      ],
+      "type": "object"
+    },
+    "FieldV3": {
+      "additionalProperties": false,
+      "description": "One Arrow field in a strict schema.",
+      "properties": {
+        "data_type": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "nullable": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "data_type"
+      ],
+      "type": "object"
+    },
+    "NodeV3": {
+      "additionalProperties": false,
+      "description": "One graph node and its operator specification.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "input_ports": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PortV3"
+          },
+          "type": "array"
+        },
+        "operator": {
+          "$ref": "#/$defs/OperatorV3"
+        },
+        "output_ports": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PortV3"
+          },
+          "type": "array"
+        },
+        "position": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositionV3"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "operator"
+      ],
+      "type": "object"
+    },
+    "OperatorV3": {
+      "description": "The operator variant; external providers are data-only references.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "expression": {
+              "default": "",
+              "type": "string"
+            },
+            "filter": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "expression",
+              "type": "string"
+            },
+            "select": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "udfs": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/UdfRefV3"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "aliases": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "sql",
+              "type": "string"
+            },
+            "query": {
+              "type": "string"
+            },
+            "udfs": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/UdfRefV3"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "query",
+            "aliases"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "external",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "options": {
+              "additionalProperties": true,
+              "default": {},
+              "type": "object"
+            },
+            "provider": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "provider",
+            "name",
+            "version"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PipelineV3": {
+      "additionalProperties": false,
+      "description": "The operator graph.",
+      "properties": {
+        "edges": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EdgeV3"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/NodeV3"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "nodes"
+      ],
+      "type": "object"
+    },
+    "PortV3": {
+      "additionalProperties": false,
+      "description": "A named port with an optional exact Arrow schema.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/BatchKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "required": {
+          "default": true,
+          "type": "boolean"
+        },
+        "schema": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FieldV3"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "PositionV3": {
+      "additionalProperties": false,
+      "description": "A canvas position for visual editors.",
+      "properties": {
+        "x": {
+          "format": "double",
+          "type": "number"
+        },
+        "y": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "type": "object"
+    },
+    "RuntimeMode": {
+      "description": "Whether the project runs as a bounded batch or a continuous stream.",
+      "enum": [
+        "batch",
+        "stream"
+      ],
+      "type": "string"
+    },
+    "RuntimeSpec": {
+      "additionalProperties": false,
+      "description": "Runtime mode and its mode-specific options.",
+      "properties": {
+        "batch": {
+          "$ref": "#/$defs/BatchRuntimeOptions",
+          "default": {
+            "max_input_bytes": 10485760,
+            "max_rows": 100000,
+            "memory_limit_mb": 512,
+            "timeout_seconds": 30
+          }
+        },
+        "mode": {
+          "$ref": "#/$defs/RuntimeMode"
+        },
+        "stream": {
+          "$ref": "#/$defs/StreamRuntimeOptions",
+          "default": {
+            "checkpoint_interval_seconds": 30,
+            "max_batch_bytes": 67108864,
+            "max_batch_rows": 10000
+          }
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "type": "object"
+    },
+    "SecretRef": {
+      "additionalProperties": false,
+      "description": "A named pointer to a secret; the only secret-shaped value a\ndata-only document may carry.",
+      "properties": {
+        "key": {
+          "description": "The resolver-specific key.",
+          "type": "string"
+        },
+        "resolver": {
+          "$ref": "#/$defs/SecretResolverKindV3",
+          "description": "Where the secret is resolved from."
+        }
+      },
+      "required": [
+        "resolver",
+        "key"
+      ],
+      "type": "object"
+    },
+    "SecretResolverKindV3": {
+      "description": "The resolver vocabulary.",
+      "enum": [
+        "environment",
+        "file",
+        "registered"
+      ],
+      "type": "string"
+    },
+    "SinkBinding": {
+      "additionalProperties": false,
+      "description": "A data-only sink binding with a delivery request.",
+      "properties": {
+        "connector": {
+          "$ref": "#/$defs/ConnectorRef",
+          "description": "Connector identity `(provider, name, version)`."
+        },
+        "database": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DatabaseBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Database write mode for database connectors."
+        },
+        "delivery": {
+          "$ref": "#/$defs/DeliveryRequest",
+          "description": "The requested per-output delivery guarantee."
+        },
+        "format": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "options": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "output": {
+          "description": "The external graph output this binding drains.",
+          "type": "string"
+        },
+        "secrets": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SecretRef"
+          },
+          "default": {},
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "output",
+        "connector",
+        "delivery"
+      ],
+      "type": "object"
+    },
+    "SourceBinding": {
+      "additionalProperties": false,
+      "description": "A data-only source binding to a registered connector.",
+      "properties": {
+        "connector": {
+          "$ref": "#/$defs/ConnectorRef",
+          "description": "Connector identity `(provider, name, version)`."
+        },
+        "database": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DatabaseBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Database read/write mode for database connectors."
+        },
+        "format": {
+          "default": null,
+          "description": "The wire format name; the registry validates it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "input": {
+          "description": "The external graph input this binding feeds.",
+          "type": "string"
+        },
+        "options": {
+          "additionalProperties": true,
+          "default": {},
+          "description": "Bounded connector options; secrets never appear here.",
+          "type": "object"
+        },
+        "schema": {
+          "default": [],
+          "description": "Explicit schema the source must match.",
+          "items": {
+            "$ref": "#/$defs/FieldV3"
+          },
+          "type": "array"
+        },
+        "secrets": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SecretRef"
+          },
+          "default": {},
+          "description": "Named secret references this source resolves at open time.",
+          "type": "object"
+        },
+        "watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WatermarkPolicyV3"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Watermark policy for stream mode."
+        }
+      },
+      "required": [
+        "id",
+        "input",
+        "connector"
+      ],
+      "type": "object"
+    },
+    "StateConfig": {
+      "additionalProperties": false,
+      "description": "State and checkpoint configuration for stream mode.",
+      "properties": {
+        "checkpoint_directory": {
+          "default": ".calc-flow-state",
+          "description": "Directory for managed checkpoint state.",
+          "type": "string"
+        },
+        "checkpoint_interval_seconds": {
+          "default": 30,
+          "description": "Interval between automatic checkpoints.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "StreamRuntimeOptions": {
+      "additionalProperties": false,
+      "description": "Continuous-stream runtime limits.",
+      "properties": {
+        "checkpoint_interval_seconds": {
+          "default": 30,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_batch_bytes": {
+          "default": 67108864,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_batch_rows": {
+          "default": 10000,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "UdfRefV3": {
+      "additionalProperties": false,
+      "description": "A trusted UDF reference by provider/name/version.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "WatermarkPolicyV3": {
+      "description": "The watermark policy for one source in stream mode.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "source_provided",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "emit_interval_ms": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "event_time_column": {
+              "type": "string"
+            },
+            "idle_timeout_ms": {
+              "default": null,
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "bounded_out_of_orderness",
+              "type": "string"
+            },
+            "max_out_of_orderness_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "event_time_column",
+            "max_out_of_orderness_ms"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "disabled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The root of a strict data-only project document.",
+  "properties": {
+    "description": {
+      "default": "",
+      "type": "string"
+    },
+    "format_version": {
+      "const": 3,
+      "type": "integer"
+    },
+    "id": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "pipeline": {
+      "$ref": "#/$defs/PipelineV3"
+    },
+    "runtime": {
+      "$ref": "#/$defs/RuntimeSpec"
+    },
+    "sinks": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SinkBinding"
+      },
+      "type": "array"
+    },
+    "sources": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SourceBinding"
+      },
+      "type": "array"
+    },
+    "state": {
+      "$ref": "#/$defs/StateConfig",
+      "default": {
+        "checkpoint_directory": ".calc-flow-state",
+        "checkpoint_interval_seconds": 30
+      }
+    }
+  },
+  "required": [
+    "format_version",
+    "id",
+    "name",
+    "runtime",
+    "pipeline"
+  ],
+  "title": "Calc Flow Project V3",
+  "type": "object"
+}
