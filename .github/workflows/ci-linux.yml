@@ -81,6 +81,38 @@ jobs:
         run: >-
           cargo test -p calc-flow-connectors --features postgresql
           --test postgresql_connector -- --ignored --test-threads=1
+
+  connector-containers-ch:
+    name: Connector containers (ClickHouse)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.12
+        env:
+          CLICKHOUSE_USER: default
+          CLICKHOUSE_PASSWORD: ""
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+        ports:
+          - 8123:8123
+        options: >-
+          --health-cmd "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CALC_FLOW_CONNECTOR_CONTAINERS: "1"
+      CH_TEST_URL: http://localhost:8123
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      - name: Run gated ClickHouse connector tests
+        run: >-
+          cargo test -p calc-flow-connectors --features clickhouse
+          --test clickhouse_connector -- --ignored --test-threads=1
   lint-and-test:
     name: Ruff + unit tests
     runs-on: ubuntu-latest
@@ -493,7 +525,7 @@ jobs:
         # measured.
         run: >-
           cargo llvm-cov --workspace --all-features --fail-under-lines 90
-          --ignore-filename-regex 'src/(kafka|postgresql|database_types)\.rs'
+          --ignore-filename-regex 'src/(kafka|postgresql|clickhouse(_sink)?|database_types)\.rs'
           --lcov --output-path rust-lcov.info
       - name: Upload Rust coverage report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

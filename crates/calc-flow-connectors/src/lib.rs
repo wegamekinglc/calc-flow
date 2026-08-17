@@ -37,6 +37,10 @@ pub mod json_lines;
 #[cfg(feature = "file")]
 pub mod parquet;
 
+#[cfg(feature = "clickhouse")]
+pub mod clickhouse;
+#[cfg(feature = "clickhouse")]
+pub mod clickhouse_sink;
 #[cfg(feature = "postgresql")]
 pub mod database_types;
 #[cfg(feature = "file")]
