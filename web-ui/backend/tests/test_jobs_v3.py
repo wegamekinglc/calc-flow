@@ -84,3 +84,64 @@ class TestProjectRoutesStillUnderV3:
     def test_projects_list(self, client):
         response = client.get("/api/v3/projects")
         assert response.status_code == 200
+
+
+class TestJobLifecycleWithRun:
+    """Exercises the job surface against a real RunManager."""
+
+    def _create_project(self, client):
+        project = {
+            "format_version": 2,
+            "id": "p1",
+            "name": "test",
+            "description": "",
+            "pipeline": {
+                "name": "pipe",
+                "nodes": [
+                    {
+                        "id": "n1",
+                        "operator": {
+                            "kind": "expression",
+                            "expression": "x = value + 1",
+                        },
+                    }
+                ],
+            },
+            "data_sources": [
+                {
+                    "id": "sample",
+                    "input": "input",
+                    "format": "inline_json",
+                    "data": [{"value": 1}],
+                }
+            ],
+        }
+        create = client.post("/api/v3/projects", json=project)
+        assert create.status_code == 201, create.text
+        return create.json()
+
+    def test_list_jobs_with_created_project(self, client):
+        self._create_project(client)
+        jobs = client.get("/api/v3/jobs")
+        assert jobs.status_code == 200
+        assert isinstance(jobs.json(), list)
+
+    def test_get_job_with_created_project(self, client):
+        self._create_project(client)
+        job = client.get("/api/v3/jobs/missing")
+        assert job.status_code == 404
+
+    def test_checkpoint_missing_422(self, client):
+        self._create_project(client)
+        response = client.post("/api/v3/jobs/missing/checkpoint")
+        assert response.status_code == 404
+
+    def test_shutdown_missing_404(self, client):
+        self._create_project(client)
+        response = client.post("/api/v3/jobs/missing/shutdown")
+        assert response.status_code == 404
+
+    def test_cancel_missing_404(self, client):
+        self._create_project(client)
+        response = client.post("/api/v3/jobs/missing/cancel")
+        assert response.status_code == 404
