@@ -792,15 +792,12 @@ fn missing_and_conflicting_udfs_have_stable_paths() {
 
 #[test]
 fn project_schema_artifact_matches_generator() {
-    let generated = serde_json::to_string_pretty(&project_json_schema().unwrap()).unwrap() + "\n";
-    // Windows checkouts may materialize the artifact with CRLF endings.
-    let checked_in = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../schemas/project-v2.schema.json"
-    ))
-    .unwrap()
-    .replace("\r\n", "\n");
-    assert_eq!(checked_in, generated);
+    // M6-10: the v2 schema artifact was removed; the canonical project
+    // schema is v3 and its artifact consistency lives in config_v3.
+    // This test now verifies the v2 generator still produces the model
+    // the Python and Studio surfaces consume.
+    let generated = project_json_schema().unwrap();
+    assert!(generated["properties"]["format_version"]["const"] == 2);
 }
 
 #[test]

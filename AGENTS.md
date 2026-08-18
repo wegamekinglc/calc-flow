@@ -261,7 +261,7 @@ Before considering a change complete, run the full command groups in
 
 ```bash
 git diff --exit-code -- \
-  schemas/project-v2.schema.json \
+  schemas/project-v3.schema.json \
   web-ui/openapi.json \
   web-ui/src/api/schema.d.ts
 git diff --check
