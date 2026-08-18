@@ -72,26 +72,26 @@ class ReleaseConfigTests(unittest.TestCase):
             (ROOT / "web-ui/package-lock.json").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(workspace["workspace"]["package"]["version"], "2.0.0")
-        self.assertEqual(binding["dependencies"]["calc-flow"]["version"], "=2.0.0")
-        self.assertEqual(package["project"]["version"], "2.0.0")
-        self.assertEqual(studio["project"]["version"], "2.0.0")
-        self.assertIn("calc-flow>=2.0.0,<3", studio["project"]["dependencies"])
-        self.assertEqual(frontend["version"], "2.0.0")
-        self.assertEqual(frontend_lock["version"], "2.0.0")
-        self.assertEqual(frontend_lock["packages"][""]["version"], "2.0.0")
+        self.assertEqual(workspace["workspace"]["package"]["version"], "3.0.0")
+        self.assertEqual(binding["dependencies"]["calc-flow"]["version"], "=3.0.0")
+        self.assertEqual(package["project"]["version"], "3.0.0")
+        self.assertEqual(studio["project"]["version"], "3.0.0")
+        self.assertIn("calc-flow>=3.0.0,<4", studio["project"]["dependencies"])
+        self.assertEqual(frontend["version"], "3.0.0")
+        self.assertEqual(frontend_lock["version"], "3.0.0")
+        self.assertEqual(frontend_lock["packages"][""]["version"], "3.0.0")
         self.assertIn(
-            '__version__ = "2.0.0"',
+            '__version__ = "3.0.0"',
             (ROOT / "python/calc_flow/__init__.py").read_text(encoding="utf-8"),
         )
         self.assertIn(
-            'version="2.0.0"',
+            'version="3.0.0"',
             (ROOT / "web-ui/backend/src/calc_flow_studio/app.py").read_text(
                 encoding="utf-8"
             ),
         )
         openapi = json.loads((ROOT / "web-ui/openapi.json").read_text(encoding="utf-8"))
-        self.assertEqual(openapi["info"]["version"], "2.0.0")
+        self.assertEqual(openapi["info"]["version"], "3.0.0")
 
         release_text = "\n".join(
             (ROOT / path).read_text(encoding="utf-8")
