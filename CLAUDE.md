@@ -158,7 +158,7 @@ The frontend talks to the backend over the `/api/v2` REST contract only.
 | `python/calc_flow/`        | Pure-Python public API, functional `PipelineBuilder`, runner/store adapters, NumPy/JAX provider registration, exception hierarchy        |
 | `web-ui/backend/`          | `calc-flow-studio` FastAPI service under `/api/v2`, loopback-bound, spawned bounded preview workers                                      |
 | `web-ui/src/`              | React + TypeScript + Vite + React Flow studio; API types generated from `web-ui/openapi.json`                                            |
-| `schemas/`                 | `project-v2.schema.json`, the canonical generated project contract                                                                       |
+| `schemas/`                 | `project-v3.schema.json`, the canonical generated project contract                                                                       |
 | `examples/`                | Executable v2 Python examples                                                                                                            |
 | `benchmarks/`              | pytest-benchmark harness (informational)                                                                                                 |
 | `docs/`                    | Published documentation                                                                                                                  |
