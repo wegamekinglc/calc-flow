@@ -74,7 +74,7 @@ from calc_flow.runtime import (
 )
 from calc_flow.store import FileProjectStore
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"
 Batch = _native.Batch
 ExecutionOptions = _native.ExecutionOptions
 ProviderContext = _native.ProviderContext

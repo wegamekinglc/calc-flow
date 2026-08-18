@@ -122,7 +122,7 @@ class TestProjectV3Surface:
         caps = runtime_capabilities(
             session_id="test",
             revision=1,
-            package_version="2.0.0",
+            package_version="3.0.0",
             registrations=[],
         )
         assert 2 in caps.project_format_versions
