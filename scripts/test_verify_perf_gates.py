@@ -29,13 +29,13 @@ class TestLoadBaseline(unittest.TestCase):
             _write_benchmark(directory, "bench_a", 1.0, 0.01)
             _write_benchmark(directory, "bench_b", 2.0, 0.02)
             results = load_baseline(directory)
-            assert set(results) == {"bench_a", "bench_b"}
-            assert results["bench_a"]["mean_seconds"] == 1.0
+            self.assertEqual(set(results), {"bench_a", "bench_b"})
+            self.assertEqual(results["bench_a"]["mean_seconds"], 1.0)
 
     def test_empty_directory_returns_empty(self) -> None:
         with TemporaryDirectory() as raw:
             results = load_baseline(Path(raw))
-            assert results == {}
+            self.assertEqual(results, {})
 
 
 class TestCheckRegression(unittest.TestCase):
@@ -51,14 +51,14 @@ class TestCheckRegression(unittest.TestCase):
             "bench_a": {"name": "bench_a", "mean_seconds": 1.03, "std_dev": 0.01},
             "bench_b": {"name": "bench_b", "mean_seconds": 2.04, "std_dev": 0.02},
         }
-        assert check_regression(self.baseline, candidate) == []
+        self.assertEqual(check_regression(self.baseline, candidate), [])
 
     def test_improvement_passes(self) -> None:
         candidate = {
             "bench_a": {"name": "bench_a", "mean_seconds": 0.5, "std_dev": 0.01},
             "bench_b": {"name": "bench_b", "mean_seconds": 1.0, "std_dev": 0.02},
         }
-        assert check_regression(self.baseline, candidate) == []
+        self.assertEqual(check_regression(self.baseline, candidate), [])
 
     def test_exceeding_threshold_fails(self) -> None:
         candidate = {
@@ -66,16 +66,16 @@ class TestCheckRegression(unittest.TestCase):
             "bench_b": {"name": "bench_b", "mean_seconds": 2.0, "std_dev": 0.02},
         }
         regressions = check_regression(self.baseline, candidate)
-        assert len(regressions) == 1
-        assert regressions[0][0] == "bench_a"
-        assert regressions[0][1] > 0.05
+        self.assertEqual(len(regressions), 1)
+        self.assertEqual(regressions[0][0], "bench_a")
+        self.assertGreater(regressions[0][1], 0.05)
 
     def test_extra_baseline_is_ignored(self) -> None:
         candidate = {
             "bench_a": {"name": "bench_a", "mean_seconds": 1.0, "std_dev": 0.01},
         }
         # bench_b has no candidate; it is not counted as a regression.
-        assert check_regression(self.baseline, candidate) == []
+        self.assertEqual(check_regression(self.baseline, candidate), [])
 
 
 if __name__ == "__main__":
