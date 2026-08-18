@@ -1,11 +1,12 @@
 # Repository Guidance
 
-Calc Flow 2.0 is a Rust-native micro-batch and streaming calculation engine.
+Calc Flow 3.0 is a Rust-native micro-batch and streaming calculation engine.
 The `calc-flow` crate owns immutable `Batch` values, graph compilation,
 DataFusion execution, projects, stores, checkpoints, and runners. The Python
 package under `python/calc_flow/` is a PyO3 binding plus functional adapters;
-it is not a second engine. `calc-flow-studio` is a separate local FastAPI and
-React application. See `docs/introduction.md`.
+it is not a second engine. `calc-flow-connectors` delivers connector implementations behind
+feature gates. `calc-flow-studio` is a separate local FastAPI and
+React application serving the `/api/v3` continuous job API. See `docs/introduction.md`.
 
 ## Commands
 

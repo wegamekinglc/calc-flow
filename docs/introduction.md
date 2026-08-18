@@ -1,4 +1,4 @@
-# Calc Flow 2.0 architecture
+# Calc Flow 3.0 architecture
 
 Calc Flow is a Rust-native stateful calculation engine for micro-batch and
 streaming data. The `calc-flow` crate owns the data contract, graph compiler,
@@ -7,8 +7,9 @@ The `calc-flow` Python distribution exposes that engine through PyO3 and adds
 functional Python builders plus explicitly registered NumPy/JAX providers.
 
 The browser Studio is not part of the core wheel. The separately packaged
-`calc-flow-studio` FastAPI application hosts a local v2 API and built React
-assets.
+`calc-flow-studio` FastAPI application hosts the local `/api/v3` continuous
+job API and built React assets. The `calc-flow-connectors` crate owns
+connector implementations behind per-transport feature gates.
 
 ## A first example
 

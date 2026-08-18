@@ -5,6 +5,26 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-18: Complete the M6 connector milestone. The
+  `calc-flow-connectors` workspace crate ships six transports behind
+  feature gates — file/Parquet (default), Kafka, PostgreSQL,
+  ClickHouse, and HTTP/WebSocket — each registering through the
+  trusted `ConnectorRegistry` with the eight-axis capability
+  vocabulary. Project format v3 introduces `runtime.mode`,
+  connector-bound source/sink/database bindings, `SecretRef`
+  credentials, and `StateConfig`; `schemas/project-v3.schema.json` is
+  the canonical contract and the v2 schema artifact is removed. The
+  Python surface exposes `registered_connectors()` and the
+  `ConnectorCapability` types; Studio serves the `/api/v3` continuous
+  job API with checkpoint, shutdown, cancel, SSE events, and the
+  `ResourceLimits` endpoint replacing the v2 worker timeout.
+- 2026-08-18: Add the M7 release gates.
+  `scripts/verify_perf_gates.py` runs the 5% paired Criterion
+  regression gate and documents the opt-in 1,200-second soak
+  procedures; `scripts/verify_security_gates.py` publishes the
+  18-entry threat-model coverage checklist linking each security
+  boundary to its named enforcement evidence.
+
 - 2026-08-15: Harden the public continuous-runtime delivery. Python blocking
   start now reclaims its dedicated event-loop thread after blocking or async
   terminal operations, observer cancellation during cleanup, and abandoned-job
