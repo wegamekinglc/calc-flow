@@ -124,17 +124,17 @@ def _create(client: TestClient, project: dict[str, object] | None = None):
     return client.post(f"{API_PREFIX}/projects", json=project or _project())
 
 
-def test_openapi_contains_only_v2_routes_and_exact_rust_schema(tmp_path) -> None:
+def test_openapi_contains_only_v3_routes_and_exact_rust_schema(tmp_path) -> None:
     with _client(tmp_path) as client:
         openapi = client.get("/openapi.json").json()
         schema = client.get(f"{API_PREFIX}/schema/project").json()
 
-    assert API_PREFIX == "/api/v2"
+    assert API_PREFIX == "/api/v3"
     assert f"{API_PREFIX}/catalog" in openapi["paths"]
     assert f"{API_PREFIX}/schema/project" in openapi["paths"]
     assert f"{API_PREFIX}/projects/{{project_id}}" in openapi["paths"]
     assert f"{API_PREFIX}/runs/{{run_id}}/events" in openapi["paths"]
-    assert not any(path.startswith("/api/v1/") for path in openapi["paths"])
+    assert not any(path.startswith("/api/v2/") for path in openapi["paths"])
     assert schema == json.loads(project_json_schema())
     assert schema["properties"]["format_version"]["const"] == 2
     assert "backend" not in json.dumps(schema).lower()

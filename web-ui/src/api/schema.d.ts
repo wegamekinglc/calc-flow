@@ -4,7 +4,7 @@
  */
 
 export interface paths {
-    "/api/v2/capabilities": {
+    "/api/v3/capabilities": {
         parameters: {
             query?: never;
             header?: never;
@@ -12,7 +12,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Capabilities */
-        get: operations["get_capabilities_api_v2_capabilities_get"];
+        get: operations["get_capabilities_api_v3_capabilities_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -21,7 +21,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/catalog": {
+    "/api/v3/catalog": {
         parameters: {
             query?: never;
             header?: never;
@@ -29,7 +29,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Catalog */
-        get: operations["get_catalog_api_v2_catalog_get"];
+        get: operations["get_catalog_api_v3_catalog_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -38,7 +38,109 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/projects": {
+    "/api/v3/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Jobs */
+        get: operations["list_jobs_api_v3_jobs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v3/jobs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Job */
+        get: operations["get_job_api_v3_jobs__run_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v3/jobs/{run_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Job */
+        post: operations["cancel_job_api_v3_jobs__run_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v3/jobs/{run_id}/checkpoint": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Trigger Job Checkpoint */
+        post: operations["trigger_job_checkpoint_api_v3_jobs__run_id__checkpoint_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v3/jobs/{run_id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Job Events */
+        get: operations["get_job_events_api_v3_jobs__run_id__events_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v3/jobs/{run_id}/shutdown": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Shutdown Job */
+        post: operations["shutdown_job_api_v3_jobs__run_id__shutdown_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v3/projects": {
         parameters: {
             query?: never;
             header?: never;
@@ -46,17 +148,17 @@ export interface paths {
             cookie?: never;
         };
         /** List Projects */
-        get: operations["list_projects_api_v2_projects_get"];
+        get: operations["list_projects_api_v3_projects_get"];
         put?: never;
         /** Create Project */
-        post: operations["create_project_api_v2_projects_post"];
+        post: operations["create_project_api_v3_projects_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v2/projects/import": {
+    "/api/v3/projects/import": {
         parameters: {
             query?: never;
             header?: never;
@@ -66,14 +168,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Import Project */
-        post: operations["import_project_api_v2_projects_import_post"];
+        post: operations["import_project_api_v3_projects_import_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v2/projects/{project_id}": {
+    "/api/v3/projects/{project_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -81,18 +183,18 @@ export interface paths {
             cookie?: never;
         };
         /** Get Project */
-        get: operations["get_project_api_v2_projects__project_id__get"];
+        get: operations["get_project_api_v3_projects__project_id__get"];
         /** Put Project */
-        put: operations["put_project_api_v2_projects__project_id__put"];
+        put: operations["put_project_api_v3_projects__project_id__put"];
         post?: never;
         /** Delete Project */
-        delete: operations["delete_project_api_v2_projects__project_id__delete"];
+        delete: operations["delete_project_api_v3_projects__project_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v2/projects/{project_id}/checkpoint": {
+    "/api/v3/projects/{project_id}/checkpoint": {
         parameters: {
             query?: never;
             header?: never;
@@ -100,17 +202,17 @@ export interface paths {
             cookie?: never;
         };
         /** Get Project Checkpoint */
-        get: operations["get_project_checkpoint_api_v2_projects__project_id__checkpoint_get"];
+        get: operations["get_project_checkpoint_api_v3_projects__project_id__checkpoint_get"];
         put?: never;
         post?: never;
         /** Delete Project Checkpoint */
-        delete: operations["delete_project_checkpoint_api_v2_projects__project_id__checkpoint_delete"];
+        delete: operations["delete_project_checkpoint_api_v3_projects__project_id__checkpoint_delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v2/projects/{project_id}/export": {
+    "/api/v3/projects/{project_id}/export": {
         parameters: {
             query?: never;
             header?: never;
@@ -118,7 +220,7 @@ export interface paths {
             cookie?: never;
         };
         /** Export Project */
-        get: operations["export_project_api_v2_projects__project_id__export_get"];
+        get: operations["export_project_api_v3_projects__project_id__export_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -127,7 +229,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/projects/{project_id}/runs": {
+    "/api/v3/projects/{project_id}/runs": {
         parameters: {
             query?: never;
             header?: never;
@@ -137,14 +239,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Create Run */
-        post: operations["create_run_api_v2_projects__project_id__runs_post"];
+        post: operations["create_run_api_v3_projects__project_id__runs_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v2/projects/{project_id}/validate": {
+    "/api/v3/projects/{project_id}/validate": {
         parameters: {
             query?: never;
             header?: never;
@@ -154,14 +256,31 @@ export interface paths {
         get?: never;
         put?: never;
         /** Validate Stored Project */
-        post: operations["validate_stored_project_api_v2_projects__project_id__validate_post"];
+        post: operations["validate_stored_project_api_v3_projects__project_id__validate_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v2/runs/{run_id}": {
+    "/api/v3/resource-limits": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Resource Limits */
+        get: operations["get_resource_limits_api_v3_resource_limits_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v3/runs/{run_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -169,17 +288,17 @@ export interface paths {
             cookie?: never;
         };
         /** Get Run */
-        get: operations["get_run_api_v2_runs__run_id__get"];
+        get: operations["get_run_api_v3_runs__run_id__get"];
         put?: never;
         post?: never;
         /** Cancel Run */
-        delete: operations["cancel_run_api_v2_runs__run_id__delete"];
+        delete: operations["cancel_run_api_v3_runs__run_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v2/runs/{run_id}/events": {
+    "/api/v3/runs/{run_id}/events": {
         parameters: {
             query?: never;
             header?: never;
@@ -187,7 +306,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Run Events */
-        get: operations["get_run_events_api_v2_runs__run_id__events_get"];
+        get: operations["get_run_events_api_v3_runs__run_id__events_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -196,7 +315,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/schema/project": {
+    "/api/v3/schema/project": {
         parameters: {
             query?: never;
             header?: never;
@@ -204,7 +323,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Project Schema */
-        get: operations["get_project_schema_api_v2_schema_project_get"];
+        get: operations["get_project_schema_api_v3_schema_project_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -894,6 +1013,39 @@ export interface components {
             /** Required */
             required: boolean;
         };
+        /**
+         * ResourceLimits
+         * @description Equivalent resource bounds replacing the v2 worker timeout for
+         *     long-running continuous jobs (M6-09).
+         */
+        ResourceLimits: {
+            /**
+             * Job Lifecycle
+             * @default user_explicit_stop
+             * @constant
+             */
+            job_lifecycle: "user_explicit_stop";
+            /**
+             * Max Checkpoint Disk Mb
+             * @default 512
+             */
+            max_checkpoint_disk_mb: number;
+            /**
+             * Max Concurrent Jobs
+             * @default 4
+             */
+            max_concurrent_jobs: number;
+            /**
+             * Max Global Memory Mb
+             * @default 4096
+             */
+            max_global_memory_mb: number;
+            /**
+             * Max Job Memory Mb
+             * @default 1024
+             */
+            max_job_memory_mb: number;
+        };
         /** RunOptions */
         RunOptions: {
             /**
@@ -1190,7 +1342,7 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    get_capabilities_api_v2_capabilities_get: {
+    get_capabilities_api_v3_capabilities_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -1210,7 +1362,7 @@ export interface operations {
             };
         };
     };
-    get_catalog_api_v2_catalog_get: {
+    get_catalog_api_v3_catalog_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -1232,7 +1384,184 @@ export interface operations {
             };
         };
     };
-    list_projects_api_v2_projects_get: {
+    list_jobs_api_v3_jobs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunResponse"][];
+                };
+            };
+        };
+    };
+    get_job_api_v3_jobs__run_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_job_api_v3_jobs__run_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    trigger_job_checkpoint_api_v3_jobs__run_id__checkpoint_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_job_events_api_v3_jobs__run_id__events_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Last-Event-ID"?: number | null;
+            };
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    shutdown_job_api_v3_jobs__run_id__shutdown_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_projects_api_v3_projects_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -1252,7 +1581,7 @@ export interface operations {
             };
         };
     };
-    create_project_api_v2_projects_post: {
+    create_project_api_v3_projects_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -1285,7 +1614,7 @@ export interface operations {
             };
         };
     };
-    import_project_api_v2_projects_import_post: {
+    import_project_api_v3_projects_import_post: {
         parameters: {
             query: {
                 format: string;
@@ -1317,7 +1646,7 @@ export interface operations {
             };
         };
     };
-    get_project_api_v2_projects__project_id__get: {
+    get_project_api_v3_projects__project_id__get: {
         parameters: {
             query?: never;
             header?: never;
@@ -1348,7 +1677,7 @@ export interface operations {
             };
         };
     };
-    put_project_api_v2_projects__project_id__put: {
+    put_project_api_v3_projects__project_id__put: {
         parameters: {
             query?: never;
             header?: never;
@@ -1383,7 +1712,7 @@ export interface operations {
             };
         };
     };
-    delete_project_api_v2_projects__project_id__delete: {
+    delete_project_api_v3_projects__project_id__delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -1412,7 +1741,7 @@ export interface operations {
             };
         };
     };
-    get_project_checkpoint_api_v2_projects__project_id__checkpoint_get: {
+    get_project_checkpoint_api_v3_projects__project_id__checkpoint_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -1443,7 +1772,7 @@ export interface operations {
             };
         };
     };
-    delete_project_checkpoint_api_v2_projects__project_id__checkpoint_delete: {
+    delete_project_checkpoint_api_v3_projects__project_id__checkpoint_delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -1474,7 +1803,7 @@ export interface operations {
             };
         };
     };
-    export_project_api_v2_projects__project_id__export_get: {
+    export_project_api_v3_projects__project_id__export_get: {
         parameters: {
             query?: {
                 format?: string;
@@ -1507,7 +1836,7 @@ export interface operations {
             };
         };
     };
-    create_run_api_v2_projects__project_id__runs_post: {
+    create_run_api_v3_projects__project_id__runs_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -1542,7 +1871,7 @@ export interface operations {
             };
         };
     };
-    validate_stored_project_api_v2_projects__project_id__validate_post: {
+    validate_stored_project_api_v3_projects__project_id__validate_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -1573,7 +1902,27 @@ export interface operations {
             };
         };
     };
-    get_run_api_v2_runs__run_id__get: {
+    get_resource_limits_api_v3_resource_limits_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResourceLimits"];
+                };
+            };
+        };
+    };
+    get_run_api_v3_runs__run_id__get: {
         parameters: {
             query?: never;
             header?: never;
@@ -1604,7 +1953,7 @@ export interface operations {
             };
         };
     };
-    cancel_run_api_v2_runs__run_id__delete: {
+    cancel_run_api_v3_runs__run_id__delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -1635,7 +1984,7 @@ export interface operations {
             };
         };
     };
-    get_run_events_api_v2_runs__run_id__events_get: {
+    get_run_events_api_v3_runs__run_id__events_get: {
         parameters: {
             query?: never;
             header?: {
@@ -1668,7 +2017,7 @@ export interface operations {
             };
         };
     };
-    get_project_schema_api_v2_schema_project_get: {
+    get_project_schema_api_v3_schema_project_get: {
         parameters: {
             query?: never;
             header?: never;

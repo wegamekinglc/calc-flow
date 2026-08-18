@@ -71,7 +71,7 @@ describe('API client', () => {
     const catalog = await api.catalog();
 
     expect(catalog).toEqual(entries);
-    expect(fetchMock).toHaveBeenCalledWith('/api/v2/catalog', expect.any(Object));
+    expect(fetchMock).toHaveBeenCalledWith('/api/v3/catalog', expect.any(Object));
   });
 
   it('surfaces API detail messages', async () => {
@@ -225,7 +225,7 @@ describe('API client', () => {
     await api.createProject(created);
 
     const init = fetchMock.mock.calls[0][1] as RequestInit;
-    expect(fetchMock.mock.calls[0][0]).toBe('/api/v2/projects');
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/v3/projects');
     expect(init.method).toBe('POST');
     expect(JSON.parse(String(init.body))).toEqual(created);
   });
@@ -256,7 +256,7 @@ describe('API client', () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      '/api/v2/projects/import?format=yaml&replace=true',
+      '/api/v3/projects/import?format=yaml&replace=true',
       expect.objectContaining({
         method: 'POST',
         body: 'name: Imported\n',
@@ -305,7 +305,7 @@ describe('API client', () => {
 
     expect(checkpoint.exists).toBe(false);
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/v2/projects/project/checkpoint',
+      '/api/v3/projects/project/checkpoint',
       expect.objectContaining({ method: 'DELETE' }),
     );
   });

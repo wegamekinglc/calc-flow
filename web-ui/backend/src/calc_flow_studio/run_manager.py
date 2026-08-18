@@ -41,6 +41,7 @@ from calc_flow_studio.models import (
     PreviewCapabilitiesResponse,
     PreviewLimit,
     PreviewLimitsResponse,
+    ResourceLimits,
     RunEvent,
     RunOptions,
     RunRequest,
@@ -1417,3 +1418,42 @@ class RunManager:
     def _join_monitor(monitor: Thread | None) -> None:
         if monitor is not None and monitor is not current_thread():
             monitor.join(timeout=1)
+
+    # ------------------------------------------------------------------
+    # M6-09 continuous job surface
+    # ------------------------------------------------------------------
+
+    def list_jobs(self) -> tuple[RunResponse, ...]:
+        with self._lock:
+            return tuple(
+                self._response(handle)
+                for handle in sorted(self._runs.values(), key=lambda h: h.id)
+            )
+
+    def trigger_checkpoint(self, run_id: str) -> RunResponse:
+        with self._lock:
+            handle = self._require(run_id)
+            if handle.status != RunStatus.RUNNING:
+                raise ValueError(
+                    f"job {run_id} is not running; "
+                    f"current status: {handle.status.value}"
+                )
+            self._event(run_id, "checkpoint_requested", "Checkpoint requested")
+            return self._response(handle)
+
+    def shutdown_job(self, run_id: str) -> RunResponse:
+        with self._lock:
+            handle = self._require(run_id)
+            if handle.status not in {RunStatus.PENDING, RunStatus.RUNNING}:
+                return self._response(handle)
+            handle.status = RunStatus.CANCELLED
+            handle.finished_at = datetime.now(UTC)
+            self._event(run_id, "shutdown", "Graceful shutdown")
+            worker, output_queue, monitor = self._detach_resources(handle)
+            response = self._response(handle)
+        self._cleanup_resources(worker, output_queue, terminate=False)
+        self._join_monitor(monitor)
+        return response
+
+    def resource_limits(self) -> ResourceLimits:
+        return ResourceLimits()

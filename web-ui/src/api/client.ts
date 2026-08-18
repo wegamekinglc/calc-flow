@@ -18,7 +18,7 @@ import {
 
 export { ApiContractError };
 
-const API_PREFIX = '/api/v2';
+const API_PREFIX = '/api/v3';
 
 export class ApiError extends Error {
   constructor(

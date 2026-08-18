@@ -91,7 +91,7 @@ describe('useRunEvents', () => {
 
     await waitFor(() => expect(onUpdate).toHaveBeenCalledWith(run()));
     expect(onError).not.toHaveBeenCalled();
-    expect(source.url).toBe('/api/v2/runs/run-1/events');
+    expect(source.url).toBe('/api/v3/runs/run-1/events');
     expect(source.close).toHaveBeenCalledOnce();
   });
 

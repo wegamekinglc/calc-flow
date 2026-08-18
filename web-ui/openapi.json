@@ -1773,6 +1773,48 @@
         "title": "ProviderPortResponse",
         "type": "object"
       },
+      "ResourceLimits": {
+        "additionalProperties": false,
+        "description": "Equivalent resource bounds replacing the v2 worker timeout for\nlong-running continuous jobs (M6-09).",
+        "properties": {
+          "job_lifecycle": {
+            "const": "user_explicit_stop",
+            "default": "user_explicit_stop",
+            "title": "Job Lifecycle",
+            "type": "string"
+          },
+          "max_checkpoint_disk_mb": {
+            "default": 512,
+            "maximum": 16384.0,
+            "minimum": 16.0,
+            "title": "Max Checkpoint Disk Mb",
+            "type": "integer"
+          },
+          "max_concurrent_jobs": {
+            "default": 4,
+            "maximum": 64.0,
+            "minimum": 1.0,
+            "title": "Max Concurrent Jobs",
+            "type": "integer"
+          },
+          "max_global_memory_mb": {
+            "default": 4096,
+            "maximum": 32768.0,
+            "minimum": 256.0,
+            "title": "Max Global Memory Mb",
+            "type": "integer"
+          },
+          "max_job_memory_mb": {
+            "default": 1024,
+            "maximum": 8192.0,
+            "minimum": 64.0,
+            "title": "Max Job Memory Mb",
+            "type": "integer"
+          }
+        },
+        "title": "ResourceLimits",
+        "type": "object"
+      },
       "RunOptions": {
         "additionalProperties": false,
         "properties": {
@@ -2570,9 +2612,9 @@
   },
   "openapi": "3.1.0",
   "paths": {
-    "/api/v2/capabilities": {
+    "/api/v3/capabilities": {
       "get": {
-        "operationId": "get_capabilities_api_v2_capabilities_get",
+        "operationId": "get_capabilities_api_v3_capabilities_get",
         "responses": {
           "200": {
             "content": {
@@ -2588,9 +2630,9 @@
         "summary": "Get Capabilities"
       }
     },
-    "/api/v2/catalog": {
+    "/api/v3/catalog": {
       "get": {
-        "operationId": "get_catalog_api_v2_catalog_get",
+        "operationId": "get_catalog_api_v3_catalog_get",
         "responses": {
           "200": {
             "content": {
@@ -2600,7 +2642,7 @@
                     "additionalProperties": true,
                     "type": "object"
                   },
-                  "title": "Response Get Catalog Api V2 Catalog Get",
+                  "title": "Response Get Catalog Api V3 Catalog Get",
                   "type": "array"
                 }
               }
@@ -2611,9 +2653,240 @@
         "summary": "Get Catalog"
       }
     },
-    "/api/v2/projects": {
+    "/api/v3/jobs": {
       "get": {
-        "operationId": "list_projects_api_v2_projects_get",
+        "operationId": "list_jobs_api_v3_jobs_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RunResponse"
+                  },
+                  "title": "Response List Jobs Api V3 Jobs Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Jobs"
+      }
+    },
+    "/api/v3/jobs/{run_id}": {
+      "get": {
+        "operationId": "get_job_api_v3_jobs__run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Job"
+      }
+    },
+    "/api/v3/jobs/{run_id}/cancel": {
+      "post": {
+        "operationId": "cancel_job_api_v3_jobs__run_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Job"
+      }
+    },
+    "/api/v3/jobs/{run_id}/checkpoint": {
+      "post": {
+        "operationId": "trigger_job_checkpoint_api_v3_jobs__run_id__checkpoint_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Trigger Job Checkpoint"
+      }
+    },
+    "/api/v3/jobs/{run_id}/events": {
+      "get": {
+        "operationId": "get_job_events_api_v3_jobs__run_id__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Last-Event-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last-Event-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Job Events"
+      }
+    },
+    "/api/v3/jobs/{run_id}/shutdown": {
+      "post": {
+        "operationId": "shutdown_job_api_v3_jobs__run_id__shutdown_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Shutdown Job"
+      }
+    },
+    "/api/v3/projects": {
+      "get": {
+        "operationId": "list_projects_api_v3_projects_get",
         "responses": {
           "200": {
             "content": {
@@ -2622,7 +2895,7 @@
                   "items": {
                     "$ref": "#/components/schemas/ProjectSummary"
                   },
-                  "title": "Response List Projects Api V2 Projects Get",
+                  "title": "Response List Projects Api V3 Projects Get",
                   "type": "array"
                 }
               }
@@ -2633,7 +2906,7 @@
         "summary": "List Projects"
       },
       "post": {
-        "operationId": "create_project_api_v2_projects_post",
+        "operationId": "create_project_api_v3_projects_post",
         "requestBody": {
           "content": {
             "application/json": {
@@ -2669,9 +2942,9 @@
         "summary": "Create Project"
       }
     },
-    "/api/v2/projects/import": {
+    "/api/v3/projects/import": {
       "post": {
-        "operationId": "import_project_api_v2_projects_import_post",
+        "operationId": "import_project_api_v3_projects_import_post",
         "parameters": [
           {
             "in": "query",
@@ -2719,9 +2992,9 @@
         "summary": "Import Project"
       }
     },
-    "/api/v2/projects/{project_id}": {
+    "/api/v3/projects/{project_id}": {
       "delete": {
-        "operationId": "delete_project_api_v2_projects__project_id__delete",
+        "operationId": "delete_project_api_v3_projects__project_id__delete",
         "parameters": [
           {
             "in": "path",
@@ -2751,7 +3024,7 @@
         "summary": "Delete Project"
       },
       "get": {
-        "operationId": "get_project_api_v2_projects__project_id__get",
+        "operationId": "get_project_api_v3_projects__project_id__get",
         "parameters": [
           {
             "in": "path",
@@ -2788,7 +3061,7 @@
         "summary": "Get Project"
       },
       "put": {
-        "operationId": "put_project_api_v2_projects__project_id__put",
+        "operationId": "put_project_api_v3_projects__project_id__put",
         "parameters": [
           {
             "in": "path",
@@ -2835,9 +3108,9 @@
         "summary": "Put Project"
       }
     },
-    "/api/v2/projects/{project_id}/checkpoint": {
+    "/api/v3/projects/{project_id}/checkpoint": {
       "delete": {
-        "operationId": "delete_project_checkpoint_api_v2_projects__project_id__checkpoint_delete",
+        "operationId": "delete_project_checkpoint_api_v3_projects__project_id__checkpoint_delete",
         "parameters": [
           {
             "in": "path",
@@ -2874,7 +3147,7 @@
         "summary": "Delete Project Checkpoint"
       },
       "get": {
-        "operationId": "get_project_checkpoint_api_v2_projects__project_id__checkpoint_get",
+        "operationId": "get_project_checkpoint_api_v3_projects__project_id__checkpoint_get",
         "parameters": [
           {
             "in": "path",
@@ -2911,9 +3184,9 @@
         "summary": "Get Project Checkpoint"
       }
     },
-    "/api/v2/projects/{project_id}/export": {
+    "/api/v3/projects/{project_id}/export": {
       "get": {
-        "operationId": "export_project_api_v2_projects__project_id__export_get",
+        "operationId": "export_project_api_v3_projects__project_id__export_get",
         "parameters": [
           {
             "in": "path",
@@ -2959,9 +3232,9 @@
         "summary": "Export Project"
       }
     },
-    "/api/v2/projects/{project_id}/runs": {
+    "/api/v3/projects/{project_id}/runs": {
       "post": {
-        "operationId": "create_run_api_v2_projects__project_id__runs_post",
+        "operationId": "create_run_api_v3_projects__project_id__runs_post",
         "parameters": [
           {
             "in": "path",
@@ -3008,9 +3281,9 @@
         "summary": "Create Run"
       }
     },
-    "/api/v2/projects/{project_id}/validate": {
+    "/api/v3/projects/{project_id}/validate": {
       "post": {
-        "operationId": "validate_stored_project_api_v2_projects__project_id__validate_post",
+        "operationId": "validate_stored_project_api_v3_projects__project_id__validate_post",
         "parameters": [
           {
             "in": "path",
@@ -3047,9 +3320,27 @@
         "summary": "Validate Stored Project"
       }
     },
-    "/api/v2/runs/{run_id}": {
+    "/api/v3/resource-limits": {
+      "get": {
+        "operationId": "get_resource_limits_api_v3_resource_limits_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceLimits"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Resource Limits"
+      }
+    },
+    "/api/v3/runs/{run_id}": {
       "delete": {
-        "operationId": "cancel_run_api_v2_runs__run_id__delete",
+        "operationId": "cancel_run_api_v3_runs__run_id__delete",
         "parameters": [
           {
             "in": "path",
@@ -3086,7 +3377,7 @@
         "summary": "Cancel Run"
       },
       "get": {
-        "operationId": "get_run_api_v2_runs__run_id__get",
+        "operationId": "get_run_api_v3_runs__run_id__get",
         "parameters": [
           {
             "in": "path",
@@ -3123,9 +3414,9 @@
         "summary": "Get Run"
       }
     },
-    "/api/v2/runs/{run_id}/events": {
+    "/api/v3/runs/{run_id}/events": {
       "get": {
-        "operationId": "get_run_events_api_v2_runs__run_id__events_get",
+        "operationId": "get_run_events_api_v3_runs__run_id__events_get",
         "parameters": [
           {
             "in": "path",
@@ -3176,16 +3467,16 @@
         "summary": "Get Run Events"
       }
     },
-    "/api/v2/schema/project": {
+    "/api/v3/schema/project": {
       "get": {
-        "operationId": "get_project_schema_api_v2_schema_project_get",
+        "operationId": "get_project_schema_api_v3_schema_project_get",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
                   "additionalProperties": true,
-                  "title": "Response Get Project Schema Api V2 Schema Project Get",
+                  "title": "Response Get Project Schema Api V3 Schema Project Get",
                   "type": "object"
                 }
               }

@@ -465,3 +465,14 @@ class RunResponse(RootModel[RunResponseVariant]):
     @property
     def result(self) -> RunResultPreview | None:
         return self.root.result
+
+
+class ResourceLimits(StrictModel):
+    """Equivalent resource bounds replacing the v2 worker timeout for
+    long-running continuous jobs (M6-09)."""
+
+    max_concurrent_jobs: int = Field(default=4, ge=1, le=64)
+    max_job_memory_mb: int = Field(default=1024, ge=64, le=8192)
+    max_global_memory_mb: int = Field(default=4096, ge=256, le=32768)
+    max_checkpoint_disk_mb: int = Field(default=512, ge=16, le=16384)
+    job_lifecycle: Literal["user_explicit_stop"] = "user_explicit_stop"

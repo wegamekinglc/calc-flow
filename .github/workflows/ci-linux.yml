@@ -340,7 +340,7 @@ jobs:
 
           app = calc_flow_studio.create_app()
           paths = [route.path for route in app.routes]
-          assert "/api/v2/catalog" in app.openapi()["paths"]
+          assert "/api/v3/catalog" in app.openapi()["paths"]
           assert "/" in paths
           assert "/assets" in paths
           assert not hasattr(calc_flow, "web")
