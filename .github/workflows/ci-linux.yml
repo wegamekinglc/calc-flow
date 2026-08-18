@@ -351,7 +351,7 @@ jobs:
           assert any(
               item.lower().startswith("calc-flow")
               and ">=3.0.0" in item
-              and "<3" in item
+              and "<4" in item
               for item in studio_requirements
           )
           index = next(route for route in app.routes if route.path == "/").endpoint()
