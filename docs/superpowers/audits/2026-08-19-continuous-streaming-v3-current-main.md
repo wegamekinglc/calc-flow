@@ -217,6 +217,22 @@ Status: **open; documented and accepted as non-blocking for this PR**
   restart stress, the focused soak, and the serial CI harness. Until then this
   item must not be represented as resolved merely because a later run passes.
 
+### CFV3-KNOWN-02 — Lockfile-only `rkyv` advisory from `rust_decimal`
+
+Status: **open upstream; documented, unreachable, and explicitly waived**
+
+- `rust_decimal 1.42.1` records optional `rkyv 0.7.46`, which triggers
+  `RUSTSEC-2026-0235` when `cargo audit` scans every package in `Cargo.lock`.
+  Calc Flow enables only the `db-tokio-postgres` and `std` rust_decimal
+  features; it does not enable `rkyv`.
+- `cargo tree --workspace --all-features -i rkyv` is empty, and `cargo deny`
+  does not encounter the advisory in the enabled workspace graph. The explicit
+  `cargo audit` waiver is therefore limited to unreachable lockfile metadata;
+  it is not a waiver for compiled or shipped vulnerable code.
+- Remove `--ignore RUSTSEC-2026-0235` as soon as rust_decimal stops recording
+  the affected optional release. Any future dependency-graph appearance of
+  `rkyv` reopens this as a blocking security defect.
+
 ## Acceptance evidence policy
 
 The PR body must map each original finding to its RED test and implementation.

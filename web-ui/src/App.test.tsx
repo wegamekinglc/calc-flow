@@ -543,7 +543,9 @@ describe('Calc Flow Studio', () => {
     await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
     expect(container.querySelector('.status-pill')).toHaveTextContent('pending');
 
-    act(() => FakeEventSource.instances[0].emit('state'));
+    act(() => {
+      FakeEventSource.instances[0].emit('state');
+    });
 
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(
       "job.status: expected 'pending' or 'running' or 'completed' or 'failed' or 'cancelled'",

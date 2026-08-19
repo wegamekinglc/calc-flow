@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 import unittest
 from contextlib import redirect_stdout
-from subprocess import CompletedProcess
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts.verify_security_gates import (
@@ -97,7 +97,7 @@ class TestEvidenceValidation(unittest.TestCase):
 class TestAuditExecution(unittest.TestCase):
     @patch("scripts.verify_security_gates.subprocess.run")
     def test_runs_every_declared_audit(self, run) -> None:
-        run.return_value = CompletedProcess([], 0)
+        run.return_value = SimpleNamespace(returncode=0)
         with redirect_stdout(io.StringIO()):
             result = run_audits()
         self.assertEqual(result, 0)

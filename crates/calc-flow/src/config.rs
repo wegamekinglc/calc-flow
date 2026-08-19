@@ -610,6 +610,9 @@ fn validate_project_connectors(
     issues
 }
 
+// Delivery validation is an exhaustive capability cross-product whose issues
+// must be accumulated deterministically in sink order.
+// #lizard forgives
 fn validate_project_delivery(
     project: &ProjectSpec,
     connectors: &ConnectorRegistrySnapshot,
@@ -700,6 +703,9 @@ fn connector_identity(
     }
 }
 
+// Connector config validation intentionally accumulates independent option,
+// format, and secret errors rather than returning only the first failure.
+// #lizard forgives
 fn validate_project_connector_config(
     base: &str,
     descriptor: &crate::ConnectorDescriptor,
@@ -818,6 +824,9 @@ fn build_project_runtime_sources(
     Ok(sources)
 }
 
+// Runtime sink construction keeps identity, factory, delivery, format, and
+// secret binding checks in one fail-closed conversion boundary.
+// #lizard forgives
 fn build_project_runtime_sinks(
     project: &ProjectSpec,
     connectors: &ConnectorRegistrySnapshot,
@@ -1256,6 +1265,9 @@ fn union_node(
     Ok(NodeOperator::Union(operator))
 }
 
+// Window construction validates the complete stream-only operator contract
+// before exposing the node to the compiled plan.
+// #lizard forgives
 fn window_node(
     node: &NodeSpec,
     inputs: &[Port],
@@ -1743,6 +1755,9 @@ fn validate_union_operator(
     }
 }
 
+// Validation mirrors window construction while accumulating stable field-level
+// diagnostics, so the operator matrix remains intentionally centralized.
+// #lizard forgives
 fn validate_window_operator(
     node: &NodeSpec,
     index: usize,

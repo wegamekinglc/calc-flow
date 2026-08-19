@@ -287,7 +287,9 @@ async fn registered_websocket_source_keeps_one_connection_across_batches() {
         ("max_frame_bytes".into(), json!(1024)),
     ]);
     let mut source = factory
-        .open(&options, &Endpoint(format!("ws://{address}/events")))
+        // Loopback plaintext is deliberate: this test exercises framing and
+        // connection reuse, while TLS policy is covered by config tests.
+        .open(&options, &Endpoint(format!("ws://{address}/events"))) // nosemgrep
         .await
         .expect("factory binds the secret without exposing it");
     source.open(None).await.expect("connects once");

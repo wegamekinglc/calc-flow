@@ -88,7 +88,7 @@ export function ResultsPanel({
       )}
 
       {job && (
-        <div className="job-metrics" aria-label="Continuous job metrics">
+        <section className="job-metrics" aria-label="Continuous job metrics">
           <article className="metric-card">
             <span className="eyebrow">Job state</span>
             <strong>{progress?.state ?? job.status}</strong>
@@ -124,7 +124,7 @@ export function ResultsPanel({
             <strong>{number(progress?.late_rows)}</strong>
             <small>event-time rejections</small>
           </article>
-        </div>
+        </section>
       )}
     </section>
   );

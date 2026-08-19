@@ -40,6 +40,39 @@ def _non_utf8_read_text_calls(tree: ast.AST) -> list[int]:
 
 
 class ReleaseConfigTests(unittest.TestCase):
+    def test_generated_contracts_are_pinned_to_lf(self) -> None:
+        attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+        for path in (
+            "schemas/project-v3.schema.json",
+            "web-ui/openapi.json",
+            "web-ui/src/api/schema.d.ts",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(f"{path} text eol=lf", attributes.splitlines())
+
+    def test_rustsec_waivers_are_consistent_and_scoped(self) -> None:
+        advisory = "RUSTSEC-2026-0235"
+        for path in (
+            "AGENTS.md",
+            ".github/workflows/ci-linux.yml",
+            ".github/workflows/release.yml",
+            "scripts/verify_security_gates.py",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(
+                    advisory,
+                    (ROOT / path).read_text(encoding="utf-8"),
+                )
+
+        audit_path = (
+            Path("docs/superpowers/audits")
+            / "2026-08-19-continuous-streaming-v3-current-main.md"
+        )
+        audit = (ROOT / audit_path).read_text(encoding="utf-8")
+        self.assertIn(advisory, audit)
+        self.assertIn("lockfile-only", audit.lower())
+        self.assertIn("cargo tree --workspace --all-features -i rkyv", audit)
+
     def test_text_read_guard_rejects_non_utf8_encoding(self) -> None:
         tree = ast.parse('Path("fixture").read_text(encoding="latin-1")')
         self.assertEqual(_non_utf8_read_text_calls(tree), [1])
@@ -151,6 +184,8 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(config.count(frozen_harness), 1)
         self.assertNotIn('  - "crates/calc-flow/benches/**"', config)
         self.assertTrue((ROOT / harness_path).is_file())
+        self.assertEqual(config.count('      - "web-ui/**"'), 1)
+        self.assertIn("Biome's default Qwik", config)
         legacy_issue_slug = "_".join(("dal", "38"))
         self.assertFalse(
             (

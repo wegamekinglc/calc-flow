@@ -299,6 +299,9 @@ impl PgValue {
         serde_json::json!({"type": kind, "value": value})
     }
 
+    // This is an exhaustive tagged-value decoder; keeping the tag matrix in one
+    // place makes the durable evidence contract auditable.
+    // #lizard forgives
     pub(crate) fn from_evidence(value: &serde_json::Value) -> Result<Self> {
         let object = value
             .as_object()

@@ -241,9 +241,10 @@ const runtimeCapabilitiesAt = (value: unknown, path: string): void => {
       ['none', 'pre_commit_commit', 'ledger_idempotent', 'retry_deduplicated'],
       `${itemPath}.capabilities.transaction`,
     );
-    ['snapshot', 'polling', 'cdc', 'lookup'].forEach((name) => {
-      booleanAt(axes[name], `${itemPath}.capabilities.${name}`);
-    });
+    booleanAt(axes.snapshot, `${itemPath}.capabilities.snapshot`);
+    booleanAt(axes.polling, `${itemPath}.capabilities.polling`);
+    booleanAt(axes.cdc, `${itemPath}.capabilities.cdc`);
+    booleanAt(axes.lookup, `${itemPath}.capabilities.lookup`);
     const options = objectAt(connector.optionsSchema, `${itemPath}.optionsSchema`);
     Object.entries(options).forEach(([name, option]) => {
       jsonAt(option, `${itemPath}.optionsSchema.${name}`);

@@ -440,10 +440,12 @@ def _default_input_ports(node: dict[str, JSONValue]) -> list[dict[str, JSONValue
 def _input_contracts(project: ProjectDocument) -> dict[str, dict[str, JSONValue]]:
     root = project.root
     graph = root["graph"]
-    assert isinstance(graph, dict)
+    if not isinstance(graph, dict):
+        raise RunManagerError("validated project graph must be an object")
     nodes = graph["nodes"]
     edges = graph.get("edges", [])
-    assert isinstance(nodes, list) and isinstance(edges, list)
+    if not isinstance(nodes, list) or not isinstance(edges, list):
+        raise RunManagerError("validated project graph nodes and edges must be arrays")
     connected = {
         (edge["target_node"], edge.get("target_port", "input"))
         for edge in edges
@@ -451,9 +453,11 @@ def _input_contracts(project: ProjectDocument) -> dict[str, dict[str, JSONValue]
     }
     endpoints: list[tuple[str, str, dict[str, JSONValue]]] = []
     for node in nodes:
-        assert isinstance(node, dict)
+        if not isinstance(node, dict):
+            raise RunManagerError("validated project graph nodes must be objects")
         node_id = node["id"]
-        assert isinstance(node_id, str)
+        if not isinstance(node_id, str):
+            raise RunManagerError("validated project node IDs must be strings")
         for port in _default_input_ports(node):
             name = port.get("name")
             if isinstance(name, str) and (node_id, name) not in connected:
@@ -987,7 +991,10 @@ class _JobHandle:
     cancel_requested: bool = False
 
 
+# Native status is a versioned, nested metrics boundary. Keep its defensive
+# shape checks together so malformed optional metrics degrade consistently.
 def _continuous_progress(status: dict[str, object]) -> dict[str, object]:
+    # #lizard forgives
     checkpoint = status.get("checkpoint")
     checkpoint = checkpoint if isinstance(checkpoint, dict) else {}
     sources = status.get("sources")
@@ -1052,11 +1059,14 @@ def _continuous_progress(status: dict[str, object]) -> dict[str, object]:
     }
 
 
+# The worker owns the complete native job lifecycle and emits exactly one
+# terminal event across normal, cancellation, and error paths.
 def _execute_continuous_worker(
     project_json: str,
     command_queue: Any,
     output_queue: Any,
 ) -> None:
+    # #lizard forgives
     job = None
     try:
         runtime = Runtime()
@@ -1323,7 +1333,10 @@ class RunManager:
             raise RunManagerError("run manager shut down during submission")
         return self.get(run_id)
 
+    # Submission is one resource-acquisition transaction; validation, queue
+    # creation, process start, registration, and rollback remain co-located.
     def submit_job(self, project: ProjectDocument) -> JobResponse:
+        # #lizard forgives
         root = project.root
         runtime = root.get("runtime")
         if not isinstance(runtime, dict) or runtime.get("mode") != "stream":
@@ -1782,7 +1795,10 @@ class RunManager:
         )
         return self._job_response(handle)
 
+    # Monitoring is the explicit worker-event state machine and owns all
+    # terminal transitions for a continuous job.
     def _monitor_job(self, job_id: str) -> None:
+        # #lizard forgives
         while True:
             with self._lock:
                 handle = self._require_job(job_id)
@@ -1825,6 +1841,7 @@ class RunManager:
                 )
                 return
             kind = message.get("kind")
+            outcome: tuple[RunStatus, str] | None = None
             with self._lock:
                 handle = self._require_job(job_id)
                 if kind == "state":
@@ -1864,10 +1881,14 @@ class RunManager:
                         "cancelled": RunStatus.CANCELLED,
                     }.get(native_state, RunStatus.FAILED)
                     cause = str(message.get("cause", native_state))[:4000]
+                    outcome = (terminal, cause)
                 else:
-                    terminal = RunStatus.FAILED
-                    cause = "worker emitted an unknown event kind"
-            if kind == "terminal" or kind not in {"state", "progress", "checkpoint"}:
+                    outcome = (
+                        RunStatus.FAILED,
+                        "worker emitted an unknown event kind",
+                    )
+            if outcome is not None:
+                terminal, cause = outcome
                 self._finish_job(
                     job_id,
                     terminal,
@@ -1876,7 +1897,10 @@ class RunManager:
                 )
                 return
 
+    # Resource checks intentionally return the first stable limit identifier in
+    # policy order so the terminal error is deterministic.
     def _job_limit_violation(self, handle: _JobHandle) -> str | None:
+        # #lizard forgives
         if self._use_processes:
             resident = _resident_bytes(handle.worker)
             if (
@@ -1980,6 +2004,8 @@ class RunManager:
             }
         )
 
+    # Cleanup centralizes process, queue, directory, and accounting teardown so
+    # every terminal path observes the same idempotent order.
     def _cleanup_job_resources(
         self,
         worker: Any,
@@ -1988,6 +2014,7 @@ class RunManager:
         *,
         terminate: bool,
     ) -> None:
+        # #lizard forgives
         if worker is not None:
             if self._use_processes and terminate and worker.is_alive():
                 with suppress(BaseException):

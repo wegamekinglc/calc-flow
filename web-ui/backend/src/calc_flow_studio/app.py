@@ -97,9 +97,11 @@ class RunManagerProtocol(Protocol):
 def _project_summary(project: ProjectDocument) -> ProjectSummary:
     root = project.root
     graph = root["graph"]
-    assert isinstance(graph, dict)
+    if not isinstance(graph, dict):
+        raise ValueError("validated project graph must be an object")
     nodes = graph["nodes"]
-    assert isinstance(nodes, list)
+    if not isinstance(nodes, list):
+        raise ValueError("validated project graph nodes must be an array")
     return ProjectSummary(
         id=str(root["id"]),
         name=str(root["name"]),

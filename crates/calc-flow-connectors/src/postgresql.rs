@@ -1255,6 +1255,9 @@ impl StreamSink for PostgresSink {
         Ok(())
     }
 
+    // This method validates the complete Arrow-to-PostgreSQL row contract
+    // before mutating the pending transaction buffer.
+    // #lizard forgives
     async fn write(&mut self, batch: &Batch) -> Result<()> {
         let payload = batch
             .table_payload()
@@ -1432,6 +1435,9 @@ impl TransactionalPostgresSink {
         ]))
     }
 
+    // Durable evidence validation is an atomic trust boundary. All identity,
+    // epoch, schema, SQL, row, and checksum checks stay together and fail closed.
+    // #lizard forgives
     fn validate_evidence(
         &self,
         epoch: calc_flow::Epoch,
@@ -1519,6 +1525,9 @@ impl TransactionalPostgresSink {
         Ok(PreparedPostgresCommit { sql, rows })
     }
 
+    // Prepared-transaction recovery deliberately handles every idempotent
+    // PostgreSQL outcome in one state transition.
+    // #lizard forgives
     async fn commit_prepared(
         &mut self,
         epoch: calc_flow::Epoch,

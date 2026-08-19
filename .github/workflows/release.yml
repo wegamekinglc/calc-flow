@@ -294,8 +294,8 @@ jobs:
       - name: Run Rust audits
         run: |
           mkdir -p audit-reports
-          cargo audit --ignore RUSTSEC-2026-0176 --ignore RUSTSEC-2026-0177
-          cargo audit --ignore RUSTSEC-2026-0176 --ignore RUSTSEC-2026-0177 \
+          cargo audit --ignore RUSTSEC-2026-0176 --ignore RUSTSEC-2026-0177 --ignore RUSTSEC-2026-0235
+          cargo audit --ignore RUSTSEC-2026-0176 --ignore RUSTSEC-2026-0177 --ignore RUSTSEC-2026-0235 \
             --json > audit-reports/cargo-audit.json
           cargo deny --locked check
           cargo deny --locked --format json check 2> audit-reports/cargo-deny.json

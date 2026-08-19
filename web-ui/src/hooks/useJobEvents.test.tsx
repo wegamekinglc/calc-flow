@@ -1,4 +1,5 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
+import type { Dispatch } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiContractError } from '../api/client';
@@ -11,12 +12,14 @@ class FakeEventSource {
   static instances: FakeEventSource[] = [];
 
   readonly close = vi.fn();
-  readonly removeEventListener = vi.fn(
-    (type: string, listener: EventListener) => this.listeners.get(type)?.delete(listener),
-  );
+  readonly removeEventListener = vi.fn((type: string, listener: EventListener) => {
+    this.listeners.get(type)?.delete(listener);
+  });
+  readonly url: string;
   private readonly listeners = new Map<string, Set<EventListener>>();
 
-  constructor(readonly url: string) {
+  constructor(url: string) {
+    this.url = url;
     FakeEventSource.instances.push(this);
   }
 
@@ -30,7 +33,9 @@ class FakeEventSource {
     const event = data
       ? new MessageEvent(type, { data })
       : new Event(type);
-    this.listeners.get(type)?.forEach((listener) => listener(event));
+    this.listeners.get(type)?.forEach((listener) => {
+      listener(event);
+    });
   }
 }
 
@@ -73,7 +78,9 @@ describe('useJobEvents', () => {
       epoch: 7,
       throughput_rows: 42,
     };
-    act(() => source.emit('progress', JSON.stringify(progress)));
+    act(() => {
+      source.emit('progress', JSON.stringify(progress));
+    });
 
     await waitFor(() => expect(onUpdate).toHaveBeenCalledWith(job('running')));
     expect(onEvent).toHaveBeenCalledWith(progress);
@@ -90,7 +97,9 @@ describe('useJobEvents', () => {
 
     renderHook(() => useJobEvents('job-1', onUpdate, vi.fn(), vi.fn()));
     const source = FakeEventSource.instances[0];
-    act(() => source.emit('terminal'));
+    act(() => {
+      source.emit('terminal');
+    });
 
     await waitFor(() => expect(onUpdate).toHaveBeenCalledWith(job('completed')));
     expect(source.close).toHaveBeenCalledOnce();
@@ -106,7 +115,9 @@ describe('useJobEvents', () => {
 
     renderHook(() => useJobEvents('job-1', onUpdate, vi.fn(), onError));
     const source = FakeEventSource.instances[0];
-    act(() => source.emit('state'));
+    act(() => {
+      source.emit('state');
+    });
 
     await waitFor(() => expect(onError).toHaveBeenCalledOnce());
     expect(onError.mock.calls[0][0]).toBeInstanceOf(ApiContractError);
@@ -115,9 +126,11 @@ describe('useJobEvents', () => {
   });
 
   it('does not let an older refresh overwrite a newer terminal response', async () => {
-    const requests: Array<(response: Response) => void> = [];
+    const requests: Dispatch<Response>[] = [];
     const fetchMock = vi.fn().mockImplementation(
-      () => new Promise<Response>((resolve) => requests.push(resolve)),
+      () => new Promise<Response>((resolve) => {
+        requests.push(resolve);
+      }),
     );
     const onUpdate = vi.fn();
     vi.stubGlobal('EventSource', FakeEventSource);

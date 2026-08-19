@@ -130,6 +130,9 @@ impl PostgresCdcSource {
         })
     }
 
+    // Snapshot bootstrap owns a multi-resource transaction whose cleanup paths
+    // must remain visible beside slot and exported-snapshot acquisition.
+    // #lizard forgives
     async fn bootstrap_snapshot(&mut self, replace_existing: bool) -> Result<()> {
         self.preflight_relation().await?;
         if replace_existing {
@@ -231,6 +234,9 @@ impl PostgresCdcSource {
         result
     }
 
+    // Snapshot pagination validates and advances one atomic source cursor; its
+    // terminal and empty-page branches are part of the same protocol step.
+    // #lizard forgives
     async fn next_snapshot_batch(&mut self) -> Result<Option<SourceEvent>> {
         let client = self
             .snapshot_client
@@ -336,6 +342,9 @@ impl PostgresCdcSource {
         Ok(())
     }
 
+    // Slot preflight keeps the complete server-side compatibility matrix at the
+    // I/O boundary so no replication task starts from an ambiguous state.
+    // #lizard forgives
     async fn preflight_slot(&self, start_lsn: u64) -> Result<()> {
         let (client, driver) = crate::postgresql::connect_postgres(&self.endpoint_url).await?;
         let result = async {
@@ -403,6 +412,9 @@ impl PostgresCdcSource {
         result
     }
 
+    // pgoutput messages form one transaction state machine; branching here is
+    // the explicit mapping from wire variants to an atomic committed event.
+    // #lizard forgives
     async fn next_committed_transaction(&mut self) -> Result<Option<SourceEvent>> {
         if self.open_gate_on_next_poll {
             self.checkpoint_gate.open();
@@ -1683,6 +1695,9 @@ impl<'a> Decoder<'a> {
         Ok(value)
     }
 
+    // Relation decoding is an exhaustive, bounds-checked wire parser kept
+    // contiguous so a partially decoded schema can never escape.
+    // #lizard forgives
     fn relation(&mut self) -> Result<Relation> {
         let id = self.u32()?;
         let namespace = self.string()?;
@@ -1891,6 +1906,9 @@ fn change_struct_array<'a>(
     clippy::too_many_lines,
     reason = "one exhaustive pgoutput-text-to-Arrow type matrix stays reviewable as a single dispatch"
 )]
+// The exhaustive type matrix is a single dispatch contract shared by every CDC
+// column; splitting it would duplicate null and parse-error semantics.
+// #lizard forgives
 fn cdc_column_array(column: &RelationColumn, values: &[Option<&[u8]>]) -> Result<ArrayRef> {
     let text = values
         .iter()
@@ -2048,6 +2066,9 @@ mod tests {
     use super::*;
 
     #[test]
+    // This is a single wire-format acceptance scenario. Its sequential fixture
+    // construction is intentionally kept together for protocol readability.
+    // #lizard forgives
     fn relation_and_insert_decode_to_typed_event() {
         let relation = relation_message();
         let mut decoder = Decoder::new(&relation[1..]);

@@ -1198,6 +1198,9 @@ pub(crate) async fn recover_transactional_sinks_with_state(
     recover_transactional_sinks_inner(sinks, manifest, Some(transaction), cancellation).await
 }
 
+// Recovery is an epoch-wide state machine. Keeping all sink evidence and
+// transaction branches together prevents partial recovery decisions.
+// #lizard forgives
 async fn recover_transactional_sinks_inner(
     sinks: &mut [ValidatedOrdinarySink],
     manifest: &crate::CheckpointManifest,

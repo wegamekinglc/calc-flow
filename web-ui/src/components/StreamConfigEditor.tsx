@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import type { Dispatch } from 'react';
 
 import type {
   ConnectorCapability,
@@ -10,13 +11,13 @@ import type {
 interface StreamConfigEditorProps {
   project: EditableProject;
   connectors: readonly ConnectorCapability[];
-  onChange: (project: EditableProject) => void;
+  onChange: Dispatch<EditableProject>;
 }
 
 interface JsonEditorProps {
   label: string;
   value: object;
-  onChange: (value: Record<string, unknown>) => void;
+  onChange: Dispatch<Record<string, unknown>>;
 }
 
 const connectorKey = (connector: ConnectorCapability): string =>
@@ -33,7 +34,9 @@ function JsonEditor({ label, value, onChange }: JsonEditorProps) {
   const [text, setText] = useState(canonical);
   const [error, setError] = useState('');
 
-  useEffect(() => setText(canonical), [canonical]);
+  useEffect(() => {
+    setText(canonical);
+  }, [canonical]);
 
   return (
     <label>
@@ -161,23 +164,27 @@ export function StreamConfigEditor({
 
   return (
     <section className="stream-config">
-      <span className="eyebrow">Runtime mode</span>
-      <div className="segmented-control" role="group" aria-label="Runtime mode">
+      <fieldset className="segmented-control">
+        <legend className="eyebrow">Runtime mode</legend>
         <button
           type="button"
           className={!streamMode ? 'active' : ''}
-          onClick={() => setMode('batch')}
+          onClick={() => {
+            setMode('batch');
+          }}
         >
           Batch
         </button>
         <button
           type="button"
           className={streamMode ? 'active' : ''}
-          onClick={() => setMode('stream')}
+          onClick={() => {
+            setMode('stream');
+          }}
         >
           Stream
         </button>
-      </div>
+      </fieldset>
 
       {streamOptions && (
         <>
@@ -187,26 +194,30 @@ export function StreamConfigEditor({
               type="number"
               min={1}
               value={streamOptions.checkpoint_interval_ms}
-              onChange={(event) => onChange({
-                ...project,
-                runtime: {
-                  mode: 'stream',
-                  options: {
-                    ...streamOptions,
-                    checkpoint_interval_ms: Number(event.target.value),
+              onChange={(event) => {
+                onChange({
+                  ...project,
+                  runtime: {
+                    mode: 'stream',
+                    options: {
+                      ...streamOptions,
+                      checkpoint_interval_ms: Number(event.target.value),
+                    },
                   },
-                },
-              })}
+                });
+              }}
             />
           </label>
           <label>
             State root
             <input
               value={project.state.root}
-              onChange={(event) => onChange({
-                ...project,
-                state: { ...project.state, root: event.target.value },
-              })}
+              onChange={(event) => {
+                onChange({
+                  ...project,
+                  state: { ...project.state, root: event.target.value },
+                });
+              }}
             />
           </label>
 
@@ -225,12 +236,14 @@ export function StreamConfigEditor({
             </button>
           </div>
           {project.sources.map((source, index) => (
-            <article className="binding-card" key={`source-${index}`}>
+            <article className="binding-card" key={source.binding}>
               <label>
                 Graph input
                 <input
                   value={source.binding}
-                  onChange={(event) => updateSource(index, { binding: event.target.value })}
+                  onChange={(event) => {
+                    updateSource(index, { binding: event.target.value });
+                  }}
                 />
               </label>
               <label>
@@ -239,7 +252,9 @@ export function StreamConfigEditor({
                   value={`${source.connector.provider}:${source.connector.name}:${source.connector.version}`}
                   onChange={(event) => {
                     const selected = sources.find((item) => connectorKey(item) === event.target.value);
-                    if (selected) updateSource(index, { connector: connectorRef(selected) });
+                    if (selected) {
+                      updateSource(index, { connector: connectorRef(selected) });
+                    }
                   }}
                 >
                   {sources.map((connector) => (
@@ -252,22 +267,28 @@ export function StreamConfigEditor({
               <JsonEditor
                 label="Options"
                 value={source.options}
-                onChange={(options) => updateSource(index, { options })}
+                onChange={(options) => {
+                  updateSource(index, { options });
+                }}
               />
               <JsonEditor
                 label="Secret references"
                 value={source.secrets}
-                onChange={(secrets) => updateSource(index, {
-                  secrets: secrets as ProjectSourceBinding['secrets'],
-                })}
+                onChange={(secrets) => {
+                  updateSource(index, {
+                    secrets: secrets as ProjectSourceBinding['secrets'],
+                  });
+                }}
               />
               <button
                 type="button"
                 className="text-button danger"
-                onClick={() => onChange({
-                  ...project,
-                  sources: project.sources.filter((_, current) => current !== index),
-                })}
+                onClick={() => {
+                  onChange({
+                    ...project,
+                    sources: project.sources.filter((_, current) => current !== index),
+                  });
+                }}
               >
                 Remove source
               </button>
@@ -289,12 +310,14 @@ export function StreamConfigEditor({
             </button>
           </div>
           {project.sinks.map((sink, index) => (
-            <article className="binding-card" key={`sink-${index}`}>
+            <article className="binding-card" key={sink.binding}>
               <label>
                 Graph output
                 <input
                   value={sink.binding}
-                  onChange={(event) => updateSink(index, { binding: event.target.value })}
+                  onChange={(event) => {
+                    updateSink(index, { binding: event.target.value });
+                  }}
                 />
               </label>
               <label>
@@ -303,7 +326,9 @@ export function StreamConfigEditor({
                   value={`${sink.connector.provider}:${sink.connector.name}:${sink.connector.version}`}
                   onChange={(event) => {
                     const selected = sinks.find((item) => connectorKey(item) === event.target.value);
-                    if (selected) updateSink(index, { connector: connectorRef(selected) });
+                    if (selected) {
+                      updateSink(index, { connector: connectorRef(selected) });
+                    }
                   }}
                 >
                   {sinks.map((connector) => (
@@ -317,9 +342,11 @@ export function StreamConfigEditor({
                 Delivery
                 <select
                   value={sink.delivery}
-                  onChange={(event) => updateSink(index, {
-                    delivery: event.target.value as ProjectSinkBinding['delivery'],
-                  })}
+                  onChange={(event) => {
+                    updateSink(index, {
+                      delivery: event.target.value as ProjectSinkBinding['delivery'],
+                    });
+                  }}
                 >
                   <option value="best_effort">Best effort</option>
                   <option value="at_least_once">At least once</option>
@@ -329,22 +356,28 @@ export function StreamConfigEditor({
               <JsonEditor
                 label="Options"
                 value={sink.options}
-                onChange={(options) => updateSink(index, { options })}
+                onChange={(options) => {
+                  updateSink(index, { options });
+                }}
               />
               <JsonEditor
                 label="Secret references"
                 value={sink.secrets}
-                onChange={(secrets) => updateSink(index, {
-                  secrets: secrets as ProjectSinkBinding['secrets'],
-                })}
+                onChange={(secrets) => {
+                  updateSink(index, {
+                    secrets: secrets as ProjectSinkBinding['secrets'],
+                  });
+                }}
               />
               <button
                 type="button"
                 className="text-button danger"
-                onClick={() => onChange({
-                  ...project,
-                  sinks: project.sinks.filter((_, current) => current !== index),
-                })}
+                onClick={() => {
+                  onChange({
+                    ...project,
+                    sinks: project.sinks.filter((_, current) => current !== index),
+                  });
+                }}
               >
                 Remove sink
               </button>

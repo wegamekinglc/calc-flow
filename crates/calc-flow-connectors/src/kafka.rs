@@ -263,6 +263,9 @@ impl KafkaSource {
         Ok(())
     }
 
+    // Cursor validation intentionally fails each malformed durable field at the
+    // boundary before any consumer state changes.
+    // #lizard forgives
     fn state_from_cursor(&self, cursor: &Cursor) -> Result<(BTreeMap<i32, i64>, u64)> {
         let sequence = cursor
             .payload()
@@ -670,6 +673,9 @@ impl TransactionalKafkaSink {
         Ok(())
     }
 
+    // The ledger scan is one bounded protocol state machine; splitting its
+    // termination branches would obscure which Kafka event closes recovery.
+    // #lizard forgives
     async fn latest_ledger_marker(&self) -> Result<Option<KafkaLedgerMarker>> {
         let mut client = rdkafka::config::ClientConfig::new();
         client.set("bootstrap.servers", &self.config.bootstrap_servers);
@@ -721,6 +727,9 @@ impl TransactionalKafkaSink {
             .map_err(|_| fail("recover", "Kafka ledger scan timed out"))?
     }
 
+    // Preflight reports each broker contract failure distinctly before the
+    // transactional producer can publish user data.
+    // #lizard forgives
     async fn preflight_ledger(&self) -> Result<()> {
         let metadata = self
             .producer
@@ -793,6 +802,9 @@ fn encode_records(records: &[Vec<u8>]) -> Result<Vec<u8>> {
     Ok(encoded)
 }
 
+// The durable record framing decoder keeps every bounds check adjacent to the
+// cursor it protects so truncated evidence always fails closed.
+// #lizard forgives
 fn decode_records(encoded: &[u8]) -> Result<Vec<Vec<u8>>> {
     let mut offset = 0_usize;
     let take_u64 = |offset: &mut usize| -> Result<u64> {

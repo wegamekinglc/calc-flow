@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import type { Dispatch } from 'react';
 
 import { api, ApiContractError } from '../api/client';
 import type { JobEvent, JobResponse } from '../types';
@@ -13,9 +14,9 @@ const eventTypes = ['state', 'progress', 'checkpoint', 'terminal'];
 
 export function useJobEvents(
   jobId: string | null,
-  onUpdate: (job: JobResponse) => void,
-  onEvent: (event: JobEvent) => void,
-  onError: (error: ApiContractError) => void,
+  onUpdate: Dispatch<JobResponse>,
+  onEvent: Dispatch<JobEvent>,
+  onError: Dispatch<ApiContractError>,
 ): void {
   useEffect(() => {
     if (!jobId) return;
@@ -47,14 +48,16 @@ export function useJobEvents(
       const revision = ++refreshRevision;
       try {
         const current = await api.job(jobId);
-        if (!active || revision !== refreshRevision) return !active;
+        if (!active) return true;
+        if (revision !== refreshRevision) return false;
         onUpdate(current);
         if (terminalStatuses.has(current.status)) {
           stop();
           return true;
         }
       } catch (error) {
-        if (!active || revision !== refreshRevision) return !active;
+        if (!active) return true;
+        if (revision !== refreshRevision) return false;
         if (error instanceof ApiContractError) {
           stop();
           onError(error);
@@ -78,9 +81,14 @@ export function useJobEvents(
     const refreshFromEvent = (raw: Event) => {
       if (raw instanceof MessageEvent) {
         try {
-          const event = JSON.parse(raw.data) as JobEvent;
-          if (event && typeof event === 'object' && typeof event.type === 'string') {
-            onEvent(event);
+          const event: unknown = JSON.parse(raw.data);
+          if (
+            event !== null
+            && typeof event === 'object'
+            && 'type' in event
+            && typeof event.type === 'string'
+          ) {
+            onEvent(event as JobEvent);
           }
         } catch {
           // The status refresh still recovers from a malformed optional summary.

@@ -573,6 +573,7 @@ jobs:
           cargo audit
           --ignore RUSTSEC-2026-0176
           --ignore RUSTSEC-2026-0177
+          --ignore RUSTSEC-2026-0235
       - name: Check licenses, sources, advisories, and duplicate policy
         run: cargo deny --locked check
   coveralls-finish:

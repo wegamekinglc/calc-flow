@@ -125,7 +125,8 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weig
 .file-button input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 
 .stream-config { display: grid; gap: 10px; margin-top: 22px; padding-top: 17px; border-top: 1px solid var(--line); }
-.segmented-control { display: grid; grid-template-columns: 1fr 1fr; padding: 3px; border: 1px solid var(--line); border-radius: 9px; background: #07120f; }
+.segmented-control { display: grid; grid-template-columns: 1fr 1fr; min-inline-size: 0; margin: 0; padding: 3px; border: 1px solid var(--line); border-radius: 9px; background: #07120f; }
+.segmented-control legend { grid-column: 1 / -1; padding: 0 4px; }
 .segmented-control button { border: 0; border-radius: 6px; padding: 7px; color: var(--muted); background: transparent; font-size: 10px; font-weight: 700; }
 .segmented-control button.active { color: #071814; background: var(--mint); }
 .binding-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 5px; }

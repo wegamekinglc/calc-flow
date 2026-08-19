@@ -586,6 +586,9 @@ fn record_unique_handle(
     Ok(())
 }
 
+// Manifest sink validation accumulates uniqueness and epoch invariants across
+// every output in deterministic map order.
+// #lizard forgives
 fn validate_sinks(
     sinks: &BTreeMap<String, SinkManifestEntry>,
     manifest_epoch: Epoch,

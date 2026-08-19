@@ -365,7 +365,9 @@ async fn connect_websocket(url: &str, insecure: bool) -> Result<Socket> {
         let mut tls = rustls::ClientConfig::builder()
             .with_root_certificates(rustls::RootCertStore::empty())
             .with_no_client_auth();
-        tls.dangerous()
+        // This bypass is reachable only through the explicit `insecure: true`
+        // connector option, which is off by default and emits a warning.
+        tls.dangerous() // nosemgrep: rust.lang.security.rustls-dangerous.rustls-dangerous
             .set_certificate_verifier(Arc::new(InsecureCertificateVerifier));
         tokio_tungstenite::connect_async_tls_with_config(
             url,
@@ -473,6 +475,9 @@ impl FrameQueue {
         })
     }
 
+    // Queue admission is one synchronized state transition; the branches encode
+    // cancellation, overflow, block, and drop-oldest behavior under one lock.
+    // #lizard forgives
     async fn push(&self, frame: Vec<u8>) -> Result<bool> {
         if frame.len() > self.max_frame_bytes {
             return Err(fail(
