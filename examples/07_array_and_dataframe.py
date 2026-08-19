@@ -26,7 +26,7 @@ def run_numpy(source: pa.Table) -> list[list[float]]:
     plan = (
         PipelineBuilder("numpy-table-matmul")
         .table_matmul("multiply", backend="numpy", columns=COLUMNS)
-        .compile(runtime)
+        .compile_batch(runtime)
     )
     weights = np.asarray([[2.0, 0.0], [0.0, 1.0]], dtype=np.float32)
     source_before = source.to_pydict()
@@ -60,7 +60,7 @@ def run_jax(source: pa.Table) -> list[list[float]] | None:
     plan = (
         PipelineBuilder("jax-table-matmul")
         .table_matmul("multiply", backend="jax", columns=COLUMNS)
-        .compile(runtime)
+        .compile_batch(runtime)
     )
     weights = jnp.asarray([[2.0, 0.0], [0.0, 1.0]], dtype=jnp.float32)
     source_before = source.to_pydict()

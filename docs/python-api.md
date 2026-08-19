@@ -106,7 +106,7 @@ plan = (
         "total = double_amount(amount)",
         udfs=(("python", "double_amount", "1"),),
     )
-    .compile(runtime)
+    .compile_batch(runtime)
 )
 ```
 
@@ -330,7 +330,7 @@ plan = (
         "1",
         {"expression": "x - mean(x)"},
     )
-    .compile(runtime)
+    .compile_batch(runtime)
 )
 batch = Batch.from_array(np.array([1.0, 2.0, 4.0, 6.0]), backend="numpy")
 centered = plan.execute({"input": batch}).outputs["output"].array
@@ -375,7 +375,7 @@ register_numpy(runtime)
 plan = (
     PipelineBuilder("table-matrix")
     .table_matmul("multiply", backend="numpy", columns=("quantity", "unit_price"))
-    .compile(runtime)
+    .compile_batch(runtime)
 )
 result = (
     plan.execute(

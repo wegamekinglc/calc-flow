@@ -40,6 +40,19 @@ def _non_utf8_read_text_calls(tree: ast.AST) -> list[int]:
 
 
 class ReleaseConfigTests(unittest.TestCase):
+    def test_current_python_surfaces_do_not_use_removed_compile_method(self) -> None:
+        for path in (
+            "examples/03_registered_udf.py",
+            "examples/06_numpy_array.py",
+            "examples/07_array_and_dataframe.py",
+            "benchmarks/test_datafusion.py",
+            "benchmarks/array_support.py",
+            "docs/python-api.md",
+        ):
+            with self.subTest(path=path):
+                source = (ROOT / path).read_text(encoding="utf-8")
+                self.assertNotIn(".compile(runtime)", source)
+
     def test_generated_contracts_are_pinned_to_lf(self) -> None:
         attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
         for path in (

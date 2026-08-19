@@ -239,7 +239,7 @@ def test_builtin_versus_registered_udf(
     plan = (
         PipelineBuilder("benchmark-udf")
         .expression("calculate", expression, udfs=references)
-        .compile(runtime)
+        .compile_batch(runtime)
     )
 
     result = _benchmark_plan(
