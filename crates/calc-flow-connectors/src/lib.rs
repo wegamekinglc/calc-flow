@@ -16,18 +16,18 @@
 //!
 //! ```
 //! use calc_flow::ConnectorRegistry;
-//! use calc_flow_connectors::register_file_connectors;
+//! use calc_flow_connectors::register_format_codecs;
 //!
 //! let mut registry = ConnectorRegistry::new();
-//! register_file_connectors(&mut registry).expect("file connectors register");
+//! register_format_codecs(&mut registry).expect("format codecs register");
 //! assert_eq!(
 //!     registry
 //!         .snapshot()
-//!         .identities()
+//!         .format_identities()
 //!         .iter()
 //!         .map(|identity| identity.name.to_string())
 //!         .collect::<Vec<String>>(),
-//!     vec!["file"]
+//!     vec!["csv", "json"]
 //! );
 //! ```
 
@@ -47,46 +47,62 @@ pub mod database_types;
 mod file;
 #[cfg(feature = "file")]
 mod file_sink;
-#[cfg(feature = "http-websocket")]
+#[cfg(feature = "http")]
 pub mod http;
 #[cfg(feature = "kafka")]
 pub mod kafka;
 #[cfg(feature = "postgresql")]
 pub mod postgresql;
-#[cfg(feature = "http-websocket")]
+#[cfg(feature = "postgresql")]
+mod postgresql_cdc;
+#[cfg(feature = "websocket")]
 pub mod websocket;
 
+#[cfg(feature = "clickhouse")]
+pub use clickhouse::{
+    ClickHouseSinkFactory, ClickHouseSourceFactory, register_clickhouse_connectors,
+};
+#[cfg(feature = "http")]
+pub use http::{HttpSourceFactory, register_http_connectors};
 #[cfg(feature = "kafka")]
 pub use kafka::{
     KAFKA_CONNECTOR_VERSION, KafkaSinkFactory, KafkaSourceFactory, register_kafka_connectors,
 };
+#[cfg(feature = "postgresql")]
+pub use postgresql::{PostgresSinkFactory, PostgresSourceFactory, register_postgresql_connectors};
+#[cfg(feature = "websocket")]
+pub use websocket::{WebSocketSourceFactory, register_websocket_connectors};
 
 #[cfg(feature = "file")]
 pub use file::{FileFormat, FileSource, FileSourceConfig};
 #[cfg(feature = "file")]
 pub use file_sink::{FileSinkConfig, TransactionalParquetSink};
 
-use std::collections::BTreeSet;
-use std::sync::Arc;
+#[cfg(feature = "file")]
+use std::{collections::BTreeSet, sync::Arc};
 
+#[cfg(feature = "file")]
 use async_trait::async_trait;
+#[cfg(feature = "file")]
 use calc_flow::{
     Batch, ConnectorCapabilities, ConnectorDescriptor, ConnectorFactories, ConnectorIdentity,
-    ConnectorKind, ConnectorRegistry, ConnectorRegistrySnapshot, ConnectorSinkFactory,
-    ConnectorSourceFactory, DeliveryCapability, Epoch, FormatDescriptor, FormatIdentity, JsonMap,
-    Result, SecretResolver, StreamSink, StreamSource, TransactionSupport, TransactionalStreamSink,
-    WatermarkSupport,
+    ConnectorKind, ConnectorRegistrySnapshot, ConnectorSinkFactory, ConnectorSourceFactory,
+    DeliveryCapability, Epoch, JsonMap, SecretResolver, StreamSink, StreamSource,
+    TransactionSupport, TransactionalStreamSink, WatermarkSupport,
 };
+use calc_flow::{ConnectorRegistry, FormatDescriptor, FormatIdentity, Result};
 
 /// The connector identity of the built-in file transport (feature
 /// `file`).
 pub const FILE_CONNECTOR_VERSION: &str = "2.0.0";
 
+#[cfg(feature = "file")]
 fn file_connector_identity() -> ConnectorIdentity {
     ConnectorIdentity::new("calc-flow-connectors", "file", FILE_CONNECTOR_VERSION)
         .expect("the file connector identity is valid")
 }
 
+#[cfg(feature = "file")]
 fn file_connector_descriptor() -> ConnectorDescriptor {
     ConnectorDescriptor {
         identity: file_connector_identity(),
@@ -121,6 +137,7 @@ fn file_connector_descriptor() -> ConnectorDescriptor {
             ("output".to_string(), serde_json::json!("string")),
         ]),
         secret_slots: BTreeSet::new(),
+        required_secret_slots: BTreeSet::new(),
     }
 }
 
@@ -152,6 +169,10 @@ impl Default for FileSourceFactory {
 impl ConnectorSourceFactory for FileSourceFactory {
     fn descriptor(&self) -> &ConnectorDescriptor {
         &self.descriptor
+    }
+
+    fn validate(&self, options: &JsonMap) -> Result<()> {
+        FileSourceConfig::from_options(options).map(drop)
     }
 
     async fn open(
@@ -237,6 +258,10 @@ impl StreamSink for OrdinaryParquetSink {
 impl ConnectorSinkFactory for FileSinkFactory {
     fn descriptor(&self) -> &ConnectorDescriptor {
         &self.descriptor
+    }
+
+    fn validate(&self, options: &JsonMap) -> Result<()> {
+        FileSinkConfig::from_options(options).map(drop)
     }
 
     async fn open(

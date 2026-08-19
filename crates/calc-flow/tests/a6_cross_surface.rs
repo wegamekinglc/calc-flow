@@ -681,8 +681,11 @@ fn terminate_surviving_test_process(pid: u32) {
 }
 
 fn uv_python_command() -> Command {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut command = Command::new("uv");
-    command.args(["run", "--no-sync", "python"]);
+    command
+        .args(["run", "--no-sync", "python"])
+        .env("UV_CACHE_DIR", workspace_root.join("target/uv-cache"));
     command
 }
 

@@ -1,5 +1,79 @@
 {
   "$defs": {
+    "AggregateFunction": {
+      "description": "Aggregate function supported by the first built-in window operator.",
+      "oneOf": [
+        {
+          "const": "count",
+          "description": "Count non-null input values.",
+          "type": "string"
+        },
+        {
+          "const": "sum",
+          "description": "Sum numeric input values.",
+          "type": "string"
+        },
+        {
+          "const": "min",
+          "description": "Select the minimum supported scalar.",
+          "type": "string"
+        },
+        {
+          "const": "max",
+          "description": "Select the maximum supported scalar.",
+          "type": "string"
+        },
+        {
+          "const": "avg",
+          "description": "Compute the arithmetic mean of numeric input values.",
+          "type": "string"
+        }
+      ]
+    },
+    "AggregateSpec": {
+      "additionalProperties": false,
+      "description": "One declared window aggregate and its output column name.",
+      "properties": {
+        "column": {
+          "description": "Input column name.",
+          "type": "string"
+        },
+        "function": {
+          "$ref": "#/$defs/AggregateFunction",
+          "description": "Aggregate function."
+        },
+        "output": {
+          "description": "Output column name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "function",
+        "column",
+        "output"
+      ],
+      "type": "object"
+    },
+    "ArrowFieldSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "data_type": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "nullable": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "data_type"
+      ],
+      "type": "object"
+    },
     "BatchKind": {
       "enum": [
         "table",
@@ -7,40 +81,9 @@
       ],
       "type": "string"
     },
-    "BatchRuntimeOptions": {
-      "additionalProperties": false,
-      "description": "Bounded-batch runtime limits.",
-      "properties": {
-        "max_input_bytes": {
-          "default": 10485760,
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "max_rows": {
-          "default": 100000,
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "memory_limit_mb": {
-          "default": 512,
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "timeout_seconds": {
-          "default": 30,
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "type": "object"
-    },
     "ConnectorRef": {
       "additionalProperties": false,
-      "description": "A connector identity reference.",
+      "description": "Exact identity of a connector implementation.",
       "properties": {
         "name": {
           "type": "string"
@@ -59,132 +102,57 @@
       ],
       "type": "object"
     },
-    "DatabaseBinding": {
-      "description": "A database binding's read or write mode declaration.",
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "cursor_column": {
-              "default": "",
-              "type": "string"
-            },
-            "mode": {
-              "const": "snapshot",
-              "type": "string"
-            },
-            "table": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "mode",
-            "table"
-          ],
-          "type": "object"
+    "DataFusionConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "batch_size": {
+          "default": 8192,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
         },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "cursor_column": {
-              "type": "string"
-            },
-            "mode": {
-              "const": "polling",
-              "type": "string"
-            },
-            "poll_interval_ms": {
-              "default": 0,
-              "format": "uint64",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "table": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "mode",
-            "table",
-            "cursor_column"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "mode": {
-              "const": "cdc",
-              "type": "string"
-            },
-            "publication": {
-              "type": "string"
-            },
-            "slot": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "mode",
-            "publication",
-            "slot"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "mode": {
-              "const": "append",
-              "type": "string"
-            },
-            "table": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "mode",
-            "table"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "conflict_columns": {
-              "default": [],
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "mode": {
-              "const": "upsert",
-              "type": "string"
-            },
-            "table": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "mode",
-            "table"
-          ],
-          "type": "object"
+        "target_partitions": {
+          "default": 1,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
         }
-      ]
+      },
+      "type": "object"
+    },
+    "DataSourceSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "data": true,
+        "format": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "input": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "input",
+        "format",
+        "data"
+      ],
+      "type": "object"
     },
     "DeliveryRequest": {
-      "description": "The requested delivery guarantee for one output.",
+      "description": "Requested delivery guarantee for one project output.",
       "enum": [
+        "best_effort",
         "at_least_once",
         "exactly_once"
       ],
       "type": "string"
     },
-    "EdgeV3": {
+    "EdgeSpec": {
       "additionalProperties": false,
-      "description": "One graph edge connecting two node ports.",
       "properties": {
         "source_node": {
           "type": "string"
@@ -207,30 +175,25 @@
       ],
       "type": "object"
     },
-    "FieldV3": {
+    "FormatRef": {
       "additionalProperties": false,
-      "description": "One Arrow field in a strict schema.",
+      "description": "Exact identity of a registered format codec.",
       "properties": {
-        "data_type": {
-          "type": "string"
-        },
         "name": {
           "type": "string"
         },
-        "nullable": {
-          "default": true,
-          "type": "boolean"
+        "version": {
+          "type": "string"
         }
       },
       "required": [
         "name",
-        "data_type"
+        "version"
       ],
       "type": "object"
     },
-    "NodeV3": {
+    "NodeSpec": {
       "additionalProperties": false,
-      "description": "One graph node and its operator specification.",
       "properties": {
         "id": {
           "type": "string"
@@ -238,24 +201,24 @@
         "input_ports": {
           "default": [],
           "items": {
-            "$ref": "#/$defs/PortV3"
+            "$ref": "#/$defs/PortSpec"
           },
           "type": "array"
         },
         "operator": {
-          "$ref": "#/$defs/OperatorV3"
+          "$ref": "#/$defs/OperatorSpec"
         },
         "output_ports": {
           "default": [],
           "items": {
-            "$ref": "#/$defs/PortV3"
+            "$ref": "#/$defs/PortSpec"
           },
           "type": "array"
         },
         "position": {
           "anyOf": [
             {
-              "$ref": "#/$defs/PositionV3"
+              "$ref": "#/$defs/PositionSpec"
             },
             {
               "type": "null"
@@ -270,8 +233,7 @@
       ],
       "type": "object"
     },
-    "OperatorV3": {
-      "description": "The operator variant; external providers are data-only references.",
+    "OperatorSpec": {
       "oneOf": [
         {
           "additionalProperties": false,
@@ -301,7 +263,7 @@
             "udfs": {
               "default": [],
               "items": {
-                "$ref": "#/$defs/UdfRefV3"
+                "$ref": "#/$defs/UdfReference"
               },
               "type": "array"
             }
@@ -330,7 +292,7 @@
             "udfs": {
               "default": [],
               "items": {
-                "$ref": "#/$defs/UdfRefV3"
+                "$ref": "#/$defs/UdfReference"
               },
               "type": "array"
             }
@@ -339,6 +301,38 @@
             "kind",
             "query",
             "aliases"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Same-schema multi-input forwarding for stream graphs.",
+          "properties": {
+            "kind": {
+              "const": "union",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Stateful event-time aggregation for stream graphs.",
+          "properties": {
+            "kind": {
+              "const": "window",
+              "type": "string"
+            },
+            "spec": {
+              "$ref": "#/$defs/WindowSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "spec"
           ],
           "type": "object"
         },
@@ -374,14 +368,20 @@
         }
       ]
     },
-    "PipelineV3": {
+    "PipelineSpec": {
       "additionalProperties": false,
-      "description": "The operator graph.",
       "properties": {
+        "datafusion": {
+          "$ref": "#/$defs/DataFusionConfig",
+          "default": {
+            "batch_size": 8192,
+            "target_partitions": 1
+          }
+        },
         "edges": {
           "default": [],
           "items": {
-            "$ref": "#/$defs/EdgeV3"
+            "$ref": "#/$defs/EdgeSpec"
           },
           "type": "array"
         },
@@ -390,7 +390,7 @@
         },
         "nodes": {
           "items": {
-            "$ref": "#/$defs/NodeV3"
+            "$ref": "#/$defs/NodeSpec"
           },
           "type": "array"
         }
@@ -401,9 +401,8 @@
       ],
       "type": "object"
     },
-    "PortV3": {
+    "PortSpec": {
       "additionalProperties": false,
-      "description": "A named port with an optional exact Arrow schema.",
       "properties": {
         "kind": {
           "$ref": "#/$defs/BatchKind"
@@ -418,7 +417,7 @@
         "schema": {
           "default": [],
           "items": {
-            "$ref": "#/$defs/FieldV3"
+            "$ref": "#/$defs/ArrowFieldSpec"
           },
           "type": "array"
         }
@@ -429,9 +428,8 @@
       ],
       "type": "object"
     },
-    "PositionV3": {
+    "PositionSpec": {
       "additionalProperties": false,
-      "description": "A canvas position for visual editors.",
       "properties": {
         "x": {
           "format": "double",
@@ -448,55 +446,278 @@
       ],
       "type": "object"
     },
-    "RuntimeMode": {
-      "description": "Whether the project runs as a bounded batch or a continuous stream.",
-      "enum": [
-        "batch",
-        "stream"
-      ],
-      "type": "string"
-    },
-    "RuntimeSpec": {
+    "ProjectSinkBinding": {
       "additionalProperties": false,
-      "description": "Runtime mode and its mode-specific options.",
+      "description": "A data-only sink binding to one registered connector.",
       "properties": {
-        "batch": {
-          "$ref": "#/$defs/BatchRuntimeOptions",
-          "default": {
-            "max_input_bytes": 10485760,
-            "max_rows": 100000,
-            "memory_limit_mb": 512,
-            "timeout_seconds": 30
-          }
+        "binding": {
+          "description": "External graph output this binding drains.",
+          "type": "string"
         },
-        "mode": {
-          "$ref": "#/$defs/RuntimeMode"
+        "connector": {
+          "$ref": "#/$defs/ConnectorRef",
+          "description": "Exact registered connector identity."
         },
-        "stream": {
-          "$ref": "#/$defs/StreamRuntimeOptions",
-          "default": {
-            "checkpoint_interval_seconds": 30,
-            "max_batch_bytes": 67108864,
-            "max_batch_rows": 10000
-          }
+        "delivery": {
+          "$ref": "#/$defs/DeliveryRequest",
+          "description": "Requested delivery guarantee for this output."
+        },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FormatRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional exact wire-format identity."
+        },
+        "options": {
+          "additionalProperties": true,
+          "default": {},
+          "description": "Bounded non-secret connector options.",
+          "type": "object"
+        },
+        "secrets": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SecretReference"
+          },
+          "default": {},
+          "description": "Named secret references resolved only when the connector opens.",
+          "type": "object"
         }
       },
       "required": [
-        "mode"
+        "binding",
+        "connector",
+        "delivery"
       ],
       "type": "object"
     },
-    "SecretRef": {
+    "ProjectSourceBinding": {
       "additionalProperties": false,
-      "description": "A named pointer to a secret; the only secret-shaped value a\ndata-only document may carry.",
+      "description": "A data-only source binding to one registered connector.",
+      "properties": {
+        "binding": {
+          "description": "External graph input this binding feeds.",
+          "type": "string"
+        },
+        "connector": {
+          "$ref": "#/$defs/ConnectorRef",
+          "description": "Exact registered connector identity."
+        },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FormatRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional exact wire-format identity."
+        },
+        "options": {
+          "additionalProperties": true,
+          "default": {},
+          "description": "Bounded non-secret connector options.",
+          "type": "object"
+        },
+        "schema": {
+          "default": [],
+          "description": "Optional exact Arrow schema.",
+          "items": {
+            "$ref": "#/$defs/ArrowFieldSpec"
+          },
+          "type": "array"
+        },
+        "secrets": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SecretReference"
+          },
+          "default": {},
+          "description": "Named secret references resolved only when the connector opens.",
+          "type": "object"
+        },
+        "watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProjectWatermarkPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional event-time watermark policy."
+        }
+      },
+      "required": [
+        "binding",
+        "connector"
+      ],
+      "type": "object"
+    },
+    "ProjectWatermarkPolicy": {
+      "description": "Event-time policy carried by one project source binding.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "policy": {
+              "const": "source_provided",
+              "type": "string"
+            }
+          },
+          "required": [
+            "policy"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "column": {
+              "type": "string"
+            },
+            "delay_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "emit_interval_ms": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "idle_timeout_ms": {
+              "default": null,
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "policy": {
+              "const": "bounded_out_of_orderness",
+              "type": "string"
+            }
+          },
+          "required": [
+            "policy",
+            "column",
+            "delay_ms"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "policy": {
+              "const": "disabled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "policy"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RunOptions": {
+      "additionalProperties": false,
+      "properties": {
+        "max_input_bytes": {
+          "default": 10485760,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_rows": {
+          "default": 100000,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "memory_limit_mb": {
+          "default": 512,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "output_rows": {
+          "default": 1000,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "timeout_seconds": {
+          "default": 30,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "RuntimeSpec": {
+      "description": "Runtime mode and mode-specific limits for a project-v3 document.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A bounded batch run using inline data fixtures.",
+          "properties": {
+            "mode": {
+              "const": "batch",
+              "type": "string"
+            },
+            "options": {
+              "$ref": "#/$defs/RunOptions"
+            }
+          },
+          "required": [
+            "mode",
+            "options"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A continuous run using registered connector bindings.",
+          "properties": {
+            "mode": {
+              "const": "stream",
+              "type": "string"
+            },
+            "options": {
+              "$ref": "#/$defs/StreamRunOptions"
+            }
+          },
+          "required": [
+            "mode",
+            "options"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SecretReference": {
+      "additionalProperties": false,
+      "description": "A named pointer to a secret; the only secret-shaped value a data-only\ndocument may carry.",
       "properties": {
         "key": {
-          "description": "The resolver-specific key.",
+          "description": "Resolver-specific key, for example the variable name.",
           "type": "string"
         },
         "resolver": {
-          "$ref": "#/$defs/SecretResolverKindV3",
-          "description": "Where the secret is resolved from."
+          "$ref": "#/$defs/SecretResolverKind",
+          "description": "Resolution source."
         }
       },
       "required": [
@@ -505,176 +726,49 @@
       ],
       "type": "object"
     },
-    "SecretResolverKindV3": {
-      "description": "The resolver vocabulary.",
-      "enum": [
-        "environment",
-        "file",
-        "registered"
-      ],
-      "type": "string"
-    },
-    "SinkBinding": {
-      "additionalProperties": false,
-      "description": "A data-only sink binding with a delivery request.",
-      "properties": {
-        "connector": {
-          "$ref": "#/$defs/ConnectorRef",
-          "description": "Connector identity `(provider, name, version)`."
-        },
-        "database": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DatabaseBinding"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Database write mode for database connectors."
-        },
-        "delivery": {
-          "$ref": "#/$defs/DeliveryRequest",
-          "description": "The requested per-output delivery guarantee."
-        },
-        "format": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "id": {
+    "SecretResolverKind": {
+      "description": "Where a secret reference is resolved from.",
+      "oneOf": [
+        {
+          "const": "environment",
+          "description": "Resolved from a process environment variable.",
           "type": "string"
         },
-        "options": {
-          "additionalProperties": true,
-          "default": {},
-          "type": "object"
-        },
-        "output": {
-          "description": "The external graph output this binding drains.",
+        {
+          "const": "file",
+          "description": "Resolved from a file path.",
           "type": "string"
         },
-        "secrets": {
-          "additionalProperties": {
-            "$ref": "#/$defs/SecretRef"
-          },
-          "default": {},
-          "type": "object"
+        {
+          "const": "registered",
+          "description": "Resolved from a trusted in-process registry.",
+          "type": "string"
         }
-      },
-      "required": [
-        "id",
-        "output",
-        "connector",
-        "delivery"
-      ],
-      "type": "object"
-    },
-    "SourceBinding": {
-      "additionalProperties": false,
-      "description": "A data-only source binding to a registered connector.",
-      "properties": {
-        "connector": {
-          "$ref": "#/$defs/ConnectorRef",
-          "description": "Connector identity `(provider, name, version)`."
-        },
-        "database": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DatabaseBinding"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Database read/write mode for database connectors."
-        },
-        "format": {
-          "default": null,
-          "description": "The wire format name; the registry validates it.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "id": {
-          "type": "string"
-        },
-        "input": {
-          "description": "The external graph input this binding feeds.",
-          "type": "string"
-        },
-        "options": {
-          "additionalProperties": true,
-          "default": {},
-          "description": "Bounded connector options; secrets never appear here.",
-          "type": "object"
-        },
-        "schema": {
-          "default": [],
-          "description": "Explicit schema the source must match.",
-          "items": {
-            "$ref": "#/$defs/FieldV3"
-          },
-          "type": "array"
-        },
-        "secrets": {
-          "additionalProperties": {
-            "$ref": "#/$defs/SecretRef"
-          },
-          "default": {},
-          "description": "Named secret references this source resolves at open time.",
-          "type": "object"
-        },
-        "watermark": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/WatermarkPolicyV3"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Watermark policy for stream mode."
-        }
-      },
-      "required": [
-        "id",
-        "input",
-        "connector"
-      ],
-      "type": "object"
+      ]
     },
     "StateConfig": {
       "additionalProperties": false,
-      "description": "State and checkpoint configuration for stream mode.",
+      "description": "Managed state location and checkpoint retention for stream projects.",
       "properties": {
-        "checkpoint_directory": {
-          "default": ".calc-flow-state",
-          "description": "Directory for managed checkpoint state.",
-          "type": "string"
-        },
-        "checkpoint_interval_seconds": {
-          "default": 30,
-          "description": "Interval between automatic checkpoints.",
-          "format": "uint64",
+        "retention": {
+          "default": 3,
+          "format": "uint",
           "minimum": 0,
           "type": "integer"
+        },
+        "root": {
+          "default": ".calc-flow-state",
+          "type": "string"
         }
       },
       "type": "object"
     },
-    "StreamRuntimeOptions": {
+    "StreamRunOptions": {
       "additionalProperties": false,
-      "description": "Continuous-stream runtime limits.",
+      "description": "Continuous runtime limits carried by project v3.",
       "properties": {
-        "checkpoint_interval_seconds": {
-          "default": 30,
+        "checkpoint_interval_ms": {
+          "default": 30000,
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -694,10 +788,20 @@
       },
       "type": "object"
     },
-    "UdfRefV3": {
+    "UdfKind": {
+      "enum": [
+        "data_fusion_scalar",
+        "external_scalar",
+        "external_array"
+      ],
+      "type": "string"
+    },
+    "UdfReference": {
       "additionalProperties": false,
-      "description": "A trusted UDF reference by provider/name/version.",
       "properties": {
+        "kind": {
+          "$ref": "#/$defs/UdfKind"
+        },
         "name": {
           "type": "string"
         },
@@ -711,52 +815,24 @@
       "required": [
         "provider",
         "name",
-        "version"
+        "version",
+        "kind"
       ],
       "type": "object"
     },
-    "WatermarkPolicyV3": {
-      "description": "The watermark policy for one source in stream mode.",
+    "WindowGeometry": {
+      "description": "Fixed UTC window geometry represented in exact microseconds.",
       "oneOf": [
         {
           "additionalProperties": false,
+          "description": "Non-overlapping windows of one fixed size.",
           "properties": {
             "kind": {
-              "const": "source_provided",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "emit_interval_ms": {
-              "default": 0,
-              "format": "uint64",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "event_time_column": {
+              "const": "tumbling",
               "type": "string"
             },
-            "idle_timeout_ms": {
-              "default": null,
-              "format": "uint64",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "kind": {
-              "const": "bounded_out_of_orderness",
-              "type": "string"
-            },
-            "max_out_of_orderness_ms": {
+            "size_micros": {
+              "description": "Window size in exact microseconds.",
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
@@ -764,31 +840,86 @@
           },
           "required": [
             "kind",
-            "event_time_column",
-            "max_out_of_orderness_ms"
+            "size_micros"
           ],
           "type": "object"
         },
         {
           "additionalProperties": false,
+          "description": "Fixed-size windows beginning at every slide coordinate.",
           "properties": {
             "kind": {
-              "const": "disabled",
+              "const": "hopping",
               "type": "string"
+            },
+            "size_micros": {
+              "description": "Window size in exact microseconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "slide_micros": {
+              "description": "Window slide in exact microseconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
             }
           },
           "required": [
-            "kind"
+            "kind",
+            "size_micros",
+            "slide_micros"
           ],
           "type": "object"
         }
       ]
+    },
+    "WindowSpec": {
+      "additionalProperties": false,
+      "description": "Data-only declaration of one event-time window aggregation.",
+      "properties": {
+        "aggregates": {
+          "description": "Aggregates in semantic declaration order.",
+          "items": {
+            "$ref": "#/$defs/AggregateSpec"
+          },
+          "type": "array"
+        },
+        "event_time_column": {
+          "description": "Input timestamp column used for window assignment.",
+          "type": "string"
+        },
+        "geometry": {
+          "$ref": "#/$defs/WindowGeometry",
+          "description": "Fixed tumbling or hopping geometry."
+        },
+        "group_by": {
+          "description": "Group columns in semantic declaration order.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "event_time_column",
+        "group_by",
+        "geometry",
+        "aggregates"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "The root of a strict data-only project document.",
   "properties": {
+    "data_sources": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/DataSourceSpec"
+      },
+      "type": "array"
+    },
     "description": {
       "default": "",
       "type": "string"
@@ -797,14 +928,14 @@
       "const": 3,
       "type": "integer"
     },
+    "graph": {
+      "$ref": "#/$defs/PipelineSpec"
+    },
     "id": {
       "type": "string"
     },
     "name": {
       "type": "string"
-    },
-    "pipeline": {
-      "$ref": "#/$defs/PipelineV3"
     },
     "runtime": {
       "$ref": "#/$defs/RuntimeSpec"
@@ -812,22 +943,22 @@
     "sinks": {
       "default": [],
       "items": {
-        "$ref": "#/$defs/SinkBinding"
+        "$ref": "#/$defs/ProjectSinkBinding"
       },
       "type": "array"
     },
     "sources": {
       "default": [],
       "items": {
-        "$ref": "#/$defs/SourceBinding"
+        "$ref": "#/$defs/ProjectSourceBinding"
       },
       "type": "array"
     },
     "state": {
       "$ref": "#/$defs/StateConfig",
       "default": {
-        "checkpoint_directory": ".calc-flow-state",
-        "checkpoint_interval_seconds": 30
+        "retention": 3,
+        "root": ".calc-flow-state"
       }
     }
   },
@@ -836,7 +967,7 @@
     "id",
     "name",
     "runtime",
-    "pipeline"
+    "graph"
   ],
   "title": "Calc Flow Project V3",
   "type": "object"

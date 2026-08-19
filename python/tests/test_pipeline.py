@@ -27,7 +27,7 @@ def _batch(**columns: list[int]) -> Batch:
 
 
 def test_python_builder_compiles_through_rust() -> None:
-    plan = PipelineBuilder("totals").expression("calc", "total = a + b").compile()
+    plan = PipelineBuilder("totals").expression("calc", "total = a + b").compile_batch()
 
     result = plan.execute({"input": _batch(a=[1], b=[2])})
 
@@ -47,9 +47,9 @@ def test_builder_is_functional_and_project_values_are_defensive() -> None:
     first = original.expression("first", "b = a + 1")
     second = first.expression("second", "c = b * 2").connect("first", "second")
 
-    assert original.project["pipeline"]["nodes"] == []
-    assert [node["id"] for node in first.project["pipeline"]["nodes"]] == ["first"]
-    assert [node["id"] for node in second.project["pipeline"]["nodes"]] == [
+    assert original.project["graph"]["nodes"] == []
+    assert [node["id"] for node in first.project["graph"]["nodes"]] == ["first"]
+    assert [node["id"] for node in second.project["graph"]["nodes"]] == [
         "first",
         "second",
     ]
@@ -58,12 +58,12 @@ def test_builder_is_functional_and_project_values_are_defensive() -> None:
     ]
 
     returned = second.project
-    returned["pipeline"]["nodes"].clear()
+    returned["graph"]["nodes"].clear()
     returned["data_sources"][0]["data"].append({"executable": "never"})
-    assert len(second.project["pipeline"]["nodes"]) == 2
+    assert len(second.project["graph"]["nodes"]) == 2
     assert second.project["data_sources"][0]["data"] == []
 
-    output = second.compile().execute({"input": _batch(a=[2])}).outputs["output"]
+    output = second.compile_batch().execute({"input": _batch(a=[2])}).outputs["output"]
     assert output.to_pyarrow()["c"].to_pylist() == [6]
 
 
@@ -77,7 +77,7 @@ def test_table_matmul_builder_is_functional_and_defensive() -> None:
     )
     columns[0] = "mutated"
 
-    assert original.project["pipeline"]["nodes"] == []
+    assert original.project["graph"]["nodes"] == []
     assert builder.project["data_sources"] == [
         {
             "data": [],
@@ -92,7 +92,7 @@ def test_table_matmul_builder_is_functional_and_defensive() -> None:
             "input": "weights",
         },
     ]
-    assert builder.project["pipeline"]["nodes"] == [
+    assert builder.project["graph"]["nodes"] == [
         {
             "id": "multiply",
             "input_ports": [
@@ -171,7 +171,7 @@ def test_builder_derives_exact_qualified_inputs_for_sql() -> None:
         "left",
         "right",
     ]
-    result = builder.compile().execute(
+    result = builder.compile_batch().execute(
         MappingProxyType({"left": _batch(a=[2]), "right": _batch(b=[3])})
     )
     assert result.outputs["output"].to_pyarrow()["total"].to_pylist() == [5]
@@ -188,7 +188,7 @@ def test_duplicate_external_port_names_are_qualified_deterministically() -> None
         "alpha.input",
         "zeta.input",
     ]
-    result = builder.compile().execute(
+    result = builder.compile_batch().execute(
         {"alpha.input": _batch(value=[1]), "zeta.input": _batch(value=[1])}
     )
     assert set(result.outputs) == {"alpha.output", "zeta.output"}
@@ -201,7 +201,7 @@ def test_builder_accepts_task_19_udf_reference_tuple_shape() -> None:
         .project
     )
 
-    assert project["pipeline"]["nodes"][0]["operator"]["udfs"] == [
+    assert project["graph"]["nodes"][0]["operator"]["udfs"] == [
         {
             "kind": "data_fusion_scalar",
             "name": "double",
@@ -225,11 +225,11 @@ def test_runtime_compiles_strict_json_and_plan_outlives_runtime() -> None:
     ].to_pylist() == [5]
 
     with pytest.raises(ConfigError):
-        Runtime().compile_project('{"format_version":2,"format_version":2}')
+        Runtime().compile_project('{"format_version":3,"format_version":3}')
 
 
 def test_execution_plan_exposes_immutable_rust_identity() -> None:
-    plan = PipelineBuilder("identity").expression("calc", "b = a + 1").compile()
+    plan = PipelineBuilder("identity").expression("calc", "b = a + 1").compile_batch()
 
     assert plan.name == "identity"
     assert plan.fingerprint
@@ -241,7 +241,11 @@ def test_execution_plan_exposes_immutable_rust_identity() -> None:
 
 def test_runtime_plan_and_result_are_visible_to_cyclic_gc() -> None:
     runtime = Runtime()
-    plan = PipelineBuilder("tracked").expression("calc", "b = a + 1").compile(runtime)
+    plan = (
+        PipelineBuilder("tracked")
+        .expression("calc", "b = a + 1")
+        .compile_batch(runtime)
+    )
     result = plan.execute({"input": _batch(a=[1])})
 
     assert gc.is_tracked(runtime._inner)
@@ -251,14 +255,15 @@ def test_runtime_plan_and_result_are_visible_to_cyclic_gc() -> None:
 
 def test_project_json_helpers_are_canonical_strict_and_defaulted() -> None:
     schema = json.loads(project_json_schema())
-    assert schema["title"] == "Calc Flow Project V2"
-    assert schema["properties"]["format_version"]["const"] == 2
+    assert schema["title"] == "Calc Flow Project V3"
+    assert schema["properties"]["format_version"]["const"] == 3
 
     minimal = {
-        "format_version": 2,
+        "format_version": 3,
         "id": "demo",
         "name": "Demo",
-        "pipeline": {
+        "runtime": {"mode": "batch", "options": {}},
+        "graph": {
             "name": "demo",
             "nodes": [
                 {
@@ -274,8 +279,8 @@ def test_project_json_helpers_are_canonical_strict_and_defaulted() -> None:
     )
     validated = json.loads(canonical)
     assert validated["description"] == ""
-    assert validated["run_options"]["timeout_seconds"] == 30
-    assert validated["pipeline"]["datafusion"]["target_partitions"] == 1
+    assert validated["runtime"]["options"]["timeout_seconds"] == 30
+    assert validated["graph"]["datafusion"]["target_partitions"] == 1
 
     with pytest.raises(ConfigError):
         validate_project_json(json.dumps({**minimal, "format_version": 1}))
@@ -292,19 +297,19 @@ def test_compile_and_execution_failures_keep_declared_exception_types() -> None:
         .connect("right", "left")
     )
     with pytest.raises(CompileError, match="cycle"):
-        cyclic.compile()
+        cyclic.compile_batch()
 
     plan = (
         PipelineBuilder("missing_column")
         .expression("calc", "result = absent + 1")
-        .compile()
+        .compile_batch()
     )
     with pytest.raises(ExecutionError, match="absent"):
         plan.execute({"input": _batch(value=[1])})
 
 
 def test_execute_validates_inputs_without_mutating_the_caller() -> None:
-    plan = PipelineBuilder("inputs").expression("calc", "b = a + 1").compile()
+    plan = PipelineBuilder("inputs").expression("calc", "b = a + 1").compile_batch()
     batch = _batch(a=[1])
     inputs = {"input": batch}
 
@@ -322,7 +327,7 @@ def test_execute_validates_inputs_without_mutating_the_caller() -> None:
 
 
 def test_run_result_properties_return_defensive_values() -> None:
-    plan = PipelineBuilder("copies").expression("calc", "b = a + 1").compile()
+    plan = PipelineBuilder("copies").expression("calc", "b = a + 1").compile_batch()
     result = plan.execute({"input": _batch(a=[1])})
 
     outputs = result.outputs
@@ -348,7 +353,7 @@ def test_blocking_execute_releases_the_gil() -> None:
             "SELECT sum(left.value * right.value) AS total FROM left CROSS JOIN right",
             aliases=("left", "right"),
         )
-        .compile()
+        .compile_batch()
     )
     progressed = threading.Event()
     ready = threading.Event()

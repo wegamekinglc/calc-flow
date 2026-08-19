@@ -1,18 +1,16 @@
 import type {
   CapabilitiesResponse,
   CatalogResponse,
-  CheckpointSummary,
+  JobResponse,
   ProjectCreateRequest,
   ProjectDocument,
   ProjectSummary,
-  RunRequest,
-  RunResponse,
   ValidationReport,
 } from '../types';
 import {
   ApiContractError,
   decodeCapabilitiesResponse,
-  decodeRunResponse,
+  decodeJobResponse,
   decodeValidationReport,
 } from './decoders';
 
@@ -145,30 +143,35 @@ export const api = {
       decodeValidationReport,
       { method: 'POST' },
     ),
-  checkpoint: (id: string) =>
-    request<CheckpointSummary>(
-      `${API_PREFIX}/projects/${id}/checkpoint`,
-      null,
-    ),
-  resetCheckpoint: (id: string) =>
-    request<CheckpointSummary>(
-      `${API_PREFIX}/projects/${id}/checkpoint`,
-      null,
-      { method: 'DELETE' },
-    ),
-  runProject: (id: string, run: RunRequest) =>
-    request<RunResponse>(`${API_PREFIX}/projects/${id}/runs`, decodeRunResponse, {
+  jobs: () => request<JobResponse[]>(`${API_PREFIX}/jobs`, (value) => {
+    if (!Array.isArray(value)) throw new ApiContractError('jobs: expected an array');
+    return value.map(decodeJobResponse);
+  }),
+  startJob: (projectId: string) =>
+    request<JobResponse>(`${API_PREFIX}/jobs`, decodeJobResponse, {
       method: 'POST',
-      body: JSON.stringify(run),
+      body: JSON.stringify({ project_id: projectId }),
     }),
-  run: (id: string) => request<RunResponse>(
-    `${API_PREFIX}/runs/${id}`,
-    decodeRunResponse,
+  job: (id: string) => request<JobResponse>(
+    `${API_PREFIX}/jobs/${id}`,
+    decodeJobResponse,
   ),
-  cancelRun: (id: string) =>
-    request<RunResponse>(
-      `${API_PREFIX}/runs/${id}`,
-      decodeRunResponse,
-      { method: 'DELETE' },
+  checkpointJob: (id: string) =>
+    request<JobResponse>(
+      `${API_PREFIX}/jobs/${id}/checkpoint`,
+      decodeJobResponse,
+      { method: 'POST' },
+    ),
+  shutdownJob: (id: string) =>
+    request<JobResponse>(
+      `${API_PREFIX}/jobs/${id}/shutdown`,
+      decodeJobResponse,
+      { method: 'POST' },
+    ),
+  cancelJob: (id: string) =>
+    request<JobResponse>(
+      `${API_PREFIX}/jobs/${id}/cancel`,
+      decodeJobResponse,
+      { method: 'POST' },
     ),
 };

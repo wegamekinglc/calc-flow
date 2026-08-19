@@ -122,6 +122,8 @@ pub struct SinkManifestEntry {
     /// Connector-owned bounded pre-commit metadata.
     #[serde(deserialize_with = "deserialize_required_option")]
     pub pre_commit: Option<JsonMap>,
+    /// Immutable connector state referenced by this prepared epoch.
+    pub segments: Vec<StateHandle>,
 }
 
 /// Persisted source watermark-generator state.
@@ -443,10 +445,19 @@ impl CheckpointManifest {
         validate_sha256("pipeline_fingerprint", &self.pipeline_fingerprint)?;
         validate_sha256("runtime_config_hash", &self.runtime_config_hash)?;
         validate_sources(&self.sources)?;
+        if let Some(owner_id) = self
+            .operators
+            .keys()
+            .find(|owner_id| self.sinks.contains_key(*owner_id))
+        {
+            return Err(format_error(format!(
+                "state owner ID {owner_id:?} is shared by an operator and sink"
+            )));
+        }
         let mut identities = BTreeSet::new();
         let mut paths = BTreeSet::new();
         validate_operators(&self.operators, self.epoch, &mut identities, &mut paths)?;
-        validate_sinks(&self.sinks)
+        validate_sinks(&self.sinks, self.epoch, &mut identities, &mut paths)
     }
 
     fn ensure_size_bound(&self) -> Result<()> {
@@ -526,20 +537,21 @@ fn validate_operator_handles(
 ) -> Result<()> {
     let mut previous = None;
     for handle in &operator.segments {
-        validate_operator_handle(operator_id, handle, manifest_epoch, previous)?;
+        validate_state_handle("operator", operator_id, handle, manifest_epoch, previous)?;
         record_unique_handle(handle, identities, paths)?;
         previous = Some(handle);
     }
     Ok(())
 }
 
-fn validate_operator_handle(
-    operator_id: &str,
+fn validate_state_handle(
+    owner_kind: &str,
+    owner_id: &str,
     handle: &StateHandle,
     manifest_epoch: Epoch,
     previous: Option<&StateHandle>,
 ) -> Result<()> {
-    handle.validate_for(operator_id, handle.epoch())?;
+    handle.validate_for(owner_id, handle.epoch())?;
     if handle.epoch() > manifest_epoch {
         return Err(mismatch(format!(
             "state handle epoch {} is newer than manifest epoch {}",
@@ -549,7 +561,7 @@ fn validate_operator_handle(
     }
     if previous.is_some_and(|value| value >= handle) {
         return Err(format_error(format!(
-            "operator {operator_id:?} state handles are not in canonical order"
+            "{owner_kind} {owner_id:?} state handles are not in canonical order"
         )));
     }
     Ok(())
@@ -574,7 +586,12 @@ fn record_unique_handle(
     Ok(())
 }
 
-fn validate_sinks(sinks: &BTreeMap<String, SinkManifestEntry>) -> Result<()> {
+fn validate_sinks(
+    sinks: &BTreeMap<String, SinkManifestEntry>,
+    manifest_epoch: Epoch,
+    identities: &mut BTreeSet<(String, Epoch, String)>,
+    paths: &mut BTreeSet<String>,
+) -> Result<()> {
     for (sink_id, sink) in sinks {
         validate_portable_identifier("sinks.id", sink_id)?;
         if let SinkDeliveryManifest::EpochIdempotent { mechanism, .. } = &sink.delivery {
@@ -582,6 +599,12 @@ fn validate_sinks(sinks: &BTreeMap<String, SinkManifestEntry>) -> Result<()> {
         }
         if let Some(pre_commit) = &sink.pre_commit {
             validate_json_map(pre_commit, "sink pre-commit metadata")?;
+        }
+        let mut previous = None;
+        for handle in &sink.segments {
+            validate_state_handle("sink", sink_id, handle, manifest_epoch, previous)?;
+            record_unique_handle(handle, identities, paths)?;
+            previous = Some(handle);
         }
     }
     Ok(())

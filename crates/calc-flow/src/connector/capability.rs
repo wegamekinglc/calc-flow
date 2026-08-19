@@ -126,6 +126,8 @@ pub enum TransactionSupport {
     PreCommitCommit,
     /// Idempotent ledger keyed by pipeline, sink, and epoch.
     LedgerIdempotent,
+    /// Stable retry token with a bounded server-side deduplication horizon.
+    RetryDeduplicated,
 }
 
 /// Independent capability axes declared by one connector descriptor.
@@ -187,24 +189,35 @@ impl ConnectorCapabilities {
             TransactionSupport::PreCommitCommit => SinkDelivery::Transactional,
             TransactionSupport::LedgerIdempotent => SinkDelivery::EpochIdempotent {
                 mechanism: "ledger".into(),
+                retention: crate::state::RetentionClass::Unbounded,
+            },
+            TransactionSupport::RetryDeduplicated => SinkDelivery::EpochIdempotent {
+                mechanism: "retry-deduplicated".into(),
                 retention: crate::state::RetentionClass::Bounded,
             },
         }
     }
 
-    fn unmet_exactly_once_axes(self, role: ParticipantRole) -> Vec<&'static str> {
+    fn unmet_at_least_once_axes(self, role: ParticipantRole) -> Vec<&'static str> {
         let mut axes = Vec::new();
+        if self.delivery == DeliveryCapability::BestEffort {
+            axes.push("delivery");
+        }
+        if role == ParticipantRole::Source && self.replay != ReplayCapability::ReplayableExact {
+            axes.push("replay");
+        }
+        axes
+    }
+
+    fn unmet_exactly_once_axes(self, role: ParticipantRole) -> Vec<&'static str> {
+        let mut axes = self.unmet_at_least_once_axes(role);
         match role {
-            ParticipantRole::Source => {
-                if self.replay != ReplayCapability::ReplayableExact {
-                    axes.push("replay");
-                }
-                if self.delivery == DeliveryCapability::BestEffort {
-                    axes.push("delivery");
-                }
-            }
+            ParticipantRole::Source => {}
             ParticipantRole::Sink => {
-                if self.transaction == TransactionSupport::None {
+                if matches!(
+                    self.transaction,
+                    TransactionSupport::None | TransactionSupport::RetryDeduplicated
+                ) {
                     axes.push("transaction");
                 }
             }
@@ -228,6 +241,8 @@ pub struct ConnectorDescriptor {
     pub config_schema: JsonMap,
     /// Named secret slots that must arrive as secret references.
     pub secret_slots: BTreeSet<String>,
+    /// Subset of `secret_slots` required before factory invocation.
+    pub required_secret_slots: BTreeSet<String>,
 }
 
 /// Data-only description of one registered format codec.
@@ -288,17 +303,43 @@ pub fn validate_connector_options(
     descriptor: &ConnectorDescriptor,
     options: &JsonMap,
 ) -> Result<()> {
-    for key in options.keys() {
+    for (key, value) in options {
         if descriptor.secret_slots.contains(key) {
             return Err(CalcFlowError::InvalidArgument {
                 field: key.clone(),
                 message: "secret values must use a secret reference, not connector options".into(),
             });
         }
-        if !descriptor.config_schema.contains_key(key) {
+        let schema =
+            descriptor
+                .config_schema
+                .get(key)
+                .ok_or_else(|| CalcFlowError::InvalidArgument {
+                    field: key.clone(),
+                    message: "unknown connector option".into(),
+                })?;
+        let expected = schema
+            .as_str()
+            .ok_or_else(|| CalcFlowError::InvalidArgument {
+                field: key.clone(),
+                message: "connector option schema must be a supported type name".into(),
+            })?;
+        let valid = match expected {
+            "string" => value.is_string(),
+            "boolean" => value.is_boolean(),
+            "array" => value.is_array(),
+            "u64" => value.as_u64().is_some(),
+            _ => {
+                return Err(CalcFlowError::InvalidArgument {
+                    field: key.clone(),
+                    message: format!("unsupported connector option schema {expected:?}"),
+                });
+            }
+        };
+        if !valid {
             return Err(CalcFlowError::InvalidArgument {
                 field: key.clone(),
-                message: "unknown connector option".into(),
+                message: format!("connector option must be {expected}"),
             });
         }
     }
@@ -336,13 +377,22 @@ pub struct DeliveryProof {
 
 /// Lists every participant that cannot uphold exactly-once with its unmet
 /// capability axes.
-fn incapable_participants(participants: &[DeliveryParticipant]) -> Vec<String> {
+fn incapable_participants(
+    participants: &[DeliveryParticipant],
+    required: DeliveryGuarantee,
+) -> Vec<String> {
     participants
         .iter()
         .filter_map(|participant| {
-            let axes = participant
-                .capabilities
-                .unmet_exactly_once_axes(participant.role);
+            let axes = match required {
+                DeliveryGuarantee::BestEffort => Vec::new(),
+                DeliveryGuarantee::AtLeastOnce => participant
+                    .capabilities
+                    .unmet_at_least_once_axes(participant.role),
+                DeliveryGuarantee::ExactlyOnce => participant
+                    .capabilities
+                    .unmet_exactly_once_axes(participant.role),
+            };
             (!axes.is_empty()).then(|| format!("{} (unmet: {})", participant.path, axes.join(", ")))
         })
         .collect()
@@ -366,9 +416,16 @@ pub fn validate_delivery_guarantee(
     participants: &[DeliveryParticipant],
 ) -> Result<DeliveryProof> {
     let effective = match requested {
-        DeliveryGuarantee::AtLeastOnce => DeliveryGuarantee::AtLeastOnce,
+        DeliveryGuarantee::BestEffort => DeliveryGuarantee::BestEffort,
+        DeliveryGuarantee::AtLeastOnce => {
+            if incapable_participants(participants, DeliveryGuarantee::AtLeastOnce).is_empty() {
+                DeliveryGuarantee::AtLeastOnce
+            } else {
+                DeliveryGuarantee::BestEffort
+            }
+        }
         DeliveryGuarantee::ExactlyOnce => {
-            let incapable = incapable_participants(participants);
+            let incapable = incapable_participants(participants, DeliveryGuarantee::ExactlyOnce);
             if incapable.is_empty() {
                 DeliveryGuarantee::ExactlyOnce
             } else {
@@ -385,4 +442,58 @@ pub fn validate_delivery_guarantee(
         requested,
         effective,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sink_participant(transaction: TransactionSupport) -> DeliveryParticipant {
+        DeliveryParticipant {
+            path: "sinks[0]".into(),
+            role: ParticipantRole::Sink,
+            capabilities: ConnectorCapabilities {
+                delivery: DeliveryCapability::AtLeastOnce,
+                replay: ReplayCapability::Unreplayable,
+                watermark: WatermarkSupport::GeneratedOnly,
+                transaction,
+                snapshot: false,
+                polling: false,
+                cdc: false,
+                lookup: false,
+            },
+        }
+    }
+
+    #[test]
+    fn retry_deduplication_does_not_prove_exactly_once() {
+        let error = validate_delivery_guarantee(
+            DeliveryGuarantee::ExactlyOnce,
+            &[sink_participant(TransactionSupport::RetryDeduplicated)],
+        )
+        .expect_err("bounded retry deduplication must not prove exactly-once");
+
+        assert!(error.to_string().contains("unmet: transaction"), "{error}");
+    }
+
+    #[test]
+    fn ledger_idempotency_projects_unbounded_retention() {
+        assert_eq!(
+            ConnectorCapabilities {
+                delivery: DeliveryCapability::AtLeastOnce,
+                replay: ReplayCapability::Unreplayable,
+                watermark: WatermarkSupport::GeneratedOnly,
+                transaction: TransactionSupport::LedgerIdempotent,
+                snapshot: false,
+                polling: false,
+                cdc: false,
+                lookup: false,
+            }
+            .sink_delivery(),
+            SinkDelivery::EpochIdempotent {
+                mechanism: "ledger".into(),
+                retention: crate::state::RetentionClass::Unbounded,
+            },
+        );
+    }
 }

@@ -107,9 +107,24 @@ pub(crate) trait TransactionalStreamSink: Send {
     async fn begin_epoch(&mut self, epoch: Epoch) -> Result<()>;
     async fn write(&mut self, batch: &Batch) -> Result<()>;
     async fn pre_commit(&mut self, epoch: Epoch) -> Result<JsonMap>;
+    async fn pre_commit_segments(&mut self, _epoch: Epoch) -> Result<BTreeMap<String, Vec<u8>>> {
+        Ok(BTreeMap::new())
+    }
     async fn commit(&mut self, epoch: Epoch, state: &JsonMap) -> Result<()>;
     async fn abort(&mut self, epoch: Epoch, state: Option<&JsonMap>) -> Result<()>;
     async fn recover(&mut self, manifest: &CheckpointManifest) -> Result<()>;
+    async fn recover_with_segments(
+        &mut self,
+        manifest: &CheckpointManifest,
+        segments: BTreeMap<String, Vec<u8>>,
+    ) -> Result<()> {
+        if !segments.is_empty() {
+            return Err(CalcFlowError::CheckpointMismatch {
+                message: "sink implementation does not accept committed state segments".into(),
+            });
+        }
+        self.recover(manifest).await
+    }
     async fn close(&mut self) -> Result<()>;
 }
 
@@ -194,6 +209,15 @@ impl OrdinarySinkBinding {
             .await
     }
 
+    pub(crate) async fn pre_commit_segments(
+        &mut self,
+        epoch: Epoch,
+    ) -> Result<BTreeMap<String, Vec<u8>>> {
+        self.transactional_mut("pre_commit_segments")?
+            .pre_commit_segments(epoch)
+            .await
+    }
+
     pub(crate) async fn commit(&mut self, epoch: Epoch, state: &JsonMap) -> Result<()> {
         self.transactional_mut("commit")?.commit(epoch, state).await
     }
@@ -204,6 +228,16 @@ impl OrdinarySinkBinding {
 
     pub(crate) async fn recover(&mut self, manifest: &CheckpointManifest) -> Result<()> {
         self.transactional_mut("recover")?.recover(manifest).await
+    }
+
+    pub(crate) async fn recover_with_segments(
+        &mut self,
+        manifest: &CheckpointManifest,
+        segments: BTreeMap<String, Vec<u8>>,
+    ) -> Result<()> {
+        self.transactional_mut("recover")?
+            .recover_with_segments(manifest, segments)
+            .await
     }
 
     fn transactional_mut(&mut self, operation: &str) -> Result<&mut dyn TransactionalStreamSink> {
@@ -422,6 +456,7 @@ pub(crate) fn preflight_job(spec: ContinuousJobSpec) -> Result<ValidatedContinuo
     validate_runtime_topology(&plan)?;
     let (validated_sources, progress) = validate_sources(&plan, sources)?;
     let validated_sinks = validate_sinks(&plan, sinks)?;
+    validate_state_owner_ids(&plan, &validated_sinks)?;
     let delivery_proofs =
         validate_delivery_requirements(&plan, &validated_sources, &validated_sinks)?;
 
@@ -434,6 +469,29 @@ pub(crate) fn preflight_job(spec: ContinuousJobSpec) -> Result<ValidatedContinuo
         delivery_mode,
         delivery_proofs,
     })
+}
+
+fn validate_state_owner_ids(
+    plan: &StreamRuntimePlanParts,
+    sinks: &BTreeMap<String, Vec<ValidatedOrdinarySink>>,
+) -> Result<()> {
+    let operator_ids = plan
+        .nodes
+        .iter()
+        .map(|node| node.operator_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if let Some(sink_id) = sinks
+        .values()
+        .flatten()
+        .map(|sink| sink.sink_id.as_str())
+        .find(|sink_id| operator_ids.contains(sink_id))
+    {
+        return Err(CalcFlowError::InvalidArgument {
+            field: format!("sinks.{sink_id}"),
+            message: "sink ID must not share the state namespace of an operator".into(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_context_fingerprint(
@@ -462,7 +520,14 @@ fn validate_delivery_requirements(
             .get(output_id)
             .copied()
             .unwrap_or(DeliveryGuarantee::AtLeastOnce);
-        let proof = output_delivery_proof(plan, output_id, requested, sinks)?;
+        let mut proof = output_delivery_proof(plan, output_id, requested, sinks)?;
+        let source_is_best_effort = proof.reachable_sources.iter().any(|source_id| {
+            sources[source_id].sampled_delivery() == SourceDeliveryCapability::Lossy
+                || !sources[source_id].sampled_capabilities().replayable
+        });
+        if requested == DeliveryGuarantee::BestEffort || source_is_best_effort {
+            proof.effective = DeliveryGuarantee::BestEffort;
+        }
         if requested != DeliveryGuarantee::ExactlyOnce {
             proofs.insert(output_id.clone(), proof);
             continue;
@@ -1568,6 +1633,45 @@ mod tests {
     }
 
     #[test]
+    fn at_least_once_preflight_reports_best_effort_for_a_lossy_source() {
+        let opened = Arc::new(AtomicBool::new(false));
+        let capabilities = SourceCapabilities {
+            replayable: false,
+            max_batch_rows: 1,
+            max_batch_bytes: 1,
+        };
+        let mut left = named_source("left", capabilities, &opened);
+        left.binding = SourceBinding::new(
+            Box::new(CapabilityProbeSource {
+                capability_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                opened: Arc::clone(&opened),
+                capabilities,
+                delivery: SourceDeliveryCapability::Lossy,
+                declared_schema: DeclaredSchema::DynamicOrUnknown,
+            }),
+            None,
+            0,
+        )
+        .unwrap();
+        let validated = preflight_job(preflight_spec(
+            union_plan(),
+            vec![left, named_source("right", capabilities, &opened)],
+            vec![named_sink("output", "sink", &opened)],
+        ))
+        .unwrap();
+
+        assert_eq!(
+            validated.delivery_proofs["output"].requested,
+            crate::DeliveryGuarantee::AtLeastOnce
+        );
+        assert_eq!(
+            validated.delivery_proofs["output"].effective,
+            crate::DeliveryGuarantee::BestEffort
+        );
+        assert!(!opened.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn declared_schema_mismatch_fails_before_open() {
         let opened = Arc::new(AtomicBool::new(false));
         let capabilities = SourceCapabilities {
@@ -1782,7 +1886,7 @@ mod tests {
         );
         assert_eq!(
             validated.delivery_proofs["b.output"].effective,
-            crate::DeliveryGuarantee::AtLeastOnce
+            crate::DeliveryGuarantee::BestEffort
         );
         assert!(!opened.load(Ordering::SeqCst));
     }

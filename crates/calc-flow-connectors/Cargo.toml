@@ -12,18 +12,28 @@ repository.workspace = true
 [features]
 default = ["file"]
 file = ["dep:parquet"]
-kafka = ["dep:hex", "dep:rdkafka", "dep:sha2"]
+kafka = ["dep:hex", "dep:rdkafka", "dep:serde", "dep:sha2"]
 clickhouse = ["dep:hex", "dep:reqwest", "dep:serde", "dep:sha2"]
-http-websocket = [
-    "dep:futures-util",
+http = [
     "dep:reqwest",
+    "dep:tracing",
+]
+websocket = [
+    "dep:futures-util",
+    "dep:rustls",
     "dep:tokio-tungstenite",
     "dep:tracing",
 ]
 postgresql = [
     "dep:chrono",
+    "dep:hex",
     "dep:postgres-types",
+    "dep:pgwire-replication",
+    "dep:rustls",
+    "dep:rust_decimal",
+    "dep:sha2",
     "dep:tokio-postgres",
+    "dep:tokio-postgres-rustls",
     "dep:uuid",
 ]
 
@@ -47,7 +57,9 @@ futures-util = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 reqwest = { version = "=0.13.4", default-features = false, features = [
     "json",
+    "query",
     "rustls",
+    "stream",
 ], optional = true }
 serde = { workspace = true, optional = true }
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = [
@@ -56,6 +68,7 @@ tokio-tungstenite = { version = "=0.30.0", default-features = false, features = 
 ], optional = true }
 tokio-postgres = { version = "=0.7.18", features = [
     "with-chrono-0_4",
+    "with-serde_json-1",
     "with-uuid-1",
 ], optional = true }
 parquet = { version = "=58.3.0", default-features = false, features = [
@@ -67,6 +80,22 @@ rdkafka = { version = "=0.39.0", default-features = false, features = [
     "cmake-build",
     "libz-static",
     "tokio",
+], optional = true }
+pgwire-replication = { version = "=0.4.0", default-features = false, features = [
+    "scram",
+    "tls-rustls",
+], optional = true }
+rustls = { version = "=0.23.43", default-features = false, features = [
+    "ring",
+    "std",
+], optional = true }
+rust_decimal = { version = "=1.42.1", default-features = false, features = [
+    "db-tokio-postgres",
+    "std",
+], optional = true }
+tokio-postgres-rustls = { version = "=0.14.0", default-features = false, features = [
+    "ring",
+    "webpki-roots",
 ], optional = true }
 serde_json.workspace = true
 tokio.workspace = true

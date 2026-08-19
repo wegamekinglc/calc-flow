@@ -107,6 +107,7 @@ fn manifest_fields() -> CheckpointManifestFields {
                     retention: RetentionClass::Bounded,
                 },
                 pre_commit: None,
+                segments: Vec::new(),
             },
         )]),
     }

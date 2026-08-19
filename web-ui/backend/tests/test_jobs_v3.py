@@ -1,388 +1,375 @@
 from __future__ import annotations
 
+import json
+import queue
+import time
+from pathlib import Path
+
 import pytest
+from calc_flow import ProjectDocument
 from fastapi.testclient import TestClient
 
+import calc_flow_studio.run_manager as run_manager_module
 from calc_flow_studio.app import create_app
+from calc_flow_studio.models import ResourceLimits, RunStatus
+from calc_flow_studio.run_manager import RunManager, RunManagerError
+
+
+def _stream_project(
+    tmp_path: Path, project_id: str = "stream_project"
+) -> dict[str, object]:
+    return {
+        "format_version": 3,
+        "id": project_id,
+        "name": "Stream project",
+        "description": "A project-v3 continuous job",
+        "runtime": {
+            "mode": "stream",
+            "options": {"checkpoint_interval_ms": 60_000},
+        },
+        "graph": {
+            "name": "stream-project",
+            "nodes": [
+                {
+                    "id": "calculate",
+                    "operator": {
+                        "kind": "expression",
+                        "expression": "result = value + 1",
+                    },
+                }
+            ],
+        },
+        "sources": [
+            {
+                "binding": "input",
+                "connector": {
+                    "provider": "calc-flow-connectors",
+                    "name": "file",
+                    "version": "2.0.0",
+                },
+                "options": {
+                    "path": str(tmp_path / "input.json"),
+                    "format": "json",
+                },
+                "watermark": {"policy": "disabled"},
+            }
+        ],
+        "sinks": [
+            {
+                "binding": "output",
+                "connector": {
+                    "provider": "calc-flow-connectors",
+                    "name": "file",
+                    "version": "2.0.0",
+                },
+                "options": {"path": str(tmp_path), "output": "results"},
+                "delivery": "at_least_once",
+            }
+        ],
+        "state": {"root": str(tmp_path / "state"), "retention": 3},
+    }
+
+
+def _batch_project() -> dict[str, object]:
+    return {
+        "format_version": 3,
+        "id": "batch_project",
+        "name": "Batch project",
+        "runtime": {"mode": "batch", "options": {}},
+        "graph": {
+            "name": "batch",
+            "nodes": [
+                {
+                    "id": "calculate",
+                    "operator": {
+                        "kind": "expression",
+                        "expression": "result = value + 1",
+                    },
+                }
+            ],
+        },
+        "data_sources": [
+            {
+                "id": "fixture",
+                "input": "input",
+                "format": "inline_json",
+                "data": [{"value": 1}],
+            }
+        ],
+    }
+
+
+def _controlled_worker(project_json: str, commands: object, output: object) -> None:
+    json.loads(project_json)
+    output.put({"kind": "state", "state": "running"})
+    output.put(
+        {
+            "kind": "progress",
+            "state": "running",
+            "epoch": 0,
+            "watermark": "2026-08-19T00:00:00Z",
+            "throughput_rows": 7,
+            "backpressure_events": 2,
+            "late_rows": 1,
+        }
+    )
+    while True:
+        try:
+            command = commands.get(timeout=1)
+        except queue.Empty:
+            continue
+        if command == "checkpoint":
+            output.put({"kind": "checkpoint", "epoch": 1})
+        elif command == "shutdown":
+            output.put(
+                {
+                    "kind": "terminal",
+                    "state": "completed",
+                    "cause": "graceful_shutdown",
+                }
+            )
+            return
+        elif command == "cancel":
+            output.put(
+                {
+                    "kind": "terminal",
+                    "state": "cancelled",
+                    "cause": "explicit_cancel",
+                }
+            )
+            return
+
+
+def _wait_for_status(
+    manager: RunManager,
+    job_id: str,
+    expected: RunStatus,
+    *,
+    timeout: float = 3,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if manager.get_job(job_id).status is expected:
+            return
+        time.sleep(0.01)
+    raise AssertionError(
+        f"job {job_id} did not reach {expected.value}: "
+        f"{manager.get_job(job_id).model_dump(mode='json')}"
+    )
+
+
+def test_continuous_progress_formats_the_native_aggregate_watermark() -> None:
+    progress = run_manager_module._continuous_progress(
+        {
+            "state": "running",
+            "watermark_micros": 1_787_097_600_123_456,
+            "sources": {},
+            "operators": {},
+            "edges": {},
+            "checkpoint": {},
+        }
+    )
+
+    assert progress["watermark"] == "2026-08-19T00:00:00.123456Z"
 
 
 @pytest.fixture()
-def client(tmp_path):
-    app = create_app(
-        project_directory=tmp_path / "projects",
+def controlled_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RunManager:
+    monkeypatch.setattr(
+        run_manager_module, "_execute_continuous_worker", _controlled_worker
+    )
+    return RunManager(
+        use_processes=False,
         checkpoint_directory=tmp_path / "checkpoints",
     )
-    return TestClient(app)
 
 
-class TestApiPrefixV3:
-    def test_openapi_uses_v3_prefix(self, client):
-        response = client.get("/openapi.json")
-        assert response.status_code == 200
-        spec = response.json()
-        paths = spec["paths"]
-        assert any(p.startswith("/api/v3/") for p in paths)
-        assert not any(p.startswith("/api/v2/") for p in paths)
+def test_openapi_exposes_only_project_v3_and_continuous_job_routes(
+    tmp_path: Path,
+) -> None:
+    with TestClient(create_app(project_directory=tmp_path / "projects")) as client:
+        paths = set(client.get("/openapi.json").json()["paths"])
 
-    def test_catalog_under_v3(self, client):
-        response = client.get("/api/v3/catalog")
-        assert response.status_code == 200
+    expected = {
+        "/api/v3/jobs",
+        "/api/v3/jobs/{job_id}",
+        "/api/v3/jobs/{job_id}/events",
+        "/api/v3/jobs/{job_id}/checkpoint",
+        "/api/v3/jobs/{job_id}/shutdown",
+        "/api/v3/jobs/{job_id}/cancel",
+    }
+    assert expected <= paths
+    assert not any(path.startswith("/api/v2/") for path in paths)
+    assert not any("/runs" in path for path in paths)
+    assert not any(
+        path.endswith("/checkpoint") and "/projects/" in path for path in paths
+    )
 
 
-class TestResourceLimits:
-    def test_returns_defaults(self, client):
+def test_resource_limits_use_exact_byte_contract(tmp_path: Path) -> None:
+    with TestClient(create_app(project_directory=tmp_path / "projects")) as client:
         response = client.get("/api/v3/resource-limits")
-        assert response.status_code == 200
-        limits = response.json()
-        assert limits["max_concurrent_jobs"] == 4
-        assert limits["max_job_memory_mb"] == 1024
-        assert limits["max_global_memory_mb"] == 4096
-        assert limits["max_checkpoint_disk_mb"] == 512
-        assert limits["job_lifecycle"] == "user_explicit_stop"
 
-    def test_appears_in_openapi(self, client):
-        response = client.get("/openapi.json")
-        spec = response.json()
-        assert "/api/v3/resource-limits" in spec["paths"]
+    assert response.status_code == 200
+    assert response.json() == {
+        "max_concurrent_jobs": 4,
+        "max_job_resident_memory_bytes": 1024 * 1024 * 1024,
+        "max_global_resident_memory_bytes": 4 * 1024 * 1024 * 1024,
+        "max_checkpoint_disk_bytes": 512 * 1024 * 1024,
+        "job_lifecycle": "user_explicit_stop",
+    }
 
 
-class TestJobRoutes:
-    def test_list_jobs_empty(self, client):
-        response = client.get("/api/v3/jobs")
-        assert response.status_code == 200
-        assert response.json() == []
-
-    def test_get_missing_job_404(self, client):
-        response = client.get("/api/v3/jobs/missing")
-        assert response.status_code == 404
-
-    def test_checkpoint_missing_job_404(self, client):
-        response = client.post("/api/v3/jobs/missing/checkpoint")
-        assert response.status_code == 404
-
-    def test_shutdown_missing_job_404(self, client):
-        response = client.post("/api/v3/jobs/missing/shutdown")
-        assert response.status_code == 404
-
-    def test_cancel_missing_job_404(self, client):
-        response = client.post("/api/v3/jobs/missing/cancel")
-        assert response.status_code == 404
-
-    def test_all_job_routes_in_openapi(self, client):
-        response = client.get("/openapi.json")
-        spec = response.json()
-        paths = spec["paths"]
-        assert "/api/v3/jobs" in paths
-        assert "/api/v3/jobs/{run_id}" in paths
-        assert "/api/v3/jobs/{run_id}/checkpoint" in paths
-        assert "/api/v3/jobs/{run_id}/shutdown" in paths
-        assert "/api/v3/jobs/{run_id}/cancel" in paths
-        assert "/api/v3/jobs/{run_id}/events" in paths
-
-
-class TestProjectRoutesStillUnderV3:
-    def test_projects_list(self, client):
-        response = client.get("/api/v3/projects")
-        assert response.status_code == 200
-
-
-class TestJobLifecycleWithRun:
-    """Exercises the job surface against a real RunManager."""
-
-    def _create_project(self, client):
-        project = {
-            "format_version": 2,
-            "id": "p1",
-            "name": "test",
-            "description": "",
-            "pipeline": {
-                "name": "pipe",
-                "nodes": [
-                    {
-                        "id": "n1",
-                        "operator": {
-                            "kind": "expression",
-                            "expression": "x = value + 1",
-                        },
-                    }
-                ],
-            },
-            "data_sources": [
-                {
-                    "id": "sample",
-                    "input": "input",
-                    "format": "inline_json",
-                    "data": [{"value": 1}],
-                }
-            ],
-        }
-        create = client.post("/api/v3/projects", json=project)
-        assert create.status_code == 201, create.text
-        return create.json()
-
-    def test_list_jobs_with_created_project(self, client):
-        self._create_project(client)
-        jobs = client.get("/api/v3/jobs")
-        assert jobs.status_code == 200
-        assert isinstance(jobs.json(), list)
-
-    def test_get_job_with_created_project(self, client):
-        self._create_project(client)
-        job = client.get("/api/v3/jobs/missing")
-        assert job.status_code == 404
-
-    def test_checkpoint_missing_422(self, client):
-        self._create_project(client)
-        response = client.post("/api/v3/jobs/missing/checkpoint")
-        assert response.status_code == 404
-
-    def test_shutdown_missing_404(self, client):
-        self._create_project(client)
-        response = client.post("/api/v3/jobs/missing/shutdown")
-        assert response.status_code == 404
-
-    def test_cancel_missing_404(self, client):
-        self._create_project(client)
-        response = client.post("/api/v3/jobs/missing/cancel")
-        assert response.status_code == 404
-
-
-class FakeJobManager:
-    """A minimal RunManager that owns one running job."""
-
-    def __init__(self) -> None:
-        from datetime import UTC, datetime
-
-        from calc_flow_studio.models import RunResponse, RunStatus
-
-        self.run = RunResponse.model_validate(
-            {
-                "id": "job_1",
-                "project_id": "project_alpha",
-                "status": RunStatus.RUNNING,
-                "created_at": datetime(2026, 1, 1, tzinfo=UTC),
-                "started_at": datetime(2026, 1, 1, tzinfo=UTC),
-            }
+def test_job_lifecycle_checkpoint_sse_and_reconnect_are_payload_free(
+    tmp_path: Path,
+    controlled_manager: RunManager,
+) -> None:
+    app = create_app(
+        project_directory=tmp_path / "projects",
+        run_manager=controlled_manager,
+    )
+    with TestClient(app) as client:
+        created = client.post("/api/v3/projects", json=_stream_project(tmp_path))
+        started = client.post("/api/v3/jobs", json={"project_id": "stream_project"})
+        job_id = started.json()["id"]
+        checkpointed = client.post(f"/api/v3/jobs/{job_id}/checkpoint")
+        stopped = client.post(f"/api/v3/jobs/{job_id}/shutdown")
+        _wait_for_status(controlled_manager, job_id, RunStatus.COMPLETED)
+        fetched = client.get(f"/api/v3/jobs/{job_id}")
+        listed = client.get("/api/v3/jobs")
+        events = client.get(
+            f"/api/v3/jobs/{job_id}/events", headers={"Last-Event-ID": "0"}
         )
-        self.checkpoint_calls: list[str] = []
-        self.shutdown_calls: list[str] = []
-        self.cancel_calls: list[str] = []
 
-    def capabilities(self):
-        raise NotImplementedError
-
-    def submit(self, project, request):
-        raise NotImplementedError
-
-    def get(self, run_id):
-        if run_id != "job_1":
-            raise KeyError(run_id)
-        return self.run
-
-    def wait_for_events(self, run_id, *, after_sequence, timeout):
-        raise NotImplementedError
-
-    def cancel(self, run_id):
-        if run_id != "job_1":
-            raise KeyError(run_id)
-        self.cancel_calls.append(run_id)
-        return self.run
-
-    def shutdown(self):
-        pass
-
-    def list_jobs(self):
-        return (self.run,)
-
-    def trigger_checkpoint(self, run_id):
-        if run_id != "job_1":
-            raise KeyError(run_id)
-        self.checkpoint_calls.append(run_id)
-        return self.run
-
-    def shutdown_job(self, run_id):
-        if run_id != "job_1":
-            raise KeyError(run_id)
-        self.shutdown_calls.append(run_id)
-        return self.run
-
-    def resource_limits(self):
-        from calc_flow_studio.models import ResourceLimits
-
-        return ResourceLimits()
+    assert created.status_code == 201
+    assert started.status_code == 202
+    assert checkpointed.status_code == 200
+    assert stopped.status_code == 200
+    assert fetched.json()["status"] == "completed"
+    assert listed.json()[0]["id"] == job_id
+    assert events.status_code == 200
+    assert events.text.startswith("retry: 500\n\n")
+    assert "event: progress" in events.text
+    assert "event: checkpoint" in events.text
+    assert "event: terminal" in events.text
+    assert '"throughput_rows":7' in events.text
+    assert '"backpressure_events":2' in events.text
+    assert '"late_rows":1' in events.text
+    for forbidden in ("password", "secret", "raw_payload", "value + 1"):
+        assert forbidden not in events.text
 
 
-class TestJobRoutesWithFakeManager:
-    def _client(self):
-        from fastapi.testclient import TestClient
+def test_cancel_produces_a_persistent_terminal_status(
+    tmp_path: Path,
+    controlled_manager: RunManager,
+) -> None:
+    project = ProjectDocument.model_validate(_stream_project(tmp_path))
+    started = controlled_manager.submit_job(project)
 
-        from calc_flow_studio.app import create_app
+    controlled_manager.cancel_job(started.id)
+    _wait_for_status(controlled_manager, started.id, RunStatus.CANCELLED)
 
-        app = create_app(run_manager=FakeJobManager())
-        return TestClient(app)
-
-    def test_list_returns_running_job(self):
-        client = self._client()
-        jobs = client.get("/api/v3/jobs")
-        assert jobs.status_code == 200
-        data = jobs.json()
-        assert len(data) == 1
-        assert data[0]["id"] == "job_1"
-
-    def test_get_returns_running_job(self):
-        client = self._client()
-        job = client.get("/api/v3/jobs/job_1")
-        assert job.status_code == 200
-        assert job.json()["id"] == "job_1"
-
-    def test_checkpoint_triggers(self):
-        client = self._client()
-        response = client.post("/api/v3/jobs/job_1/checkpoint")
-        assert response.status_code == 200
-
-    def test_shutdown_stops(self):
-        client = self._client()
-        response = client.post("/api/v3/jobs/job_1/shutdown")
-        assert response.status_code == 200
-
-    def test_cancel_stops(self):
-        client = self._client()
-        response = client.post("/api/v3/jobs/job_1/cancel")
-        assert response.status_code == 200
-
-    def test_resource_limits_returns_model(self):
-        client = self._client()
-        response = client.get("/api/v3/resource-limits")
-        assert response.status_code == 200
-        assert response.json()["job_lifecycle"] == "user_explicit_stop"
+    assert controlled_manager.get_job(started.id).status is RunStatus.CANCELLED
+    assert controlled_manager.list_jobs()[0].id == started.id
 
 
-class TestRealManagerJobSurface:
-    """Exercises the real RunManager's M6-09 methods directly."""
+def test_batch_projects_cannot_start_continuous_jobs(tmp_path: Path) -> None:
+    app = create_app(project_directory=tmp_path / "projects")
+    with TestClient(app) as client:
+        assert client.post("/api/v3/projects", json=_batch_project()).status_code == 201
+        response = client.post("/api/v3/jobs", json={"project_id": "batch_project"})
 
-    def _manager(self):
-        from calc_flow_studio.run_manager import RunManager
-
-        return RunManager(use_processes=False)
-
-    def test_list_jobs_empty(self):
-        manager = self._manager()
-        assert manager.list_jobs() == ()
-
-    def test_resource_limits_returns_defaults(self):
-        from calc_flow_studio.models import ResourceLimits
-
-        manager = self._manager()
-        limits = manager.resource_limits()
-        assert isinstance(limits, ResourceLimits)
-        assert limits.max_concurrent_jobs == 4
-        assert limits.job_lifecycle == "user_explicit_stop"
-
-    def test_checkpoint_missing_raises_key_error(self):
-        manager = self._manager()
-        with pytest.raises(KeyError):
-            manager.trigger_checkpoint("missing")
-
-    def test_shutdown_missing_raises_key_error(self):
-        manager = self._manager()
-        with pytest.raises(KeyError):
-            manager.shutdown_job("missing")
+    assert response.status_code == 422
+    assert "runtime.mode 'stream'" in response.json()["detail"]
 
 
-class TestRealManagerJobLifecycle:
-    """Exercises the real RunManager's checkpoint and shutdown on a
-    submitted run."""
+def test_concurrency_limit_is_enforced_before_starting_another_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        run_manager_module, "_execute_continuous_worker", _controlled_worker
+    )
+    manager = RunManager(
+        use_processes=False,
+        checkpoint_directory=tmp_path / "checkpoints",
+        resource_limits=ResourceLimits(max_concurrent_jobs=1),
+    )
+    project = ProjectDocument.model_validate(_stream_project(tmp_path))
+    first = manager.submit_job(project)
 
-    def _submit(self, manager):
-        from calc_flow import ProjectDocument
+    with pytest.raises(RunManagerError, match="max_concurrent_jobs"):
+        manager.submit_job(project)
 
-        project = ProjectDocument.model_validate(
-            {
-                "format_version": 2,
-                "id": "p1",
-                "name": "test",
-                "pipeline": {
-                    "name": "pipe",
-                    "nodes": [
-                        {
-                            "id": "n1",
-                            "operator": {
-                                "kind": "expression",
-                                "expression": "x = value",
-                            },
-                        }
-                    ],
-                },
-                "data_sources": [
-                    {
-                        "id": "s",
-                        "input": "input",
-                        "format": "inline_json",
-                        "data": [{"value": 1}],
-                    }
-                ],
-            }
+    manager.cancel_job(first.id)
+    _wait_for_status(manager, first.id, RunStatus.CANCELLED)
+
+
+def test_checkpoint_disk_limit_becomes_a_typed_terminal_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    limit = 16 * 1024 * 1024
+
+    def oversized_worker(project_json: str, _commands: object, output: object) -> None:
+        document = json.loads(project_json)
+        state = Path(document["state"]["root"])
+        state.mkdir(parents=True, exist_ok=True)
+        with (state / "oversized").open("wb") as file:
+            file.truncate(limit + 1)
+        output.put({"kind": "state", "state": "running"})
+        time.sleep(1)
+
+    monkeypatch.setattr(
+        run_manager_module, "_execute_continuous_worker", oversized_worker
+    )
+    manager = RunManager(
+        use_processes=False,
+        checkpoint_directory=tmp_path / "checkpoints",
+        resource_limits=ResourceLimits(max_checkpoint_disk_bytes=limit),
+    )
+    started = manager.submit_job(
+        ProjectDocument.model_validate(_stream_project(tmp_path))
+    )
+
+    _wait_for_status(manager, started.id, RunStatus.FAILED)
+    failed = manager.get_job(started.id).model_dump(mode="json")
+
+    assert failed["error_code"] == "job_limit_exceeded"
+    assert failed["error"] == "job_limit_exceeded: max_checkpoint_disk_bytes"
+
+
+def test_worker_death_without_terminal_event_is_a_typed_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def dying_worker(_project_json: str, _commands: object, output: object) -> None:
+        output.put({"kind": "state", "state": "running"})
+
+    monkeypatch.setattr(run_manager_module, "_execute_continuous_worker", dying_worker)
+    manager = RunManager(
+        use_processes=False,
+        checkpoint_directory=tmp_path / "checkpoints",
+    )
+    started = manager.submit_job(
+        ProjectDocument.model_validate(_stream_project(tmp_path))
+    )
+
+    _wait_for_status(manager, started.id, RunStatus.FAILED)
+    failed = manager.get_job(started.id).model_dump(mode="json")
+
+    assert failed["error_code"] == "worker_failed"
+    assert failed["error"] == "worker exited without a terminal event"
+
+
+def test_missing_job_operations_return_not_found(tmp_path: Path) -> None:
+    with TestClient(create_app(project_directory=tmp_path / "projects")) as client:
+        responses = (
+            client.get("/api/v3/jobs/missing"),
+            client.get("/api/v3/jobs/missing/events"),
+            client.post("/api/v3/jobs/missing/checkpoint"),
+            client.post("/api/v3/jobs/missing/shutdown"),
+            client.post("/api/v3/jobs/missing/cancel"),
         )
-        request = {
-            "inputs": {"input": {"format": "columns", "data": {"value": [1, 2]}}},
-            "options": {"timeout_seconds": 5},
-        }
-        from calc_flow_studio.models import RunRequest
 
-        return manager.submit(project, RunRequest.model_validate(request))
-
-    def test_list_contains_submitted_job(self):
-        manager = self._submit_manager()
-        jobs = manager.list_jobs()
-        assert len(jobs) >= 1
-
-    def _submit_manager(self):
-        from calc_flow_studio.run_manager import RunManager
-
-        manager = RunManager(use_processes=False)
-        self._submit(manager)
-        return manager
-
-
-class TestShutdownJobLifecycle:
-    def test_shutdown_real_submitted_job(self):
-        from calc_flow_studio.run_manager import RunManager
-
-        manager = RunManager(use_processes=False)
-        project = {
-            "format_version": 2,
-            "id": "p1",
-            "name": "test",
-            "pipeline": {
-                "name": "pipe",
-                "nodes": [
-                    {
-                        "id": "n1",
-                        "operator": {"kind": "expression", "expression": "x = value"},
-                    }
-                ],
-            },
-            "data_sources": [
-                {
-                    "id": "s",
-                    "input": "input",
-                    "format": "inline_json",
-                    "data": [{"value": 1}],
-                }
-            ],
-        }
-        from calc_flow import ProjectDocument
-
-        from calc_flow_studio.models import RunRequest
-
-        doc = ProjectDocument.model_validate(project)
-        request = RunRequest.model_validate(
-            {
-                "inputs": {"input": {"format": "columns", "data": {"value": [1]}}},
-                "options": {"timeout_seconds": 5},
-            }
-        )
-        manager.submit(doc, request)
-        run_id = manager.list_jobs()[0].model_dump()["id"]
-        response = manager.shutdown_job(run_id)
-        assert response.model_dump()["id"] == run_id
+    assert all(response.status_code == 404 for response in responses)

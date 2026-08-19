@@ -558,7 +558,9 @@ def test_array_expression_cache_preserves_runtime_intermediate_validation(
     try:
         runtime = Runtime()
         register_numpy(runtime)
-        plan = _external("cached_validation", "numpy", "sum(x) + 1").compile(runtime)
+        plan = _external("cached_validation", "numpy", "sum(x) + 1").compile_batch(
+            runtime
+        )
         batch = Batch.from_array(np.array([1]), backend="numpy")
         before_execution = cache.cache_info()
 
@@ -581,7 +583,7 @@ def test_numpy_provider_owns_read_only_arrays() -> None:
     source = np.array([1.0, 2.0])
     batch = Batch.from_array(source, backend="numpy")
     source[0] = 99
-    plan = _external("arrays", "numpy", "x * 2").compile(runtime)
+    plan = _external("arrays", "numpy", "x * 2").compile_batch(runtime)
 
     output = plan.execute({"input": batch}).outputs["output"].array
 
@@ -644,7 +646,7 @@ def test_numpy_table_matmul_multiplies_selected_arrow_columns() -> None:
             backend="numpy",
             columns=("quantity", "unit_price"),
         )
-        .compile(runtime)
+        .compile_batch(runtime)
     )
 
     run = plan.execute(
@@ -693,7 +695,7 @@ def test_numpy_table_matmul_accepts_primitive_arrow_numeric_dtypes(
     plan = (
         PipelineBuilder(f"numpy-table-{arrow_type}")
         .table_matmul("multiply", backend="numpy", columns=("value",))
-        .compile(runtime)
+        .compile_batch(runtime)
     )
 
     output = plan.execute(
@@ -1063,7 +1065,7 @@ def test_jax_table_matmul_rejects_result_dtype_narrowing_before_adoption(
     plan = (
         PipelineBuilder("jax-result-dtype")
         .table_matmul("multiply", backend="jax", columns=("value",))
-        .compile(runtime)
+        .compile_batch(runtime)
     )
     narrowed_result = jnp.asarray([[2.0]], dtype=jnp.float16)
     original_from_owned = Batch._from_owned_array
@@ -1143,7 +1145,7 @@ def test_numpy_table_matmul_honors_copy_and_ownership_ceiling(
             backend="numpy",
             columns=("quantity", "unit_price"),
         )
-        .compile(runtime)
+        .compile_batch(runtime)
     )
 
     def reject_owned_numpy(*_args: object, **_kwargs: object) -> None:
@@ -1270,7 +1272,7 @@ def test_table_matmul_registration_and_fingerprint_are_deterministic(
             backend=backend,
             columns=("quantity", "unit_price"),
         )
-        .compile(runtime)
+        .compile_batch(runtime)
         for runtime in runtimes
     ]
     assert plans[0].fingerprint == plans[1].fingerprint
@@ -1292,7 +1294,7 @@ def test_jax_table_matmul_stays_on_jax() -> None:
             backend="jax",
             columns=("quantity", "unit_price"),
         )
-        .compile(runtime)
+        .compile_batch(runtime)
     )
     table = Batch.from_pyarrow(
         pa.table(
@@ -1334,7 +1336,7 @@ def test_jax_table_matmul_preserves_device_identity_and_copy_ceiling(
     plan = (
         PipelineBuilder("jax-copy-ceiling")
         .table_matmul("multiply", backend="jax", columns=("a", "b"))
-        .compile(runtime)
+        .compile_batch(runtime)
     )
     original_asarray = np.asarray
     original_new_owned = Batch._new_owned_numpy
@@ -1428,7 +1430,7 @@ register_jax(runtime)
 plan = (
     PipelineBuilder("jax-table-matmul-x64")
     .table_matmul("multiply", backend="jax", columns=("value",))
-    .compile(runtime)
+    .compile_batch(runtime)
 )
 weights = Batch.from_array(
     jnp.asarray([[2.0]], dtype=jnp.float64),
@@ -1463,7 +1465,7 @@ assert output.array.device == weights.array.device
 
 def test_missing_python_provider_fails_during_compile() -> None:
     with pytest.raises(Exception, match="provider numpy:expression@1 is unavailable"):
-        _external("arrays", "numpy", "x + 1").compile(Runtime())
+        _external("arrays", "numpy", "x + 1").compile_batch(Runtime())
 
 
 @pytest.mark.parametrize(
@@ -1483,7 +1485,7 @@ def test_missing_python_provider_fails_during_compile() -> None:
 )
 def test_array_expression_rejects_unsafe_syntax(expression: str) -> None:
     with pytest.raises(ValueError, match="array expression"):
-        _external("unsafe", "numpy", expression).compile()
+        _external("unsafe", "numpy", expression).compile_batch()
 
 
 def test_array_expression_enforces_node_and_depth_limits() -> None:
@@ -1491,9 +1493,9 @@ def test_array_expression_enforces_node_and_depth_limits() -> None:
     too_deep = "-" * 40 + "x"
 
     with pytest.raises(ValueError, match="node limit"):
-        _external("large", "numpy", too_many_nodes).compile()
+        _external("large", "numpy", too_many_nodes).compile_batch()
     with pytest.raises(ValueError, match="depth limit"):
-        _external("deep", "numpy", too_deep).compile()
+        _external("deep", "numpy", too_deep).compile_batch()
 
 
 @pytest.mark.parametrize(
@@ -1509,7 +1511,7 @@ def test_array_expression_enforces_literal_work_limits(
     expression: str, message: str
 ) -> None:
     with pytest.raises(ValueError, match=message):
-        _external("bounded", "numpy", expression).compile()
+        _external("bounded", "numpy", expression).compile_batch()
 
 
 @pytest.mark.parametrize(
@@ -1525,7 +1527,7 @@ def test_array_expression_supports_bounded_literal_exponents(
 ) -> None:
     runtime = Runtime()
     register_numpy(runtime)
-    plan = _external("bounded", "numpy", expression).compile(runtime)
+    plan = _external("bounded", "numpy", expression).compile_batch(runtime)
 
     output = plan.execute(
         {"input": Batch.from_array(np.array([2.0, 4.0]), backend="numpy")}
@@ -1550,7 +1552,7 @@ def test_array_expression_validates_function_arguments(
     expression: str, message: str
 ) -> None:
     with pytest.raises(ValueError, match=message):
-        _external("invalid", "numpy", expression).compile()
+        _external("invalid", "numpy", expression).compile_batch()
 
 
 @pytest.mark.parametrize(
@@ -1569,7 +1571,7 @@ def test_numpy_provider_rejects_inferred_reshape_limits(
 ) -> None:
     runtime = Runtime()
     register_numpy(runtime)
-    plan = _external("reshape_limit", "numpy", expression).compile(runtime)
+    plan = _external("reshape_limit", "numpy", expression).compile_batch(runtime)
     source = np.zeros(source_shape, dtype=np.uint8)
 
     with pytest.raises(ProviderError, match=message):
@@ -1593,7 +1595,7 @@ def test_jax_provider_rejects_inferred_reshape_limits(
     jnp = pytest.importorskip("jax.numpy")
     runtime = Runtime()
     register_jax(runtime)
-    plan = _external("reshape_limit", "jax", expression).compile(runtime)
+    plan = _external("reshape_limit", "jax", expression).compile_batch(runtime)
     source = jnp.zeros(source_shape, dtype=jnp.uint8)
 
     with pytest.raises(ProviderError, match=message):
@@ -1617,7 +1619,7 @@ def test_inferred_reshape_accepts_exact_dimension_and_element_limits(
     namespace: Any = np if backend == "numpy" else pytest.importorskip("jax.numpy")
     runtime = Runtime()
     {"numpy": register_numpy, "jax": register_jax}[backend](runtime)
-    plan = _external("reshape_boundary", backend, expression).compile(runtime)
+    plan = _external("reshape_boundary", backend, expression).compile_batch(runtime)
     source = namespace.zeros(source_shape, dtype=namespace.uint8)
 
     output = plan.execute({"input": Batch.from_array(source, backend=backend)}).outputs[
@@ -1641,7 +1643,7 @@ def test_expression_rejects_broadcast_output_above_operation_limit(
     namespace: Any = np if backend == "numpy" else pytest.importorskip("jax.numpy")
     runtime = Runtime()
     {"numpy": register_numpy, "jax": register_jax}[backend](runtime)
-    plan = _external("broadcast_limit", backend, expression).compile(runtime)
+    plan = _external("broadcast_limit", backend, expression).compile_batch(runtime)
     source = namespace.zeros(elements, dtype=namespace.uint8)
 
     with pytest.raises(
@@ -1661,7 +1663,7 @@ def test_expression_rejects_matmul_output_above_operation_limit_before_allocatio
         "matmul_limit",
         backend,
         "x @ transpose(x)",
-    ).compile(runtime)
+    ).compile_batch(runtime)
     source = namespace.zeros((3163, 1), dtype=namespace.uint8)
 
     def reject_matmul(*_arguments: object) -> object:
@@ -1701,7 +1703,7 @@ def test_expression_accepts_operation_output_at_exact_limit(backend: str) -> Non
     namespace: Any = np if backend == "numpy" else pytest.importorskip("jax.numpy")
     runtime = Runtime()
     {"numpy": register_numpy, "jax": register_jax}[backend](runtime)
-    plan = _external("operation_boundary", backend, "x + 1").compile(runtime)
+    plan = _external("operation_boundary", backend, "x + 1").compile_batch(runtime)
     source = namespace.zeros(10_000_000, dtype=namespace.uint8)
 
     output = plan.execute({"input": Batch.from_array(source, backend=backend)}).outputs[
@@ -1722,7 +1724,7 @@ def test_expression_accepts_broadcast_output_below_operation_limit(
         "broadcast_boundary",
         backend,
         "reshape(x, (3162, 1)) * reshape(x, (1, 3162))",
-    ).compile(runtime)
+    ).compile_batch(runtime)
     source = namespace.zeros(3162, dtype=namespace.uint8)
 
     output = plan.execute({"input": Batch.from_array(source, backend=backend)}).outputs[
@@ -1739,7 +1741,7 @@ def test_expression_reduction_accepts_input_above_operation_limit(
     namespace: Any = np if backend == "numpy" else pytest.importorskip("jax.numpy")
     runtime = Runtime()
     {"numpy": register_numpy, "jax": register_jax}[backend](runtime)
-    plan = _external("large_input_reduction", backend, "sum(x)").compile(runtime)
+    plan = _external("large_input_reduction", backend, "sum(x)").compile_batch(runtime)
     source = namespace.ones(10_000_001, dtype=namespace.uint8)
 
     output = plan.execute({"input": Batch.from_array(source, backend=backend)}).outputs[
@@ -1754,7 +1756,7 @@ def test_reshape_to_empty_shape_preserves_single_element(backend: str) -> None:
     namespace: Any = np if backend == "numpy" else pytest.importorskip("jax.numpy")
     runtime = Runtime()
     {"numpy": register_numpy, "jax": register_jax}[backend](runtime)
-    plan = _external("reshape_scalar", backend, "reshape(x, ())").compile(runtime)
+    plan = _external("reshape_scalar", backend, "reshape(x, ())").compile_batch(runtime)
     source = namespace.asarray([5.0])
 
     output = plan.execute({"input": Batch.from_array(source, backend=backend)}).outputs[
@@ -1777,7 +1779,7 @@ def test_reshape_with_zero_dimension_and_inferred_axis_is_rejected_during_compil
     with pytest.raises(
         ValueError, match="reshape cannot combine a zero dimension with -1"
     ):
-        _external("reshape_zero", backend, "reshape(x, (0, -1))").compile(runtime)
+        _external("reshape_zero", backend, "reshape(x, (0, -1))").compile_batch(runtime)
 
 
 def test_numpy_provider_supports_bounded_array_operations() -> None:
@@ -1785,9 +1787,9 @@ def test_numpy_provider_supports_bounded_array_operations() -> None:
     register_numpy(runtime)
     source = np.arange(6).reshape(2, 3)
 
-    reshaped = _external("reshape", "numpy", "reshape(transpose(x), (6,))").compile(
-        runtime
-    )
+    reshaped = _external(
+        "reshape", "numpy", "reshape(transpose(x), (6,))"
+    ).compile_batch(runtime)
     output = reshaped.execute(
         {"input": Batch.from_array(source, backend="numpy")}
     ).outputs["output"]
@@ -1823,7 +1825,7 @@ def test_numpy_batches_accept_array_api_numeric_and_bool_dtypes(
     register_numpy(runtime)
     output = (
         _external("dtype", "numpy", "x")
-        .compile(runtime)
+        .compile_batch(runtime)
         .execute({"input": batch})
         .outputs["output"]
     )
@@ -1860,7 +1862,7 @@ def test_numpy_batches_accept_semantically_equivalent_dtype_aliases(
     register_numpy(runtime)
     output = (
         _external("dtype_alias", "numpy", "x")
-        .compile(runtime)
+        .compile_batch(runtime)
         .execute({"input": batch})
         .outputs["output"]
     )
@@ -1871,7 +1873,7 @@ def test_numpy_batches_accept_semantically_equivalent_dtype_aliases(
 def test_numpy_provider_accepts_bool_scalar_results() -> None:
     runtime = Runtime()
     register_numpy(runtime)
-    plan = _external("bool_scalar", "numpy", "max(x)").compile(runtime)
+    plan = _external("bool_scalar", "numpy", "max(x)").compile_batch(runtime)
 
     output = plan.execute(
         {"input": Batch.from_array(np.array([False, True]), backend="numpy")}
@@ -1943,7 +1945,7 @@ def test_numpy_intermediate_is_rejected_before_dispatching_magic_methods(
     monkeypatch.setattr(np, "sum", lambda _value: np.array([Magic()], dtype=object))
     runtime = Runtime()
     register_numpy(runtime)
-    plan = _external("object_output", "numpy", "sum(x) + 1").compile(runtime)
+    plan = _external("object_output", "numpy", "sum(x) + 1").compile_batch(runtime)
 
     with pytest.raises(ProviderError, match="NumPy Array API dtype"):
         plan.execute({"input": Batch.from_array(np.array([1]), backend="numpy")})
@@ -1956,7 +1958,7 @@ def test_numpy_intermediate_rejects_unbounded_python_integer(
     monkeypatch.setattr(np, "sum", lambda _value: 2**64)
     runtime = Runtime()
     register_numpy(runtime)
-    plan = _external("integer_output", "numpy", "sum(x) + 1").compile(runtime)
+    plan = _external("integer_output", "numpy", "sum(x) + 1").compile_batch(runtime)
 
     with pytest.raises(ProviderError, match="integer constant magnitude limit"):
         plan.execute({"input": Batch.from_array(np.array([1]), backend="numpy")})
@@ -1965,7 +1967,7 @@ def test_numpy_intermediate_rejects_unbounded_python_integer(
 def test_numpy_provider_preserves_metadata() -> None:
     runtime = Runtime()
     register_numpy(runtime)
-    plan = _external("metadata", "numpy", "mean(x)").compile(runtime)
+    plan = _external("metadata", "numpy", "mean(x)").compile_batch(runtime)
 
     output = plan.execute(
         {
@@ -1985,7 +1987,7 @@ def test_numpy_provider_preserves_metadata() -> None:
 def test_provider_rejects_backend_mismatches_and_table_batches() -> None:
     runtime = Runtime()
     register_numpy(runtime)
-    plan = _external("backend", "numpy", "x + 1").compile(runtime)
+    plan = _external("backend", "numpy", "x + 1").compile_batch(runtime)
 
     with pytest.raises(ProviderError, match="requires backend numpy"):
         plan.execute({"input": Batch._from_external(object(), "other", 1, {})})
@@ -2000,7 +2002,7 @@ def test_custom_array_udf_references_are_rejected_explicitly() -> None:
             "numpy",
             "custom(x)",
             options={"udfs": [{"name": "custom", "version": "1"}]},
-        ).compile()
+        ).compile_batch()
 
 
 def test_callback_failure_leaves_plan_reusable() -> None:
@@ -2027,7 +2029,7 @@ def test_callback_failure_leaves_plan_reusable() -> None:
     plan = (
         PipelineBuilder("reuse")
         .external("calc", "test", "increment", "1", {"increment": 1})
-        .compile(runtime)
+        .compile_batch(runtime)
     )
     batch = Batch.from_array(np.array([1]), backend="numpy")
 
@@ -2067,7 +2069,7 @@ def test_jax_provider_retains_jax_arrays() -> None:
     runtime = Runtime()
     register_jax(runtime)
     source = jnp.array([1.0, 2.0])
-    plan = _external("jax", "jax", "x ** 2").compile(runtime)
+    plan = _external("jax", "jax", "x ** 2").compile_batch(runtime)
 
     output = (
         plan.execute({"input": Batch.from_array(source, backend="jax")})
@@ -2084,7 +2086,7 @@ def test_jax_provider_keeps_constant_results_on_jax() -> None:
     jnp = pytest.importorskip("jax.numpy")
     runtime = Runtime()
     register_jax(runtime)
-    plan = _external("jax_constant", "jax", "2").compile(runtime)
+    plan = _external("jax_constant", "jax", "2").compile_batch(runtime)
 
     output = (
         plan.execute({"input": Batch.from_array(jnp.array([1.0]), backend="jax")})
@@ -2101,7 +2103,7 @@ def test_jax_provider_bounds_nested_integer_power_intermediates() -> None:
     jnp = pytest.importorskip("jax.numpy")
     runtime = Runtime()
     register_jax(runtime)
-    plan = _external("jax_bounded", "jax", "(2 ** 64) ** 2").compile(runtime)
+    plan = _external("jax_bounded", "jax", "(2 ** 64) ** 2").compile_batch(runtime)
 
     with pytest.raises(ProviderError, match="integer constant magnitude limit"):
         plan.execute({"input": Batch.from_array(jnp.array([1.0]), backend="jax")})
@@ -2129,9 +2131,9 @@ def test_registration_does_not_mutate_options() -> None:
     runtime.register_provider("copy", "identity", "1", Callback())
     options: dict[str, object] = {"value": 1}
 
-    PipelineBuilder("copy").external("calc", "copy", "identity", "1", options).compile(
-        runtime
-    )
+    PipelineBuilder("copy").external(
+        "calc", "copy", "identity", "1", options
+    ).compile_batch(runtime)
 
     assert options == {"value": 1}
 
@@ -2161,7 +2163,7 @@ def test_external_provider_identity_and_nested_options_change_fingerprints() -> 
     fingerprints = {
         PipelineBuilder("fingerprints")
         .external("calc", provider, name, version, options)
-        .compile(runtime)
+        .compile_batch(runtime)
         .execute({"input": batch})
         .metadata["pipeline_fingerprint"]
         for provider, name, version, options in configurations

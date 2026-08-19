@@ -77,10 +77,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      - name: Enable logical replication for CDC tests
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$POSTGRES_CONTAINER" psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "ALTER SYSTEM SET wal_level = 'logical'" \
+            -c "ALTER SYSTEM SET max_replication_slots = 10" \
+            -c "ALTER SYSTEM SET max_wal_senders = 10"
+          docker restart "$POSTGRES_CONTAINER"
+          for attempt in $(seq 1 60); do
+            if docker exec "$POSTGRES_CONTAINER" pg_isready -U postgres -d postgres; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "PostgreSQL never became ready after enabling logical replication" >&2
+          exit 1
       - name: Run gated PostgreSQL connector tests
         run: >-
           cargo test -p calc-flow-connectors --features postgresql
-          --test postgresql_connector -- --ignored --test-threads=1
+          --test postgresql_connector --test postgresql_cdc
+          -- --ignored --test-threads=1
 
   connector-containers-ch:
     name: Connector containers (ClickHouse)
@@ -278,7 +296,7 @@ jobs:
           enable-cache: true
       - name: Build wheel and source distribution
         run: |
-          python -m unittest scripts.test_run_rust_tests scripts.test_inspect_wheel scripts.test_release_config
+          python -m unittest scripts.test_run_rust_tests scripts.test_inspect_wheel scripts.test_release_config scripts.test_verify_perf_gates scripts.test_verify_security_gates
           uv build
           python scripts/inspect_wheel.py core-wheel dist/calc_flow-*.whl
           python scripts/inspect_wheel.py sdist dist/calc_flow-*.tar.gz
@@ -518,14 +536,8 @@ jobs:
           cargo clean --target-dir "$FROZEN_ALLOCATION_HARNESS_TARGET_DIR"
           cargo clean --target-dir "$FROZEN_ALLOCATION_CANDIDATE_TARGET_DIR"
       - name: Enforce Rust core line coverage
-        # The kafka transport's runtime surface needs a broker and is
-        # proven by the connector-containers leg; per the M6 delta's
-        # per-connector coverage clause its broker-bound module is
-        # omitted from the line gate while its offline logic stays
-        # measured.
         run: >-
           cargo llvm-cov --workspace --all-features --fail-under-lines 90
-          --ignore-filename-regex 'src/(kafka|postgresql|clickhouse(_sink)?|http|websocket|database_types)\.rs'
           --lcov --output-path rust-lcov.info
       - name: Upload Rust coverage report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

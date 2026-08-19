@@ -1,37 +1,31 @@
 import { useEffect } from 'react';
 
 import { api, ApiContractError } from '../api/client';
-import type { RunResponse } from '../types';
+import type { JobEvent, JobResponse } from '../types';
 
-const terminalStatuses = new Set<RunResponse['status']>([
+const terminalStatuses = new Set<JobResponse['status']>([
   'completed',
   'failed',
   'cancelled',
-  'timed_out',
 ]);
 
-const eventTypes = [
-  'created',
-  'running',
-  'completed',
-  'failed',
-  'cancelled',
-  'timed_out',
-];
+const eventTypes = ['state', 'progress', 'checkpoint', 'terminal'];
 
-export function useRunEvents(
-  runId: string | null,
-  onUpdate: (run: RunResponse) => void,
+export function useJobEvents(
+  jobId: string | null,
+  onUpdate: (job: JobResponse) => void,
+  onEvent: (event: JobEvent) => void,
   onError: (error: ApiContractError) => void,
 ): void {
   useEffect(() => {
-    if (!runId) return;
+    if (!jobId) return;
 
     let active = true;
     let closed = false;
     let consecutiveErrors = 0;
+    let refreshRevision = 0;
     let pollTimer: number | undefined;
-    const source = new EventSource(`/api/v3/runs/${runId}/events`);
+    const source = new EventSource(`/api/v3/jobs/${jobId}/events`);
 
     const closeSource = () => {
       if (closed) return;
@@ -50,16 +44,17 @@ export function useRunEvents(
 
     const refresh = async (): Promise<boolean> => {
       if (!active) return true;
+      const revision = ++refreshRevision;
       try {
-        const current = await api.run(runId);
-        if (!active) return true;
+        const current = await api.job(jobId);
+        if (!active || revision !== refreshRevision) return !active;
         onUpdate(current);
         if (terminalStatuses.has(current.status)) {
           stop();
           return true;
         }
       } catch (error) {
-        if (!active) return true;
+        if (!active || revision !== refreshRevision) return !active;
         if (error instanceof ApiContractError) {
           stop();
           onError(error);
@@ -80,7 +75,19 @@ export function useRunEvents(
       }, 500);
     };
 
-    const refreshFromEvent = () => void refresh();
+    const refreshFromEvent = (raw: Event) => {
+      if (raw instanceof MessageEvent) {
+        try {
+          const event = JSON.parse(raw.data) as JobEvent;
+          if (event && typeof event === 'object' && typeof event.type === 'string') {
+            onEvent(event);
+          }
+        } catch {
+          // The status refresh still recovers from a malformed optional summary.
+        }
+      }
+      void refresh();
+    };
     const handleOpen = () => {
       consecutiveErrors = 0;
     };
@@ -100,5 +107,5 @@ export function useRunEvents(
       source.removeEventListener('open', handleOpen);
       source.removeEventListener('error', handleError);
     };
-  }, [onError, onUpdate, runId]);
+  }, [jobId, onError, onEvent, onUpdate]);
 }

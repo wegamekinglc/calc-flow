@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use calc_flow::{
     BatchMetadata, BatchOperator, CalcFlowError, DataFusionConfig, DataSourceSpec, Edge, NodeSpec,
     OperatorSpec, PROJECT_FORMAT_VERSION, PipelineBuilder, PipelineSpec, PortEndpoint, ProjectSpec,
-    RunOptions, UdfRegistry, canonical_json, export_project_json, export_project_yaml,
+    RuntimeSpec, UdfRegistry, canonical_json, export_project_json, export_project_yaml,
     import_project_json, import_project_yaml,
 };
 use proptest::{
@@ -81,8 +81,9 @@ fn project(id: String, name: String, description: String, data: Value) -> Projec
         id,
         name,
         description,
-        pipeline: PipelineSpec {
-            name: "property-pipeline".into(),
+        runtime: RuntimeSpec::default(),
+        graph: PipelineSpec {
+            name: "property-graph".into(),
             nodes: vec![NodeSpec {
                 id: "calculate".into(),
                 operator: OperatorSpec::Expression {
@@ -104,7 +105,9 @@ fn project(id: String, name: String, description: String, data: Value) -> Projec
             format: "inline_json".into(),
             data,
         }],
-        run_options: RunOptions::default(),
+        sources: Vec::new(),
+        sinks: Vec::new(),
+        state: calc_flow::StateConfig::default(),
     }
 }
 

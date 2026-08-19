@@ -590,8 +590,8 @@ class JobOutcome:
 
 
 class OutputDeliveryStatus(TypedDict):
-    requested: Literal["at_least_once", "exactly_once"]
-    effective: Literal["at_least_once", "exactly_once"]
+    requested: Literal["best_effort", "at_least_once", "exactly_once"]
+    effective: Literal["best_effort", "at_least_once", "exactly_once"]
 
 
 class JobStatus(TypedDict):
@@ -609,6 +609,7 @@ class JobStatus(TypedDict):
     task_count: int
     task_errors: int
     metrics_overflowed: bool
+    watermark_micros: int | None
     edges: dict[str, dict[str, object]]
     sources: dict[str, dict[str, object]]
     operators: dict[str, dict[str, object]]
@@ -863,9 +864,9 @@ class StreamingRunner:
     def __init__(
         self,
         plan: StreamExecutionPlan,
-        sources: Mapping[str, SourceBinding],
-        sinks: Mapping[str, Sequence[SinkBinding]],
-        checkpoints: ManagedCheckpointRuntime,
+        sources: Mapping[str, SourceBinding] | None = None,
+        sinks: Mapping[str, Sequence[SinkBinding]] | None = None,
+        checkpoints: ManagedCheckpointRuntime | None = None,
         *,
         config: StreamRuntimeConfig | None = None,
     ) -> None:
@@ -873,6 +874,27 @@ class StreamingRunner:
 
         if not isinstance(plan, StreamExecutionPlan):
             raise TypeError("plan must be a calc_flow.StreamExecutionPlan")
+        settings = plan._project_settings
+        if settings is not None:
+            if any(
+                value is not None for value in (sources, sinks, checkpoints, config)
+            ):
+                raise TypeError(
+                    "connector-backed project plans own sources, sinks, checkpoints, "
+                    "and runtime config"
+                )
+            sources = {}
+            sinks = {}
+            checkpoints = ManagedCheckpointRuntime(settings.state_root)
+            config = StreamRuntimeConfig(
+                checkpoint_interval=timedelta(
+                    milliseconds=settings.checkpoint_interval_ms
+                ),
+                edge_budget=EdgeBudget(
+                    settings.max_batch_rows, settings.max_batch_bytes
+                ),
+                retained_epochs=settings.retained_epochs,
+            )
         if not isinstance(sources, Mapping):
             raise TypeError("sources must be a mapping of source bindings")
         if not isinstance(sinks, Mapping):

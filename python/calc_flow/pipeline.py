@@ -58,14 +58,14 @@ def _node_inputs(node: Mapping[str, Any]) -> tuple[str, ...]:
 
 
 def _data_sources(project: Mapping[str, Any]) -> list[dict[str, JSONValue]]:
-    pipeline = project["pipeline"]
+    graph = project["graph"]
     connected = {
         (edge["target_node"], edge.get("target_port", "input"))
-        for edge in pipeline["edges"]
+        for edge in graph["edges"]
     }
     endpoints = sorted(
         (node["id"], port)
-        for node in pipeline["nodes"]
+        for node in graph["nodes"]
         for port in _node_inputs(node)
         if (node["id"], port) not in connected
     )
@@ -286,6 +286,10 @@ class Runtime:
             raise TypeError("project_json must be a string")
         return BatchExecutionPlan(self._inner.compile_project(project_json))
 
+    def compile_batch_project(self, project_json: str) -> BatchExecutionPlan:
+        """Compile one canonical project-v3 batch document."""
+        return self.compile_project(project_json)
+
     def compile_stream_project(
         self,
         project_json: str,
@@ -303,8 +307,33 @@ class Runtime:
         delivery = {
             output: guarantee.value for output, guarantee in selected.delivery.items()
         }
+        canonical = _native.validate_project_json(project_json)
+        project = json.loads(canonical)
+        runtime_options = project["runtime"]["options"]
+        state = project["state"]
         return StreamExecutionPlan(
-            self._inner.compile_stream_project(project_json, delivery)
+            self._inner.compile_stream_project(canonical, delivery),
+            _ProjectStreamSettings(
+                state_root=state["root"],
+                retained_epochs=state["retention"],
+                checkpoint_interval_ms=runtime_options["checkpoint_interval_ms"],
+                max_batch_rows=runtime_options["max_batch_rows"],
+                max_batch_bytes=runtime_options["max_batch_bytes"],
+            ),
+        )
+
+    def _compile_stream_graph_project(
+        self,
+        project_json: str,
+        *,
+        requirements: StreamRequirements | None = None,
+    ) -> StreamExecutionPlan:
+        selected = StreamRequirements() if requirements is None else requirements
+        delivery = {
+            output: guarantee.value for output, guarantee in selected.delivery.items()
+        }
+        return StreamExecutionPlan(
+            self._inner._compile_stream_graph_project(project_json, delivery)
         )
 
 
@@ -410,6 +439,7 @@ ExecutionPlan = BatchExecutionPlan
 class DeliveryGuarantee(StrEnum):
     """Delivery guarantee requested for one external stream output."""
 
+    BEST_EFFORT = "best_effort"
     AT_LEAST_ONCE = "at_least_once"
     EXACTLY_ONCE = "exactly_once"
 
@@ -437,10 +467,20 @@ class StreamRequirements:
 
 
 @dataclass(frozen=True, slots=True)
+class _ProjectStreamSettings:
+    state_root: str
+    retained_epochs: int
+    checkpoint_interval_ms: int
+    max_batch_rows: int
+    max_batch_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
 class StreamExecutionPlan:
     """Compiled immutable continuous plan consumed by ``StreamingRunner``."""
 
     _inner: _native.StreamExecutionPlan = field(repr=False)
+    _project_settings: _ProjectStreamSettings | None = field(default=None, repr=False)
 
     @property
     def name(self) -> str:
@@ -477,10 +517,11 @@ class PipelineBuilder:
             raise TypeError("pipeline name must be a string")
         project = {
             "data_sources": [],
-            "format_version": 2,
+            "format_version": 3,
             "id": name,
             "name": name,
-            "pipeline": {"edges": [], "name": name, "nodes": []},
+            "runtime": {"mode": "batch", "options": {}},
+            "graph": {"edges": [], "name": name, "nodes": []},
         }
         object.__setattr__(self, "_project_json", _canonical(project))
 
@@ -504,7 +545,7 @@ class PipelineBuilder:
         udfs: Sequence[UdfReference] = (),
     ) -> PipelineBuilder:
         def add(project: dict[str, Any]) -> None:
-            project["pipeline"]["nodes"].append(
+            project["graph"]["nodes"].append(
                 {
                     "id": name,
                     "operator": {
@@ -528,7 +569,7 @@ class PipelineBuilder:
         udfs: Sequence[UdfReference] = (),
     ) -> PipelineBuilder:
         def add(project: dict[str, Any]) -> None:
-            project["pipeline"]["nodes"].append(
+            project["graph"]["nodes"].append(
                 {
                     "id": name,
                     "operator": {
@@ -553,7 +594,7 @@ class PipelineBuilder:
         copied_options = dict(options)
 
         def add(project: dict[str, Any]) -> None:
-            project["pipeline"]["nodes"].append(
+            project["graph"]["nodes"].append(
                 {
                     "id": node_id,
                     "input_ports": [
@@ -604,7 +645,7 @@ class PipelineBuilder:
             raise ValueError("columns must be unique")
 
         def add(project: dict[str, Any]) -> None:
-            project["pipeline"]["nodes"].append(
+            project["graph"]["nodes"].append(
                 {
                     "id": node_id,
                     "input_ports": [
@@ -650,7 +691,7 @@ class PipelineBuilder:
         target_port: str = "input",
     ) -> PipelineBuilder:
         def add(project: dict[str, Any]) -> None:
-            project["pipeline"]["edges"].append(
+            project["graph"]["edges"].append(
                 {
                     "source_node": source_node,
                     "source_port": source_port,
@@ -661,10 +702,10 @@ class PipelineBuilder:
 
         return self._from_json(_updated_project(self._project_json, add))
 
-    def compile(self, runtime: Runtime | None = None) -> BatchExecutionPlan:
+    def compile_batch(self, runtime: Runtime | None = None) -> BatchExecutionPlan:
         from calc_flow.array import _validate_provider_options
 
-        for node in self.project["pipeline"]["nodes"]:
+        for node in self.project["graph"]["nodes"]:
             operator = node["operator"]
             if operator["kind"] == "external":
                 _validate_provider_options(
@@ -676,10 +717,7 @@ class PipelineBuilder:
         selected = Runtime() if runtime is None else runtime
         if not isinstance(selected, Runtime):
             raise TypeError("runtime must be a calc_flow.Runtime")
-        return selected.compile_project(self._project_json)
-
-    def compile_batch(self, runtime: Runtime | None = None) -> BatchExecutionPlan:
-        return self.compile(runtime)
+        return selected.compile_batch_project(self._project_json)
 
     def compile_stream(
         self,
@@ -691,9 +729,32 @@ class PipelineBuilder:
         selected = Runtime() if runtime is None else runtime
         if not isinstance(selected, Runtime):
             raise TypeError("runtime must be a calc_flow.Runtime")
-        return selected.compile_stream_project(
-            self._project_json, requirements=requirements
+        project = self.project
+        project["runtime"] = {"mode": "stream", "options": {}}
+        project["data_sources"] = []
+        return selected._compile_stream_graph_project(
+            _canonical(project), requirements=requirements
         )
+
+
+def compile_stream_project(
+    project: Mapping[str, object],
+    *,
+    requirements: StreamRequirements | None = None,
+    runtime: Runtime | None = None,
+) -> StreamExecutionPlan:
+    """Defensively compile one connector-backed project-v3 document."""
+    from calc_flow.config import ProjectDocument
+
+    if not isinstance(project, Mapping):
+        raise TypeError("project must be a mapping")
+    document = ProjectDocument.model_validate(dict(project))
+    selected = Runtime() if runtime is None else runtime
+    if not isinstance(selected, Runtime):
+        raise TypeError("runtime must be a calc_flow.Runtime")
+    return selected.compile_stream_project(
+        document.canonical_json(), requirements=requirements
+    )
 
 
 def project_json_schema() -> str:

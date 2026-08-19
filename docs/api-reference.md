@@ -1,12 +1,12 @@
-# Calc Flow 2.0 API reference
+# Calc Flow 3.0 API reference
 
 Calc Flow has three supported surfaces:
 
 | Surface            | Package or path                    | Purpose                                      |
 | ------------------ | ---------------------------------- | -------------------------------------------- |
-| Rust core          | `calc-flow = "2.0.0"`              | Native batches, graphs, execution, recovery  |
-| Python binding     | `calc-flow==2.0.0`                 | PyO3 engine access and Python integrations   |
-| Local Studio API   | `calc-flow-studio==2.0.0`          | Loopback FastAPI service and React assets    |
+| Rust core          | `calc-flow = "3.0.0"`              | Native batches, graphs, execution, recovery  |
+| Python binding     | `calc-flow==3.0.0`                 | PyO3 engine access and Python integrations   |
+| Local Studio API   | `calc-flow-studio==3.0.0`          | Loopback FastAPI service and React assets    |
 
 For examples and lifecycle detail, see [the Rust API](rust-api.md) and
 [the Python API](python-api.md).
@@ -218,9 +218,16 @@ These are execution ceilings, not end-to-end zero-copy claims.
 
 ### Projects and stores
 
-`ProjectDocument` is the strict Pydantic root model for format v2.
+`ProjectDocument` is the strict Pydantic root model for format v3.
 `project_json_schema()` returns the Rust-generated schema and
 `validate_project_json()` returns canonical validated JSON.
+
+Project v3 carries an explicit batch or stream runtime. Stream documents bind
+graph endpoints to exact connector and format identities, refer to named
+secrets, configure watermarks and managed state, and request delivery per
+output as best-effort, at-least-once, or exactly-once. Trusted connector
+factories and the secret resolver are runtime
+registrations and are never serialized into the project.
 
 `FileProjectStore` provides async `create`, `put`, `get`, `list`, and
 `delete` plus explicit `*_blocking` forms. Import/export helpers accept safe
@@ -248,52 +255,43 @@ over cancellation that arrives while the thread is being reclaimed.
 
 ## Local HTTP API
 
-The separate Studio service exposes its supported API under `/api/v2`.
+The separate Studio service exposes its supported API under `/api/v3`.
 
-| Method                 | Route                       | Purpose                                      |
-| ---------------------- | --------------------------- | -------------------------------------------- |
-| `GET`                  | `/catalog`                  | Compatibility UDF-only top-level array       |
-| `GET`                  | `/capabilities`             | Runtime and preview-worker capabilities      |
-| `GET`                  | `/schema/project`           | Rust-generated v2 project JSON Schema        |
-| `GET`, `POST`          | `/projects`                 | List or create projects                      |
-| `POST`                 | `/projects/import`          | Safely import JSON or YAML                   |
-| `GET`, `PUT`, `DELETE` | `/projects/{id}`            | Read, replace, or delete a project           |
-| `GET`                  | `/projects/{id}/export`     | Export canonical JSON or safe YAML           |
-| `POST`                 | `/projects/{id}/validate`   | Validate and compile a stored graph          |
-| `GET`, `DELETE`        | `/projects/{id}/checkpoint` | Inspect or reset recovery state              |
-| `POST`                 | `/projects/{id}/runs`       | Start a bounded preview worker               |
-| `GET`                  | `/runs/{id}`                | Read typed preview status/results            |
-| `GET`                  | `/runs/{id}/events`         | Stream run events                            |
-| `DELETE`               | `/runs/{id}`                | Cancel a managed preview                     |
+| Method                 | Route                    | Purpose                                             |
+| ---------------------- | ------------------------ | --------------------------------------------------- |
+| `GET`                  | `/catalog`               | UDF-only top-level array                            |
+| `GET`                  | `/capabilities`          | Runtime, connector, and worker capabilities         |
+| `GET`                  | `/schema/project`        | Rust-generated v3 project JSON Schema               |
+| `GET`, `POST`          | `/projects`              | List or create projects                             |
+| `POST`                 | `/projects/import`       | Safely import JSON or YAML                          |
+| `GET`, `PUT`, `DELETE` | `/projects/{id}`         | Read, replace, or delete a project                  |
+| `GET`                  | `/projects/{id}/export`  | Export canonical JSON or safe YAML                  |
+| `POST`                 | `/projects/{id}/validate` | Validate and compile a stored graph                |
+| `POST`, `GET`          | `/jobs`                  | Start a continuous job or list owned jobs           |
+| `GET`                  | `/jobs/{id}`             | Read typed job status, metrics, and bounded results |
+| `GET`                  | `/jobs/{id}/events`      | Resume-safe job event SSE                           |
+| `POST`                 | `/jobs/{id}/checkpoint`  | Trigger one durable checkpoint                      |
+| `POST`                 | `/jobs/{id}/shutdown`    | Request graceful terminal checkpoint and shutdown  |
+| `POST`                 | `/jobs/{id}/cancel`      | Cancel and settle a job                             |
+| `GET`                  | `/resource-limits`       | Read enforced continuous-job resource bounds        |
 
 `/capabilities` deliberately separates two scopes. `runtime` is the parent
 session snapshot used for compilation. `preview.workerRegistrations` describes
 whether a matching registration can be reconstructed as `serialized`,
-`lazyBuiltin`, or `unavailable` in a spawned preview worker. Transportability
+`lazyBuiltin`, or `unavailable` in a spawned worker. Transportability
 is not a promise that arbitrary project input is executable: normal compile,
 Port, option, input-format, and resource-limit checks still apply.
 
-When an older Studio server returns `404` for `/capabilities`, clients may use
-`/catalog` only to populate a scalar-UDF picker. That fallback does not
-discover providers, built-in Operators, portable Arrow types, preview limits,
-worker reconstruction, or transportability; clients must not infer any of
-those capabilities from it.
-
 Only NumPy/JAX `expression@1` is eligible for lazy built-in reconstruction in
 schema version 1. There is no lazy `table_matmul@1`; a parent registration may
-therefore be compile-capable while preview reconstruction is unavailable.
-Clients should disable only the unsupported preview action and keep project
+therefore be compile-capable while worker reconstruction is unavailable.
+Clients should disable only the unsupported job action and keep project
 editing and parent-runtime validation available.
 
 Capability schema version 1 is closed. The browser decoder rejects an unknown
-version or any extra field before React receives it. Validation and run
-responses now use generated discriminated unions, which is an intentional
-generated-client source break and requires backend/frontend deployment
-coupling. The current compatibility gate covers a version-1 client against
-newer or extended payloads and the new client against the old response shape.
-An explicit version-2 decoder that can fall back to the version-1 fixture is
-deferred until a real version-2 schema exists; no synthetic version-2
-migration fixture is claimed in this release.
+version or any extra field before React receives it. Validation, job, and SSE
+responses use generated discriminated unions, so backend and frontend must be
+deployed from the same generated contract.
 
 The checked contract is [web-ui/openapi.json](../web-ui/openapi.json).
 `npm run sync:api` regenerates it and
@@ -320,8 +318,9 @@ manifest publication uses `CheckpointPublicationUnknownError`.
 ## Version and compatibility
 
 The Rust crate, Python binding, Studio package, and frontend are versioned
-`2.0.0`. Project format version `2` and checkpoint format versioning are
-separate protocol values.
+`3.0.0`. Project format version `3` and checkpoint-manifest version `3` are
+separate protocol values from the package version.
 
-Calc Flow 2.0 does not load v1 projects or checkpoints. See
-[the release guide](v2-release.md) for the required migration boundary.
+Calc Flow 3.0 does not load project-v2 documents or expose Studio `/api/v2`.
+See the [v2-to-v3 migration guide](migration-v2-to-v3.md) for the required
+migration boundary.

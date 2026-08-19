@@ -28,12 +28,12 @@ import {
   type FlowNodeData,
 } from './components/CalculationNode';
 import { BenchmarkComparison } from './components/BenchmarkComparison';
-import { CheckpointControl } from './components/CheckpointControl';
 import { DataSourceEditor } from './components/DataSourceEditor';
 import { NodeInspector } from './components/NodeInspector';
 import { PanelResizeHandle } from './components/PanelResizeHandle';
 import { ProjectActions } from './components/ProjectActions';
 import { ResultsPanel } from './components/ResultsPanel';
+import { StreamConfigEditor } from './components/StreamConfigEditor';
 import {
   createDataSourceDrafts,
   materializeDataSources,
@@ -49,16 +49,17 @@ import {
   useElementWidth,
   usePanelLayout,
 } from './components/panelLayout';
-import { useRunEvents } from './hooks/useRunEvents';
+import { useJobEvents } from './hooks/useJobEvents';
 import {
   blankProject,
   type CatalogResponse,
-  type CheckpointSummary,
+  type CapabilitiesResponse,
   type EditableProject,
+  type JobEvent,
+  type JobResponse,
   type NodeConfig,
   type ProjectDocument,
   type ProjectSummary,
-  type RunResponse,
   type ValidationReport,
 } from './types';
 
@@ -171,7 +172,7 @@ export const connectProject = (
     source_port: connection.sourceHandle ?? 'output',
     target_port: connection.targetHandle ?? 'input',
   };
-  const duplicate = project.pipeline.edges.some(
+  const duplicate = project.graph.edges.some(
     (current) =>
       current.source_node === edge.source_node
       && current.target_node === edge.target_node
@@ -181,9 +182,9 @@ export const connectProject = (
   if (duplicate) return project;
   return {
     ...project,
-    pipeline: {
-      ...project.pipeline,
-      edges: [...project.pipeline.edges, edge],
+    graph: {
+      ...project.graph,
+      edges: [...project.graph.edges, edge],
     },
   };
 };
@@ -201,6 +202,7 @@ export default function App() {
   const { layout, setPanelWidth, resetPanelWidth } = usePanelLayout();
   const { ref: workspaceRef, width: workspaceWidth } = useElementWidth<HTMLElement>();
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null);
+  const [capabilities, setCapabilities] = useState<CapabilitiesResponse | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [project, setProject] = useState<EditableProject>(() => blankProject());
   const projectRef = useRef(project);
@@ -211,8 +213,8 @@ export default function App() {
   const [persisted, setPersisted] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string>('calculate');
   const [validation, setValidation] = useState<ValidationReport | null>(null);
-  const [run, setRun] = useState<RunResponse | null>(null);
-  const [checkpoint, setCheckpoint] = useState<CheckpointSummary | null>(null);
+  const [job, setJob] = useState<JobResponse | null>(null);
+  const [progress, setProgress] = useState<JobEvent | null>(null);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const [pendingFileReads, setPendingFileReads] = useState(0);
@@ -246,10 +248,10 @@ export default function App() {
       setProject(next);
       setSourceDrafts(drafts);
       setPersisted(isPersisted);
-      setSelectedNodeId(next.pipeline.nodes[0]?.id ?? '');
+      setSelectedNodeId(next.graph.nodes[0]?.id ?? '');
       setValidation(null);
-      setRun(null);
-      setCheckpoint(null);
+      setJob(null);
+      setProgress(null);
     },
     [],
   );
@@ -258,12 +260,14 @@ export default function App() {
     const controller = new AbortController();
     const initialize = async () => {
       try {
-        const [loadedCatalog, loadedProjects] = await Promise.all([
+        const [loadedCatalog, loadedCapabilities, loadedProjects] = await Promise.all([
           api.catalog(),
+          api.capabilities(),
           api.projects(),
         ]);
         if (controller.signal.aborted) return;
         setCatalog(loadedCatalog);
+        setCapabilities(loadedCapabilities);
         setProjects(loadedProjects);
         if (loadedProjects.length) {
           const loaded = await api.project(loadedProjects[0].id);
@@ -285,20 +289,30 @@ export default function App() {
     projectRef.current = next;
     setProject(next);
     setValidation(null);
-    setRun(null);
-    setCheckpoint(null);
   }, []);
 
-  const handleRunError = useCallback((error: Error) => {
-    setRun(null);
+  const handleJobUpdate = useCallback((next: JobResponse) => {
+    setJob(next);
+  }, []);
+
+  const handleJobEvent = useCallback((event: JobEvent) => {
+    setProgress((current) => ({ ...current, ...event }));
+  }, []);
+
+  const handleJobError = useCallback((error: Error) => {
+    setJob(null);
+    setProgress(null);
     setMessage(error.message);
   }, []);
 
-  useRunEvents(run?.id ?? null, setRun, handleRunError);
+  const observedJobId = job?.status === 'pending' || job?.status === 'running'
+    ? job.id
+    : null;
+  useJobEvents(observedJobId, handleJobUpdate, handleJobEvent, handleJobError);
 
   const flowNodes = useMemo<FlowNode[]>(
     () =>
-      project.pipeline.nodes.map((node) => ({
+      project.graph.nodes.map((node) => ({
         id: node.id,
         type: 'calculation',
         position: node.position ?? { x: 0, y: 0 },
@@ -306,12 +320,12 @@ export default function App() {
         className: `flow-node ${node.operator.kind}`,
         selected: selectedNodeId === node.id,
       })),
-    [project.pipeline.nodes, selectedNodeId],
+    [project.graph.nodes, selectedNodeId],
   );
 
   const flowEdges = useMemo<Edge[]>(
     () =>
-      project.pipeline.edges.map((edge, index) => ({
+      project.graph.edges.map((edge, index) => ({
         id: `${edge.source_node}:${edge.source_port}-${edge.target_node}:${edge.target_port}-${index}`,
         source: edge.source_node,
         target: edge.target_node,
@@ -320,7 +334,7 @@ export default function App() {
         data: { sourcePort: edge.source_port, targetPort: edge.target_port },
         animated: true,
       })),
-    [project.pipeline.edges],
+    [project.graph.edges],
   );
 
   const onNodesChange = useCallback(
@@ -331,9 +345,9 @@ export default function App() {
       const positions = new Map(changed.map((node) => [node.id, node.position]));
       updateProject((current) => ({
         ...current,
-        pipeline: {
-          ...current.pipeline,
-          nodes: current.pipeline.nodes.map((node) => ({
+        graph: {
+          ...current.graph,
+          nodes: current.graph.nodes.map((node) => ({
             ...node,
             position: positions.get(node.id) ?? node.position,
           })),
@@ -350,8 +364,8 @@ export default function App() {
       const changed = applyEdgeChanges(structuralChanges, flowEdges);
       updateProject((current) => ({
         ...current,
-        pipeline: {
-          ...current.pipeline,
+        graph: {
+          ...current.graph,
           edges: changed.map((edge) => ({
             source_node: edge.source,
             target_node: edge.target,
@@ -371,7 +385,7 @@ export default function App() {
     [updateProject],
   );
 
-  const selectedNode = project.pipeline.nodes.find((node) => node.id === selectedNodeId) ?? null;
+  const selectedNode = project.graph.nodes.find((node) => node.id === selectedNodeId) ?? null;
 
   const persistProject = async (
     nextProject: EditableProject,
@@ -387,6 +401,12 @@ export default function App() {
   };
 
   const prepareProject = (): EditableProject | null => {
+    if (projectRef.current.runtime.mode === 'stream') {
+      const prepared = { ...projectRef.current, data_sources: [] };
+      projectRef.current = prepared;
+      setProject(prepared);
+      return prepared;
+    }
     if (pendingFileReadsRef.current > 0) {
       setMessage('Data source files are still loading');
       return null;
@@ -439,15 +459,21 @@ export default function App() {
     }
   };
 
-  const execute = async () => {
+  const startJob = async () => {
     setBusy(true);
     setMessage('');
     try {
       const prepared = prepareProject();
       if (!prepared) return;
+      if (prepared.runtime.mode !== 'stream') {
+        setMessage('Switch the project to Stream mode before starting a job');
+        return;
+      }
       const saved = await persistProject(prepared);
-      const submitted = await api.runProject(saved.id, {});
-      setRun(submitted);
+      const submitted = await api.startJob(saved.id);
+      setProgress(null);
+      setJob(submitted);
+      setMessage('Continuous job started');
     } catch (error) {
       setMessage((error as Error).message);
     } finally {
@@ -455,13 +481,12 @@ export default function App() {
     }
   };
 
-  const inspectCheckpoint = async () => {
+  const checkpointJob = async () => {
+    if (!job) return;
     setBusy(true);
     try {
-      const prepared = prepareProject();
-      if (!prepared) return;
-      const saved = await persistProject(prepared);
-      setCheckpoint(await api.checkpoint(saved.id));
+      setJob(await api.checkpointJob(job.id));
+      setMessage('Checkpoint requested');
     } catch (error) {
       setMessage((error as Error).message);
     } finally {
@@ -469,12 +494,12 @@ export default function App() {
     }
   };
 
-  const resetCheckpoint = async () => {
-    if (!persisted) return;
+  const shutdownJob = async () => {
+    if (!job) return;
     setBusy(true);
     try {
-      setCheckpoint(await api.resetCheckpoint(project.id));
-      setMessage('Runner checkpoint reset');
+      setJob(await api.shutdownJob(job.id));
+      setMessage('Graceful shutdown requested');
     } catch (error) {
       setMessage((error as Error).message);
     } finally {
@@ -550,7 +575,6 @@ export default function App() {
       ),
     );
     setValidation(null);
-    setRun(null);
   };
 
   const loadDataSourceFile = async (index: number, file: File) => {
@@ -608,12 +632,16 @@ export default function App() {
     }
   };
 
-  const cancelRun = async () => {
-    if (!run) return;
+  const cancelJob = async () => {
+    if (!job) return;
+    setBusy(true);
     try {
-      setRun(await api.cancelRun(run.id));
+      setJob(await api.cancelJob(job.id));
+      setMessage('Job cancelled');
     } catch (error) {
       setMessage((error as Error).message);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -701,10 +729,10 @@ export default function App() {
   };
 
   const addNode = (kind: EditableNodeKind) => {
-    const node = makeNode(kind, project.pipeline.nodes);
+    const node = makeNode(kind, project.graph.nodes);
     updateProject((current) => ({
       ...current,
-      pipeline: { ...current.pipeline, nodes: [...current.pipeline.nodes, node] },
+      graph: { ...current.graph, nodes: [...current.graph.nodes, node] },
     }));
     setSelectedNodeId(node.id);
   };
@@ -712,22 +740,22 @@ export default function App() {
   const updateNode = (node: NodeConfig) => {
     updateProject((current) => ({
       ...current,
-      pipeline: {
-        ...current.pipeline,
-        nodes: current.pipeline.nodes.map((item) => (item.id === node.id ? node : item)),
+      graph: {
+        ...current.graph,
+        nodes: current.graph.nodes.map((item) => (item.id === node.id ? node : item)),
       },
     }));
   };
 
   const deleteSelectedNode = () => {
     if (!selectedNode) return;
-    const nodes = project.pipeline.nodes.filter((node) => node.id !== selectedNode.id);
+    const nodes = project.graph.nodes.filter((node) => node.id !== selectedNode.id);
     updateProject((current) => ({
       ...current,
-      pipeline: {
-        ...current.pipeline,
-        nodes: current.pipeline.nodes.filter((node) => node.id !== selectedNode.id),
-        edges: current.pipeline.edges.filter(
+      graph: {
+        ...current.graph,
+        nodes: current.graph.nodes.filter((node) => node.id !== selectedNode.id),
+        edges: current.graph.edges.filter(
           (edge) => edge.source_node !== selectedNode.id && edge.target_node !== selectedNode.id,
         ),
       },
@@ -745,6 +773,7 @@ export default function App() {
   };
 
   const persistenceBusy = busy || pendingFileReads > 0;
+  const activeJob = job?.status === 'pending' || job?.status === 'running';
   const workspaceLayout = useMemo(
     () => workspaceWidth > 0
       ? clampWorkspaceLayout(layout, workspaceWidth)
@@ -817,7 +846,7 @@ export default function App() {
           />
           <button className="ghost-button topbar-control" type="button" disabled={persistenceBusy} onClick={() => void save()}>Save</button>
           <button className="ghost-button topbar-control" type="button" disabled={persistenceBusy} onClick={() => void validate()}>Validate</button>
-          <button className="run-button topbar-control" type="button" disabled={persistenceBusy} onClick={() => void execute()}><span>▶</span> Run preview</button>
+          <button className="run-button topbar-control" type="button" disabled={persistenceBusy || project.runtime.mode !== 'stream' || activeJob} onClick={() => void startJob()}><span>▶</span> Start job</button>
         </div>
       </header>
 
@@ -831,23 +860,24 @@ export default function App() {
           <button className="node-tool expression" type="button" onClick={() => addNode('expression')}><span>ƒx</span><div><strong>Expression</strong><small>Project · filter · calculate</small></div></button>
           <button className="node-tool sql" type="button" onClick={() => addNode('sql')}><span>SQL</span><div><strong>DataFusion SQL</strong><small>Join · aggregate · window</small></div></button>
 
-          <DataSourceEditor
-            sources={project.data_sources}
-            drafts={sourceDrafts}
-            busy={busy}
-            pendingSourceKeys={pendingFileReadKeys}
-            onAdd={addDataSource}
-            onRemove={removeDataSource}
-            onFieldChange={updateDataSourceField}
-            onDataChange={updateDataSourceData}
-            onLoadFile={(index, file) => void loadDataSourceFile(index, file)}
+          <StreamConfigEditor
+            project={project}
+            connectors={capabilities?.runtime.connectors ?? []}
+            onChange={updateProject}
           />
-          <CheckpointControl
-            checkpoint={checkpoint}
-            busy={persistenceBusy}
-            onInspect={() => void inspectCheckpoint()}
-            onReset={() => void resetCheckpoint()}
-          />
+          {project.runtime.mode === 'batch' && (
+            <DataSourceEditor
+              sources={project.data_sources}
+              drafts={sourceDrafts}
+              busy={busy}
+              pendingSourceKeys={pendingFileReadKeys}
+              onAdd={addDataSource}
+              onRemove={removeDataSource}
+              onFieldChange={updateDataSourceField}
+              onDataChange={updateDataSourceData}
+              onLoadFile={(index, file) => void loadDataSourceFile(index, file)}
+            />
+          )}
         </aside>
 
         <PanelResizeHandle
@@ -861,7 +891,7 @@ export default function App() {
         />
 
         <section className="canvas-panel">
-          <div className="canvas-meta"><span>{project.pipeline.nodes.length} nodes</span><span>{project.pipeline.edges.length} edges</span><span>DataFusion · {project.pipeline.datafusion.target_partitions} partition</span></div>
+          <div className="canvas-meta"><span>{project.graph.nodes.length} nodes</span><span>{project.graph.edges.length} edges</span><span>DataFusion · {project.graph.datafusion.target_partitions} partition</span></div>
           <ReactFlow<FlowNode, Edge>
             nodes={flowNodes}
             edges={flowEdges}
@@ -909,11 +939,12 @@ export default function App() {
 
       <ResultsPanel
         validation={validation}
-        run={run}
-        metricsWidth={layout.metrics}
-        onMetricsWidthChange={(width) => setPanelWidth('metrics', width)}
-        onMetricsWidthReset={() => resetPanelWidth('metrics')}
-        onCancel={() => void cancelRun()}
+        job={job}
+        progress={progress}
+        busy={busy}
+        onCheckpoint={() => void checkpointJob()}
+        onShutdown={() => void shutdownJob()}
+        onCancel={() => void cancelJob()}
       />
       <BenchmarkComparison />
     </main>

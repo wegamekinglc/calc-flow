@@ -15,7 +15,11 @@ def _batch(**columns: list[int]) -> Batch:
 def test_execute_async_does_not_block_the_python_loop() -> None:
     async def exercise() -> None:
         events: list[str] = []
-        plan = PipelineBuilder("totals").expression("calc", "total = a + b").compile()
+        plan = (
+            PipelineBuilder("totals")
+            .expression("calc", "total = a + b")
+            .compile_batch()
+        )
 
         async def heartbeat() -> None:
             await asyncio.sleep(0)
@@ -37,7 +41,11 @@ def test_execute_async_does_not_block_the_python_loop() -> None:
 
 def test_blocking_execute_rejects_running_loop_before_native_entry() -> None:
     async def exercise() -> None:
-        plan = PipelineBuilder("totals").expression("calc", "total = a + b").compile()
+        plan = (
+            PipelineBuilder("totals")
+            .expression("calc", "total = a + b")
+            .compile_batch()
+        )
         with pytest.raises(
             RuntimeError,
             match=r"execute\(\) cannot run inside an event loop; use execute_async\(\)",
@@ -52,7 +60,11 @@ def test_blocking_execute_rejects_running_loop_before_native_entry() -> None:
 
 def test_concurrent_async_calls_serialize_and_both_complete() -> None:
     async def exercise() -> None:
-        plan = PipelineBuilder("concurrent").expression("calc", "b = a + 1").compile()
+        plan = (
+            PipelineBuilder("concurrent")
+            .expression("calc", "b = a + 1")
+            .compile_batch()
+        )
         first, second = await asyncio.gather(
             plan.execute_async({"input": _batch(a=[1])}),
             plan.execute_async({"input": _batch(a=[10])}),
@@ -74,7 +86,7 @@ def test_cancelling_async_execution_preserves_plan_recovery() -> None:
                 "FROM left CROSS JOIN right",
                 aliases=("left", "right"),
             )
-            .compile()
+            .compile_batch()
         )
         large = _batch(value=list(range(5_000)))
         running = asyncio.create_task(

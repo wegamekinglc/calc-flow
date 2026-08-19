@@ -18,11 +18,21 @@ test.use({
 });
 
 const twoSourceProject = {
-  format_version: 2,
+  format_version: 3,
   id: 'two_source_e2e',
   name: 'Two source E2E',
   description: 'Two independent saved sources join downstream.',
-  pipeline: {
+  runtime: {
+    mode: 'batch',
+    options: {
+      max_input_bytes: 10485760,
+      max_rows: 100000,
+      timeout_seconds: 30,
+      memory_limit_mb: 512,
+      output_rows: 1000,
+    },
+  },
+  graph: {
     name: 'Two source pipeline',
     nodes: [
       {
@@ -92,13 +102,9 @@ const twoSourceProject = {
       data: [{ id: 1, adjustment: 10 }, { id: 2, adjustment: 20 }],
     },
   ],
-  run_options: {
-    max_input_bytes: 10485760,
-    max_rows: 100000,
-    timeout_seconds: 30,
-    memory_limit_mb: 512,
-    output_rows: 1000,
-  },
+  sources: [],
+  sinks: [],
+  state: { root: '.calc-flow-state', retention: 3 },
 };
 
 async function deleteTwoSourceProject(request: APIRequestContext): Promise<number> {

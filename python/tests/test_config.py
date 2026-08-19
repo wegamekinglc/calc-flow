@@ -23,8 +23,8 @@ def _minimal_project() -> dict[str, object]:
 def test_project_document_delegates_schema_and_rust_defaults() -> None:
     schema = ProjectDocument.model_json_schema()
     assert schema == json.loads(project_json_schema())
-    assert schema["title"] == "Calc Flow Project V2"
-    assert schema["properties"]["format_version"]["const"] == 2
+    assert schema["title"] == "Calc Flow Project V3"
+    assert schema["properties"]["format_version"]["const"] == 3
 
     project = _minimal_project()
     project.pop("data_sources")
@@ -35,7 +35,7 @@ def test_project_document_delegates_schema_and_rust_defaults() -> None:
         json.loads(canonical), sort_keys=True, separators=(",", ":")
     )
     assert document.root["description"] == ""
-    assert document.root["run_options"]["timeout_seconds"] == 30
+    assert document.root["runtime"]["options"]["timeout_seconds"] == 30
 
 
 def test_project_document_converts_native_errors_to_validation_errors() -> None:
@@ -120,7 +120,7 @@ def test_project_document_rejects_cycles_and_excessive_depth() -> None:
 
 def test_project_document_json_rejects_duplicate_keys() -> None:
     with pytest.raises(ValidationError, match="duplicate"):
-        ProjectDocument.model_validate_json('{"format_version":2,"format_version":2}')
+        ProjectDocument.model_validate_json('{"format_version":3,"format_version":3}')
 
 
 def test_project_document_json_translates_decoder_recursion_errors() -> None:
@@ -140,14 +140,14 @@ def test_project_document_does_not_mutate_inputs_or_expose_owned_values() -> Non
     document = ProjectDocument.model_validate(project)
     assert project == original
 
-    project["pipeline"]["nodes"].clear()
+    project["graph"]["nodes"].clear()
     returned = document.model_dump()
-    returned["pipeline"]["nodes"].clear()
+    returned["graph"]["nodes"].clear()
     schema = ProjectDocument.model_json_schema()
     schema.clear()
 
-    assert document.root["pipeline"]["nodes"]
-    assert ProjectDocument.model_json_schema()["title"] == "Calc Flow Project V2"
+    assert document.root["graph"]["nodes"]
+    assert ProjectDocument.model_json_schema()["title"] == "Calc Flow Project V3"
 
 
 def test_runtime_validation_report_uses_runtime_snapshots_defensively() -> None:
@@ -175,8 +175,9 @@ def test_runtime_validation_report_uses_runtime_snapshots_defensively() -> None:
 def test_runtime_compile_stream_project_requires_source_coverage() -> None:
     project = _minimal_project()
     project["data_sources"] = []
+    project["runtime"] = {"mode": "stream", "options": {}}
 
-    with pytest.raises(ConfigError, match=r"data_sources \[source_input_mismatch\]"):
+    with pytest.raises(ConfigError, match=r"sources \[source_input_mismatch\]"):
         Runtime().compile_stream_project(json.dumps(project))
 
 

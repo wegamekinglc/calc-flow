@@ -2551,7 +2551,13 @@ async fn run_job_driver(
     if let Some(checkpoint) = checkpoint.as_ref()
         && let Some(selected) = &checkpoint.selected
     {
-        let recovery = recover_opened_sinks(&mut opened_sinks, &selected.manifest).await;
+        let recovery = recover_opened_sinks(
+            &mut opened_sinks,
+            &selected.manifest,
+            &checkpoint.transaction,
+            &core.launch_cancel,
+        )
+        .await;
         let recovery = match recovery {
             Ok(()) => {
                 let sink_retries = opened_sinks.values().map(Vec::len).sum();
@@ -2675,7 +2681,14 @@ async fn recover_terminal_manifest(
             .await;
     }
     let (_, mut opened_sinks) = opened_connector_bindings(std::mem::take(&mut resources));
-    if let Err(error) = recover_opened_sinks(&mut opened_sinks, &selected.manifest).await {
+    if let Err(error) = recover_opened_sinks(
+        &mut opened_sinks,
+        &selected.manifest,
+        transaction,
+        &core.launch_cancel,
+    )
+    .await
+    {
         let mut resources = connector_resources(BTreeMap::new(), opened_sinks);
         let mut supervisor = TaskSupervisor::new(core.launch_cancel.clone());
         return finish_failed_launch(
@@ -2900,9 +2913,17 @@ fn add_restored_ended_source_cuts(
 async fn recover_opened_sinks(
     sinks: &mut BTreeMap<String, Vec<ValidatedOrdinarySink>>,
     manifest: &CheckpointManifest,
+    transaction: &ManifestTransaction,
+    cancellation: &CancellationToken,
 ) -> crate::Result<()> {
     for output_sinks in sinks.values_mut() {
-        super::sink_task::recover_transactional_sinks(output_sinks, manifest).await?;
+        super::sink_task::recover_transactional_sinks_with_state(
+            output_sinks,
+            manifest,
+            transaction,
+            cancellation,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -3288,6 +3309,7 @@ impl LiveCheckpointChannels {
                 .expect("checkpoint wiring covers every validated sink output"),
             finalizations,
             terminal_ready: Some(self.sink_terminal_ready_sender.clone()),
+            transaction: Some(Arc::clone(&self.operator.transaction)),
         }
     }
 }
@@ -4414,6 +4436,7 @@ async fn handle_checkpoint_event(
             publish_epoch_manifest(
                 checkpoint,
                 coordinator,
+                sources,
                 sink_commands,
                 cancellation,
                 metrics,
@@ -4486,9 +4509,14 @@ async fn notify_terminal_checkpoint(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "manifest publication owns the checkpoint, participant, cancellation, metrics, and epoch boundaries"
+)]
 async fn publish_epoch_manifest(
     checkpoint: &OpenedCheckpointRuntime,
     coordinator: &CheckpointCoordinatorHandle,
+    sources: &BTreeMap<String, SourceProgress>,
     sink_commands: &BTreeMap<String, mpsc::Sender<SinkCheckpointCommand>>,
     cancellation: &CancellationToken,
     metrics: &MetricsRecorder,
@@ -4521,7 +4549,15 @@ async fn publish_epoch_manifest(
     match publication {
         ManifestPublication::Durable => {
             assembly.manifest_durable = true;
-            settle_durable_manifest(coordinator, sink_commands, epoch, assembly.terminal).await
+            settle_durable_manifest(
+                coordinator,
+                sources,
+                &assembly.sources,
+                sink_commands,
+                epoch,
+                assembly.terminal,
+            )
+            .await
         }
         ManifestPublication::Installed {
             parent_synced,
@@ -4532,8 +4568,15 @@ async fn publish_epoch_manifest(
                 if !cancellation.is_cancelled() {
                     assembly.deferred_publication_error = Some(error);
                 }
-                settle_durable_manifest(coordinator, sink_commands, epoch, assembly.terminal)
-                    .await?;
+                settle_durable_manifest(
+                    coordinator,
+                    sources,
+                    &assembly.sources,
+                    sink_commands,
+                    epoch,
+                    assembly.terminal,
+                )
+                .await?;
             } else {
                 assembly.manifest_installed_unknown = true;
                 checkpoint.status.installed_unknown(epoch);
@@ -4551,12 +4594,35 @@ async fn publish_epoch_manifest(
 
 async fn settle_durable_manifest(
     coordinator: &CheckpointCoordinatorHandle,
+    sources: &BTreeMap<String, SourceProgress>,
+    source_entries: &BTreeMap<String, SourceManifestEntry>,
     sink_commands: &BTreeMap<String, mpsc::Sender<SinkCheckpointCommand>>,
     epoch: Epoch,
     terminal: bool,
 ) -> crate::Result<()> {
+    acknowledge_durable_source_cursors(sources, source_entries).await?;
     notify_sink_manifest_durable(sink_commands, epoch, terminal).await?;
     coordinator.manifest_durable(epoch).await
+}
+
+async fn acknowledge_durable_source_cursors(
+    sources: &BTreeMap<String, SourceProgress>,
+    entries: &BTreeMap<String, SourceManifestEntry>,
+) -> crate::Result<()> {
+    for (source_id, entry) in entries {
+        let Some(source) = sources.get(source_id) else {
+            if entry.ended {
+                continue;
+            }
+            return Err(CalcFlowError::Internal {
+                message: format!("durable manifest names unknown source {source_id:?}"),
+            });
+        };
+        source
+            .acknowledge_durable_cursor(entry.cursor.as_ref())
+            .await?;
+    }
+    Ok(())
 }
 
 async fn retain_completed_epoch(
@@ -4835,6 +4901,12 @@ fn checkpoint_manifest_sizes(manifest: &CheckpointManifest) -> crate::Result<(u6
         .operators()
         .values()
         .flat_map(|operator| operator.segments.iter())
+        .chain(
+            manifest
+                .sinks()
+                .values()
+                .flat_map(|sink| sink.segments.iter()),
+        )
         .try_fold(0_u64, |total, handle| {
             total
                 .checked_add(handle.byte_len())
@@ -5342,7 +5414,7 @@ mod tests {
             atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         },
         task::Poll,
-        time::Duration as StdDuration,
+        time::{Duration as StdDuration, Instant as StdInstant},
     };
 
     use async_trait::async_trait;
@@ -5497,6 +5569,7 @@ mod tests {
                 SinkManifestEntry {
                     delivery: SinkDeliveryManifest::Ordinary,
                     pre_commit: None,
+                    segments: Vec::new(),
                 },
             )]),
         })
@@ -5619,6 +5692,7 @@ mod tests {
                 SinkManifestEntry {
                     delivery: SinkDeliveryManifest::Ordinary,
                     pre_commit: None,
+                    segments: Vec::new(),
                 },
             )]),
         })
@@ -5710,6 +5784,45 @@ mod tests {
         assert_eq!(load_count.load(Ordering::SeqCst), 3);
     }
 
+    fn assert_job_status_json_is_allowlisted(encoded: &serde_json::Value) {
+        let keys = encoded
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            BTreeSet::from([
+                "checkpoint",
+                "delivery",
+                "edges",
+                "job_id",
+                "metrics_overflowed",
+                "operators",
+                "sinks",
+                "sources",
+                "state",
+                "task_count",
+                "task_errors",
+                "terminal_cause",
+                "watermark",
+            ])
+        );
+        let encoded = encoded.to_string();
+        for forbidden in [
+            "cursor",
+            "payload",
+            "tasks",
+            "progress",
+            "abandoned_runner_drops",
+            "latest_observed_order",
+            "durable_order",
+        ] {
+            assert!(!encoded.contains(forbidden), "leaked field {forbidden:?}");
+        }
+    }
+
     #[tokio::test]
     async fn owning_job_status_is_allowlisted_stably_ordered_and_observe_only() {
         let alpha_sink = LifecycleProbe::default();
@@ -5769,41 +5882,7 @@ mod tests {
         );
 
         let encoded = serde_json::to_value(&first).unwrap();
-        let keys = encoded
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            keys,
-            BTreeSet::from([
-                "checkpoint",
-                "delivery",
-                "edges",
-                "job_id",
-                "metrics_overflowed",
-                "operators",
-                "sinks",
-                "sources",
-                "state",
-                "task_count",
-                "task_errors",
-                "terminal_cause",
-            ])
-        );
-        let encoded = encoded.to_string();
-        for forbidden in [
-            "cursor",
-            "payload",
-            "tasks",
-            "progress",
-            "abandoned_runner_drops",
-            "latest_observed_order",
-            "durable_order",
-        ] {
-            assert!(!encoded.contains(forbidden), "leaked field {forbidden:?}");
-        }
+        assert_job_status_json_is_allowlisted(&encoded);
 
         let outcome = job.cancel().await;
         assert_eq!(outcome.state, ContinuousJobState::Cancelled);
@@ -5816,6 +5895,35 @@ mod tests {
             terminal.terminal_cause,
             Some(crate::runtime::streaming::projection::TerminalCause::ExplicitCancel)
         );
+    }
+
+    #[tokio::test]
+    async fn owning_job_status_projects_the_aggregate_watermark() {
+        let mut job_spec = spec(
+            false,
+            Arc::new(AtomicUsize::new(0)),
+            LifecycleProbe::default(),
+            LifecycleProbe::default(),
+        );
+        job_spec.sources[0].binding = SourceBinding::new(
+            Box::new(FiniteSource {
+                events: VecDeque::from([SourceEvent::Watermark(EventTime::from_micros(17))]),
+                closed: Arc::new(AtomicUsize::new(0)),
+            }),
+            None,
+            0,
+        )
+        .unwrap();
+        job_spec.edge_budget.max_bytes = 1 << 20;
+        let job = OneShotContinuousRunner::new()
+            .start(job_spec)
+            .await
+            .unwrap();
+
+        let outcome = job.wait().await;
+
+        assert_eq!(outcome.cause, TerminalCause::NaturalEnd);
+        assert_eq!(job.status().watermark, Some(EventTime::from_micros(17)));
     }
 
     #[tokio::test]
@@ -8031,7 +8139,7 @@ mod tests {
                 },
                 NamedSinkBinding {
                     output_id: "ordinary.output".into(),
-                    sink_id: "ordinary".into(),
+                    sink_id: "ordinary-sink".into(),
                     binding: OrdinarySinkBinding::new(Box::new(OrderedRecordingSink {
                         id: "ordinary".into(),
                         writes: Arc::clone(&probes.ordinary_writes),
@@ -8726,6 +8834,7 @@ mod tests {
                         "prepared".into(),
                         serde_json::json!(true),
                     )])),
+                    segments: Vec::new(),
                 },
             )]),
         })
@@ -8802,6 +8911,8 @@ mod tests {
         let (sink_sender, mut sink_receiver) = mpsc::channel(1);
         let error = settle_durable_manifest(
             coordinator,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
             &BTreeMap::from([("output".into(), sink_sender)]),
             crate::Epoch::INITIAL,
             false,
@@ -13751,7 +13862,7 @@ mod tests {
                 },
                 NamedSinkBinding {
                     output_id: "ordinary.output".into(),
-                    sink_id: "ordinary".into(),
+                    sink_id: "ordinary-sink".into(),
                     binding: OrdinarySinkBinding::new(Box::new(OrderedRecordingSink {
                         id: "ordinary".into(),
                         writes: Arc::clone(&ordinary_writes),
@@ -13804,10 +13915,10 @@ mod tests {
             SinkDeliveryManifest::Transactional
         );
         assert_eq!(
-            manifest.sinks()["ordinary"].delivery,
+            manifest.sinks()["ordinary-sink"].delivery,
             SinkDeliveryManifest::Ordinary
         );
-        assert!(manifest.sinks()["ordinary"].pre_commit.is_none());
+        assert!(manifest.sinks()["ordinary-sink"].pre_commit.is_none());
         drop(job);
         runner.shutdown().await.unwrap();
     }
@@ -14527,6 +14638,7 @@ mod tests {
                 SinkManifestEntry {
                     delivery: SinkDeliveryManifest::Transactional,
                     pre_commit: Some(JsonMap::new()),
+                    segments: Vec::new(),
                 },
             )]),
         })
@@ -14762,6 +14874,7 @@ mod tests {
                 SinkManifestEntry {
                     delivery: SinkDeliveryManifest::Transactional,
                     pre_commit: Some(JsonMap::new()),
+                    segments: Vec::new(),
                 },
             )]),
         })
@@ -14862,16 +14975,15 @@ mod tests {
         let job = runner.start_checkpointed(spec, checkpoint).await.unwrap();
         wait_for_counter(&live_polls, 1).await;
         tokio::time::advance(StdDuration::from_millis(20)).await;
-        tokio::time::timeout(StdDuration::from_secs(5), async {
-            loop {
-                if sink_log.lock().iter().any(|entry| entry == "sink-begin:3") {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("mixed-source restored checkpoint did not complete");
+        let deadline = StdInstant::now() + StdDuration::from_secs(30);
+        while !sink_log.lock().iter().any(|entry| entry == "sink-begin:3") {
+            assert!(
+                StdInstant::now() < deadline,
+                "mixed-source restored checkpoint did not complete: {:?}",
+                job.status()
+            );
+            tokio::task::yield_now().await;
+        }
 
         assert_eq!(ended_opens.load(Ordering::SeqCst), 0);
         assert_eq!(ended_seeks.load(Ordering::SeqCst), 0);

@@ -99,11 +99,36 @@ fn set_axis_fields(
     Ok(())
 }
 
-fn register_builtin_connectors(
+pub(crate) fn register_builtin_connectors(
     registry: &mut calc_flow::ConnectorRegistry,
 ) -> calc_flow::Result<()> {
-    // register_file_connectors already registers the format codecs.
-    calc_flow_connectors::register_file_connectors(registry)
+    let _ = &registry;
+    #[cfg(feature = "connector-file")]
+    calc_flow_connectors::register_file_connectors(registry)?;
+    #[cfg(all(
+        not(feature = "connector-file"),
+        any(
+            feature = "connector-kafka",
+            feature = "connector-postgresql",
+            feature = "connector-clickhouse",
+            feature = "connector-http",
+            feature = "connector-websocket"
+        )
+    ))]
+    calc_flow_connectors::register_format_codecs(registry)?;
+
+    #[cfg(feature = "connector-kafka")]
+    calc_flow_connectors::register_kafka_connectors(registry)?;
+    #[cfg(feature = "connector-clickhouse")]
+    calc_flow_connectors::register_clickhouse_connectors(registry)?;
+    #[cfg(feature = "connector-http")]
+    calc_flow_connectors::register_http_connectors(registry)?;
+    #[cfg(feature = "connector-websocket")]
+    calc_flow_connectors::register_websocket_connectors(registry)?;
+    #[cfg(feature = "connector-postgresql")]
+    calc_flow_connectors::register_postgresql_connectors(registry)?;
+
+    Ok(())
 }
 
 fn delivery_str(value: calc_flow::DeliveryCapability) -> String {
@@ -133,6 +158,7 @@ fn transaction_str(value: calc_flow::TransactionSupport) -> String {
         calc_flow::TransactionSupport::None => "none".into(),
         calc_flow::TransactionSupport::PreCommitCommit => "pre_commit_commit".into(),
         calc_flow::TransactionSupport::LedgerIdempotent => "ledger_idempotent".into(),
+        calc_flow::TransactionSupport::RetryDeduplicated => "retry_deduplicated".into(),
     }
 }
 

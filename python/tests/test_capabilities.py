@@ -45,7 +45,7 @@ def test_empty_runtime_capabilities_are_frozen_and_session_scoped() -> None:
     assert snapshot.scope.revision == 0
     assert snapshot.scope.session_id == repeated.scope.session_id
     assert snapshot.package_version == "3.0.0"
-    assert snapshot.project_format_versions == (2,)
+    assert snapshot.project_format_versions == (3,)
     assert snapshot.batch_kinds == ("array", "table")
     assert tuple(operator.kind for operator in snapshot.operators) == (
         "expression",
@@ -56,6 +56,7 @@ def test_empty_runtime_capabilities_are_frozen_and_session_scoped() -> None:
     assert all(operator.requires_datafusion for operator in snapshot.operators)
     assert snapshot.udfs == ()
     assert snapshot.providers == ()
+    assert tuple(connector.name for connector in snapshot.connectors) == ("file",)
     with pytest.raises(FrozenInstanceError):
         snapshot.scope.revision = 1  # type: ignore[misc]
 

@@ -178,6 +178,14 @@ pub(crate) trait StreamSource: Send {
     /// teardown, never polls this instance again, and then calls `close`.
     async fn next(&mut self) -> Result<Option<SourceEvent>>;
 
+    fn durable_cursor_acknowledger(&self) -> Option<Arc<dyn DurableCursorAcknowledger>> {
+        None
+    }
+
+    fn checkpoint_gate(&self) -> Option<Arc<dyn SourceCheckpointGate>> {
+        None
+    }
+
     /// Must tolerate a `next` future dropped during teardown (spec D3.5).
     async fn close(&mut self) -> Result<()>;
 
@@ -202,6 +210,16 @@ pub(crate) trait StreamSource: Send {
     fn existing_private_watermark_toggle(&self) -> Option<ExistingPrivateToggleRoute> {
         None
     }
+}
+
+#[async_trait]
+pub(crate) trait DurableCursorAcknowledger: Send + Sync {
+    async fn acknowledge(&self, cursor: &Cursor) -> Result<()>;
+}
+
+#[async_trait]
+pub(crate) trait SourceCheckpointGate: Send + Sync {
+    async fn wait_ready(&self) -> Result<()>;
 }
 
 /// Test-only oracle populated at the FR10A slot-commit linearization point.
@@ -235,6 +253,8 @@ pub(crate) struct SourceBinding {
     native_watermarks: Option<NativeWatermarkCapability>,
     replay_positioning: Option<ReplayPositioningCapability>,
     existing_toggle_route: Option<ExistingPrivateToggleRoute>,
+    durable_cursor_acknowledger: Option<Arc<dyn DurableCursorAcknowledger>>,
+    checkpoint_gate: Option<Arc<dyn SourceCheckpointGate>>,
     resume_cursor: Option<Cursor>,
     next_sequence: u64,
     restored_ended: bool,
@@ -259,6 +279,8 @@ impl SourceBinding {
             native_watermarks: None,
             replay_positioning: None,
             existing_toggle_route: None,
+            durable_cursor_acknowledger: None,
+            checkpoint_gate: None,
             resume_cursor,
             next_sequence,
             restored_ended: false,
@@ -317,6 +339,8 @@ impl SourceBinding {
             },
         ));
         self.existing_toggle_route = self.source.existing_private_watermark_toggle();
+        self.durable_cursor_acknowledger = self.source.durable_cursor_acknowledger();
+        self.checkpoint_gate = self.source.checkpoint_gate();
         capabilities
     }
 
@@ -689,6 +713,9 @@ impl SourceAcceptance {
 pub(crate) struct SourceProgress {
     snapshot: Arc<Mutex<SourceProgressSnapshot>>,
     acceptance: Arc<SourceAcceptance>,
+    binding_id: String,
+    durable_cursor_acknowledger: Option<Arc<dyn DurableCursorAcknowledger>>,
+    checkpoint_gate: Option<Arc<dyn SourceCheckpointGate>>,
 }
 
 pub(crate) struct SourceCloseFailures {
@@ -700,8 +727,14 @@ impl std::fmt::Debug for SourceProgress {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SourceProgress")
+            .field("binding_id", &self.binding_id)
             .field("snapshot", &*self.snapshot.lock())
             .field("acceptance", &*self.acceptance.state.lock())
+            .field(
+                "durable_cursor_acknowledger",
+                &self.durable_cursor_acknowledger.is_some(),
+            )
+            .field("checkpoint_gate", &self.checkpoint_gate.is_some())
             .finish()
     }
 }
@@ -709,6 +742,17 @@ impl std::fmt::Debug for SourceProgress {
 impl SourceProgress {
     pub(crate) fn snapshot(&self) -> SourceProgressSnapshot {
         self.snapshot.lock().clone()
+    }
+
+    pub(crate) async fn acknowledge_durable_cursor(
+        &self,
+        cursor: Option<&crate::CursorManifestEntry>,
+    ) -> Result<()> {
+        let (Some(acknowledger), Some(cursor)) = (&self.durable_cursor_acknowledger, cursor) else {
+            return Ok(());
+        };
+        let cursor = Cursor::from_manifest_entry(&self.binding_id, cursor)?;
+        acknowledger.acknowledge(&cursor).await
     }
 
     pub(crate) async fn barrier(
@@ -720,6 +764,13 @@ impl SourceProgress {
             return Err(CalcFlowError::CheckpointMismatch {
                 message: "source cannot report an exact replayable checkpoint cut".into(),
             });
+        }
+        if let Some(gate) = &self.checkpoint_gate {
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(source_checkpoint_cancelled()),
+                ready = gate.wait_ready() => ready?,
+            }
         }
         self.acceptance.request_checkpoint_pause(epoch)?;
         loop {
@@ -1131,6 +1182,8 @@ fn spawn_validated_source_tasks(
         native_watermarks: _,
         replay_positioning: _,
         existing_toggle_route: _,
+        durable_cursor_acknowledger,
+        checkpoint_gate,
         resume_cursor,
         next_sequence,
         restored_ended,
@@ -1162,6 +1215,9 @@ fn spawn_validated_source_tasks(
             ended: restored_ended,
         })),
         acceptance: Arc::clone(&acceptance),
+        binding_id: binding_id.clone(),
+        durable_cursor_acknowledger,
+        checkpoint_gate,
     };
     let (slot_tx, slot_rx) = mpsc::channel(1);
     let cancellation = source_context.job().cancellation().clone();

@@ -1,6 +1,6 @@
 # Python API
 
-The `calc-flow==2.0.0` Python package is a PyO3 binding to the Rust engine plus
+The `calc-flow==3.0.0` Python package is a PyO3 binding to the Rust engine plus
 small functional adapters. Python 3.13 or newer is required.
 
 ## Install and develop
@@ -405,9 +405,17 @@ optional JAX paths are in
 
 ## Projects and persistence
 
-`ProjectDocument` validates a strict `format_version: 2` mapping with the Rust
+`ProjectDocument` validates a strict `format_version: 3` mapping with the Rust
 schema. `project_json_schema()` returns the generated schema;
 `validate_project_json(document)` returns canonical JSON.
+
+Project v3 selects `runtime.mode` explicitly. Stream projects carry exact
+connector and format identities, non-secret options, named secret references,
+watermark policy, managed state settings, and per-output best-effort,
+at-least-once, or exactly-once delivery requests.
+`PipelineBuilder.compile_stream()` resolves those references through the
+runtime's connector registry and secret resolver; project JSON never embeds a
+connector object or credential value.
 
 `FileProjectStore` has async `create`, `put`, `get`, `list`, and `delete`
 methods and explicit `*_blocking` variants. Safe JSON/YAML import/export helpers

@@ -1,50 +1,7 @@
 {
   "components": {
     "schemas": {
-      "ArrayOutputPreview": {
-        "additionalProperties": false,
-        "properties": {
-          "backend": {
-            "title": "Backend",
-            "type": "string"
-          },
-          "data": {
-            "$ref": "#/components/schemas/calc_flow_studio__models__JSONValue-Output"
-          },
-          "kind": {
-            "const": "array",
-            "default": "array",
-            "title": "Kind",
-            "type": "string"
-          },
-          "metadata": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/calc_flow_studio__models__JSONValue-Output"
-            },
-            "title": "Metadata",
-            "type": "object"
-          },
-          "total_rows": {
-            "minimum": 0.0,
-            "title": "Total Rows",
-            "type": "integer"
-          },
-          "truncated": {
-            "title": "Truncated",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "backend",
-          "total_rows",
-          "truncated",
-          "data",
-          "metadata"
-        ],
-        "title": "ArrayOutputPreview",
-        "type": "object"
-      },
-      "CancelledRunResponse": {
+      "CancelledJobResponse": {
         "additionalProperties": false,
         "properties": {
           "created_at": {
@@ -54,6 +11,10 @@
           },
           "error": {
             "title": "Error",
+            "type": "null"
+          },
+          "error_code": {
+            "title": "Error Code",
             "type": "null"
           },
           "finished_at": {
@@ -68,10 +29,6 @@
           "project_id": {
             "title": "Project Id",
             "type": "string"
-          },
-          "result": {
-            "title": "Result",
-            "type": "null"
           },
           "started_at": {
             "anyOf": [
@@ -98,7 +55,7 @@
           "status",
           "finished_at"
         ],
-        "title": "CancelledRunResponse",
+        "title": "CancelledJobResponse",
         "type": "object"
       },
       "CapabilitiesResponse": {
@@ -124,82 +81,7 @@
         "title": "CapabilitiesResponse",
         "type": "object"
       },
-      "CheckpointSummary": {
-        "additionalProperties": false,
-        "properties": {
-          "compatible": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Compatible"
-          },
-          "created_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Created At"
-          },
-          "exists": {
-            "title": "Exists",
-            "type": "boolean"
-          },
-          "pipeline_fingerprint": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Pipeline Fingerprint"
-          },
-          "pipeline_name": {
-            "title": "Pipeline Name",
-            "type": "string"
-          },
-          "sequence": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Sequence"
-          },
-          "source_cursor": {
-            "$ref": "#/components/schemas/calc_flow_studio__models__JSONValue-Output"
-          },
-          "state_nodes": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "State Nodes",
-            "type": "array"
-          }
-        },
-        "required": [
-          "pipeline_name",
-          "exists"
-        ],
-        "title": "CheckpointSummary",
-        "type": "object"
-      },
-      "CompletedRunResponse": {
+      "CompletedJobResponse": {
         "additionalProperties": false,
         "properties": {
           "created_at": {
@@ -209,6 +91,10 @@
           },
           "error": {
             "title": "Error",
+            "type": "null"
+          },
+          "error_code": {
+            "title": "Error Code",
             "type": "null"
           },
           "finished_at": {
@@ -223,9 +109,6 @@
           "project_id": {
             "title": "Project Id",
             "type": "string"
-          },
-          "result": {
-            "$ref": "#/components/schemas/RunResultPreview"
           },
           "started_at": {
             "format": "date-time",
@@ -244,68 +127,131 @@
           "created_at",
           "status",
           "started_at",
-          "finished_at",
-          "result"
+          "finished_at"
         ],
-        "title": "CompletedRunResponse",
+        "title": "CompletedJobResponse",
         "type": "object"
       },
-      "DataFusionMetricPreview": {
+      "ConnectorAxesResponse": {
         "additionalProperties": false,
         "properties": {
-          "execution_ns": {
-            "minimum": 0.0,
-            "title": "Execution Ns",
-            "type": "integer"
+          "cdc": {
+            "title": "Cdc",
+            "type": "boolean"
           },
-          "logical_plan": {
-            "title": "Logical Plan",
-            "type": "string"
-          },
-          "node_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+          "delivery": {
+            "enum": [
+              "best_effort",
+              "at_least_once",
+              "exactly_once"
             ],
-            "title": "Node Id"
-          },
-          "output_rows": {
-            "minimum": 0.0,
-            "title": "Output Rows",
-            "type": "integer"
-          },
-          "physical_plan": {
-            "title": "Physical Plan",
+            "title": "Delivery",
             "type": "string"
           },
-          "planning_ns": {
-            "minimum": 0.0,
-            "title": "Planning Ns",
-            "type": "integer"
+          "lookup": {
+            "title": "Lookup",
+            "type": "boolean"
           },
-          "query_id": {
-            "minimum": 0.0,
-            "title": "Query Id",
-            "type": "integer"
+          "polling": {
+            "title": "Polling",
+            "type": "boolean"
+          },
+          "replay": {
+            "enum": [
+              "replayable_exact",
+              "unreplayable"
+            ],
+            "title": "Replay",
+            "type": "string"
+          },
+          "snapshot": {
+            "title": "Snapshot",
+            "type": "boolean"
+          },
+          "transaction": {
+            "enum": [
+              "none",
+              "pre_commit_commit",
+              "ledger_idempotent"
+            ],
+            "title": "Transaction",
+            "type": "string"
+          },
+          "watermark": {
+            "enum": [
+              "native",
+              "generated_only"
+            ],
+            "title": "Watermark",
+            "type": "string"
           }
         },
         "required": [
-          "query_id",
-          "node_id",
-          "planning_ns",
-          "execution_ns",
-          "output_rows",
-          "logical_plan",
-          "physical_plan"
+          "delivery",
+          "replay",
+          "watermark",
+          "transaction",
+          "snapshot",
+          "polling",
+          "cdc",
+          "lookup"
         ],
-        "title": "DataFusionMetricPreview",
+        "title": "ConnectorAxesResponse",
         "type": "object"
       },
-      "FailedRunResponse": {
+      "ConnectorCapabilityResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/ConnectorAxesResponse"
+          },
+          "formats": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Formats",
+            "type": "array"
+          },
+          "kind": {
+            "enum": [
+              "source",
+              "sink",
+              "both"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "optionsSchema": {
+            "additionalProperties": true,
+            "title": "Optionsschema",
+            "type": "object"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "name",
+          "version",
+          "kind",
+          "capabilities",
+          "formats",
+          "optionsSchema"
+        ],
+        "title": "ConnectorCapabilityResponse",
+        "type": "object"
+      },
+      "FailedJobResponse": {
         "additionalProperties": false,
         "properties": {
           "created_at": {
@@ -316,6 +262,14 @@
           "error": {
             "minLength": 1,
             "title": "Error",
+            "type": "string"
+          },
+          "error_code": {
+            "enum": [
+              "job_limit_exceeded",
+              "worker_failed"
+            ],
+            "title": "Error Code",
             "type": "string"
           },
           "finished_at": {
@@ -330,10 +284,6 @@
           "project_id": {
             "title": "Project Id",
             "type": "string"
-          },
-          "result": {
-            "title": "Result",
-            "type": "null"
           },
           "started_at": {
             "format": "date-time",
@@ -353,9 +303,10 @@
           "status",
           "started_at",
           "finished_at",
+          "error_code",
           "error"
         ],
-        "title": "FailedRunResponse",
+        "title": "FailedJobResponse",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -369,43 +320,6 @@
           }
         },
         "title": "HTTPValidationError",
-        "type": "object"
-      },
-      "InputPayload": {
-        "additionalProperties": false,
-        "properties": {
-          "data": {
-            "$ref": "#/components/schemas/calc_flow_studio__models__JSONValue-Input"
-          },
-          "format": {
-            "enum": [
-              "records",
-              "columns",
-              "arrow_ipc"
-            ],
-            "title": "Format",
-            "type": "string"
-          },
-          "source_id": {
-            "anyOf": [
-              {
-                "maxLength": 64,
-                "minLength": 1,
-                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Source Id"
-          }
-        },
-        "required": [
-          "format",
-          "data"
-        ],
-        "title": "InputPayload",
         "type": "object"
       },
       "InvalidValidationReport": {
@@ -441,6 +355,118 @@
         ],
         "title": "InvalidValidationReport",
         "type": "object"
+      },
+      "JSONValue-Input": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/JSONValue-Input"
+            },
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JSONValue-Input"
+            },
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "JSONValue-Output": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/JSONValue-Output"
+            },
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JSONValue-Output"
+            },
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "JobCreateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "project_id": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Project Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id"
+        ],
+        "title": "JobCreateRequest",
+        "type": "object"
+      },
+      "JobResponse": {
+        "$ref": "#/components/schemas/JobResponseVariant",
+        "description": "Typed lifecycle state for one persistent continuous job.",
+        "title": "JobResponse"
+      },
+      "JobResponseVariant": {
+        "discriminator": {
+          "mapping": {
+            "cancelled": "#/components/schemas/CancelledJobResponse",
+            "completed": "#/components/schemas/CompletedJobResponse",
+            "failed": "#/components/schemas/FailedJobResponse",
+            "pending": "#/components/schemas/PendingJobResponse",
+            "running": "#/components/schemas/RunningJobResponse"
+          },
+          "propertyName": "status"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/PendingJobResponse"
+          },
+          {
+            "$ref": "#/components/schemas/RunningJobResponse"
+          },
+          {
+            "$ref": "#/components/schemas/CompletedJobResponse"
+          },
+          {
+            "$ref": "#/components/schemas/FailedJobResponse"
+          },
+          {
+            "$ref": "#/components/schemas/CancelledJobResponse"
+          }
+        ]
       },
       "LazyBuiltinWorkerRegistration": {
         "additionalProperties": false,
@@ -479,37 +505,6 @@
           "version"
         ],
         "title": "LazyBuiltinWorkerRegistration",
-        "type": "object"
-      },
-      "NodeTimingPreview": {
-        "additionalProperties": false,
-        "properties": {
-          "duration_ns": {
-            "minimum": 0.0,
-            "title": "Duration Ns",
-            "type": "integer"
-          },
-          "input_rows": {
-            "additionalProperties": {
-              "type": "integer"
-            },
-            "title": "Input Rows",
-            "type": "object"
-          },
-          "output_rows": {
-            "additionalProperties": {
-              "type": "integer"
-            },
-            "title": "Output Rows",
-            "type": "object"
-          }
-        },
-        "required": [
-          "duration_ns",
-          "input_rows",
-          "output_rows"
-        ],
-        "title": "NodeTimingPreview",
         "type": "object"
       },
       "OperatorCapabilityResponse": {
@@ -555,48 +550,7 @@
         "title": "OperatorCapabilityResponse",
         "type": "object"
       },
-      "OutputFieldPreview": {
-        "additionalProperties": false,
-        "properties": {
-          "name": {
-            "title": "Name",
-            "type": "string"
-          },
-          "nullable": {
-            "title": "Nullable",
-            "type": "boolean"
-          },
-          "type": {
-            "title": "Type",
-            "type": "string"
-          }
-        },
-        "required": [
-          "name",
-          "type",
-          "nullable"
-        ],
-        "title": "OutputFieldPreview",
-        "type": "object"
-      },
-      "OutputPreview": {
-        "discriminator": {
-          "mapping": {
-            "array": "#/components/schemas/ArrayOutputPreview",
-            "table": "#/components/schemas/TableOutputPreview"
-          },
-          "propertyName": "kind"
-        },
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/TableOutputPreview"
-          },
-          {
-            "$ref": "#/components/schemas/ArrayOutputPreview"
-          }
-        ]
-      },
-      "PendingRunResponse": {
+      "PendingJobResponse": {
         "additionalProperties": false,
         "properties": {
           "created_at": {
@@ -606,6 +560,10 @@
           },
           "error": {
             "title": "Error",
+            "type": "null"
+          },
+          "error_code": {
+            "title": "Error Code",
             "type": "null"
           },
           "finished_at": {
@@ -619,10 +577,6 @@
           "project_id": {
             "title": "Project Id",
             "type": "string"
-          },
-          "result": {
-            "title": "Result",
-            "type": "null"
           },
           "started_at": {
             "title": "Started At",
@@ -640,7 +594,7 @@
           "created_at",
           "status"
         ],
-        "title": "PendingRunResponse",
+        "title": "PendingJobResponse",
         "type": "object"
       },
       "PreviewCapabilitiesResponse": {
@@ -785,6 +739,27 @@
             ],
             "type": "string"
           },
+          "ConnectorRef": {
+            "additionalProperties": false,
+            "description": "Exact identity of a connector implementation.",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "name",
+              "version"
+            ],
+            "type": "object"
+          },
           "DataFusionConfig": {
             "additionalProperties": false,
             "properties": {
@@ -825,6 +800,14 @@
             ],
             "type": "object"
           },
+          "DeliveryRequest": {
+            "description": "Requested delivery guarantee for one project output.",
+            "enum": [
+              "at_least_once",
+              "exactly_once"
+            ],
+            "type": "string"
+          },
           "EdgeSpec": {
             "additionalProperties": false,
             "properties": {
@@ -846,6 +829,23 @@
             "required": [
               "source_node",
               "target_node"
+            ],
+            "type": "object"
+          },
+          "FormatRef": {
+            "additionalProperties": false,
+            "description": "Exact identity of a registered format codec.",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "version"
             ],
             "type": "object"
           },
@@ -1069,6 +1069,186 @@
             ],
             "type": "object"
           },
+          "ProjectSinkBinding": {
+            "additionalProperties": false,
+            "description": "A data-only sink binding to one registered connector.",
+            "properties": {
+              "binding": {
+                "description": "External graph output this binding drains.",
+                "type": "string"
+              },
+              "connector": {
+                "$ref": "#/components/schemas/ProjectCreateRequest/$defs/ConnectorRef",
+                "description": "Exact registered connector identity."
+              },
+              "delivery": {
+                "$ref": "#/components/schemas/ProjectCreateRequest/$defs/DeliveryRequest",
+                "description": "Requested delivery guarantee for this output."
+              },
+              "format": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/FormatRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Optional exact wire-format identity."
+              },
+              "options": {
+                "additionalProperties": true,
+                "default": {},
+                "description": "Bounded non-secret connector options.",
+                "type": "object"
+              },
+              "secrets": {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/ProjectCreateRequest/$defs/SecretReference"
+                },
+                "default": {},
+                "description": "Named secret references resolved only when the connector opens.",
+                "type": "object"
+              }
+            },
+            "required": [
+              "binding",
+              "connector",
+              "delivery"
+            ],
+            "type": "object"
+          },
+          "ProjectSourceBinding": {
+            "additionalProperties": false,
+            "description": "A data-only source binding to one registered connector.",
+            "properties": {
+              "binding": {
+                "description": "External graph input this binding feeds.",
+                "type": "string"
+              },
+              "connector": {
+                "$ref": "#/components/schemas/ProjectCreateRequest/$defs/ConnectorRef",
+                "description": "Exact registered connector identity."
+              },
+              "format": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/FormatRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Optional exact wire-format identity."
+              },
+              "options": {
+                "additionalProperties": true,
+                "default": {},
+                "description": "Bounded non-secret connector options.",
+                "type": "object"
+              },
+              "schema": {
+                "default": [],
+                "description": "Optional exact Arrow schema.",
+                "items": {
+                  "$ref": "#/components/schemas/ProjectCreateRequest/$defs/ArrowFieldSpec"
+                },
+                "type": "array"
+              },
+              "secrets": {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/ProjectCreateRequest/$defs/SecretReference"
+                },
+                "default": {},
+                "description": "Named secret references resolved only when the connector opens.",
+                "type": "object"
+              },
+              "watermark": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/ProjectWatermarkPolicy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Optional event-time watermark policy."
+              }
+            },
+            "required": [
+              "binding",
+              "connector"
+            ],
+            "type": "object"
+          },
+          "ProjectWatermarkPolicy": {
+            "description": "Event-time policy carried by one project source binding.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "policy": {
+                    "const": "source_provided",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "policy"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "column": {
+                    "type": "string"
+                  },
+                  "delay_ms": {
+                    "format": "uint64",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "emit_interval_ms": {
+                    "default": 0,
+                    "format": "uint64",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "idle_timeout_ms": {
+                    "format": "uint64",
+                    "minimum": 0.0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "policy": {
+                    "const": "bounded_out_of_orderness",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "policy",
+                  "column",
+                  "delay_ms"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "policy": {
+                    "const": "disabled",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "policy"
+                ],
+                "type": "object"
+              }
+            ]
+          },
           "RunOptions": {
             "additionalProperties": false,
             "properties": {
@@ -1099,6 +1279,128 @@
               "timeout_seconds": {
                 "default": 30,
                 "format": "uint64",
+                "minimum": 0.0,
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "RuntimeSpec": {
+            "description": "Runtime mode and mode-specific limits for a project-v3 document.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "A bounded batch run using inline data fixtures.",
+                "properties": {
+                  "mode": {
+                    "const": "batch",
+                    "type": "string"
+                  },
+                  "options": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RunOptions"
+                  }
+                },
+                "required": [
+                  "mode",
+                  "options"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "A continuous run using registered connector bindings.",
+                "properties": {
+                  "mode": {
+                    "const": "stream",
+                    "type": "string"
+                  },
+                  "options": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/StreamRunOptions"
+                  }
+                },
+                "required": [
+                  "mode",
+                  "options"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "SecretReference": {
+            "additionalProperties": false,
+            "description": "A named pointer to a secret; the only secret-shaped value a data-only\ndocument may carry.",
+            "properties": {
+              "key": {
+                "description": "Resolver-specific key, for example the variable name.",
+                "type": "string"
+              },
+              "resolver": {
+                "$ref": "#/components/schemas/ProjectCreateRequest/$defs/SecretResolverKind",
+                "description": "Resolution source."
+              }
+            },
+            "required": [
+              "resolver",
+              "key"
+            ],
+            "type": "object"
+          },
+          "SecretResolverKind": {
+            "description": "Where a secret reference is resolved from.",
+            "oneOf": [
+              {
+                "const": "environment",
+                "description": "Resolved from a process environment variable.",
+                "type": "string"
+              },
+              {
+                "const": "file",
+                "description": "Resolved from a file path.",
+                "type": "string"
+              },
+              {
+                "const": "registered",
+                "description": "Resolved from a trusted in-process registry.",
+                "type": "string"
+              }
+            ]
+          },
+          "StateConfig": {
+            "additionalProperties": false,
+            "description": "Managed state location and checkpoint retention for stream projects.",
+            "properties": {
+              "retention": {
+                "default": 3,
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "root": {
+                "default": ".calc-flow-state",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "StreamRunOptions": {
+            "additionalProperties": false,
+            "description": "Continuous runtime limits carried by project v3.",
+            "properties": {
+              "checkpoint_interval_ms": {
+                "default": 30000,
+                "format": "uint64",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "max_batch_bytes": {
+                "default": 67108864,
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "max_batch_rows": {
+                "default": 10000,
+                "format": "uint",
                 "minimum": 0.0,
                 "type": "integer"
               }
@@ -1153,8 +1455,11 @@
             "type": "string"
           },
           "format_version": {
-            "const": 2,
+            "const": 3,
             "type": "integer"
+          },
+          "graph": {
+            "$ref": "#/components/schemas/ProjectCreateRequest/$defs/PipelineSpec"
           },
           "id": {
             "type": "string"
@@ -1162,17 +1467,28 @@
           "name": {
             "type": "string"
           },
-          "pipeline": {
-            "$ref": "#/components/schemas/ProjectCreateRequest/$defs/PipelineSpec"
+          "runtime": {
+            "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RuntimeSpec"
           },
-          "run_options": {
-            "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RunOptions",
+          "sinks": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProjectCreateRequest/$defs/ProjectSinkBinding"
+            },
+            "type": "array"
+          },
+          "sources": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProjectCreateRequest/$defs/ProjectSourceBinding"
+            },
+            "type": "array"
+          },
+          "state": {
+            "$ref": "#/components/schemas/ProjectCreateRequest/$defs/StateConfig",
             "default": {
-              "max_input_bytes": 10485760,
-              "max_rows": 100000,
-              "memory_limit_mb": 512,
-              "output_rows": 1000,
-              "timeout_seconds": 30
+              "retention": 3,
+              "root": ".calc-flow-state"
             }
           }
         },
@@ -1180,9 +1496,10 @@
           "format_version",
           "id",
           "name",
-          "pipeline"
+          "runtime",
+          "graph"
         ],
-        "title": "Calc Flow Project V2",
+        "title": "Calc Flow Project V3",
         "type": "object"
       },
       "ProjectDocument": {
@@ -1213,6 +1530,27 @@
               "array"
             ],
             "type": "string"
+          },
+          "ConnectorRef": {
+            "additionalProperties": false,
+            "description": "Exact identity of a connector implementation.",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "name",
+              "version"
+            ],
+            "type": "object"
           },
           "DataFusionConfig": {
             "additionalProperties": false,
@@ -1254,6 +1592,14 @@
             ],
             "type": "object"
           },
+          "DeliveryRequest": {
+            "description": "Requested delivery guarantee for one project output.",
+            "enum": [
+              "at_least_once",
+              "exactly_once"
+            ],
+            "type": "string"
+          },
           "EdgeSpec": {
             "additionalProperties": false,
             "properties": {
@@ -1275,6 +1621,23 @@
             "required": [
               "source_node",
               "target_node"
+            ],
+            "type": "object"
+          },
+          "FormatRef": {
+            "additionalProperties": false,
+            "description": "Exact identity of a registered format codec.",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "version"
             ],
             "type": "object"
           },
@@ -1498,6 +1861,186 @@
             ],
             "type": "object"
           },
+          "ProjectSinkBinding": {
+            "additionalProperties": false,
+            "description": "A data-only sink binding to one registered connector.",
+            "properties": {
+              "binding": {
+                "description": "External graph output this binding drains.",
+                "type": "string"
+              },
+              "connector": {
+                "$ref": "#/components/schemas/ProjectDocument/$defs/ConnectorRef",
+                "description": "Exact registered connector identity."
+              },
+              "delivery": {
+                "$ref": "#/components/schemas/ProjectDocument/$defs/DeliveryRequest",
+                "description": "Requested delivery guarantee for this output."
+              },
+              "format": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/FormatRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Optional exact wire-format identity."
+              },
+              "options": {
+                "additionalProperties": true,
+                "default": {},
+                "description": "Bounded non-secret connector options.",
+                "type": "object"
+              },
+              "secrets": {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/ProjectDocument/$defs/SecretReference"
+                },
+                "default": {},
+                "description": "Named secret references resolved only when the connector opens.",
+                "type": "object"
+              }
+            },
+            "required": [
+              "binding",
+              "connector",
+              "delivery"
+            ],
+            "type": "object"
+          },
+          "ProjectSourceBinding": {
+            "additionalProperties": false,
+            "description": "A data-only source binding to one registered connector.",
+            "properties": {
+              "binding": {
+                "description": "External graph input this binding feeds.",
+                "type": "string"
+              },
+              "connector": {
+                "$ref": "#/components/schemas/ProjectDocument/$defs/ConnectorRef",
+                "description": "Exact registered connector identity."
+              },
+              "format": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/FormatRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Optional exact wire-format identity."
+              },
+              "options": {
+                "additionalProperties": true,
+                "default": {},
+                "description": "Bounded non-secret connector options.",
+                "type": "object"
+              },
+              "schema": {
+                "default": [],
+                "description": "Optional exact Arrow schema.",
+                "items": {
+                  "$ref": "#/components/schemas/ProjectDocument/$defs/ArrowFieldSpec"
+                },
+                "type": "array"
+              },
+              "secrets": {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/ProjectDocument/$defs/SecretReference"
+                },
+                "default": {},
+                "description": "Named secret references resolved only when the connector opens.",
+                "type": "object"
+              },
+              "watermark": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/ProjectWatermarkPolicy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Optional event-time watermark policy."
+              }
+            },
+            "required": [
+              "binding",
+              "connector"
+            ],
+            "type": "object"
+          },
+          "ProjectWatermarkPolicy": {
+            "description": "Event-time policy carried by one project source binding.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "policy": {
+                    "const": "source_provided",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "policy"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "column": {
+                    "type": "string"
+                  },
+                  "delay_ms": {
+                    "format": "uint64",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "emit_interval_ms": {
+                    "default": 0,
+                    "format": "uint64",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "idle_timeout_ms": {
+                    "format": "uint64",
+                    "minimum": 0.0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "policy": {
+                    "const": "bounded_out_of_orderness",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "policy",
+                  "column",
+                  "delay_ms"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "policy": {
+                    "const": "disabled",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "policy"
+                ],
+                "type": "object"
+              }
+            ]
+          },
           "RunOptions": {
             "additionalProperties": false,
             "properties": {
@@ -1528,6 +2071,128 @@
               "timeout_seconds": {
                 "default": 30,
                 "format": "uint64",
+                "minimum": 0.0,
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "RuntimeSpec": {
+            "description": "Runtime mode and mode-specific limits for a project-v3 document.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "A bounded batch run using inline data fixtures.",
+                "properties": {
+                  "mode": {
+                    "const": "batch",
+                    "type": "string"
+                  },
+                  "options": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/RunOptions"
+                  }
+                },
+                "required": [
+                  "mode",
+                  "options"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "A continuous run using registered connector bindings.",
+                "properties": {
+                  "mode": {
+                    "const": "stream",
+                    "type": "string"
+                  },
+                  "options": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/StreamRunOptions"
+                  }
+                },
+                "required": [
+                  "mode",
+                  "options"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "SecretReference": {
+            "additionalProperties": false,
+            "description": "A named pointer to a secret; the only secret-shaped value a data-only\ndocument may carry.",
+            "properties": {
+              "key": {
+                "description": "Resolver-specific key, for example the variable name.",
+                "type": "string"
+              },
+              "resolver": {
+                "$ref": "#/components/schemas/ProjectDocument/$defs/SecretResolverKind",
+                "description": "Resolution source."
+              }
+            },
+            "required": [
+              "resolver",
+              "key"
+            ],
+            "type": "object"
+          },
+          "SecretResolverKind": {
+            "description": "Where a secret reference is resolved from.",
+            "oneOf": [
+              {
+                "const": "environment",
+                "description": "Resolved from a process environment variable.",
+                "type": "string"
+              },
+              {
+                "const": "file",
+                "description": "Resolved from a file path.",
+                "type": "string"
+              },
+              {
+                "const": "registered",
+                "description": "Resolved from a trusted in-process registry.",
+                "type": "string"
+              }
+            ]
+          },
+          "StateConfig": {
+            "additionalProperties": false,
+            "description": "Managed state location and checkpoint retention for stream projects.",
+            "properties": {
+              "retention": {
+                "default": 3,
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "root": {
+                "default": ".calc-flow-state",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "StreamRunOptions": {
+            "additionalProperties": false,
+            "description": "Continuous runtime limits carried by project v3.",
+            "properties": {
+              "checkpoint_interval_ms": {
+                "default": 30000,
+                "format": "uint64",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "max_batch_bytes": {
+                "default": 67108864,
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "max_batch_rows": {
+                "default": 10000,
+                "format": "uint",
                 "minimum": 0.0,
                 "type": "integer"
               }
@@ -1582,8 +2247,11 @@
             "type": "string"
           },
           "format_version": {
-            "const": 2,
+            "const": 3,
             "type": "integer"
+          },
+          "graph": {
+            "$ref": "#/components/schemas/ProjectDocument/$defs/PipelineSpec"
           },
           "id": {
             "type": "string"
@@ -1591,17 +2259,28 @@
           "name": {
             "type": "string"
           },
-          "pipeline": {
-            "$ref": "#/components/schemas/ProjectDocument/$defs/PipelineSpec"
+          "runtime": {
+            "$ref": "#/components/schemas/ProjectDocument/$defs/RuntimeSpec"
           },
-          "run_options": {
-            "$ref": "#/components/schemas/ProjectDocument/$defs/RunOptions",
+          "sinks": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProjectDocument/$defs/ProjectSinkBinding"
+            },
+            "type": "array"
+          },
+          "sources": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProjectDocument/$defs/ProjectSourceBinding"
+            },
+            "type": "array"
+          },
+          "state": {
+            "$ref": "#/components/schemas/ProjectDocument/$defs/StateConfig",
             "default": {
-              "max_input_bytes": 10485760,
-              "max_rows": 100000,
-              "memory_limit_mb": 512,
-              "output_rows": 1000,
-              "timeout_seconds": 30
+              "retention": 3,
+              "root": ".calc-flow-state"
             }
           }
         },
@@ -1609,9 +2288,10 @@
           "format_version",
           "id",
           "name",
-          "pipeline"
+          "runtime",
+          "graph"
         ],
-        "title": "Calc Flow Project V2",
+        "title": "Calc Flow Project V3",
         "type": "object"
       },
       "ProjectSummary": {
@@ -1775,7 +2455,7 @@
       },
       "ResourceLimits": {
         "additionalProperties": false,
-        "description": "Equivalent resource bounds replacing the v2 worker timeout for\nlong-running continuous jobs (M6-09).",
+        "description": "Hard bounds for long-running continuous jobs.",
         "properties": {
           "job_lifecycle": {
             "const": "user_explicit_stop",
@@ -1783,11 +2463,10 @@
             "title": "Job Lifecycle",
             "type": "string"
           },
-          "max_checkpoint_disk_mb": {
-            "default": 512,
-            "maximum": 16384.0,
-            "minimum": 16.0,
-            "title": "Max Checkpoint Disk Mb",
+          "max_checkpoint_disk_bytes": {
+            "default": 536870912,
+            "minimum": 16777216.0,
+            "title": "Max Checkpoint Disk Bytes",
             "type": "integer"
           },
           "max_concurrent_jobs": {
@@ -1797,169 +2476,23 @@
             "title": "Max Concurrent Jobs",
             "type": "integer"
           },
-          "max_global_memory_mb": {
-            "default": 4096,
-            "maximum": 32768.0,
-            "minimum": 256.0,
-            "title": "Max Global Memory Mb",
+          "max_global_resident_memory_bytes": {
+            "default": 4294967296,
+            "minimum": 268435456.0,
+            "title": "Max Global Resident Memory Bytes",
             "type": "integer"
           },
-          "max_job_memory_mb": {
-            "default": 1024,
-            "maximum": 8192.0,
-            "minimum": 64.0,
-            "title": "Max Job Memory Mb",
+          "max_job_resident_memory_bytes": {
+            "default": 1073741824,
+            "minimum": 67108864.0,
+            "title": "Max Job Resident Memory Bytes",
             "type": "integer"
           }
         },
         "title": "ResourceLimits",
         "type": "object"
       },
-      "RunOptions": {
-        "additionalProperties": false,
-        "properties": {
-          "max_input_bytes": {
-            "default": 10485760,
-            "maximum": 10485760.0,
-            "minimum": 1.0,
-            "title": "Max Input Bytes",
-            "type": "integer"
-          },
-          "max_rows": {
-            "default": 100000,
-            "maximum": 100000.0,
-            "minimum": 1.0,
-            "title": "Max Rows",
-            "type": "integer"
-          },
-          "memory_limit_mb": {
-            "default": 512,
-            "maximum": 4096.0,
-            "minimum": 64.0,
-            "title": "Memory Limit Mb",
-            "type": "integer"
-          },
-          "output_rows": {
-            "default": 1000,
-            "maximum": 10000.0,
-            "minimum": 1.0,
-            "title": "Output Rows",
-            "type": "integer"
-          },
-          "timeout_seconds": {
-            "default": 30,
-            "maximum": 300.0,
-            "minimum": 1.0,
-            "title": "Timeout Seconds",
-            "type": "integer"
-          }
-        },
-        "title": "RunOptions",
-        "type": "object"
-      },
-      "RunRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "inputs": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/InputPayload"
-            },
-            "title": "Inputs",
-            "type": "object"
-          },
-          "options": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/RunOptions"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "title": "RunRequest",
-        "type": "object"
-      },
-      "RunResponse": {
-        "$ref": "#/components/schemas/RunResponseVariant",
-        "title": "RunResponse"
-      },
-      "RunResponseVariant": {
-        "discriminator": {
-          "mapping": {
-            "cancelled": "#/components/schemas/CancelledRunResponse",
-            "completed": "#/components/schemas/CompletedRunResponse",
-            "failed": "#/components/schemas/FailedRunResponse",
-            "pending": "#/components/schemas/PendingRunResponse",
-            "running": "#/components/schemas/RunningRunResponse",
-            "timed_out": "#/components/schemas/TimedOutRunResponse"
-          },
-          "propertyName": "status"
-        },
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/PendingRunResponse"
-          },
-          {
-            "$ref": "#/components/schemas/RunningRunResponse"
-          },
-          {
-            "$ref": "#/components/schemas/CompletedRunResponse"
-          },
-          {
-            "$ref": "#/components/schemas/FailedRunResponse"
-          },
-          {
-            "$ref": "#/components/schemas/TimedOutRunResponse"
-          },
-          {
-            "$ref": "#/components/schemas/CancelledRunResponse"
-          }
-        ]
-      },
-      "RunResultPreview": {
-        "additionalProperties": false,
-        "properties": {
-          "datafusion_metrics": {
-            "items": {
-              "$ref": "#/components/schemas/DataFusionMetricPreview"
-            },
-            "title": "Datafusion Metrics",
-            "type": "array"
-          },
-          "metadata": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/calc_flow_studio__models__JSONValue-Output"
-            },
-            "title": "Metadata",
-            "type": "object"
-          },
-          "node_timings": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/NodeTimingPreview"
-            },
-            "title": "Node Timings",
-            "type": "object"
-          },
-          "outputs": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/OutputPreview"
-            },
-            "title": "Outputs",
-            "type": "object"
-          }
-        },
-        "required": [
-          "outputs",
-          "node_timings",
-          "datafusion_metrics",
-          "metadata"
-        ],
-        "title": "RunResultPreview",
-        "type": "object"
-      },
-      "RunningRunResponse": {
+      "RunningJobResponse": {
         "additionalProperties": false,
         "properties": {
           "created_at": {
@@ -1969,6 +2502,10 @@
           },
           "error": {
             "title": "Error",
+            "type": "null"
+          },
+          "error_code": {
+            "title": "Error Code",
             "type": "null"
           },
           "finished_at": {
@@ -1982,10 +2519,6 @@
           "project_id": {
             "title": "Project Id",
             "type": "string"
-          },
-          "result": {
-            "title": "Result",
-            "type": "null"
           },
           "started_at": {
             "format": "date-time",
@@ -2005,7 +2538,7 @@
           "status",
           "started_at"
         ],
-        "title": "RunningRunResponse",
+        "title": "RunningJobResponse",
         "type": "object"
       },
       "RuntimeCapabilitiesResponse": {
@@ -2020,6 +2553,13 @@
               "type": "string"
             },
             "title": "Batchkinds",
+            "type": "array"
+          },
+          "connectors": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorCapabilityResponse"
+            },
+            "title": "Connectors",
             "type": "array"
           },
           "operators": {
@@ -2073,7 +2613,8 @@
           "portableArrowTypes",
           "operators",
           "udfs",
-          "providers"
+          "providers",
+          "connectors"
         ],
         "title": "RuntimeCapabilitiesResponse",
         "type": "object"
@@ -2141,112 +2682,6 @@
           "version"
         ],
         "title": "SerializedWorkerRegistration",
-        "type": "object"
-      },
-      "TableOutputPreview": {
-        "additionalProperties": false,
-        "properties": {
-          "kind": {
-            "const": "table",
-            "default": "table",
-            "title": "Kind",
-            "type": "string"
-          },
-          "metadata": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/calc_flow_studio__models__JSONValue-Output"
-            },
-            "title": "Metadata",
-            "type": "object"
-          },
-          "rows": {
-            "items": {
-              "additionalProperties": {
-                "$ref": "#/components/schemas/calc_flow_studio__models__JSONValue-Output"
-              },
-              "type": "object"
-            },
-            "title": "Rows",
-            "type": "array"
-          },
-          "schema": {
-            "items": {
-              "$ref": "#/components/schemas/OutputFieldPreview"
-            },
-            "title": "Schema",
-            "type": "array"
-          },
-          "total_rows": {
-            "minimum": 0.0,
-            "title": "Total Rows",
-            "type": "integer"
-          },
-          "truncated": {
-            "title": "Truncated",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "total_rows",
-          "truncated",
-          "schema",
-          "rows",
-          "metadata"
-        ],
-        "title": "TableOutputPreview",
-        "type": "object"
-      },
-      "TimedOutRunResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "created_at": {
-            "format": "date-time",
-            "title": "Created At",
-            "type": "string"
-          },
-          "error": {
-            "minLength": 1,
-            "title": "Error",
-            "type": "string"
-          },
-          "finished_at": {
-            "format": "date-time",
-            "title": "Finished At",
-            "type": "string"
-          },
-          "id": {
-            "title": "Id",
-            "type": "string"
-          },
-          "project_id": {
-            "title": "Project Id",
-            "type": "string"
-          },
-          "result": {
-            "title": "Result",
-            "type": "null"
-          },
-          "started_at": {
-            "format": "date-time",
-            "title": "Started At",
-            "type": "string"
-          },
-          "status": {
-            "const": "timed_out",
-            "title": "Status",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "project_id",
-          "created_at",
-          "status",
-          "started_at",
-          "finished_at",
-          "error"
-        ],
-        "title": "TimedOutRunResponse",
         "type": "object"
       },
       "UdfCapabilityResponse": {
@@ -2479,130 +2914,6 @@
             "$ref": "#/components/schemas/UnavailableWorkerRegistration"
           }
         ]
-      },
-      "calc_flow__config__JSONValue-Input": {
-        "anyOf": [
-          {
-            "type": "boolean"
-          },
-          {
-            "type": "integer"
-          },
-          {
-            "type": "number"
-          },
-          {
-            "type": "string"
-          },
-          {
-            "items": {
-              "$ref": "#/components/schemas/calc_flow__config__JSONValue-Input"
-            },
-            "type": "array"
-          },
-          {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/calc_flow__config__JSONValue-Input"
-            },
-            "type": "object"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      },
-      "calc_flow__config__JSONValue-Output": {
-        "anyOf": [
-          {
-            "type": "boolean"
-          },
-          {
-            "type": "integer"
-          },
-          {
-            "type": "number"
-          },
-          {
-            "type": "string"
-          },
-          {
-            "items": {
-              "$ref": "#/components/schemas/calc_flow__config__JSONValue-Output"
-            },
-            "type": "array"
-          },
-          {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/calc_flow__config__JSONValue-Output"
-            },
-            "type": "object"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      },
-      "calc_flow_studio__models__JSONValue-Input": {
-        "anyOf": [
-          {
-            "type": "boolean"
-          },
-          {
-            "type": "integer"
-          },
-          {
-            "type": "number"
-          },
-          {
-            "type": "string"
-          },
-          {
-            "items": {
-              "$ref": "#/components/schemas/calc_flow_studio__models__JSONValue-Input"
-            },
-            "type": "array"
-          },
-          {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/calc_flow_studio__models__JSONValue-Input"
-            },
-            "type": "object"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      },
-      "calc_flow_studio__models__JSONValue-Output": {
-        "anyOf": [
-          {
-            "type": "boolean"
-          },
-          {
-            "type": "integer"
-          },
-          {
-            "type": "number"
-          },
-          {
-            "type": "string"
-          },
-          {
-            "items": {
-              "$ref": "#/components/schemas/calc_flow_studio__models__JSONValue-Output"
-            },
-            "type": "array"
-          },
-          {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/calc_flow_studio__models__JSONValue-Output"
-            },
-            "type": "object"
-          },
-          {
-            "type": "null"
-          }
-        ]
       }
     }
   },
@@ -2662,7 +2973,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/RunResponse"
+                    "$ref": "#/components/schemas/JobResponse"
                   },
                   "title": "Response List Jobs Api V3 Jobs Get",
                   "type": "array"
@@ -2673,18 +2984,54 @@
           }
         },
         "summary": "List Jobs"
+      },
+      "post": {
+        "operationId": "create_job_api_v3_jobs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JobCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Job"
       }
     },
-    "/api/v3/jobs/{run_id}": {
+    "/api/v3/jobs/{job_id}": {
       "get": {
-        "operationId": "get_job_api_v3_jobs__run_id__get",
+        "operationId": "get_job_api_v3_jobs__job_id__get",
         "parameters": [
           {
             "in": "path",
-            "name": "run_id",
+            "name": "job_id",
             "required": true,
             "schema": {
-              "title": "Run Id",
+              "title": "Job Id",
               "type": "string"
             }
           }
@@ -2694,7 +3041,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RunResponse"
+                  "$ref": "#/components/schemas/JobResponse"
                 }
               }
             },
@@ -2714,16 +3061,16 @@
         "summary": "Get Job"
       }
     },
-    "/api/v3/jobs/{run_id}/cancel": {
+    "/api/v3/jobs/{job_id}/cancel": {
       "post": {
-        "operationId": "cancel_job_api_v3_jobs__run_id__cancel_post",
+        "operationId": "cancel_job_api_v3_jobs__job_id__cancel_post",
         "parameters": [
           {
             "in": "path",
-            "name": "run_id",
+            "name": "job_id",
             "required": true,
             "schema": {
-              "title": "Run Id",
+              "title": "Job Id",
               "type": "string"
             }
           }
@@ -2733,7 +3080,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RunResponse"
+                  "$ref": "#/components/schemas/JobResponse"
                 }
               }
             },
@@ -2753,16 +3100,16 @@
         "summary": "Cancel Job"
       }
     },
-    "/api/v3/jobs/{run_id}/checkpoint": {
+    "/api/v3/jobs/{job_id}/checkpoint": {
       "post": {
-        "operationId": "trigger_job_checkpoint_api_v3_jobs__run_id__checkpoint_post",
+        "operationId": "trigger_job_checkpoint_api_v3_jobs__job_id__checkpoint_post",
         "parameters": [
           {
             "in": "path",
-            "name": "run_id",
+            "name": "job_id",
             "required": true,
             "schema": {
-              "title": "Run Id",
+              "title": "Job Id",
               "type": "string"
             }
           }
@@ -2772,7 +3119,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RunResponse"
+                  "$ref": "#/components/schemas/JobResponse"
                 }
               }
             },
@@ -2792,16 +3139,16 @@
         "summary": "Trigger Job Checkpoint"
       }
     },
-    "/api/v3/jobs/{run_id}/events": {
+    "/api/v3/jobs/{job_id}/events": {
       "get": {
-        "operationId": "get_job_events_api_v3_jobs__run_id__events_get",
+        "operationId": "get_job_events_api_v3_jobs__job_id__events_get",
         "parameters": [
           {
             "in": "path",
-            "name": "run_id",
+            "name": "job_id",
             "required": true,
             "schema": {
-              "title": "Run Id",
+              "title": "Job Id",
               "type": "string"
             }
           },
@@ -2845,16 +3192,16 @@
         "summary": "Get Job Events"
       }
     },
-    "/api/v3/jobs/{run_id}/shutdown": {
+    "/api/v3/jobs/{job_id}/shutdown": {
       "post": {
-        "operationId": "shutdown_job_api_v3_jobs__run_id__shutdown_post",
+        "operationId": "shutdown_job_api_v3_jobs__job_id__shutdown_post",
         "parameters": [
           {
             "in": "path",
-            "name": "run_id",
+            "name": "job_id",
             "required": true,
             "schema": {
-              "title": "Run Id",
+              "title": "Job Id",
               "type": "string"
             }
           }
@@ -2864,7 +3211,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RunResponse"
+                  "$ref": "#/components/schemas/JobResponse"
                 }
               }
             },
@@ -3108,82 +3455,6 @@
         "summary": "Put Project"
       }
     },
-    "/api/v3/projects/{project_id}/checkpoint": {
-      "delete": {
-        "operationId": "delete_project_checkpoint_api_v3_projects__project_id__checkpoint_delete",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "project_id",
-            "required": true,
-            "schema": {
-              "title": "Project Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CheckpointSummary"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Delete Project Checkpoint"
-      },
-      "get": {
-        "operationId": "get_project_checkpoint_api_v3_projects__project_id__checkpoint_get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "project_id",
-            "required": true,
-            "schema": {
-              "title": "Project Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CheckpointSummary"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Get Project Checkpoint"
-      }
-    },
     "/api/v3/projects/{project_id}/export": {
       "get": {
         "operationId": "export_project_api_v3_projects__project_id__export_get",
@@ -3230,55 +3501,6 @@
           }
         },
         "summary": "Export Project"
-      }
-    },
-    "/api/v3/projects/{project_id}/runs": {
-      "post": {
-        "operationId": "create_run_api_v3_projects__project_id__runs_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "project_id",
-            "required": true,
-            "schema": {
-              "title": "Project Id",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RunRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RunResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Create Run"
       }
     },
     "/api/v3/projects/{project_id}/validate": {
@@ -3336,135 +3558,6 @@
           }
         },
         "summary": "Get Resource Limits"
-      }
-    },
-    "/api/v3/runs/{run_id}": {
-      "delete": {
-        "operationId": "cancel_run_api_v3_runs__run_id__delete",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "run_id",
-            "required": true,
-            "schema": {
-              "title": "Run Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RunResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Cancel Run"
-      },
-      "get": {
-        "operationId": "get_run_api_v3_runs__run_id__get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "run_id",
-            "required": true,
-            "schema": {
-              "title": "Run Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RunResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Get Run"
-      }
-    },
-    "/api/v3/runs/{run_id}/events": {
-      "get": {
-        "operationId": "get_run_events_api_v3_runs__run_id__events_get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "run_id",
-            "required": true,
-            "schema": {
-              "title": "Run Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Last-Event-ID",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Last-Event-Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Get Run Events"
       }
     },
     "/api/v3/schema/project": {

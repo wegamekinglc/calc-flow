@@ -15,6 +15,28 @@ const CLEARED_RUNTIME_MESSAGE: &str = "Runtime has been cleared by garbage colle
 #[derive(Clone, Copy)]
 struct ExactBool(bool);
 
+fn stream_requirements(
+    delivery: BTreeMap<String, String>,
+) -> PyResult<calc_flow::StreamRequirements> {
+    let delivery = delivery
+        .into_iter()
+        .map(|(output, guarantee)| {
+            let guarantee = match guarantee.as_str() {
+                "best_effort" => calc_flow::DeliveryGuarantee::BestEffort,
+                "at_least_once" => calc_flow::DeliveryGuarantee::AtLeastOnce,
+                "exactly_once" => calc_flow::DeliveryGuarantee::ExactlyOnce,
+                _ => {
+                    return Err(PyTypeError::new_err(format!(
+                        "delivery requirement for {output:?} must be 'best_effort', 'at_least_once', or 'exactly_once'"
+                    )));
+                }
+            };
+            Ok((output, guarantee))
+        })
+        .collect::<PyResult<BTreeMap<_, _>>>()?;
+    Ok(calc_flow::StreamRequirements { delivery })
+}
+
 impl<'a, 'py> FromPyObject<'a, 'py> for ExactBool {
     type Error = PyErr;
 
@@ -77,6 +99,7 @@ fn mapping_port_contract(name: &str, kind: &str) -> PyResult<crate::provider::Po
 
 struct RuntimeState {
     providers: Arc<calc_flow::ProviderRegistry>,
+    connectors: calc_flow::ConnectorRegistrySnapshot,
     udfs: Arc<RwLock<calc_flow::UdfRegistry>>,
     tokio: Arc<tokio::runtime::Runtime>,
     roots: Vec<Arc<PythonRoot>>,
@@ -95,6 +118,7 @@ pub(crate) struct UdfCatalogMetadata {
 
 struct RuntimeSnapshot {
     providers: Arc<calc_flow::ProviderRegistry>,
+    connectors: calc_flow::ConnectorRegistrySnapshot,
     udfs: calc_flow::UdfRegistrySnapshot,
     tokio: Arc<tokio::runtime::Runtime>,
 }
@@ -106,9 +130,13 @@ pub(crate) struct PyRuntime {
 
 impl PyRuntime {
     fn from_tokio(tokio: Arc<tokio::runtime::Runtime>) -> Self {
+        let mut connector_registry = calc_flow::ConnectorRegistry::new();
+        crate::connector::register_builtin_connectors(&mut connector_registry)
+            .expect("built-in connector registration is internally consistent");
         Self {
             state: RwLock::new(Some(RuntimeState {
                 providers: Arc::new(calc_flow::ProviderRegistry::default()),
+                connectors: connector_registry.snapshot(),
                 udfs: Arc::new(RwLock::new(calc_flow::UdfRegistry::new())),
                 tokio,
                 roots: Vec::new(),
@@ -125,6 +153,7 @@ impl PyRuntime {
         let udfs = state.udfs.read().snapshot();
         Ok(RuntimeSnapshot {
             providers: Arc::clone(&state.providers),
+            connectors: state.connectors.clone(),
             udfs,
             tokio: Arc::clone(&state.tokio),
         })
@@ -402,7 +431,43 @@ impl PyRuntime {
         let runtime = self.snapshot()?;
         let project = calc_flow::import_project_json(project_json.as_bytes())
             .map_err(crate::error::to_py_err)?;
-        let report = calc_flow::validate_project(&project, &runtime.providers, &runtime.udfs);
+        let report = match &project.runtime {
+            calc_flow::RuntimeSpec::Batch(_) => {
+                calc_flow::validate_project(&project, &runtime.providers, &runtime.udfs)
+            }
+            calc_flow::RuntimeSpec::Stream(_) => {
+                match calc_flow::compile_stream_project(
+                    &project,
+                    &runtime.providers,
+                    &runtime.udfs,
+                    &runtime.connectors,
+                    &calc_flow::StreamRequirements::default(),
+                ) {
+                    Ok(plan) => calc_flow::ValidationReport {
+                        valid: true,
+                        issues: Vec::new(),
+                        fingerprint: Some(plan.fingerprint().to_owned()),
+                    },
+                    Err(error) => {
+                        let path = match &error {
+                            calc_flow::CalcFlowError::InvalidArgument { field, .. } => {
+                                field.clone()
+                            }
+                            _ => "project".into(),
+                        };
+                        calc_flow::ValidationReport {
+                            valid: false,
+                            issues: vec![calc_flow::ValidationIssue {
+                                path,
+                                code: "stream_compile".into(),
+                                message: error.to_string(),
+                            }],
+                            fingerprint: None,
+                        }
+                    }
+                }
+            }
+        };
         let value = serde_json::to_value(report).map_err(|error| {
             crate::error::to_py_err(calc_flow::CalcFlowError::Format {
                 message: error.to_string(),
@@ -439,23 +504,30 @@ impl PyRuntime {
         let runtime = slf.snapshot()?;
         let project = calc_flow::import_project_json(project_json.as_bytes())
             .map_err(crate::error::to_py_err)?;
-        let delivery = delivery
-            .into_iter()
-            .map(|(output, guarantee)| {
-                let guarantee = match guarantee.as_str() {
-                    "at_least_once" => calc_flow::DeliveryGuarantee::AtLeastOnce,
-                    "exactly_once" => calc_flow::DeliveryGuarantee::ExactlyOnce,
-                    _ => {
-                        return Err(PyTypeError::new_err(format!(
-                            "delivery requirement for {output:?} must be 'at_least_once' or 'exactly_once'"
-                        )));
-                    }
-                };
-                Ok((output, guarantee))
-            })
-            .collect::<PyResult<BTreeMap<_, _>>>()?;
-        let requirements = calc_flow::StreamRequirements { delivery };
+        let requirements = stream_requirements(delivery)?;
         let plan = calc_flow::compile_stream_project(
+            &project,
+            &runtime.providers,
+            &runtime.udfs,
+            &runtime.connectors,
+            &requirements,
+        )
+        .map_err(crate::error::to_py_err)?;
+        let owner = slf.into_pyobject(py)?.into_any().unbind();
+        Ok(PyStreamExecutionPlan::new(plan, owner))
+    }
+
+    fn _compile_stream_graph_project(
+        slf: PyRef<'_, Self>,
+        py: Python<'_>,
+        project_json: &str,
+        delivery: BTreeMap<String, String>,
+    ) -> PyResult<PyStreamExecutionPlan> {
+        let runtime = slf.snapshot()?;
+        let project = calc_flow::import_project_json(project_json.as_bytes())
+            .map_err(crate::error::to_py_err)?;
+        let requirements = stream_requirements(delivery)?;
+        let plan = calc_flow::compile_stream_project_graph(
             &project,
             &runtime.providers,
             &runtime.udfs,
@@ -559,10 +631,11 @@ mod tests {
     }
 
     const PROJECT: &str = r#"{
-        "format_version": 2,
+        "format_version": 3,
         "id": "demo",
         "name": "Demo",
-        "pipeline": {
+        "runtime": {"mode": "batch", "options": {}},
+        "graph": {
             "name": "demo",
             "nodes": [{
                 "id": "calc",
@@ -606,13 +679,13 @@ mod tests {
             let canonical = validate_project_json(PROJECT).unwrap();
             let value: serde_json::Value = serde_json::from_str(&canonical).unwrap();
             assert_eq!(value["description"], "");
-            assert_eq!(value["run_options"]["timeout_seconds"], 30);
+            assert_eq!(value["runtime"]["options"]["timeout_seconds"], 30);
             assert_eq!(canonical, calc_flow::canonical_json(&value).unwrap());
 
             let schema: serde_json::Value =
                 serde_json::from_str(&project_json_schema().unwrap()).unwrap();
-            assert_eq!(schema["title"], "Calc Flow Project V2");
-            assert_eq!(schema["properties"]["format_version"]["const"], 2);
+            assert_eq!(schema["title"], "Calc Flow Project V3");
+            assert_eq!(schema["properties"]["format_version"]["const"], 3);
         });
     }
 

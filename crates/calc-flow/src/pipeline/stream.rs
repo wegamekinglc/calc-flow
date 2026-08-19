@@ -6,13 +6,17 @@
 //! runtime consumes it. Runtime-tunable values feed only the runtime-config hash
 //! (spec NFR-5), never the semantic fingerprint.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 use datafusion::arrow::datatypes::SchemaRef;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use crate::continuous::{SinkBinding, SourceBinding};
 use crate::{
     BatchKind, CalcFlowError, DataFusionConfig, Edge, NodeOperator, OperatorMetadata,
     PipelineBuilder, Port, PortEndpoint, Result, StreamOperator, UdfKind, UdfRegistrySnapshot,
@@ -34,6 +38,7 @@ pub struct StreamRequirements {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryGuarantee {
+    BestEffort,
     AtLeastOnce,
     ExactlyOnce,
 }
@@ -486,6 +491,8 @@ pub struct StreamExecutionPlan {
     fingerprint: String,
     requirements: StreamRequirements,
     table: Option<TablePlanResources>,
+    project_sources: Option<BTreeMap<String, SourceBinding>>,
+    project_sinks: Option<BTreeMap<String, Vec<SinkBinding>>>,
 }
 
 impl PipelineBuilder {
@@ -540,6 +547,8 @@ impl PipelineBuilder {
             fingerprint: graph.fingerprint,
             requirements: requirements.clone(),
             table,
+            project_sources: None,
+            project_sinks: None,
         })
     }
 }
@@ -681,7 +690,46 @@ fn validate_deterministic_udfs(
     Ok(())
 }
 
+type ProjectRuntimeBindings = (
+    BTreeMap<String, SourceBinding>,
+    BTreeMap<String, Vec<SinkBinding>>,
+);
+
 impl StreamExecutionPlan {
+    pub(crate) fn with_project_fingerprint(mut self, canonical_project: &str) -> Self {
+        let value = json!({
+            "graph_fingerprint": self.fingerprint,
+            "project": canonical_project,
+        });
+        let canonical = canonical_json(&value)
+            .expect("project and graph fingerprints are always canonical JSON values");
+        self.fingerprint = hex::encode(Sha256::digest(canonical.as_bytes()));
+        self
+    }
+
+    pub(crate) fn with_project_bindings(
+        mut self,
+        sources: BTreeMap<String, SourceBinding>,
+        sinks: BTreeMap<String, Vec<SinkBinding>>,
+    ) -> Self {
+        self.project_sources = Some(sources);
+        self.project_sinks = Some(sinks);
+        self
+    }
+
+    pub(crate) fn take_project_bindings(&mut self) -> Option<ProjectRuntimeBindings> {
+        match (self.project_sources.take(), self.project_sinks.take()) {
+            (Some(sources), Some(sinks)) => Some((sources, sinks)),
+            (None, None) => None,
+            _ => unreachable!("project connector bindings are attached atomically"),
+        }
+    }
+
+    /// Returns whether this plan owns project-v3 connector bindings.
+    pub fn has_project_bindings(&self) -> bool {
+        self.project_sources.is_some()
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -733,6 +781,32 @@ impl StreamExecutionPlan {
         self.external_outputs.keys().map(String::as_str).collect()
     }
 
+    pub(crate) fn reachable_source_binding_ids(&self, output: &str) -> BTreeSet<&str> {
+        let Some(endpoint) = self.external_outputs.get(output) else {
+            return BTreeSet::new();
+        };
+        let mut nodes = BTreeSet::from([endpoint.node_id.as_str()]);
+        loop {
+            let before = nodes.len();
+            for edge in self.edges.values() {
+                if nodes.contains(edge.target.node_id.as_str()) {
+                    nodes.insert(edge.source.node_id.as_str());
+                }
+            }
+            if nodes.len() == before {
+                break;
+            }
+        }
+        self.external_inputs
+            .iter()
+            .filter_map(|(binding, endpoint)| {
+                nodes
+                    .contains(endpoint.node_id.as_str())
+                    .then_some(binding.as_str())
+            })
+            .collect()
+    }
+
     /// The stable edge identifiers in deterministic order (plan M1.1).
     pub fn edge_ids(&self) -> Vec<&str> {
         self.edges.keys().map(String::as_str).collect()
@@ -780,6 +854,8 @@ impl StreamExecutionPlan {
             fingerprint,
             requirements,
             table: _,
+            project_sources: _,
+            project_sinks: _,
         } = self;
         let mut edges = project_internal_edges(compiled_edges, default_budget)?;
         let node_indexes = nodes

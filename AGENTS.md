@@ -201,7 +201,7 @@ selectors.
   `crates/calc-flow-python/`.
 - `Batch.from_pyarrow` and `Batch.from_array` construct Python-facing native
   envelopes.
-- Functional `PipelineBuilder` emits strict project format v2 and compiles
+- Functional `PipelineBuilder` emits strict project format v3 and compiles
   through Rust `Runtime`.
 - Python scalar UDFs are trusted vectorized callbacks registered with exact
   Arrow types/provider/name/version/volatility and selected explicitly by
@@ -216,11 +216,11 @@ selectors.
 ### Studio
 
 - `web-ui/backend/` is the independent `calc-flow-studio` package. Its
-  FastAPI routes live under `/api/v2`; `serve()` must reject non-loopback
+  FastAPI routes live under `/api/v3`; `serve()` must reject non-loopback
   hosts.
-- `RunManager` decodes bounded Arrow inputs in the parent, then uses spawned
-  workers with timeout, CPU, resident-memory, output, cancellation, and
-  lifecycle controls.
+- `RunManager` owns spawned continuous-job workers with concurrency,
+  resident-memory, checkpoint-disk, cancellation, shutdown, and lifecycle
+  controls.
 - `web-ui/` is React, TypeScript, Vite, and React Flow. API types are generated
   from `web-ui/openapi.json`; regenerate both after route/model/version
   changes.

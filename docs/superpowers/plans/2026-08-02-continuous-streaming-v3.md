@@ -1,12 +1,17 @@
 # Calc-Flow 3.0 持续流计算详细开发计划
 
-> **状态：** M0-M5 internal complete; Public A6 complete; M6-M7 pending
+> **状态：** M0-M5 internal complete; Public A6 complete; M6-M7 implementation
+> closure is present on the 2026-08-19 review candidate. Final acceptance still
+> requires the full repository gates and exact PR-head review. The original
+> current-main findings and their implementation evidence are reconciled in the
+> [current-main acceptance audit](../audits/2026-08-19-continuous-streaming-v3-current-main.md).
 > `a6-public-continuous-runtime` 已通过 Rust、PyO3、Python、Studio 私有持久化、
 > 48-case fault catalog、跨语言恢复和 exact-head 20-minute soak 的集成门禁，并由
 > PR #129 合入 `main`。完成证据和获准的非原子交付偏差记录在
 > [Public A6 implementation evidence](../../../.codex/artifacts/analysis/a6-public-continuous-runtime-implementation-evidence.md)。
-> A6 完成不代表 `3.0.0` 发布：当前 package version、project v2 与 Studio
-> `/api/v2` 按 A6 non-goal 保持不变，分别由 M6/M7 后续替换或发布。
+> A6 完成不代表 `3.0.0` 发布：在 2026-08-14 的 A6 验收边界，package version、
+> project v2 与 Studio `/api/v2` 按 non-goal 保持不变；其后的 M6/M7-labelled
+> changes 仍须通过上述 current-main acceptance audit。
 >
 > **依据：**
 > [`Arroyo / RisingWave 独立调研与 Calc-Flow 流式演进建议`](../../research/2026-08-02-arroyo-risingwave-streaming-research.md)

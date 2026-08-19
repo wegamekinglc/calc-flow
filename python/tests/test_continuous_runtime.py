@@ -104,6 +104,12 @@ def test_stream_plan_exposes_immutable_binding_metadata() -> None:
     assert plan.requirements.delivery == {"output": DeliveryGuarantee.EXACTLY_ONCE}
 
 
+def test_stream_requirements_expose_explicit_best_effort_delivery() -> None:
+    requirements = StreamRequirements({"output": DeliveryGuarantee.BEST_EFFORT})
+
+    assert requirements.delivery == {"output": DeliveryGuarantee.BEST_EFFORT}
+
+
 @pytest.mark.parametrize("delivery", ([], 1))
 def test_stream_requirements_reject_non_mapping_delivery(delivery: object) -> None:
     with pytest.raises(TypeError, match="delivery must be a mapping"):

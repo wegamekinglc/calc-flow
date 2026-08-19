@@ -101,7 +101,28 @@ class ReleaseConfigTests(unittest.TestCase):
             )
         )
         self.assertNotIn(">=2.0.0a1", release_text)
-        self.assertIn(">=2.0.0", release_text)
+        self.assertIn(">=3.0.0", release_text)
+
+        release_workflow = (ROOT / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('- "v3.*"', release_workflow)
+        self.assertNotIn('- "v2.*"', release_workflow)
+        self.assertIn('assert "/api/v3/catalog"', release_workflow)
+        self.assertIn('and ">=3.0.0" in requirement', release_workflow)
+        self.assertIn('and "<4" in requirement', release_workflow)
+        self.assertEqual(release_workflow.count("--save-baseline exact-"), 2)
+        self.assertIn("--criterion-dir", release_workflow)
+        self.assertIn("--criterion-baseline exact-baseline", release_workflow)
+        self.assertIn("--criterion-candidate exact-candidate", release_workflow)
+        self.assertEqual(release_workflow.count("provenance.json"), 3)
+        self.assertIn('baseline_sha="$(git rev-parse', release_workflow)
+        self.assertIn('candidate_sha="$(git rev-parse', release_workflow)
+        self.assertIn('test "${baseline_sha}" != "${candidate_sha}"', release_workflow)
+        self.assertLess(
+            release_workflow.index("cargo bench --manifest-path"),
+            release_workflow.index("scripts/verify_perf_gates.py"),
+        )
 
     def test_python_projects_ship_license_files(self) -> None:
         for project in (ROOT, ROOT / "web-ui/backend"):
@@ -313,7 +334,8 @@ class ReleaseConfigTests(unittest.TestCase):
     def test_ci_and_release_execute_rust_test_harness_unit_tests(self) -> None:
         command = (
             "python -m unittest scripts.test_run_rust_tests "
-            "scripts.test_inspect_wheel scripts.test_release_config"
+            "scripts.test_inspect_wheel scripts.test_release_config "
+            "scripts.test_verify_perf_gates scripts.test_verify_security_gates"
         )
         windows_test = (
             "scripts.test_run_rust_tests.RustTestHarnessTests."
@@ -461,6 +483,33 @@ class ReleaseConfigTests(unittest.TestCase):
             text = (ROOT / path).read_text(encoding="utf-8")
             with self.subTest(path=path):
                 for claim in claims:
+                    self.assertNotIn(claim, text)
+
+    def test_normative_docs_use_final_package_and_project_versions(self) -> None:
+        documentation = {
+            "README.md": ("Calc Flow 3.0", 'calc-flow = "3.0.0"'),
+            "docs/api-reference.md": (
+                "Calc Flow 3.0 API reference",
+                "`calc-flow==3.0.0`",
+                "Project format version `3`",
+            ),
+            "docs/getting-started.md": ("cargo add calc-flow@3.0.0",),
+            "docs/python-api.md": ("`calc-flow==3.0.0`",),
+            "docs/rust-api.md": ("Calc Flow 3.0", "cargo add calc-flow@3.0.0"),
+        }
+        stale_package_claims = (
+            "Calc Flow 2.0",
+            'calc-flow = "2.0.0"',
+            "calc-flow==2.0.0",
+            "calc-flow@2.0.0",
+        )
+
+        for path, required in documentation.items():
+            text = (ROOT / path).read_text(encoding="utf-8")
+            with self.subTest(path=path):
+                for claim in required:
+                    self.assertIn(claim, text)
+                for claim in stale_package_claims:
                     self.assertNotIn(claim, text)
 
     def test_batch_metadata_docs_match_runtime_contract(self) -> None:

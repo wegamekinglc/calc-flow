@@ -48,14 +48,15 @@ export interface paths {
         /** List Jobs */
         get: operations["list_jobs_api_v3_jobs_get"];
         put?: never;
-        post?: never;
+        /** Create Job */
+        post: operations["create_job_api_v3_jobs_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v3/jobs/{run_id}": {
+    "/api/v3/jobs/{job_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -63,7 +64,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Job */
-        get: operations["get_job_api_v3_jobs__run_id__get"];
+        get: operations["get_job_api_v3_jobs__job_id__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -72,7 +73,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v3/jobs/{run_id}/cancel": {
+    "/api/v3/jobs/{job_id}/cancel": {
         parameters: {
             query?: never;
             header?: never;
@@ -82,14 +83,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Cancel Job */
-        post: operations["cancel_job_api_v3_jobs__run_id__cancel_post"];
+        post: operations["cancel_job_api_v3_jobs__job_id__cancel_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v3/jobs/{run_id}/checkpoint": {
+    "/api/v3/jobs/{job_id}/checkpoint": {
         parameters: {
             query?: never;
             header?: never;
@@ -99,14 +100,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Trigger Job Checkpoint */
-        post: operations["trigger_job_checkpoint_api_v3_jobs__run_id__checkpoint_post"];
+        post: operations["trigger_job_checkpoint_api_v3_jobs__job_id__checkpoint_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v3/jobs/{run_id}/events": {
+    "/api/v3/jobs/{job_id}/events": {
         parameters: {
             query?: never;
             header?: never;
@@ -114,7 +115,7 @@ export interface paths {
             cookie?: never;
         };
         /** Get Job Events */
-        get: operations["get_job_events_api_v3_jobs__run_id__events_get"];
+        get: operations["get_job_events_api_v3_jobs__job_id__events_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -123,7 +124,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v3/jobs/{run_id}/shutdown": {
+    "/api/v3/jobs/{job_id}/shutdown": {
         parameters: {
             query?: never;
             header?: never;
@@ -133,7 +134,7 @@ export interface paths {
         get?: never;
         put?: never;
         /** Shutdown Job */
-        post: operations["shutdown_job_api_v3_jobs__run_id__shutdown_post"];
+        post: operations["shutdown_job_api_v3_jobs__job_id__shutdown_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -194,24 +195,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v3/projects/{project_id}/checkpoint": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get Project Checkpoint */
-        get: operations["get_project_checkpoint_api_v3_projects__project_id__checkpoint_get"];
-        put?: never;
-        post?: never;
-        /** Delete Project Checkpoint */
-        delete: operations["delete_project_checkpoint_api_v3_projects__project_id__checkpoint_delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v3/projects/{project_id}/export": {
         parameters: {
             query?: never;
@@ -223,23 +206,6 @@ export interface paths {
         get: operations["export_project_api_v3_projects__project_id__export_get"];
         put?: never;
         post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v3/projects/{project_id}/runs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Create Run */
-        post: operations["create_run_api_v3_projects__project_id__runs_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -280,41 +246,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v3/runs/{run_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get Run */
-        get: operations["get_run_api_v3_runs__run_id__get"];
-        put?: never;
-        post?: never;
-        /** Cancel Run */
-        delete: operations["cancel_run_api_v3_runs__run_id__delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v3/runs/{run_id}/events": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get Run Events */
-        get: operations["get_run_events_api_v3_runs__run_id__events_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v3/schema/project": {
         parameters: {
             query?: never;
@@ -336,27 +267,8 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /** ArrayOutputPreview */
-        ArrayOutputPreview: {
-            /** Backend */
-            backend: string;
-            data: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            kind: "array";
-            /** Metadata */
-            metadata: {
-                [key: string]: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
-            };
-            /** Total Rows */
-            total_rows: number;
-            /** Truncated */
-            truncated: boolean;
-        };
-        /** CancelledRunResponse */
-        CancelledRunResponse: {
+        /** CancelledJobResponse */
+        CancelledJobResponse: {
             /**
              * Created At
              * Format: date-time
@@ -364,6 +276,8 @@ export interface components {
             created_at: string;
             /** Error */
             error?: null;
+            /** Error Code */
+            error_code?: null;
             /**
              * Finished At
              * Format: date-time
@@ -373,8 +287,6 @@ export interface components {
             id: string;
             /** Project Id */
             project_id: string;
-            /** Result */
-            result?: null;
             /** Started At */
             started_at?: string | null;
             /**
@@ -393,29 +305,8 @@ export interface components {
              */
             schemaVersion: 1;
         };
-        /** CheckpointSummary */
-        CheckpointSummary: {
-            /** Compatible */
-            compatible?: boolean | null;
-            /** Created At */
-            created_at?: string | null;
-            /** Exists */
-            exists: boolean;
-            /** Pipeline Fingerprint */
-            pipeline_fingerprint?: string | null;
-            /** Pipeline Name */
-            pipeline_name: string;
-            /** Sequence */
-            sequence?: number | null;
-            source_cursor?: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
-            /**
-             * State Nodes
-             * @default []
-             */
-            state_nodes: string[];
-        };
-        /** CompletedRunResponse */
-        CompletedRunResponse: {
+        /** CompletedJobResponse */
+        CompletedJobResponse: {
             /**
              * Created At
              * Format: date-time
@@ -423,6 +314,8 @@ export interface components {
             created_at: string;
             /** Error */
             error?: null;
+            /** Error Code */
+            error_code?: null;
             /**
              * Finished At
              * Format: date-time
@@ -432,7 +325,6 @@ export interface components {
             id: string;
             /** Project Id */
             project_id: string;
-            result: components["schemas"]["RunResultPreview"];
             /**
              * Started At
              * Format: date-time
@@ -444,25 +336,60 @@ export interface components {
              */
             status: "completed";
         };
-        /** DataFusionMetricPreview */
-        DataFusionMetricPreview: {
-            /** Execution Ns */
-            execution_ns: number;
-            /** Logical Plan */
-            logical_plan: string;
-            /** Node Id */
-            node_id: string | null;
-            /** Output Rows */
-            output_rows: number;
-            /** Physical Plan */
-            physical_plan: string;
-            /** Planning Ns */
-            planning_ns: number;
-            /** Query Id */
-            query_id: number;
+        /** ConnectorAxesResponse */
+        ConnectorAxesResponse: {
+            /** Cdc */
+            cdc: boolean;
+            /**
+             * Delivery
+             * @enum {string}
+             */
+            delivery: "best_effort" | "at_least_once" | "exactly_once";
+            /** Lookup */
+            lookup: boolean;
+            /** Polling */
+            polling: boolean;
+            /**
+             * Replay
+             * @enum {string}
+             */
+            replay: "replayable_exact" | "unreplayable";
+            /** Snapshot */
+            snapshot: boolean;
+            /**
+             * Transaction
+             * @enum {string}
+             */
+            transaction: "none" | "pre_commit_commit" | "ledger_idempotent";
+            /**
+             * Watermark
+             * @enum {string}
+             */
+            watermark: "native" | "generated_only";
         };
-        /** FailedRunResponse */
-        FailedRunResponse: {
+        /** ConnectorCapabilityResponse */
+        ConnectorCapabilityResponse: {
+            capabilities: components["schemas"]["ConnectorAxesResponse"];
+            /** Formats */
+            formats: string[];
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "source" | "sink" | "both";
+            /** Name */
+            name: string;
+            /** Optionsschema */
+            optionsSchema: {
+                [key: string]: unknown;
+            };
+            /** Provider */
+            provider: string;
+            /** Version */
+            version: string;
+        };
+        /** FailedJobResponse */
+        FailedJobResponse: {
             /**
              * Created At
              * Format: date-time
@@ -470,6 +397,11 @@ export interface components {
             created_at: string;
             /** Error */
             error: string;
+            /**
+             * Error Code
+             * @enum {string}
+             */
+            error_code: "job_limit_exceeded" | "worker_failed";
             /**
              * Finished At
              * Format: date-time
@@ -479,8 +411,6 @@ export interface components {
             id: string;
             /** Project Id */
             project_id: string;
-            /** Result */
-            result?: null;
             /**
              * Started At
              * Format: date-time
@@ -496,17 +426,6 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
-        };
-        /** InputPayload */
-        InputPayload: {
-            data: components["schemas"]["calc_flow_studio__models__JSONValue-Input"];
-            /**
-             * Format
-             * @enum {string}
-             */
-            format: "records" | "columns" | "arrow_ipc";
-            /** Source Id */
-            source_id?: string | null;
         };
         /** InvalidValidationReport */
         InvalidValidationReport: {
@@ -526,6 +445,23 @@ export interface components {
              */
             valid: false;
         };
+        "JSONValue-Input": boolean | number | string | components["schemas"]["JSONValue-Input"][] | {
+            [key: string]: components["schemas"]["JSONValue-Input"];
+        } | null;
+        "JSONValue-Output": boolean | number | string | components["schemas"]["JSONValue-Output"][] | {
+            [key: string]: components["schemas"]["JSONValue-Output"];
+        } | null;
+        /** JobCreateRequest */
+        JobCreateRequest: {
+            /** Project Id */
+            project_id: string;
+        };
+        /**
+         * JobResponse
+         * @description Typed lifecycle state for one persistent continuous job.
+         */
+        JobResponse: components["schemas"]["JobResponseVariant"];
+        JobResponseVariant: components["schemas"]["PendingJobResponse"] | components["schemas"]["RunningJobResponse"] | components["schemas"]["CompletedJobResponse"] | components["schemas"]["FailedJobResponse"] | components["schemas"]["CancelledJobResponse"];
         /** LazyBuiltinWorkerRegistration */
         LazyBuiltinWorkerRegistration: {
             /** Name */
@@ -545,19 +481,6 @@ export interface components {
             /** Version */
             version: string;
         };
-        /** NodeTimingPreview */
-        NodeTimingPreview: {
-            /** Duration Ns */
-            duration_ns: number;
-            /** Input Rows */
-            input_rows: {
-                [key: string]: number;
-            };
-            /** Output Rows */
-            output_rows: {
-                [key: string]: number;
-            };
-        };
         /** OperatorCapabilityResponse */
         OperatorCapabilityResponse: {
             /** Inputkinds */
@@ -569,18 +492,8 @@ export interface components {
             /** Requiresdatafusion */
             requiresDatafusion: boolean;
         };
-        /** OutputFieldPreview */
-        OutputFieldPreview: {
-            /** Name */
-            name: string;
-            /** Nullable */
-            nullable: boolean;
-            /** Type */
-            type: string;
-        };
-        OutputPreview: components["schemas"]["TableOutputPreview"] | components["schemas"]["ArrayOutputPreview"];
-        /** PendingRunResponse */
-        PendingRunResponse: {
+        /** PendingJobResponse */
+        PendingJobResponse: {
             /**
              * Created At
              * Format: date-time
@@ -588,14 +501,14 @@ export interface components {
             created_at: string;
             /** Error */
             error?: null;
+            /** Error Code */
+            error_code?: null;
             /** Finished At */
             finished_at?: null;
             /** Id */
             id: string;
             /** Project Id */
             project_id: string;
-            /** Result */
-            result?: null;
             /** Started At */
             started_at?: null;
             /**
@@ -633,27 +546,29 @@ export interface components {
             outputRows: components["schemas"]["PreviewLimit"];
             timeoutSeconds: components["schemas"]["PreviewLimit"];
         };
-        /** Calc Flow Project V2 */
+        /** Calc Flow Project V3 */
         ProjectCreateRequest: {
             /** @default [] */
             data_sources: components["schemas"]["ProjectCreateRequest"]["$defs"]["DataSourceSpec"][];
             /** @default  */
             description: string;
             /** @constant */
-            format_version: 2;
+            format_version: 3;
+            graph: components["schemas"]["ProjectCreateRequest"]["$defs"]["PipelineSpec"];
             id: string;
             name: string;
-            pipeline: components["schemas"]["ProjectCreateRequest"]["$defs"]["PipelineSpec"];
+            runtime: components["schemas"]["ProjectCreateRequest"]["$defs"]["RuntimeSpec"];
+            /** @default [] */
+            sinks: components["schemas"]["ProjectCreateRequest"]["$defs"]["ProjectSinkBinding"][];
+            /** @default [] */
+            sources: components["schemas"]["ProjectCreateRequest"]["$defs"]["ProjectSourceBinding"][];
             /**
              * @default {
-             *       "max_input_bytes": 10485760,
-             *       "max_rows": 100000,
-             *       "memory_limit_mb": 512,
-             *       "output_rows": 1000,
-             *       "timeout_seconds": 30
+             *       "retention": 3,
+             *       "root": ".calc-flow-state"
              *     }
              */
-            run_options: components["schemas"]["ProjectCreateRequest"]["$defs"]["RunOptions"];
+            state: components["schemas"]["ProjectCreateRequest"]["$defs"]["StateConfig"];
             $defs: {
                 ArrowFieldSpec: {
                     data_type: string;
@@ -663,6 +578,12 @@ export interface components {
                 };
                 /** @enum {string} */
                 BatchKind: "table" | "array";
+                /** @description Exact identity of a connector implementation. */
+                ConnectorRef: {
+                    name: string;
+                    provider: string;
+                    version: string;
+                };
                 DataFusionConfig: {
                     /**
                      * Format: uint
@@ -681,6 +602,11 @@ export interface components {
                     id: string;
                     input: string;
                 };
+                /**
+                 * @description Requested delivery guarantee for one project output.
+                 * @enum {string}
+                 */
+                DeliveryRequest: "at_least_once" | "exactly_once";
                 EdgeSpec: {
                     source_node: string;
                     /** @default output */
@@ -688,6 +614,11 @@ export interface components {
                     target_node: string;
                     /** @default input */
                     target_port: string;
+                };
+                /** @description Exact identity of a registered format codec. */
+                FormatRef: {
+                    name: string;
+                    version: string;
                 };
                 NodeSpec: {
                     id: string;
@@ -753,6 +684,82 @@ export interface components {
                     /** Format: double */
                     y: number;
                 };
+                /** @description A data-only sink binding to one registered connector. */
+                ProjectSinkBinding: {
+                    /** @description External graph output this binding drains. */
+                    binding: string;
+                    /** @description Exact registered connector identity. */
+                    connector: components["schemas"]["ProjectCreateRequest"]["$defs"]["ConnectorRef"];
+                    /** @description Requested delivery guarantee for this output. */
+                    delivery: components["schemas"]["ProjectCreateRequest"]["$defs"]["DeliveryRequest"];
+                    /** @description Optional exact wire-format identity. */
+                    format?: components["schemas"]["ProjectCreateRequest"]["$defs"]["FormatRef"] | null;
+                    /**
+                     * @description Bounded non-secret connector options.
+                     * @default {}
+                     */
+                    options: {
+                        [key: string]: unknown;
+                    };
+                    /**
+                     * @description Named secret references resolved only when the connector opens.
+                     * @default {}
+                     */
+                    secrets: {
+                        [key: string]: components["schemas"]["ProjectCreateRequest"]["$defs"]["SecretReference"];
+                    };
+                };
+                /** @description A data-only source binding to one registered connector. */
+                ProjectSourceBinding: {
+                    /** @description External graph input this binding feeds. */
+                    binding: string;
+                    /** @description Exact registered connector identity. */
+                    connector: components["schemas"]["ProjectCreateRequest"]["$defs"]["ConnectorRef"];
+                    /** @description Optional exact wire-format identity. */
+                    format?: components["schemas"]["ProjectCreateRequest"]["$defs"]["FormatRef"] | null;
+                    /**
+                     * @description Bounded non-secret connector options.
+                     * @default {}
+                     */
+                    options: {
+                        [key: string]: unknown;
+                    };
+                    /**
+                     * @description Optional exact Arrow schema.
+                     * @default []
+                     */
+                    schema: components["schemas"]["ProjectCreateRequest"]["$defs"]["ArrowFieldSpec"][];
+                    /**
+                     * @description Named secret references resolved only when the connector opens.
+                     * @default {}
+                     */
+                    secrets: {
+                        [key: string]: components["schemas"]["ProjectCreateRequest"]["$defs"]["SecretReference"];
+                    };
+                    /** @description Optional event-time watermark policy. */
+                    watermark?: components["schemas"]["ProjectCreateRequest"]["$defs"]["ProjectWatermarkPolicy"] | null;
+                };
+                /** @description Event-time policy carried by one project source binding. */
+                ProjectWatermarkPolicy: {
+                    /** @constant */
+                    policy: "source_provided";
+                } | {
+                    column: string;
+                    /** Format: uint64 */
+                    delay_ms: number;
+                    /**
+                     * Format: uint64
+                     * @default 0
+                     */
+                    emit_interval_ms: number;
+                    /** Format: uint64 */
+                    idle_timeout_ms?: number | null;
+                    /** @constant */
+                    policy: "bounded_out_of_orderness";
+                } | {
+                    /** @constant */
+                    policy: "disabled";
+                };
                 RunOptions: {
                     /**
                      * Format: uint
@@ -780,6 +787,56 @@ export interface components {
                      */
                     timeout_seconds: number;
                 };
+                /** @description Runtime mode and mode-specific limits for a project-v3 document. */
+                RuntimeSpec: {
+                    /** @constant */
+                    mode: "batch";
+                    options: components["schemas"]["ProjectCreateRequest"]["$defs"]["RunOptions"];
+                } | {
+                    /** @constant */
+                    mode: "stream";
+                    options: components["schemas"]["ProjectCreateRequest"]["$defs"]["StreamRunOptions"];
+                };
+                /**
+                 * @description A named pointer to a secret; the only secret-shaped value a data-only
+                 *     document may carry.
+                 */
+                SecretReference: {
+                    /** @description Resolver-specific key, for example the variable name. */
+                    key: string;
+                    /** @description Resolution source. */
+                    resolver: components["schemas"]["ProjectCreateRequest"]["$defs"]["SecretResolverKind"];
+                };
+                /** @description Where a secret reference is resolved from. */
+                SecretResolverKind: "environment" | "file" | "registered";
+                /** @description Managed state location and checkpoint retention for stream projects. */
+                StateConfig: {
+                    /**
+                     * Format: uint
+                     * @default 3
+                     */
+                    retention: number;
+                    /** @default .calc-flow-state */
+                    root: string;
+                };
+                /** @description Continuous runtime limits carried by project v3. */
+                StreamRunOptions: {
+                    /**
+                     * Format: uint64
+                     * @default 30000
+                     */
+                    checkpoint_interval_ms: number;
+                    /**
+                     * Format: uint
+                     * @default 67108864
+                     */
+                    max_batch_bytes: number;
+                    /**
+                     * Format: uint
+                     * @default 10000
+                     */
+                    max_batch_rows: number;
+                };
                 /** @enum {string} */
                 UdfKind: "data_fusion_scalar" | "external_scalar" | "external_array";
                 UdfReference: {
@@ -790,27 +847,29 @@ export interface components {
                 };
             };
         };
-        /** Calc Flow Project V2 */
+        /** Calc Flow Project V3 */
         ProjectDocument: {
             /** @default [] */
             data_sources: components["schemas"]["ProjectDocument"]["$defs"]["DataSourceSpec"][];
             /** @default  */
             description: string;
             /** @constant */
-            format_version: 2;
+            format_version: 3;
+            graph: components["schemas"]["ProjectDocument"]["$defs"]["PipelineSpec"];
             id: string;
             name: string;
-            pipeline: components["schemas"]["ProjectDocument"]["$defs"]["PipelineSpec"];
+            runtime: components["schemas"]["ProjectDocument"]["$defs"]["RuntimeSpec"];
+            /** @default [] */
+            sinks: components["schemas"]["ProjectDocument"]["$defs"]["ProjectSinkBinding"][];
+            /** @default [] */
+            sources: components["schemas"]["ProjectDocument"]["$defs"]["ProjectSourceBinding"][];
             /**
              * @default {
-             *       "max_input_bytes": 10485760,
-             *       "max_rows": 100000,
-             *       "memory_limit_mb": 512,
-             *       "output_rows": 1000,
-             *       "timeout_seconds": 30
+             *       "retention": 3,
+             *       "root": ".calc-flow-state"
              *     }
              */
-            run_options: components["schemas"]["ProjectDocument"]["$defs"]["RunOptions"];
+            state: components["schemas"]["ProjectDocument"]["$defs"]["StateConfig"];
             $defs: {
                 ArrowFieldSpec: {
                     data_type: string;
@@ -820,6 +879,12 @@ export interface components {
                 };
                 /** @enum {string} */
                 BatchKind: "table" | "array";
+                /** @description Exact identity of a connector implementation. */
+                ConnectorRef: {
+                    name: string;
+                    provider: string;
+                    version: string;
+                };
                 DataFusionConfig: {
                     /**
                      * Format: uint
@@ -838,6 +903,11 @@ export interface components {
                     id: string;
                     input: string;
                 };
+                /**
+                 * @description Requested delivery guarantee for one project output.
+                 * @enum {string}
+                 */
+                DeliveryRequest: "at_least_once" | "exactly_once";
                 EdgeSpec: {
                     source_node: string;
                     /** @default output */
@@ -845,6 +915,11 @@ export interface components {
                     target_node: string;
                     /** @default input */
                     target_port: string;
+                };
+                /** @description Exact identity of a registered format codec. */
+                FormatRef: {
+                    name: string;
+                    version: string;
                 };
                 NodeSpec: {
                     id: string;
@@ -910,6 +985,82 @@ export interface components {
                     /** Format: double */
                     y: number;
                 };
+                /** @description A data-only sink binding to one registered connector. */
+                ProjectSinkBinding: {
+                    /** @description External graph output this binding drains. */
+                    binding: string;
+                    /** @description Exact registered connector identity. */
+                    connector: components["schemas"]["ProjectDocument"]["$defs"]["ConnectorRef"];
+                    /** @description Requested delivery guarantee for this output. */
+                    delivery: components["schemas"]["ProjectDocument"]["$defs"]["DeliveryRequest"];
+                    /** @description Optional exact wire-format identity. */
+                    format?: components["schemas"]["ProjectDocument"]["$defs"]["FormatRef"] | null;
+                    /**
+                     * @description Bounded non-secret connector options.
+                     * @default {}
+                     */
+                    options: {
+                        [key: string]: unknown;
+                    };
+                    /**
+                     * @description Named secret references resolved only when the connector opens.
+                     * @default {}
+                     */
+                    secrets: {
+                        [key: string]: components["schemas"]["ProjectDocument"]["$defs"]["SecretReference"];
+                    };
+                };
+                /** @description A data-only source binding to one registered connector. */
+                ProjectSourceBinding: {
+                    /** @description External graph input this binding feeds. */
+                    binding: string;
+                    /** @description Exact registered connector identity. */
+                    connector: components["schemas"]["ProjectDocument"]["$defs"]["ConnectorRef"];
+                    /** @description Optional exact wire-format identity. */
+                    format?: components["schemas"]["ProjectDocument"]["$defs"]["FormatRef"] | null;
+                    /**
+                     * @description Bounded non-secret connector options.
+                     * @default {}
+                     */
+                    options: {
+                        [key: string]: unknown;
+                    };
+                    /**
+                     * @description Optional exact Arrow schema.
+                     * @default []
+                     */
+                    schema: components["schemas"]["ProjectDocument"]["$defs"]["ArrowFieldSpec"][];
+                    /**
+                     * @description Named secret references resolved only when the connector opens.
+                     * @default {}
+                     */
+                    secrets: {
+                        [key: string]: components["schemas"]["ProjectDocument"]["$defs"]["SecretReference"];
+                    };
+                    /** @description Optional event-time watermark policy. */
+                    watermark?: components["schemas"]["ProjectDocument"]["$defs"]["ProjectWatermarkPolicy"] | null;
+                };
+                /** @description Event-time policy carried by one project source binding. */
+                ProjectWatermarkPolicy: {
+                    /** @constant */
+                    policy: "source_provided";
+                } | {
+                    column: string;
+                    /** Format: uint64 */
+                    delay_ms: number;
+                    /**
+                     * Format: uint64
+                     * @default 0
+                     */
+                    emit_interval_ms: number;
+                    /** Format: uint64 */
+                    idle_timeout_ms?: number | null;
+                    /** @constant */
+                    policy: "bounded_out_of_orderness";
+                } | {
+                    /** @constant */
+                    policy: "disabled";
+                };
                 RunOptions: {
                     /**
                      * Format: uint
@@ -936,6 +1087,56 @@ export interface components {
                      * @default 30
                      */
                     timeout_seconds: number;
+                };
+                /** @description Runtime mode and mode-specific limits for a project-v3 document. */
+                RuntimeSpec: {
+                    /** @constant */
+                    mode: "batch";
+                    options: components["schemas"]["ProjectDocument"]["$defs"]["RunOptions"];
+                } | {
+                    /** @constant */
+                    mode: "stream";
+                    options: components["schemas"]["ProjectDocument"]["$defs"]["StreamRunOptions"];
+                };
+                /**
+                 * @description A named pointer to a secret; the only secret-shaped value a data-only
+                 *     document may carry.
+                 */
+                SecretReference: {
+                    /** @description Resolver-specific key, for example the variable name. */
+                    key: string;
+                    /** @description Resolution source. */
+                    resolver: components["schemas"]["ProjectDocument"]["$defs"]["SecretResolverKind"];
+                };
+                /** @description Where a secret reference is resolved from. */
+                SecretResolverKind: "environment" | "file" | "registered";
+                /** @description Managed state location and checkpoint retention for stream projects. */
+                StateConfig: {
+                    /**
+                     * Format: uint
+                     * @default 3
+                     */
+                    retention: number;
+                    /** @default .calc-flow-state */
+                    root: string;
+                };
+                /** @description Continuous runtime limits carried by project v3. */
+                StreamRunOptions: {
+                    /**
+                     * Format: uint64
+                     * @default 30000
+                     */
+                    checkpoint_interval_ms: number;
+                    /**
+                     * Format: uint
+                     * @default 67108864
+                     */
+                    max_batch_bytes: number;
+                    /**
+                     * Format: uint
+                     * @default 10000
+                     */
+                    max_batch_rows: number;
                 };
                 /** @enum {string} */
                 UdfKind: "data_fusion_scalar" | "external_scalar" | "external_array";
@@ -1015,8 +1216,7 @@ export interface components {
         };
         /**
          * ResourceLimits
-         * @description Equivalent resource bounds replacing the v2 worker timeout for
-         *     long-running continuous jobs (M6-09).
+         * @description Hard bounds for long-running continuous jobs.
          */
         ResourceLimits: {
             /**
@@ -1026,84 +1226,28 @@ export interface components {
              */
             job_lifecycle: "user_explicit_stop";
             /**
-             * Max Checkpoint Disk Mb
-             * @default 512
+             * Max Checkpoint Disk Bytes
+             * @default 536870912
              */
-            max_checkpoint_disk_mb: number;
+            max_checkpoint_disk_bytes: number;
             /**
              * Max Concurrent Jobs
              * @default 4
              */
             max_concurrent_jobs: number;
             /**
-             * Max Global Memory Mb
-             * @default 4096
+             * Max Global Resident Memory Bytes
+             * @default 4294967296
              */
-            max_global_memory_mb: number;
+            max_global_resident_memory_bytes: number;
             /**
-             * Max Job Memory Mb
-             * @default 1024
+             * Max Job Resident Memory Bytes
+             * @default 1073741824
              */
-            max_job_memory_mb: number;
+            max_job_resident_memory_bytes: number;
         };
-        /** RunOptions */
-        RunOptions: {
-            /**
-             * Max Input Bytes
-             * @default 10485760
-             */
-            max_input_bytes: number;
-            /**
-             * Max Rows
-             * @default 100000
-             */
-            max_rows: number;
-            /**
-             * Memory Limit Mb
-             * @default 512
-             */
-            memory_limit_mb: number;
-            /**
-             * Output Rows
-             * @default 1000
-             */
-            output_rows: number;
-            /**
-             * Timeout Seconds
-             * @default 30
-             */
-            timeout_seconds: number;
-        };
-        /** RunRequest */
-        RunRequest: {
-            /** Inputs */
-            inputs?: {
-                [key: string]: components["schemas"]["InputPayload"];
-            };
-            options?: components["schemas"]["RunOptions"] | null;
-        };
-        /** RunResponse */
-        RunResponse: components["schemas"]["RunResponseVariant"];
-        RunResponseVariant: components["schemas"]["PendingRunResponse"] | components["schemas"]["RunningRunResponse"] | components["schemas"]["CompletedRunResponse"] | components["schemas"]["FailedRunResponse"] | components["schemas"]["TimedOutRunResponse"] | components["schemas"]["CancelledRunResponse"];
-        /** RunResultPreview */
-        RunResultPreview: {
-            /** Datafusion Metrics */
-            datafusion_metrics: components["schemas"]["DataFusionMetricPreview"][];
-            /** Metadata */
-            metadata: {
-                [key: string]: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
-            };
-            /** Node Timings */
-            node_timings: {
-                [key: string]: components["schemas"]["NodeTimingPreview"];
-            };
-            /** Outputs */
-            outputs: {
-                [key: string]: components["schemas"]["OutputPreview"];
-            };
-        };
-        /** RunningRunResponse */
-        RunningRunResponse: {
+        /** RunningJobResponse */
+        RunningJobResponse: {
             /**
              * Created At
              * Format: date-time
@@ -1111,14 +1255,14 @@ export interface components {
             created_at: string;
             /** Error */
             error?: null;
+            /** Error Code */
+            error_code?: null;
             /** Finished At */
             finished_at?: null;
             /** Id */
             id: string;
             /** Project Id */
             project_id: string;
-            /** Result */
-            result?: null;
             /**
              * Started At
              * Format: date-time
@@ -1134,6 +1278,8 @@ export interface components {
         RuntimeCapabilitiesResponse: {
             /** Batchkinds */
             batchKinds: ("table" | "array")[];
+            /** Connectors */
+            connectors: components["schemas"]["ConnectorCapabilityResponse"][];
             /** Operators */
             operators: components["schemas"]["OperatorCapabilityResponse"][];
             /** Packageversion */
@@ -1178,59 +1324,6 @@ export interface components {
             registrationKind: "provider" | "dataFusionScalar";
             /** Version */
             version: string;
-        };
-        /** TableOutputPreview */
-        TableOutputPreview: {
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            kind: "table";
-            /** Metadata */
-            metadata: {
-                [key: string]: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
-            };
-            /** Rows */
-            rows: {
-                [key: string]: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
-            }[];
-            /** Schema */
-            schema: components["schemas"]["OutputFieldPreview"][];
-            /** Total Rows */
-            total_rows: number;
-            /** Truncated */
-            truncated: boolean;
-        };
-        /** TimedOutRunResponse */
-        TimedOutRunResponse: {
-            /**
-             * Created At
-             * Format: date-time
-             */
-            created_at: string;
-            /** Error */
-            error: string;
-            /**
-             * Finished At
-             * Format: date-time
-             */
-            finished_at: string;
-            /** Id */
-            id: string;
-            /** Project Id */
-            project_id: string;
-            /** Result */
-            result?: null;
-            /**
-             * Started At
-             * Format: date-time
-             */
-            started_at: string;
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            status: "timed_out";
         };
         /** UdfCapabilityResponse */
         UdfCapabilityResponse: {
@@ -1321,18 +1414,6 @@ export interface components {
         };
         ValidationReport: components["schemas"]["ValidValidationReport"] | components["schemas"]["InvalidValidationReport"];
         WorkerRegistrationCapability: components["schemas"]["SerializedWorkerRegistration"] | components["schemas"]["LazyBuiltinWorkerRegistration"] | components["schemas"]["UnavailableWorkerRegistration"];
-        "calc_flow__config__JSONValue-Input": boolean | number | string | components["schemas"]["calc_flow__config__JSONValue-Input"][] | {
-            [key: string]: components["schemas"]["calc_flow__config__JSONValue-Input"];
-        } | null;
-        "calc_flow__config__JSONValue-Output": boolean | number | string | components["schemas"]["calc_flow__config__JSONValue-Output"][] | {
-            [key: string]: components["schemas"]["calc_flow__config__JSONValue-Output"];
-        } | null;
-        "calc_flow_studio__models__JSONValue-Input": boolean | number | string | components["schemas"]["calc_flow_studio__models__JSONValue-Input"][] | {
-            [key: string]: components["schemas"]["calc_flow_studio__models__JSONValue-Input"];
-        } | null;
-        "calc_flow_studio__models__JSONValue-Output": boolean | number | string | components["schemas"]["calc_flow_studio__models__JSONValue-Output"][] | {
-            [key: string]: components["schemas"]["calc_flow_studio__models__JSONValue-Output"];
-        } | null;
     };
     responses: never;
     parameters: never;
@@ -1399,29 +1480,31 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["RunResponse"][];
+                    "application/json": components["schemas"]["JobResponse"][];
                 };
             };
         };
     };
-    get_job_api_v3_jobs__run_id__get: {
+    create_job_api_v3_jobs_post: {
         parameters: {
             query?: never;
             header?: never;
-            path: {
-                run_id: string;
-            };
+            path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JobCreateRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
-            200: {
+            202: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["RunResponse"];
+                    "application/json": components["schemas"]["JobResponse"];
                 };
             };
             /** @description Validation Error */
@@ -1435,12 +1518,12 @@ export interface operations {
             };
         };
     };
-    cancel_job_api_v3_jobs__run_id__cancel_post: {
+    get_job_api_v3_jobs__job_id__get: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                run_id: string;
+                job_id: string;
             };
             cookie?: never;
         };
@@ -1452,7 +1535,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["RunResponse"];
+                    "application/json": components["schemas"]["JobResponse"];
                 };
             };
             /** @description Validation Error */
@@ -1466,12 +1549,12 @@ export interface operations {
             };
         };
     };
-    trigger_job_checkpoint_api_v3_jobs__run_id__checkpoint_post: {
+    cancel_job_api_v3_jobs__job_id__cancel_post: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                run_id: string;
+                job_id: string;
             };
             cookie?: never;
         };
@@ -1483,7 +1566,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["RunResponse"];
+                    "application/json": components["schemas"]["JobResponse"];
                 };
             };
             /** @description Validation Error */
@@ -1497,14 +1580,45 @@ export interface operations {
             };
         };
     };
-    get_job_events_api_v3_jobs__run_id__events_get: {
+    trigger_job_checkpoint_api_v3_jobs__job_id__checkpoint_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_job_events_api_v3_jobs__job_id__events_get: {
         parameters: {
             query?: never;
             header?: {
                 "Last-Event-ID"?: number | null;
             };
             path: {
-                run_id: string;
+                job_id: string;
             };
             cookie?: never;
         };
@@ -1530,12 +1644,12 @@ export interface operations {
             };
         };
     };
-    shutdown_job_api_v3_jobs__run_id__shutdown_post: {
+    shutdown_job_api_v3_jobs__job_id__shutdown_post: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                run_id: string;
+                job_id: string;
             };
             cookie?: never;
         };
@@ -1547,7 +1661,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["RunResponse"];
+                    "application/json": components["schemas"]["JobResponse"];
                 };
             };
             /** @description Validation Error */
@@ -1741,68 +1855,6 @@ export interface operations {
             };
         };
     };
-    get_project_checkpoint_api_v3_projects__project_id__checkpoint_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                project_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CheckpointSummary"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    delete_project_checkpoint_api_v3_projects__project_id__checkpoint_delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                project_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CheckpointSummary"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     export_project_api_v3_projects__project_id__export_get: {
         parameters: {
             query?: {
@@ -1823,41 +1875,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    create_run_api_v3_projects__project_id__runs_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                project_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RunRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RunResponse"];
                 };
             };
             /** @description Validation Error */
@@ -1918,101 +1935,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ResourceLimits"];
-                };
-            };
-        };
-    };
-    get_run_api_v3_runs__run_id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                run_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RunResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    cancel_run_api_v3_runs__run_id__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                run_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RunResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_run_events_api_v3_runs__run_id__events_get: {
-        parameters: {
-            query?: never;
-            header?: {
-                "Last-Event-ID"?: number | null;
-            };
-            path: {
-                run_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

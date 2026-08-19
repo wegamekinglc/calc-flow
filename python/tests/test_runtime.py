@@ -20,7 +20,9 @@ def _batch(value: int) -> Batch:
 
 
 def _plan(name: str = "stream"):
-    return PipelineBuilder(name).expression("calc", "result = value + 1").compile()
+    return (
+        PipelineBuilder(name).expression("calc", "result = value + 1").compile_batch()
+    )
 
 
 def test_registration_snapshot_is_success_only_and_defensive() -> None:
@@ -102,7 +104,7 @@ def test_mapping_provider_executes_mixed_named_inputs() -> None:
         .table_matmul("multiply", backend="numpy", columns=("value",))
         .project
     )
-    project["pipeline"]["nodes"][0]["operator"]["provider"] = "test"
+    project["graph"]["nodes"][0]["operator"]["provider"] = "test"
     plan = runtime.compile_project(json.dumps(project))
     table = _batch(3)
     weights = Batch.from_array(np.array([[2.0]]), backend="numpy")

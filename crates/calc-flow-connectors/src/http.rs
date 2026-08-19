@@ -1,4 +1,4 @@
-//! The `HTTP` polling connector (feature `http-websocket`).
+//! The `HTTP` polling connector (feature `http`).
 //!
 //! Polls one `HTTP` endpoint with response size, timeout, and retry
 //! limits. Conditional requests carry `ETag`/Last-Modified as an optional
@@ -15,7 +15,7 @@ use calc_flow::{
     Batch, BatchMetadata, CalcFlowError, ConnectorCapabilities, ConnectorDescriptor,
     ConnectorError, ConnectorFactories, ConnectorIdentity, ConnectorKind, ConnectorOperation,
     ConnectorRegistry, ConnectorSinkFactory, ConnectorSourceFactory, Cursor, DeliveryCapability,
-    FormatDecoder, JsonMap, Result, SecretHandle, SecretReference, SecretResolver,
+    FormatDecoder, FormatIdentity, JsonMap, Result, SecretHandle, SecretReference, SecretResolver,
     SecretResolverKind, SourceCapabilities, SourceEvent, SourceSchema, StreamSource,
     TransactionSupport, WatermarkSupport,
 };
@@ -44,8 +44,8 @@ fn fail(operation: &str, detail: &str) -> CalcFlowError {
 /// # Errors
 ///
 /// Returns the resolver error; the URL value never enters the error.
-pub fn resolve_http_url(secrets: &dyn SecretResolver, key: &str) -> Result<String> {
-    let reference = SecretReference::new(SecretResolverKind::Environment, key)
+pub fn resolve_http_url(secrets: &dyn SecretResolver, slot: &str) -> Result<String> {
+    let reference = SecretReference::new(SecretResolverKind::Registered, slot)
         .map_err(|error| fail("open", &error.to_string()))?;
     let handle: SecretHandle = secrets
         .resolve(&reference)
@@ -59,8 +59,8 @@ pub fn resolve_http_url(secrets: &dyn SecretResolver, key: &str) -> Result<Strin
 /// # Errors
 ///
 /// Returns the resolver error when the reference cannot resolve.
-pub fn resolve_auth_header(secrets: &dyn SecretResolver, key: &str) -> Result<Option<String>> {
-    let reference = SecretReference::new(SecretResolverKind::Environment, key)
+pub fn resolve_auth_header(secrets: &dyn SecretResolver, slot: &str) -> Result<Option<String>> {
+    let reference = SecretReference::new(SecretResolverKind::Registered, slot)
         .map_err(|error| fail("open", &error.to_string()))?;
     match secrets.resolve(&reference) {
         Ok(handle) => String::from_utf8(handle.expose().to_vec())
@@ -73,22 +73,22 @@ pub fn resolve_auth_header(secrets: &dyn SecretResolver, key: &str) -> Result<Op
 /// Data-only configuration for one `HTTP` polling source.
 #[derive(Clone, Debug)]
 pub struct HttpSourceConfig {
-    /// Secret key holding the `https://…` endpoint URL.
-    pub url_key: String,
-    /// Optional secret key holding an Authorization header value.
-    pub auth_key: Option<String>,
     /// Poll interval between requests.
     pub poll_interval: Duration,
     /// Per-request timeout.
     pub timeout: Duration,
     /// Maximum accepted response body size.
     pub max_response_bytes: u64,
-    /// Whether to send If-None-Match / If-Modified-Since (`ETag` replay).
+    /// Whether to send If-None-Match / If-Modified-Since change validators.
     pub conditional: bool,
     /// Whether TLS certificate verification is disabled (warns).
     pub insecure: bool,
     /// Row bound of one decoded batch.
     pub max_batch_rows: u64,
+    /// Maximum retry attempts after the initial request.
+    pub max_retries: u64,
+    /// Delay between retryable request attempts.
+    pub retry_backoff: Duration,
 }
 
 impl HttpSourceConfig {
@@ -99,17 +99,12 @@ impl HttpSourceConfig {
     /// Returns [`CalcFlowError::InvalidArgument`] naming the offending
     /// option; `insecure` also emits a tracing warning.
     pub fn from_options(options: &JsonMap) -> Result<Self> {
-        let url_key = required_string(options, "url_key")?;
-        let auth_key = match options.get("auth_key") {
-            None | Some(Value::Null) => None,
-            Some(Value::String(key)) => Some(key.clone()),
-            Some(_) => {
-                return Err(CalcFlowError::InvalidArgument {
-                    field: "auth_key".into(),
-                    message: "auth_key must be a string".into(),
-                });
-            }
-        };
+        if options.contains_key("url_key") || options.contains_key("auth_key") {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "options".into(),
+                message: "URL and authorization credentials must use secret references".into(),
+            });
+        }
         let insecure = options
             .get("insecure")
             .and_then(Value::as_bool)
@@ -121,35 +116,38 @@ impl HttpSourceConfig {
             );
         }
         Ok(Self {
-            url_key,
-            auth_key,
-            poll_interval: Duration::from_millis(
-                u64_option(options, "poll_interval_ms")?.unwrap_or(1000),
-            ),
-            timeout: Duration::from_secs(u64_option(options, "timeout_seconds")?.unwrap_or(30)),
-            max_response_bytes: u64_option(options, "max_response_bytes")?
-                .unwrap_or(8 * 1024 * 1024),
+            poll_interval: Duration::from_millis(positive_option(
+                options,
+                "poll_interval_ms",
+                1000,
+            )?),
+            timeout: Duration::from_secs(positive_option(options, "timeout_seconds", 30)?),
+            max_response_bytes: positive_option(options, "max_response_bytes", 8 * 1024 * 1024)?,
             conditional: options
                 .get("conditional")
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
             insecure,
-            max_batch_rows: u64_option(options, "max_batch_rows")?.unwrap_or(8192),
+            max_batch_rows: positive_option(options, "max_batch_rows", 8192)?,
+            max_retries: u64_option(options, "max_retries")?.unwrap_or(3),
+            retry_backoff: Duration::from_millis(positive_option(
+                options,
+                "retry_backoff_ms",
+                100,
+            )?),
         })
     }
 }
 
-fn required_string(options: &JsonMap, key: &str) -> Result<String> {
-    match options.get(key) {
-        Some(Value::String(value)) => Ok(value.clone()),
-        Some(_) => Err(CalcFlowError::InvalidArgument {
+fn positive_option(options: &JsonMap, key: &str, default: u64) -> Result<u64> {
+    let value = u64_option(options, key)?.unwrap_or(default);
+    if value == 0 {
+        Err(CalcFlowError::InvalidArgument {
             field: key.into(),
-            message: "option must be a string".into(),
-        }),
-        None => Err(CalcFlowError::InvalidArgument {
-            field: key.into(),
-            message: "option is required".into(),
-        }),
+            message: "option must be greater than zero".into(),
+        })
+    } else {
+        Ok(value)
     }
 }
 
@@ -180,6 +178,8 @@ pub struct HttpSource {
     etag: Option<String>,
     last_modified: Option<String>,
     sequence: u64,
+    endpoint_url: Option<String>,
+    authorization: Option<String>,
 }
 
 impl HttpSource {
@@ -196,14 +196,9 @@ impl HttpSource {
         let client = builder
             .build()
             .map_err(|error| fail("open", &error.to_string()))?;
-        let replayable = config.conditional;
         let capabilities = SourceCapabilities {
-            replay_positioning: if replayable {
-                calc_flow::ReplayPositioning::ExactPauseReportAndSeek
-            } else {
-                calc_flow::ReplayPositioning::Unsupported
-            },
-            delivery: calc_flow::SourceDeliveryCapability::Lossless,
+            replay_positioning: calc_flow::ReplayPositioning::Unsupported,
+            delivery: calc_flow::SourceDeliveryCapability::Lossy,
             max_batch_rows: usize::try_from(config.max_batch_rows).unwrap_or(usize::MAX),
             max_batch_bytes: usize::try_from(config.max_response_bytes).unwrap_or(usize::MAX),
             schema: SourceSchema::DynamicOrUnknown,
@@ -216,30 +211,32 @@ impl HttpSource {
             etag: None,
             last_modified: None,
             sequence: 0,
+            endpoint_url: None,
+            authorization: None,
         })
     }
 
-    /// Opens at a cursor carrying the `ETag`/Last-Modified replay state.
+    fn with_credentials(mut self, endpoint_url: String, authorization: Option<String>) -> Self {
+        self.endpoint_url = Some(endpoint_url);
+        self.authorization = authorization;
+        self
+    }
+
+    /// Opens without a replay cursor; validators do not provide historical seek.
     ///
     /// # Errors
     ///
     /// Returns the configuration error.
     pub fn open_with_secrets(
         &mut self,
-        cursor: Option<Cursor>,
+        cursor: Option<&Cursor>,
         _secrets: &dyn SecretResolver,
     ) -> Result<()> {
-        if let Some(cursor) = cursor {
-            self.etag = cursor
-                .payload()
-                .get("etag")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            self.last_modified = cursor
-                .payload()
-                .get("last_modified")
-                .and_then(Value::as_str)
-                .map(str::to_string);
+        if cursor.is_some() {
+            return Err(fail(
+                "open",
+                "HTTP polling cannot restore historical endpoint representations",
+            ));
         }
         Ok(())
     }
@@ -270,8 +267,8 @@ impl HttpSource {
         &mut self,
         secrets: &dyn SecretResolver,
     ) -> Result<Option<SourceEvent>> {
-        let url = resolve_http_url(secrets, &self.config.url_key)?;
-        let auth = self.resolve_auth(secrets)?;
+        let url = resolve_http_url(secrets, "url")?;
+        let auth = resolve_auth_header(secrets, "authorization")?;
         let response = self.fetch(&url, auth.as_deref()).await?;
         if response.status() == reqwest::StatusCode::NOT_MODIFIED {
             tokio::time::sleep(self.config.poll_interval).await;
@@ -286,29 +283,48 @@ impl HttpSource {
         Ok(Some(SourceEvent::Data { batch, cursor }))
     }
 
-    fn resolve_auth(&self, secrets: &dyn SecretResolver) -> Result<Option<String>> {
-        match &self.config.auth_key {
-            Some(key) => resolve_auth_header(secrets, key),
-            None => Ok(None),
-        }
-    }
-
     async fn fetch(&self, url: &str, auth: Option<&str>) -> Result<reqwest::Response> {
-        let request = self.build_request(url, auth);
-        let response = request
-            .send()
-            .await
-            .map_err(|error| fail("poll", &redact_url(&error.to_string())))?;
-        if !response.status().is_success() {
-            return Err(fail(
-                "poll",
-                &format!("endpoint returned status {}", response.status()),
-            ));
+        let mut attempt = 0_u64;
+        loop {
+            let result = self.build_request(url, auth).send().await;
+            match result {
+                Ok(response)
+                    if response.status().is_success()
+                        || response.status() == reqwest::StatusCode::NOT_MODIFIED =>
+                {
+                    return Ok(response);
+                }
+                Ok(response)
+                    if response.status().is_server_error()
+                        || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS =>
+                {
+                    if attempt >= self.config.max_retries {
+                        return Err(fail(
+                            "poll",
+                            &format!("endpoint returned status {}", response.status()),
+                        ));
+                    }
+                }
+                Ok(response) => {
+                    return Err(fail(
+                        "poll",
+                        &format!("endpoint returned status {}", response.status()),
+                    ));
+                }
+                Err(error) => {
+                    if attempt >= self.config.max_retries {
+                        return Err(fail("poll", &redact_url(&error.to_string())));
+                    }
+                }
+            }
+            attempt = attempt
+                .checked_add(1)
+                .ok_or_else(|| fail("poll", "HTTP retry counter exhausted"))?;
+            tokio::time::sleep(self.config.retry_backoff).await;
         }
-        Ok(response)
     }
 
-    async fn read_body(&mut self, response: reqwest::Response) -> Result<bytes::Bytes> {
+    async fn read_body(&mut self, mut response: reqwest::Response) -> Result<bytes::Bytes> {
         self.etag = response
             .headers()
             .get("etag")
@@ -329,21 +345,30 @@ impl HttpSource {
                 ),
             ));
         }
-        let body = response
-            .bytes()
+        let capacity = usize::try_from(content_length.min(self.config.max_response_bytes))
+            .unwrap_or(usize::MAX);
+        let mut body = Vec::with_capacity(capacity);
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|error| fail("poll", &error.to_string()))?;
-        if body.len() as u64 > self.config.max_response_bytes {
-            return Err(fail(
-                "poll",
-                &format!(
-                    "response body {} bytes exceeds the {} byte limit",
-                    body.len(),
-                    self.config.max_response_bytes
-                ),
-            ));
+            .map_err(|error| fail("poll", &redact_url(&error.to_string())))?
+        {
+            let next_len = body
+                .len()
+                .checked_add(chunk.len())
+                .ok_or_else(|| fail("poll", "response body length exhausted usize"))?;
+            if u64::try_from(next_len).unwrap_or(u64::MAX) > self.config.max_response_bytes {
+                return Err(fail(
+                    "poll",
+                    &format!(
+                        "response body exceeds the {} byte limit",
+                        self.config.max_response_bytes
+                    ),
+                ));
+            }
+            body.extend_from_slice(&chunk);
         }
-        Ok(body)
+        Ok(bytes::Bytes::from(body))
     }
 
     fn decode_body(&mut self, body: &[u8]) -> Result<Batch> {
@@ -353,16 +378,12 @@ impl HttpSource {
             self.config.max_response_bytes,
         )?;
         let batch = codec.decode(body, &bounds, &[])?;
-        self.sequence += 1;
-        let metadata = BatchMetadata::new(
-            "http",
-            self.sequence,
-            BTreeMap::from([(
-                "url_key".to_string(),
-                Value::String(self.config.url_key.clone()),
-            )]),
-        )
-        .map_err(|error| fail("poll", &error.to_string()))?;
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| fail("poll", "HTTP cursor sequence exhausted u64"))?;
+        let metadata = BatchMetadata::new("http", self.sequence, BTreeMap::new())
+            .map_err(|error| fail("poll", &error.to_string()))?;
         Ok(batch.with_metadata(metadata))
     }
 
@@ -377,9 +398,8 @@ impl HttpSource {
                 Value::String(last_modified.clone()),
             );
         }
-        let order = serde_json::to_vec(&vec![&self.etag, &self.last_modified])
-            .map_err(|error| fail("cursor", &error.to_string()))?;
-        Cursor::unbound(order, payload)
+        payload.insert("sequence".to_string(), Value::from(self.sequence));
+        Cursor::unbound(self.sequence.to_be_bytes().to_vec(), payload)
     }
 }
 
@@ -397,12 +417,33 @@ impl StreamSource for HttpSource {
         self.capabilities.clone()
     }
 
-    async fn open(&mut self, _cursor: Option<Cursor>) -> Result<()> {
+    async fn open(&mut self, cursor: Option<Cursor>) -> Result<()> {
+        if cursor.is_some() {
+            return Err(fail(
+                "open",
+                "HTTP polling cannot restore historical endpoint representations",
+            ));
+        }
         Ok(())
     }
 
     async fn next(&mut self) -> Result<Option<SourceEvent>> {
-        Ok(Some(SourceEvent::Idle))
+        let url = self.endpoint_url.as_deref().ok_or_else(|| {
+            fail(
+                "read",
+                "the `HTTP` source was not opened through its trusted factory",
+            )
+        })?;
+        let response = self.fetch(url, self.authorization.as_deref()).await?;
+        if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+            tokio::time::sleep(self.config.poll_interval).await;
+            return Ok(Some(SourceEvent::Idle));
+        }
+        let body = self.read_body(response).await?;
+        let batch = self.decode_body(&body)?;
+        let cursor = self.cursor_from_state()?;
+        tokio::time::sleep(self.config.poll_interval).await;
+        Ok(Some(SourceEvent::Data { batch, cursor }))
     }
 
     async fn close(&mut self) -> Result<()> {
@@ -436,13 +477,26 @@ impl ConnectorSourceFactory for HttpSourceFactory {
         &self.descriptor
     }
 
+    fn validate(&self, options: &JsonMap) -> Result<()> {
+        HttpSourceConfig::from_options(options).map(drop)
+    }
+
+    fn capabilities(&self, options: &JsonMap) -> Result<ConnectorCapabilities> {
+        HttpSourceConfig::from_options(options)?;
+        Ok(self.descriptor.capabilities)
+    }
+
     async fn open(
         &self,
         options: &JsonMap,
-        _secrets: &dyn SecretResolver,
+        secrets: &dyn SecretResolver,
     ) -> Result<Box<dyn StreamSource>> {
         let config = HttpSourceConfig::from_options(options)?;
-        Ok(Box::new(HttpSource::new(config)?))
+        let endpoint_url = resolve_http_url(secrets, "url")?;
+        let authorization = resolve_auth_header(secrets, "authorization")?;
+        Ok(Box::new(
+            HttpSource::new(config)?.with_credentials(endpoint_url, authorization),
+        ))
     }
 }
 
@@ -486,8 +540,8 @@ fn http_connector_descriptor() -> ConnectorDescriptor {
         identity: connector_identity(),
         kind: ConnectorKind::Source,
         capabilities: ConnectorCapabilities {
-            delivery: DeliveryCapability::AtLeastOnce,
-            replay: calc_flow::ReplayCapability::ReplayableExact,
+            delivery: DeliveryCapability::BestEffort,
+            replay: calc_flow::ReplayCapability::Unreplayable,
             watermark: WatermarkSupport::GeneratedOnly,
             transaction: TransactionSupport::None,
             snapshot: false,
@@ -495,20 +549,27 @@ fn http_connector_descriptor() -> ConnectorDescriptor {
             cdc: false,
             lookup: false,
         },
-        formats: vec![],
+        formats: vec![
+            FormatIdentity::new(
+                crate::json_lines::IDENTITY,
+                crate::json_lines::IDENTITY_VERSION,
+            )
+            .expect("json-lines identity"),
+        ],
         config_schema: JsonMap::from([
-            ("url_key".to_string(), serde_json::json!("string")),
-            ("auth_key".to_string(), serde_json::json!("string")),
             ("poll_interval_ms".to_string(), serde_json::json!("u64")),
             ("timeout_seconds".to_string(), serde_json::json!("u64")),
             ("max_response_bytes".to_string(), serde_json::json!("u64")),
             ("conditional".to_string(), serde_json::json!("boolean")),
+            ("max_retries".to_string(), serde_json::json!("u64")),
+            ("retry_backoff_ms".to_string(), serde_json::json!("u64")),
             ("insecure".to_string(), serde_json::json!("boolean")),
             ("max_batch_rows".to_string(), serde_json::json!("u64")),
         ]),
-        secret_slots: ["url_key".to_string(), "auth_key".to_string()]
+        secret_slots: ["url".to_string(), "authorization".to_string()]
             .into_iter()
             .collect(),
+        required_secret_slots: ["url".to_string()].into_iter().collect(),
     }
 }
 

@@ -28,19 +28,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import TypeAdapter, ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from calc_flow_studio.checkpoint_store import (
-    CheckpointDocumentError,
-    FileCheckpointDocumentStore,
-)
 from calc_flow_studio.models import (
     CapabilitiesResponse,
-    CheckpointSummary,
+    JobCreateRequest,
+    JobResponse,
     ProjectCreateRequest,
     ProjectSummary,
     ResourceLimits,
     RunEvent,
-    RunRequest,
-    RunResponse,
     RunStatus,
     ValidationReport,
 )
@@ -67,12 +62,6 @@ class ProjectStoreProtocol(Protocol):
     async def delete(self, project_id: str) -> None: ...
 
 
-class CheckpointStoreProtocol(Protocol):
-    async def load(self, pipeline_name: str) -> dict[str, object] | None: ...
-
-    async def delete(self, pipeline_name: str) -> None: ...
-
-
 class RuntimeProtocol(Protocol):
     def catalog(self) -> list[dict[str, object]]: ...
 
@@ -84,32 +73,32 @@ class RuntimeProtocol(Protocol):
 class RunManagerProtocol(Protocol):
     def capabilities(self) -> CapabilitiesResponse: ...
 
-    def submit(self, project: ProjectDocument, request: RunRequest) -> RunResponse: ...
+    def submit_job(self, project: ProjectDocument) -> JobResponse: ...
 
-    def get(self, run_id: str) -> RunResponse: ...
+    def get_job(self, job_id: str) -> JobResponse: ...
 
     def wait_for_events(
         self, run_id: str, *, after_sequence: int, timeout: float
     ) -> tuple[tuple[RunEvent, ...], RunStatus]: ...
 
-    def cancel(self, run_id: str) -> RunResponse: ...
+    def cancel_job(self, job_id: str) -> JobResponse: ...
 
     def shutdown(self) -> None: ...
 
-    def list_jobs(self) -> tuple[RunResponse, ...]: ...
+    def list_jobs(self) -> tuple[JobResponse, ...]: ...
 
-    def trigger_checkpoint(self, run_id: str) -> RunResponse: ...
+    def trigger_checkpoint(self, run_id: str) -> JobResponse: ...
 
-    def shutdown_job(self, run_id: str) -> RunResponse: ...
+    def shutdown_job(self, run_id: str) -> JobResponse: ...
 
     def resource_limits(self) -> ResourceLimits: ...
 
 
 def _project_summary(project: ProjectDocument) -> ProjectSummary:
     root = project.root
-    pipeline = root["pipeline"]
-    assert isinstance(pipeline, dict)
-    nodes = pipeline["nodes"]
+    graph = root["graph"]
+    assert isinstance(graph, dict)
+    nodes = graph["nodes"]
     assert isinstance(nodes, list)
     return ProjectSummary(
         id=str(root["id"]),
@@ -176,20 +165,19 @@ def create_app(
     project_directory: str | Path = ".calc-flow-projects",
     checkpoint_directory: str | Path = ".calc-flow-checkpoints",
     project_store: ProjectStoreProtocol | None = None,
-    checkpoint_store: CheckpointStoreProtocol | None = None,
     runtime: RuntimeProtocol | None = None,
     run_manager: RunManagerProtocol | None = None,
     frontend_directory: str | Path | None = None,
 ) -> FastAPI:
-    """Create the local-only v2 API without opening a network listener."""
+    """Create the local-only v3 API without opening a network listener."""
     projects = project_store or FileProjectStore(project_directory)
-    checkpoints = checkpoint_store or FileCheckpointDocumentStore(checkpoint_directory)
     selected_runtime = runtime or Runtime()
     selected_run_manager = (
         run_manager
         if run_manager is not None
         else RunManager(
-            runtime=selected_runtime if isinstance(selected_runtime, Runtime) else None
+            runtime=selected_runtime if isinstance(selected_runtime, Runtime) else None,
+            checkpoint_directory=checkpoint_directory,
         )
     )
 
@@ -202,7 +190,6 @@ def create_app(
 
     app = FastAPI(title="Calc Flow API", version="3.0.0", lifespan=lifespan)
     app.state.project_store = projects
-    app.state.checkpoint_store = checkpoints
     app.state.runtime = selected_runtime
     app.state.run_manager = selected_run_manager
     app.add_middleware(
@@ -393,73 +380,41 @@ def create_app(
         project = await stored_project(project_id)
         return await runtime_validation_report(project)
 
-    async def compiled_project(project_id: str) -> tuple[ProjectDocument, object]:
-        project = await stored_project(project_id)
-        try:
-            plan = await run_in_threadpool(
-                selected_runtime.compile_project, project.canonical_json()
-            )
-        except CalcFlowError as error:
-            raise _native_error(error, operation="compile") from error
-        return project, plan
-
-    async def checkpoint_summary(project_id: str) -> CheckpointSummary:
-        _, plan = await compiled_project(project_id)
-        pipeline_name = str(plan.name)
-        fingerprint = str(plan.fingerprint)
-        try:
-            checkpoint = await checkpoints.load(pipeline_name)
-        except CheckpointDocumentError as error:
-            raise _native_error(error, operation="checkpoint") from error
-        if checkpoint is None:
-            return CheckpointSummary(pipeline_name=pipeline_name, exists=False)
-        state = checkpoint.get("state", {})
-        if not isinstance(state, dict):
-            raise _http_error(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                "checkpoint state must be a JSON object",
-            )
-        return CheckpointSummary(
-            pipeline_name=pipeline_name,
-            exists=True,
-            compatible=checkpoint.get("pipeline_fingerprint") == fingerprint,
-            pipeline_fingerprint=str(checkpoint["pipeline_fingerprint"]),
-            sequence=int(checkpoint["sequence"]),
-            source_cursor=checkpoint.get("source_cursor"),
-            created_at=checkpoint.get("created_at"),
-            state_nodes=tuple(sorted(state)),
-        )
-
-    @app.get(
-        f"{API_PREFIX}/projects/{{project_id}}/checkpoint",
-        response_model=CheckpointSummary,
-    )
-    async def get_project_checkpoint(project_id: str) -> CheckpointSummary:
-        return await checkpoint_summary(project_id)
-
-    @app.delete(
-        f"{API_PREFIX}/projects/{{project_id}}/checkpoint",
-        response_model=CheckpointSummary,
-    )
-    async def delete_project_checkpoint(project_id: str) -> CheckpointSummary:
-        _, plan = await compiled_project(project_id)
-        pipeline_name = str(plan.name)
-        try:
-            await checkpoints.delete(pipeline_name)
-        except CheckpointDocumentError as error:
-            raise _native_error(error, operation="checkpoint") from error
-        return CheckpointSummary(pipeline_name=pipeline_name, exists=False)
-
     @app.post(
-        f"{API_PREFIX}/projects/{{project_id}}/runs",
-        response_model=RunResponse,
+        f"{API_PREFIX}/jobs",
+        response_model=JobResponse,
         status_code=status.HTTP_202_ACCEPTED,
     )
-    async def create_run(project_id: str, request: RunRequest) -> RunResponse:
-        project = await stored_project(project_id)
+    async def create_job(request: JobCreateRequest) -> JobResponse:
+        project = await stored_project(request.project_id)
+        try:
+            return await run_in_threadpool(selected_run_manager.submit_job, project)
+        except KeyError as error:
+            raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
+        except (RuntimeError, ValueError) as error:
+            raise _http_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)
+            ) from error
+
+    @app.get(f"{API_PREFIX}/jobs", response_model=tuple[JobResponse, ...])
+    async def list_jobs() -> tuple[JobResponse, ...]:
+        return await run_in_threadpool(selected_run_manager.list_jobs)
+
+    @app.get(f"{API_PREFIX}/jobs/{{job_id}}", response_model=JobResponse)
+    async def get_job(job_id: str) -> JobResponse:
+        try:
+            return await run_in_threadpool(selected_run_manager.get_job, job_id)
+        except KeyError as error:
+            raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
+
+    @app.post(
+        f"{API_PREFIX}/jobs/{{job_id}}/checkpoint",
+        response_model=JobResponse,
+    )
+    async def trigger_job_checkpoint(job_id: str) -> JobResponse:
         try:
             return await run_in_threadpool(
-                selected_run_manager.submit, project, request
+                selected_run_manager.trigger_checkpoint, job_id
             )
         except KeyError as error:
             raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
@@ -468,20 +423,43 @@ def create_app(
                 status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)
             ) from error
 
-    @app.get(f"{API_PREFIX}/runs/{{run_id}}", response_model=RunResponse)
-    async def get_run(run_id: str) -> RunResponse:
+    @app.post(
+        f"{API_PREFIX}/jobs/{{job_id}}/shutdown",
+        response_model=JobResponse,
+    )
+    async def shutdown_job(job_id: str) -> JobResponse:
         try:
-            return await run_in_threadpool(selected_run_manager.get, run_id)
+            return await run_in_threadpool(selected_run_manager.shutdown_job, job_id)
         except KeyError as error:
             raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
+        except RuntimeError as error:
+            raise _http_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)
+            ) from error
 
-    @app.get(f"{API_PREFIX}/runs/{{run_id}}/events")
-    async def get_run_events(
-        run_id: str,
+    @app.post(
+        f"{API_PREFIX}/jobs/{{job_id}}/cancel",
+        response_model=JobResponse,
+    )
+    async def cancel_job(job_id: str) -> JobResponse:
+        try:
+            return await run_in_threadpool(selected_run_manager.cancel_job, job_id)
+        except KeyError as error:
+            raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
+        except RuntimeError as error:
+            raise _http_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)
+            ) from error
+
+    @app.get(
+        f"{API_PREFIX}/jobs/{{job_id}}/events",
+    )
+    async def get_job_events(
+        job_id: str,
         last_event_id: int | None = Header(default=None, alias="Last-Event-ID"),
     ) -> StreamingResponse:
         try:
-            await run_in_threadpool(selected_run_manager.get, run_id)
+            await run_in_threadpool(selected_run_manager.get_job, job_id)
         except KeyError as error:
             raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
 
@@ -491,31 +469,31 @@ def create_app(
                 RunStatus.COMPLETED,
                 RunStatus.FAILED,
                 RunStatus.CANCELLED,
-                RunStatus.TIMED_OUT,
             }
             yield "retry: 500\n\n"
             while True:
-                events, run_status = await run_in_threadpool(
+                events, job_status = await run_in_threadpool(
                     selected_run_manager.wait_for_events,
-                    run_id,
+                    job_id,
                     after_sequence=after_sequence,
                     timeout=10.0,
                 )
                 if not events:
-                    if run_status in terminal:
+                    if job_status in terminal:
                         return
                     yield ": keep-alive\n\n"
                     continue
                 for event in events:
                     payload = json.dumps(
-                        event.model_dump(mode="json"), separators=(",", ":")
+                        event.model_dump(mode="json", exclude_none=True),
+                        separators=(",", ":"),
                     )
                     yield (
                         f"id: {event.sequence}\nevent: {event.type}\n"
                         f"data: {payload}\n\n"
                     )
                     after_sequence = event.sequence
-                if run_status in terminal:
+                if job_status in terminal:
                     return
 
         return StreamingResponse(
@@ -523,69 +501,6 @@ def create_app(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-
-    @app.delete(f"{API_PREFIX}/runs/{{run_id}}", response_model=RunResponse)
-    async def cancel_run(run_id: str) -> RunResponse:
-        try:
-            return await run_in_threadpool(selected_run_manager.cancel, run_id)
-        except KeyError as error:
-            raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
-
-    @app.get(f"{API_PREFIX}/jobs", response_model=tuple[RunResponse, ...])
-    async def list_jobs() -> tuple[RunResponse, ...]:
-        return await run_in_threadpool(selected_run_manager.list_jobs)
-
-    @app.get(f"{API_PREFIX}/jobs/{{run_id}}", response_model=RunResponse)
-    async def get_job(run_id: str) -> RunResponse:
-        try:
-            return await run_in_threadpool(selected_run_manager.get, run_id)
-        except KeyError as error:
-            raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
-
-    @app.post(
-        f"{API_PREFIX}/jobs/{{run_id}}/checkpoint",
-        response_model=RunResponse,
-    )
-    async def trigger_job_checkpoint(run_id: str) -> RunResponse:
-        try:
-            return await run_in_threadpool(
-                selected_run_manager.trigger_checkpoint, run_id
-            )
-        except KeyError as error:
-            raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
-        except (RuntimeError, ValueError) as error:
-            raise _http_error(
-                status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)
-            ) from error
-
-    @app.post(
-        f"{API_PREFIX}/jobs/{{run_id}}/shutdown",
-        response_model=RunResponse,
-    )
-    async def shutdown_job(run_id: str) -> RunResponse:
-        try:
-            return await run_in_threadpool(selected_run_manager.shutdown_job, run_id)
-        except KeyError as error:
-            raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
-
-    @app.post(
-        f"{API_PREFIX}/jobs/{{run_id}}/cancel",
-        response_model=RunResponse,
-    )
-    async def cancel_job(run_id: str) -> RunResponse:
-        try:
-            return await run_in_threadpool(selected_run_manager.cancel, run_id)
-        except KeyError as error:
-            raise _http_error(status.HTTP_404_NOT_FOUND, str(error)) from error
-
-    @app.get(
-        f"{API_PREFIX}/jobs/{{run_id}}/events",
-    )
-    async def get_job_events(
-        run_id: str,
-        last_event_id: int | None = Header(default=None, alias="Last-Event-ID"),
-    ) -> StreamingResponse:
-        return await get_run_events(run_id, last_event_id)
 
     @app.get(
         f"{API_PREFIX}/resource-limits",
@@ -634,7 +549,7 @@ def serve(
     project_directory: str | Path = ".calc-flow-projects",
     checkpoint_directory: str | Path = ".calc-flow-checkpoints",
 ) -> None:
-    """Run the unauthenticated v2 service on a loopback interface only."""
+    """Run the unauthenticated v3 service on a loopback interface only."""
     import uvicorn
 
     validate_bind_host(host)

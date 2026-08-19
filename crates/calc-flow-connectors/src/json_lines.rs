@@ -63,12 +63,17 @@ impl JsonLinesCodec {
             return Ok(SchemaRef::from(inferred));
         }
         let expected = schema_from_spec(schema)?;
-        let fields_agree = expected.fields().len() == inferred.fields().len()
-            && expected
-                .fields()
-                .iter()
-                .zip(inferred.fields())
-                .all(|(left, right)| left.name() == right.name());
+        let expected_names = expected
+            .fields()
+            .iter()
+            .map(|field| field.name())
+            .collect::<std::collections::BTreeSet<_>>();
+        let inferred_names = inferred
+            .fields()
+            .iter()
+            .map(|field| field.name())
+            .collect::<std::collections::BTreeSet<_>>();
+        let fields_agree = expected_names == inferred_names;
         if !fields_agree {
             return Err(codec_error(
                 &self.identity,

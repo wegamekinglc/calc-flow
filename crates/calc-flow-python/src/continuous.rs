@@ -1452,6 +1452,7 @@ fn job_status_to_py<'py>(
         "task_count" => status.task_count,
         "task_errors" => status.task_errors,
         "metrics_overflowed" => status.metrics_overflowed,
+        "watermark_micros" => status.watermark.map(calc_flow::EventTime::as_micros),
         "edges" => edge_status_to_py(py, &status.edges)?,
         "sources" => source_status_to_py(py, &status.sources)?,
         "operators" => operator_status_to_py(py, &status.operators)?,
@@ -1719,6 +1720,7 @@ const fn source_delivery_name(capability: calc_flow::SourceDeliveryCapability) -
 
 const fn delivery_guarantee_name(guarantee: calc_flow::DeliveryGuarantee) -> &'static str {
     match guarantee {
+        calc_flow::DeliveryGuarantee::BestEffort => "best_effort",
         calc_flow::DeliveryGuarantee::AtLeastOnce => "at_least_once",
         calc_flow::DeliveryGuarantee::ExactlyOnce => "exactly_once",
     }
@@ -2390,7 +2392,7 @@ mod tests {
                 .unwrap();
             py.run(
                 &CString::new(
-                    "import asyncio\nasync def exercise():\n    assert 'consumed=false' in repr(runner)\n    job = await runner.start_async()\n    assert job.id > 0\n    while 'transactional.write:1' not in events:\n        await asyncio.sleep(0)\n    epoch = await job.trigger_checkpoint_async()\n    assert epoch >= 1\n    source.release.set()\n    status = job.status()\n    assert status['job_id'] == job.id\n    assert set(status) == {'job_id', 'state', 'terminal_cause', 'delivery', 'task_count', 'task_errors', 'metrics_overflowed', 'edges', 'sources', 'operators', 'sinks', 'checkpoint'}\n    outcome = await job.wait_async()\n    assert outcome['state'] == 'completed', outcome\n    assert outcome['cause'] == 'natural_end'\n    assert outcome['errors'] == ()\n    assert 'state=completed' in repr(job)\nasyncio.run(exercise())\nassert 'source.open' in events\nassert 'sink.open' in events\nassert 'sink.write:1' in events\nassert 'source.close' in events\nassert 'sink.close' in events\nassert any(value.startswith('transactional.begin:') for value in events)\nassert any(value.startswith('transactional.pre_commit:') for value in events)\nassert any(value.startswith('transactional.commit:') for value in events)\nassert 'transactional.close' in events",
+                    "import asyncio\nasync def exercise():\n    assert 'consumed=false' in repr(runner)\n    job = await runner.start_async()\n    assert job.id > 0\n    while 'transactional.write:1' not in events:\n        await asyncio.sleep(0)\n    epoch = await job.trigger_checkpoint_async()\n    assert epoch >= 1\n    source.release.set()\n    status = job.status()\n    assert status['job_id'] == job.id\n    assert set(status) == {'job_id', 'state', 'terminal_cause', 'delivery', 'task_count', 'task_errors', 'metrics_overflowed', 'watermark_micros', 'edges', 'sources', 'operators', 'sinks', 'checkpoint'}\n    outcome = await job.wait_async()\n    assert outcome['state'] == 'completed', outcome\n    assert outcome['cause'] == 'natural_end'\n    assert outcome['errors'] == ()\n    assert 'state=completed' in repr(job)\nasyncio.run(exercise())\nassert 'source.open' in events\nassert 'sink.open' in events\nassert 'sink.write:1' in events\nassert 'source.close' in events\nassert 'sink.close' in events\nassert any(value.startswith('transactional.begin:') for value in events)\nassert any(value.startswith('transactional.pre_commit:') for value in events)\nassert any(value.startswith('transactional.commit:') for value in events)\nassert 'transactional.close' in events",
                 )
                 .unwrap(),
                 Some(&locals),

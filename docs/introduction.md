@@ -133,7 +133,7 @@ batch kind, required flag, and optional exact Arrow schema. Compilation checks:
 - explicit UDF/provider availability;
 - deterministic graph inputs, outputs, order, and fingerprint.
 
-The Python `PipelineBuilder` is a functional projection of the same v2 project
+The Python `PipelineBuilder` is a functional projection of the same v3 project
 model. Its `expression`, `sql`, `external`, `table_matmul`, and `connect`
 methods return new builders. `compile()` serializes the strict project and
 asks the Rust `Runtime` to validate and compile it.
@@ -261,16 +261,20 @@ names/calls, unbounded shapes, and backend changes are rejected.
 ## Projects and schema
 
 The canonical project format is a strict data-only document with
-`format_version: 2`. The Rust `ProjectSpec`, generated JSON Schema, Python
+`format_version: 3`. The Rust `ProjectSpec`, generated JSON Schema, Python
 `ProjectDocument`, FastAPI request models, and generated TypeScript contract
 all describe the same structure.
 
-Projects contain graph nodes/edges/ports, DataFusion settings, UDF references,
-sample data sources, and bounded run options. Unknown fields and duplicate JSON
-keys are rejected. JSON is canonical storage; YAML is safe import/export only.
-`FileProjectStore` writes hashed filenames atomically.
+Projects contain an explicit batch or stream runtime, graph
+nodes/edges/ports, DataFusion settings, UDF references, bounded run options,
+and managed state settings. Batch projects may carry sample data sources.
+Stream projects bind graph inputs and outputs to exact registered connector
+and format identities, name secret references resolved only at connector open,
+and declare watermark and per-output delivery requirements. Unknown fields and
+duplicate JSON keys are rejected. JSON is canonical storage; YAML is safe
+import/export only. `FileProjectStore` writes hashed filenames atomically.
 
-The checked schema is [schemas/project-v2.schema.json](../schemas/project-v2.schema.json).
+The checked schema is [schemas/project-v3.schema.json](../schemas/project-v3.schema.json).
 
 ## Streaming and recovery
 
@@ -283,7 +287,9 @@ requirements. `StreamingRunner` owns that plan, all `SourceBinding` and
 
 Sources and sinks are async lifecycle connectors. A source declares replay,
 delivery, schema, watermark, and batch-bound capabilities before it opens.
-Ordinary sinks provide at-least-once delivery; transactional or
+Best-effort routes remain explicit in the requested/effective delivery proof.
+Ordinary sinks can provide at-least-once delivery when the reachable source is
+lossless and replayable; transactional or
 epoch-idempotent bindings can prove exactly-once compatibility for a requested
 output.
 
@@ -311,8 +317,8 @@ uses it as its durable checkpoint and recovery truth. `StreamingJob` exposes
 checkpoint, shutdown, cancel, wait, status, and outcome controls without
 exposing cursor payloads, connector state, or filesystem paths.
 
-The v2 micro-batch and push runners and public checkpoint-document store are
-removed. Project format v2 and Studio REST/OpenAPI routes are unchanged. Every
+The v2 micro-batch and push runners, project format, Studio REST API, and public
+checkpoint-document store are removed. Every
 runtime edge uses the public two-field `EdgeBudget`: for
 `EdgeBudget::new(R, B)`, at most `R` envelopes, `R` rows, and `B` bytes are
 reserved independently. Direct `edge_channel` callers must choose
@@ -332,33 +338,34 @@ The Python package lives under `python/calc_flow/`. The native extension is
 - NumPy/JAX provider registration and bounded array expressions;
 - stable Python exception classes that mirror native error categories.
 
-There is no `src/calc_flow/` execution path in v2.
+There is no `src/calc_flow/` execution path in v3.
 
 ## Local Studio
 
 `web-ui/backend/` provides the local-only `calc-flow-studio` package.
-FastAPI routes are under `/api/v2`. The service stores projects and
-checkpoints asynchronously and executes bounded previews in spawned workers
-with timeout, CPU, memory, output, cancellation, and lifecycle controls.
-The UDF-only `/catalog` compatibility route remains unchanged.
+FastAPI routes are under `/api/v3`. The service stores projects asynchronously
+and executes bounded continuous jobs in spawned workers with concurrency,
+resident-memory, checkpoint-disk, cancellation, and lifecycle controls.
+The UDF-only `/catalog` route remains available under the v3 prefix.
 `/capabilities` separately reports the parent runtime-session compile snapshot
 and the spawned worker's serialized, lazy-built-in, or unavailable
 reconstruction projection.
 
 `web-ui/` is a React/TypeScript/Vite application using React Flow. API types
-are generated from `web-ui/openapi.json`. The Studio edits v2 project
-documents, validates graphs, previews results and metrics, controls runner
-checkpoints, and compares local benchmark reports.
+are generated from `web-ui/openapi.json`. The Studio edits v3 project
+documents, validates graphs, observes results and metrics, and controls
+continuous-job checkpoints, graceful shutdown, and cancellation.
 
 The server binds only to loopback. It has no public-hosting or authentication
 mode.
 
 ## Compatibility
 
-Calc Flow 2.0 does not load Calc Flow 1.x project documents or checkpoints.
-Recreate projects with the v2 schema and restart stateful processing from a
-chosen source boundary. No automated converter is provided. See the
-[v2 release guide](v2-release.md) for the upgrade checklist.
+Calc Flow 3.0 does not load project-v2 documents or expose Studio `/api/v2`.
+Recreate projects with the v3 schema, register connector factories and secret
+resolvers in the trusted runtime, and restart stateful processing from a chosen
+source boundary. No automated converter is provided. See the
+[v2-to-v3 migration guide](migration-v2-to-v3.md) for the upgrade checklist.
 
 The historical [v1 API](v1-final-api.md) and
 [v0.2 migration guide](migration-v0.2.md) are references only. The frozen v1

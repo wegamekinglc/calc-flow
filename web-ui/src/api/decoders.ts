@@ -1,7 +1,7 @@
 import type { components } from './schema';
 
 type CapabilitiesResponse = components['schemas']['CapabilitiesResponse'];
-type RunResponse = components['schemas']['RunResponse'];
+type JobResponse = components['schemas']['JobResponse'];
 type ValidationReport = components['schemas']['ValidationReport'];
 
 export class ApiContractError extends Error {
@@ -142,6 +142,7 @@ const runtimeCapabilitiesAt = (value: unknown, path: string): void => {
     'operators',
     'udfs',
     'providers',
+    'connectors',
   ], path);
   const scope = objectAt(runtime.scope, `${path}.scope`);
   exactKeys(scope, ['kind', 'sessionId', 'revision'], `${path}.scope`);
@@ -200,6 +201,53 @@ const runtimeCapabilitiesAt = (value: unknown, path: string): void => {
     arrayAt(provider.outputPorts, `${itemPath}.outputPorts`)
       .forEach((port, portIndex) => providerPortAt(port, `${itemPath}.outputPorts[${portIndex}]`));
     providerOptionsAt(provider.optionsSchema, `${itemPath}.optionsSchema`);
+  });
+  arrayAt(runtime.connectors, `${path}.connectors`).forEach((item, index) => {
+    const itemPath = `${path}.connectors[${index}]`;
+    const connector = objectAt(item, itemPath);
+    exactKeys(
+      connector,
+      ['provider', 'name', 'version', 'kind', 'capabilities', 'formats', 'optionsSchema'],
+      itemPath,
+    );
+    stringAt(connector.provider, `${itemPath}.provider`);
+    stringAt(connector.name, `${itemPath}.name`);
+    stringAt(connector.version, `${itemPath}.version`);
+    literalAt(connector.kind, ['source', 'sink', 'both'], `${itemPath}.kind`);
+    stringArrayAt(connector.formats, null, `${itemPath}.formats`);
+    const axes = objectAt(connector.capabilities, `${itemPath}.capabilities`);
+    exactKeys(
+      axes,
+      ['delivery', 'replay', 'watermark', 'transaction', 'snapshot', 'polling', 'cdc', 'lookup'],
+      `${itemPath}.capabilities`,
+    );
+    literalAt(
+      axes.delivery,
+      ['best_effort', 'at_least_once', 'exactly_once'],
+      `${itemPath}.capabilities.delivery`,
+    );
+    literalAt(
+      axes.replay,
+      ['replayable_exact', 'unreplayable'],
+      `${itemPath}.capabilities.replay`,
+    );
+    literalAt(
+      axes.watermark,
+      ['native', 'generated_only'],
+      `${itemPath}.capabilities.watermark`,
+    );
+    literalAt(
+      axes.transaction,
+      ['none', 'pre_commit_commit', 'ledger_idempotent', 'retry_deduplicated'],
+      `${itemPath}.capabilities.transaction`,
+    );
+    ['snapshot', 'polling', 'cdc', 'lookup'].forEach((name) => {
+      booleanAt(axes[name], `${itemPath}.capabilities.${name}`);
+    });
+    const options = objectAt(connector.optionsSchema, `${itemPath}.optionsSchema`);
+    Object.entries(options).forEach(([name, option]) => {
+      jsonAt(option, `${itemPath}.optionsSchema.${name}`);
+    });
   });
 };
 
@@ -402,54 +450,62 @@ const nullableStringAt = (value: unknown, path: string): void => {
   if (value !== null) stringAt(value, path);
 };
 
-export const decodeRunResponse = (value: unknown): RunResponse => {
-  const run = objectAt(value, 'run');
-  exactKeys(run, [
+export const decodeJobResponse = (value: unknown): JobResponse => {
+  const job = objectAt(value, 'job');
+  exactKeys(job, [
     'id',
     'project_id',
     'status',
     'created_at',
     'started_at',
     'finished_at',
+    'error_code',
     'error',
-    'result',
-  ], 'run');
-  stringAt(run.id, 'run.id');
-  stringAt(run.project_id, 'run.project_id');
-  stringAt(run.created_at, 'run.created_at');
+  ], 'job');
+  stringAt(job.id, 'job.id');
+  stringAt(job.project_id, 'job.project_id');
+  stringAt(job.created_at, 'job.created_at');
   const status = literalAt(
-    run.status,
-    ['pending', 'running', 'completed', 'failed', 'timed_out', 'cancelled'],
-    'run.status',
+    job.status,
+    ['pending', 'running', 'completed', 'failed', 'cancelled'],
+    'job.status',
   );
-  nullableStringAt(run.started_at, 'run.started_at');
-  nullableStringAt(run.finished_at, 'run.finished_at');
-  nullableStringAt(run.error, 'run.error');
+  nullableStringAt(job.started_at, 'job.started_at');
+  nullableStringAt(job.finished_at, 'job.finished_at');
+  nullableStringAt(job.error_code, 'job.error_code');
+  nullableStringAt(job.error, 'job.error');
   if (status === 'pending') {
-    if (run.started_at !== null || run.finished_at !== null) {
-      fail('run', 'pending runs cannot have start or finish times');
+    if (job.started_at !== null || job.finished_at !== null) {
+      fail('job', 'pending jobs cannot have start or finish times');
     }
-    if (run.error !== null || run.result !== null) fail('run', 'pending run payload is inconsistent');
+    if (job.error_code !== null || job.error !== null) {
+      fail('job', 'pending job payload is inconsistent');
+    }
   } else if (status === 'running') {
-    stringAt(run.started_at, 'run.started_at');
-    if (run.finished_at !== null || run.error !== null || run.result !== null) {
-      fail('run', 'running run payload is inconsistent');
+    stringAt(job.started_at, 'job.started_at');
+    if (job.finished_at !== null || job.error_code !== null || job.error !== null) {
+      fail('job', 'running job payload is inconsistent');
     }
   } else if (status === 'completed') {
-    stringAt(run.started_at, 'run.started_at');
-    stringAt(run.finished_at, 'run.finished_at');
-    if (run.error !== null) fail('run.error', 'completed runs require null');
-    resultAt(run.result, 'run.result');
-  } else if (status === 'failed' || status === 'timed_out') {
-    stringAt(run.started_at, 'run.started_at');
-    stringAt(run.finished_at, 'run.finished_at');
-    if (!stringAt(run.error, 'run.error')) fail('run.error', 'must not be empty');
-    if (run.result !== null) fail('run.result', 'failed runs require null');
+    stringAt(job.started_at, 'job.started_at');
+    stringAt(job.finished_at, 'job.finished_at');
+    if (job.error_code !== null || job.error !== null) {
+      fail('job.error', 'completed jobs require null errors');
+    }
+  } else if (status === 'failed') {
+    stringAt(job.started_at, 'job.started_at');
+    stringAt(job.finished_at, 'job.finished_at');
+    literalAt(
+      job.error_code,
+      ['job_limit_exceeded', 'worker_failed'],
+      'job.error_code',
+    );
+    if (!stringAt(job.error, 'job.error')) fail('job.error', 'must not be empty');
   } else {
-    stringAt(run.finished_at, 'run.finished_at');
-    if (run.error !== null || run.result !== null) {
-      fail('run', 'cancelled run payload is inconsistent');
+    stringAt(job.finished_at, 'job.finished_at');
+    if (job.error_code !== null || job.error !== null) {
+      fail('job', 'cancelled job payload is inconsistent');
     }
   }
-  return value as RunResponse;
+  return value as JobResponse;
 };

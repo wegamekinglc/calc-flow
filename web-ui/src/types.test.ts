@@ -2,14 +2,14 @@ import { describe, expect, it } from 'vitest';
 
 import { blankProject, updateNodeOperator } from './types';
 
-describe('v2 project transforms', () => {
-  it('creates a semantically valid portable v2 expression project', () => {
+describe('v3 project transforms', () => {
+  it('creates a semantically valid portable v3 expression project', () => {
     const project = blankProject();
 
-    expect(project.format_version).toBe(2);
+    expect(project.format_version).toBe(3);
     expect(project).not.toHaveProperty('$defs');
     expect(project.id).toMatch(/^[A-Za-z][A-Za-z0-9_-]*$/);
-    expect(project.pipeline.nodes[0].operator).toEqual({
+    expect(project.graph.nodes[0].operator).toEqual({
       kind: 'expression',
       expression: 'total = a + b',
       select: [],
@@ -27,11 +27,17 @@ describe('v2 project transforms', () => {
         ],
       },
     ]);
+    expect(project).toMatchObject({
+      runtime: { mode: 'batch' },
+      sources: [],
+      sinks: [],
+      state: { root: '.calc-flow-state', retention: 3 },
+    });
   });
 
   it('updates a nested operator without mutating the project or node', () => {
     const project = blankProject();
-    const originalNode = project.pipeline.nodes[0];
+    const originalNode = project.graph.nodes[0];
 
     const updated = updateNodeOperator(project, originalNode.id, (operator) =>
       operator.kind === 'expression'
@@ -40,9 +46,9 @@ describe('v2 project transforms', () => {
     );
 
     expect(updated).not.toBe(project);
-    expect(updated.pipeline).not.toBe(project.pipeline);
-    expect(updated.pipeline.nodes[0]).not.toBe(originalNode);
-    expect(updated.pipeline.nodes[0].operator).toMatchObject({
+    expect(updated.graph).not.toBe(project.graph);
+    expect(updated.graph.nodes[0]).not.toBe(originalNode);
+    expect(updated.graph.nodes[0].operator).toMatchObject({
       kind: 'expression',
       expression: 'total = a - b',
     });

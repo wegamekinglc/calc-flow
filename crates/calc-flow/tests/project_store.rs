@@ -2,27 +2,30 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use calc_flow::{
     CalcFlowError, DataFusionConfig, FileProjectStore, MAX_JSON_DEPTH, NodeSpec, OperatorSpec,
-    PipelineSpec, ProjectSpec, ProjectStore, RunOptions, export_project_json, export_project_yaml,
-    import_project_json, import_project_json_with_limit, import_project_yaml,
-    import_project_yaml_with_limit,
+    PROJECT_FORMAT_VERSION, PipelineSpec, ProjectSpec, ProjectStore, RuntimeSpec, StateConfig,
+    export_project_json, export_project_yaml, import_project_json, import_project_json_with_limit,
+    import_project_yaml, import_project_yaml_with_limit,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 fn project(id: &str, name: &str) -> ProjectSpec {
     ProjectSpec {
-        format_version: 2,
+        format_version: PROJECT_FORMAT_VERSION,
         id: id.into(),
         name: name.into(),
         description: "project".into(),
-        pipeline: PipelineSpec {
-            name: "pipeline".into(),
+        runtime: RuntimeSpec::default(),
+        graph: PipelineSpec {
+            name: "graph".into(),
             nodes: Vec::new(),
             edges: Vec::new(),
             datafusion: DataFusionConfig::default(),
         },
         data_sources: Vec::new(),
-        run_options: RunOptions::default(),
+        sources: Vec::new(),
+        sinks: Vec::new(),
+        state: StateConfig::default(),
     }
 }
 
@@ -107,11 +110,11 @@ fn project_import_caps_bytes_before_parsing_with_inclusive_boundary() {
 #[test]
 fn yaml_import_rejects_v1_unknown_alias_tag_include_bomb_and_multiple_documents() {
     let valid = export_project_yaml(&project("demo", "Demo")).unwrap();
-    let v1 = valid.replacen("format_version: 2", "format_version: 1", 1);
+    let v1 = valid.replacen("format_version: 3", "format_version: 1", 1);
     assert!(matches!(
         import_project_yaml(v1.as_bytes()),
         Err(CalcFlowError::UnsupportedVersion {
-            expected: 2,
+            expected: 3,
             found: 1
         })
     ));
@@ -146,9 +149,9 @@ fn yaml_import_rejects_v1_unknown_alias_tag_include_bomb_and_multiple_documents(
 #[test]
 fn project_json_import_rejects_duplicate_keys_at_every_extensible_depth() {
     let documents = [
-        r#"{"format_version":2,"id":"demo","id":"other","name":"Demo","pipeline":{"name":"pipeline","nodes":[]}}"#,
-        r#"{"format_version":2,"id":"demo","name":"Demo","pipeline":{"name":"pipeline","nodes":[{"id":"node","operator":{"kind":"external","provider":"python","name":"custom","version":"1","options":{"nested":{"value":1,"value":2}}}}]}}"#,
-        r#"{"format_version":2,"id":"demo","name":"Demo","pipeline":{"name":"pipeline","nodes":[]},"data_sources":[{"id":"source","input":"input","format":"inline_json","data":{"nested":{"value":1,"value":2}}}]}"#,
+        r#"{"format_version":3,"id":"demo","id":"other","name":"Demo","graph":{"name":"graph","nodes":[]}}"#,
+        r#"{"format_version":3,"id":"demo","name":"Demo","graph":{"name":"graph","nodes":[{"id":"node","operator":{"kind":"external","provider":"python","name":"custom","version":"1","options":{"nested":{"value":1,"value":2}}}}]}}"#,
+        r#"{"format_version":3,"id":"demo","name":"Demo","graph":{"name":"graph","nodes":[]},"data_sources":[{"id":"source","input":"input","format":"inline_json","data":{"nested":{"value":1,"value":2}}}]}"#,
     ];
     for document in documents {
         assert!(
@@ -181,9 +184,9 @@ fn project_json_import_enforces_the_full_document_depth_limit() {
 
 #[test]
 fn yaml_import_rejects_duplicate_keys_and_merge_keys() {
-    let duplicate = b"format_version: 2\nid: demo\nid: other\nname: Demo\npipeline:\n  name: pipeline\n  nodes: []\n";
-    let nested_duplicate = b"format_version: 2\nid: demo\nname: Demo\npipeline:\n  name: pipeline\n  name: other\n  nodes: []\n";
-    let merge = b"format_version: 2\nid: demo\nname: Demo\n<<: {description: merged}\npipeline:\n  name: pipeline\n  nodes: []\n";
+    let duplicate = b"format_version: 3\nid: demo\nid: other\nname: Demo\nruntime: {mode: batch, options: {}}\ngraph:\n  name: graph\n  nodes: []\n";
+    let nested_duplicate = b"format_version: 3\nid: demo\nname: Demo\nruntime: {mode: batch, options: {}}\ngraph:\n  name: graph\n  name: other\n  nodes: []\n";
+    let merge = b"format_version: 3\nid: demo\nname: Demo\nruntime: {mode: batch, options: {}}\n<<: {description: merged}\ngraph:\n  name: graph\n  nodes: []\n";
     for document in [
         duplicate.as_slice(),
         nested_duplicate.as_slice(),
@@ -213,7 +216,7 @@ fn project_export_preflights_external_json_values_and_wire_document_depth() {
     ));
 
     let mut external = project("external", "External");
-    external.pipeline.nodes.push(NodeSpec {
+    external.graph.nodes.push(NodeSpec {
         id: "node".into(),
         operator: OperatorSpec::External {
             provider: "python".into(),
@@ -301,11 +304,11 @@ async fn project_store_rejects_corrupt_non_object_v1_unknown_oversize_and_key_mi
     assert!(matches!(
         store.get("demo").await,
         Err(CalcFlowError::UnsupportedVersion {
-            expected: 2,
+            expected: 3,
             found: 1
         })
     ));
-    raw["format_version"] = json!(2);
+    raw["format_version"] = json!(3);
     raw["unknown"] = json!(true);
     std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
     assert!(matches!(

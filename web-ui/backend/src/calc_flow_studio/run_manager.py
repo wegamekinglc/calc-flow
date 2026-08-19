@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import math
 import multiprocessing
@@ -29,6 +30,7 @@ from calc_flow import (
     ProjectDocument,
     Runtime,
     RuntimeCapabilities,
+    StreamingRunner,
     register_jax,
     register_numpy,
 )
@@ -36,6 +38,7 @@ from pydantic import ValidationError
 
 from calc_flow_studio.models import (
     CapabilitiesResponse,
+    JobResponse,
     JSONValue,
     LazyBuiltinWorkerRegistration,
     PreviewCapabilitiesResponse,
@@ -261,7 +264,7 @@ def _run_result_contract_error(
                     )
     first = error.errors(include_input=False, include_url=False)[0]
     location = ".".join(str(part) for part in first["loc"]) or "<root>"
-    return f"run result violates the v2 preview contract at {location}: {first['msg']}"
+    return f"run result violates the preview contract at {location}: {first['msg']}"
 
 
 def _json_size(value: JSONValue) -> int:
@@ -436,10 +439,10 @@ def _default_input_ports(node: dict[str, JSONValue]) -> list[dict[str, JSONValue
 
 def _input_contracts(project: ProjectDocument) -> dict[str, dict[str, JSONValue]]:
     root = project.root
-    pipeline = root["pipeline"]
-    assert isinstance(pipeline, dict)
-    nodes = pipeline["nodes"]
-    edges = pipeline.get("edges", [])
+    graph = root["graph"]
+    assert isinstance(graph, dict)
+    nodes = graph["nodes"]
+    edges = graph.get("edges", [])
     assert isinstance(nodes, list) and isinstance(edges, list)
     connected = {
         (edge["target_node"], edge.get("target_port", "input"))
@@ -516,7 +519,8 @@ def prepare_run(
     request: RunRequest,
 ) -> tuple[PreparedInputs, RunOptions]:
     """Prepare plain, bounded worker inputs without constructing PyO3 objects."""
-    root_options = project.root.get("run_options", {})
+    runtime = project.root.get("runtime", {})
+    root_options = runtime.get("options", {}) if isinstance(runtime, dict) else {}
     assert isinstance(root_options, dict)
     options = request.options or RunOptions.model_validate(root_options)
     contracts = _input_contracts(project)
@@ -684,7 +688,7 @@ def _register_referenced_builtins(
     registrations: tuple[RegistrationRecord, ...] = (),
 ) -> None:
     project = json.loads(project_json)
-    nodes = project["pipeline"]["nodes"]
+    nodes = project["graph"]["nodes"]
     references = {
         (
             operator.get("provider"),
@@ -714,7 +718,7 @@ def _selected_registrations(
     registrations: tuple[RegistrationRecord, ...],
 ) -> tuple[RegistrationRecord, ...]:
     project = json.loads(project_json)
-    nodes = project["pipeline"]["nodes"]
+    nodes = project["graph"]["nodes"]
     references: set[tuple[str, str, str, str]] = set()
     for node in nodes:
         operator = node.get("operator", {})
@@ -964,6 +968,179 @@ class _RunHandle:
     cancel_requested: bool = False
 
 
+@dataclass(slots=True)
+class _JobHandle:
+    id: str
+    project_id: str
+    status: RunStatus
+    created_at: datetime
+    work_directory: Path
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    error_code: str | None = None
+    error: str | None = None
+    events: tuple[RunEvent, ...] = ()
+    worker: Any = None
+    commands: Any = None
+    output_queue: Any = None
+    monitor: Thread | None = None
+    cancel_requested: bool = False
+
+
+def _continuous_progress(status: dict[str, object]) -> dict[str, object]:
+    checkpoint = status.get("checkpoint")
+    checkpoint = checkpoint if isinstance(checkpoint, dict) else {}
+    sources = status.get("sources")
+    sources = sources if isinstance(sources, dict) else {}
+    operators = status.get("operators")
+    operators = operators if isinstance(operators, dict) else {}
+    edges = status.get("edges")
+    edges = edges if isinstance(edges, dict) else {}
+    throughput_rows = sum(
+        int(source.get("data_rows", 0))
+        for source in sources.values()
+        if isinstance(source, dict)
+    )
+    late_rows = sum(
+        int(operator.get("late_rows", 0))
+        for operator in operators.values()
+        if isinstance(operator, dict)
+    )
+    backpressure = sum(
+        int(edge.get("blocked_sends", 0))
+        for edge in edges.values()
+        if isinstance(edge, dict)
+    )
+    queue_envelopes = sum(
+        int(edge.get("current_envelopes", 0))
+        for edge in edges.values()
+        if isinstance(edge, dict)
+    )
+    queue_rows = sum(
+        int(edge.get("current_rows", 0))
+        for edge in edges.values()
+        if isinstance(edge, dict)
+    )
+    queue_bytes = sum(
+        int(edge.get("current_bytes", 0))
+        for edge in edges.values()
+        if isinstance(edge, dict)
+    )
+    watermark_micros = status.get("watermark_micros")
+    watermark = None
+    if isinstance(watermark_micros, int) and not isinstance(watermark_micros, bool):
+        try:
+            seconds, micros = divmod(watermark_micros, 1_000_000)
+            watermark = (
+                datetime.fromtimestamp(seconds, tz=UTC)
+                .replace(microsecond=micros)
+                .isoformat(timespec="microseconds")
+                .replace("+00:00", "Z")
+            )
+        except (OverflowError, OSError, ValueError):
+            watermark = f"{watermark_micros}us"
+    return {
+        "state": str(status.get("state", "running")),
+        "epoch": checkpoint.get("last_completed_epoch"),
+        "watermark": watermark,
+        "throughput_rows": throughput_rows,
+        "queue_envelopes": queue_envelopes,
+        "queue_rows": queue_rows,
+        "queue_bytes": queue_bytes,
+        "backpressure_events": backpressure,
+        "late_rows": late_rows,
+    }
+
+
+def _execute_continuous_worker(
+    project_json: str,
+    command_queue: Any,
+    output_queue: Any,
+) -> None:
+    job = None
+    try:
+        runtime = Runtime()
+        plan = runtime.compile_stream_project(project_json)
+        job = StreamingRunner(plan).start()
+        output_queue.put({"kind": "state", "state": "running"})
+        last_progress: dict[str, object] | None = None
+        while True:
+            try:
+                command = command_queue.get(timeout=0.1)
+            except queue.Empty:
+                command = None
+            if command == "checkpoint":
+                epoch = job.trigger_checkpoint()
+                output_queue.put({"kind": "checkpoint", "epoch": epoch})
+            elif command == "shutdown":
+                output_queue.put({"kind": "state", "state": "draining"})
+                outcome = job.shutdown()
+                output_queue.put(
+                    {
+                        "kind": "terminal",
+                        "state": outcome.state,
+                        "cause": outcome.cause,
+                    }
+                )
+                return
+            elif command == "cancel":
+                outcome = job.cancel()
+                output_queue.put(
+                    {
+                        "kind": "terminal",
+                        "state": outcome.state,
+                        "cause": outcome.cause,
+                    }
+                )
+                return
+            status = job.status()
+            progress = _continuous_progress(status)
+            if progress != last_progress:
+                output_queue.put({"kind": "progress", **progress})
+                last_progress = progress
+            if status["state"] not in {"running", "draining"}:
+                outcome = job.wait()
+                output_queue.put(
+                    {
+                        "kind": "terminal",
+                        "state": outcome.state,
+                        "cause": outcome.cause,
+                    }
+                )
+                return
+    except BaseException as error:
+        if job is not None:
+            with suppress(BaseException):
+                job.cancel()
+        with suppress(BaseException):
+            output_queue.put(
+                {
+                    "kind": "terminal",
+                    "state": "failed",
+                    "cause": f"{type(error).__name__}: {error}"[:4000],
+                }
+            )
+
+
+def _directory_size(path: Path) -> int:
+    total = 0
+    pending = [path]
+    while pending:
+        current = pending.pop()
+        try:
+            entries = tuple(os.scandir(current))
+        except FileNotFoundError:
+            continue
+        for entry in entries:
+            if entry.is_symlink():
+                raise RunManagerError("checkpoint state contains a symbolic link")
+            if entry.is_dir(follow_symlinks=False):
+                pending.append(Path(entry.path))
+            elif entry.is_file(follow_symlinks=False):
+                total += entry.stat(follow_symlinks=False).st_size
+    return total
+
+
 class RunManager:
     """Manage bounded Rust preview workers and retain their local run records."""
 
@@ -974,18 +1151,23 @@ class RunManager:
         use_processes: bool = True,
         max_workers: int = 2,
         max_history: int = 100,
+        checkpoint_directory: str | Path = ".calc-flow-checkpoints",
+        resource_limits: ResourceLimits | None = None,
     ) -> None:
         if max_workers <= 0 or max_history <= 0:
             raise ValueError("max_workers and max_history must be greater than 0")
         self._lock = RLock()
         self._event_condition = Condition(self._lock)
         self._runs: dict[str, _RunHandle] = {}
+        self._jobs: dict[str, _JobHandle] = {}
         self._runtime = runtime
         self._lazy_builtins = _preflight_lazy_builtins()
         self._capability_cache: dict[tuple[str, int], CapabilitiesResponse] = {}
         self._use_processes = use_processes
         self._max_workers = max_workers
         self._max_history = max_history
+        self._checkpoint_directory = Path(checkpoint_directory)
+        self._resource_limits = resource_limits or ResourceLimits()
         self._shutdown = False
         self._process_context = (
             multiprocessing.get_context("spawn") if use_processes else None
@@ -1141,12 +1323,103 @@ class RunManager:
             raise RunManagerError("run manager shut down during submission")
         return self.get(run_id)
 
+    def submit_job(self, project: ProjectDocument) -> JobResponse:
+        root = project.root
+        runtime = root.get("runtime")
+        if not isinstance(runtime, dict) or runtime.get("mode") != "stream":
+            raise RunManagerError("continuous jobs require runtime.mode 'stream'")
+        project_id = str(root["id"])
+        with self._lock:
+            if self._shutdown:
+                raise RunManagerError("run manager is shut down")
+            active = sum(
+                handle.status in {RunStatus.PENDING, RunStatus.RUNNING}
+                for handle in self._jobs.values()
+            )
+            if active >= self._resource_limits.max_concurrent_jobs:
+                raise RunManagerError("job_limit_exceeded: max_concurrent_jobs")
+            job_id = uuid4().hex
+            project_key = hashlib.sha256(project_id.encode("utf-8")).hexdigest()
+            work_directory = self._checkpoint_directory / project_key
+            handle = _JobHandle(
+                id=job_id,
+                project_id=project_id,
+                status=RunStatus.PENDING,
+                created_at=datetime.now(UTC),
+                work_directory=work_directory,
+            )
+            self._jobs[job_id] = handle
+            self._job_event(handle, "state", "Job accepted", state="pending")
+
+        worker = commands = output_queue = None
+        try:
+            work_directory.mkdir(parents=True, exist_ok=True)
+            if work_directory.is_symlink():
+                raise RunManagerError(
+                    "checkpoint directory must not be a symbolic link"
+                )
+            document = json.loads(project.canonical_json())
+            document["state"]["root"] = str(work_directory / "state")
+            project_json = json.dumps(
+                document, allow_nan=False, separators=(",", ":"), sort_keys=True
+            )
+            if self._use_processes:
+                assert self._process_context is not None
+                commands = self._process_context.Queue(maxsize=16)
+                output_queue = self._process_context.Queue(maxsize=64)
+                worker = self._process_context.Process(
+                    target=_execute_continuous_worker,
+                    args=(project_json, commands, output_queue),
+                    daemon=True,
+                    name=f"calc-flow-job-{job_id[:8]}",
+                )
+            else:
+                commands = queue.Queue(maxsize=16)
+                output_queue = queue.Queue(maxsize=64)
+                worker = Thread(
+                    target=_execute_continuous_worker,
+                    args=(project_json, commands, output_queue),
+                    daemon=True,
+                    name=f"calc-flow-job-{job_id[:8]}",
+                )
+            worker.start()
+        except BaseException:
+            self._cleanup_job_resources(worker, commands, output_queue, terminate=True)
+            with self._lock:
+                self._jobs.pop(job_id, None)
+                self._event_condition.notify_all()
+            raise
+
+        with self._lock:
+            handle.worker = worker
+            handle.commands = commands
+            handle.output_queue = output_queue
+            handle.status = RunStatus.RUNNING
+            handle.started_at = datetime.now(UTC)
+            monitor = Thread(
+                target=self._monitor_job,
+                args=(job_id,),
+                daemon=True,
+                name=f"calc-flow-job-monitor-{job_id[:8]}",
+            )
+            handle.monitor = monitor
+            monitor.start()
+            return self._job_response(handle)
+
     def get(self, run_id: str) -> RunResponse:
         with self._lock:
+            if run_id in self._jobs:
+                return self._job_response(self._jobs[run_id])
             return self._response(self._require(run_id))
+
+    def get_job(self, job_id: str) -> JobResponse:
+        with self._lock:
+            return self._job_response(self._require_job(job_id))
 
     def events(self, run_id: str) -> tuple[RunEvent, ...]:
         with self._lock:
+            if run_id in self._jobs:
+                return tuple(self._jobs[run_id].events)
             return tuple(self._require(run_id).events)
 
     def wait_for_events(
@@ -1160,6 +1433,12 @@ class RunManager:
         }
 
         def ready() -> bool:
+            if run_id in self._jobs:
+                handle = self._jobs[run_id]
+                return (
+                    any(event.sequence > after_sequence for event in handle.events)
+                    or handle.status in terminal
+                )
             handle = self._require(run_id)
             return (
                 any(event.sequence > after_sequence for event in handle.events)
@@ -1168,6 +1447,16 @@ class RunManager:
 
         with self._event_condition:
             self._event_condition.wait_for(ready, timeout=timeout)
+            if run_id in self._jobs:
+                handle = self._jobs[run_id]
+                return (
+                    tuple(
+                        event
+                        for event in handle.events
+                        if event.sequence > after_sequence
+                    ),
+                    handle.status,
+                )
             handle = self._require(run_id)
             return (
                 tuple(
@@ -1178,6 +1467,8 @@ class RunManager:
 
     def cancel(self, run_id: str) -> RunResponse:
         with self._lock:
+            if run_id in self._jobs:
+                return self._command_job(self._jobs[run_id], "cancel")
             handle = self._require(run_id)
             if handle.status not in {RunStatus.PENDING, RunStatus.RUNNING}:
                 return self._response(handle)
@@ -1191,12 +1482,31 @@ class RunManager:
         self._join_monitor(monitor)
         return response
 
+    def cancel_job(self, job_id: str) -> JobResponse:
+        with self._lock:
+            return self._command_job(self._require_job(job_id), "cancel")
+
     def shutdown(self) -> None:
         resources: list[tuple[Any, Any, Thread | None]] = []
+        job_resources: list[tuple[Any, Any, Any, Thread | None]] = []
         with self._lock:
             if self._shutdown:
                 return
             self._shutdown = True
+            for handle in self._jobs.values():
+                if handle.status in {RunStatus.PENDING, RunStatus.RUNNING}:
+                    handle.cancel_requested = True
+                    if handle.commands is not None:
+                        with suppress(BaseException):
+                            handle.commands.put_nowait("cancel")
+                    job_resources.append(
+                        (
+                            handle.worker,
+                            handle.commands,
+                            handle.output_queue,
+                            handle.monitor,
+                        )
+                    )
             for handle in self._runs.values():
                 if handle.status in {RunStatus.PENDING, RunStatus.RUNNING}:
                     handle.cancel_requested = True
@@ -1206,6 +1516,9 @@ class RunManager:
                     resources.append((*self._detach_resources(handle),))
         for worker, output_queue, monitor in resources:
             self._cleanup_resources(worker, output_queue, terminate=True)
+            self._join_monitor(monitor)
+        for worker, commands, output_queue, monitor in job_resources:
+            self._cleanup_job_resources(worker, commands, output_queue, terminate=True)
             self._join_monitor(monitor)
 
     def _monitor(self, run_id: str, options: RunOptions) -> None:
@@ -1423,37 +1736,273 @@ class RunManager:
     # M6-09 continuous job surface
     # ------------------------------------------------------------------
 
-    def list_jobs(self) -> tuple[RunResponse, ...]:
+    def list_jobs(self) -> tuple[JobResponse, ...]:
         with self._lock:
             return tuple(
-                self._response(handle)
-                for handle in sorted(self._runs.values(), key=lambda h: h.id)
+                self._job_response(handle)
+                for handle in sorted(self._jobs.values(), key=lambda h: h.id)
             )
 
-    def trigger_checkpoint(self, run_id: str) -> RunResponse:
+    def trigger_checkpoint(self, run_id: str) -> JobResponse:
         with self._lock:
-            handle = self._require(run_id)
+            handle = self._require_job(run_id)
             if handle.status != RunStatus.RUNNING:
                 raise ValueError(
                     f"job {run_id} is not running; "
                     f"current status: {handle.status.value}"
                 )
-            self._event(run_id, "checkpoint_requested", "Checkpoint requested")
-            return self._response(handle)
+            return self._command_job(handle, "checkpoint")
 
-    def shutdown_job(self, run_id: str) -> RunResponse:
+    def shutdown_job(self, run_id: str) -> JobResponse:
         with self._lock:
-            handle = self._require(run_id)
+            handle = self._require_job(run_id)
             if handle.status not in {RunStatus.PENDING, RunStatus.RUNNING}:
-                return self._response(handle)
-            handle.status = RunStatus.CANCELLED
-            handle.finished_at = datetime.now(UTC)
-            self._event(run_id, "shutdown", "Graceful shutdown")
-            worker, output_queue, monitor = self._detach_resources(handle)
-            response = self._response(handle)
-        self._cleanup_resources(worker, output_queue, terminate=False)
-        self._join_monitor(monitor)
-        return response
+                return self._job_response(handle)
+            return self._command_job(handle, "shutdown")
 
     def resource_limits(self) -> ResourceLimits:
-        return ResourceLimits()
+        return self._resource_limits
+
+    def _command_job(self, handle: _JobHandle, command: str) -> JobResponse:
+        if handle.status not in {RunStatus.PENDING, RunStatus.RUNNING}:
+            return self._job_response(handle)
+        if handle.commands is None:
+            raise RunManagerError(f"job {handle.id} command channel is unavailable")
+        try:
+            handle.commands.put_nowait(command)
+        except queue.Full as error:
+            raise RunManagerError(f"job {handle.id} command queue is full") from error
+        if command == "cancel":
+            handle.cancel_requested = True
+        self._job_event(
+            handle,
+            "state",
+            f"{command} requested",
+            state="draining" if command == "shutdown" else handle.status.value,
+        )
+        return self._job_response(handle)
+
+    def _monitor_job(self, job_id: str) -> None:
+        while True:
+            with self._lock:
+                handle = self._require_job(job_id)
+                worker = handle.worker
+                output_queue = handle.output_queue
+                if handle.status in {
+                    RunStatus.COMPLETED,
+                    RunStatus.FAILED,
+                    RunStatus.CANCELLED,
+                }:
+                    handle.monitor = None
+                    return
+            violation = self._job_limit_violation(handle)
+            if violation is not None:
+                self._finish_job(
+                    job_id,
+                    RunStatus.FAILED,
+                    f"job_limit_exceeded: {violation}",
+                    terminate=True,
+                )
+                return
+            try:
+                message = output_queue.get(timeout=0.1)
+            except (queue.Empty, OSError, ValueError):
+                if worker is not None and not worker.is_alive():
+                    self._finish_job(
+                        job_id,
+                        RunStatus.FAILED,
+                        "worker exited without a terminal event",
+                        terminate=False,
+                    )
+                    return
+                continue
+            if not isinstance(message, dict):
+                self._finish_job(
+                    job_id,
+                    RunStatus.FAILED,
+                    "worker emitted an invalid event",
+                    terminate=True,
+                )
+                return
+            kind = message.get("kind")
+            with self._lock:
+                handle = self._require_job(job_id)
+                if kind == "state":
+                    self._job_event(
+                        handle,
+                        "state",
+                        "Job state changed",
+                        state=str(message.get("state", "running")),
+                    )
+                elif kind == "progress":
+                    self._job_event(
+                        handle,
+                        "progress",
+                        "Job progress",
+                        state=str(message.get("state", "running")),
+                        epoch=message.get("epoch"),
+                        watermark=message.get("watermark"),
+                        throughput_rows=int(message.get("throughput_rows", 0)),
+                        queue_envelopes=int(message.get("queue_envelopes", 0)),
+                        queue_rows=int(message.get("queue_rows", 0)),
+                        queue_bytes=int(message.get("queue_bytes", 0)),
+                        backpressure_events=int(message.get("backpressure_events", 0)),
+                        late_rows=int(message.get("late_rows", 0)),
+                    )
+                elif kind == "checkpoint":
+                    self._job_event(
+                        handle,
+                        "checkpoint",
+                        "Checkpoint completed",
+                        epoch=int(message["epoch"]),
+                        state=handle.status.value,
+                    )
+                elif kind == "terminal":
+                    native_state = str(message.get("state", "failed"))
+                    terminal = {
+                        "completed": RunStatus.COMPLETED,
+                        "cancelled": RunStatus.CANCELLED,
+                    }.get(native_state, RunStatus.FAILED)
+                    cause = str(message.get("cause", native_state))[:4000]
+                else:
+                    terminal = RunStatus.FAILED
+                    cause = "worker emitted an unknown event kind"
+            if kind == "terminal" or kind not in {"state", "progress", "checkpoint"}:
+                self._finish_job(
+                    job_id,
+                    terminal,
+                    cause,
+                    terminate=False,
+                )
+                return
+
+    def _job_limit_violation(self, handle: _JobHandle) -> str | None:
+        if self._use_processes:
+            resident = _resident_bytes(handle.worker)
+            if (
+                resident is not None
+                and resident > self._resource_limits.max_job_resident_memory_bytes
+            ):
+                return "max_job_resident_memory_bytes"
+            with self._lock:
+                global_resident = sum(
+                    _resident_bytes(job.worker) or 0
+                    for job in self._jobs.values()
+                    if job.status in {RunStatus.PENDING, RunStatus.RUNNING}
+                )
+            if global_resident > self._resource_limits.max_global_resident_memory_bytes:
+                return "max_global_resident_memory_bytes"
+        try:
+            checkpoint_bytes = _directory_size(handle.work_directory)
+        except RunManagerError:
+            return "max_checkpoint_disk_bytes"
+        if checkpoint_bytes > self._resource_limits.max_checkpoint_disk_bytes:
+            return "max_checkpoint_disk_bytes"
+        return None
+
+    def _finish_job(
+        self,
+        job_id: str,
+        status: RunStatus,
+        error: str,
+        *,
+        terminate: bool,
+    ) -> None:
+        with self._lock:
+            handle = self._require_job(job_id)
+            if handle.status not in {RunStatus.PENDING, RunStatus.RUNNING}:
+                return
+            handle.status = status
+            handle.finished_at = datetime.now(UTC)
+            handle.error_code = (
+                "job_limit_exceeded"
+                if status is RunStatus.FAILED
+                and error.startswith("job_limit_exceeded:")
+                else "worker_failed"
+                if status is RunStatus.FAILED
+                else None
+            )
+            handle.error = error if status is RunStatus.FAILED else None
+            self._job_event(
+                handle,
+                "terminal",
+                "Job terminated",
+                state=status.value,
+            )
+            worker, commands, output_queue = (
+                handle.worker,
+                handle.commands,
+                handle.output_queue,
+            )
+            handle.worker = None
+            handle.commands = None
+            handle.output_queue = None
+            handle.monitor = None
+        self._cleanup_job_resources(worker, commands, output_queue, terminate=terminate)
+
+    def _job_event(
+        self,
+        handle: _JobHandle,
+        event_type: str,
+        message: str,
+        **progress: object,
+    ) -> None:
+        handle.events = (
+            *handle.events,
+            RunEvent(
+                sequence=len(handle.events),
+                timestamp=datetime.now(UTC),
+                type=event_type,
+                message=message,
+                **progress,
+            ),
+        )
+        self._event_condition.notify_all()
+
+    def _require_job(self, job_id: str) -> _JobHandle:
+        try:
+            return self._jobs[job_id]
+        except KeyError as error:
+            raise KeyError(f"job {job_id!r} does not exist") from error
+
+    @staticmethod
+    def _job_response(handle: _JobHandle) -> JobResponse:
+        return JobResponse.model_validate(
+            {
+                "id": handle.id,
+                "project_id": handle.project_id,
+                "status": handle.status,
+                "created_at": handle.created_at,
+                "started_at": handle.started_at,
+                "finished_at": handle.finished_at,
+                "error_code": handle.error_code,
+                "error": handle.error,
+            }
+        )
+
+    def _cleanup_job_resources(
+        self,
+        worker: Any,
+        commands: Any,
+        output_queue: Any,
+        *,
+        terminate: bool,
+    ) -> None:
+        if worker is not None:
+            if self._use_processes and terminate and worker.is_alive():
+                with suppress(BaseException):
+                    worker.terminate()
+            if worker is not current_thread():
+                with suppress(BaseException):
+                    worker.join(timeout=2)
+            if self._use_processes and worker.is_alive():
+                with suppress(BaseException):
+                    worker.kill()
+                    worker.join(timeout=1)
+        if self._use_processes:
+            for channel in (commands, output_queue):
+                if channel is not None:
+                    with suppress(BaseException):
+                        channel.close()
+                    with suppress(BaseException):
+                        channel.join_thread()

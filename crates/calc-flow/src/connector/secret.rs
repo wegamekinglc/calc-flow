@@ -8,12 +8,13 @@
 
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{CalcFlowError, Result};
 
 /// Where a secret reference is resolved from.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SecretResolverKind {
     /// Resolved from a process environment variable.
@@ -26,7 +27,8 @@ pub enum SecretResolverKind {
 
 /// A named pointer to a secret; the only secret-shaped value a data-only
 /// document may carry.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SecretReference {
     /// Resolution source.
     pub resolver: SecretResolverKind,

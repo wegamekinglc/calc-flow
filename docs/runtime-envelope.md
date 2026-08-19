@@ -274,15 +274,17 @@ table engine:
 `requires_datafusion` reports whether any node needs a DataFusion session.
 
 `StreamRequirements` records the requested `DeliveryGuarantee` per graph
-output — `AtLeastOnce` or `ExactlyOnce`; outputs absent from the map default
-to `AtLeastOnce`. The guarantee is scoped to one output, not a global property
+output — `BestEffort`, `AtLeastOnce`, or `ExactlyOnce`; outputs absent from the
+map default to `AtLeastOnce`. The guarantee is scoped to one output, not a global property
 of the plan. Compilation applies the deterministic-UDF rule above. Before a
 checkpointed job starts, whole-job preflight proves every reachable
 source, operator, bounded edge, and bound sink for each exactly-once output.
 It reports the output and first incompatible stable component before connector
 lifecycle work. An internal job path without checkpoint wiring rejects every
 exactly-once request. The frozen requested/effective proof is kept for every
-output; an at-least-once request is never silently upgraded.
+output. A best-effort request is never upgraded; an at-least-once request is
+downgraded explicitly when a reachable source is lossy or unreplayable; and no
+request is silently upgraded.
 
 Two hashes describe the plan (NFR-5):
 
@@ -322,6 +324,11 @@ admits only operators explicitly classified as stateless or versioned
 checkpointed-stateful; an unproven third-party stream operator fails before
 task registration. The compiled graph node ID is the stable operator ID and
 must be unique and portable.
+
+Status exposes both requested and effective delivery for each output. Lossy or
+unreplayable routes project `BestEffort`, even when the project used the
+default at-least-once request, so observability never overstates the runtime
+contract.
 
 Public diagnostic projection also treats source identity as untrusted. If a
 validation path contains a non-portable source ID, projection fails closed to
@@ -549,11 +556,12 @@ source/operator/sink tasks and progress snapshots, scoped task contexts,
 whole-job preflight, the task supervisor, checkpoint coordinator/transaction
 internals, raw status and metrics, and the runner-scoped reaper.
 
-Runtime-owned checkpoint control and transactional internals do not appear in
-the current project-v2 or Studio checkpoint-inspection document formats.
-Python binds the public continuous facade, while Studio adds no continuous-job
-route. The public v3 manifest model and state backend support the production
-transaction without replacing those existing document surfaces.
+Runtime-owned control-message and transaction internals do not appear in
+project-v3 documents or Studio responses. Python binds the public continuous
+facade, while Studio owns persistent `/api/v3/jobs` lifecycle, checkpoint,
+shutdown, cancellation, and SSE observation routes. The public v3 manifest
+model and state backend remain the runtime's durable recovery truth; Studio
+does not expose raw cursor, connector state, secret, or filesystem payloads.
 
 Non-goals:
 
@@ -567,8 +575,8 @@ Non-goals:
 - **No alternate continuous compatibility API.** The crate-root
   `StreamingRunner`/`StreamingJob` facade is the sole public continuous
   lifecycle. The v2 micro-batch and formed-batch push runners are removed,
-  with no aliases or provisional runners; project format v2 and Studio's
-  checkpoint-inspection documents remain unchanged.
+  with no aliases or provisional runners; project v3 and Studio `/api/v3`
+  expose only the owning lifecycle projections described above.
 - **No payload leakage in diagnostics.** Debug output and metrics show
   kinds and typed business values only; row payloads, metadata, and
   attributes never appear (I4).
@@ -656,7 +664,8 @@ finishes any sink commit and returns terminal success without reopening
 sources or re-emitting final windows. Exactly-once is proved per output over
 every reachable source, operator, edge policy, and sink before lifecycle work.
 The coordinator implementation remains crate-private behind
-`ManagedCheckpointRuntime`; project format v2 and Studio routes are unchanged.
+`ManagedCheckpointRuntime`; project v3 and Studio `/api/v3` expose the same
+requested/effective delivery and lifecycle contract.
 
 The 48-case checkpoint fault/restart matrix and the three-process checkpoint
 soak both construct jobs through the crate-root public `StreamingRunner`,

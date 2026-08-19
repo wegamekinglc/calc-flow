@@ -4,7 +4,7 @@
 [![Windows CI](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml)
 [![Coverage Status](https://coveralls.io/repos/github/wegamekinglc/calc-flow/badge.svg?branch=main)](https://coveralls.io/github/wegamekinglc/calc-flow?branch=main)
 
-Calc Flow 2.0 is a Rust-native calculation engine for immutable Arrow
+Calc Flow 3.0 is a Rust-native calculation engine for immutable Arrow
 micro-batches and stateful streams. The core crate compiles typed calculation
 graphs, runs every table expression and query with Apache DataFusion, and owns
 checkpoint/recovery semantics. The Python package is a PyO3 binding to that
@@ -30,7 +30,7 @@ Rust:
 
 ```toml
 [dependencies]
-calc-flow = "2.0.0"
+calc-flow = "3.0.0"
 ```
 
 ## Python quickstart
@@ -146,13 +146,13 @@ to the public types, or the [Rust examples index](crates/calc-flow/examples/READ
 crates/calc-flow  (Rust core: Batch, graph compiler, DataFusion, runners, stores)
   └─ crates/calc-flow-python  (PyO3 _native binding)
        └─ python/calc_flow  (pure-Python public API + functional adapters)
-            └─ web-ui/backend  (calc-flow-studio FastAPI, /api/v2, loopback only)
+            └─ web-ui/backend  (calc-flow-studio FastAPI, /api/v3, loopback only)
                   └─ web-ui/src  (React + TypeScript + Vite + React Flow studio, via REST)
 ```
 
 The native dependency edge is
 `crates/calc-flow ← crates/calc-flow-python ← python/calc_flow ← web-ui/backend`.
-The frontend talks to the backend over the `/api/v2` REST contract only; the
+The frontend talks to the backend over the `/api/v3` REST contract only; the
 Python package is not a second engine.
 
 | Path                       | Purpose                                                                                                                                  |
@@ -160,10 +160,10 @@ Python package is not a second engine.
 | `crates/calc-flow/`        | Native core: batches, ports/operators, graph compiler, DataFusion runtime, UDF/provider registries, runners, checkpoints, project stores |
 | `crates/calc-flow-python/` | PyO3 binding exposing the core as `calc_flow._native`                                                                                    |
 | `python/calc_flow/`        | Pure-Python public API, functional `PipelineBuilder`, runner/store adapters, NumPy/JAX provider registration, exception hierarchy        |
-| `web-ui/backend/`          | `calc-flow-studio` FastAPI service under `/api/v2`, loopback-bound, spawned bounded preview workers                                      |
+| `web-ui/backend/`          | `calc-flow-studio` FastAPI service under `/api/v3`, loopback-bound, spawned bounded continuous-job workers                               |
 | `web-ui/src/`              | React + TypeScript + Vite + React Flow studio; API types generated from `web-ui/openapi.json`                                            |
-| `schemas/`                 | `project-v2.schema.json`, the canonical generated project contract                                                                       |
-| `examples/`                | Executable v2 Python examples                                                                                                            |
+| `schemas/`                 | `project-v3.schema.json`, the canonical generated project contract                                                                       |
+| `examples/`                | Executable v3 Python examples                                                                                                            |
 | `benchmarks/`              | pytest-benchmark harness (informational)                                                                                                 |
 
 ## Data and execution model
@@ -174,8 +174,9 @@ Python package is not a second engine.
 - Raw tables or arrays never cross a graph or runner boundary; they are wrapped
   in immutable `Batch` envelopes.
 - Project documents are strict, data-only JSON/YAML with
-  `format_version: 2`. They contain no callable source, import path, or table
-  backend selector.
+  `format_version: 3`. They select batch or stream runtime mode explicitly;
+  stream documents reference registered connectors and named secrets without
+  embedding credentials, callables, import paths, or table backend selectors.
 - Table and mixed graph runs own one run-scoped DataFusion session. External-only
   NumPy/JAX runs own no DataFusion configuration, UDF state, or runtime and
   return an empty DataFusion metrics list.
@@ -212,10 +213,10 @@ Rust applications use `UdfRegistry` for native DataFusion UDFs and
 service. `web-ui/` is the React, TypeScript, Vite, and React Flow client.
 The local service:
 
-- exposes the v2 REST API under `/api/v2`;
+- exposes the v3 REST API under `/api/v3`;
 - binds only to loopback and is intentionally single-user;
-- validates and stores v2 project documents;
-- runs bounded previews in spawned workers;
+- validates and stores v3 project documents;
+- runs bounded continuous jobs in spawned workers;
 - serves generated frontend assets from the Studio wheel.
 
 Start both development processes on macOS, Linux, or WSL:
@@ -249,11 +250,11 @@ response types are in `web-ui/src/api/schema.d.ts`.
 
 ## Compatibility
 
-Calc Flow 2.0 is a clean break from the frozen Python v1 implementation. It
-does not load v1 projects or checkpoints. See
-[the v2 release guide](docs/v2-release.md) before upgrading. Historical v1
-behavior remains available at the `v1-python-final` tag and as immutable
-semantic fixtures under `tests/fixtures/v1/`.
+Calc Flow 3.0 accepts only strict project-v3 documents and exposes only the
+Studio `/api/v3` surface. It does not load project-v2 documents; see the
+[v2-to-v3 migration guide](docs/migration-v2-to-v3.md) before upgrading.
+Historical v1 behavior remains available at the `v1-python-final` tag and as
+immutable semantic fixtures under `tests/fixtures/v1/`.
 
 ## Development
 
