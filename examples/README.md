@@ -1,6 +1,6 @@
-# Calc Flow v2 examples
+# Calc Flow 3.0 examples
 
-These executable examples use the Rust-native v2 engine through the PyO3
+These executable examples use the Rust-native 3.0 engine through the PyO3
 Python package. Table batches contain PyArrow tables and every table expression
 or query runs in DataFusion. NumPy remains an explicit optional provider.
 DataFrame-style data means `pyarrow.Table`; pandas and Polars are not part of

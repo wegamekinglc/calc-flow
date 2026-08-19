@@ -1,4 +1,4 @@
-"""Build and execute a DataFusion expression pipeline with the v2 builder."""
+"""Build and execute a DataFusion expression pipeline with the v3 builder."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def main() -> None:
             filter="gross >= 20",
         )
         .connect("calculate_gross", "large_orders")
-        .compile()
+        .compile_batch()
     )
 
     run = plan.execute({"input": orders})

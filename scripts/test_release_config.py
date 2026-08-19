@@ -41,17 +41,29 @@ def _non_utf8_read_text_calls(tree: ast.AST) -> list[int]:
 
 class ReleaseConfigTests(unittest.TestCase):
     def test_current_python_surfaces_do_not_use_removed_compile_method(self) -> None:
-        for path in (
-            "examples/03_registered_udf.py",
-            "examples/06_numpy_array.py",
-            "examples/07_array_and_dataframe.py",
-            "benchmarks/test_datafusion.py",
-            "benchmarks/array_support.py",
-            "docs/python-api.md",
-        ):
+        paths = [
+            *sorted((ROOT / "benchmarks").glob("*.py")),
+            *sorted((ROOT / "examples").glob("*.py")),
+            ROOT / "README.md",
+            ROOT / "examples/README.md",
+            ROOT / "scripts/smoke_wheel.py",
+            *(
+                ROOT / path
+                for path in (
+                    "docs/api-reference.md",
+                    "docs/getting-started.md",
+                    "docs/introduction.md",
+                    "docs/python-api.md",
+                )
+            ),
+        ]
+        for absolute_path in paths:
+            path = absolute_path.relative_to(ROOT)
             with self.subTest(path=path):
-                source = (ROOT / path).read_text(encoding="utf-8")
+                source = absolute_path.read_text(encoding="utf-8")
+                self.assertNotIn(".compile()", source)
                 self.assertNotIn(".compile(runtime)", source)
+                self.assertNotIn('["pipeline"]', source)
 
     def test_generated_contracts_are_pinned_to_lf(self) -> None:
         attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
@@ -62,6 +74,14 @@ class ReleaseConfigTests(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 self.assertIn(f"{path} text eol=lf", attributes.splitlines())
+
+    def test_kafka_ci_does_not_block_on_apt_index_refresh(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
+        self.assertNotIn("apt-get update", workflow)
+        self.assertEqual(
+            workflow.count("timeout 5m sudo apt-get"),
+            2,
+        )
 
     def test_rustsec_waivers_are_consistent_and_scoped(self) -> None:
         advisory = "RUSTSEC-2026-0235"

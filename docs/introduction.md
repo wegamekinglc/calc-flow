@@ -25,7 +25,11 @@ import pyarrow as pa
 from calc_flow import Batch, PipelineBuilder
 
 batch = Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))
-plan = PipelineBuilder("totals").expression("calculate", "total = a + b").compile()
+plan = (
+    PipelineBuilder("totals")
+    .expression("calculate", "total = a + b")
+    .compile_batch()
+)
 result = plan.execute({"input": batch})
 
 assert result.outputs["output"].to_pyarrow()["total"].to_pylist() == [3, 7]
@@ -235,7 +239,7 @@ does not expose callback objects.
 NumPy and JAX are Python-owned providers registered with `register_numpy` or
 `register_jax`. Where explicitly registered, each provides `expression@1` for
 bounded array expressions and mapped `table_matmul@1` for table-array matrix
-multiplication. An external v2 node selects provider `numpy` or `jax`, an
+multiplication. An external v3 node selects provider `numpy` or `jax`, an
 operator, and version `1`.
 
 The mapped matrix operator receives a `table` batch and same-backend `weights`

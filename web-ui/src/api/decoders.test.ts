@@ -33,7 +33,12 @@ const capabilitiesFixture = () => ({
     projectFormatVersions: [3],
     batchKinds: ['table', 'array'],
     portableArrowTypes: ['int64'],
-    operators: [],
+    operators: [{
+      kind: 'expression',
+      inputKinds: ['table'],
+      outputKinds: ['table'],
+      requiresDatafusion: true,
+    }],
     udfs: [],
     providers: [],
     connectors: [connectorFixture()],

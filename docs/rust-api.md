@@ -282,7 +282,7 @@ cargo run -p calc-flow --example continuous_runtime
 
 ## Projects and stores
 
-`ProjectSpec` is the strict v2 data model. Use `validate_project` for a
+`ProjectSpec` is the strict v3 data model. Use `validate_project` for a
 `ValidationReport`, `compile_project` for a `BatchExecutionPlan`, and
 `project_json_schema` for the generated schema.
 

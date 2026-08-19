@@ -159,13 +159,13 @@ const runtimeCapabilitiesAt = (value: unknown, path: string): void => {
     const operator = objectAt(item, itemPath);
     exactKeys(
       operator,
-      ['kind', 'inputKinds', 'outputKinds', 'requiresDataFusion'],
+      ['kind', 'inputKinds', 'outputKinds', 'requiresDatafusion'],
       itemPath,
     );
     stringAt(operator.kind, `${itemPath}.kind`);
     stringArrayAt(operator.inputKinds, ['table', 'array'], `${itemPath}.inputKinds`);
     stringArrayAt(operator.outputKinds, ['table', 'array'], `${itemPath}.outputKinds`);
-    booleanAt(operator.requiresDataFusion, `${itemPath}.requiresDataFusion`);
+    booleanAt(operator.requiresDatafusion, `${itemPath}.requiresDatafusion`);
   });
   arrayAt(runtime.udfs, `${path}.udfs`).forEach((item, index) => {
     const itemPath = `${path}.udfs[${index}]`;

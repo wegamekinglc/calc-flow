@@ -25,7 +25,7 @@ def test_graph_fan_out(benchmark: BenchmarkFixture, _scale: str) -> None:
         .connect("root", "gross")
         .connect("root", "tax")
         .connect("root", "flag")
-        .compile()
+        .compile_batch()
     )
 
     warm_result = plan.execute({"input": batch})

@@ -29,10 +29,10 @@ from calc_flow import Batch, PipelineBuilder
 batch = Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))
 builder = PipelineBuilder("totals")
 configured = builder.expression("calculate", "total = a + b")
-plan = configured.compile()
+plan = configured.compile_batch()
 result = plan.execute({"input": batch})
 
-assert builder.project["pipeline"]["nodes"] == []
+assert builder.project["graph"]["nodes"] == []
 assert result.outputs["output"].to_pyarrow()["total"].to_pylist() == [3, 7]
 ```
 
@@ -56,7 +56,7 @@ plan = (
         "ORDER BY orders.order_id",
         aliases=("orders", "fees"),
     )
-    .compile()
+    .compile_batch()
 )
 result = plan.execute(
     {
@@ -265,7 +265,9 @@ from calc_flow import ExecutionOptions
 
 async def calculate() -> list[int]:
     plan = (
-        PipelineBuilder("async-example").expression("calc", "total = a + b").compile()
+        PipelineBuilder("async-example")
+        .expression("calc", "total = a + b")
+        .compile_batch()
     )
     options = ExecutionOptions(
         settings={"request": {"source": "async-example"}},
@@ -490,4 +492,4 @@ paths, callback representations, or raw source chains.
 ## More examples
 
 Every file under [`examples/`](../examples/README.md) is executable against the
-installed v2 wheel. See the linked inventory for the commands.
+installed 3.0 wheel. See the linked inventory for the commands.

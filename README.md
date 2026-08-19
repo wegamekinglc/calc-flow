@@ -43,7 +43,11 @@ import pyarrow as pa
 from calc_flow import Batch, ExecutionOptions, PipelineBuilder
 
 batch = Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))
-plan = PipelineBuilder("totals").expression("calculate", "total = a + b").compile()
+plan = (
+    PipelineBuilder("totals")
+    .expression("calculate", "total = a + b")
+    .compile_batch()
+)
 result = plan.execute(
     {"input": batch},
     options=ExecutionOptions(

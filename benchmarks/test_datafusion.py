@@ -31,15 +31,15 @@ def _compile_with_datafusion(
     project = builder.project
     configured = {
         **project,
-        "pipeline": {
-            **project["pipeline"],
+        "graph": {
+            **project["graph"],
             "datafusion": {
                 "batch_size": batch_size,
                 "target_partitions": target_partitions,
             },
         },
     }
-    return Runtime().compile_project(
+    return Runtime().compile_batch_project(
         json.dumps(configured, separators=(",", ":"), sort_keys=True)
     )
 
@@ -78,7 +78,7 @@ def test_projection_and_calculated_column(
             "",
             select=("id", "amount * quantity AS gross"),
         )
-        .compile()
+        .compile_batch()
     )
 
     result = _benchmark_plan(
@@ -107,7 +107,7 @@ def test_filter_selectivity(benchmark: BenchmarkFixture, _scale: str) -> None:
             select=("id", "amount"),
             filter="selected",
         )
-        .compile()
+        .compile_batch()
     )
 
     result = _benchmark_plan(
@@ -135,7 +135,7 @@ def test_group_by_aggregation(benchmark: BenchmarkFixture, _scale: str) -> None:
             "SELECT group_id, SUM(amount) AS total FROM fact GROUP BY group_id",
             aliases=("fact",),
         )
-        .compile()
+        .compile_batch()
     )
 
     result = _benchmark_plan(
@@ -164,7 +164,7 @@ def test_join_cardinality(benchmark: BenchmarkFixture, _scale: str) -> None:
             "FROM fact f JOIN dimension d USING (group_id)",
             aliases=("fact", "dimension"),
         )
-        .compile()
+        .compile_batch()
     )
 
     result = _benchmark_plan(
@@ -193,7 +193,7 @@ def test_window_function(benchmark: BenchmarkFixture, _scale: str) -> None:
             "PARTITION BY group_id ORDER BY amount) AS position FROM fact",
             aliases=("fact",),
         )
-        .compile()
+        .compile_batch()
     )
 
     result = _benchmark_plan(
@@ -300,7 +300,7 @@ def test_repeated_compiled_plan_execution(
     plan = (
         PipelineBuilder("benchmark-repeated-plan")
         .expression("calculate", "value = amount + 1")
-        .compile()
+        .compile_batch()
     )
     result = _benchmark_plan(
         benchmark,

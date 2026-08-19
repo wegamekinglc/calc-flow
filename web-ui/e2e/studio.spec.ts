@@ -5,10 +5,21 @@ import {
   type Locator,
   type Page,
 } from '@playwright/test';
-import { readFile } from 'node:fs/promises';
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
+import { resolve } from 'node:path';
 
 const projectsUrl = 'http://127.0.0.1:8765/api/v3/projects';
 const twoSourceProjectUrl = `${projectsUrl}/two_source_e2e`;
+const streamProjectUrl = `${projectsUrl}/stream_job_e2e`;
+const streamFixtureDirectory = resolve('test-results', 'continuous-job');
+const streamSourcePath = resolve(streamFixtureDirectory, 'input.json');
+const streamSinkPath = resolve(streamFixtureDirectory, 'sink');
 
 // The constrained headless renderer otherwise stalls Playwright's stability check.
 test.use({
@@ -107,6 +118,48 @@ const twoSourceProject = {
   state: { root: '.calc-flow-state', retention: 3 },
 };
 
+const streamProject = {
+  format_version: 3,
+  id: 'stream_job_e2e',
+  name: 'Continuous job E2E',
+  description: 'A finite file source exercises the persistent Studio job lifecycle.',
+  runtime: {
+    mode: 'stream',
+    options: { checkpoint_interval_ms: 60_000 },
+  },
+  graph: {
+    name: 'continuous-job-e2e',
+    nodes: [{
+      id: 'calculate',
+      operator: {
+        kind: 'expression',
+        expression: 'result = value + 1',
+      },
+    }],
+  },
+  sources: [{
+    binding: 'input',
+    connector: {
+      provider: 'calc-flow-connectors',
+      name: 'file',
+      version: '2.0.0',
+    },
+    options: { path: streamSourcePath, format: 'json' },
+    watermark: { policy: 'disabled' },
+  }],
+  sinks: [{
+    binding: 'output',
+    connector: {
+      provider: 'calc-flow-connectors',
+      name: 'file',
+      version: '2.0.0',
+    },
+    options: { path: streamSinkPath, output: 'results' },
+    delivery: 'at_least_once',
+  }],
+  state: { root: resolve(streamFixtureDirectory, 'state'), retention: 3 },
+};
+
 async function deleteTwoSourceProject(request: APIRequestContext): Promise<number> {
   const response = await request.delete(twoSourceProjectUrl);
   expect([204, 404]).toContain(response.status());
@@ -163,8 +216,8 @@ const toolbarControls = (page: Page): MeasuredControl[] => [
     locator: page.getByRole('button', { name: 'Validate', exact: true }),
   },
   {
-    label: 'Run preview',
-    locator: page.getByRole('button', { name: /Run preview/ }),
+    label: 'Start job',
+    locator: page.getByRole('button', { name: /Start job/ }),
   },
 ];
 
@@ -364,7 +417,7 @@ test.describe('Data Source dialog and toolbar layout', () => {
   }
 });
 
-test('builds and runs a persisted DataFusion UDF graph without browser code', async ({ page }) => {
+test('persists and validates a DataFusion UDF graph without browser code', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByText('Build the flow')).toBeVisible();
   await expect(page.getByText('double_value', { exact: true })).toBeVisible();
@@ -373,14 +426,6 @@ test('builds and runs a persisted DataFusion UDF graph without browser code', as
   await page.locator('.udf-option input[type="checkbox"]').check({ force: true });
   await page.getByRole('button', { name: 'Validate' }).click({ force: true });
   await expect(page.getByText('Graph is valid')).toBeVisible();
-
-  await page.getByRole('button', { name: /Run preview/ }).click({ force: true });
-  await expect(page.getByText('completed')).toBeVisible({ timeout: 20_000 });
-  await expect(page.getByRole('columnheader', { name: /doubled/ })).toBeVisible();
-  await page.getByText('Physical plan').click({ force: true });
-  await expect(page.getByText('ProjectionExec')).toBeVisible();
-  await page.getByRole('button', { name: 'Inspect' }).click({ force: true });
-  await expect(page.getByText('No stored checkpoint')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Benchmark comparison' })).toBeVisible();
 
   const projects = await page.request.get('http://127.0.0.1:8765/api/v3/projects');
@@ -392,8 +437,8 @@ test('builds and runs a persisted DataFusion UDF graph without browser code', as
   );
   expect(project.ok()).toBeTruthy();
   const document = await project.json();
-  expect(document.format_version).toBe(2);
-  expect(document.pipeline.nodes[0].operator.udfs).toEqual([
+  expect(document.format_version).toBe(3);
+  expect(document.graph.nodes[0].operator.udfs).toEqual([
     {
       provider: 'python',
       name: 'double_value',
@@ -431,6 +476,42 @@ test('builds and runs a persisted DataFusion UDF graph without browser code', as
   expect(await remaining.json()).toEqual([]);
 });
 
+test('starts and observes a persistent continuous file job', async ({ page, request }) => {
+  await rm(streamFixtureDirectory, { recursive: true, force: true });
+  await mkdir(streamSinkPath, { recursive: true });
+  await writeFile(streamSourcePath, '{"value":1}\n{"value":2}\n', 'utf8');
+  await request.delete(streamProjectUrl);
+
+  try {
+    const created = await request.post(projectsUrl, { data: streamProject });
+    expect(created.status()).toBe(201);
+
+    await page.goto('/');
+    const project = page.getByLabel('Project', { exact: true });
+    await expect(project.locator('option[value="stream_job_e2e"]')).toHaveCount(1);
+    await project.selectOption('stream_job_e2e');
+    await expect(project).toHaveValue('stream_job_e2e');
+
+    await page.getByRole('button', { name: 'Validate' }).click();
+    await expect(page.getByText('Graph is valid')).toBeVisible();
+
+    const start = page.getByRole('button', { name: /Start job/ });
+    await expect(start).toBeEnabled();
+    await start.click();
+    const metrics = page.getByRole('region', { name: 'Continuous job metrics' });
+    await expect(metrics).toBeVisible({ timeout: 20_000 });
+    await expect(metrics.getByText('completed', { exact: true })).toBeVisible();
+
+    await expect.poll(async () => {
+      const entries = await readdir(streamSinkPath, { recursive: true });
+      return entries.some((entry) => entry.endsWith('.parquet'));
+    }).toBe(true);
+  } finally {
+    await request.delete(streamProjectUrl);
+    await rm(streamFixtureDirectory, { recursive: true, force: true });
+  }
+});
+
 test.describe('persisted two-source SQL join', () => {
   test.beforeEach(async ({ request }) => {
     await deleteTwoSourceProject(request);
@@ -440,7 +521,7 @@ test.describe('persisted two-source SQL join', () => {
     await deleteTwoSourceProject(request);
   });
 
-  test('edits and runs through two saved sources', async ({ page, request }) => {
+  test('edits and validates through two saved sources', async ({ page, request }) => {
     const created = await request.post(projectsUrl, { data: twoSourceProject });
     expect(created.status()).toBe(201);
 
@@ -518,19 +599,6 @@ test.describe('persisted two-source SQL join', () => {
     await validate.click();
     await expect(page.getByText('Graph is valid')).toBeVisible();
 
-    const run = page.getByRole('button', { name: /Run preview/ });
-    await expect(run).toBeVisible();
-    await expect(run).toBeEnabled();
-    await run.click();
-    await expect(page.getByText('completed', { exact: true })).toBeVisible({ timeout: 20_000 });
-    await expect(page.getByRole('columnheader', { name: /total/ })).toBeVisible();
-    await expect(page.getByRole('cell', { name: '18', exact: true })).toBeVisible();
-
-    const metricsBefore = await panelWidth(page, '.metrics-stack');
-    await dragSeparator(page, 'Resize Metrics', -40);
-    const metricsWidth = await panelWidth(page, '.metrics-stack');
-    expect(metricsWidth).toBeGreaterThan(metricsBefore + 30);
-
     const saved = await request.get(twoSourceProjectUrl);
     expect(saved.ok()).toBeTruthy();
     const document = await saved.json();
@@ -550,12 +618,10 @@ test.describe('persisted two-source SQL join', () => {
       version: 1,
       toolbox: toolboxWidth,
       inspector: inspectorWidth,
-      metrics: metricsWidth,
     });
 
-    await page.getByRole('button', { name: /Run preview/ }).click();
-    await expect(page.getByText('completed', { exact: true })).toBeVisible({ timeout: 20_000 });
-    await expect.poll(() => panelWidth(page, '.metrics-stack')).toBeCloseTo(metricsWidth, 0);
+    await page.getByRole('button', { name: 'Validate' }).click();
+    await expect(page.getByText('Graph is valid')).toBeVisible();
 
     expect(await deleteTwoSourceProject(request)).toBe(204);
   });

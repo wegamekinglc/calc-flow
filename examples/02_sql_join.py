@@ -17,7 +17,7 @@ def main() -> None:
             "ORDER BY orders.order_id",
             aliases=("orders", "fees"),
         )
-        .compile()
+        .compile_batch()
     )
 
     run = plan.execute(
