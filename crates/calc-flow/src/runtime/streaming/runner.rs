@@ -5462,6 +5462,10 @@ mod tests {
         },
     };
 
+    // Managed checkpoint tests perform real file publication and fsync work;
+    // allow scheduler and antivirus jitter while still bounding deadlocks.
+    const FILESYSTEM_SETTLEMENT_TIMEOUT: StdDuration = StdDuration::from_secs(5);
+
     #[test]
     fn one_shot_runner_start_has_a_consuming_signature() {
         let start: fn(OneShotContinuousRunner, ContinuousJobSpec) -> OneShotStartObserver =
@@ -14258,7 +14262,7 @@ mod tests {
         let mut runner = ContinuousRunner::new();
         let job = runner.start_checkpointed(spec, checkpoint).await.unwrap();
 
-        let outcome = match tokio::time::timeout(StdDuration::from_millis(100), job.wait()).await {
+        let outcome = match tokio::time::timeout(FILESYSTEM_SETTLEMENT_TIMEOUT, job.wait()).await {
             Ok(outcome) => outcome,
             Err(error) => {
                 let _ = job.cancel().await;
@@ -14331,7 +14335,7 @@ mod tests {
             .start_checkpointed(restored_spec, restored_checkpoint)
             .await
             .unwrap();
-        let restored = tokio::time::timeout(StdDuration::from_millis(100), restored_job.wait())
+        let restored = tokio::time::timeout(FILESYSTEM_SETTLEMENT_TIMEOUT, restored_job.wait())
             .await
             .expect("terminal manifest recovery should short-circuit");
         assert_eq!(restored.state, ContinuousJobState::Completed);
@@ -14523,7 +14527,7 @@ mod tests {
             .start_checkpointed(restored_spec, checkpoint())
             .await
             .unwrap();
-        let restored = tokio::time::timeout(StdDuration::from_millis(100), restored_job.wait())
+        let restored = tokio::time::timeout(FILESYSTEM_SETTLEMENT_TIMEOUT, restored_job.wait())
             .await
             .expect("durable terminal epoch should recover after retention failure");
         assert_eq!(restored.state, ContinuousJobState::Completed);
