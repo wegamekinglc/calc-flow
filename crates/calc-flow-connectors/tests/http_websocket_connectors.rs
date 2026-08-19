@@ -339,7 +339,9 @@ async fn websocket_drop_oldest_is_bounded_and_observable() {
         ("max_frame_bytes".into(), json!(1024)),
     ]);
     let mut source = factory
-        .open(&options, &Endpoint(format!("ws://{address}/events")))
+        // Loopback plaintext is deliberate for bounded backpressure behavior;
+        // TLS verification policy is covered by the connector config tests.
+        .open(&options, &Endpoint(format!("ws://{address}/events"))) // nosemgrep
         .await
         .expect("factory opens");
     source.open(None).await.expect("connects");

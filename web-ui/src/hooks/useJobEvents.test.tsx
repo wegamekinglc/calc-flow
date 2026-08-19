@@ -68,7 +68,9 @@ describe('useJobEvents', () => {
       new Response(JSON.stringify(job('running'))),
     ));
 
-    renderHook(() => useJobEvents('job-1', onUpdate, onEvent, onError));
+    renderHook(() => {
+      useJobEvents('job-1', onUpdate, onEvent, onError);
+    });
     const source = FakeEventSource.instances[0];
     const progress = {
       sequence: 2,
@@ -95,7 +97,9 @@ describe('useJobEvents', () => {
       new Response(JSON.stringify(job('completed'))),
     ));
 
-    renderHook(() => useJobEvents('job-1', onUpdate, vi.fn(), vi.fn()));
+    renderHook(() => {
+      useJobEvents('job-1', onUpdate, vi.fn(), vi.fn());
+    });
     const source = FakeEventSource.instances[0];
     act(() => {
       source.emit('terminal');
@@ -113,7 +117,9 @@ describe('useJobEvents', () => {
       new Response(JSON.stringify({ ...job('running'), status: 'timed_out' })),
     ));
 
-    renderHook(() => useJobEvents('job-1', onUpdate, vi.fn(), onError));
+    renderHook(() => {
+      useJobEvents('job-1', onUpdate, vi.fn(), onError);
+    });
     const source = FakeEventSource.instances[0];
     act(() => {
       source.emit('state');
@@ -136,7 +142,9 @@ describe('useJobEvents', () => {
     vi.stubGlobal('EventSource', FakeEventSource);
     vi.stubGlobal('fetch', fetchMock);
 
-    renderHook(() => useJobEvents('job-1', onUpdate, vi.fn(), vi.fn()));
+    renderHook(() => {
+      useJobEvents('job-1', onUpdate, vi.fn(), vi.fn());
+    });
     const source = FakeEventSource.instances[0];
     act(() => {
       source.emit('progress');
@@ -163,7 +171,9 @@ describe('useJobEvents', () => {
       new Response(JSON.stringify(job('completed'))),
     ));
 
-    renderHook(() => useJobEvents('job-1', onUpdate, vi.fn(), vi.fn()));
+    renderHook(() => {
+      useJobEvents('job-1', onUpdate, vi.fn(), vi.fn());
+    });
     const source = FakeEventSource.instances[0];
     act(() => {
       source.emit('error');
@@ -177,7 +187,9 @@ describe('useJobEvents', () => {
   it('removes every stream listener when the owner unmounts', () => {
     vi.stubGlobal('EventSource', FakeEventSource);
     const { unmount } = renderHook(
-      () => useJobEvents('job-1', vi.fn(), vi.fn(), vi.fn()),
+      () => {
+        useJobEvents('job-1', vi.fn(), vi.fn(), vi.fn());
+      },
     );
     const source = FakeEventSource.instances[0];
 
