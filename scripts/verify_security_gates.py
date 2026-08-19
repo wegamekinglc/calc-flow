@@ -12,7 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import subprocess
+import subprocess  # nosec B404 -- fixed, module-owned audit commands only
 from dataclasses import dataclass
 from pathlib import Path
 

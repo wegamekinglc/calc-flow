@@ -186,6 +186,7 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertTrue((ROOT / harness_path).is_file())
         self.assertEqual(config.count('      - "web-ui/**"'), 1)
         self.assertIn("Biome's default Qwik", config)
+        self.assertEqual(config.count('  - "web-ui/src/api/schema.d.ts"'), 1)
         legacy_issue_slug = "_".join(("dal", "38"))
         self.assertFalse(
             (

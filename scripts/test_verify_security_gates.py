@@ -109,7 +109,8 @@ class TestAuditExecution(unittest.TestCase):
 
     @patch("scripts.verify_security_gates.subprocess.run")
     def test_audit_failure_stops_the_gate(self, run) -> None:
-        from subprocess import CalledProcessError
+        # This test constructs the exception; it never launches a process.
+        from subprocess import CalledProcessError  # nosec B404
 
         run.side_effect = CalledProcessError(7, ["cargo", "audit"])
         with redirect_stdout(io.StringIO()):

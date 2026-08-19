@@ -45,6 +45,7 @@ exclude_paths:
   - "crates/calc-flow-connectors/src/clickhouse*.rs"
   # Generated JSON Schema contracts
   - "schemas/**"
+  - "web-ui/src/api/schema.d.ts"
   # Historical parity evidence, kept verbatim on purpose
   - "tests/fixtures/**"
   # Frozen executable allocation evidence, kept byte-identical to its baseline
