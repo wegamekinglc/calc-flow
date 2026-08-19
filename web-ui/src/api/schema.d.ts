@@ -360,7 +360,7 @@ export interface components {
              * Transaction
              * @enum {string}
              */
-            transaction: "none" | "pre_commit_commit" | "ledger_idempotent";
+            transaction: "none" | "pre_commit_commit" | "ledger_idempotent" | "retry_deduplicated";
             /**
              * Watermark
              * @enum {string}
@@ -570,6 +570,17 @@ export interface components {
              */
             state: components["schemas"]["ProjectCreateRequest"]["$defs"]["StateConfig"];
             $defs: {
+                /** @description Aggregate function supported by the first built-in window operator. */
+                AggregateFunction: "count" | "sum" | "min" | "max" | "avg";
+                /** @description One declared window aggregate and its output column name. */
+                AggregateSpec: {
+                    /** @description Input column name. */
+                    column: string;
+                    /** @description Aggregate function. */
+                    function: components["schemas"]["ProjectCreateRequest"]["$defs"]["AggregateFunction"];
+                    /** @description Output column name. */
+                    output: string;
+                };
                 ArrowFieldSpec: {
                     data_type: string;
                     name: string;
@@ -606,7 +617,7 @@ export interface components {
                  * @description Requested delivery guarantee for one project output.
                  * @enum {string}
                  */
-                DeliveryRequest: "at_least_once" | "exactly_once";
+                DeliveryRequest: "best_effort" | "at_least_once" | "exactly_once";
                 EdgeSpec: {
                     source_node: string;
                     /** @default output */
@@ -646,6 +657,13 @@ export interface components {
                     query: string;
                     /** @default [] */
                     udfs: components["schemas"]["ProjectCreateRequest"]["$defs"]["UdfReference"][];
+                } | {
+                    /** @constant */
+                    kind: "union";
+                } | {
+                    /** @constant */
+                    kind: "window";
+                    spec: components["schemas"]["ProjectCreateRequest"]["$defs"]["WindowSpec"];
                 } | {
                     /** @constant */
                     kind: "external";
@@ -845,6 +863,40 @@ export interface components {
                     provider: string;
                     version: string;
                 };
+                /** @description Fixed UTC window geometry represented in exact microseconds. */
+                WindowGeometry: {
+                    /** @constant */
+                    kind: "tumbling";
+                    /**
+                     * Format: uint64
+                     * @description Window size in exact microseconds.
+                     */
+                    size_micros: number;
+                } | {
+                    /** @constant */
+                    kind: "hopping";
+                    /**
+                     * Format: uint64
+                     * @description Window size in exact microseconds.
+                     */
+                    size_micros: number;
+                    /**
+                     * Format: uint64
+                     * @description Window slide in exact microseconds.
+                     */
+                    slide_micros: number;
+                };
+                /** @description Data-only declaration of one event-time window aggregation. */
+                WindowSpec: {
+                    /** @description Aggregates in semantic declaration order. */
+                    aggregates: components["schemas"]["ProjectCreateRequest"]["$defs"]["AggregateSpec"][];
+                    /** @description Input timestamp column used for window assignment. */
+                    event_time_column: string;
+                    /** @description Fixed tumbling or hopping geometry. */
+                    geometry: components["schemas"]["ProjectCreateRequest"]["$defs"]["WindowGeometry"];
+                    /** @description Group columns in semantic declaration order. */
+                    group_by: string[];
+                };
             };
         };
         /** Calc Flow Project V3 */
@@ -871,6 +923,17 @@ export interface components {
              */
             state: components["schemas"]["ProjectDocument"]["$defs"]["StateConfig"];
             $defs: {
+                /** @description Aggregate function supported by the first built-in window operator. */
+                AggregateFunction: "count" | "sum" | "min" | "max" | "avg";
+                /** @description One declared window aggregate and its output column name. */
+                AggregateSpec: {
+                    /** @description Input column name. */
+                    column: string;
+                    /** @description Aggregate function. */
+                    function: components["schemas"]["ProjectDocument"]["$defs"]["AggregateFunction"];
+                    /** @description Output column name. */
+                    output: string;
+                };
                 ArrowFieldSpec: {
                     data_type: string;
                     name: string;
@@ -907,7 +970,7 @@ export interface components {
                  * @description Requested delivery guarantee for one project output.
                  * @enum {string}
                  */
-                DeliveryRequest: "at_least_once" | "exactly_once";
+                DeliveryRequest: "best_effort" | "at_least_once" | "exactly_once";
                 EdgeSpec: {
                     source_node: string;
                     /** @default output */
@@ -947,6 +1010,13 @@ export interface components {
                     query: string;
                     /** @default [] */
                     udfs: components["schemas"]["ProjectDocument"]["$defs"]["UdfReference"][];
+                } | {
+                    /** @constant */
+                    kind: "union";
+                } | {
+                    /** @constant */
+                    kind: "window";
+                    spec: components["schemas"]["ProjectDocument"]["$defs"]["WindowSpec"];
                 } | {
                     /** @constant */
                     kind: "external";
@@ -1145,6 +1215,40 @@ export interface components {
                     name: string;
                     provider: string;
                     version: string;
+                };
+                /** @description Fixed UTC window geometry represented in exact microseconds. */
+                WindowGeometry: {
+                    /** @constant */
+                    kind: "tumbling";
+                    /**
+                     * Format: uint64
+                     * @description Window size in exact microseconds.
+                     */
+                    size_micros: number;
+                } | {
+                    /** @constant */
+                    kind: "hopping";
+                    /**
+                     * Format: uint64
+                     * @description Window size in exact microseconds.
+                     */
+                    size_micros: number;
+                    /**
+                     * Format: uint64
+                     * @description Window slide in exact microseconds.
+                     */
+                    slide_micros: number;
+                };
+                /** @description Data-only declaration of one event-time window aggregation. */
+                WindowSpec: {
+                    /** @description Aggregates in semantic declaration order. */
+                    aggregates: components["schemas"]["ProjectDocument"]["$defs"]["AggregateSpec"][];
+                    /** @description Input timestamp column used for window assignment. */
+                    event_time_column: string;
+                    /** @description Fixed tumbling or hopping geometry. */
+                    geometry: components["schemas"]["ProjectDocument"]["$defs"]["WindowGeometry"];
+                    /** @description Group columns in semantic declaration order. */
+                    group_by: string[];
                 };
             };
         };

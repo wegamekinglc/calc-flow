@@ -172,7 +172,8 @@
             "enum": [
               "none",
               "pre_commit_commit",
-              "ledger_idempotent"
+              "ledger_idempotent",
+              "retry_deduplicated"
             ],
             "title": "Transaction",
             "type": "string"
@@ -712,6 +713,60 @@
       },
       "ProjectCreateRequest": {
         "$defs": {
+          "AggregateFunction": {
+            "description": "Aggregate function supported by the first built-in window operator.",
+            "oneOf": [
+              {
+                "const": "count",
+                "description": "Count non-null input values.",
+                "type": "string"
+              },
+              {
+                "const": "sum",
+                "description": "Sum numeric input values.",
+                "type": "string"
+              },
+              {
+                "const": "min",
+                "description": "Select the minimum supported scalar.",
+                "type": "string"
+              },
+              {
+                "const": "max",
+                "description": "Select the maximum supported scalar.",
+                "type": "string"
+              },
+              {
+                "const": "avg",
+                "description": "Compute the arithmetic mean of numeric input values.",
+                "type": "string"
+              }
+            ]
+          },
+          "AggregateSpec": {
+            "additionalProperties": false,
+            "description": "One declared window aggregate and its output column name.",
+            "properties": {
+              "column": {
+                "description": "Input column name.",
+                "type": "string"
+              },
+              "function": {
+                "$ref": "#/components/schemas/ProjectCreateRequest/$defs/AggregateFunction",
+                "description": "Aggregate function."
+              },
+              "output": {
+                "description": "Output column name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "function",
+              "column",
+              "output"
+            ],
+            "type": "object"
+          },
           "ArrowFieldSpec": {
             "additionalProperties": false,
             "properties": {
@@ -803,6 +858,7 @@
           "DeliveryRequest": {
             "description": "Requested delivery guarantee for one project output.",
             "enum": [
+              "best_effort",
               "at_least_once",
               "exactly_once"
             ],
@@ -956,6 +1012,38 @@
                   "kind",
                   "query",
                   "aliases"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Same-schema multi-input forwarding for stream graphs.",
+                "properties": {
+                  "kind": {
+                    "const": "union",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Stateful event-time aggregation for stream graphs.",
+                "properties": {
+                  "kind": {
+                    "const": "window",
+                    "type": "string"
+                  },
+                  "spec": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/WindowSpec"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "spec"
                 ],
                 "type": "object"
               },
@@ -1438,6 +1526,95 @@
               "kind"
             ],
             "type": "object"
+          },
+          "WindowGeometry": {
+            "description": "Fixed UTC window geometry represented in exact microseconds.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Non-overlapping windows of one fixed size.",
+                "properties": {
+                  "kind": {
+                    "const": "tumbling",
+                    "type": "string"
+                  },
+                  "size_micros": {
+                    "description": "Window size in exact microseconds.",
+                    "format": "uint64",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "size_micros"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Fixed-size windows beginning at every slide coordinate.",
+                "properties": {
+                  "kind": {
+                    "const": "hopping",
+                    "type": "string"
+                  },
+                  "size_micros": {
+                    "description": "Window size in exact microseconds.",
+                    "format": "uint64",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "slide_micros": {
+                    "description": "Window slide in exact microseconds.",
+                    "format": "uint64",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "size_micros",
+                  "slide_micros"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "WindowSpec": {
+            "additionalProperties": false,
+            "description": "Data-only declaration of one event-time window aggregation.",
+            "properties": {
+              "aggregates": {
+                "description": "Aggregates in semantic declaration order.",
+                "items": {
+                  "$ref": "#/components/schemas/ProjectCreateRequest/$defs/AggregateSpec"
+                },
+                "type": "array"
+              },
+              "event_time_column": {
+                "description": "Input timestamp column used for window assignment.",
+                "type": "string"
+              },
+              "geometry": {
+                "$ref": "#/components/schemas/ProjectCreateRequest/$defs/WindowGeometry",
+                "description": "Fixed tumbling or hopping geometry."
+              },
+              "group_by": {
+                "description": "Group columns in semantic declaration order.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "event_time_column",
+              "group_by",
+              "geometry",
+              "aggregates"
+            ],
+            "type": "object"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1504,6 +1681,60 @@
       },
       "ProjectDocument": {
         "$defs": {
+          "AggregateFunction": {
+            "description": "Aggregate function supported by the first built-in window operator.",
+            "oneOf": [
+              {
+                "const": "count",
+                "description": "Count non-null input values.",
+                "type": "string"
+              },
+              {
+                "const": "sum",
+                "description": "Sum numeric input values.",
+                "type": "string"
+              },
+              {
+                "const": "min",
+                "description": "Select the minimum supported scalar.",
+                "type": "string"
+              },
+              {
+                "const": "max",
+                "description": "Select the maximum supported scalar.",
+                "type": "string"
+              },
+              {
+                "const": "avg",
+                "description": "Compute the arithmetic mean of numeric input values.",
+                "type": "string"
+              }
+            ]
+          },
+          "AggregateSpec": {
+            "additionalProperties": false,
+            "description": "One declared window aggregate and its output column name.",
+            "properties": {
+              "column": {
+                "description": "Input column name.",
+                "type": "string"
+              },
+              "function": {
+                "$ref": "#/components/schemas/ProjectDocument/$defs/AggregateFunction",
+                "description": "Aggregate function."
+              },
+              "output": {
+                "description": "Output column name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "function",
+              "column",
+              "output"
+            ],
+            "type": "object"
+          },
           "ArrowFieldSpec": {
             "additionalProperties": false,
             "properties": {
@@ -1595,6 +1826,7 @@
           "DeliveryRequest": {
             "description": "Requested delivery guarantee for one project output.",
             "enum": [
+              "best_effort",
               "at_least_once",
               "exactly_once"
             ],
@@ -1748,6 +1980,38 @@
                   "kind",
                   "query",
                   "aliases"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Same-schema multi-input forwarding for stream graphs.",
+                "properties": {
+                  "kind": {
+                    "const": "union",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Stateful event-time aggregation for stream graphs.",
+                "properties": {
+                  "kind": {
+                    "const": "window",
+                    "type": "string"
+                  },
+                  "spec": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/WindowSpec"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "spec"
                 ],
                 "type": "object"
               },
@@ -2228,6 +2492,95 @@
               "name",
               "version",
               "kind"
+            ],
+            "type": "object"
+          },
+          "WindowGeometry": {
+            "description": "Fixed UTC window geometry represented in exact microseconds.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Non-overlapping windows of one fixed size.",
+                "properties": {
+                  "kind": {
+                    "const": "tumbling",
+                    "type": "string"
+                  },
+                  "size_micros": {
+                    "description": "Window size in exact microseconds.",
+                    "format": "uint64",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "size_micros"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Fixed-size windows beginning at every slide coordinate.",
+                "properties": {
+                  "kind": {
+                    "const": "hopping",
+                    "type": "string"
+                  },
+                  "size_micros": {
+                    "description": "Window size in exact microseconds.",
+                    "format": "uint64",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "slide_micros": {
+                    "description": "Window slide in exact microseconds.",
+                    "format": "uint64",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "size_micros",
+                  "slide_micros"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "WindowSpec": {
+            "additionalProperties": false,
+            "description": "Data-only declaration of one event-time window aggregation.",
+            "properties": {
+              "aggregates": {
+                "description": "Aggregates in semantic declaration order.",
+                "items": {
+                  "$ref": "#/components/schemas/ProjectDocument/$defs/AggregateSpec"
+                },
+                "type": "array"
+              },
+              "event_time_column": {
+                "description": "Input timestamp column used for window assignment.",
+                "type": "string"
+              },
+              "geometry": {
+                "$ref": "#/components/schemas/ProjectDocument/$defs/WindowGeometry",
+                "description": "Fixed tumbling or hopping geometry."
+              },
+              "group_by": {
+                "description": "Group columns in semantic declaration order.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "event_time_column",
+              "group_by",
+              "geometry",
+              "aggregates"
             ],
             "type": "object"
           }
