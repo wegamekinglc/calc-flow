@@ -54,7 +54,6 @@ def coverage_commands() -> tuple[tuple[str, ...], ...]:
             "build",
             "-p",
             "calc-flow-python",
-            "--all-features",
         ),
         (
             *connector,

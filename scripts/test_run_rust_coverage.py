@@ -47,7 +47,6 @@ class RustCoverageRunnerTests(unittest.TestCase):
                 "build",
                 "-p",
                 "calc-flow-python",
-                "--all-features",
             ),
         )
         self.assertEqual(

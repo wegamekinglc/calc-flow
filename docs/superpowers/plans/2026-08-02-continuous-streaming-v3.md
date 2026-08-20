@@ -356,10 +356,11 @@ M6 才发现：
   测试纳入覆盖率采集。不做决定就会在 M6 撞上无法通过的门。
   **最终选择（2026-08-20）**：不排除 connector 源码；由
   `scripts/run_rust_coverage.py` 通过 `cargo llvm-cov show-env --sh` 建立同一插桩环境，
-  清理旧 profile 后依次用普通 `cargo test` 采集 workspace、在同一 debug/all-features
-  Cargo profile 显式构建未 strip 的 PyO3 cdylib 并用临时 `target/` 包运行 Python
-  adapter suite，再采集 Kafka、PostgreSQL/CDC、ClickHouse 容器测试；随后从同一
-  profile 集先导出 LCOV、再用文本
+  清理旧 profile 后依次用普通 `cargo test --workspace --all-features` 采集 workspace、
+  在同一 debug Cargo profile 以发布 wheel 的默认 feature 集显式构建未 strip 的
+  PyO3 cdylib 并用临时 `target/` 包运行 Python adapter suite，再采集
+  Kafka、PostgreSQL/CDC、ClickHouse 容器测试；随后从同一 profile 集先导出 LCOV、
+  再用文本
   `cargo llvm-cov report` 对合并结果执行不变的 90% 行覆盖门，使失败日志保留可操作
   的逐文件与总覆盖率。服务环境不完整时 runner 在编译前失败；不能组合使用工具明确
   禁止的 `--no-clean --no-report`。`--workspace --all-features` 只用于插桩 build/test；

@@ -126,9 +126,10 @@ Status: **implemented; combined numeric gate must pass on the final tree**
   reportable coverage map for the extension used by Python. That ineffective
   15-minute build is not retained. The runner now syncs dependencies without
   installing the project, builds the PyO3 cdylib explicitly in the same
-  unstripped debug/all-features Cargo profile, stages it only under `target/`,
-  and executes the existing Python suite against that artifact before the
-  connector tests.
+  unstripped debug Cargo profile and release-wheel default feature set, stages
+  it only under `target/`, and executes the existing Python suite against that
+  artifact before the connector tests. The preceding workspace suite and the
+  following connector suites continue to collect all-feature coverage.
 - The report excludes only `runtime/streaming/soak.rs`, which is a dedicated
   `#[cfg(test)]` harness module rather than shipped code. All core, connector,
   and PyO3 production sources remain in the denominator, and the production
