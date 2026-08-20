@@ -14,7 +14,6 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
 jobs:
   connector-containers:
-    if: ${{ false }} # Temporary: isolate rust-core coverage repair.
     name: Connector containers (Kafka)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -61,7 +60,6 @@ jobs:
           --test kafka_connector -- --ignored --test-threads=1
 
   connector-containers-pg:
-    if: ${{ false }} # Temporary: isolate rust-core coverage repair.
     name: Connector containers (PostgreSQL)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -112,7 +110,6 @@ jobs:
           -- --ignored --test-threads=1
 
   connector-containers-ch:
-    if: ${{ false }} # Temporary: isolate rust-core coverage repair.
     name: Connector containers (ClickHouse)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -144,7 +141,6 @@ jobs:
           cargo test -p calc-flow-connectors --features clickhouse
           --test clickhouse_connector -- --ignored --test-threads=1
   lint-and-test:
-    if: ${{ false }} # Temporary: isolate rust-core coverage repair.
     name: Ruff + unit tests
     runs-on: ubuntu-latest
     steps:
@@ -184,7 +180,6 @@ jobs:
           file: coverage.xml
           parallel: true
   frontend:
-    if: ${{ false }} # Temporary: isolate rust-core coverage repair.
     name: Studio build + tests
     runs-on: ubuntu-latest
     defaults:
@@ -208,7 +203,6 @@ jobs:
       - name: Audit production dependencies
         run: npm audit --omit=dev
   studio-backend:
-    if: ${{ false }} # Temporary: isolate rust-core coverage repair.
     name: Studio backend tests
     runs-on: ubuntu-latest
     steps:
@@ -258,7 +252,6 @@ jobs:
           file: web-ui/backend/coverage.xml
           parallel: true
   browser-e2e:
-    if: ${{ false }} # Temporary: isolate rust-core coverage repair.
     name: Studio browser workflow
     runs-on: ubuntu-latest
     defaults:
@@ -296,7 +289,6 @@ jobs:
       - name: Run browser workflow
         run: npm run test:e2e
   package:
-    if: ${{ false }} # Temporary: isolate rust-core coverage repair.
     name: Build + isolated wheel smoke test
     needs: lint-and-test
     runs-on: ubuntu-latest
@@ -332,7 +324,6 @@ jobs:
           if-no-files-found: error
           retention-days: 30
   studio-package:
-    if: ${{ false }} # Temporary: isolate rust-core coverage repair.
     name: Build + isolated studio wheel smoke test
     needs:
       - frontend
@@ -401,7 +392,6 @@ jobs:
           if-no-files-found: error
           retention-days: 30
   benchmark-smoke:
-    if: ${{ false }} # Temporary: isolate rust-core coverage repair.
     name: Informational ${{ matrix.scale }} benchmark smoke
     needs: lint-and-test
     runs-on: ubuntu-latest
@@ -541,11 +531,8 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
       - run: cargo fmt --all --check
-        if: ${{ false }} # Temporary: run only the failing coverage gate.
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-        if: ${{ false }} # Temporary: run only the failing coverage gate.
       - name: Detect frozen allocation harness
-        if: ${{ false }} # Temporary: run only the failing coverage gate.
         id: frozen_allocation_harness
         run: |
           if git merge-base --is-ancestor "$FROZEN_ALLOCATION_HARNESS_SHA" HEAD; then
@@ -554,11 +541,10 @@ jobs:
             echo "enabled=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Run Rust tests
-        if: ${{ false }} # Temporary: run only the failing coverage gate.
         timeout-minutes: 30
         run: python3.13 scripts/run_rust_tests.py --python-stress-runs 3
       - name: Verify frozen allocation harness
-        if: ${{ false }} # Temporary: run only the failing coverage gate.
+        if: steps.frozen_allocation_harness.outputs.enabled == 'true'
         env:
           FROZEN_ALLOCATION_HARNESS_WORKTREE: ${{ runner.temp }}/frozen-allocation-harness
         run: |
@@ -567,10 +553,16 @@ jobs:
           CARGO_TARGET_DIR="$FROZEN_ALLOCATION_HARNESS_TARGET_DIR" \
             cargo test --locked -p calc-flow --bench allocation_regression --all-features
       - name: Reclaim Rust test build disk before allocation comparison
-        if: ${{ false }} # Temporary: run only the failing coverage gate.
+        if: >-
+          steps.frozen_allocation_harness.outputs.enabled == 'true' &&
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.base.sha == env.FROZEN_ALLOCATION_HARNESS_SHA
         run: cargo clean
       - name: Compare candidate allocations
-        if: ${{ false }} # Temporary: run only the failing coverage gate.
+        if: >-
+          steps.frozen_allocation_harness.outputs.enabled == 'true' &&
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.base.sha == env.FROZEN_ALLOCATION_HARNESS_SHA
         timeout-minutes: 120
         env:
           FROZEN_ALLOCATION_BASELINE_REPORT: ${{ runner.temp }}/frozen-allocation-harness/target/allocation-regression/baseline-2ac7e97.json
@@ -602,7 +594,7 @@ jobs:
             cargo bench --locked -p calc-flow --bench allocation_regression -- \
             --compare "$FROZEN_ALLOCATION_BASELINE_REPORT" "$FROZEN_ALLOCATION_CANDIDATE_REPORT"
       - name: Remove frozen allocation worktrees
-        if: ${{ false }} # Temporary: run only the failing coverage gate.
+        if: always() && steps.frozen_allocation_harness.outputs.enabled == 'true'
         env:
           FROZEN_ALLOCATION_CANDIDATE_WORKTREE: ${{ runner.temp }}/frozen-allocation-candidate
           FROZEN_ALLOCATION_HARNESS_WORKTREE: ${{ runner.temp }}/frozen-allocation-harness
@@ -619,7 +611,6 @@ jobs:
         with:
           tool: cargo-llvm-cov@0.8.7
       - name: Reclaim Rust build disk before coverage
-        if: ${{ false }} # Temporary: run only the failing coverage gate.
         run: |
           cargo clean
           cargo clean --target-dir "$FROZEN_ALLOCATION_HARNESS_TARGET_DIR"
@@ -627,7 +618,7 @@ jobs:
       - name: Enforce combined Rust and connector line coverage
         run: python3.13 scripts/run_rust_coverage.py
       - name: Upload Rust coverage report
-        if: ${{ false }} # Temporary: run only the failing coverage gate.
+        if: ${{ always() && hashFiles('rust-lcov.info') != '' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: rust-coverage
@@ -635,7 +626,6 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Report Rust coverage to Coveralls
-        if: ${{ false }} # Temporary: run only the failing coverage gate.
         uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -643,12 +633,9 @@ jobs:
           file: rust-lcov.info
           parallel: true
       - name: Reclaim coverage build disk before docs
-        if: ${{ false }} # Temporary: run only the failing coverage gate.
         run: cargo llvm-cov clean --workspace
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
-        if: ${{ false }} # Temporary: run only the failing coverage gate.
   rust-supply-chain:
-    if: ${{ false }} # Temporary: isolate rust-core coverage repair.
     name: Rust dependency policy
     runs-on: ubuntu-latest
     steps:
@@ -669,7 +656,6 @@ jobs:
       - name: Check licenses, sources, advisories, and duplicate policy
         run: cargo deny --locked check
   coveralls-finish:
-    if: ${{ false }} # Temporary: isolate rust-core coverage repair.
     name: Coveralls finish
     needs:
       - lint-and-test
