@@ -107,6 +107,12 @@ Status: **implemented; combined numeric gate must pass on the final tree**
   `show-env --sh` exports, clean after loading that environment, execute each
   target through ordinary `cargo test`, and generate one final `llvm-cov
   report`.
+- The next exact-head attempt exposed a third CLI-context defect: with the
+  `show-env` instrumentation active, `cargo llvm-cov report` rejects the
+  build-selection flags `--all-features` and `--workspace`. Workspace and
+  feature selection are already fixed by the instrumented `cargo test`
+  commands and their collected profiles, so the runner now keeps those flags
+  on every build/test command and omits them only from the report-only command.
 - Linux Rust-core CI owns healthy Kafka, logical-replication PostgreSQL, and
   ClickHouse services for that runner. The independent container jobs remain
   as focused diagnostics; fake/local-server and expanded offline protocol tests

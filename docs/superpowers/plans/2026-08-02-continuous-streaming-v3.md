@@ -359,7 +359,10 @@ M6 才发现：
   清理旧 profile 后依次用普通 `cargo test` 采集 workspace 与 Kafka、PostgreSQL/CDC、
   ClickHouse 容器测试，再用单次 `cargo llvm-cov report` 对合并结果执行不变的 90%
   行覆盖门。服务环境不完整时 runner 在编译前失败；不能组合使用工具明确禁止的
-  `--no-clean --no-report`。
+  `--no-clean --no-report`。`--workspace --all-features` 只用于插桩 build/test；
+  `show-env` 生效后 report-only 命令不再重复传入这些构建选择参数，因为 profile
+  已经固定了实际 workspace 和 feature 集合，且 `cargo-llvm-cov` 在该上下文中会
+  拒绝这些参数。
 - **版本与发布**：release invariant 要求各包版本同步。`calc-flow-connectors` 的
   版本策略、是否随核心 crate 发布、以及 crate 打包内容都要一并写入 M7.4。
 
