@@ -50,6 +50,7 @@ class RustCoverageRunnerTests(unittest.TestCase):
         for command in commands[1:4]:
             self.assertIn("--ignored", command)
         self.assertEqual(commands[-1][0:3], ("cargo", "llvm-cov", "report"))
+        self.assertNotIn("--all-features", commands[-1])
         self.assertIn("90", commands[-1])
         self.assertEqual(commands[-1][-1], str(OUTPUT_PATH))
 

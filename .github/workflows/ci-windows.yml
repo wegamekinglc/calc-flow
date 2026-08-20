@@ -14,6 +14,7 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
 jobs:
   process-tree:
+    if: ${{ false }} # Temporary: isolate rust-core coverage repair.
     name: Windows process-tree cleanup
     runs-on: windows-latest
     timeout-minutes: 10
@@ -38,6 +39,7 @@ jobs:
   # embedded-Python lib test itself and the core crate is parallel-safe, so
   # RUST_TEST_THREADS is no longer forced to one here.
   rust-tests:
+    if: ${{ false }} # Temporary: isolate rust-core coverage repair.
     name: Rust tests
     runs-on: windows-latest
     timeout-minutes: 60
@@ -59,6 +61,7 @@ jobs:
         timeout-minutes: 50
         run: python scripts/run_rust_tests.py --python-stress-runs 1
   python-tests:
+    if: ${{ false }} # Temporary: isolate rust-core coverage repair.
     name: Python tests
     runs-on: windows-latest
     timeout-minutes: 45

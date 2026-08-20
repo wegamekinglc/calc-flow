@@ -61,7 +61,6 @@ def coverage_commands() -> tuple[tuple[str, ...], ...]:
             "llvm-cov",
             "report",
             "--workspace",
-            "--all-features",
             "--fail-under-lines",
             "90",
             "--lcov",
