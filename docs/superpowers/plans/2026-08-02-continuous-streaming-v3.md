@@ -357,9 +357,10 @@ M6 才发现：
   **最终选择（2026-08-20）**：不排除 connector 源码；由
   `scripts/run_rust_coverage.py` 通过 `cargo llvm-cov show-env --sh` 建立同一插桩环境，
   清理旧 profile 后依次用普通 `cargo test` 采集 workspace 与 Kafka、PostgreSQL/CDC、
-  ClickHouse 容器测试，再用单次 `cargo llvm-cov report` 对合并结果执行不变的 90%
-  行覆盖门。服务环境不完整时 runner 在编译前失败；不能组合使用工具明确禁止的
-  `--no-clean --no-report`。`--workspace --all-features` 只用于插桩 build/test；
+  ClickHouse 容器测试，再从同一 profile 集先导出 LCOV、随后用文本
+  `cargo llvm-cov report` 对合并结果执行不变的 90% 行覆盖门，使失败日志保留可操作
+  的逐文件与总覆盖率。服务环境不完整时 runner 在编译前失败；不能组合使用工具明确
+  禁止的 `--no-clean --no-report`。`--workspace --all-features` 只用于插桩 build/test；
   `show-env` 生效后 report-only 命令不再重复传入这些构建选择参数，因为 profile
   已经固定了实际 workspace 和 feature 集合，且 `cargo-llvm-cov` 在该上下文中会
   拒绝这些参数。

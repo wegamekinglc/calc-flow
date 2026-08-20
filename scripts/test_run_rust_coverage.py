@@ -29,7 +29,7 @@ class RustCoverageRunnerTests(unittest.TestCase):
     def test_plan_accumulates_all_real_connector_tests_before_enforcement(self) -> None:
         commands = coverage_commands()
 
-        self.assertEqual(len(commands), 5)
+        self.assertEqual(len(commands), 6)
         self.assertEqual(
             commands[0], ("cargo", "test", "--workspace", "--all-features")
         )
@@ -49,11 +49,15 @@ class RustCoverageRunnerTests(unittest.TestCase):
         )
         for command in commands[1:4]:
             self.assertIn("--ignored", command)
-        self.assertEqual(commands[-1][0:3], ("cargo", "llvm-cov", "report"))
-        self.assertNotIn("--all-features", commands[-1])
-        self.assertNotIn("--workspace", commands[-1])
-        self.assertIn("90", commands[-1])
-        self.assertEqual(commands[-1][-1], str(OUTPUT_PATH))
+        export, enforce = commands[-2:]
+        self.assertEqual(export[0:3], ("cargo", "llvm-cov", "report"))
+        self.assertEqual(enforce[0:3], ("cargo", "llvm-cov", "report"))
+        for command in (export, enforce):
+            self.assertNotIn("--all-features", command)
+            self.assertNotIn("--workspace", command)
+        self.assertNotIn("--fail-under-lines", export)
+        self.assertEqual(export[-1], str(OUTPUT_PATH))
+        self.assertEqual(enforce[-2:], ("--fail-under-lines", "90"))
 
     def test_environment_guard_names_every_missing_service(self) -> None:
         with self.assertRaisesRegex(
@@ -111,7 +115,7 @@ class RustCoverageRunnerTests(unittest.TestCase):
 
         run(environment)
 
-        self.assertEqual(execute.call_count, 7)
+        self.assertEqual(execute.call_count, 8)
         self.assertEqual(execute.call_args_list[0].args, (SHOW_ENV_COMMAND,))
         self.assertEqual(
             execute.call_args_list[0].kwargs,

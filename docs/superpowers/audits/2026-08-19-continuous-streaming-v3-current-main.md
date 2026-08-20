@@ -105,14 +105,19 @@ Status: **implemented; combined numeric gate must pass on the final tree**
   `cargo-llvm-cov` rejects `--no-clean` together with `--no-report`. The runner
   now follows the tool's external-test workflow exactly: load the reviewed
   `show-env --sh` exports, clean after loading that environment, execute each
-  target through ordinary `cargo test`, and generate one final `llvm-cov
-  report`.
+  target through ordinary `cargo test`, and enter one final `llvm-cov` report
+  phase over the collected profiles.
 - The next exact-head attempt exposed a third CLI-context defect: with the
   `show-env` instrumentation active, `cargo llvm-cov report` rejects the
   build-selection flags `--all-features` and `--workspace`. Workspace and
   feature selection are already fixed by the instrumented `cargo test`
   commands and their collected profiles, so the runner now keeps those flags
   on every build/test command and omits them only from the report-only command.
+- That corrected command reached the numeric floor and saved LCOV, but
+  `--lcov --output-path` suppressed the text summary before returning the
+  threshold failure. The runner now exports LCOV first and then applies the
+  unchanged 90% floor with a text report over the same profiles, so failures
+  expose actionable per-file and total coverage without recompiling.
 - Linux Rust-core CI owns healthy Kafka, logical-replication PostgreSQL, and
   ClickHouse services for that runner. The independent container jobs remain
   as focused diagnostics; fake/local-server and expanded offline protocol tests
