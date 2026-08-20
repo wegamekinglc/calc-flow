@@ -29,14 +29,27 @@ class RustCoverageRunnerTests(unittest.TestCase):
     def test_plan_accumulates_all_real_connector_tests_before_enforcement(self) -> None:
         commands = coverage_commands()
 
-        self.assertEqual(len(commands), 6)
+        self.assertEqual(len(commands), 8)
         self.assertEqual(
             commands[0], ("cargo", "test", "--workspace", "--all-features")
+        )
+        self.assertEqual(commands[1], ("uv", "sync", "--extra", "dev"))
+        self.assertEqual(
+            commands[2],
+            (
+                "uv",
+                "run",
+                "pytest",
+                "python/tests",
+                "-q",
+                "-p",
+                "no:benchmark",
+            ),
         )
         self.assertEqual(
             [
                 target
-                for command in commands[1:4]
+                for command in commands[3:6]
                 for index, target in enumerate(command)
                 if index > 0 and command[index - 1] == "--test"
             ],
@@ -47,7 +60,7 @@ class RustCoverageRunnerTests(unittest.TestCase):
                 "clickhouse_connector",
             ],
         )
-        for command in commands[1:4]:
+        for command in commands[3:6]:
             self.assertIn("--ignored", command)
         export, enforce = commands[-2:]
         self.assertEqual(export[0:3], ("cargo", "llvm-cov", "report"))
@@ -115,7 +128,7 @@ class RustCoverageRunnerTests(unittest.TestCase):
 
         run(environment)
 
-        self.assertEqual(execute.call_count, 8)
+        self.assertEqual(execute.call_count, 10)
         self.assertEqual(execute.call_args_list[0].args, (SHOW_ENV_COMMAND,))
         self.assertEqual(
             execute.call_args_list[0].kwargs,
@@ -132,6 +145,7 @@ class RustCoverageRunnerTests(unittest.TestCase):
             "LLVM_PROFILE_FILE": "/repo-%p.profraw",
             "CARGO_LLVM_COV": "1",
             "CARGO_LLVM_COV_TARGET_DIR": "/repo/target",
+            "JAX_PLATFORMS": "cpu",
         }
         self.assertEqual(execute.call_args_list[1].args, (CLEAN_COMMAND,))
         self.assertEqual(

@@ -118,6 +118,13 @@ Status: **implemented; combined numeric gate must pass on the final tree**
   threshold failure. The runner now exports LCOV first and then applies the
   unchanged 90% floor with a text report over the same profiles, so failures
   expose actionable per-file and total coverage without recompiling.
+- The resulting report measured 88.67% and exposed the remaining collection
+  gap: the workspace denominator includes the Rust/PyO3 binding, while the
+  combined runner had executed only its inline Rust tests. The runner now
+  builds the editable package and executes the existing Python adapter suite in
+  the same instrumented environment before the connector container tests. This
+  covers the binding through its public Python behavior instead of excluding
+  production files or reducing the floor.
 - Linux Rust-core CI owns healthy Kafka, logical-replication PostgreSQL, and
   ClickHouse services for that runner. The independent container jobs remain
   as focused diagnostics; fake/local-server and expanded offline protocol tests

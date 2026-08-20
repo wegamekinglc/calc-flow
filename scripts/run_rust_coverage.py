@@ -1,9 +1,10 @@
 """Run the workspace Rust coverage gate with service-backed connectors.
 
-The connector implementations are part of the workspace coverage denominator,
-while their real I/O paths live in opt-in container tests.  This runner keeps
-one llvm-cov profile set across the ordinary workspace suite and those gated
-tests, then enforces the unchanged 90 percent line floor on the combined data.
+The connector implementations and Rust/PyO3 binding are part of the workspace
+coverage denominator, while their public behavior spans Python and opt-in
+container tests.  This runner keeps one llvm-cov profile set across those
+surfaces, then enforces the unchanged 90 percent line floor on the combined
+data.
 """
 
 from __future__ import annotations
@@ -30,6 +31,16 @@ def coverage_commands() -> tuple[tuple[str, ...], ...]:
     )
     return (
         ("cargo", "test", "--workspace", "--all-features"),
+        ("uv", "sync", "--extra", "dev"),
+        (
+            "uv",
+            "run",
+            "pytest",
+            "python/tests",
+            "-q",
+            "-p",
+            "no:benchmark",
+        ),
         (
             *connector,
             "--test",
@@ -117,6 +128,7 @@ def run(environment: dict[str, str]) -> None:
     """Execute the combined coverage plan and propagate the first failure."""
     require_connector_environment(environment)
     environment = instrumented_environment(environment)
+    environment.setdefault("JAX_PLATFORMS", "cpu")
     subprocess.run(  # nosec B603  # nosemgrep
         CLEAN_COMMAND, cwd=ROOT, env=environment, check=True
     )
