@@ -35,7 +35,11 @@ uv sync --extra dev
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 uv run python scripts/run_rust_tests.py
-cargo llvm-cov --workspace --all-features --fail-under-lines 90
+CALC_FLOW_CONNECTOR_CONTAINERS=1 \
+  CALC_FLOW_KAFKA_BOOTSTRAP=localhost:9092 \
+  CALC_FLOW_PG_TEST_URL=postgresql://postgres:postgres@localhost:5432/postgres \
+  CH_TEST_URL=http://localhost:8123 \
+  uv run python scripts/run_rust_coverage.py
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 
 # PyO3 package and Python adapters
@@ -61,7 +65,7 @@ npm audit --omit=dev
 # Supply chain and release helpers
 cargo audit --ignore RUSTSEC-2026-0176 --ignore RUSTSEC-2026-0177
 cargo deny --locked check
-python -m unittest scripts.test_run_rust_tests scripts.test_inspect_wheel scripts.test_release_config
+python -m unittest scripts.test_run_rust_tests scripts.test_run_rust_coverage scripts.test_inspect_wheel scripts.test_release_config
 ```
 
 Run informational benchmarks with:
@@ -91,8 +95,10 @@ surface has its own runner.
   unit tests and the Python suite under `python/tests/`. Run `uv sync --extra
   dev`, then use `uv run python scripts/run_rust_tests.py` to test the core
   targets normally and the compiled PyO3 test executable serially with its
-  runtime-only timeout. Enforce the 90% line floor with `cargo llvm-cov
-  --workspace --all-features --fail-under-lines 90`.
+  runtime-only timeout. Enforce the 90% line floor with
+  `scripts/run_rust_coverage.py` while the documented connector containers are
+  available; it combines the ordinary workspace and real connector paths in
+  one llvm-cov profile set.
 - **Python binding and adapters** — `python/tests/`, run with
   `JAX_PLATFORMS=cpu uv run pytest python/tests -q` after
   `uv run maturin develop`. Define fixtures in focused test modules; there is no
@@ -210,10 +216,11 @@ The frontend talks to the backend over the `/api/v3` REST contract only.
 ### Local Studio
 
 `web-ui/backend/` is the independently packaged `calc-flow-studio` FastAPI
-service. Its routes live under `/api/v3`; `serve()` must reject non-loopback
-hosts. `RunManager` owns spawned continuous-job workers with concurrency,
-resident-memory, checkpoint-disk, cancellation, shutdown, and lifecycle
-controls. `web-ui/` is React, TypeScript, Vite, and
+service. Its routes live under `/api/v3`; by default `serve()` rejects
+non-loopback hosts, and changing that security boundary requires a separately
+reviewed exception. `RunManager` owns spawned continuous-job workers with
+concurrency, resident-memory, checkpoint-disk, cancellation, shutdown, and
+lifecycle controls. `web-ui/` is React, TypeScript, Vite, and
 React Flow; API types are generated from `web-ui/openapi.json` via
 `npm run sync:api`, which also writes `web-ui/src/api/schema.d.ts`. Regenerate
 both after any route, model, or version change.

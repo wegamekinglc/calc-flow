@@ -90,14 +90,28 @@ Status: **implemented**
 
 ### CFV3-05 — Honest connector coverage gate
 
-Status: **implemented; numeric gate must pass on the final tree**
+Status: **implemented; combined numeric gate must pass on the final tree**
 
-- Linux CI now runs the exact repository command
-  `cargo llvm-cov --workspace --all-features --fail-under-lines 90` without
-  excluding connector modules.
-- Fake/local-server tests cover offline and protocol-independent logic;
-  service-backed correctness remains a separate container gate and is not used
-  to hide unmeasured source files.
+- The first exact-head CI run exposed the previously unverified M0 decision:
+  ordinary workspace tests measured only 85.52% because the real Kafka,
+  PostgreSQL/CDC, and ClickHouse paths were compiled into the denominator while
+  their opt-in container tests were not collected. This was a real acceptance
+  defect, not a reason to reduce the 90% floor or exclude connector source.
+- `scripts/run_rust_coverage.py` now keeps one llvm-cov profile set across the
+  ordinary workspace suite and all three existing service-backed connector
+  suites, then applies the unchanged 90% line floor to the combined report.
+  It fails before compilation when any required service environment is absent.
+- The first combined-runner CI attempt exposed a second defect:
+  `cargo-llvm-cov` rejects `--no-clean` together with `--no-report`. The runner
+  now follows the tool's external-test workflow exactly: load the reviewed
+  `show-env --sh` exports, clean after loading that environment, execute each
+  target through ordinary `cargo test`, and generate one final `llvm-cov
+  report`.
+- Linux Rust-core CI owns healthy Kafka, logical-replication PostgreSQL, and
+  ClickHouse services for that runner. The independent container jobs remain
+  as focused diagnostics; fake/local-server and expanded offline protocol tests
+  continue to cover malformed configuration, cursor, evidence, and decoder
+  paths without weakening the real-I/O gate.
 
 ### CFV3-06 — Paired performance and soak release gates
 

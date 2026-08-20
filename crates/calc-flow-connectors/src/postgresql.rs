@@ -1965,6 +1965,157 @@ pub fn register_postgresql_connectors(registry: &mut ConnectorRegistry) -> Resul
 mod tests {
     use super::*;
 
+    fn source_options(mode: &str) -> JsonMap {
+        BTreeMap::from([
+            ("table".into(), Value::String("orders".into())),
+            ("mode".into(), Value::String(mode.into())),
+        ])
+    }
+
+    fn sink_options(mode: &str) -> JsonMap {
+        BTreeMap::from([
+            ("table".into(), Value::String("orders".into())),
+            ("mode".into(), Value::String(mode.into())),
+            ("pipeline".into(), Value::String("pipeline".into())),
+            ("output".into(), Value::String("output".into())),
+        ])
+    }
+
+    #[test]
+    fn source_configuration_rejects_ambiguous_modes_and_unbounded_values() {
+        let mut candidate = source_options("incremental_query");
+        assert!(PostgresSourceConfig::from_options(&candidate).is_err());
+
+        candidate.insert("cursor_columns".into(), serde_json::json!(["id"]));
+        candidate.insert(
+            "columns".into(),
+            serde_json::json!([{"name": "label", "data_type": "string", "nullable": false}]),
+        );
+        assert!(PostgresSourceConfig::from_options(&candidate).is_err());
+
+        for field in [
+            "max_batch_rows",
+            "max_batch_bytes",
+            "max_transaction_rows",
+            "max_transaction_bytes",
+            "poll_interval_ms",
+        ] {
+            let mut candidate = source_options("snapshot");
+            candidate.insert(field.into(), Value::from(0));
+            assert!(
+                PostgresSourceConfig::from_options(&candidate).is_err(),
+                "{field}"
+            );
+        }
+
+        candidate = source_options("snapshot");
+        candidate.insert("url_key".into(), Value::String("legacy".into()));
+        assert!(PostgresSourceConfig::from_options(&candidate).is_err());
+    }
+
+    #[test]
+    fn logical_cdc_configuration_accepts_explicit_frozen_contract() {
+        let mut candidate = source_options("logical_cdc");
+        candidate.extend([
+            ("slot".into(), Value::String("orders_slot".into())),
+            (
+                "publication".into(),
+                Value::String("orders_publication".into()),
+            ),
+            (
+                "slot_policy".into(),
+                Value::String("require_existing".into()),
+            ),
+            (
+                "columns".into(),
+                serde_json::json!([{"name": "id", "data_type": "int64", "nullable": false}]),
+            ),
+            ("require_before".into(), Value::Bool(true)),
+        ]);
+        let config = PostgresSourceConfig::from_options(&candidate).unwrap();
+        assert_eq!(config.mode, PgSourceMode::LogicalCdc);
+        assert_eq!(config.slot.as_deref(), Some("orders_slot"));
+        assert_eq!(config.slot_policy, Some(PgSlotPolicy::RequireExisting));
+        assert!(config.require_before);
+    }
+
+    #[test]
+    fn parameterized_insert_sql_covers_append_and_upsert_shapes() {
+        let append = PostgresSinkConfig::from_options(&sink_options("append")).unwrap();
+        assert_eq!(
+            compile_insert_sql(&append, &["id".into(), "label".into()]).unwrap(),
+            "INSERT INTO orders (id, label) VALUES ($1, $2)"
+        );
+
+        let mut candidate = sink_options("upsert");
+        candidate.insert("conflict_columns".into(), serde_json::json!(["id"]));
+        let upsert = PostgresSinkConfig::from_options(&candidate).unwrap();
+        assert_eq!(
+            compile_insert_sql(&upsert, &["id".into(), "label".into()]).unwrap(),
+            "INSERT INTO orders (id, label) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET label = EXCLUDED.label"
+        );
+        assert_eq!(
+            compile_insert_sql(&upsert, &["id".into()]).unwrap(),
+            "INSERT INTO orders (id) VALUES ($1) ON CONFLICT (id) DO NOTHING"
+        );
+    }
+
+    #[test]
+    fn transactional_evidence_round_trips_and_detects_tampering_offline() {
+        let config = PostgresSinkConfig::from_options(&sink_options("transactional")).unwrap();
+        let mut sink = TransactionalPostgresSink::new(config).unwrap();
+        sink.pending_rows = vec![vec![crate::database_types::PgValue::Int64(7)]];
+        sink.pending_columns = vec!["id".into()];
+        sink.pending_schema_hash = Some("a".repeat(64));
+        sink.rows = 1;
+        let epoch = calc_flow::Epoch::INITIAL;
+        let evidence = sink.prepared_evidence(epoch).unwrap();
+        let prepared = sink
+            .validate_evidence(epoch, &evidence, sink.pending_rows.clone())
+            .unwrap();
+        assert_eq!(prepared.rows.len(), 1);
+        assert_eq!(prepared.sql, "INSERT INTO orders (id) VALUES ($1)");
+
+        let encoded = evidence_rows(&sink.pending_rows);
+        assert_eq!(
+            decode_evidence_rows(&encoded, 1).unwrap(),
+            sink.pending_rows
+        );
+        assert!(decode_evidence_rows(&encoded, 2).is_err());
+
+        let mut tampered = evidence;
+        tampered.insert("rows".into(), Value::from(2));
+        assert!(
+            sink.validate_evidence(epoch, &tampered, sink.pending_rows.clone())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn reviewed_cursor_type_matrix_is_explicit() {
+        use tokio_postgres::types::Type;
+
+        let supported = [
+            Type::BOOL,
+            Type::INT2,
+            Type::INT4,
+            Type::INT8,
+            Type::FLOAT4,
+            Type::FLOAT8,
+            Type::TEXT,
+            Type::TIMESTAMP,
+            Type::TIMESTAMPTZ,
+            Type::DATE,
+            Type::UUID,
+        ];
+        for data_type in supported {
+            assert!(cursor_type_supported(&data_type), "{data_type}");
+            assert_ne!(cursor_sql_type(&data_type), "");
+        }
+        assert!(!cursor_type_supported(&Type::BYTEA));
+        assert_eq!(parse_pg_type("future"), Type::TEXT);
+    }
+
     #[test]
     fn composite_cursor_uses_lexicographic_row_comparison() {
         let config = PostgresSourceConfig::from_options(&BTreeMap::from([

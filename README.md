@@ -270,7 +270,11 @@ uv sync --extra dev
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 uv run python scripts/run_rust_tests.py
-cargo llvm-cov --workspace --all-features --fail-under-lines 90
+CALC_FLOW_CONNECTOR_CONTAINERS=1 \
+  CALC_FLOW_KAFKA_BOOTSTRAP=localhost:9092 \
+  CALC_FLOW_PG_TEST_URL=postgresql://postgres:postgres@localhost:5432/postgres \
+  CH_TEST_URL=http://localhost:8123 \
+  uv run python scripts/run_rust_coverage.py
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 
 uv run maturin develop

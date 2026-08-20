@@ -1290,3 +1290,122 @@ pub fn register_kafka_connectors(registry: &mut ConnectorRegistry) -> Result<()>
         ),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source_options(format: &str) -> JsonMap {
+        BTreeMap::from([
+            (
+                "bootstrap_servers".into(),
+                Value::String("127.0.0.1:1".into()),
+            ),
+            ("topic".into(), Value::String("events".into())),
+            ("format".into(), Value::String(format.into())),
+            (
+                "schema".into(),
+                serde_json::json!([
+                    {"name": "id", "data_type": "int64", "nullable": false},
+                    {"name": "label", "data_type": "string", "nullable": false}
+                ]),
+            ),
+        ])
+    }
+
+    #[test]
+    fn json_and_csv_payloads_decode_against_the_frozen_schema() {
+        let json = KafkaSourceConfig::from_options(&source_options("json")).unwrap();
+        let batch = json.decode(b"{\"id\":1,\"label\":\"one\"}\n").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+
+        let csv = KafkaSourceConfig::from_options(&source_options("csv")).unwrap();
+        let batch = csv.decode(b"id,label\n2,two\n").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert!(csv.decode(b"id,label\nnot-an-int,two\n").is_err());
+    }
+
+    #[test]
+    fn configuration_rejects_ambiguous_partitions_formats_and_bounds() {
+        let mut candidate = source_options("future");
+        assert!(KafkaSourceConfig::from_options(&candidate).is_err());
+
+        candidate = source_options("json");
+        candidate.insert("partitions".into(), Value::Array(Vec::new()));
+        assert!(KafkaSourceConfig::from_options(&candidate).is_err());
+
+        candidate = source_options("json");
+        candidate.insert("partitions".into(), serde_json::json!([1, 0, 1]));
+        assert_eq!(
+            KafkaSourceConfig::from_options(&candidate)
+                .unwrap()
+                .partitions,
+            vec![0, 1]
+        );
+
+        for field in ["max_batch_rows", "max_batch_bytes"] {
+            candidate = source_options("json");
+            candidate.insert(field.into(), Value::from(0));
+            assert!(
+                KafkaSourceConfig::from_options(&candidate).is_err(),
+                "{field}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_cursor_shape_is_strict_and_partition_bound() {
+        let mut candidate = source_options("json");
+        candidate.insert("partitions".into(), serde_json::json!([0, 2]));
+        let mut source =
+            KafkaSource::new(KafkaSourceConfig::from_options(&candidate).unwrap()).unwrap();
+        source.offsets = BTreeMap::from([(0, 7), (2, 9)]);
+        source.sequence = 3;
+        let cursor = source.cursor_from_offsets().unwrap();
+        let (offsets, sequence) = source.state_from_cursor(&cursor).unwrap();
+        assert_eq!(offsets, source.offsets);
+        assert_eq!(sequence, 3);
+        source.open(Some(cursor)).await.unwrap();
+
+        let wrong_order = Cursor::unbound(
+            2_u64.to_be_bytes().to_vec(),
+            BTreeMap::from([
+                ("offsets".into(), serde_json::json!({"0": 7, "2": 9})),
+                ("sequence".into(), Value::from(3)),
+            ]),
+        )
+        .unwrap();
+        assert!(source.state_from_cursor(&wrong_order).is_err());
+
+        let wrong_partitions = Cursor::unbound(
+            3_u64.to_be_bytes().to_vec(),
+            BTreeMap::from([
+                ("offsets".into(), serde_json::json!({"0": 7})),
+                ("sequence".into(), Value::from(3)),
+            ]),
+        )
+        .unwrap();
+        assert!(source.state_from_cursor(&wrong_partitions).is_err());
+    }
+
+    #[test]
+    fn source_capabilities_preserve_exact_schema_and_bounds() {
+        let config = KafkaSourceConfig::from_options(&source_options("json")).unwrap();
+        let schema = SourceSchema::Exact(schema_from_spec(&config.schema).unwrap());
+        let bounds = DecodeBounds::new(config.max_batch_rows, config.max_batch_bytes).unwrap();
+        let capabilities = source_capabilities(schema.clone(), bounds);
+        let SourceSchema::Exact(actual) = capabilities.schema else {
+            panic!("the frozen Kafka schema must remain exact")
+        };
+        let SourceSchema::Exact(expected) = schema else {
+            unreachable!("the fixture constructs an exact schema")
+        };
+        assert_eq!(actual, expected);
+        assert_eq!(capabilities.max_batch_rows, 8192);
+        assert_eq!(capabilities.max_batch_bytes, 8 * 1024 * 1024);
+        assert_eq!(
+            capabilities.native_watermarks,
+            calc_flow::NativeWatermarkCapability::NeverEmits
+        );
+    }
+}

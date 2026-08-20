@@ -632,3 +632,193 @@ pub fn pg_identifiers(fields: &[ArrowFieldSpec]) -> Result<Vec<String>> {
         .map(|field| pg_identifier(&field.name))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use arrow::array::{
+        BinaryArray, BooleanArray, Date32Array, Decimal128Array, FixedSizeBinaryBuilder,
+        Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, StringArray,
+        TimestampMicrosecondArray, UInt8Array,
+    };
+    use serde_json::json;
+    use tokio_postgres::types::IsNull;
+
+    use super::*;
+
+    fn assert_cell(array: &dyn arrow::array::Array, expected: &PgValue) {
+        assert_eq!(&cell_value(array, 0).unwrap(), expected);
+    }
+
+    #[test]
+    fn reviewed_arrow_cells_convert_to_exact_postgresql_values() {
+        assert_cell(&BooleanArray::from(vec![true]), &PgValue::Boolean(true));
+        assert_cell(&Int16Array::from(vec![-2]), &PgValue::Int16(-2));
+        assert_cell(&Int32Array::from(vec![-3]), &PgValue::Int32(-3));
+        assert_cell(&Int64Array::from(vec![-4]), &PgValue::Int64(-4));
+        assert_cell(&Float32Array::from(vec![1.25]), &PgValue::Float32(1.25));
+        assert_cell(&Float64Array::from(vec![2.5]), &PgValue::Float64(2.5));
+        assert_cell(
+            &StringArray::from(vec!["exact"]),
+            &PgValue::Text("exact".into()),
+        );
+        assert_cell(
+            &BinaryArray::from_vec(vec![b"bytes".as_slice()]),
+            &PgValue::Bytes(b"bytes".to_vec()),
+        );
+        let decimal = Decimal128Array::from(vec![1234_i128])
+            .with_precision_and_scale(10, 2)
+            .unwrap();
+        assert_cell(
+            &decimal,
+            &PgValue::Numeric(rust_decimal::Decimal::new(1234, 2)),
+        );
+        assert_cell(&Date32Array::from(vec![20_000]), &PgValue::Date32(20_000));
+        assert_cell(
+            &TimestampMicrosecondArray::from(vec![42]),
+            &PgValue::Timestamp(42),
+        );
+        assert_cell(
+            &TimestampMicrosecondArray::from(vec![43]).with_timezone_utc(),
+            &PgValue::TimestampTz(43),
+        );
+        let id = uuid::Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap();
+        let mut builder = FixedSizeBinaryBuilder::with_capacity(1, 16);
+        builder.append_value(id.as_bytes()).unwrap();
+        assert_cell(&builder.finish(), &PgValue::Uuid(id));
+
+        assert_eq!(
+            cell_value(&Int64Array::from(vec![None]), 0).unwrap(),
+            PgValue::Null
+        );
+        assert!(cell_value(&UInt8Array::from(vec![1]), 0).is_err());
+    }
+
+    #[test]
+    fn postgresql_value_evidence_round_trips_every_tag() {
+        let id = uuid::Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap();
+        let values = [
+            PgValue::Null,
+            PgValue::Boolean(true),
+            PgValue::Int16(-2),
+            PgValue::Int32(-3),
+            PgValue::Int64(-4),
+            PgValue::Float32(1.25),
+            PgValue::Float64(2.5),
+            PgValue::Text("exact".into()),
+            PgValue::Bytes(vec![0, 127, 255]),
+            PgValue::Numeric(rust_decimal::Decimal::new(1234, 2)),
+            PgValue::Date32(20_000),
+            PgValue::Timestamp(42),
+            PgValue::TimestampTz(43),
+            PgValue::Uuid(id),
+        ];
+        for value in values {
+            assert_eq!(PgValue::from_evidence(&value.to_evidence()).unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn postgresql_value_evidence_rejects_malformed_and_overflowing_tags() {
+        let invalid = [
+            json!(null),
+            json!({"type": "null"}),
+            json!({"type": 1, "value": null}),
+            json!({"type": "null", "value": 1}),
+            json!({"type": "bool", "value": 1}),
+            json!({"type": "i16", "value": 32768}),
+            json!({"type": "i32", "value": 2_147_483_648_i64}),
+            json!({"type": "i64", "value": "1"}),
+            json!({"type": "f32_bits", "value": 4_294_967_296_u64}),
+            json!({"type": "f64_bits", "value": -1}),
+            json!({"type": "text", "value": 1}),
+            json!({"type": "bytes", "value": "00"}),
+            json!({"type": "bytes", "value": [256]}),
+            json!({"type": "numeric", "value": "not-decimal"}),
+            json!({"type": "date32", "value": 2_147_483_648_i64}),
+            json!({"type": "timestamp_us", "value": "1"}),
+            json!({"type": "timestamptz_us", "value": "1"}),
+            json!({"type": "uuid", "value": "not-a-uuid"}),
+            json!({"type": "future", "value": null}),
+        ];
+        for evidence in invalid {
+            assert!(PgValue::from_evidence(&evidence).is_err(), "{evidence}");
+        }
+    }
+
+    #[test]
+    fn postgresql_values_serialize_through_the_reviewed_sql_matrix() {
+        let id = uuid::Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap();
+        let values = [
+            (PgValue::Null, PgType::INT8),
+            (PgValue::Boolean(true), PgType::BOOL),
+            (PgValue::Int16(-2), PgType::INT2),
+            (PgValue::Int32(-3), PgType::INT4),
+            (PgValue::Int64(-4), PgType::INT8),
+            (PgValue::Float32(1.25), PgType::FLOAT4),
+            (PgValue::Float64(2.5), PgType::FLOAT8),
+            (PgValue::Text("plain".into()), PgType::TEXT),
+            (PgValue::Text("{\"ok\":true}".into()), PgType::JSONB),
+            (PgValue::Text("12.34".into()), PgType::NUMERIC),
+            (PgValue::Bytes(vec![0, 255]), PgType::BYTEA),
+            (
+                PgValue::Numeric(rust_decimal::Decimal::new(1234, 2)),
+                PgType::NUMERIC,
+            ),
+            (PgValue::Date32(20_000), PgType::DATE),
+            (PgValue::Timestamp(42), PgType::TIMESTAMP),
+            (PgValue::TimestampTz(43), PgType::TIMESTAMPTZ),
+            (PgValue::Uuid(id), PgType::UUID),
+        ];
+        for (value, data_type) in values {
+            let mut buffer = tokio_postgres::types::private::BytesMut::new();
+            let result = value.to_sql(&data_type, &mut buffer).unwrap();
+            assert_eq!(matches!(result, IsNull::Yes), value == PgValue::Null);
+            assert!(PgValue::accepts(&data_type));
+        }
+    }
+
+    #[test]
+    fn reviewed_postgresql_types_build_the_exact_arrow_schema() {
+        let pairs = [
+            (PgType::BOOL, DataType::Boolean),
+            (PgType::INT2, DataType::Int16),
+            (PgType::INT4, DataType::Int32),
+            (PgType::INT8, DataType::Int64),
+            (PgType::FLOAT4, DataType::Float32),
+            (PgType::FLOAT8, DataType::Float64),
+            (PgType::TEXT, DataType::Utf8),
+            (PgType::VARCHAR, DataType::Utf8),
+            (PgType::BPCHAR, DataType::Utf8),
+            (PgType::NAME, DataType::Utf8),
+            (PgType::NUMERIC, DataType::Utf8),
+            (PgType::JSON, DataType::Utf8),
+            (PgType::JSONB, DataType::Utf8),
+            (PgType::BYTEA, DataType::Binary),
+            (
+                PgType::TIMESTAMP,
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+            ),
+            (
+                PgType::TIMESTAMPTZ,
+                DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into())),
+            ),
+            (PgType::DATE, DataType::Date32),
+            (PgType::UUID, DataType::FixedSizeBinary(16)),
+        ];
+        let columns = pairs
+            .iter()
+            .enumerate()
+            .map(|(index, (data_type, _))| PgColumn {
+                name: format!("column_{index}"),
+                data_type: data_type.clone(),
+                nullable: index % 2 == 0,
+            })
+            .collect::<Vec<_>>();
+        let schema = arrow_schema(&columns).unwrap();
+        for (index, (_, expected)) in pairs.iter().enumerate() {
+            assert_eq!(schema.field(index).data_type(), expected);
+            assert_eq!(schema.field(index).is_nullable(), index % 2 == 0);
+        }
+        assert!(arrow_data_type(&PgType::OID).is_err());
+    }
+}

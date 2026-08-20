@@ -599,3 +599,124 @@ fn schema_hash(schema: &arrow::datatypes::Schema) -> String {
     }
     hex::encode(hasher.finalize())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow::array::{Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use calc_flow::BatchMetadata;
+
+    use super::*;
+
+    fn options() -> JsonMap {
+        BTreeMap::from([
+            ("table".into(), Value::String("events".into())),
+            ("pipeline".into(), Value::String("pipeline".into())),
+            ("output".into(), Value::String("output".into())),
+        ])
+    }
+
+    fn table_batch(values: &[i64]) -> Batch {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let record =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(values.to_vec()))])
+                .unwrap();
+        Batch::table(
+            vec![record],
+            BatchMetadata::new("test", 1, BTreeMap::new()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn configuration_rejects_legacy_secrets_and_invalid_bounds() {
+        let mut candidate = options();
+        candidate.insert("url_key".into(), Value::String("legacy".into()));
+        assert!(ClickHouseSinkConfig::from_options(&candidate).is_err());
+
+        for field in ["max_block_rows", "max_block_bytes"] {
+            let mut candidate = options();
+            candidate.insert(field.into(), Value::from(0));
+            assert!(
+                ClickHouseSinkConfig::from_options(&candidate).is_err(),
+                "{field}"
+            );
+        }
+
+        let mut candidate = options();
+        candidate.insert("retry_deduplicated".into(), Value::String("yes".into()));
+        assert!(ClickHouseSinkConfig::from_options(&candidate).is_err());
+    }
+
+    #[tokio::test]
+    async fn empty_epoch_commits_without_an_endpoint() {
+        let mut sink =
+            ClickHouseSink::new(ClickHouseSinkConfig::from_options(&options()).unwrap()).unwrap();
+        let epoch = Epoch::INITIAL;
+        sink.begin_epoch(epoch).await.unwrap();
+        let evidence = sink.pre_commit(epoch).await.unwrap();
+        assert_eq!(evidence["rows"], Value::from(0));
+        sink.commit(epoch, &evidence).await.unwrap();
+        assert!(sink.active_epoch.is_none());
+    }
+
+    #[tokio::test]
+    async fn prepared_evidence_round_trips_and_detects_tampering_offline() {
+        let mut sink =
+            ClickHouseSink::new(ClickHouseSinkConfig::from_options(&options()).unwrap()).unwrap();
+        let epoch = Epoch::INITIAL;
+        sink.begin_epoch(epoch).await.unwrap();
+        sink.write(&table_batch(&[1, 2])).await.unwrap();
+        let evidence = sink.pre_commit(epoch).await.unwrap();
+        let segments = sink.pre_commit_segments(epoch).await.unwrap();
+        let insert_block = String::from_utf8(segments[PREPARED_SEGMENT_ID].clone()).unwrap();
+        let prepared = sink
+            .validate_evidence(epoch, &evidence, insert_block.clone())
+            .unwrap();
+        assert_eq!(prepared.rows, 2);
+
+        let mut tampered = evidence.clone();
+        tampered.insert("segment_sha256".into(), Value::String("0".repeat(64)));
+        assert!(
+            sink.validate_evidence(epoch, &tampered, insert_block)
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn staging_rejects_schema_changes_and_preserves_atomic_bounds() {
+        let mut candidate = options();
+        candidate.insert("max_block_rows".into(), Value::from(1));
+        let mut sink =
+            ClickHouseSink::new(ClickHouseSinkConfig::from_options(&candidate).unwrap()).unwrap();
+        sink.begin_epoch(Epoch::INITIAL).await.unwrap();
+        assert!(sink.write(&table_batch(&[1, 2])).await.is_err());
+        assert_eq!(sink.rows, 1);
+
+        sink.abort(Epoch::INITIAL, None).await.unwrap();
+        sink.begin_epoch(Epoch::INITIAL).await.unwrap();
+        sink.write(&table_batch(&[1])).await.unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "label",
+            DataType::Utf8,
+            false,
+        )]));
+        let record =
+            RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(vec!["changed"]))])
+                .unwrap();
+        let changed = Batch::table(
+            vec![record],
+            BatchMetadata::new("test", 2, BTreeMap::new()).unwrap(),
+        )
+        .unwrap();
+        assert!(sink.write(&changed).await.is_err());
+        assert_eq!(sink.rows, 1);
+    }
+}

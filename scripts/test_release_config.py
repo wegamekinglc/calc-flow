@@ -314,7 +314,7 @@ class ReleaseConfigTests(unittest.TestCase):
 
         rust_tests = "python3.13 scripts/run_rust_tests.py --python-stress-runs 3"
         clean_tests = "cargo clean"
-        coverage = "cargo llvm-cov --workspace --all-features --fail-under-lines 90"
+        coverage = "python3.13 scripts/run_rust_coverage.py"
         clean_coverage = "cargo llvm-cov clean --workspace"
         rustdoc = (
             'RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps'
@@ -403,6 +403,7 @@ class ReleaseConfigTests(unittest.TestCase):
     def test_ci_and_release_execute_rust_test_harness_unit_tests(self) -> None:
         command = (
             "python -m unittest scripts.test_run_rust_tests "
+            "scripts.test_run_rust_coverage "
             "scripts.test_inspect_wheel scripts.test_release_config "
             "scripts.test_verify_perf_gates scripts.test_verify_security_gates"
         )

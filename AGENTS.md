@@ -16,7 +16,11 @@ uv sync --extra dev
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 uv run python scripts/run_rust_tests.py
-cargo llvm-cov --workspace --all-features --fail-under-lines 90
+CALC_FLOW_CONNECTOR_CONTAINERS=1 \
+  CALC_FLOW_KAFKA_BOOTSTRAP=localhost:9092 \
+  CALC_FLOW_PG_TEST_URL=postgresql://postgres:postgres@localhost:5432/postgres \
+  CH_TEST_URL=http://localhost:8123 \
+  uv run python scripts/run_rust_coverage.py
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 
 # PyO3 package and Python adapters
@@ -42,12 +46,19 @@ npm audit --omit=dev
 # Supply chain and release helpers
 cargo audit --ignore RUSTSEC-2026-0176 --ignore RUSTSEC-2026-0177 --ignore RUSTSEC-2026-0235
 cargo deny --locked check
-python -m unittest scripts.test_run_rust_tests scripts.test_inspect_wheel scripts.test_release_config
+python -m unittest scripts.test_run_rust_tests scripts.test_run_rust_coverage scripts.test_inspect_wheel scripts.test_release_config
 ```
 
 Keep Cargo, Maturin, uv, coverage, and release outputs under the repository
 `target/` tree when working from a constrained mirror. Never leave a generated
 `python/calc_flow/_native*.so` in source.
+
+The Rust coverage gate includes the opt-in Kafka, PostgreSQL change data
+capture (CDC), and ClickHouse container tests in one llvm-cov profile set.
+Start those three services before running `scripts/run_rust_coverage.py`; the
+runner fails before compilation when any service environment variable is
+missing and preserves the 90% workspace line floor without excluding connector
+source.
 
 `uv sync --extra dev` installs the NumPy and PyArrow dependencies imported by
 the PyO3 Rust tests. Run the harness through `uv run python` so Cargo and the
@@ -216,8 +227,9 @@ selectors.
 ### Studio
 
 - `web-ui/backend/` is the independent `calc-flow-studio` package. Its
-  FastAPI routes live under `/api/v3`; `serve()` must reject non-loopback
-  hosts.
+  FastAPI routes live under `/api/v3`; by default `serve()` rejects non-loopback
+  hosts, and changing that security boundary requires a separately reviewed
+  exception.
 - `RunManager` owns spawned continuous-job workers with concurrency,
   resident-memory, checkpoint-disk, cancellation, shutdown, and lifecycle
   controls.

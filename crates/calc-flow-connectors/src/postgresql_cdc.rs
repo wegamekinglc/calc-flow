@@ -2065,6 +2065,122 @@ fn parse_timestamptz(value: &str) -> Result<i64> {
 mod tests {
     use super::*;
 
+    fn cdc_config() -> PostgresSourceConfig {
+        PostgresSourceConfig::from_options(&BTreeMap::from([
+            ("table".into(), serde_json::json!("orders")),
+            ("mode".into(), serde_json::json!("logical_cdc")),
+            ("slot".into(), serde_json::json!("orders_slot")),
+            (
+                "publication".into(),
+                serde_json::json!("orders_publication"),
+            ),
+            ("slot_policy".into(), serde_json::json!("require_existing")),
+            (
+                "columns".into(),
+                serde_json::json!([
+                    {"name": "id", "data_type": "int64", "nullable": false},
+                    {"name": "label", "data_type": "string", "nullable": false}
+                ]),
+            ),
+        ]))
+        .unwrap()
+    }
+
+    // This short constructor is reported as the rest of the nested test module
+    // by lizard's Rust parser; keep the false-positive suppression local.
+    // #lizard forgives
+    fn relation_fixture() -> Relation {
+        Relation {
+            id: 42,
+            namespace: "public".into(),
+            name: "orders".into(),
+            replica_identity: b'f',
+            columns: vec![
+                RelationColumn {
+                    name: "id".into(),
+                    key: true,
+                    pg_type: PgType::INT8,
+                },
+                RelationColumn {
+                    name: "label".into(),
+                    key: false,
+                    pg_type: PgType::TEXT,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn cdc_text_values_cover_the_reviewed_postgresql_matrix() {
+        let values: [(PgType, &[u8]); 15] = [
+            (PgType::BOOL, b"t"),
+            (PgType::INT2, b"-2"),
+            (PgType::INT4, b"-3"),
+            (PgType::INT8, b"-4"),
+            (PgType::FLOAT4, b"1.25"),
+            (PgType::FLOAT8, b"2.5"),
+            (PgType::TEXT, b"text"),
+            (PgType::NUMERIC, b"12.34"),
+            (PgType::JSONB, b"{\"ok\":true}"),
+            (PgType::BYTEA, b"\\x00ff"),
+            (PgType::DATE, b"2026-08-20"),
+            (PgType::TIMESTAMP, b"2026-08-20 12:34:56.123"),
+            (PgType::TIMESTAMPTZ, b"2026-08-20 12:34:56+00"),
+            (PgType::UUID, b"12345678-1234-5678-1234-567812345678"),
+            (PgType::VARCHAR, b"varchar"),
+        ];
+        for (pg_type, value) in values {
+            let column = RelationColumn {
+                name: "value".into(),
+                key: false,
+                pg_type,
+            };
+            assert_eq!(cdc_column_array(&column, &[Some(value)]).unwrap().len(), 1);
+            assert_eq!(cdc_column_array(&column, &[None]).unwrap().null_count(), 1);
+        }
+
+        let boolean = RelationColumn {
+            name: "flag".into(),
+            key: false,
+            pg_type: PgType::BOOL,
+        };
+        assert!(cdc_column_array(&boolean, &[Some(b"maybe")]).is_err());
+    }
+
+    #[test]
+    fn decoder_rejects_truncation_unknown_tags_and_trailing_bytes() {
+        assert!(Decoder::new(&[]).byte().is_err());
+        assert!(Decoder::new(b"unterminated").string().is_err());
+
+        let mut binary = Decoder::new(&[0, 1, b'b']);
+        assert!(binary.tuple(1).is_err());
+        let mut unknown = Decoder::new(&[0, 1, b'x']);
+        assert!(unknown.tuple(1).is_err());
+
+        let mut trailing = Decoder::new(&[1, 2]);
+        assert_eq!(trailing.byte().unwrap(), 1);
+        assert!(trailing.finish().is_err());
+    }
+
+    #[test]
+    fn unchanged_tuple_values_require_a_complete_previous_row() {
+        let tuple = vec![TupleValue::Unchanged, TupleValue::Null];
+        assert!(resolve_tuple(&tuple, None).is_err());
+        assert_eq!(
+            resolve_tuple(&tuple, Some(&[Some(b"old".to_vec()), None])).unwrap(),
+            vec![Some(b"old".to_vec()), None]
+        );
+    }
+
+    #[test]
+    fn frozen_schema_detects_relation_drift() {
+        let config = cdc_config();
+        let mut relation = relation_fixture();
+        validate_relation_schema(&config, &relation).unwrap();
+        relation.columns[1].name = "renamed".into();
+        assert!(validate_relation_schema(&config, &relation).is_err());
+    }
+
     #[test]
     // This is a single wire-format acceptance scenario. Its sequential fixture
     // construction is intentionally kept together for protocol readability.
@@ -2175,24 +2291,7 @@ mod tests {
         ]))
         .unwrap();
         let mut source = PostgresCdcSource::new(config, "unused".into()).unwrap();
-        let relation = Arc::new(Relation {
-            id: 42,
-            namespace: "public".into(),
-            name: "orders".into(),
-            replica_identity: b'f',
-            columns: vec![
-                RelationColumn {
-                    name: "id".into(),
-                    key: true,
-                    pg_type: PgType::INT8,
-                },
-                RelationColumn {
-                    name: "label".into(),
-                    key: false,
-                    pg_type: PgType::TEXT,
-                },
-            ],
-        });
+        let relation = Arc::new(relation_fixture());
         source.begin_transaction(Lsn::from_u64(9), 7, 1).unwrap();
         assert!(!source.checkpoint_gate.ready.load(Ordering::Acquire));
         for id in 1..=5 {

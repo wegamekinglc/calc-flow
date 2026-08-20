@@ -354,6 +354,12 @@ M6 才发现：
   且计划明确要求容器测试不混入普通单测。必须在 M0 决定是把
   `calc-flow-connectors` 排除在 workspace 覆盖门之外并给它单独的门槛，还是把容器
   测试纳入覆盖率采集。不做决定就会在 M6 撞上无法通过的门。
+  **最终选择（2026-08-20）**：不排除 connector 源码；由
+  `scripts/run_rust_coverage.py` 通过 `cargo llvm-cov show-env --sh` 建立同一插桩环境，
+  清理旧 profile 后依次用普通 `cargo test` 采集 workspace 与 Kafka、PostgreSQL/CDC、
+  ClickHouse 容器测试，再用单次 `cargo llvm-cov report` 对合并结果执行不变的 90%
+  行覆盖门。服务环境不完整时 runner 在编译前失败；不能组合使用工具明确禁止的
+  `--no-clean --no-report`。
 - **版本与发布**：release invariant 要求各包版本同步。`calc-flow-connectors` 的
   版本策略、是否随核心 crate 发布、以及 crate 打包内容都要一并写入 M7.4。
 
@@ -1999,9 +2005,9 @@ cancellation stress 保持通过。
   覆盖启用全部 connector feature 的配置。
 - [ ] 审查 `rdkafka`、PostgreSQL、ClickHouse、HTTP、WebSocket、Avro、compression 的
   license/platform build。
-- [ ] 按 M6.1 的决定核对 workspace 覆盖率门：确认 `calc-flow-connectors` 是被排除
-  并单独设门，还是已把容器测试纳入采集，且 `--fail-under-lines 90` 在最终配置下
-  真实通过。
+- [x] 按 M6.1 的决定核对 workspace 覆盖率门：`calc-flow-connectors` 不排除，容器
+  测试由 `scripts/run_rust_coverage.py` 纳入同一采集流程，且最终合并报告继续执行
+  `--fail-under-lines 90`。
 - [ ] checkpoint/state cleanup 不遍历 symlink 或宽泛路径。
 - [ ] fuzz/property test project、checkpoint、format、state metadata decoder。
 
