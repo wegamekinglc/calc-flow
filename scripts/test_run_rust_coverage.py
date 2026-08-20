@@ -6,13 +6,16 @@ from unittest.mock import patch
 
 from scripts.run_rust_coverage import (
     CLEAN_COMMAND,
+    NATIVE_LIBRARY,
     OUTPUT_PATH,
+    REPORT_IGNORE_ARGUMENTS,
     ROOT,
     SHOW_ENV_COMMAND,
     coverage_commands,
     instrumented_environment,
     require_connector_environment,
     run,
+    run_python_suite,
 )
 
 
@@ -33,17 +36,18 @@ class RustCoverageRunnerTests(unittest.TestCase):
         self.assertEqual(
             commands[0], ("cargo", "test", "--workspace", "--all-features")
         )
-        self.assertEqual(commands[1], ("uv", "sync", "--extra", "dev"))
+        self.assertEqual(
+            commands[1],
+            ("uv", "sync", "--extra", "dev", "--no-install-project"),
+        )
         self.assertEqual(
             commands[2],
             (
-                "uv",
-                "run",
-                "pytest",
-                "python/tests",
-                "-q",
+                "cargo",
+                "build",
                 "-p",
-                "no:benchmark",
+                "calc-flow-python",
+                "--all-features",
             ),
         )
         self.assertEqual(
@@ -68,6 +72,7 @@ class RustCoverageRunnerTests(unittest.TestCase):
         for command in (export, enforce):
             self.assertNotIn("--all-features", command)
             self.assertNotIn("--workspace", command)
+            self.assertTrue(set(REPORT_IGNORE_ARGUMENTS).issubset(command))
         self.assertNotIn("--fail-under-lines", export)
         self.assertEqual(export[-1], str(OUTPUT_PATH))
         self.assertEqual(enforce[-2:], ("--fail-under-lines", "90"))
@@ -115,8 +120,11 @@ class RustCoverageRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "omitted required exports"):
             instrumented_environment(base)
 
+    @patch("scripts.run_rust_coverage.run_python_suite")
     @patch("scripts.run_rust_coverage.subprocess.run")
-    def test_runner_executes_the_exact_plan_in_the_repository(self, execute) -> None:
+    def test_runner_executes_the_exact_plan_in_the_repository(
+        self, execute, python_suite
+    ) -> None:
         environment = connector_environment()
         execute.return_value = SimpleNamespace(
             stdout=(
@@ -145,7 +153,6 @@ class RustCoverageRunnerTests(unittest.TestCase):
             "LLVM_PROFILE_FILE": "/repo-%p.profraw",
             "CARGO_LLVM_COV": "1",
             "CARGO_LLVM_COV_TARGET_DIR": "/repo/target",
-            "JAX_PLATFORMS": "cpu",
         }
         self.assertEqual(execute.call_args_list[1].args, (CLEAN_COMMAND,))
         self.assertEqual(
@@ -161,6 +168,46 @@ class RustCoverageRunnerTests(unittest.TestCase):
             self.assertEqual(
                 call.kwargs, {"cwd": ROOT, "env": instrumented, "check": True}
             )
+        python_suite.assert_called_once_with(instrumented)
+
+    @patch("scripts.run_rust_coverage.subprocess.run")
+    def test_python_suite_loads_the_unstripped_debug_extension(self, execute) -> None:
+        environment = connector_environment()
+
+        with (
+            patch("scripts.run_rust_coverage.Path.is_file", return_value=True),
+            patch("scripts.run_rust_coverage.shutil.copytree") as copytree,
+            patch("scripts.run_rust_coverage.shutil.copy2") as copy2,
+            patch("scripts.run_rust_coverage.tempfile.TemporaryDirectory") as temporary,
+        ):
+            temporary.return_value.__enter__.return_value = str(
+                ROOT / "target" / "python-cov"
+            )
+            run_python_suite(environment)
+
+        package = ROOT / "python" / "calc_flow"
+        staged = ROOT / "target" / "python-cov" / "calc_flow"
+        copytree.assert_called_once()
+        self.assertEqual(copytree.call_args.args, (package, staged))
+        copy2.assert_called_once_with(NATIVE_LIBRARY, staged / "_native.abi3.so")
+        execute.assert_called_once()
+        self.assertEqual(
+            execute.call_args.args[0],
+            (
+                "uv",
+                "run",
+                "--no-sync",
+                "pytest",
+                "python/tests",
+                "-q",
+                "-p",
+                "no:benchmark",
+            ),
+        )
+        self.assertEqual(
+            execute.call_args.kwargs["env"]["PYTHONPATH"],
+            str(ROOT / "target" / "python-cov"),
+        )
 
 
 if __name__ == "__main__":

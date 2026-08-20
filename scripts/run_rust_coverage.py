@@ -1,23 +1,40 @@
-"""Run the workspace Rust coverage gate with service-backed connectors.
+"""Run the production Rust coverage gate with service-backed connectors.
 
-The connector implementations and Rust/PyO3 binding are part of the workspace
-coverage denominator, while their public behavior spans Python and opt-in
-container tests.  This runner keeps one llvm-cov profile set across those
-surfaces, then enforces the unchanged 90 percent line floor on the combined
-data.
+The connector implementations and Rust/PyO3 binding stay in the coverage
+denominator. Their public behavior spans Python and opt-in container tests, so
+this runner keeps one llvm-cov profile set across those surfaces. The dedicated
+streaming soak test module is test harness rather than production source and is
+excluded from the unchanged 90 percent production-line floor.
 """
 
 from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import subprocess  # nosec B404 -- fixed, module-owned cargo commands only
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_PATH = ROOT / "rust-lcov.info"
+NATIVE_LIBRARY = ROOT / "target" / "debug" / "libcalc_flow_python.so"
 SHOW_ENV_COMMAND = ("cargo", "llvm-cov", "show-env", "--sh")
 CLEAN_COMMAND = ("cargo", "llvm-cov", "clean", "--workspace")
+REPORT_IGNORE_ARGUMENTS = (
+    "--ignore-filename-regex",
+    r"/runtime/streaming/soak\.rs$",
+)
+PYTHON_TEST_COMMAND = (
+    "uv",
+    "run",
+    "--no-sync",
+    "pytest",
+    "python/tests",
+    "-q",
+    "-p",
+    "no:benchmark",
+)
 
 
 def coverage_commands() -> tuple[tuple[str, ...], ...]:
@@ -31,15 +48,13 @@ def coverage_commands() -> tuple[tuple[str, ...], ...]:
     )
     return (
         ("cargo", "test", "--workspace", "--all-features"),
-        ("uv", "sync", "--extra", "dev"),
+        ("uv", "sync", "--extra", "dev", "--no-install-project"),
         (
-            "uv",
-            "run",
-            "pytest",
-            "python/tests",
-            "-q",
+            "cargo",
+            "build",
             "-p",
-            "no:benchmark",
+            "calc-flow-python",
+            "--all-features",
         ),
         (
             *connector,
@@ -71,12 +86,46 @@ def coverage_commands() -> tuple[tuple[str, ...], ...]:
             "cargo",
             "llvm-cov",
             "report",
+            *REPORT_IGNORE_ARGUMENTS,
             "--lcov",
             "--output-path",
             str(OUTPUT_PATH),
         ),
-        ("cargo", "llvm-cov", "report", "--fail-under-lines", "90"),
+        (
+            "cargo",
+            "llvm-cov",
+            "report",
+            *REPORT_IGNORE_ARGUMENTS,
+            "--fail-under-lines",
+            "90",
+        ),
     )
+
+
+def run_python_suite(environment: dict[str, str]) -> None:
+    """Run Python tests against the unstripped, instrumented debug extension."""
+    if not NATIVE_LIBRARY.is_file():
+        raise SystemExit(f"instrumented Python extension is missing: {NATIVE_LIBRARY}")
+    target = ROOT / "target"
+    with tempfile.TemporaryDirectory(prefix="python-rust-cov-", dir=target) as root:
+        staged = Path(root) / "calc_flow"
+        shutil.copytree(
+            ROOT / "python" / "calc_flow",
+            staged,
+            ignore=shutil.ignore_patterns("_native*.so", "__pycache__"),
+        )
+        shutil.copy2(NATIVE_LIBRARY, staged / "_native.abi3.so")
+        python_environment = dict(environment)
+        inherited = python_environment.get("PYTHONPATH")
+        python_environment["PYTHONPATH"] = (
+            f"{root}{os.pathsep}{inherited}" if inherited else root
+        )
+        subprocess.run(  # nosec B603  # nosemgrep
+            PYTHON_TEST_COMMAND,
+            cwd=ROOT,
+            env=python_environment,
+            check=True,
+        )
 
 
 def instrumented_environment(environment: dict[str, str]) -> dict[str, str]:
@@ -128,16 +177,17 @@ def run(environment: dict[str, str]) -> None:
     """Execute the combined coverage plan and propagate the first failure."""
     require_connector_environment(environment)
     environment = instrumented_environment(environment)
-    environment.setdefault("JAX_PLATFORMS", "cpu")
     subprocess.run(  # nosec B603  # nosemgrep
         CLEAN_COMMAND, cwd=ROOT, env=environment, check=True
     )
-    for command in coverage_commands():
+    for index, command in enumerate(coverage_commands()):
         # The tuple comes exclusively from coverage_commands and shell
         # expansion is disabled.
         subprocess.run(  # nosec B603  # nosemgrep
             command, cwd=ROOT, env=environment, check=True
         )
+        if index == 2:
+            run_python_suite(environment)
 
 
 def main() -> None:

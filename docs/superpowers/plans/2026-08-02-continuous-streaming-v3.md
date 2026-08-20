@@ -356,15 +356,18 @@ M6 才发现：
   测试纳入覆盖率采集。不做决定就会在 M6 撞上无法通过的门。
   **最终选择（2026-08-20）**：不排除 connector 源码；由
   `scripts/run_rust_coverage.py` 通过 `cargo llvm-cov show-env --sh` 建立同一插桩环境，
-  清理旧 profile 后依次用普通 `cargo test` 采集 workspace、用相同插桩环境运行
-  Python adapter suite，再采集 Kafka、PostgreSQL/CDC、ClickHouse 容器测试；随后从
-  同一 profile 集先导出 LCOV、再用文本
+  清理旧 profile 后依次用普通 `cargo test` 采集 workspace、在同一 debug/all-features
+  Cargo profile 显式构建未 strip 的 PyO3 cdylib 并用临时 `target/` 包运行 Python
+  adapter suite，再采集 Kafka、PostgreSQL/CDC、ClickHouse 容器测试；随后从同一
+  profile 集先导出 LCOV、再用文本
   `cargo llvm-cov report` 对合并结果执行不变的 90% 行覆盖门，使失败日志保留可操作
   的逐文件与总覆盖率。服务环境不完整时 runner 在编译前失败；不能组合使用工具明确
   禁止的 `--no-clean --no-report`。`--workspace --all-features` 只用于插桩 build/test；
   `show-env` 生效后 report-only 命令不再重复传入这些构建选择参数，因为 profile
   已经固定了实际 workspace 和 feature 集合，且 `cargo-llvm-cov` 在该上下文中会
-  拒绝这些参数。
+  拒绝这些参数。报告只排除 `#[cfg(test)]` 的专用 `runtime/streaming/soak.rs` 测试
+  夹具；core、connector 与 PyO3 生产源码均保留在 90% 分母内，长时 soak 仍属于
+  release gate，不混入普通 coverage CI。
 - **版本与发布**：release invariant 要求各包版本同步。`calc-flow-connectors` 的
   版本策略、是否随核心 crate 发布、以及 crate 打包内容都要一并写入 M7.4。
 
@@ -2010,9 +2013,10 @@ cancellation stress 保持通过。
   覆盖启用全部 connector feature 的配置。
 - [ ] 审查 `rdkafka`、PostgreSQL、ClickHouse、HTTP、WebSocket、Avro、compression 的
   license/platform build。
-- [x] 按 M6.1 的决定核对 workspace 覆盖率门：`calc-flow-connectors` 不排除，容器
-  测试由 `scripts/run_rust_coverage.py` 纳入同一采集流程，且最终合并报告继续执行
-  `--fail-under-lines 90`。
+- [x] 按 M6.1 的决定核对 production workspace 覆盖率门：`calc-flow-connectors` 与
+  PyO3 源码不排除，容器测试和 Python adapter suite 由
+  `scripts/run_rust_coverage.py` 纳入同一采集流程，仅排除 `#[cfg(test)]` 的 soak
+  夹具，最终合并报告继续执行 `--fail-under-lines 90`。
 - [ ] checkpoint/state cleanup 不遍历 symlink 或宽泛路径。
 - [ ] fuzz/property test project、checkpoint、format、state metadata decoder。
 

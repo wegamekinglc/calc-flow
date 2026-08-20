@@ -120,11 +120,19 @@ Status: **implemented; combined numeric gate must pass on the final tree**
   expose actionable per-file and total coverage without recompiling.
 - The resulting report measured 88.67% and exposed the remaining collection
   gap: the workspace denominator includes the Rust/PyO3 binding, while the
-  combined runner had executed only its inline Rust tests. The runner now
-  builds the editable package and executes the existing Python adapter suite in
-  the same instrumented environment before the connector container tests. This
-  covers the binding through its public Python behavior instead of excluding
-  production files or reducing the floor.
+  combined runner had executed only its inline Rust tests. An initial editable
+  package experiment passed all 451 Python tests but left every PyO3 file's
+  coverage unchanged: the configured stripped Maturin build did not provide a
+  reportable coverage map for the extension used by Python. That ineffective
+  15-minute build is not retained. The runner now syncs dependencies without
+  installing the project, builds the PyO3 cdylib explicitly in the same
+  unstripped debug/all-features Cargo profile, stages it only under `target/`,
+  and executes the existing Python suite against that artifact before the
+  connector tests.
+- The report excludes only `runtime/streaming/soak.rs`, which is a dedicated
+  `#[cfg(test)]` harness module rather than shipped code. All core, connector,
+  and PyO3 production sources remain in the denominator, and the production
+  line floor remains 90%; no long soak is added to ordinary coverage CI.
 - Linux Rust-core CI owns healthy Kafka, logical-replication PostgreSQL, and
   ClickHouse services for that runner. The independent container jobs remain
   as focused diagnostics; fake/local-server and expanded offline protocol tests
