@@ -415,9 +415,13 @@ Project v3 selects `runtime.mode` explicitly. Stream projects carry exact
 connector and format identities, non-secret options, named secret references,
 watermark policy, managed state settings, and per-output best-effort,
 at-least-once, or exactly-once delivery requests.
-`PipelineBuilder.compile_stream()` resolves those references through the
-runtime's connector registry and secret resolver; project JSON never embeds a
-connector object or credential value.
+`compile_stream_project(project, runtime=...)` resolves those references
+through the runtime's connector registry and secret resolver. Its returned plan
+owns deferred connector bindings and project runtime/state settings, so launch
+uses `StreamingRunner(plan)` without separate Python connector objects.
+`PipelineBuilder.compile_stream()` is the graph-only path for
+application-owned `SourceBinding` and `SinkBinding` values. Project JSON never
+embeds a connector object or credential value.
 
 `FileProjectStore` has async `create`, `put`, `get`, `list`, and `delete`
 methods and explicit `*_blocking` variants. Safe JSON/YAML import/export helpers
@@ -468,9 +472,12 @@ and cleanup still completes.
 
 `Cursor` payloads, capability/config mappings, pre-commit values, recovery
 values, status, and outcomes cross the boundary as defensive copies. Managed
-checkpoint recovery reopens a replayable source with a cursor bound to the
-exact source-map key. See
-[`examples/04_continuous_runtime.py`](../examples/04_continuous_runtime.py).
+checkpoint recovery reopens a live replayable source with a cursor bound to the
+exact source-map key. A terminal manifest instead returns completed without
+reopening ended sources or duplicating final output. See
+[`04_continuous_runtime.py`](../examples/04_continuous_runtime.py),
+[`08_streaming_recovery.py`](../examples/08_streaming_recovery.py), and the
+[continuous streaming guide](streaming-guide.md).
 
 The A6 cutover has no compatibility aliases: `MicroBatchRunner`,
 `LegacyStreamingRunner`, the batch-plan `StreamingRunner` overload, and
@@ -492,4 +499,6 @@ paths, callback representations, or raw source chains.
 ## More examples
 
 Every file under [`examples/`](../examples/README.md) is executable against the
-installed 3.0 wheel. See the linked inventory for the commands.
+installed 3.0 wheel. See the [cross-language inventory](examples.md) or run
+all user examples with
+`JAX_PLATFORMS=cpu uv run python scripts/run_examples.py`.

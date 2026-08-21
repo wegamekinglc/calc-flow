@@ -5,6 +5,20 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-22: Add a maintained cross-language example runner, Python terminal
+  checkpoint recovery and Rust event-time window examples, a complete
+  executable-example inventory, a continuous streaming usage guide, and a
+  component-level design and architecture guide. Reconcile current docs with
+  the public project-v3, connector, recovery, and Studio `/api/v3/jobs`
+  surfaces.
+
+- 2026-08-21: Close every P0 finding from the 2026-08-19 audit. The canonical
+  Rust/PyO3/Python project contract is v3, registered connectors own their
+  deferred source/sink lifecycles, PostgreSQL CDC and delivery preflight are
+  complete, Studio jobs own the native continuous runtime, and the 3.0 release
+  and verification gates are restored. This supersedes the temporary M6/M7
+  withdrawal below.
+
 - 2026-08-19: Withdraw M6/M7 acceptance pending the
   [current-main audit](docs/superpowers/audits/2026-08-19-continuous-streaming-v3-current-main.md).
   The 2026-08-18 entries record merged, release-labelled slices, not completed

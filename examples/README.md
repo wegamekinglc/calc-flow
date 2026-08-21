@@ -23,6 +23,13 @@ uv run python examples/04_continuous_runtime.py
 uv run python examples/05_async_execution.py
 JAX_PLATFORMS=cpu uv run python examples/06_numpy_array.py
 JAX_PLATFORMS=cpu uv run python examples/07_array_and_dataframe.py
+uv run python examples/08_streaming_recovery.py
+```
+
+Or run the entire Python and Rust user-example inventory:
+
+```bash
+JAX_PLATFORMS=cpu uv run python scripts/run_examples.py
 ```
 
 The files cover:
@@ -43,6 +50,9 @@ The files cover:
   array expression over an immutable array batch.
 - `07_array_and_dataframe.py` — explicit `pyarrow.Table`-to-array matrix
   multiplication using NumPy and, when installed, JAX.
+- `08_streaming_recovery.py` — a second process-lifecycle run over the same
+  managed checkpoint root, proving terminal recovery does not reopen an ended
+  source or duplicate sink output.
 
 `07_array_and_dataframe.py` selects ordered numeric `pyarrow.Table` columns
 and multiplies their dense matrix by an array weight matrix. After input
@@ -62,4 +72,10 @@ The Rust crate ships parallel examples under
 expression (`01_datafusion_pipeline.py` ↔ `expression_pipeline.rs`) and SQL
 join (`02_sql_join.py` ↔ `sql_join.rs`) examples share their datasets and
 expressions. `04_continuous_runtime.py` and `continuous_runtime.rs` demonstrate
-the same source-driven lifecycle on the Python and Rust surfaces.
+the same source-driven lifecycle on the Python and Rust surfaces. Rust's
+`windowed_streaming.rs` adds event-time aggregation; Python's
+`08_streaming_recovery.py` focuses on durable terminal recovery.
+
+See the [executable example guide](../docs/examples.md) for the cross-language
+matrix and the [continuous streaming guide](../docs/streaming-guide.md) for the
+runtime contracts behind these programs.

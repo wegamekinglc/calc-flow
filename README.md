@@ -44,9 +44,7 @@ from calc_flow import Batch, ExecutionOptions, PipelineBuilder
 
 batch = Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))
 plan = (
-    PipelineBuilder("totals")
-    .expression("calculate", "total = a + b")
-    .compile_batch()
+    PipelineBuilder("totals").expression("calculate", "total = a + b").compile_batch()
 )
 result = plan.execute(
     {"input": batch},
@@ -69,7 +67,7 @@ means empty settings.
 
 See [the Python API guide](docs/python-api.md) and the executable
 [examples](examples/README.md) for SQL, Python scalar UDFs, continuous
-execution, asyncio, and NumPy.
+execution and recovery, asyncio, and NumPy/JAX.
 
 ## Rust quickstart
 
@@ -139,6 +137,7 @@ Run the checked examples:
 cargo run -p calc-flow --example expression_pipeline
 cargo run -p calc-flow --example sql_join
 cargo run -p calc-flow --example continuous_runtime
+cargo run -p calc-flow --example windowed_streaming
 ```
 
 See [the Rust API guide](docs/rust-api.md) for paired source examples and links
@@ -148,27 +147,29 @@ to the public types, or the [Rust examples index](crates/calc-flow/examples/READ
 
 ```text
 crates/calc-flow  (Rust core: Batch, graph compiler, DataFusion, runners, stores)
-  └─ crates/calc-flow-python  (PyO3 _native binding)
+  ├─ crates/calc-flow-connectors  (trusted transport implementations)
+  └─ crates/calc-flow-python  (PyO3 _native binding + registered connectors)
        └─ python/calc_flow  (pure-Python public API + functional adapters)
             └─ web-ui/backend  (calc-flow-studio FastAPI, /api/v3, loopback only)
                   └─ web-ui/src  (React + TypeScript + Vite + React Flow studio, via REST)
 ```
 
-The native dependency edge is
+The native dependency edges are `crates/calc-flow ← calc-flow-connectors` and
 `crates/calc-flow ← crates/calc-flow-python ← python/calc_flow ← web-ui/backend`.
 The frontend talks to the backend over the `/api/v3` REST contract only; the
 Python package is not a second engine.
 
-| Path                       | Purpose                                                                                                                                  |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `crates/calc-flow/`        | Native core: batches, ports/operators, graph compiler, DataFusion runtime, UDF/provider registries, runners, checkpoints, project stores |
-| `crates/calc-flow-python/` | PyO3 binding exposing the core as `calc_flow._native`                                                                                    |
-| `python/calc_flow/`        | Pure-Python public API, functional `PipelineBuilder`, runner/store adapters, NumPy/JAX provider registration, exception hierarchy        |
-| `web-ui/backend/`          | `calc-flow-studio` FastAPI service under `/api/v3`, loopback-bound, spawned bounded continuous-job workers                               |
-| `web-ui/src/`              | React + TypeScript + Vite + React Flow studio; API types generated from `web-ui/openapi.json`                                            |
-| `schemas/`                 | `project-v3.schema.json`, the canonical generated project contract                                                                       |
-| `examples/`                | Executable v3 Python examples                                                                                                            |
-| `benchmarks/`              | pytest-benchmark harness (informational)                                                                                                 |
+| Path                           | Purpose                                                                                                                                  |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/calc-flow/`            | Native core: batches, ports/operators, graph compiler, DataFusion runtime, UDF/provider registries, runners, checkpoints, project stores |
+| `crates/calc-flow-connectors/` | Trusted file, Kafka, PostgreSQL, ClickHouse, HTTP, and WebSocket connectors behind feature gates                                         |
+| `crates/calc-flow-python/`     | PyO3 binding exposing the core as `calc_flow._native`                                                                                    |
+| `python/calc_flow/`            | Pure-Python public API, functional `PipelineBuilder`, runner/store adapters, NumPy/JAX provider registration, exception hierarchy        |
+| `web-ui/backend/`              | `calc-flow-studio` FastAPI service under `/api/v3`, loopback-bound, spawned bounded continuous-job workers                               |
+| `web-ui/src/`                  | React + TypeScript + Vite + React Flow studio; API types generated from `web-ui/openapi.json`                                            |
+| `schemas/`                     | `project-v3.schema.json`, the canonical generated project contract                                                                       |
+| `examples/`                    | Executable v3 Python examples                                                                                                            |
+| `benchmarks/`                  | pytest-benchmark harness (informational)                                                                                                 |
 
 ## Data and execution model
 
@@ -198,7 +199,9 @@ Python package is not a second engine.
   document store are removed without aliases.
 
 The canonical architecture is described in
-[docs/introduction.md](docs/introduction.md).
+[docs/introduction.md](docs/introduction.md). The complete component and
+lifecycle design is in [docs/design.md](docs/design.md), and the practical
+continuous tutorial is [docs/streaming-guide.md](docs/streaming-guide.md).
 
 ## Trusted extensions
 
@@ -279,6 +282,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 
 uv run maturin develop
 JAX_PLATFORMS=cpu uv run pytest python/tests -q
+JAX_PLATFORMS=cpu uv run python scripts/run_examples.py
 uv run ruff check .
 uv run ruff format --check .
 
@@ -303,7 +307,11 @@ repository commands and constraints.
 
 - **[Documentation index](docs/README.md)** — reading order for all published docs
 - **[Introduction](docs/introduction.md)** — architecture and data flow
+- **[Design and architecture](docs/design.md)** — component ownership and end-to-end design
 - **[getting started](docs/getting-started.md)** — installation and smoke test
+- **[Executable examples](docs/examples.md)** — verified example matrix and runner
+- **[Continuous streaming](docs/streaming-guide.md)** — source-to-recovery tutorial
+- **[Connectors](docs/connectors.md)** — transport configuration and guarantees
 - **[Python API](docs/python-api.md)** — Python surface and examples
 - **[Rust API](docs/rust-api.md)** — native surface and examples
 - **[API reference](docs/api-reference.md)** — supported surfaces at a glance

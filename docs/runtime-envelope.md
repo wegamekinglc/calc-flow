@@ -42,13 +42,13 @@ a graph, plan, or runner boundary.
 `StreamMessage` is the single ordered message carried by one stream edge
 (S1.1). Its representation is private; the variants are:
 
-| Variant       | Payload     | Contract meaning                                                      |
-| ------------- | ----------- | --------------------------------------------------------------------- |
-| `Data`        | `Batch`     | One immutable data batch; the only variant public callers construct.  |
-| `Watermark`   | `EventTime` | An event-time progress estimate (S5).                                 |
-| `Barrier`     | `Epoch`     | A checkpoint barrier carrying its epoch (S7).                         |
-| `Idle`        | —           | Marks its ingress idle; excluded from watermark progress only (S1.4). |
-| `EndOfInput`  | —           | Terminates its ingress permanently (S1.6).                            |
+| Variant      | Payload     | Contract meaning                                                      |
+| ------------ | ----------- | --------------------------------------------------------------------- |
+| `Data`       | `Batch`     | One immutable data batch; the only variant public callers construct.  |
+| `Watermark`  | `EventTime` | An event-time progress estimate (S5).                                 |
+| `Barrier`    | `Epoch`     | A checkpoint barrier carrying its epoch (S7).                         |
+| `Idle`       | —           | Marks its ingress idle; excluded from watermark progress only (S1.4). |
+| `EndOfInput` | —           | Terminates its ingress permanently (S1.6).                            |
 
 The data variant wraps one immutable `Batch`. Fan-out clones share the
 payload: cloning a message clones the handle, not the Arrow buffers (S3).
@@ -68,14 +68,14 @@ started without checkpoint wiring still fails closed if it receives a barrier.
 
 Inspection goes through the message kind and typed accessors:
 
-| Accessor            | Returns             | Meaning                                                  |
-| ------------------- | ------------------- | -------------------------------------------------------- |
-| `kind()`            | `StreamMessageKind` | The message kind, for inspection and routing.            |
-| `as_data()`         | `Option<&Batch>`    | The data payload, when this is a data message.           |
-| `as_watermark()`    | `Option<EventTime>` | The watermark value, when this is a watermark message.   |
-| `as_barrier()`      | `Option<Epoch>`     | The barrier epoch, when this is a barrier message.       |
-| `is_idle()`         | `bool`              | Whether this message marks its ingress idle.             |
-| `is_end_of_input()` | `bool`              | Whether this message terminates its ingress.             |
+| Accessor            | Returns             | Meaning                                                |
+| ------------------- | ------------------- | ------------------------------------------------------ |
+| `kind()`            | `StreamMessageKind` | The message kind, for inspection and routing.          |
+| `as_data()`         | `Option<&Batch>`    | The data payload, when this is a data message.         |
+| `as_watermark()`    | `Option<EventTime>` | The watermark value, when this is a watermark message. |
+| `as_barrier()`      | `Option<Epoch>`     | The barrier epoch, when this is a barrier message.     |
+| `is_idle()`         | `bool`              | Whether this message marks its ingress idle.           |
+| `is_end_of_input()` | `bool`              | Whether this message terminates its ingress.           |
 
 The `Debug` implementation shows kinds and typed business values only. Row
 payloads, batch metadata, and attributes — which may carry secrets — never
@@ -709,16 +709,25 @@ hosts produce inconclusive performance evidence. These commands define the
 repository harness contracts; this document does not claim final candidate
 performance, soak, review, or CI evidence has run.
 
-## Outside the current public surface
+## Current public boundary
 
-The current tree does not provide these public surfaces:
+The crate-root Rust and Python surfaces expose the owning continuous lifecycle,
+and Studio projects it through persistent `/api/v3/jobs`, checkpoint,
+shutdown, cancel, status, and resume-safe SSE routes. The current public
+boundary still deliberately excludes:
 
-- **Control internals** — barrier construction, supervisors, coordinator
-  transactions, raw diagnostics, and reaper ownership remain crate-private.
-- **Studio execution** — Studio keeps its existing batch run and checkpoint
-  inspection routes; it does not add a continuous-job REST surface.
+- control-message construction and injection;
+- task supervisors, checkpoint coordinator transactions, raw diagnostics, and
+  reaper ownership;
+- cursor, sink pre-commit, secret, state-byte, and filesystem payloads in job
+  status or Studio responses;
+- a public-hosted or authenticated Studio mode.
 
-The reviewed design snapshot for this public boundary is recorded in the A6
+For supported application usage, read the
+[continuous streaming guide](streaming-guide.md). The
+[design and architecture guide](design.md) maps ownership across core, Python,
+connectors, and Studio. The A6
 [specification](../.codex/artifacts/specs/a6-public-continuous-runtime.md),
 [API note](../.codex/artifacts/api-notes/a6-public-continuous-runtime.md), and
-[critique](../.codex/artifacts/critiques/a6-public-continuous-runtime.md).
+[critique](../.codex/artifacts/critiques/a6-public-continuous-runtime.md) remain
+point-in-time engineering records rather than current user documentation.

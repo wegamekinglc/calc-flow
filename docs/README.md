@@ -10,15 +10,21 @@ below.
 
 ## Start here
 
+- **[Getting started](getting-started.md)** — published-package and
+  from-source installation, Studio startup, and an install smoke test
+- **[Executable examples](examples.md)** — complete Python/Rust inventory,
+  one-command runner, expected behavior, and choosing an example to copy
 - **[Introduction](introduction.md)** — architecture, data contract, graph
   compilation, table execution, optional array providers, and recovery
+- **[Design and architecture](design.md)** — component ownership, batch and
+  streaming data paths, checkpoint transactions, extension and security boundaries
+- **[Continuous streaming guide](streaming-guide.md)** — sources, cursors,
+  watermarks, windows, sinks, delivery, checkpoints, recovery, and operations
 - **[Stream message envelope](runtime-envelope.md)** — the v3 stream message
   contract: typed messages, event-time progress, windows, state manifests and
   backends, the operator emission boundary, and current delivery guarantees
 - **[Connectors and stream projects](connectors.md)** — exact connector
   identities, delivery limits, project fragments, windows, and recovery
-- **[Getting started](getting-started.md)** — published-package and
-  from-source installation, Studio startup, and an install smoke test
 - **[Python API guide](python-api.md)** — `PipelineBuilder`, batches, UDFs,
   async execution, NumPy/JAX, projects, and runners
 - **[Rust API guide](rust-api.md)** — native batches, operators, graph
@@ -69,8 +75,8 @@ surfaces and are preserved for audit; leave them untouched. The current
   current API or operational guidance.
 
 Immutable v1 semantic fixtures live under
-[`tests/fixtures/v1/`](../tests/fixtures/v1/) as v2 parity evidence; they are
-not a v2 runtime or package path.
+[`tests/fixtures/v1/`](../tests/fixtures/v1/) as historical parity evidence;
+they are not a v2 runtime or package path.
 
 ## Conventions
 
