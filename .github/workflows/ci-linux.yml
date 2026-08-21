@@ -36,11 +36,21 @@ jobs:
             | grep -qx 'install ok installed'; then
             exit 0
           fi
-          timeout 5m sudo apt-get \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=15 \
-            -o Acquire::https::Timeout=15 \
-            install --no-install-recommends -y libcurl4-openssl-dev
+          install_libcurl_headers() {
+            timeout 5m sudo apt-get \
+              -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=15 \
+              -o Acquire::https::Timeout=15 \
+              install --no-install-recommends -y libcurl4-openssl-dev
+          }
+          if ! install_libcurl_headers; then
+            timeout 2m sudo apt-get \
+              -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=15 \
+              -o Acquire::https::Timeout=15 \
+              update
+            install_libcurl_headers
+          fi
       - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
@@ -484,11 +494,21 @@ jobs:
             | grep -qx 'install ok installed'; then
             exit 0
           fi
-          timeout 5m sudo apt-get \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=15 \
-            -o Acquire::https::Timeout=15 \
-            install --no-install-recommends -y libcurl4-openssl-dev
+          install_libcurl_headers() {
+            timeout 5m sudo apt-get \
+              -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=15 \
+              -o Acquire::https::Timeout=15 \
+              install --no-install-recommends -y libcurl4-openssl-dev
+          }
+          if ! install_libcurl_headers; then
+            timeout 2m sudo apt-get \
+              -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=15 \
+              -o Acquire::https::Timeout=15 \
+              update
+            install_libcurl_headers
+          fi
       - name: Wait for Kafka and enable PostgreSQL logical replication
         env:
           POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
