@@ -14,6 +14,7 @@ from calc_flow import (
     Runtime,
     project_json_schema,
 )
+from calc_flow.config import _openapi_project_schema
 
 
 def _minimal_project() -> dict[str, object]:
@@ -36,6 +37,27 @@ def test_project_document_delegates_schema_and_rust_defaults() -> None:
     )
     assert document.root["description"] == ""
     assert document.root["runtime"]["options"]["timeout_seconds"] == 30
+
+
+def test_project_document_openapi_schema_rewrites_component_references() -> None:
+    schema = _openapi_project_schema(ProjectDocument.__name__)
+    references: list[str] = []
+    pending: list[object] = [schema]
+    while pending:
+        value = pending.pop()
+        if type(value) is dict:
+            reference = value.get("$ref")
+            if isinstance(reference, str):
+                references.append(reference)
+            pending.extend(value.values())
+        elif type(value) is list:
+            pending.extend(value)
+
+    assert references
+    assert all(
+        reference.startswith("#/components/schemas/ProjectDocument/$defs/")
+        for reference in references
+    )
 
 
 def test_project_document_converts_native_errors_to_validation_errors() -> None:

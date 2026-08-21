@@ -134,6 +134,13 @@ Status: **implemented; combined numeric gate must pass on the final tree**
   `#[cfg(test)]` harness module rather than shipped code. All core, connector,
   and PyO3 production sources remain in the denominator, and the production
   line floor remains 90%; no long soak is added to ordinary coverage CI.
+- Restoring the full final-head workflow exposed one additional external-status
+  defect after every GitHub Actions job passed: `Coveralls - python` reported
+  89.691% and failed the pull request because the Pydantic/OpenAPI component
+  reference rewrite had no core-suite coverage. A focused regression test now
+  verifies every nested project reference is rewritten below
+  `#/components/schemas/ProjectDocument/$defs/`; the complete 452-test Python
+  suite measures 90.56% locally against the final-head wheel artifact.
 - Linux Rust-core CI owns healthy Kafka, logical-replication PostgreSQL, and
   ClickHouse services for that runner. The independent container jobs remain
   as focused diagnostics; fake/local-server and expanded offline protocol tests
