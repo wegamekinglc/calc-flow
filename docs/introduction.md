@@ -11,6 +11,11 @@ The browser Studio is not part of the core wheel. The separately packaged
 job API and built React assets. The `calc-flow-connectors` crate owns
 connector implementations behind per-transport feature gates.
 
+For a component-by-component ownership map and lifecycle sequences, read the
+[design and architecture guide](design.md). For a practical source-to-recovery
+tutorial, read the [continuous streaming guide](streaming-guide.md). Every
+runnable program is indexed in the [example guide](examples.md).
+
 ## A first example
 
 The same calculation runs on both surfaces. A one-node expression pipeline named
@@ -26,9 +31,7 @@ from calc_flow import Batch, PipelineBuilder
 
 batch = Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))
 plan = (
-    PipelineBuilder("totals")
-    .expression("calculate", "total = a + b")
-    .compile_batch()
+    PipelineBuilder("totals").expression("calculate", "total = a + b").compile_batch()
 )
 result = plan.execute({"input": batch})
 
@@ -139,8 +142,8 @@ batch kind, required flag, and optional exact Arrow schema. Compilation checks:
 
 The Python `PipelineBuilder` is a functional projection of the same v3 project
 model. Its `expression`, `sql`, `external`, `table_matmul`, and `connect`
-methods return new builders. `compile()` serializes the strict project and
-asks the Rust `Runtime` to validate and compile it.
+methods return new builders. `compile_batch()` and `compile_stream()` serialize
+the strict graph project and ask the Rust `Runtime` to validate and compile it.
 
 Rust stream graphs can also contain `UnionOperator` and
 `WindowAggregateOperator`. A `WindowSpec` declares fixed UTC tumbling or
@@ -375,4 +378,4 @@ The historical [v1 API](v1-final-api.md) and
 [v0.2 migration guide](migration-v0.2.md) are references only. The frozen v1
 implementation is available at the `v1-python-final` tag, while
 [`tests/fixtures/v1/`](../tests/fixtures/v1/) preserves the semantic corpus
-used to prove v2 parity.
+as historical parity evidence.

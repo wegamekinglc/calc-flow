@@ -9,13 +9,13 @@ steps. There is no automatic migration.
 
 ### `format_version`
 
-| v2                                  | v3                                             |
-| ----------------------------------- | ---------------------------------------------- |
-| `format_version: 2`                 | `format_version: 3`                            |
-| No runtime block                    | `runtime.mode: batch\|stream`                  |
+| v2                                  | v3                                               |
+| ----------------------------------- | ------------------------------------------------ |
+| `format_version: 2`                 | `format_version: 3`                              |
+| No runtime block                    | `runtime.mode: batch\|stream`                     |
 | Inline `data_sources` with raw data | Connector-bound `sources` with secret references |
-| No sink binding                     | Connector-bound `sinks` with delivery request  |
-| No state config                     | `state.root` and `state.retention`              |
+| No sink binding                     | Connector-bound `sinks` with delivery request    |
+| No state config                     | `state.root` and `state.retention`               |
 
 ### v2 inline data sources → v3 connector bindings
 
@@ -64,24 +64,24 @@ values in options. v3 structurally rejects secret values:
 
 `/api/v2` is removed; `/api/v3` is the only REST surface.
 
-| v2 route                               | v3 route or replacement                         |
-| -------------------------------------- | ----------------------------------------------- |
-| `GET /api/v2/catalog`                  | `GET /api/v3/catalog`                           |
-| `GET /api/v2/capabilities`             | `GET /api/v3/capabilities`                      |
-| `GET /api/v2/schema/project`           | `GET /api/v3/schema/project`                    |
-| `GET/POST /api/v2/projects`            | `GET/POST /api/v3/projects`                     |
-| `GET/PUT/DELETE /api/v2/projects/{id}` | `GET/PUT/DELETE /api/v3/projects/{id}`          |
-| `POST /api/v2/projects/{id}/runs`      | Removed; batch execution remains a Python API   |
-| `GET /api/v2/runs/{id}`                | Removed                                         |
-| `GET /api/v2/runs/{id}/events`         | Removed                                         |
-| `DELETE /api/v2/runs/{id}`             | Removed                                         |
-| (new)                                  | `POST/GET /api/v3/jobs`                         |
-| (new)                                  | `GET /api/v3/jobs/{id}`                         |
-| (new)                                  | `POST /api/v3/jobs/{id}/checkpoint`             |
-| (new)                                  | `POST /api/v3/jobs/{id}/shutdown`               |
-| (new)                                  | `POST /api/v3/jobs/{id}/cancel`                 |
+| v2 route                               | v3 route or replacement                          |
+| -------------------------------------- | ------------------------------------------------ |
+| `GET /api/v2/catalog`                  | `GET /api/v3/catalog`                            |
+| `GET /api/v2/capabilities`             | `GET /api/v3/capabilities`                       |
+| `GET /api/v2/schema/project`           | `GET /api/v3/schema/project`                     |
+| `GET/POST /api/v2/projects`            | `GET/POST /api/v3/projects`                      |
+| `GET/PUT/DELETE /api/v2/projects/{id}` | `GET/PUT/DELETE /api/v3/projects/{id}`           |
+| `POST /api/v2/projects/{id}/runs`      | Removed; batch execution remains a Python API    |
+| `GET /api/v2/runs/{id}`                | Removed                                          |
+| `GET /api/v2/runs/{id}/events`         | Removed                                          |
+| `DELETE /api/v2/runs/{id}`             | Removed                                          |
+| (new)                                  | `POST/GET /api/v3/jobs`                          |
+| (new)                                  | `GET /api/v3/jobs/{id}`                          |
+| (new)                                  | `POST /api/v3/jobs/{id}/checkpoint`              |
+| (new)                                  | `POST /api/v3/jobs/{id}/shutdown`                |
+| (new)                                  | `POST /api/v3/jobs/{id}/cancel`                  |
 | (new)                                  | `GET /api/v3/jobs/{id}/events` (resume-safe SSE) |
-| (new)                                  | `GET /api/v3/resource-limits`                   |
+| (new)                                  | `GET /api/v3/resource-limits`                    |
 
 ### Resource limits
 
@@ -92,15 +92,15 @@ checkpoint/state disk usage, and the explicit user-stop lifecycle.
 
 ## Connector delivery guarantees
 
-| Connector                  | Delivery      | Replay                   | Transaction        |
-| -------------------------- | ------------- | ------------------------ | ------------------ |
-| file                       | at-least-once | replayable-exact         | pre-commit-commit  |
-| kafka                      | at-least-once | replayable-exact         | ledger-idempotent  |
-| postgresql snapshot        | best-effort   | unreplayable             | none               |
-| postgresql incremental/CDC | at-least-once | replayable-exact         | ledger-idempotent  |
-| clickhouse                 | at-least-once | replayable-exact         | retry-deduplicated |
-| http                       | best-effort   | unreplayable             | none               |
-| websocket                  | best-effort   | unreplayable             | none               |
+| Connector                  | Delivery      | Replay           | Transaction        |
+| -------------------------- | ------------- | ---------------- | ------------------ |
+| file                       | at-least-once | replayable-exact | pre-commit-commit  |
+| kafka                      | at-least-once | replayable-exact | ledger-idempotent  |
+| postgresql snapshot        | best-effort   | unreplayable     | none               |
+| postgresql incremental/CDC | at-least-once | replayable-exact | ledger-idempotent  |
+| clickhouse                 | at-least-once | replayable-exact | retry-deduplicated |
+| http                       | best-effort   | unreplayable     | none               |
+| websocket                  | best-effort   | unreplayable     | none               |
 
 HTTP conditional validators suppress an unchanged response, but they cannot
 seek an endpoint's historical representations and therefore never prove exact

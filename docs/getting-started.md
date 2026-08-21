@@ -291,9 +291,7 @@ from calc_flow import Batch, PipelineBuilder
 
 batch = Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))
 plan = (
-    PipelineBuilder("totals")
-    .expression("calculate", "total = a + b")
-    .compile_batch()
+    PipelineBuilder("totals").expression("calculate", "total = a + b").compile_batch()
 )
 result = plan.execute({"input": batch})
 print(result.outputs["output"].to_pyarrow()["total"].to_pylist())
@@ -368,3 +366,12 @@ instance.
 Inspect `.calc-flow-web/api.log` for backend failures and
 `.calc-flow-web/studio.log` for npm or Vite failures. The managed launcher
 cleans up a partial start and leaves both logs in place.
+
+## Continue learning
+
+- Run the complete [executable example inventory](examples.md).
+- Build a recoverable job with the [continuous streaming guide](streaming-guide.md).
+- Configure production transports with the [connector guide](connectors.md).
+- Understand component ownership in the [design and architecture guide](design.md).
+- Look up exact names in the [Python API](python-api.md),
+  [Rust API](rust-api.md), or [API reference](api-reference.md).

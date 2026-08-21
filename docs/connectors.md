@@ -12,18 +12,22 @@ The examples below are project fragments. The complete contract is
 running process is authoritative for available identities and options through
 its capability response.
 
+This guide describes transport configuration. Read the
+[continuous streaming guide](streaming-guide.md) for source/sink lifecycle,
+watermarks, job control, checkpoint transactions, and operational practice.
+
 ## Delivery boundaries
 
-| Connector and mode          | Replay                    | Sink completion                         | Maximum claim                         |
-| --------------------------- | ------------------------- | --------------------------------------- | ------------------------------------- |
-| File snapshot / Parquet     | Exact file and row cursor | Atomic epoch directory publication      | Exactly once on supported local FS    |
-| Kafka                       | Exact partition offsets   | Transactional target plus compact ledger | Exactly once after ledger preflight   |
-| PostgreSQL snapshot         | Unreplayable transaction  | N/A                                     | Best effort source                    |
-| PostgreSQL incremental/CDC  | Exact composite cursor/LSN | Same-transaction epoch ledger          | Exactly once with transactional sink  |
-| ClickHouse polling          | Exact bounded cursor      | Stable insert deduplication token       | At least once; retry deduplicated only |
-| HTTP polling                | Unreplayable              | N/A                                     | Best effort                           |
-| WebSocket `block`           | Unreplayable              | N/A                                     | Best effort                           |
-| WebSocket `drop_oldest`     | Lossy and observable      | N/A                                     | Best effort                           |
+| Connector and mode         | Replay                     | Sink completion                          | Maximum claim                          |
+| -------------------------- | -------------------------- | ---------------------------------------- | -------------------------------------- |
+| File snapshot / Parquet    | Exact file and row cursor  | Atomic epoch directory publication       | Exactly once on supported local FS     |
+| Kafka                      | Exact partition offsets    | Transactional target plus compact ledger | Exactly once after ledger preflight    |
+| PostgreSQL snapshot        | Unreplayable transaction   | N/A                                      | Best effort source                     |
+| PostgreSQL incremental/CDC | Exact composite cursor/LSN | Same-transaction epoch ledger            | Exactly once with transactional sink   |
+| ClickHouse polling         | Exact bounded cursor       | Stable insert deduplication token        | At least once; retry deduplicated only |
+| HTTP polling               | Unreplayable               | N/A                                      | Best effort                            |
+| WebSocket `block`          | Unreplayable               | N/A                                      | Best effort                            |
+| WebSocket `drop_oldest`    | Lossy and observable       | N/A                                      | Best effort                            |
 
 HTTP ETag and Last-Modified validators can suppress an unchanged response,
 but cannot seek historical endpoint representations. They therefore never

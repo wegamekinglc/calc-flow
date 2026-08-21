@@ -190,7 +190,10 @@ progress.
 aggregates. `WindowAggregateOperator` is stream-only: it updates incremental
 state, classifies late row-window assignments against the current input
 watermark, emits closed windows in deterministic order, and snapshots retained
-Arrow IPC deltas. `StateBackend` opens an exclusive lineage session;
+Arrow IPC deltas. The complete
+[`windowed_streaming.rs`](../crates/calc-flow/examples/windowed_streaming.rs)
+example wires a source-provided watermark through this operator to a sink.
+`StateBackend` opens an exclusive lineage session;
 `LocalStateBackend` provides immutable checksum-verified segment publication.
 `CheckpointManifest` is the strict bounded v3 state-manifest contract. Barrier
 coordination cuts live sources, aligns operator ingresses, stages operator
@@ -278,7 +281,12 @@ Run the checked examples:
 cargo run -p calc-flow --example expression_pipeline
 cargo run -p calc-flow --example sql_join
 cargo run -p calc-flow --example continuous_runtime
+cargo run -p calc-flow --example windowed_streaming
 ```
+
+The [continuous streaming guide](streaming-guide.md) explains cursor,
+watermark, window, delivery, checkpoint, and recovery behavior across both
+language surfaces.
 
 ## Projects and stores
 

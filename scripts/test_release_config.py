@@ -75,13 +75,17 @@ class ReleaseConfigTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIn(f"{path} text eol=lf", attributes.splitlines())
 
-    def test_kafka_ci_does_not_block_on_apt_index_refresh(self) -> None:
+    def test_kafka_ci_bounds_stale_apt_index_recovery(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
-        self.assertNotIn("apt-get update", workflow)
         self.assertEqual(
             workflow.count("timeout 5m sudo apt-get"),
             2,
         )
+        self.assertEqual(
+            workflow.count("timeout 2m sudo apt-get"),
+            2,
+        )
+        self.assertEqual(workflow.count("if ! install_libcurl_headers; then"), 2)
 
     def test_rustsec_waivers_are_consistent_and_scoped(self) -> None:
         advisory = "RUSTSEC-2026-0235"

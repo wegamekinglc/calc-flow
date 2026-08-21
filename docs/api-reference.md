@@ -2,14 +2,15 @@
 
 Calc Flow has three supported surfaces:
 
-| Surface            | Package or path                    | Purpose                                      |
-| ------------------ | ---------------------------------- | -------------------------------------------- |
-| Rust core          | `calc-flow = "3.0.0"`              | Native batches, graphs, execution, recovery  |
-| Python binding     | `calc-flow==3.0.0`                 | PyO3 engine access and Python integrations   |
-| Local Studio API   | `calc-flow-studio==3.0.0`          | Loopback FastAPI service and React assets    |
+| Surface          | Package or path           | Purpose                                     |
+| ---------------- | ------------------------- | ------------------------------------------- |
+| Rust core        | `calc-flow = "3.0.0"`     | Native batches, graphs, execution, recovery |
+| Python binding   | `calc-flow==3.0.0`        | PyO3 engine access and Python integrations  |
+| Local Studio API | `calc-flow-studio==3.0.0` | Loopback FastAPI service and React assets   |
 
-For examples and lifecycle detail, see [the Rust API](rust-api.md) and
-[the Python API](python-api.md).
+For examples and lifecycle detail, see the [executable example guide](examples.md),
+[Rust API](rust-api.md), [Python API](python-api.md), and
+[continuous streaming guide](streaming-guide.md).
 
 ## Examples
 
@@ -22,9 +23,7 @@ from calc_flow import Batch, PipelineBuilder
 
 batch = Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))
 plan = (
-    PipelineBuilder("totals")
-    .expression("calculate", "total = a + b")
-    .compile_batch()
+    PipelineBuilder("totals").expression("calculate", "total = a + b").compile_batch()
 )
 result = plan.execute({"input": batch})
 
@@ -34,36 +33,38 @@ assert result.outputs["output"].to_pyarrow()["total"].to_pylist() == [3, 7]
 The runnable inventories span both surfaces and share datasets and expressions:
 
 - Python: [`examples/README.md`](../examples/README.md) — expression pipeline,
-  SQL join, registered UDF, continuous execution, async batch execution, and NumPy
-  arrays plus NumPy/JAX `pyarrow.Table` matrix multiplication.
+  SQL join, registered UDF, continuous execution and recovery, async batch
+  execution, and NumPy arrays plus NumPy/JAX `pyarrow.Table` matrix multiplication.
 - Rust: [`crates/calc-flow/examples/README.md`](../crates/calc-flow/examples/README.md)
-  — `expression_pipeline.rs`, `sql_join.rs`, `continuous_runtime.rs`, and
-  `export_schema.rs`.
+  — expression, SQL, continuous lifecycle, event-time window, and schema tools.
+
+Run all user examples with
+`JAX_PLATFORMS=cpu uv run python scripts/run_examples.py`.
 
 ## Rust modules and exports
 
 The `calc_flow` crate re-exports its supported public types from
 [`lib.rs`](../crates/calc-flow/src/lib.rs).
 
-| Area               | Primary APIs                                                                                                                        |
-| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
-| Data               | `Batch`, `BatchKind`, `BatchMetadata`, `TableBatch`                                                                                 |
-| Batch graph        | `PipelineBuilder`, `Edge`, `PortEndpoint`, `BatchExecutionPlan`                                                                     |
-| Stream plan        | `StreamExecutionPlan`, `StreamRequirements`, `DeliveryGuarantee`, `StreamRuntimeConfig`                                             |
-| Operator traits    | `Port`, `OperatorMetadata`, `NodeOperator`, `BatchOperator`, `StreamOperator`, `OperatorStateSnapshot`                              |
-| Built-in operators | `ExpressionOperator`, `SqlOperator`, `UnionOperator`, `WindowAggregateOperator`                                                     |
-| Window model       | `WindowSpec`, `WindowGeometry`, `AggregateSpec`, `AggregateFunction`, `MAX_WINDOW_OVERLAP`                                          |
-| Execution          | `ExecutionOptions`, `RunResult`, `RunMetadata`, `NodeTiming`                                                                        |
-| Stream model       | `StreamMessage`, `StreamMessageKind`, `StreamJobContext`, `EventTime`, `Epoch`                                                      |
-| Stream channel     | `EdgeBudget`, `EnvelopeCost`, `ChannelMetrics`, `EdgeSender`, `EdgeReceiver`, `edge_channel`                                        |
-| State backend      | `StateBackend`, `StateLineageBackend`, `StateLineageKey`, `StateHandle`, `LocalStateBackend`                                        |
-| State manifest     | `CheckpointManifest`, `CheckpointManifestFields`, `ManifestExpectation`, `OperatorManifestEntry`, `RecoveryStatus`                  |
-| UDF/providers      | `UdfRegistry`, `UdfReference`, `ProviderRegistry`, `BatchOperatorFactory`, `StreamOperatorFactory`                                  |
-| Sources and sinks  | `StreamSource`, `StreamSink`, `TransactionalStreamSink`, `SourceBinding`, `SinkBinding`                                              |
-| Continuous runtime | `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`, `Cursor`, `SourceEvent`, `JobStatus`, `JobOutcome`                    |
-| Projects           | `ProjectSpec`, `compile_project`, `validate_project`                                                                                |
-| Persistence        | `FileProjectStore`, `LocalStateBackend`, `CheckpointManifest`                                                                        |
-| Errors             | `CalcFlowError`, `Result<T>`                                                                                                        |
+| Area               | Primary APIs                                                                                                       |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| Data               | `Batch`, `BatchKind`, `BatchMetadata`, `TableBatch`                                                                |
+| Batch graph        | `PipelineBuilder`, `Edge`, `PortEndpoint`, `BatchExecutionPlan`                                                    |
+| Stream plan        | `StreamExecutionPlan`, `StreamRequirements`, `DeliveryGuarantee`, `StreamRuntimeConfig`                            |
+| Operator traits    | `Port`, `OperatorMetadata`, `NodeOperator`, `BatchOperator`, `StreamOperator`, `OperatorStateSnapshot`             |
+| Built-in operators | `ExpressionOperator`, `SqlOperator`, `UnionOperator`, `WindowAggregateOperator`                                    |
+| Window model       | `WindowSpec`, `WindowGeometry`, `AggregateSpec`, `AggregateFunction`, `MAX_WINDOW_OVERLAP`                         |
+| Execution          | `ExecutionOptions`, `RunResult`, `RunMetadata`, `NodeTiming`                                                       |
+| Stream model       | `StreamMessage`, `StreamMessageKind`, `StreamJobContext`, `EventTime`, `Epoch`                                     |
+| Stream channel     | `EdgeBudget`, `EnvelopeCost`, `ChannelMetrics`, `EdgeSender`, `EdgeReceiver`, `edge_channel`                       |
+| State backend      | `StateBackend`, `StateLineageBackend`, `StateLineageKey`, `StateHandle`, `LocalStateBackend`                       |
+| State manifest     | `CheckpointManifest`, `CheckpointManifestFields`, `ManifestExpectation`, `OperatorManifestEntry`, `RecoveryStatus` |
+| UDF/providers      | `UdfRegistry`, `UdfReference`, `ProviderRegistry`, `BatchOperatorFactory`, `StreamOperatorFactory`                 |
+| Sources and sinks  | `StreamSource`, `StreamSink`, `TransactionalStreamSink`, `SourceBinding`, `SinkBinding`                            |
+| Continuous runtime | `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`, `Cursor`, `SourceEvent`, `JobStatus`, `JobOutcome`  |
+| Projects           | `ProjectSpec`, `compile_project`, `validate_project`                                                               |
+| Persistence        | `FileProjectStore`, `LocalStateBackend`, `CheckpointManifest`                                                      |
+| Errors             | `CalcFlowError`, `Result<T>`                                                                                       |
 
 `compile_project` produces a `BatchExecutionPlan`. `compile_batch` and
 `compile_stream` are the Rust graph-compilation entry points. A
@@ -90,13 +91,13 @@ Import the main surface from `calc_flow`.
 
 ### Batch
 
-| Member                                      | Contract                                                   |
-| ------------------------------------------- | ---------------------------------------------------------- |
-| `Batch.from_pyarrow(table, metadata=None)`  | Own an Arrow C Stream as an immutable table batch          |
-| `Batch.from_array(array, backend=..., ...)` | Own a read-only explicitly named array-provider payload    |
-| `to_pyarrow()`                              | Return the table payload or reject a non-table batch       |
-| `array` / `backend`                         | Return array-provider data or reject a table batch         |
-| `kind` / `num_rows` / `metadata`            | Return defensive batch observations                        |
+| Member                                      | Contract                                                |
+| ------------------------------------------- | ------------------------------------------------------- |
+| `Batch.from_pyarrow(table, metadata=None)`  | Own an Arrow C Stream as an immutable table batch       |
+| `Batch.from_array(array, backend=..., ...)` | Own a read-only explicitly named array-provider payload |
+| `to_pyarrow()`                              | Return the table payload or reject a non-table batch    |
+| `array` / `backend`                         | Return array-provider data or reject a table batch      |
+| `kind` / `num_rows` / `metadata`            | Return defensive batch observations                     |
 
 ### Graph and execution
 
@@ -261,23 +262,23 @@ over cancellation that arrives while the thread is being reclaimed.
 
 The separate Studio service exposes its supported API under `/api/v3`.
 
-| Method                 | Route                    | Purpose                                             |
-| ---------------------- | ------------------------ | --------------------------------------------------- |
-| `GET`                  | `/catalog`               | UDF-only top-level array                            |
-| `GET`                  | `/capabilities`          | Runtime, connector, and worker capabilities         |
-| `GET`                  | `/schema/project`        | Rust-generated v3 project JSON Schema               |
-| `GET`, `POST`          | `/projects`              | List or create projects                             |
-| `POST`                 | `/projects/import`       | Safely import JSON or YAML                          |
-| `GET`, `PUT`, `DELETE` | `/projects/{id}`         | Read, replace, or delete a project                  |
-| `GET`                  | `/projects/{id}/export`  | Export canonical JSON or safe YAML                  |
-| `POST`                 | `/projects/{id}/validate` | Validate and compile a stored graph                |
-| `POST`, `GET`          | `/jobs`                  | Start a continuous job or list owned jobs           |
-| `GET`                  | `/jobs/{id}`             | Read typed job status, metrics, and bounded results |
-| `GET`                  | `/jobs/{id}/events`      | Resume-safe job event SSE                           |
-| `POST`                 | `/jobs/{id}/checkpoint`  | Trigger one durable checkpoint                      |
-| `POST`                 | `/jobs/{id}/shutdown`    | Request graceful terminal checkpoint and shutdown  |
-| `POST`                 | `/jobs/{id}/cancel`      | Cancel and settle a job                             |
-| `GET`                  | `/resource-limits`       | Read enforced continuous-job resource bounds        |
+| Method                 | Route                     | Purpose                                             |
+| ---------------------- | ------------------------- | --------------------------------------------------- |
+| `GET`                  | `/catalog`                | UDF-only top-level array                            |
+| `GET`                  | `/capabilities`           | Runtime, connector, and worker capabilities         |
+| `GET`                  | `/schema/project`         | Rust-generated v3 project JSON Schema               |
+| `GET`, `POST`          | `/projects`               | List or create projects                             |
+| `POST`                 | `/projects/import`        | Safely import JSON or YAML                          |
+| `GET`, `PUT`, `DELETE` | `/projects/{id}`          | Read, replace, or delete a project                  |
+| `GET`                  | `/projects/{id}/export`   | Export canonical JSON or safe YAML                  |
+| `POST`                 | `/projects/{id}/validate` | Validate and compile a stored graph                 |
+| `POST`, `GET`          | `/jobs`                   | Start a continuous job or list owned jobs           |
+| `GET`                  | `/jobs/{id}`              | Read typed job status, metrics, and bounded results |
+| `GET`                  | `/jobs/{id}/events`       | Resume-safe job event SSE                           |
+| `POST`                 | `/jobs/{id}/checkpoint`   | Trigger one durable checkpoint                      |
+| `POST`                 | `/jobs/{id}/shutdown`     | Request graceful terminal checkpoint and shutdown   |
+| `POST`                 | `/jobs/{id}/cancel`       | Cancel and settle a job                             |
+| `GET`                  | `/resource-limits`        | Read enforced continuous-job resource bounds        |
 
 `/capabilities` deliberately separates two scopes. `runtime` is the parent
 session snapshot used for compilation. `preview.workerRegistrations` describes

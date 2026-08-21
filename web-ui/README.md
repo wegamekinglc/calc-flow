@@ -3,6 +3,10 @@
 The studio is the local React/TypeScript client for Calc Flow's FastAPI service.
 It uses React Flow 12 and types generated from `openapi.json`.
 
+See the repository [design guide](../docs/design.md) for Studio's ownership
+boundary and the [continuous streaming guide](../docs/streaming-guide.md) for
+the job lifecycle exposed by `/api/v3`.
+
 Start the API and Vite server together from the repository root on macOS,
 Linux, or WSL:
 
