@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
-import subprocess
+import subprocess  # nosec B404
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -48,7 +48,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     for command in _commands(arguments.surface):
         print(f"+ {' '.join(command)}", flush=True)
-        subprocess.run(
+        # Every executable and argument comes from the fixed inventories above;
+        # argparse accepts only the three declared surface choices. Never use a
+        # shell here, so example names cannot become command syntax.
+        subprocess.run(  # nosec B603  # nosemgrep
             command,
             cwd=REPOSITORY_ROOT,
             env=environment,

@@ -72,6 +72,12 @@ class CollectSink:
         pass
 
 
+def require(condition: bool, message: str) -> None:
+    """Keep example verification active under regular and optimized Python."""
+    if not condition:
+        raise RuntimeError(message)
+
+
 async def run_once(checkpoint_root: Path) -> tuple[list[int], list[int], int]:
     plan = (
         PipelineBuilder("streaming-recovery-example")
@@ -92,8 +98,8 @@ async def run_once(checkpoint_root: Path) -> tuple[list[int], list[int], int]:
         ManagedCheckpointRuntime(checkpoint_root),
     )
     outcome = await (await runner.start_async()).wait_async()
-    assert outcome.state == "completed"
-    assert outcome.completed_epoch is not None
+    require(outcome.state == "completed", f"unexpected outcome: {outcome.state}")
+    require(outcome.completed_epoch is not None, "terminal epoch is missing")
     return sink.values, source.opened_at, outcome.completed_epoch
 
 
@@ -103,13 +109,16 @@ async def main() -> None:
         first_values, first_open, first_epoch = await run_once(checkpoint_root)
         second_values, second_open, second_epoch = await run_once(checkpoint_root)
 
-        assert first_values == [20, 40, 60]
-        assert first_open == [0]
-        assert second_values == []
+        require(first_values == [20, 40, 60], f"unexpected output: {first_values}")
+        require(first_open == [0], f"unexpected initial cursor: {first_open}")
+        require(second_values == [], f"restart duplicated output: {second_values}")
         # A terminal manifest records the source as ended. Recovery therefore
         # does not reopen it merely to seek to its final cursor.
-        assert second_open == []
-        assert second_epoch == first_epoch
+        require(second_open == [], f"terminal source reopened: {second_open}")
+        require(
+            second_epoch == first_epoch,
+            f"terminal epoch changed: {first_epoch} -> {second_epoch}",
+        )
 
         print("first run:", first_values, "opened at", first_open[0])
         print("restart:", second_values, "source reopened:", bool(second_open))
