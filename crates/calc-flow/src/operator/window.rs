@@ -24,6 +24,7 @@ use datafusion::arrow::{
     },
     record_batch::RecordBatch,
 };
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -44,7 +45,7 @@ const MAX_GROUP_KEY_BYTES: usize = 65_536;
 const MAX_WINDOW_DELTA_SEGMENTS: usize = 32;
 
 /// Aggregate function supported by the first built-in window operator.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AggregateFunction {
     /// Count non-null input values.
@@ -60,7 +61,7 @@ pub enum AggregateFunction {
 }
 
 /// One declared window aggregate and its output column name.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AggregateSpec {
     /// Aggregate function.
@@ -72,7 +73,7 @@ pub struct AggregateSpec {
 }
 
 /// Fixed UTC window geometry represented in exact microseconds.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WindowGeometry {
     /// Non-overlapping windows of one fixed size.
@@ -90,7 +91,7 @@ pub enum WindowGeometry {
 }
 
 /// Data-only declaration of one event-time window aggregation.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WindowSpec {
     /// Input timestamp column used for window assignment.
@@ -3555,6 +3556,9 @@ where
 mod tests {
     use super::*;
 
+    const HIGH_CARDINALITY_ROWS: usize = 400_000;
+    const LEGACY_PROJECT_JSON_LIMIT: usize = 10 * 1024 * 1024;
+
     fn output_record(rows: usize) -> RecordBatch {
         RecordBatch::try_from_iter(vec![(
             "value",
@@ -3651,5 +3655,72 @@ mod tests {
             update_accumulator(&mut average, AggregateFunction::Avg, ScalarValue::Signed(1),),
             Err("average count overflowed UInt64".into())
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "M7 high-cardinality state soak; set CALC_FLOW_M7_WINDOW_STATE_SOAK=1"]
+    async fn high_cardinality_window_state_exceeds_legacy_json_limit_and_restores() {
+        if std::env::var("CALC_FLOW_M7_WINDOW_STATE_SOAK").as_deref() != Ok("1") {
+            return;
+        }
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+            Field::new("account", DataType::Int64, false),
+            Field::new("amount", DataType::Int64, false),
+        ]));
+        let input = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(vec![
+                    0;
+                    HIGH_CARDINALITY_ROWS
+                ])) as ArrayRef,
+                Arc::new(Int64Array::from_iter_values(
+                    0..i64::try_from(HIGH_CARDINALITY_ROWS).unwrap(),
+                )),
+                Arc::new(Int64Array::from(vec![1; HIGH_CARDINALITY_ROWS])),
+            ],
+        )
+        .unwrap();
+        let spec = WindowSpec::tumbling("event_time", Duration::from_secs(60))
+            .unwrap()
+            .group_by(["account"])
+            .unwrap()
+            .aggregate(AggregateFunction::Sum, "amount", "total")
+            .unwrap();
+        let mut source =
+            WindowAggregateOperator::new("window", Arc::clone(&schema), spec.clone()).unwrap();
+        let job = crate::StreamJobContext::new(
+            1,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        );
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut collector = crate::EdgeCollector::new(source.output_ports().to_vec());
+        source
+            .process_data(
+                "input",
+                Batch::table(vec![input], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+
+        let snapshot = source.checkpoint(crate::Epoch::INITIAL).unwrap();
+        let segment_bytes = snapshot.segments.values().map(Vec::len).sum::<usize>();
+        assert!(
+            segment_bytes > LEGACY_PROJECT_JSON_LIMIT,
+            "high-cardinality state encoded only {segment_bytes} bytes"
+        );
+        let mut restored = WindowAggregateOperator::new("window", schema, spec).unwrap();
+        restored.restore(&snapshot).unwrap();
+        assert_eq!(restored.state.accumulators.len(), HIGH_CARDINALITY_ROWS);
     }
 }

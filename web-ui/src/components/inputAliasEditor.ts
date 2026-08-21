@@ -40,7 +40,7 @@ export const editSqlInputAliases = (
   nodeId: string,
   edit: SqlInputAliasEdit,
 ): EditableProject => {
-  const current = project.pipeline.nodes.find((node) => node.id === nodeId);
+  const current = project.graph.nodes.find((node) => node.id === nodeId);
   if (!current || current.operator.kind !== 'sql') return project;
 
   const aliases = current.operator.aliases;
@@ -77,22 +77,22 @@ export const editSqlInputAliases = (
   } satisfies NodeConfig;
 
   const edges = edit.type === 'remove'
-    ? project.pipeline.edges.filter(
+    ? project.graph.edges.filter(
         (edge) => edge.target_node !== nodeId || edge.target_port !== edit.alias,
       )
     : edit.type === 'rename'
-      ? project.pipeline.edges.map((edge) =>
+      ? project.graph.edges.map((edge) =>
           edge.target_node === nodeId && edge.target_port === edit.alias
             ? { ...edge, target_port: edit.nextAlias.trim() }
             : edge,
         )
-      : project.pipeline.edges;
+      : project.graph.edges;
 
   return {
     ...project,
-    pipeline: {
-      ...project.pipeline,
-      nodes: project.pipeline.nodes.map((candidate) =>
+    graph: {
+      ...project.graph,
+      nodes: project.graph.nodes.map((candidate) =>
         candidate.id === nodeId ? node : candidate,
       ),
       edges,

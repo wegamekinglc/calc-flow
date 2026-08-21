@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use pyo3::{
     PyTraverseError, PyVisit,
     exceptions::{PyRuntimeError, PyTypeError},
@@ -71,20 +71,20 @@ struct StreamPlanState {
 
 #[pyclass(name = "StreamExecutionPlan", frozen, module = "calc_flow._native")]
 pub(crate) struct PyStreamExecutionPlan {
-    state: RwLock<Option<StreamPlanState>>,
+    state: Mutex<Option<StreamPlanState>>,
 }
 
 impl PyStreamExecutionPlan {
     pub(crate) fn new(inner: calc_flow::StreamExecutionPlan, owner: Py<PyAny>) -> Self {
         Self {
-            state: RwLock::new(Some(StreamPlanState { inner, owner })),
+            state: Mutex::new(Some(StreamPlanState { inner, owner })),
         }
     }
 
     pub(crate) fn take(&self) -> PyResult<(calc_flow::StreamExecutionPlan, Py<PyAny>)> {
         let state = self
             .state
-            .write()
+            .lock()
             .take()
             .ok_or_else(|| PyRuntimeError::new_err(CLEARED_STREAM_PLAN_MESSAGE))?;
         Ok((state.inner, state.owner))
@@ -92,7 +92,7 @@ impl PyStreamExecutionPlan {
 
     fn with_plan<T>(&self, read: impl FnOnce(&calc_flow::StreamExecutionPlan) -> T) -> PyResult<T> {
         self.state
-            .read()
+            .lock()
             .as_ref()
             .map(|state| read(&state.inner))
             .ok_or_else(|| PyRuntimeError::new_err(CLEARED_STREAM_PLAN_MESSAGE))
@@ -141,6 +141,7 @@ impl PyStreamExecutionPlan {
                 .iter()
                 .map(|(output, guarantee)| {
                     let guarantee = match guarantee {
+                        calc_flow::DeliveryGuarantee::BestEffort => "best_effort",
                         calc_flow::DeliveryGuarantee::AtLeastOnce => "at_least_once",
                         calc_flow::DeliveryGuarantee::ExactlyOnce => "exactly_once",
                     };
@@ -157,14 +158,14 @@ impl PyStreamExecutionPlan {
 
     #[allow(clippy::needless_pass_by_value)]
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-        if let Some(state) = self.state.read().as_ref() {
+        if let Some(state) = self.state.lock().as_ref() {
             visit.call(&state.owner)?;
         }
         Ok(())
     }
 
     fn __clear__(&self) {
-        drop(self.state.write().take());
+        drop(self.state.lock().take());
     }
 }
 

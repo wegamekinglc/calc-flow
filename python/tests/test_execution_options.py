@@ -469,7 +469,11 @@ def _table_batch(value: int = 1) -> Batch:
 
 
 def test_execution_options_are_keyword_only_and_type_checked_before_execution() -> None:
-    plan = PipelineBuilder("options-shape").expression("calc", "out = value").compile()
+    plan = (
+        PipelineBuilder("options-shape")
+        .expression("calc", "out = value")
+        .compile_batch()
+    )
     inputs = {"input": _table_batch()}
 
     with pytest.raises(TypeError):
@@ -484,7 +488,9 @@ def test_execution_options_are_keyword_only_and_type_checked_before_execution() 
 
 def test_sync_event_loop_error_precedes_inputs_and_options_validation() -> None:
     plan = (
-        PipelineBuilder("loop-precedence").expression("calc", "out = value").compile()
+        PipelineBuilder("loop-precedence")
+        .expression("calc", "out = value")
+        .compile_batch()
     )
 
     async def exercise() -> None:
@@ -513,7 +519,7 @@ def test_already_expired_deadline_cancels_sync_before_provider_entry() -> None:
     plan = (
         PipelineBuilder("expired-sync")
         .external("identity", "test", "identity", "1", {})
-        .compile(runtime)
+        .compile_batch(runtime)
     )
 
     with pytest.raises(CancelledError):
@@ -540,7 +546,7 @@ def test_already_expired_deadline_cancels_async_before_provider_entry() -> None:
         plan = (
             PipelineBuilder("expired-async")
             .external("identity", "test", "identity", "1", {})
-            .compile(runtime)
+            .compile_batch(runtime)
         )
         with pytest.raises(CancelledError):
             await plan.execute_async(
@@ -580,7 +586,7 @@ def test_context_aware_single_provider_observes_sync_and_async_run_options() -> 
     plan = (
         PipelineBuilder("context-single")
         .external("context", "test", "context", "1", {"compiled": True})
-        .compile(runtime)
+        .compile_batch(runtime)
     )
     source = {"nested": {"values": [1, 2]}}
     deadline = datetime(2030, 5, 6, 7, 8, 9, 123456, tzinfo=UTC)
@@ -632,7 +638,7 @@ def test_context_aware_mapping_provider_observes_authoritative_run_options() -> 
         .table_matmul("mapping", backend="numpy", columns=("value",))
         .project
     )
-    project["pipeline"]["nodes"][0]["operator"].update(
+    project["graph"]["nodes"][0]["operator"].update(
         {"provider": "test", "name": "mapping"}
     )
     plan = runtime.compile_project(json.dumps(project))
@@ -685,12 +691,12 @@ def test_legacy_and_context_provider_abis_are_explicit_and_one_shot() -> None:
     legacy_plan = (
         PipelineBuilder("legacy")
         .external("provider", "test", "legacy", "1", {})
-        .compile(runtime)
+        .compile_batch(runtime)
     )
     failing_plan = (
         PipelineBuilder("failing")
         .external("provider", "test", "failing", "1", {})
-        .compile(runtime)
+        .compile_batch(runtime)
     )
 
     legacy_plan.execute({"input": batch})
@@ -768,7 +774,7 @@ def test_selected_provider_arity_mismatch_is_a_provider_error() -> None:
         plan = (
             PipelineBuilder(name)
             .external("provider", "test", name, "1", {})
-            .compile(runtime)
+            .compile_batch(runtime)
         )
         with pytest.raises(ProviderError):
             plan.execute({"input": batch})
@@ -821,8 +827,8 @@ def test_one_options_value_is_isolated_across_concurrent_independent_plans() -> 
     builder = PipelineBuilder("concurrent-options").external(
         "provider", "test", "concurrent", "1", {}
     )
-    first_plan = builder.compile(runtime)
-    second_plan = builder.compile(runtime)
+    first_plan = builder.compile_batch(runtime)
+    second_plan = builder.compile_batch(runtime)
     options = ExecutionOptions({"shared": [1, 2]})
     inputs = {"input": Batch.from_array(np.array([1]), backend="test")}
 
@@ -874,7 +880,7 @@ def test_same_plan_queued_runs_keep_context_snapshots_isolated() -> None:
     plan = (
         PipelineBuilder("same-plan-context")
         .external("provider", "test", "same-plan-context", "1", {})
-        .compile(runtime)
+        .compile_batch(runtime)
     )
     batch = Batch.from_array(np.array([1]), backend="test")
     first_deadline = datetime(2030, 1, 1, tzinfo=UTC)
@@ -941,7 +947,7 @@ def test_same_plan_deadline_expires_while_waiting_without_second_provider_call()
     plan = (
         PipelineBuilder("queued-deadline")
         .external("provider", "test", "queued-deadline", "1", {})
-        .compile(runtime)
+        .compile_batch(runtime)
     )
     batch = Batch.from_array(np.array([1]), backend="test")
 
@@ -999,7 +1005,7 @@ def _deadline_pipeline(
         .external("gate", "test", "gate", "1", {})
         .external("downstream", "test", "downstream", "1", {})
         .connect("gate", "downstream")
-        .compile(runtime)
+        .compile_batch(runtime)
     )
 
 
@@ -1080,7 +1086,7 @@ def test_provider_error_after_deadline_is_reported_as_cancellation() -> None:
     plan = (
         PipelineBuilder("deadline-error")
         .external("provider", "test", "deadline-error", "1", {})
-        .compile(runtime)
+        .compile_batch(runtime)
     )
     batch = Batch.from_array(np.array([1]), backend="test")
 
@@ -1124,7 +1130,7 @@ def test_async_task_cancellation_waits_for_cleanup_and_reuses_options() -> None:
     plan = (
         PipelineBuilder("task-cancel")
         .external("provider", "test", "cancel", "1", {})
-        .compile(runtime)
+        .compile_batch(runtime)
     )
     options = ExecutionOptions({"request": 7})
 

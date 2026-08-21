@@ -21,7 +21,7 @@ def _project(name: str) -> ProjectDocument:
     )
 
 
-def test_project_store_round_trips_sorted_defensive_v2_documents(tmp_path) -> None:
+def test_project_store_round_trips_sorted_defensive_v3_documents(tmp_path) -> None:
     async def exercise() -> None:
         store = FileProjectStore(tmp_path)
         zeta = _project("zeta")
@@ -116,14 +116,15 @@ def test_project_document_transforms_are_bounded_strict_and_rust_backed() -> Non
     assert imported_json.root == project.root
     assert imported_yaml.root == project.root
     assert exported_json == json.dumps(project.root, indent=2, sort_keys=True) + "\n"
-    assert "format_version: 2" in exported_yaml
+    assert "format_version: 3" in exported_yaml
 
     with pytest.raises(ConfigError):
         import_project_json('{"format_version":1}')
     with pytest.raises(ConfigError, match="alias"):
         import_project_yaml(
-            "format_version: 2\nid: aliases\nname: &name aliases\n"
-            "description: *name\npipeline: {name: p, nodes: []}\n"
+            "format_version: 3\nid: aliases\nname: &name aliases\n"
+            "description: *name\nruntime: {mode: batch, options: {}}\n"
+            "graph: {name: p, nodes: []}\n"
         )
     with pytest.raises(ConfigError, match="exceeds"):
         import_project_json(b"x" * (10 * 1024 * 1024 + 1))

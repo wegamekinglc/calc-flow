@@ -1,6 +1,6 @@
 # Python API
 
-The `calc-flow==2.0.0` Python package is a PyO3 binding to the Rust engine plus
+The `calc-flow==3.0.0` Python package is a PyO3 binding to the Rust engine plus
 small functional adapters. Python 3.13 or newer is required.
 
 ## Install and develop
@@ -29,10 +29,10 @@ from calc_flow import Batch, PipelineBuilder
 batch = Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))
 builder = PipelineBuilder("totals")
 configured = builder.expression("calculate", "total = a + b")
-plan = configured.compile()
+plan = configured.compile_batch()
 result = plan.execute({"input": batch})
 
-assert builder.project["pipeline"]["nodes"] == []
+assert builder.project["graph"]["nodes"] == []
 assert result.outputs["output"].to_pyarrow()["total"].to_pylist() == [3, 7]
 ```
 
@@ -56,7 +56,7 @@ plan = (
         "ORDER BY orders.order_id",
         aliases=("orders", "fees"),
     )
-    .compile()
+    .compile_batch()
 )
 result = plan.execute(
     {
@@ -106,7 +106,7 @@ plan = (
         "total = double_amount(amount)",
         udfs=(("python", "double_amount", "1"),),
     )
-    .compile(runtime)
+    .compile_batch(runtime)
 )
 ```
 
@@ -265,7 +265,9 @@ from calc_flow import ExecutionOptions
 
 async def calculate() -> list[int]:
     plan = (
-        PipelineBuilder("async-example").expression("calc", "total = a + b").compile()
+        PipelineBuilder("async-example")
+        .expression("calc", "total = a + b")
+        .compile_batch()
     )
     options = ExecutionOptions(
         settings={"request": {"source": "async-example"}},
@@ -330,7 +332,7 @@ plan = (
         "1",
         {"expression": "x - mean(x)"},
     )
-    .compile(runtime)
+    .compile_batch(runtime)
 )
 batch = Batch.from_array(np.array([1.0, 2.0, 4.0, 6.0]), backend="numpy")
 centered = plan.execute({"input": batch}).outputs["output"].array
@@ -375,7 +377,7 @@ register_numpy(runtime)
 plan = (
     PipelineBuilder("table-matrix")
     .table_matmul("multiply", backend="numpy", columns=("quantity", "unit_price"))
-    .compile(runtime)
+    .compile_batch(runtime)
 )
 result = (
     plan.execute(
@@ -405,9 +407,17 @@ optional JAX paths are in
 
 ## Projects and persistence
 
-`ProjectDocument` validates a strict `format_version: 2` mapping with the Rust
+`ProjectDocument` validates a strict `format_version: 3` mapping with the Rust
 schema. `project_json_schema()` returns the generated schema;
 `validate_project_json(document)` returns canonical JSON.
+
+Project v3 selects `runtime.mode` explicitly. Stream projects carry exact
+connector and format identities, non-secret options, named secret references,
+watermark policy, managed state settings, and per-output best-effort,
+at-least-once, or exactly-once delivery requests.
+`PipelineBuilder.compile_stream()` resolves those references through the
+runtime's connector registry and secret resolver; project JSON never embeds a
+connector object or credential value.
 
 `FileProjectStore` has async `create`, `put`, `get`, `list`, and `delete`
 methods and explicit `*_blocking` variants. Safe JSON/YAML import/export helpers
@@ -482,4 +492,4 @@ paths, callback representations, or raw source chains.
 ## More examples
 
 Every file under [`examples/`](../examples/README.md) is executable against the
-installed v2 wheel. See the linked inventory for the commands.
+installed 3.0 wheel. See the linked inventory for the commands.

@@ -156,7 +156,7 @@ mod tests {
 
     fn project_json(name: &str) -> String {
         format!(
-            r#"{{"format_version":2,"id":"{name}","name":"{name}","pipeline":{{"name":"{name}","nodes":[{{"id":"calc","operator":{{"kind":"expression","expression":"b = a + 1"}}}}]}}}}"#
+            r#"{{"format_version":3,"id":"{name}","name":"{name}","runtime":{{"mode":"batch","options":{{}}}},"graph":{{"name":"{name}","nodes":[{{"id":"calc","operator":{{"kind":"expression","expression":"b = a + 1"}}}}]}}}}"#
         )
     }
 
@@ -207,11 +207,11 @@ mod tests {
             assert!(imported.ends_with('\n'));
             assert_eq!(
                 serde_json::from_str::<serde_json::Value>(&imported).unwrap()["format_version"],
-                2
+                3
             );
 
             let yaml = export_project_yaml(py, &project).unwrap();
-            assert!(yaml.contains("format_version: 2"));
+            assert!(yaml.contains("format_version: 3"));
             assert_eq!(
                 serde_json::from_str::<serde_json::Value>(
                     &import_project_yaml(py, yaml.as_bytes()).unwrap(),
@@ -233,7 +233,7 @@ mod tests {
             assert!(
                 import_project_yaml(
                     py,
-                    b"format_version: 2\nid: aliases\nname: &name aliases\ndescription: *name\npipeline: {name: p, nodes: []}\n",
+                    b"format_version: 3\nid: aliases\nname: &name aliases\ndescription: *name\nruntime: {mode: batch, options: {}}\ngraph: {name: p, nodes: []}\n",
                 )
                 .is_err()
             );

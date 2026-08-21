@@ -23,6 +23,53 @@ const catalog = [
   },
 ];
 
+const capabilities = {
+  schemaVersion: 1,
+  runtime: {
+    scope: { kind: 'runtimeSession', sessionId: 'session', revision: 0 },
+    packageVersion: '3.0.0',
+    projectFormatVersions: [3],
+    batchKinds: ['table', 'array'],
+    portableArrowTypes: ['int64'],
+    operators: [],
+    udfs: [],
+    providers: [],
+    connectors: [
+      {
+        provider: 'builtin',
+        name: 'file',
+        version: '1',
+        kind: 'both',
+        capabilities: {
+          delivery: 'exactly_once',
+          replay: 'replayable_exact',
+          watermark: 'generated_only',
+          transaction: 'pre_commit_commit',
+          snapshot: true,
+          polling: true,
+          cdc: false,
+          lookup: false,
+        },
+        formats: ['json'],
+        optionsSchema: {},
+      },
+    ],
+  },
+  preview: {
+    inputBatchKinds: ['table'],
+    requestInputFormats: ['arrow_ipc', 'columns', 'records'],
+    projectInputFormats: ['arrow_ipc', 'csv', 'inline_json', 'json'],
+    workerRegistrations: [],
+    limits: {
+      maxInputBytes: { default: 10, minimum: 1, maximum: 10 },
+      maxRows: { default: 10, minimum: 1, maximum: 10 },
+      timeoutSeconds: { default: 30, minimum: 1, maximum: 300 },
+      memoryLimitMb: { default: 512, minimum: 64, maximum: 4096 },
+      outputRows: { default: 1000, minimum: 1, maximum: 10_000 },
+    },
+  },
+};
+
 const delayedTextFile = (name: string) => {
   let resolve!: (value: string) => void;
   const file = {
@@ -89,6 +136,7 @@ describe('Calc Flow Studio', () => {
       vi.fn((input: RequestInfo | URL) => {
         const path = String(input);
         if (path.endsWith('/catalog')) return response(catalog);
+      if (path.endsWith('/capabilities')) return response(capabilities);
         if (path.endsWith('/projects')) return response([]);
         throw new Error(`Unexpected request ${path}`);
       }),
@@ -116,6 +164,7 @@ describe('Calc Flow Studio', () => {
       vi.fn((input: RequestInfo | URL) => {
         const path = String(input);
         if (path.endsWith('/catalog')) return response(catalog);
+      if (path.endsWith('/capabilities')) return response(capabilities);
         if (path.endsWith('/projects')) return response([]);
         throw new Error(`Unexpected request ${path}`);
       }),
@@ -129,7 +178,7 @@ describe('Calc Flow Studio', () => {
   });
 
   it('maps external graph handles from configured ports without defaults', () => {
-    const base = blankProject().pipeline.nodes[0];
+    const base = blankProject().graph.nodes[0];
     const source = {
       ...base,
       input_ports: [],
@@ -172,8 +221,8 @@ describe('Calc Flow Studio', () => {
     const connected = connectProject(project, connection);
     const reconnected = connectProject(connected, connection);
 
-    expect(project.pipeline.edges).toEqual([]);
-    expect(reconnected.pipeline.edges).toEqual([
+    expect(project.graph.edges).toEqual([]);
+    expect(reconnected.graph.edges).toEqual([
       {
         source_node: 'source',
         target_node: 'calculate',
@@ -189,6 +238,7 @@ describe('Calc Flow Studio', () => {
       vi.fn((input: RequestInfo | URL) => {
         const path = String(input);
         if (path.endsWith('/catalog')) return response(catalog);
+      if (path.endsWith('/capabilities')) return response(capabilities);
         if (path.endsWith('/projects')) return response([]);
         throw new Error(`Unexpected request ${path}`);
       }),
@@ -207,13 +257,13 @@ describe('Calc Flow Studio', () => {
 
   it('persists a SQL alias rename across its schema port and incoming edge', async () => {
     const base = blankProject();
-    const expression = base.pipeline.nodes[0];
+    const expression = base.graph.nodes[0];
     const loadedProject = {
       ...base,
       id: 'alias_project',
       name: 'Alias project',
-      pipeline: {
-        ...base.pipeline,
+      graph: {
+        ...base.graph,
         nodes: [
           {
             id: 'join',
@@ -258,11 +308,12 @@ describe('Calc Flow Studio', () => {
       id: loadedProject.id,
       name: loadedProject.name,
       description: loadedProject.description,
-      node_count: loadedProject.pipeline.nodes.length,
+      node_count: loadedProject.graph.nodes.length,
     }];
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path.endsWith('/catalog')) return response(catalog);
+      if (path.endsWith('/capabilities')) return response(capabilities);
       if (path.endsWith('/projects') && !init?.method) return response(summaries);
       if (path.endsWith('/projects/alias_project') && !init?.method) {
         return response(loadedProject);
@@ -285,24 +336,25 @@ describe('Calc Flow Studio', () => {
     ).toBe(true));
     const saveCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'PUT');
     const saved = JSON.parse(String(saveCall?.[1]?.body));
-    expect(saved.pipeline.nodes[0].operator.aliases).toEqual(['left', 'rhs']);
-    expect(saved.pipeline.nodes[0].input_ports[1]).toEqual({
+    expect(saved.graph.nodes[0].operator.aliases).toEqual(['left', 'rhs']);
+    expect(saved.graph.nodes[0].input_ports[1]).toEqual({
       name: 'rhs',
       kind: 'table',
       required: true,
       schema: [{ name: 'id', data_type: 'int64', nullable: false }],
     });
-    expect(saved.pipeline.edges[1].target_port).toBe('rhs');
-    expect(loadedProject.pipeline.nodes[0].operator).toMatchObject({
+    expect(saved.graph.edges[1].target_port).toBe('rhs');
+    expect(loadedProject.graph.nodes[0].operator).toMatchObject({
       aliases: ['left', 'right'],
     });
-    expect(loadedProject.pipeline.edges[1].target_port).toBe('right');
+    expect(loadedProject.graph.edges[1].target_port).toBe('right');
   });
 
   it('creates an unsaved draft before validating it', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path.endsWith('/catalog')) return response(catalog);
+      if (path.endsWith('/capabilities')) return response(capabilities);
       if (path.endsWith('/projects') && !init?.method) return response([]);
       if (path.endsWith('/projects') && init?.method === 'POST') {
         return response(
@@ -327,30 +379,17 @@ describe('Calc Flow Studio', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Validate' }));
 
     expect(await screen.findByText('Graph is valid')).toBeInTheDocument();
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(6));
     const createCall = fetchMock.mock.calls.find(
       ([path, init]) => String(path).endsWith('/projects') && init?.method === 'POST',
     );
     const created = JSON.parse(String(createCall?.[1]?.body));
-    expect(created.format_version).toBe(2);
+    expect(created.format_version).toBe(3);
     expect(created.id).toMatch(/^project_[0-9a-f]{32}$/);
-    expect(created.pipeline.nodes[0].operator.kind).toBe('expression');
+    expect(created.graph.nodes[0].operator.kind).toBe('expression');
   });
 
-  it('persists every loaded source and runs with the saved-source contract', async () => {
-    class FakeEventSource {
-      static readonly instances: FakeEventSource[] = [];
-
-      readonly close = vi.fn();
-
-      constructor(readonly url: string) {
-        FakeEventSource.instances.push(this);
-      }
-
-      addEventListener() {}
-      removeEventListener() {}
-    }
-
+  it('persists every loaded batch source with the saved-source contract', async () => {
     const loadedProject = {
       ...blankProject(),
       id: 'two_source',
@@ -375,12 +414,13 @@ describe('Calc Flow Studio', () => {
         id: loadedProject.id,
         name: loadedProject.name,
         description: loadedProject.description,
-        node_count: loadedProject.pipeline.nodes.length,
+        node_count: loadedProject.graph.nodes.length,
       },
     ];
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path.endsWith('/catalog')) return response(catalog);
+      if (path.endsWith('/capabilities')) return response(capabilities);
       if (path.endsWith('/projects') && !init?.method) return response(summaries);
       if (path.endsWith('/projects/two_source') && !init?.method) {
         return response(loadedProject);
@@ -388,26 +428,10 @@ describe('Calc Flow Studio', () => {
       if (path.endsWith('/projects/two_source') && init?.method === 'PUT') {
         return response(JSON.parse(String(init.body)));
       }
-      if (path.endsWith('/projects/two_source/runs')) {
-        return response(
-          {
-            id: 'run_1',
-            project_id: loadedProject.id,
-            status: 'pending',
-            created_at: '2026-01-01T00:00:00Z',
-            started_at: null,
-            finished_at: null,
-            error: null,
-            result: null,
-          },
-          202,
-        );
-      }
       throw new Error(`Unexpected request ${path}`);
     });
     vi.stubGlobal('fetch', fetchMock);
-    vi.stubGlobal('EventSource', FakeEventSource);
-    const { unmount } = render(<App />);
+    render(<App />);
 
     await waitFor(() =>
       expect(screen.getByLabelText('Source ID 1')).toHaveValue('left'),
@@ -415,12 +439,13 @@ describe('Calc Flow Studio', () => {
     expect(screen.getByLabelText('Source ID 2')).toHaveValue('right');
     commitDataSourceText('left', '[{"id":1,"value":4}]');
 
-    fireEvent.click(screen.getByRole('button', { name: /Run preview/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() =>
       expect(
         fetchMock.mock.calls.some(
-          ([path]) => String(path).endsWith('/projects/two_source/runs'),
+          ([path, init]) =>
+            String(path).endsWith('/projects/two_source') && init?.method === 'PUT',
         ),
       ).toBe(true),
     );
@@ -442,24 +467,9 @@ describe('Calc Flow Studio', () => {
         data: 'id,adjustment\n1,10\n',
       },
     ]);
-    const runCall = fetchMock.mock.calls.find(
-      ([path]) => String(path).endsWith('/projects/two_source/runs'),
-    );
-    expect(JSON.parse(String(runCall?.[1]?.body))).toEqual({});
-
-    await waitFor(() =>
-      expect(FakeEventSource.instances.map(({ url }) => url)).toEqual([
-        '/api/v3/runs/run_1/events',
-      ]),
-    );
-    const [source] = FakeEventSource.instances;
-
-    unmount();
-
-    expect(source.close).toHaveBeenCalledOnce();
   });
 
-  it('shows contract errors instead of retaining stale run state', async () => {
+  it('starts a continuous job and rejects stale contract state', async () => {
     class FakeEventSource {
       static readonly instances: FakeEventSource[] = [];
 
@@ -488,35 +498,37 @@ describe('Calc Flow Studio', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path.endsWith('/catalog')) return response(catalog);
+      if (path.endsWith('/capabilities')) return response(capabilities);
       if (path.endsWith('/projects') && !init?.method) return response([]);
       if (path.endsWith('/projects') && init?.method === 'POST') {
         return response(JSON.parse(String(init.body)), 201);
       }
-      if (path.match(/\/projects\/[^/]+\/runs$/)) {
+      if (path.endsWith('/jobs') && init?.method === 'POST') {
+        const projectId = JSON.parse(String(init.body)).project_id;
         return response(
           {
-            id: 'run_contract_error',
-            project_id: path.split('/').at(-2),
+            id: 'job_contract_error',
+            project_id: projectId,
             status: 'pending',
             created_at: '2026-01-01T00:00:00Z',
             started_at: null,
             finished_at: null,
+            error_code: null,
             error: null,
-            result: null,
           },
           202,
         );
       }
-      if (path.endsWith('/runs/run_contract_error')) {
+      if (path.endsWith('/jobs/job_contract_error')) {
         return response({
-          id: 'run_contract_error',
+          id: 'job_contract_error',
           project_id: 'project_invalid',
-          status: 'unknown',
+          status: 'timed_out',
           created_at: '2026-01-01T00:00:00Z',
           started_at: null,
           finished_at: null,
+          error_code: null,
           error: null,
-          result: null,
         });
       }
       throw new Error(`Unexpected request ${path}`);
@@ -526,15 +538,18 @@ describe('Calc Flow Studio', () => {
     const { container } = render(<App />);
 
     await screen.findByText('Build the flow');
-    fireEvent.click(screen.getByRole('button', { name: /Run preview/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Stream' }));
+    fireEvent.click(screen.getByRole('button', { name: /Start job/ }));
     await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
     expect(container.querySelector('.status-pill')).toHaveTextContent('pending');
 
-    act(() => FakeEventSource.instances[0].emit('running'));
+    act(() => {
+      FakeEventSource.instances[0].emit('state');
+    });
 
-    expect(await screen.findByRole('status')).toHaveTextContent(
-      "run.status: expected 'pending' or 'running'",
-    );
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(
+      "job.status: expected 'pending' or 'running' or 'completed' or 'failed' or 'cancelled'",
+    ));
     expect(container.querySelector('.status-pill')).not.toBeInTheDocument();
     expect(FakeEventSource.instances[0].close).toHaveBeenCalledOnce();
   });
@@ -543,6 +558,7 @@ describe('Calc Flow Studio', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path.endsWith('/catalog')) return response(catalog);
+      if (path.endsWith('/capabilities')) return response(capabilities);
       if (path.endsWith('/projects') && !init?.method) return response([]);
       throw new Error(`Unexpected request ${path}`);
     });
@@ -566,8 +582,6 @@ describe('Calc Flow Studio', () => {
     const actions = [
       screen.getByRole('button', { name: 'Save' }),
       screen.getByRole('button', { name: 'Validate' }),
-      screen.getByRole('button', { name: /Run preview/ }),
-      screen.getByRole('button', { name: 'Inspect' }),
     ];
     for (const action of actions) {
       fireEvent.click(action);
@@ -580,7 +594,7 @@ describe('Calc Flow Studio', () => {
     expect(
       fetchMock.mock.calls.filter(([path, init]) =>
         Boolean(init?.method)
-        || /\/validate$|\/runs$|\/checkpoint$/.test(String(path)),
+        || /\/validate$|\/jobs$/.test(String(path)),
       ),
     ).toEqual([]);
 
@@ -621,13 +635,14 @@ describe('Calc Flow Studio', () => {
       id: item.id,
       name: item.name,
       description: item.description,
-      node_count: item.pipeline.nodes.length,
+      node_count: item.graph.nodes.length,
     }));
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         const path = String(input);
         if (path.endsWith('/catalog')) return response(catalog);
+      if (path.endsWith('/capabilities')) return response(capabilities);
         if (path.endsWith('/projects') && !init?.method) return response(summaries);
         if (path.endsWith('/projects/first')) return response(first);
         if (path.endsWith('/projects/second')) return response(second);
@@ -687,11 +702,12 @@ describe('Calc Flow Studio', () => {
       id: item.id,
       name: item.name,
       description: item.description,
-      node_count: item.pipeline.nodes.length,
+      node_count: item.graph.nodes.length,
     }));
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path.endsWith('/catalog')) return response(catalog);
+      if (path.endsWith('/capabilities')) return response(capabilities);
       if (path.endsWith('/projects') && !init?.method) return response(summaries);
       if (path.endsWith('/projects/first') && !init?.method) return response(first);
       if (path.endsWith('/projects/second') && !init?.method) return response(second);
@@ -762,6 +778,7 @@ describe('Calc Flow Studio', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path.endsWith('/catalog')) return response(catalog);
+      if (path.endsWith('/capabilities')) return response(capabilities);
       if (path.endsWith('/projects') && !init?.method) return response([]);
       if (path.endsWith('/projects') && init?.method === 'POST') {
         return response(JSON.parse(String(init.body)), 201);
@@ -821,6 +838,7 @@ describe('Calc Flow Studio', () => {
       vi.fn((input: RequestInfo | URL) => {
         const path = String(input);
         if (path.endsWith('/catalog')) return response(catalog);
+      if (path.endsWith('/capabilities')) return response(capabilities);
         if (path.endsWith('/projects')) return response([]);
         throw new Error(`Unexpected request ${path}`);
       }),
@@ -861,6 +879,7 @@ describe('Calc Flow Studio', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path.endsWith('/catalog')) return response(catalog);
+      if (path.endsWith('/capabilities')) return response(capabilities);
       if (path.endsWith('/projects') && !init?.method) return response([]);
       if (path.endsWith('/projects') && init?.method === 'POST') {
         return response(JSON.parse(String(init.body)), 201);

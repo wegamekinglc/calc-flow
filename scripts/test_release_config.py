@@ -40,6 +40,72 @@ def _non_utf8_read_text_calls(tree: ast.AST) -> list[int]:
 
 
 class ReleaseConfigTests(unittest.TestCase):
+    def test_current_python_surfaces_do_not_use_removed_compile_method(self) -> None:
+        paths = [
+            *sorted((ROOT / "benchmarks").glob("*.py")),
+            *sorted((ROOT / "examples").glob("*.py")),
+            ROOT / "README.md",
+            ROOT / "examples/README.md",
+            ROOT / "scripts/smoke_wheel.py",
+            *(
+                ROOT / path
+                for path in (
+                    "docs/api-reference.md",
+                    "docs/getting-started.md",
+                    "docs/introduction.md",
+                    "docs/python-api.md",
+                )
+            ),
+        ]
+        for absolute_path in paths:
+            path = absolute_path.relative_to(ROOT)
+            with self.subTest(path=path):
+                source = absolute_path.read_text(encoding="utf-8")
+                self.assertNotIn(".compile()", source)
+                self.assertNotIn(".compile(runtime)", source)
+                self.assertNotIn('["pipeline"]', source)
+
+    def test_generated_contracts_are_pinned_to_lf(self) -> None:
+        attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+        for path in (
+            "schemas/project-v3.schema.json",
+            "web-ui/openapi.json",
+            "web-ui/src/api/schema.d.ts",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(f"{path} text eol=lf", attributes.splitlines())
+
+    def test_kafka_ci_does_not_block_on_apt_index_refresh(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
+        self.assertNotIn("apt-get update", workflow)
+        self.assertEqual(
+            workflow.count("timeout 5m sudo apt-get"),
+            2,
+        )
+
+    def test_rustsec_waivers_are_consistent_and_scoped(self) -> None:
+        advisory = "RUSTSEC-2026-0235"
+        for path in (
+            "AGENTS.md",
+            ".github/workflows/ci-linux.yml",
+            ".github/workflows/release.yml",
+            "scripts/verify_security_gates.py",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(
+                    advisory,
+                    (ROOT / path).read_text(encoding="utf-8"),
+                )
+
+        audit_path = (
+            Path("docs/superpowers/audits")
+            / "2026-08-19-continuous-streaming-v3-current-main.md"
+        )
+        audit = (ROOT / audit_path).read_text(encoding="utf-8")
+        self.assertIn(advisory, audit)
+        self.assertIn("lockfile-only", audit.lower())
+        self.assertIn("cargo tree --workspace --all-features -i rkyv", audit)
+
     def test_text_read_guard_rejects_non_utf8_encoding(self) -> None:
         tree = ast.parse('Path("fixture").read_text(encoding="latin-1")')
         self.assertEqual(_non_utf8_read_text_calls(tree), [1])
@@ -101,7 +167,28 @@ class ReleaseConfigTests(unittest.TestCase):
             )
         )
         self.assertNotIn(">=2.0.0a1", release_text)
-        self.assertIn(">=2.0.0", release_text)
+        self.assertIn(">=3.0.0", release_text)
+
+        release_workflow = (ROOT / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('- "v3.*"', release_workflow)
+        self.assertNotIn('- "v2.*"', release_workflow)
+        self.assertIn('assert "/api/v3/catalog"', release_workflow)
+        self.assertIn('and ">=3.0.0" in requirement', release_workflow)
+        self.assertIn('and "<4" in requirement', release_workflow)
+        self.assertEqual(release_workflow.count("--save-baseline exact-"), 2)
+        self.assertIn("--criterion-dir", release_workflow)
+        self.assertIn("--criterion-baseline exact-baseline", release_workflow)
+        self.assertIn("--criterion-candidate exact-candidate", release_workflow)
+        self.assertEqual(release_workflow.count("provenance.json"), 3)
+        self.assertIn('baseline_sha="$(git rev-parse', release_workflow)
+        self.assertIn('candidate_sha="$(git rev-parse', release_workflow)
+        self.assertIn('test "${baseline_sha}" != "${candidate_sha}"', release_workflow)
+        self.assertLess(
+            release_workflow.index("cargo bench --manifest-path"),
+            release_workflow.index("scripts/verify_perf_gates.py"),
+        )
 
     def test_python_projects_ship_license_files(self) -> None:
         for project in (ROOT, ROOT / "web-ui/backend"):
@@ -130,6 +217,9 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(config.count(frozen_harness), 1)
         self.assertNotIn('  - "crates/calc-flow/benches/**"', config)
         self.assertTrue((ROOT / harness_path).is_file())
+        self.assertEqual(config.count('      - "web-ui/**"'), 1)
+        self.assertIn("Biome's default Qwik", config)
+        self.assertEqual(config.count('  - "web-ui/src/api/schema.d.ts"'), 1)
         legacy_issue_slug = "_".join(("dal", "38"))
         self.assertFalse(
             (
@@ -224,7 +314,7 @@ class ReleaseConfigTests(unittest.TestCase):
 
         rust_tests = "python3.13 scripts/run_rust_tests.py --python-stress-runs 3"
         clean_tests = "cargo clean"
-        coverage = "cargo llvm-cov --workspace --all-features --fail-under-lines 90"
+        coverage = "python3.13 scripts/run_rust_coverage.py"
         clean_coverage = "cargo llvm-cov clean --workspace"
         rustdoc = (
             'RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps'
@@ -313,7 +403,9 @@ class ReleaseConfigTests(unittest.TestCase):
     def test_ci_and_release_execute_rust_test_harness_unit_tests(self) -> None:
         command = (
             "python -m unittest scripts.test_run_rust_tests "
-            "scripts.test_inspect_wheel scripts.test_release_config"
+            "scripts.test_run_rust_coverage "
+            "scripts.test_inspect_wheel scripts.test_release_config "
+            "scripts.test_verify_perf_gates scripts.test_verify_security_gates"
         )
         windows_test = (
             "scripts.test_run_rust_tests.RustTestHarnessTests."
@@ -461,6 +553,33 @@ class ReleaseConfigTests(unittest.TestCase):
             text = (ROOT / path).read_text(encoding="utf-8")
             with self.subTest(path=path):
                 for claim in claims:
+                    self.assertNotIn(claim, text)
+
+    def test_normative_docs_use_final_package_and_project_versions(self) -> None:
+        documentation = {
+            "README.md": ("Calc Flow 3.0", 'calc-flow = "3.0.0"'),
+            "docs/api-reference.md": (
+                "Calc Flow 3.0 API reference",
+                "`calc-flow==3.0.0`",
+                "Project format version `3`",
+            ),
+            "docs/getting-started.md": ("cargo add calc-flow@3.0.0",),
+            "docs/python-api.md": ("`calc-flow==3.0.0`",),
+            "docs/rust-api.md": ("Calc Flow 3.0", "cargo add calc-flow@3.0.0"),
+        }
+        stale_package_claims = (
+            "Calc Flow 2.0",
+            'calc-flow = "2.0.0"',
+            "calc-flow==2.0.0",
+            "calc-flow@2.0.0",
+        )
+
+        for path, required in documentation.items():
+            text = (ROOT / path).read_text(encoding="utf-8")
+            with self.subTest(path=path):
+                for claim in required:
+                    self.assertIn(claim, text)
+                for claim in stale_package_claims:
                     self.assertNotIn(claim, text)
 
     def test_batch_metadata_docs_match_runtime_contract(self) -> None:

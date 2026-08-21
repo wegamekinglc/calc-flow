@@ -73,12 +73,12 @@ def _project(
         node["input_ports"] = input_ports
     return ProjectDocument.model_validate(
         {
-            "format_version": 2,
+            "format_version": 3,
             "id": "demo",
             "name": "Demo",
-            "pipeline": {"name": "Main", "nodes": [node]},
+            "runtime": {"mode": "batch", "options": run_options or {}},
+            "graph": {"name": "Main", "nodes": [node]},
             "data_sources": sources if sources is not None else [_source()],
-            **({"run_options": run_options} if run_options is not None else {}),
         }
     )
 
@@ -86,10 +86,11 @@ def _project(
 def _two_input_project(*, run_options: dict[str, int] | None = None) -> ProjectDocument:
     return ProjectDocument.model_validate(
         {
-            "format_version": 2,
+            "format_version": 3,
             "id": "two_inputs",
             "name": "Two inputs",
-            "pipeline": {
+            "runtime": {"mode": "batch", "options": run_options or {}},
+            "graph": {
                 "name": "Two inputs",
                 "nodes": [
                     {
@@ -109,14 +110,13 @@ def _two_input_project(*, run_options: dict[str, int] | None = None) -> ProjectD
                 _source(input_name="left_input", source_id="left", data=[]),
                 _source(input_name="right_input", source_id="right", data=[]),
             ],
-            **({"run_options": run_options} if run_options is not None else {}),
         }
     )
 
 
 def _udf_project() -> ProjectDocument:
     project = _project()
-    operator = project.root["pipeline"]["nodes"][0]["operator"]
+    operator = project.root["graph"]["nodes"][0]["operator"]
     operator["expression"] = "result = identity(value)"
     operator["udfs"] = [
         {
@@ -422,10 +422,11 @@ def test_prepare_run_casts_declared_schema_and_copies_metadata() -> None:
 def test_prepare_run_rejects_array_external_inputs_before_worker_creation() -> None:
     project = ProjectDocument.model_validate(
         {
-            "format_version": 2,
+            "format_version": 3,
             "id": "array",
             "name": "Array",
-            "pipeline": {
+            "runtime": {"mode": "batch", "options": {}},
+            "graph": {
                 "name": "Array",
                 "nodes": [
                     {
@@ -470,10 +471,11 @@ def test_worker_transportability_does_not_override_input_execution_limits(
         prepare_run(
             ProjectDocument.model_validate(
                 {
-                    "format_version": 2,
+                    "format_version": 3,
                     "id": "array",
                     "name": "Array",
-                    "pipeline": {
+                    "runtime": {"mode": "batch", "options": {}},
+                    "graph": {
                         "name": "Array",
                         "nodes": [
                             {
@@ -657,7 +659,6 @@ def test_capabilities_separate_parent_compile_and_worker_transport_snapshots(
     for forbidden in (
         "callback",
         "source",
-        "path",
         "secret",
         "cloudpickle",
         "table_matmul",
@@ -1403,7 +1404,7 @@ def test_worker_registers_only_exact_referenced_builtin_providers(
     )
     project_json = json.dumps(
         {
-            "pipeline": {
+            "graph": {
                 "nodes": [
                     {
                         "operator": {
@@ -1512,10 +1513,11 @@ def test_worker_restores_and_executes_a_mapped_table_provider(
     )
     project = ProjectDocument.model_validate(
         {
-            "format_version": 2,
+            "format_version": 3,
             "id": "mapped",
             "name": "Mapped provider",
-            "pipeline": {
+            "runtime": {"mode": "batch", "options": {}},
+            "graph": {
                 "name": "Mapped provider",
                 "nodes": [
                     {
@@ -1691,9 +1693,7 @@ def test_other_malformed_worker_results_are_redacted_before_completed_state(
         failed = manager.get(submitted.id)
         assert failed.result is None
         assert failed.error is not None
-        assert failed.error.startswith(
-            "run result violates the v2 preview contract at "
-        )
+        assert failed.error.startswith("run result violates the preview contract at ")
         assert "must-not-leak" not in failed.error
         manager.shutdown()
 
@@ -1800,7 +1800,7 @@ def test_direct_worker_message_rejects_coercible_result_scalars(
     assert failed.result is None
     assert failed.error is not None
     assert failed.error.startswith(
-        f"run result violates the v2 preview contract at {error_location}:"
+        f"run result violates the preview contract at {error_location}:"
     )
     assert repr(malformed_output) not in failed.error
     manager.shutdown()
@@ -1857,7 +1857,7 @@ def test_preparation_failure_leaves_no_run_or_capacity_reservation() -> None:
 
 def test_worker_compile_failure_does_not_prevent_immediate_reuse() -> None:
     invalid = _project()
-    invalid.root["pipeline"]["nodes"][0]["operator"]["expression"] = "bad("
+    invalid.root["graph"]["nodes"][0]["operator"]["expression"] = "bad("
     manager = RunManager(use_processes=False, max_workers=1)
     failed = manager.submit(invalid, RunRequest())
     assert _wait(manager, failed.id) is RunStatus.FAILED

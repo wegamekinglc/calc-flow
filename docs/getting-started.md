@@ -1,6 +1,6 @@
 # Getting started with Calc Flow
 
-Calc Flow 2.0 is a Rust-native calculation engine with a Python binding and an
+Calc Flow 3.0 is a Rust-native calculation engine with a Python binding and an
 optional local Studio. This guide covers two installation paths:
 
 - install published packages when you want to use Calc Flow in an application;
@@ -19,7 +19,7 @@ Python wheels, or Node.js.
 
 Build from source if you are changing Calc Flow, need unreleased code, or want
 the managed API-plus-Vite Studio. The source flow builds non-editable core and
-Studio wheels so the API process and its spawned preview workers import the
+Studio wheels so the API process and its spawned job workers import the
 same native extension from the prepared environment.
 
 ## Prerequisites
@@ -86,7 +86,7 @@ calc-flow-web
 ```
 
 Open `http://127.0.0.1:8765`. The packaged server serves the built frontend and
-the `/api/v2` API from the same loopback service. Stop it with `Ctrl+C`.
+the `/api/v3` API from the same loopback service. Stop it with `Ctrl+C`.
 
 ### Windows PowerShell
 
@@ -112,7 +112,7 @@ Open `http://127.0.0.1:8765`. Stop the server with `Ctrl+C`.
 Rust applications add the published crate from their Cargo project:
 
 ```bash
-cargo add calc-flow@2.0.0
+cargo add calc-flow@3.0.0
 ```
 
 Continue with the [Python API guide](python-api.md) or
@@ -254,7 +254,7 @@ it with the source installation steps before starting Studio.
 
 ## Verify the installation
 
-Confirm that Calc Flow reports version `2.0.0` and that the native extension
+Confirm that Calc Flow reports version `3.0.0` and that the native extension
 loads from the environment rather than `python/calc_flow/`.
 
 ### Linux and WSL
@@ -263,7 +263,7 @@ loads from the environment rather than `python/calc_flow/`.
 .venv/bin/python -c \
   'import calc_flow, calc_flow._native as native; print(calc_flow.__version__); print(native.__file__)'
 
-curl --fail http://127.0.0.1:8765/api/v2/catalog
+curl --fail http://127.0.0.1:8765/api/v3/catalog
 ```
 
 ### Windows PowerShell
@@ -272,7 +272,7 @@ curl --fail http://127.0.0.1:8765/api/v2/catalog
 .venv\Scripts\python.exe -c `
   "import calc_flow, calc_flow._native as native; print(calc_flow.__version__); print(native.__file__)"
 
-Invoke-RestMethod http://127.0.0.1:8765/api/v2/catalog
+Invoke-RestMethod http://127.0.0.1:8765/api/v3/catalog
 ```
 
 For a release-wheel installation, the printed native-module path is beneath
@@ -290,7 +290,11 @@ import pyarrow as pa
 from calc_flow import Batch, PipelineBuilder
 
 batch = Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))
-plan = PipelineBuilder("totals").expression("calculate", "total = a + b").compile()
+plan = (
+    PipelineBuilder("totals")
+    .expression("calculate", "total = a + b")
+    .compile_batch()
+)
 result = plan.execute({"input": batch})
 print(result.outputs["output"].to_pyarrow()["total"].to_pylist())
 ```

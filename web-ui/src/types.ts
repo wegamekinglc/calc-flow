@@ -15,18 +15,30 @@ export type EdgeConfig = GeneratedProjectDocument['$defs']['EdgeSpec'];
 export type PortConfig = GeneratedProjectDocument['$defs']['PortSpec'];
 export type ArrowFieldConfig = GeneratedProjectDocument['$defs']['ArrowFieldSpec'];
 export type UdfReference = GeneratedProjectDocument['$defs']['UdfReference'];
-export type CheckpointSummary = components['schemas']['CheckpointSummary'];
-export type RunRequest = components['schemas']['RunRequest'];
-export type RunResponse = components['schemas']['RunResponse'];
-export type RunResultPreview = components['schemas']['RunResultPreview'];
-export type OutputPreview = components['schemas']['OutputPreview'];
-export type OutputFieldPreview = components['schemas']['OutputFieldPreview'];
-export type NodeTimingPreview = components['schemas']['NodeTimingPreview'];
-export type DataFusionMetricPreview = components['schemas']['DataFusionMetricPreview'];
+export type ProjectSourceBinding = GeneratedProjectDocument['$defs']['ProjectSourceBinding'];
+export type ProjectSinkBinding = GeneratedProjectDocument['$defs']['ProjectSinkBinding'];
+export type ConnectorCapability = components['schemas']['ConnectorCapabilityResponse'];
+export type JobResponse = components['schemas']['JobResponse'];
 export type ValidationIssue = components['schemas']['ValidationIssue'];
 export type ValidationReport = components['schemas']['ValidationReport'];
 export type CapabilitiesResponse = components['schemas']['CapabilitiesResponse'];
-export type JSONValue = components['schemas']['calc_flow_studio__models__JSONValue-Input'];
+export type JSONValue = components['schemas']['JSONValue-Input'];
+
+export interface JobEvent {
+  sequence: number;
+  timestamp: string;
+  type: 'state' | 'progress' | 'checkpoint' | 'terminal';
+  message: string;
+  state?: string;
+  epoch?: number;
+  watermark?: string;
+  throughput_rows?: number;
+  queue_envelopes?: number;
+  queue_rows?: number;
+  queue_bytes?: number;
+  backpressure_events?: number;
+  late_rows?: number;
+}
 
 export interface UdfCatalogEntry {
   provider: string;
@@ -43,11 +55,21 @@ export interface UdfCatalogEntry {
 export type CatalogResponse = UdfCatalogEntry[];
 
 export const blankProject = (): ProjectCreateRequest => ({
-  format_version: 2,
+  format_version: 3,
   id: `project_${crypto.randomUUID().replaceAll('-', '')}`,
   name: 'Untitled flow',
   description: '',
-  pipeline: {
+  runtime: {
+    mode: 'batch',
+    options: {
+      max_input_bytes: 10 * 1024 * 1024,
+      max_rows: 100_000,
+      timeout_seconds: 30,
+      memory_limit_mb: 512,
+      output_rows: 1000,
+    },
+  },
+  graph: {
     name: 'Main pipeline',
     nodes: [
       {
@@ -78,13 +100,9 @@ export const blankProject = (): ProjectCreateRequest => ({
       ],
     },
   ],
-  run_options: {
-    max_input_bytes: 10 * 1024 * 1024,
-    max_rows: 100_000,
-    timeout_seconds: 30,
-    memory_limit_mb: 512,
-    output_rows: 1000,
-  },
+  sources: [],
+  sinks: [],
+  state: { root: '.calc-flow-state', retention: 3 },
 });
 
 export const updateNodeOperator = (
@@ -93,9 +111,9 @@ export const updateNodeOperator = (
   update: (operator: OperatorSpec) => OperatorSpec,
 ): EditableProject => ({
   ...project,
-  pipeline: {
-    ...project.pipeline,
-    nodes: project.pipeline.nodes.map((node) =>
+  graph: {
+    ...project.graph,
+    nodes: project.graph.nodes.map((node) =>
       node.id === nodeId
         ? { ...node, operator: update(node.operator) }
         : node,

@@ -31,7 +31,7 @@ def main() -> None:
             "total = double_amount(amount)",
             udfs=(("python", "double_amount", "1"),),
         )
-        .compile(runtime)
+        .compile_batch(runtime)
     )
     run = plan.execute(
         {

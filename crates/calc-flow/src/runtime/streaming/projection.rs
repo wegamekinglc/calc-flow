@@ -18,7 +18,7 @@ use super::{
     source_task::SourceDeliveryCapability as InternalSourceDeliveryCapability,
 };
 use crate::{
-    CalcFlowError, DeliveryGuarantee, Epoch, RetentionClass,
+    CalcFlowError, DeliveryGuarantee, Epoch, EventTime, RetentionClass,
     continuous::{ReplayPositioning, SourceDeliveryCapability},
 };
 
@@ -1026,6 +1026,8 @@ pub struct JobStatus {
     pub task_count: usize,
     pub task_errors: u64,
     pub metrics_overflowed: bool,
+    /// Latest job-scoped aggregate event-time watermark.
+    pub watermark: Option<EventTime>,
     pub edges: BTreeMap<String, EdgeStatus>,
     pub sources: BTreeMap<String, SourceStatus>,
     pub operators: BTreeMap<String, OperatorStatus>,
@@ -1087,22 +1089,14 @@ pub(crate) struct StatusProjection {
 impl StatusProjection {
     pub(crate) fn new(job: &ValidatedContinuousJob) -> Self {
         let delivery = job
-            .plan
-            .sink_routes
-            .keys()
-            .map(|output_id| {
-                let requested = job
-                    .plan
-                    .requirements
-                    .delivery
-                    .get(output_id)
-                    .copied()
-                    .unwrap_or(DeliveryGuarantee::AtLeastOnce);
+            .delivery_proofs
+            .iter()
+            .map(|(output_id, proof)| {
                 (
                     output_id.clone(),
                     OutputDeliveryStatus {
-                        requested,
-                        effective: requested,
+                        requested: proof.requested,
+                        effective: proof.effective,
                     },
                 )
             })
@@ -1186,6 +1180,10 @@ impl StatusProjection {
             task_count: status.tasks.len(),
             task_errors: status.metrics.job.task_errors,
             metrics_overflowed: status.metrics.job.metrics_overflowed,
+            watermark: status
+                .progress
+                .as_ref()
+                .and_then(|progress| progress.current.aggregate_watermark),
             edges: self.project_edges(status),
             sources: self.project_sources(status),
             operators: Self::project_operators(status),

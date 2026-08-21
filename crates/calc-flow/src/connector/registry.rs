@@ -12,6 +12,7 @@ use async_trait::async_trait;
 
 use crate::connector::capability::{
     ConnectorDescriptor, ConnectorIdentity, ConnectorKind, FormatDescriptor, FormatIdentity,
+    validate_connector_options,
 };
 use crate::connector::secret::SecretResolver;
 use crate::continuous::{StreamSink, StreamSource, TransactionalStreamSink};
@@ -23,6 +24,26 @@ use crate::{CalcFlowError, Result};
 pub trait ConnectorSourceFactory: Send + Sync {
     /// The data-only descriptor this factory registers.
     fn descriptor(&self) -> &ConnectorDescriptor;
+
+    /// Validates direction-specific options without opening external resources.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe configuration error before any connector side effect.
+    fn validate(&self, options: &JsonMap) -> Result<()> {
+        validate_connector_options(self.descriptor(), options)
+    }
+
+    /// Derives source capability axes for the validated option set.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same side-effect-free configuration errors as
+    /// [`Self::validate`].
+    fn capabilities(&self, options: &JsonMap) -> Result<crate::ConnectorCapabilities> {
+        self.validate(options)?;
+        Ok(self.descriptor().capabilities)
+    }
 
     /// Opens one source connector.
     ///
@@ -44,6 +65,30 @@ pub trait ConnectorSourceFactory: Send + Sync {
 pub trait ConnectorSinkFactory: Send + Sync {
     /// The data-only descriptor this factory registers.
     fn descriptor(&self) -> &ConnectorDescriptor;
+
+    /// Validates direction-specific options without opening external resources.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe configuration error before any connector side effect.
+    fn validate(&self, options: &JsonMap) -> Result<()> {
+        validate_connector_options(self.descriptor(), options)
+    }
+
+    /// Derives sink capability axes for the validated option set.
+    ///
+    /// Connectors with mode-specific delivery semantics override this method;
+    /// the descriptor remains the discoverable upper bound for the connector
+    /// identity as a whole.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same side-effect-free configuration errors as
+    /// [`Self::validate`].
+    fn capabilities(&self, options: &JsonMap) -> Result<crate::ConnectorCapabilities> {
+        self.validate(options)?;
+        Ok(self.descriptor().capabilities)
+    }
 
     /// Opens one ordinary sink connector.
     ///
@@ -197,6 +242,7 @@ fn validate_factory_identities(
 pub struct ConnectorRegistry {
     connectors: BTreeMap<ConnectorIdentity, RegisteredConnector>,
     formats: BTreeMap<FormatIdentity, FormatDescriptor>,
+    registered_secret_resolver: Option<Arc<dyn SecretResolver>>,
 }
 
 impl std::fmt::Debug for ConnectorRegistry {
@@ -223,6 +269,10 @@ impl std::fmt::Debug for ConnectorRegistry {
                     .keys()
                     .map(|identity| format!("{}/{}", identity.name, identity.version))
                     .collect::<Vec<String>>(),
+            )
+            .field(
+                "registered_secret_resolver",
+                &self.registered_secret_resolver.is_some(),
             )
             .finish()
     }
@@ -296,6 +346,26 @@ impl ConnectorRegistry {
         Ok(())
     }
 
+    /// Registers the trusted resolver used by `registered` secret references.
+    ///
+    /// The resolver itself is captured by registry snapshots and never enters
+    /// project serialization or fingerprints.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::Conflict`] when a resolver is already
+    /// registered.
+    pub fn register_secret_resolver(&mut self, resolver: Arc<dyn SecretResolver>) -> Result<()> {
+        if self.registered_secret_resolver.is_some() {
+            return Err(CalcFlowError::Conflict {
+                resource: "secret resolver".into(),
+                key: "registered".into(),
+            });
+        }
+        self.registered_secret_resolver = Some(resolver);
+        Ok(())
+    }
+
     /// Captures the immutable plan-scoped snapshot.
     pub fn snapshot(&self) -> ConnectorRegistrySnapshot {
         ConnectorRegistrySnapshot {
@@ -314,6 +384,7 @@ impl ConnectorRegistry {
                     .collect(),
             ),
             formats: Arc::new(self.formats.clone()),
+            registered_secret_resolver: self.registered_secret_resolver.clone(),
         }
     }
 }
@@ -332,9 +403,14 @@ type SnapshotConnectorMap = Arc<BTreeMap<ConnectorIdentity, SnapshotConnector>>;
 pub struct ConnectorRegistrySnapshot {
     connectors: SnapshotConnectorMap,
     formats: Arc<BTreeMap<FormatIdentity, FormatDescriptor>>,
+    registered_secret_resolver: Option<Arc<dyn SecretResolver>>,
 }
 
 impl ConnectorRegistrySnapshot {
+    pub(crate) fn registered_secret_resolver(&self) -> Option<Arc<dyn SecretResolver>> {
+        self.registered_secret_resolver.clone()
+    }
+
     /// Resolves the source factory for one identity.
     ///
     /// # Errors

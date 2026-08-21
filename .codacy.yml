@@ -10,6 +10,12 @@ engines:
     exclude_paths:
       - "python/tests/**"
       - "web-ui/backend/tests/**"
+  biome:
+    # The frontend is React and is already governed by the repository ESLint
+    # configuration. Biome's default Qwik and no-React patterns misclassify
+    # valid React closures and className attributes.
+    exclude_paths:
+      - "web-ui/**"
 exclude_paths:
   # Build artifacts and local environments
   - ".venv/**"
@@ -39,6 +45,7 @@ exclude_paths:
   - "crates/calc-flow-connectors/src/clickhouse*.rs"
   # Generated JSON Schema contracts
   - "schemas/**"
+  - "web-ui/src/api/schema.d.ts"
   # Historical parity evidence, kept verbatim on purpose
   - "tests/fixtures/**"
   # Frozen executable allocation evidence, kept byte-identical to its baseline

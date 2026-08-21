@@ -37,10 +37,12 @@ The benchmark comparison panel accepts baseline and current JSON reports from
 mean-time deltas and coefficient of variation, and keeps noisy cases
 informational according to the repository benchmark policy.
 
-Runner recovery controls inspect and reset checkpoints stored for the current
-pipeline. They report fingerprint compatibility, cursor, sequence, and stateful
-node names. Bounded preview runs are intentionally stateless and do not create
-runner checkpoints.
+The stream configuration editor switches a project between batch and stream
+mode and edits checkpoint, batch, connector, format, secret-reference,
+watermark, delivery, and managed-state settings without placing credentials in
+the document. The Job observatory starts persistent stream jobs, resumes SSE
+status after disconnects, displays bounded metrics and results, and exposes
+checkpoint, graceful shutdown, and cancellation controls.
 
 ## Edit data sources
 
@@ -53,9 +55,9 @@ card's latest confirmed text and keeps typing in a temporary draft:
   text remains opaque at this step.
 - **Cancel**, the close button, Escape, or a backdrop click discards the
   temporary draft and leaves the card unchanged.
-- Confirming does not save or validate the whole project. Subsequent **Save**,
-  **Validate**, **Run preview**, and checkpoint inspection use the confirmed
-  card text.
+- Confirming does not save or validate the whole project. Subsequent **Save**
+  and **Validate** operations use the confirmed card text; inline data sources
+  apply to batch-mode projects.
 
 Keyboard focus starts in the editor, stays inside the open dialog while
 tabbing, and returns to the exact **Edit data** button after the dialog closes.

@@ -1,4 +1,4 @@
-//! Python bindings for Calc Flow's Rust-native v2 engine.
+//! Python bindings for Calc Flow's Rust-native v3 engine.
 
 mod batch;
 mod config;

@@ -10,7 +10,7 @@ use crate::{CalcFlowError, Epoch, Result, json::validate_portable_identifier};
 /// caller-selected filesystem paths.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct StateHandle {
-    /// Stable logical operator identity.
+    /// Stable logical operator or sink identity.
     operator_id: String,
     /// Checkpoint epoch that created the segment.
     epoch: Epoch,
@@ -53,7 +53,7 @@ impl StateHandle {
         })
     }
 
-    /// Returns the stable logical operator identity.
+    /// Returns the stable logical state-owner identity.
     pub fn operator_id(&self) -> &str {
         &self.operator_id
     }
@@ -83,22 +83,22 @@ impl StateHandle {
         &self.sha256
     }
 
-    /// Validates that this handle belongs to one expected operator and epoch.
+    /// Validates that this handle belongs to one expected state owner and epoch.
     ///
     /// # Errors
     ///
     /// Returns [`CalcFlowError::InvalidArgument`] when the handle itself is
     /// non-canonical, or [`CalcFlowError::CheckpointMismatch`] before any
     /// segment load when either ownership coordinate differs.
-    pub fn validate_for(&self, expected_operator: &str, expected_epoch: Epoch) -> Result<()> {
+    pub fn validate_for(&self, expected_owner: &str, expected_epoch: Epoch) -> Result<()> {
         validate_portable_identifier("operator_id", &self.operator_id)?;
         validate_portable_identifier("segment_id", &self.segment_id)?;
         validate_committed_relative_path(&self.relative_path)?;
         validate_sha256("sha256", &self.sha256)?;
-        if self.operator_id != expected_operator {
+        if self.operator_id != expected_owner {
             return Err(CalcFlowError::CheckpointMismatch {
                 message: format!(
-                    "state handle operator {:?} does not match expected operator {expected_operator:?}",
+                    "state handle owner {:?} does not match expected owner {expected_owner:?}",
                     self.operator_id
                 ),
             });

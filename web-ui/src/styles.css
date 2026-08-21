@@ -124,6 +124,17 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weig
 .file-button { position: relative; display: block; text-align: center; overflow: hidden; }
 .file-button input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 
+.stream-config { display: grid; gap: 10px; margin-top: 22px; padding-top: 17px; border-top: 1px solid var(--line); }
+.segmented-control { display: grid; grid-template-columns: 1fr 1fr; min-inline-size: 0; margin: 0; padding: 3px; border: 1px solid var(--line); border-radius: 9px; background: #07120f; }
+.segmented-control legend { grid-column: 1 / -1; padding: 0 4px; }
+.segmented-control button { border: 0; border-radius: 6px; padding: 7px; color: var(--muted); background: transparent; font-size: 10px; font-weight: 700; }
+.segmented-control button.active { color: #071814; background: var(--mint); }
+.binding-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 5px; }
+.binding-heading strong { font-size: 10px; }
+.binding-card { display: grid; gap: 9px; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: #091815; }
+.binding-card .danger { color: var(--danger); }
+.field-error { color: var(--danger); font-size: 9px; font-weight: 500; letter-spacing: 0; }
+
 .data-source-dialog {
   z-index: 50;
   width: min(920px, calc(100vw - 32px));
@@ -175,15 +186,6 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weig
   background: var(--surface);
 }
 .data-source-dialog-actions button { display: inline-flex; align-items: center; justify-content: center; min-width: 96px; height: 36px; }
-.checkpoint-control { margin-top: 22px; padding-top: 17px; border-top: 1px solid var(--line); }
-.checkpoint-control > p { color: var(--muted); font-size: 9px; line-height: 1.45; }
-.checkpoint-status { display: grid; gap: 3px; margin-top: 8px; padding: 9px; border: 1px solid var(--line); border-radius: 8px; background: #091815; }
-.checkpoint-status strong { color: #dceae5; font-size: 10px; }
-.checkpoint-status span { overflow: hidden; color: var(--muted); font: 400 8px 'SFMono-Regular', Consolas, ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
-.checkpoint-warning { color: var(--danger) !important; }
-.checkpoint-actions { display: grid; grid-template-columns: 1fr auto; gap: 6px; }
-.checkpoint-actions button { width: 100%; }
-
 .canvas-panel { position: relative; min-width: 0; background: #091815; }
 .canvas-panel::before { content: ''; position: absolute; inset: 0; pointer-events: none; background: radial-gradient(circle at center, #1b3c322b, transparent 58%); }
 .canvas-meta { z-index: 5; position: absolute; top: 12px; left: 14px; display: flex; gap: 7px; }
@@ -238,10 +240,15 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weig
 
 .results { min-height: 330px; padding: 18px 20px 30px; background: #091613; }
 .results-heading { justify-content: flex-start; align-items: center; }
-.results-heading > div { margin-right: auto; }
+.results-heading > div:first-child { margin-right: auto; }
 .status-pill.completed { color: var(--mint); }
-.status-pill.failed, .status-pill.timed_out { color: var(--danger); border-color: #754343; background: #2b1919; }
+.status-pill.failed, .status-pill.cancelled { color: var(--danger); border-color: #754343; background: #2b1919; }
 .status-pill.running { color: var(--orange); border-color: #754f35; background: #2e2118; }
+.job-actions { display: flex; align-items: center; gap: 7px; }
+.job-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 11px; }
+.job-metrics .metric-card { display: grid; align-content: start; gap: 5px; min-height: 104px; }
+.job-metrics .metric-card > strong { overflow: hidden; color: #e3f3ed; font-size: 17px; text-overflow: ellipsis; white-space: nowrap; }
+.job-metrics .metric-card > small { overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .validation-banner { display: flex; gap: 14px; align-items: center; margin-bottom: 14px; padding: 9px 12px; border: 1px solid #316b5c; border-radius: 8px; color: #bce8dc; background: #102b24; font-size: 10px; }
 .validation-banner.invalid { border-color: #704141; color: #ffc2c2; background: #2a1717; }
 .validation-banner span { color: var(--muted); }

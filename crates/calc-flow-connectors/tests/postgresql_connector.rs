@@ -8,13 +8,12 @@ use std::collections::BTreeMap;
 
 use calc_flow_connectors::database_types::{PgValue, arrow_data_type, pg_identifier};
 use calc_flow_connectors::postgresql::{
-    PgSinkMode, PgSourceMode, PostgresSinkConfig, PostgresSourceConfig,
+    PgSinkMode, PgSlotPolicy, PgSourceMode, PostgresSinkConfig, PostgresSourceConfig,
 };
 use serde_json::{Value, json};
 
 fn source_options() -> BTreeMap<String, Value> {
     BTreeMap::from([
-        ("url_key".to_string(), json!("CALC_FLOW_PG_TEST_URL")),
         ("table".to_string(), json!("orders")),
         ("mode".to_string(), json!("snapshot")),
     ])
@@ -22,7 +21,6 @@ fn source_options() -> BTreeMap<String, Value> {
 
 fn incremental_options() -> BTreeMap<String, Value> {
     BTreeMap::from([
-        ("url_key".to_string(), json!("CALC_FLOW_PG_TEST_URL")),
         ("table".to_string(), json!("orders")),
         ("mode".to_string(), json!("incremental_query")),
         ("cursor_columns".to_string(), json!(["updated_at", "id"])),
@@ -31,7 +29,6 @@ fn incremental_options() -> BTreeMap<String, Value> {
 
 fn sink_options(mode: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([
-        ("url_key".to_string(), json!("CALC_FLOW_PG_TEST_URL")),
         ("table".to_string(), json!("orders_out")),
         ("mode".to_string(), json!(mode)),
         ("pipeline".to_string(), json!("pg_test")),
@@ -85,8 +82,43 @@ fn source_config_parses_modes_and_validates_identifiers() {
     let error = PostgresSourceConfig::from_options(&bad_table).expect_err("identifier checked");
     assert!(error.to_string().contains("identifier"), "{error}");
 
+    let mut cdc = source_options();
+    cdc.insert("mode".to_string(), json!("logical_cdc"));
+    cdc.insert("slot".to_string(), json!("orders_slot"));
+    cdc.insert("publication".to_string(), json!("orders_publication"));
+    cdc.insert("slot_policy".to_string(), json!("require_existing"));
+    cdc.insert(
+        "columns".to_string(),
+        json!([
+            {"name": "id", "data_type": "int64", "nullable": false},
+            {"name": "label", "data_type": "string", "nullable": false}
+        ]),
+    );
+    let config = PostgresSourceConfig::from_options(&cdc).expect("logical CDC parses");
+    assert_eq!(config.mode, PgSourceMode::LogicalCdc);
+    assert_eq!(config.slot_policy, Some(PgSlotPolicy::RequireExisting));
+
+    cdc.insert("slot_policy".to_string(), json!("create_with_snapshot"));
+    assert_eq!(
+        PostgresSourceConfig::from_options(&cdc)
+            .expect("slot creation policy parses")
+            .slot_policy,
+        Some(PgSlotPolicy::CreateWithSnapshot)
+    );
+    cdc.insert("slot_policy".to_string(), json!("recreate_with_snapshot"));
+    assert_eq!(
+        PostgresSourceConfig::from_options(&cdc)
+            .expect("slot replacement policy parses")
+            .slot_policy,
+        Some(PgSlotPolicy::RecreateWithSnapshot)
+    );
+
+    cdc.remove("slot");
+    let error = PostgresSourceConfig::from_options(&cdc).expect_err("slot required");
+    assert!(error.to_string().contains("slot"), "{error}");
+
     let mut bad_mode = source_options();
-    bad_mode.insert("mode".to_string(), json!("logical_cdc"));
+    bad_mode.insert("mode".to_string(), json!("trigger_cdc"));
     let error = PostgresSourceConfig::from_options(&bad_mode).expect_err("mode vocabulary");
     assert!(error.to_string().contains("mode"), "{error}");
 }
@@ -140,10 +172,14 @@ fn type_matrix_maps_and_rejects_unknown_types() {
         arrow_data_type(&Type::NUMERIC).unwrap(),
         arrow::datatypes::DataType::Utf8
     );
-    let error = arrow_data_type(&Type::JSONB).expect_err("jsonb rejected");
-    assert!(error.to_string().contains("matrix"), "{error}");
-    let error = arrow_data_type(&Type::JSON).expect_err("json rejected");
-    assert!(error.to_string().contains("matrix"), "{error}");
+    assert_eq!(
+        arrow_data_type(&Type::JSONB).unwrap(),
+        arrow::datatypes::DataType::Utf8
+    );
+    assert_eq!(
+        arrow_data_type(&Type::JSON).unwrap(),
+        arrow::datatypes::DataType::Utf8
+    );
 }
 
 #[test]
@@ -195,6 +231,66 @@ async fn connection_url_only_from_secrets() {
     assert!(
         !error.to_string().contains("pass"),
         "the URL never enters the error"
+    );
+}
+
+#[test]
+fn factories_register_both_postgresql_lifecycles() {
+    let mut registry = calc_flow::ConnectorRegistry::new();
+    calc_flow_connectors::register_postgresql_connectors(&mut registry).expect("registers");
+    let snapshot = registry.snapshot();
+    let identity = calc_flow::ConnectorIdentity::new(
+        "calc-flow-connectors",
+        "postgresql",
+        calc_flow_connectors::postgresql::IDENTITY_VERSION,
+    )
+    .unwrap();
+    let source = snapshot.resolve_source(&identity).expect("source resolves");
+    let sink = snapshot.resolve_sink(&identity).expect("sink resolves");
+    assert!(source.descriptor().capabilities.snapshot);
+    assert!(source.descriptor().capabilities.polling);
+    assert!(source.descriptor().capabilities.cdc);
+    let snapshot_capabilities = source
+        .capabilities(&source_options())
+        .expect("snapshot capabilities");
+    assert_eq!(
+        snapshot_capabilities.delivery,
+        calc_flow::DeliveryCapability::BestEffort
+    );
+    assert_eq!(
+        snapshot_capabilities.replay,
+        calc_flow::ReplayCapability::Unreplayable
+    );
+    let incremental_capabilities = source
+        .capabilities(&incremental_options())
+        .expect("incremental capabilities");
+    assert_eq!(
+        incremental_capabilities.delivery,
+        calc_flow::DeliveryCapability::AtLeastOnce
+    );
+    assert_eq!(
+        incremental_capabilities.replay,
+        calc_flow::ReplayCapability::ReplayableExact
+    );
+    assert_eq!(
+        sink.descriptor().capabilities.transaction,
+        calc_flow::TransactionSupport::LedgerIdempotent
+    );
+    assert_eq!(
+        sink.capabilities(&sink_options("transactional"))
+            .expect("transactional capabilities")
+            .transaction,
+        calc_flow::TransactionSupport::LedgerIdempotent
+    );
+    assert_eq!(
+        sink.capabilities(&sink_options("append"))
+            .expect("append capabilities")
+            .transaction,
+        calc_flow::TransactionSupport::None
+    );
+    assert_eq!(
+        source.descriptor().required_secret_slots,
+        ["url".to_string()].into_iter().collect()
     );
 }
 
@@ -313,6 +409,10 @@ fn snapshot_reads_and_transactional_sink_commits() {
         .unwrap();
         sink.write(&batch).await.expect("stages writes");
         let evidence = sink.pre_commit(calc_flow::Epoch::INITIAL).await.expect("pre");
+        let segments = sink
+            .pre_commit_segments(calc_flow::Epoch::INITIAL)
+            .await
+            .expect("prepared rows become a state segment");
         assert_eq!(
             evidence.get("rows").and_then(Value::as_u64),
             Some(2),
@@ -339,22 +439,35 @@ fn snapshot_reads_and_transactional_sink_commits() {
             .get(0);
         assert_eq!(ledger, 1, "the epoch ledger entry committed");
 
-        // Replay the commit idempotently.
-        sink.begin_epoch(calc_flow::Epoch::INITIAL)
+        // Reconcile a lost commit acknowledgement in a newly opened sink with
+        // the exact durable manifest metadata and committed state segment.
+        sink.close().await.expect("closes first sink");
+        let sink_config = PostgresSinkConfig::from_options(&sink_options("transactional"))
+            .expect("recovery sink parses");
+        let mut recovered =
+            calc_flow_connectors::postgresql::TransactionalPostgresSink::new(sink_config)
+                .expect("recovery sink builds");
+        recovered
+            .open_with_secrets(&PassUrl)
+            .expect("recovery URL set");
+        recovered.open().await.expect("recovery sink connects");
+        let recovery = calc_flow::SinkRecovery::from_parts(
+            calc_flow::Epoch::INITIAL,
+            false,
+            calc_flow::SinkDelivery::Transactional,
+            evidence,
+        )
+        .with_segments(segments);
+        recovered
+            .recover(&recovery)
             .await
-            .expect("re-begins");
-        let evidence2 = sink
-            .pre_commit(calc_flow::Epoch::INITIAL)
-            .await
-            .expect("pre again");
-        sink.commit(calc_flow::Epoch::INITIAL, &evidence2)
-            .await
-            .expect("replays");
+            .expect("reconciles");
         let count: i64 = client
             .query_one("SELECT COUNT(*) FROM orders_out", &[])
             .await
             .expect("recounts")
             .get(0);
         assert_eq!(count, 2, "replay adds no duplicates");
+        recovered.close().await.expect("closes recovered sink");
     });
 }

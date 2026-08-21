@@ -37,7 +37,7 @@ def _plan(runtime: Runtime, expression: str = "result = transform(value)"):
     return (
         PipelineBuilder("udf")
         .expression("calc", expression, udfs=(("python", "transform", "1"),))
-        .compile(runtime)
+        .compile_batch(runtime)
     )
 
 
@@ -255,7 +255,7 @@ def test_unknown_version_and_sql_name_collision_fail_compilation() -> None:
     with pytest.raises(ConfigError, match="python:transform@2"):
         PipelineBuilder("unknown").expression(
             "calc", "result = transform(value)", udfs=(("python", "transform", "2"),)
-        ).compile(runtime)
+        ).compile_batch(runtime)
 
     _register(runtime, lambda value: value, provider="plugin")
     with pytest.raises(ConfigError, match="conflicting DataFusion SQL names"):
@@ -263,7 +263,7 @@ def test_unknown_version_and_sql_name_collision_fail_compilation() -> None:
             "calc",
             "result = transform(value)",
             udfs=(("python", "transform", "1"), ("plugin", "transform", "1")),
-        ).compile(runtime)
+        ).compile_batch(runtime)
 
 
 def test_runtime_callback_cycle_is_collected() -> None:

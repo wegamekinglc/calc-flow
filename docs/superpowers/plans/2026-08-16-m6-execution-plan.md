@@ -1,6 +1,9 @@
 # Calc-Flow 3.0 M6/M7 执行计划（Post-A6 基线）
 
-> **状态：** 已建立 issue 与 PR 映射；M6.0 未启动
+> **状态：** 2026-08-19 review candidate 已关闭 current-main audit 中的 M6/M7
+> 实现缺口；最终 acceptance 仍以完整仓库门禁和 PR exact-head 复核为准。逐项实现
+> 证据见
+> [current-main acceptance audit](../audits/2026-08-19-continuous-streaming-v3-current-main.md)。
 > **基线：** `main@858199f6df0161801bb6028f37f3ebbeb1684e3e`（PR #131 之后）
 > **控制链：** 本文件负责执行顺序、结构性决策、issue/PR 映射与集成策略；
 > 各 task 的完整 RED/实现/验收细节以

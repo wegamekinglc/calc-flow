@@ -3,20 +3,45 @@ import { describe, expect, it } from 'vitest';
 import {
   ApiContractError,
   decodeCapabilitiesResponse,
-  decodeRunResponse,
+  decodeJobResponse,
 } from './decoders';
+
+const connectorFixture = () => ({
+  provider: 'builtin',
+  name: 'file',
+  version: '1',
+  kind: 'both',
+  capabilities: {
+    delivery: 'exactly_once',
+    replay: 'replayable_exact',
+    watermark: 'generated_only',
+    transaction: 'pre_commit_commit',
+    snapshot: true,
+    polling: true,
+    cdc: false,
+    lookup: false,
+  },
+  formats: ['json'],
+  optionsSchema: { path: { type: 'string' } },
+});
 
 const capabilitiesFixture = () => ({
   schemaVersion: 1,
   runtime: {
     scope: { kind: 'runtimeSession', sessionId: 'session', revision: 0 },
-    packageVersion: '2.0.0',
-    projectFormatVersions: [2],
+    packageVersion: '3.0.0',
+    projectFormatVersions: [3],
     batchKinds: ['table', 'array'],
     portableArrowTypes: ['int64'],
-    operators: [],
+    operators: [{
+      kind: 'expression',
+      inputKinds: ['table'],
+      outputKinds: ['table'],
+      requiresDatafusion: true,
+    }],
     udfs: [],
     providers: [],
+    connectors: [connectorFixture()],
   },
   preview: {
     inputBatchKinds: ['table'],
@@ -33,231 +58,106 @@ const capabilitiesFixture = () => ({
   },
 });
 
-const providerFixture = () => ({
-  provider: 'numpy',
-  name: 'expression',
-  version: '1',
-  inputPorts: [{ name: 'input', kind: 'array', required: true }],
-  outputPorts: [{ name: 'output', kind: 'array', required: true }],
-  optionsSchema: null,
-});
-
-const registrationFixture = (
-  reconstruction: string,
-  extra: Record<string, unknown> = {},
-) => ({
-  reconstruction,
-  registrationKind: 'provider',
-  provider: 'numpy',
-  name: 'expression',
-  version: '1',
-  ...extra,
-});
-
-const capabilitiesWithRegistrations = (registrations: unknown[]) => ({
-  ...capabilitiesFixture(),
-  preview: { ...capabilitiesFixture().preview, workerRegistrations: registrations },
-});
-
-const completedRunWithArrayData = (data: unknown) => ({
-  id: 'run',
-  project_id: 'project',
-  status: 'completed',
+const job = (status: string) => ({
+  id: 'job-1',
+  project_id: 'project-1',
+  status,
   created_at: '2026-01-01T00:00:00Z',
-  started_at: '2026-01-01T00:00:00Z',
-  finished_at: '2026-01-01T00:00:01Z',
-  error: null,
-  result: {
-    outputs: {
-      output: {
-        kind: 'array',
-        backend: 'numpy',
-        total_rows: 1,
-        truncated: false,
-        data,
-        metadata: {},
-      },
-    },
-    node_timings: {},
-    datafusion_metrics: [],
-    metadata: {},
-  },
+  started_at: status === 'pending' ? null : '2026-01-01T00:00:01Z',
+  finished_at: ['completed', 'failed', 'cancelled'].includes(status)
+    ? '2026-01-01T00:00:02Z'
+    : null,
+  error_code: status === 'failed' ? 'worker_failed' : null,
+  error: status === 'failed' ? 'worker exited' : null,
 });
 
-const nestArrays = (depth: number): unknown => {
-  let value: unknown = 1;
-  for (let level = 0; level < depth; level += 1) value = [value];
-  return value;
-};
-
-describe('capabilities decoder nested object validation', () => {
-  it('accepts a fully populated nested provider document', () => {
-    const document = {
-      ...capabilitiesFixture(),
-      runtime: { ...capabilitiesFixture().runtime, providers: [providerFixture()] },
-    };
+describe('capabilities decoder', () => {
+  it('accepts the closed runtime connector capability axes', () => {
+    const document = capabilitiesFixture();
 
     expect(decodeCapabilitiesResponse(document)).toEqual(document);
+  });
+
+  it('rejects extra connector capability axes', () => {
+    const document = capabilitiesFixture();
+    const connector = connectorFixture();
+
+    expect(() => decodeCapabilitiesResponse({
+      ...document,
+      runtime: {
+        ...document.runtime,
+        connectors: [{
+          ...connector,
+          capabilities: { ...connector.capabilities, future: true },
+        }],
+      },
+    })).toThrowError(new ApiContractError(
+      'capabilities.runtime.connectors[0].capabilities.future: extra fields are forbidden',
+    ));
+  });
+
+  it('rejects an unknown connector transaction semantic', () => {
+    const document = capabilitiesFixture();
+    const connector = connectorFixture();
+
+    expect(() => decodeCapabilitiesResponse({
+      ...document,
+      runtime: {
+        ...document.runtime,
+        connectors: [{
+          ...connector,
+          capabilities: { ...connector.capabilities, transaction: 'deduplicated' },
+        }],
+      },
+    })).toThrowError(new ApiContractError(
+      "capabilities.runtime.connectors[0].capabilities.transaction: expected 'none' or 'pre_commit_commit' or 'ledger_idempotent' or 'retry_deduplicated'",
+    ));
   });
 
   it('rejects extra fields inside the nested runtime scope', () => {
     const document = capabilitiesFixture();
 
-    expect(() =>
-      decodeCapabilitiesResponse({
-        ...document,
-        runtime: {
-          ...document.runtime,
-          scope: { ...document.runtime.scope, unexpected: true },
-        },
-      }),
-    ).toThrowError(
-      new ApiContractError(
-        'capabilities.runtime.scope.unexpected: extra fields are forbidden',
-      ),
-    );
-  });
-
-  it('rejects extra fields inside a nested provider port', () => {
-    const document = capabilitiesFixture();
-
-    expect(() =>
-      decodeCapabilitiesResponse({
-        ...document,
-        runtime: {
-          ...document.runtime,
-          providers: [
-            {
-              ...providerFixture(),
-              inputPorts: [
-                { name: 'input', kind: 'array', required: true, futureFlag: true },
-              ],
-            },
-          ],
-        },
-      }),
-    ).toThrowError(
-      new ApiContractError(
-        'capabilities.runtime.providers[0].inputPorts[0].futureFlag: '
-        + 'extra fields are forbidden',
-      ),
-    );
-  });
-
-  it('rejects extra fields inside a nested preview limit entry', () => {
-    const document = capabilitiesFixture();
-
-    expect(() =>
-      decodeCapabilitiesResponse({
-        ...document,
-        preview: {
-          ...document.preview,
-          limits: {
-            ...document.preview.limits,
-            maxRows: { default: 10, minimum: 1, maximum: 10, soft: true },
-          },
-        },
-      }),
-    ).toThrowError(
-      new ApiContractError(
-        'capabilities.preview.limits.maxRows.soft: extra fields are forbidden',
-      ),
-    );
+    expect(() => decodeCapabilitiesResponse({
+      ...document,
+      runtime: {
+        ...document.runtime,
+        scope: { ...document.runtime.scope, unexpected: true },
+      },
+    })).toThrowError(new ApiContractError(
+      'capabilities.runtime.scope.unexpected: extra fields are forbidden',
+    ));
   });
 });
 
-describe('worker registration discriminator validation', () => {
-  it('accepts every defined reconstruction discriminator', () => {
-    const document = capabilitiesWithRegistrations([
-      registrationFixture('serialized'),
-      registrationFixture('lazyBuiltin'),
-      registrationFixture('unavailable', { reasonCode: 'serializationFailed' }),
-    ]);
-
-    expect(decodeCapabilitiesResponse(document)).toEqual(document);
+describe('job decoder', () => {
+  it('accepts every public continuous job state', () => {
+    ['pending', 'running', 'completed', 'failed', 'cancelled'].forEach((status) => {
+      expect(decodeJobResponse(job(status))).toEqual(job(status));
+    });
   });
 
-  it('rejects an unknown reconstruction discriminator', () => {
-    expect(() =>
-      decodeCapabilitiesResponse(
-        capabilitiesWithRegistrations([registrationFixture('embedded')]),
-      ),
-    ).toThrowError(
+  it('rejects preview-only terminal states', () => {
+    expect(() => decodeJobResponse(job('timed_out'))).toThrowError(
       new ApiContractError(
-        'capabilities.preview.workerRegistrations[0].reconstruction: '
-        + "expected 'serialized' or 'lazyBuiltin' or 'unavailable'",
+        "job.status: expected 'pending' or 'running' or 'completed' or 'failed' or 'cancelled'",
       ),
     );
   });
 
-  it('rejects an unknown reason code on unavailable registrations', () => {
-    expect(() =>
-      decodeCapabilitiesResponse(
-        capabilitiesWithRegistrations([
-          registrationFixture('unavailable', { reasonCode: 'unsupportedBackend' }),
-        ]),
-      ),
-    ).toThrowError(
-      new ApiContractError(
-        'capabilities.preview.workerRegistrations[0].reasonCode: '
-        + "expected 'serializationFailed'",
-      ),
-    );
+  it('rejects inconsistent running failures', () => {
+    expect(() => decodeJobResponse({
+      ...job('running'),
+      error_code: 'worker_failed',
+      error: 'worker exited',
+    })).toThrowError(new ApiContractError('job: running job payload is inconsistent'));
   });
 
-  it('requires a reason code on unavailable registrations', () => {
-    expect(() =>
-      decodeCapabilitiesResponse(
-        capabilitiesWithRegistrations([registrationFixture('unavailable')]),
-      ),
-    ).toThrowError(
-      new ApiContractError(
-        'capabilities.preview.workerRegistrations[0].reasonCode: field is required',
-      ),
-    );
-  });
-
-  it('forbids a reason code on serializable registrations', () => {
-    expect(() =>
-      decodeCapabilitiesResponse(
-        capabilitiesWithRegistrations([
-          registrationFixture('serialized', { reasonCode: 'serializationFailed' }),
-        ]),
-      ),
-    ).toThrowError(
-      new ApiContractError(
-        'capabilities.preview.workerRegistrations[0].reasonCode: '
-        + 'extra fields are forbidden',
-      ),
-    );
-  });
-});
-
-describe('run decoder JSON depth limit', () => {
-  it('accepts JSON values nested exactly to the depth limit', () => {
-    const run = completedRunWithArrayData(nestArrays(32));
-
-    expect(decodeRunResponse(run)).toEqual(run);
-  });
-
-  it('rejects JSON values nested beyond the depth limit', () => {
-    expect(() =>
-      decodeRunResponse(completedRunWithArrayData(nestArrays(33))),
-    ).toThrowError(
-      new ApiContractError(
-        'run.result.outputs.output.data'
-        + `${'[0]'.repeat(33)}: JSON value exceeds maximum depth 32`,
-      ),
-    );
-  });
-
-  it('rejects non-finite JSON numbers in run outputs', () => {
-    expect(() =>
-      decodeRunResponse(completedRunWithArrayData([Number.NaN])),
-    ).toThrowError(
-      new ApiContractError(
-        'run.result.outputs.output.data[0]: JSON numbers must be finite',
-      ),
-    );
+  it('requires typed failure codes', () => {
+    expect(() => decodeJobResponse({
+      ...job('failed'),
+      error_code: 'unknown_failure',
+    })).toThrowError(new ApiContractError(
+      "job.error_code: expected 'job_limit_exceeded' or 'worker_failed'",
+    ));
   });
 });

@@ -1,4 +1,4 @@
-"""Execute a compiled v2 plan without blocking an asyncio event loop."""
+"""Execute a compiled batch plan without blocking an asyncio event loop."""
 
 from __future__ import annotations
 
@@ -12,7 +12,9 @@ from calc_flow import Batch, ExecutionOptions, PipelineBuilder
 
 async def run() -> None:
     plan = (
-        PipelineBuilder("async-example").expression("calc", "total = a + b").compile()
+        PipelineBuilder("async-example")
+        .expression("calc", "total = a + b")
+        .compile_batch()
     )
     options = ExecutionOptions(
         settings={"request": {"source": "async-example"}},

@@ -6,7 +6,7 @@ import { NodeInspector } from './NodeInspector';
 
 describe('NodeInspector', () => {
   it('updates a nested v2 expression operator with a trusted UDF reference', () => {
-    const node = blankProject().pipeline.nodes[0];
+    const node = blankProject().graph.nodes[0];
     const onChange = vi.fn();
 
     render(
@@ -56,7 +56,7 @@ describe('NodeInspector', () => {
   });
 
   it('shows only configured schema ports for an external source', () => {
-    const base = blankProject().pipeline.nodes[0];
+    const base = blankProject().graph.nodes[0];
     const node = {
       ...base,
       input_ports: [],
@@ -95,7 +95,7 @@ describe('NodeInspector', () => {
   });
 
   it('shows only configured schema ports for an external sink', () => {
-    const base = blankProject().pipeline.nodes[0];
+    const base = blankProject().graph.nodes[0];
     const node = {
       ...base,
       input_ports: [
@@ -132,7 +132,7 @@ describe('NodeInspector', () => {
   });
 
   it('emits semantic edits for independent SQL alias rows', () => {
-    const base = blankProject().pipeline.nodes[0];
+    const base = blankProject().graph.nodes[0];
     const node = {
       ...base,
       operator: {

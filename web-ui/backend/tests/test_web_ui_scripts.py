@@ -214,7 +214,8 @@ def test_web_ui_process_manager_launches_workspace_backend() -> None:
         source,
     )
     assert '"--extra", "web"' not in source
-    assert "/api/v2/catalog" in source
+    assert "/api/v3/catalog" in source
+    assert "/api/v2/catalog" not in source
 
 
 def test_web_ui_documentation_includes_native_windows_commands() -> None:

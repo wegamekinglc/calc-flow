@@ -5,6 +5,15 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-19: Withdraw M6/M7 acceptance pending the
+  [current-main audit](docs/superpowers/audits/2026-08-19-continuous-streaming-v3-current-main.md).
+  The 2026-08-18 entries record merged, release-labelled slices, not completed
+  milestone gates: the canonical project/PyO3/Python surface is still v2,
+  registered connector lifecycles and database protocols are incomplete, and
+  Studio jobs do not yet own the native continuous runtime. Repair the 3.0
+  release trigger and release-helper unit-test coverage, but do not publish
+  3.0 until every P0 audit finding and the exact-head M7 evidence are closed.
+
 - 2026-08-18: Complete the M6 connector milestone. The
   `calc-flow-connectors` workspace crate ships six transports behind
   feature gates — file/Parquet (default), Kafka, PostgreSQL,
@@ -19,8 +28,9 @@ engine or Studio capabilities.
   job API with checkpoint, shutdown, cancel, SSE events, and the
   `ResourceLimits` endpoint replacing the v2 worker timeout.
 - 2026-08-18: Add the M7 release gates.
-  `scripts/verify_perf_gates.py` runs the 5% paired Criterion
-  regression gate and documents the opt-in 1,200-second soak
+  `scripts/verify_perf_gates.py` evaluates paired Python statistics and Rust
+  Criterion confidence intervals at the 5% regression threshold and documents
+  the opt-in 1,200-second soak
   procedures; `scripts/verify_security_gates.py` publishes the
   18-entry threat-model coverage checklist linking each security
   boundary to its named enforcement evidence.

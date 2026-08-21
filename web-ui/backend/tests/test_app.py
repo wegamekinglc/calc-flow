@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import asyncio
 import json
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import pyarrow as pa
 import pytest
 from calc_flow import (
     CalcFlowError,
@@ -22,7 +19,6 @@ from starlette.requests import Request as StarletteRequest
 
 import calc_flow_studio.app as app_module
 from calc_flow_studio.app import API_PREFIX, create_app, validate_bind_host
-from calc_flow_studio.checkpoint_store import FileCheckpointDocumentStore
 from calc_flow_studio.models import RunEvent, RunResponse, RunStatus
 from calc_flow_studio.run_manager import CapabilitySnapshotError, RunManagerError
 
@@ -31,11 +27,12 @@ def _project(
     project_id: str = "project_alpha", *, name: str = "Alpha"
 ) -> dict[str, object]:
     return {
-        "format_version": 2,
+        "format_version": 3,
         "id": project_id,
         "name": name,
-        "description": "A v2 project",
-        "pipeline": {
+        "description": "A v3 project",
+        "runtime": {"mode": "batch", "options": {}},
+        "graph": {
             "name": f"{name} pipeline",
             "nodes": [
                 {
@@ -133,10 +130,11 @@ def test_openapi_contains_only_v3_routes_and_exact_rust_schema(tmp_path) -> None
     assert f"{API_PREFIX}/catalog" in openapi["paths"]
     assert f"{API_PREFIX}/schema/project" in openapi["paths"]
     assert f"{API_PREFIX}/projects/{{project_id}}" in openapi["paths"]
-    assert f"{API_PREFIX}/runs/{{run_id}}/events" in openapi["paths"]
+    assert f"{API_PREFIX}/jobs/{{job_id}}/events" in openapi["paths"]
+    assert not any("/runs" in path for path in openapi["paths"])
     assert not any(path.startswith("/api/v2/") for path in openapi["paths"])
     assert schema == json.loads(project_json_schema())
-    assert schema["properties"]["format_version"]["const"] == 2
+    assert schema["properties"]["format_version"]["const"] == 3
     assert "backend" not in json.dumps(schema).lower()
 
     def without_none_defaults(value: object) -> object:
@@ -507,7 +505,7 @@ def test_project_crud_preserves_client_ids_sorting_and_request_values(tmp_path) 
         "project_beta",
     ]
     assert listed.json()[0]["node_count"] == 1
-    assert fetched.json()["pipeline"]["nodes"][0]["id"] == "calculate"
+    assert fetched.json()["graph"]["nodes"][0]["id"] == "calculate"
     assert updated.json()["name"] == "Updated"
     assert mismatch.status_code == 409
     assert original["name"] == "Alpha"
@@ -613,7 +611,7 @@ def test_import_export_use_bounded_strict_rust_transforms_and_conflicts(
         == json.dumps(json_export.json(), indent=2, sort_keys=True) + "\n"
     )
     assert yaml_export.status_code == 200
-    assert "format_version: 2" in yaml_export.text
+    assert "format_version: 3" in yaml_export.text
     assert unsafe.status_code == 422
     assert alias.status_code == 422
     assert oversized.status_code == 422
@@ -763,195 +761,38 @@ def test_import_and_export_threadpool_only_pure_rust_transformations(
     assert FileProjectStore.get not in calls
 
 
-def test_checkpoint_routes_use_compiled_plan_identity_and_async_store(tmp_path) -> None:
-    projects = FileProjectStore(tmp_path / "projects")
-    checkpoints = FileCheckpointDocumentStore(tmp_path / "checkpoints")
-    runtime = Runtime()
-    project = ProjectDocument.model_validate(_project())
-    asyncio.run(projects.create(project))
-    plan = runtime.compile_project(project.canonical_json())
-    checkpoint = {
-        "format_version": 2,
-        "pipeline_name": plan.name,
-        "pipeline_fingerprint": plan.fingerprint,
-        "source_cursor": {"offset": 12},
-        "sequence": 4,
-        "state": {"calculate": {"rows": 12}},
-        "created_at": "2026-01-01T00:00:00Z",
-    }
-    asyncio.run(checkpoints.save(checkpoint))
-
-    with _client(
-        tmp_path,
-        project_store=projects,
-        checkpoint_store=checkpoints,
-        runtime=runtime,
-    ) as client:
-        inspected = client.get(f"{API_PREFIX}/projects/project_alpha/checkpoint")
-        asyncio.run(checkpoints.save({**checkpoint, "pipeline_fingerprint": "stale"}))
-        stale = client.get(f"{API_PREFIX}/projects/project_alpha/checkpoint")
-        reset = client.delete(f"{API_PREFIX}/projects/project_alpha/checkpoint")
-        absent = client.get(f"{API_PREFIX}/projects/project_alpha/checkpoint")
-        missing = client.get(f"{API_PREFIX}/projects/missing/checkpoint")
-
-    assert inspected.json() == {
-        "pipeline_name": "Alpha pipeline",
-        "exists": True,
-        "compatible": True,
-        "pipeline_fingerprint": plan.fingerprint,
-        "sequence": 4,
-        "source_cursor": {"offset": 12},
-        "created_at": "2026-01-01T00:00:00Z",
-        "state_nodes": ["calculate"],
-    }
-    assert stale.json()["compatible"] is False
-    assert reset.json()["exists"] is False
-    assert absent.json()["exists"] is False
-    assert missing.status_code == 404
-
-
-def test_checkpoint_routes_preserve_unexpected_store_failures_as_internal(
-    tmp_path,
-) -> None:
-    class FailingCheckpointStore:
-        async def load(self, pipeline_name: str) -> dict[str, object] | None:
-            raise OSError(f"cannot load {pipeline_name}")
-
-        async def delete(self, pipeline_name: str) -> None:
-            raise OSError(f"cannot delete {pipeline_name}")
-
-    app = create_app(
-        project_directory=tmp_path / "projects",
-        checkpoint_store=FailingCheckpointStore(),
-    )
-    with TestClient(app, raise_server_exceptions=False) as client:
-        assert _create(client).status_code == 201
-        inspected = client.get(f"{API_PREFIX}/projects/project_alpha/checkpoint")
-        reset = client.delete(f"{API_PREFIX}/projects/project_alpha/checkpoint")
-
-    assert inspected.status_code == 500
-    assert reset.status_code == 500
-
-
-def test_default_checkpoint_store_is_studio_private(tmp_path) -> None:
+def test_v2_checkpoint_routes_are_removed(tmp_path) -> None:
     with _client(tmp_path) as client:
-        store = client.app.state.checkpoint_store
-
-    assert type(store).__module__ == "calc_flow_studio.checkpoint_store"
-
-
-def test_run_routes_use_injected_manager_and_preserve_sse_contract(tmp_path) -> None:
-    manager = FakeManager()
-    with _client(tmp_path, run_manager=manager) as client:
         assert _create(client).status_code == 201
-        submitted = client.post(
-            f"{API_PREFIX}/projects/project_alpha/runs",
-            json={"inputs": {"input": {"format": "records", "data": [{"value": 2}]}}},
-        )
-        fetched = client.get(f"{API_PREFIX}/runs/run_1")
-        events = client.get(
-            f"{API_PREFIX}/runs/run_1/events", headers={"Last-Event-ID": "0"}
-        )
-        cancelled = client.delete(f"{API_PREFIX}/runs/run_1")
-        missing_run = client.get(f"{API_PREFIX}/runs/missing")
-        missing_events = client.get(f"{API_PREFIX}/runs/missing/events")
-        missing_cancel = client.delete(f"{API_PREFIX}/runs/missing")
+        inspected = client.get(f"{API_PREFIX}/projects/project_alpha/checkpoint")
+        reset = client.delete(f"{API_PREFIX}/projects/project_alpha/checkpoint")
 
-    assert submitted.status_code == 202
-    assert fetched.json()["status"] == "running"
-    assert events.status_code == 200
-    assert events.text.startswith("retry: 500\n\n")
-    assert ": keep-alive\n\n" in events.text
-    assert "id: 1\nevent: completed\n" in events.text
-    assert events.headers["cache-control"] == "no-cache"
-    assert events.headers["x-accel-buffering"] == "no"
-    assert manager.wait_calls[0][1] == 0
-    assert cancelled.json()["status"] == "cancelled"
-    assert missing_run.status_code == 404
-    assert missing_events.status_code == 404
-    assert missing_cancel.status_code == 404
-    assert manager.shutdown_calls == 1
+    assert inspected.status_code == 404
+    assert reset.status_code == 404
 
 
-def test_default_app_runs_a_real_rust_worker_and_shuts_it_down(tmp_path) -> None:
-    app = create_app(
-        project_directory=tmp_path / "projects",
-        checkpoint_directory=tmp_path / "checkpoints",
-    )
-    manager = app.state.run_manager
-    with TestClient(app) as client:
+def test_v2_checkpoint_store_is_not_attached_to_studio(tmp_path) -> None:
+    with _client(tmp_path) as client:
+        state = client.app.state
+
+    assert not hasattr(state, "checkpoint_store")
+
+
+def test_v2_run_routes_are_removed(tmp_path) -> None:
+    with _client(tmp_path) as client:
         assert _create(client).status_code == 201
-        submitted = client.post(
-            f"{API_PREFIX}/projects/project_alpha/runs",
-            json={"inputs": {"input": {"format": "records", "data": [{"value": 2}]}}},
-        )
-        assert submitted.status_code == 202
-        run_id = submitted.json()["id"]
-        for _ in range(400):
-            completed = client.get(f"{API_PREFIX}/runs/{run_id}")
-            if completed.json()["status"] not in {"pending", "running"}:
-                break
-            time.sleep(0.025)
-
-        assert completed.json()["status"] == "completed"
-        assert completed.json()["result"]["outputs"]["output"]["rows"] == [
-            {"value": 2, "result": 3}
-        ]
-
-    assert manager._runs[run_id].worker is None
-    assert manager._runs[run_id].output_queue is None
-
-
-def test_default_manager_runs_injected_runtime_udf_in_spawned_worker(tmp_path) -> None:
-    runtime = Runtime()
-
-    def identity(value: pa.Array) -> pa.Array:
-        return value
-
-    runtime.register_scalar_udf(
-        provider="python",
-        name="identity",
-        version="1",
-        input_types=("int64",),
-        return_type="int64",
-        volatility="immutable",
-        function=identity,
-    )
-    project = _project()
-    operator = project["pipeline"]["nodes"][0]["operator"]
-    operator["expression"] = "result = identity(value)"
-    operator["udfs"] = [
-        {
-            "kind": "data_fusion_scalar",
-            "provider": "python",
-            "name": "identity",
-            "version": "1",
-        }
-    ]
-    app = create_app(
-        project_directory=tmp_path / "projects",
-        checkpoint_directory=tmp_path / "checkpoints",
-        runtime=runtime,
-    )
-    manager = app.state.run_manager
-
-    with TestClient(app) as client:
-        assert _create(client, project).status_code == 201
         submitted = client.post(f"{API_PREFIX}/projects/project_alpha/runs", json={})
-        assert submitted.status_code == 202
-        run_id = submitted.json()["id"]
-        for _ in range(400):
-            completed = client.get(f"{API_PREFIX}/runs/{run_id}")
-            if completed.json()["status"] not in {"pending", "running"}:
-                break
-            time.sleep(0.025)
+        fetched = client.get(f"{API_PREFIX}/runs/run_1")
+        events = client.get(f"{API_PREFIX}/runs/run_1/events")
+        cancelled = client.delete(f"{API_PREFIX}/runs/run_1")
 
-        assert completed.json()["status"] == "completed"
-        assert completed.json()["result"]["outputs"]["output"]["rows"] == [
-            {"value": 1, "result": 1}
-        ]
-
-    assert manager._runtime is runtime
+    statuses = {
+        submitted.status_code,
+        fetched.status_code,
+        events.status_code,
+        cancelled.status_code,
+    }
+    assert statuses == {404}
 
 
 def test_app_serves_static_frontend_and_accepts_only_loopback(tmp_path) -> None:

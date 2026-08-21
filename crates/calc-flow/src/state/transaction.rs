@@ -455,7 +455,7 @@ impl ManifestTransaction {
         cancellation: &CancellationToken,
     ) -> Result<StagedOperatorState> {
         let (staged, unpublished) = self
-            .collect_staged_operator_segments(operator_id, epoch, &snapshot.segments, cancellation)
+            .collect_staged_state_segments(operator_id, epoch, &snapshot.segments, cancellation)
             .await?;
         self.validate_staged_segments(&unpublished, cancellation)
             .await?;
@@ -471,22 +471,47 @@ impl ManifestTransaction {
         })
     }
 
-    async fn collect_staged_operator_segments(
+    pub(crate) async fn stage_sink_segments_cancellable(
         &self,
-        operator_id: &str,
+        sink_id: &str,
+        epoch: Epoch,
+        segments: &BTreeMap<String, Vec<u8>>,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<StateHandle>> {
+        let _guard = owner_settled(cancellation, "sink-state-stage-lock", async {
+            Ok(self.operation.lock().await)
+        })
+        .await?;
+        let (staged, unpublished) = self
+            .collect_staged_state_segments(sink_id, epoch, segments, cancellation)
+            .await?;
+        self.validate_staged_segments(&unpublished, cancellation)
+            .await?;
+        self.publish_staged_segments(&unpublished, cancellation)
+            .await?;
+        #[cfg(test)]
+        if !staged.is_empty() {
+            self.inject_fault(ManifestTransactionFaultPoint::StateStage)?;
+        }
+        Ok(staged)
+    }
+
+    async fn collect_staged_state_segments(
+        &self,
+        owner_id: &str,
         epoch: Epoch,
         segments: &BTreeMap<String, Vec<u8>>,
         cancellation: &CancellationToken,
     ) -> Result<(Vec<StateHandle>, Vec<StateHandle>)> {
-        let operator_hash = digest(operator_id);
+        let owner_hash = digest(owner_id);
         let mut staged = Vec::with_capacity(segments.len());
         let mut unpublished = Vec::with_capacity(segments.len());
         for (segment_id, bytes) in segments {
             let (handle, needs_publication) = self
-                .stage_operator_segment(
-                    operator_id,
+                .stage_state_segment(
+                    owner_id,
                     epoch,
-                    &operator_hash,
+                    &owner_hash,
                     segment_id,
                     bytes,
                     cancellation,
@@ -500,28 +525,28 @@ impl ManifestTransaction {
         Ok((staged, unpublished))
     }
 
-    async fn stage_operator_segment(
+    async fn stage_state_segment(
         &self,
-        operator_id: &str,
+        owner_id: &str,
         epoch: Epoch,
-        operator_hash: &str,
+        owner_hash: &str,
         segment_id: &str,
         bytes: &[u8],
         cancellation: &CancellationToken,
     ) -> Result<(StateHandle, bool)> {
         let segment_hash = digest(segment_id);
         let relative_path = format!(
-            "committed/{}/{operator_hash}/{}-{segment_hash}.segment",
+            "committed/{}/{owner_hash}/{}-{segment_hash}.segment",
             self.lineage_hash,
             epoch.as_u64()
         );
         let handle = StateHandle::new(
-            operator_id,
+            owner_id,
             epoch,
             segment_id,
             &relative_path,
             u64::try_from(bytes.len()).map_err(|_| CalcFlowError::InvalidArgument {
-                field: format!("operators.{operator_id}.segments.{segment_id}"),
+                field: format!("state.{owner_id}.segments.{segment_id}"),
                 message: "segment byte length does not fit u64".into(),
             })?,
             &digest(bytes),
@@ -536,7 +561,7 @@ impl ManifestTransaction {
             Ok(committed) if committed == bytes => Ok((handle, false)),
             Ok(_) => Err(CalcFlowError::CheckpointMismatch {
                 message: format!(
-                    "operator {operator_id:?} committed segment {segment_id:?} changed bytes"
+                    "state owner {owner_id:?} committed segment {segment_id:?} changed bytes"
                 ),
             }),
             Err(CalcFlowError::NotFound { .. }) => {
@@ -634,6 +659,38 @@ impl ManifestTransaction {
             inline_metadata: entry.inline_metadata.clone(),
             segments,
         })
+    }
+
+    pub(crate) async fn load_sink_segments_cancellable(
+        &self,
+        sink_id: &str,
+        epoch: Epoch,
+        handles: &[StateHandle],
+        cancellation: &CancellationToken,
+    ) -> Result<BTreeMap<String, Vec<u8>>> {
+        let _guard = owner_settled(cancellation, "sink-state-load-lock", async {
+            Ok(self.operation.lock().await)
+        })
+        .await?;
+        let mut segments = BTreeMap::new();
+        for handle in handles {
+            handle.validate_for(sink_id, epoch)?;
+            let bytes = owner_settled(
+                cancellation,
+                "sink-state-load-segment",
+                self.lineage.load_segment(handle),
+            )
+            .await?;
+            if segments.insert(handle.segment_id().into(), bytes).is_some() {
+                return Err(CalcFlowError::CheckpointMismatch {
+                    message: format!(
+                        "sink {sink_id:?} repeats state segment {:?}",
+                        handle.segment_id()
+                    ),
+                });
+            }
+        }
+        Ok(segments)
     }
 
     pub(crate) async fn select_latest(
@@ -911,12 +968,20 @@ async fn validate_manifest_segments(
             lineage.load_segment(handle).await?;
         }
     }
+    for sink in manifest.sinks().values() {
+        for handle in &sink.segments {
+            lineage.load_segment(handle).await?;
+        }
+    }
     Ok(())
 }
 
 fn collect_manifest_handles(manifest: &CheckpointManifest, retained: &mut BTreeSet<StateHandle>) {
     for operator in manifest.operators().values() {
         retained.extend(operator.segments.iter().cloned());
+    }
+    for sink in manifest.sinks().values() {
+        retained.extend(sink.segments.iter().cloned());
     }
 }
 

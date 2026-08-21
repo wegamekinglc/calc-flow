@@ -1,0 +1,3 @@
+schemas/project-v3.schema.json text eol=lf
+web-ui/openapi.json text eol=lf
+web-ui/src/api/schema.d.ts text eol=lf

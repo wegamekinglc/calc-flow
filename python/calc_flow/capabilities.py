@@ -151,6 +151,7 @@ class RuntimeCapabilities:
     operators: tuple[OperatorCapability, ...]
     udfs: tuple[UdfCapability, ...]
     providers: tuple[ProviderCapability, ...]
+    connectors: tuple[ConnectorCapability, ...]
 
 
 def runtime_capabilities(
@@ -160,6 +161,8 @@ def runtime_capabilities(
     package_version: str,
     registrations: Sequence[Mapping[str, Any]],
 ) -> RuntimeCapabilities:
+    from calc_flow import _native
+
     udfs = tuple(
         sorted(
             (
@@ -213,7 +216,7 @@ def runtime_capabilities(
             revision=revision,
         ),
         package_version=package_version,
-        project_format_versions=(2,),
+        project_format_versions=(3,),
         batch_kinds=("array", "table"),
         portable_arrow_types=PORTABLE_ARROW_TYPES,
         operators=(
@@ -232,6 +235,7 @@ def runtime_capabilities(
         ),
         udfs=udfs,
         providers=providers,
+        connectors=connector_capabilities(_native.registered_connectors()),
     )
 
 
@@ -242,7 +246,12 @@ def runtime_capabilities(
 type DeliveryCapabilityKind = Literal["best_effort", "at_least_once", "exactly_once"]
 type ReplayCapabilityKind = Literal["replayable_exact", "unreplayable"]
 type WatermarkSupportKind = Literal["native", "generated_only"]
-type TransactionSupportKind = Literal["none", "pre_commit_commit", "ledger_idempotent"]
+type TransactionSupportKind = Literal[
+    "none",
+    "pre_commit_commit",
+    "ledger_idempotent",
+    "retry_deduplicated",
+]
 
 
 @dataclass(frozen=True, slots=True)

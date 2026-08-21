@@ -113,6 +113,29 @@ class ProviderCapabilityResponse(CapabilityModel):
     options_schema: ProviderOptionsSchemaResponse | None
 
 
+class ConnectorAxesResponse(CapabilityModel):
+    delivery: Literal["best_effort", "at_least_once", "exactly_once"]
+    replay: Literal["replayable_exact", "unreplayable"]
+    watermark: Literal["native", "generated_only"]
+    transaction: Literal[
+        "none", "pre_commit_commit", "ledger_idempotent", "retry_deduplicated"
+    ]
+    snapshot: bool
+    polling: bool
+    cdc: bool
+    lookup: bool
+
+
+class ConnectorCapabilityResponse(CapabilityModel):
+    provider: str
+    name: str
+    version: str
+    kind: Literal["source", "sink", "both"]
+    capabilities: ConnectorAxesResponse
+    formats: tuple[str, ...]
+    options_schema: dict[str, object]
+
+
 class RuntimeCapabilitiesResponse(CapabilityModel):
     scope: RuntimeSessionScopeResponse
     package_version: str
@@ -122,6 +145,7 @@ class RuntimeCapabilitiesResponse(CapabilityModel):
     operators: tuple[OperatorCapabilityResponse, ...]
     udfs: tuple[UdfCapabilityResponse, ...]
     providers: tuple[ProviderCapabilityResponse, ...]
+    connectors: tuple[ConnectorCapabilityResponse, ...]
 
 
 class SerializedWorkerRegistration(CapabilityModel):
@@ -229,6 +253,10 @@ class RunRequest(StrictModel):
     options: RunOptions | None = None
 
 
+class JobCreateRequest(StrictModel):
+    project_id: str = Field(min_length=1, max_length=120)
+
+
 class ProjectCreateRequest(ProjectDocument):
     def to_project(self) -> ProjectDocument:
         return ProjectDocument.model_validate(self.root)
@@ -239,22 +267,6 @@ class ProjectSummary(StrictModel):
     name: str
     description: str
     node_count: int
-
-
-class CheckpointSummary(StrictModel):
-    pipeline_name: str
-    exists: bool
-    compatible: bool | None = None
-    pipeline_fingerprint: str | None = None
-    sequence: int | None = None
-    source_cursor: JSONValue = None
-    created_at: datetime | None = None
-    state_nodes: tuple[str, ...] = ()
-
-    @field_validator("source_cursor", mode="before")
-    @classmethod
-    def copy_source_cursor(cls, value: object) -> JSONValue:
-        return _copy_json_value(value)
 
 
 class ValidationIssue(StrictModel):
@@ -288,6 +300,15 @@ class RunEvent(StrictModel):
     timestamp: datetime
     type: str
     message: str
+    state: str | None = None
+    epoch: int | None = Field(default=None, ge=0)
+    watermark: datetime | None = None
+    throughput_rows: int | None = Field(default=None, ge=0)
+    queue_envelopes: int | None = Field(default=None, ge=0)
+    queue_rows: int | None = Field(default=None, ge=0)
+    queue_bytes: int | None = Field(default=None, ge=0)
+    backpressure_events: int | None = Field(default=None, ge=0)
+    late_rows: int | None = Field(default=None, ge=0)
 
 
 class OutputFieldPreview(StrictModel):
@@ -467,12 +488,91 @@ class RunResponse(RootModel[RunResponseVariant]):
         return self.root.result
 
 
+class JobResponseBase(StrictModel):
+    id: str
+    project_id: str
+    created_at: datetime
+
+
+class PendingJobResponse(JobResponseBase):
+    status: Literal[RunStatus.PENDING]
+    started_at: None = None
+    finished_at: None = None
+    error_code: None = None
+    error: None = None
+
+
+class RunningJobResponse(JobResponseBase):
+    status: Literal[RunStatus.RUNNING]
+    started_at: datetime
+    finished_at: None = None
+    error_code: None = None
+    error: None = None
+
+
+class CompletedJobResponse(JobResponseBase):
+    status: Literal[RunStatus.COMPLETED]
+    started_at: datetime
+    finished_at: datetime
+    error_code: None = None
+    error: None = None
+
+
+class FailedJobResponse(JobResponseBase):
+    status: Literal[RunStatus.FAILED]
+    started_at: datetime
+    finished_at: datetime
+    error_code: Literal["job_limit_exceeded", "worker_failed"]
+    error: str = Field(min_length=1)
+
+
+class CancelledJobResponse(JobResponseBase):
+    status: Literal[RunStatus.CANCELLED]
+    started_at: datetime | None = None
+    finished_at: datetime
+    error_code: None = None
+    error: None = None
+
+
+type JobResponseVariant = Annotated[
+    PendingJobResponse
+    | RunningJobResponse
+    | CompletedJobResponse
+    | FailedJobResponse
+    | CancelledJobResponse,
+    Field(discriminator="status"),
+]
+
+
+class JobResponse(RootModel[JobResponseVariant]):
+    """Typed lifecycle state for one persistent continuous job."""
+
+    model_config = ConfigDict(frozen=True)
+
+    @property
+    def id(self) -> str:
+        return self.root.id
+
+    @property
+    def project_id(self) -> str:
+        return self.root.project_id
+
+    @property
+    def status(self) -> RunStatus:
+        return self.root.status
+
+
 class ResourceLimits(StrictModel):
-    """Equivalent resource bounds replacing the v2 worker timeout for
-    long-running continuous jobs (M6-09)."""
+    """Hard bounds for long-running continuous jobs."""
 
     max_concurrent_jobs: int = Field(default=4, ge=1, le=64)
-    max_job_memory_mb: int = Field(default=1024, ge=64, le=8192)
-    max_global_memory_mb: int = Field(default=4096, ge=256, le=32768)
-    max_checkpoint_disk_mb: int = Field(default=512, ge=16, le=16384)
+    max_job_resident_memory_bytes: int = Field(
+        default=1024 * 1024 * 1024, ge=64 * 1024 * 1024
+    )
+    max_global_resident_memory_bytes: int = Field(
+        default=4 * 1024 * 1024 * 1024, ge=256 * 1024 * 1024
+    )
+    max_checkpoint_disk_bytes: int = Field(
+        default=512 * 1024 * 1024, ge=16 * 1024 * 1024
+    )
     job_lifecycle: Literal["user_explicit_stop"] = "user_explicit_stop"

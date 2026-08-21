@@ -25,7 +25,9 @@ fn sink_options() -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("bootstrap_servers".to_string(), json!("localhost:9092")),
         ("topic".to_string(), json!("totals")),
-        ("transactional_id".to_string(), json!("calc-flow-test")),
+        ("ledger_topic".to_string(), json!("calc-flow-test-ledger")),
+        ("pipeline".to_string(), json!("orders")),
+        ("output".to_string(), json!("totals")),
         ("format".to_string(), json!("json")),
     ])
 }
@@ -72,14 +74,18 @@ fn source_config_parses_and_normalizes_partitions() {
 }
 
 #[test]
-fn sink_config_requires_transactional_identity() {
+fn sink_config_derives_transactional_identity() {
     let config = KafkaSinkConfig::from_options(&sink_options()).expect("parses");
-    assert_eq!(config.transactional_id, "calc-flow-test");
+    assert_eq!(
+        config.transactional_id,
+        transactional_id("orders", "totals")
+    );
 
-    let mut missing = sink_options();
-    missing.remove("transactional_id");
-    let error = KafkaSinkConfig::from_options(&missing).expect_err("transactional id required");
-    assert!(error.to_string().contains("transactional_id"), "{error}");
+    let mut injected = sink_options();
+    injected.insert("transactional_id".into(), json!("caller-controlled"));
+    let error = KafkaSinkConfig::from_options(&injected)
+        .expect_err("caller-provided transactional IDs fail closed");
+    assert!(error.to_string().contains("derived"), "{error}");
 }
 
 #[test]
@@ -136,7 +142,12 @@ fn kafka_roundtrip_and_transactional_exactly_once() {
     let sink_config = KafkaSinkConfig::from_options(&BTreeMap::from([
         ("bootstrap_servers".to_string(), json!(bootstrap_servers)),
         ("topic".to_string(), json!(topic)),
-        ("transactional_id".to_string(), json!("calc-flow-it-txn")),
+        (
+            "ledger_topic".to_string(),
+            json!("calc-flow-kafka-it-ledger"),
+        ),
+        ("pipeline".to_string(), json!("kafka-it")),
+        ("output".to_string(), json!("records")),
         ("format".to_string(), json!("json")),
     ]))
     .expect("parses");
@@ -147,6 +158,8 @@ fn kafka_roundtrip_and_transactional_exactly_once() {
         .expect("runtime");
 
     rt.block_on(async move {
+        provision_ledger(&bootstrap_servers, "calc-flow-kafka-it-ledger").await;
+
         let batch = sample_batch();
         let mut sink =
             calc_flow_connectors::kafka::TransactionalKafkaSink::new(sink_config.clone())
@@ -160,9 +173,38 @@ fn kafka_roundtrip_and_transactional_exactly_once() {
             .pre_commit(calc_flow::Epoch::INITIAL)
             .await
             .expect("pre");
+        let segments = sink
+            .pre_commit_segments(calc_flow::Epoch::INITIAL)
+            .await
+            .expect("prepared records");
         sink.commit(calc_flow::Epoch::INITIAL, &evidence)
             .await
             .expect("commits");
+        sink.close().await.expect("first producer closes");
+
+        let mut recovery_sink =
+            calc_flow_connectors::kafka::TransactionalKafkaSink::new(sink_config)
+                .expect("new producer fences stale ownership");
+        recovery_sink.open().await.expect("recovery sink opens");
+        recovery_sink
+            .recover(
+                &calc_flow::SinkRecovery::from_parts(
+                    calc_flow::Epoch::INITIAL,
+                    false,
+                    calc_flow::SinkDelivery::EpochIdempotent {
+                        mechanism: "kafka-ledger".into(),
+                        retention: calc_flow::RetentionClass::Unbounded,
+                    },
+                    evidence,
+                )
+                .with_segments(segments),
+            )
+            .await
+            .expect("committed marker suppresses replay after lost acknowledgement");
+        recovery_sink
+            .close()
+            .await
+            .expect("recovery producer closes");
 
         let mut source =
             calc_flow_connectors::kafka::KafkaSource::new(config).expect("source constructs");
@@ -180,8 +222,26 @@ fn kafka_roundtrip_and_transactional_exactly_once() {
                 }
             }
         }
-        assert!(seen >= 2, "delivered rows reached the consumer: {seen}");
+        assert_eq!(seen, 2, "recovery did not duplicate committed rows");
     });
+}
+
+async fn provision_ledger(bootstrap_servers: &str, topic: &str) {
+    use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+    use rdkafka::client::DefaultClientContext;
+
+    let admin: AdminClient<DefaultClientContext> = rdkafka::config::ClientConfig::new()
+        .set("bootstrap.servers", bootstrap_servers)
+        .create()
+        .expect("admin client");
+    let ledger =
+        NewTopic::new(topic, 1, TopicReplication::Fixed(1)).set("cleanup.policy", "compact");
+    admin
+        .create_topics(&[ledger], &AdminOptions::new())
+        .await
+        .expect("ledger topic request")[0]
+        .as_ref()
+        .expect("ledger topic is created");
 }
 
 fn sample_batch() -> calc_flow::Batch {
@@ -219,15 +279,36 @@ async fn offline_source_reports_idle_and_replays_cursors() {
 
     // Cursor replay re-assigns partitions at the carried offsets without
     // contacting a broker.
-    let offsets: serde_json::Map<String, Value> = [("0".to_string(), Value::from(7_i64))]
-        .into_iter()
-        .collect();
+    let offsets: serde_json::Map<String, Value> = [
+        ("0".to_string(), Value::from(7_i64)),
+        ("1".to_string(), Value::from(3_i64)),
+        ("2".to_string(), Value::from(9_i64)),
+    ]
+    .into_iter()
+    .collect();
     let cursor = calc_flow::Cursor::unbound(
-        vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7],
-        BTreeMap::from([("offsets".to_string(), Value::Object(offsets))]),
+        7_u64.to_be_bytes().to_vec(),
+        BTreeMap::from([
+            ("offsets".to_string(), Value::Object(offsets)),
+            ("sequence".to_string(), Value::from(7_u64)),
+        ]),
     )
     .expect("cursor");
     source.open(Some(cursor)).await.expect("replay assignment");
+
+    let malformed = calc_flow::Cursor::unbound(
+        8_u64.to_be_bytes().to_vec(),
+        BTreeMap::from([
+            ("offsets".to_string(), json!({"0": 8, "1": 4})),
+            ("sequence".to_string(), Value::from(8_u64)),
+        ]),
+    )
+    .expect("cursor shape");
+    let error = source
+        .open(Some(malformed))
+        .await
+        .expect_err("partial partition cursors fail closed");
+    assert!(error.to_string().contains("partition set"), "{error}");
     source.close().await.expect("closes");
 }
 
@@ -296,7 +377,7 @@ async fn factories_register_and_resolve_offline() {
     assert!(!source.descriptor().capabilities.snapshot);
     assert_eq!(
         sink.descriptor().capabilities.transaction,
-        calc_flow::TransactionSupport::PreCommitCommit
+        calc_flow::TransactionSupport::LedgerIdempotent
     );
 
     // Duplicate registration conflicts atomically.
@@ -319,7 +400,12 @@ async fn factories_register_and_resolve_offline() {
     let options = BTreeMap::from([
         ("bootstrap_servers".to_string(), json!(bootstrap())),
         ("topic".to_string(), json!("calc-flow-it")),
-        ("transactional_id".to_string(), json!("calc-flow-offline")),
+        (
+            "ledger_topic".to_string(),
+            json!("calc-flow-offline-ledger"),
+        ),
+        ("pipeline".to_string(), json!("offline")),
+        ("output".to_string(), json!("records")),
         ("format".to_string(), json!("json")),
     ]);
     let sink_result = sink.open(&options, &NoSecrets).await;

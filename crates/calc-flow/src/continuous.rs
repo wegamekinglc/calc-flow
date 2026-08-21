@@ -125,7 +125,7 @@ use std::{
     fmt,
     path::PathBuf,
     sync::{
-        OnceLock,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -151,8 +151,11 @@ use crate::{
         projection,
         runner::{OneShotContinuousRunner, StartFailure},
         source_task::{
-            Cursor as InternalCursor, SourceBinding as InternalSourceBinding,
+            Cursor as InternalCursor,
+            DurableCursorAcknowledger as InternalDurableCursorAcknowledger,
+            SourceBinding as InternalSourceBinding,
             SourceCapabilities as InternalSourceCapabilities,
+            SourceCheckpointGate as InternalSourceCheckpointGate,
             SourceDeliveryCapability as InternalSourceDeliveryCapability,
             SourceEvent as InternalSourceEvent, StreamSource as InternalStreamSource,
         },
@@ -334,8 +337,48 @@ pub trait StreamSource: Send {
     async fn open(&mut self, cursor: Option<Cursor>) -> Result<()>;
     /// Produces the next event, or `None` when the source has ended.
     async fn next(&mut self) -> Result<Option<SourceEvent>>;
+    /// Returns an optional job-independent handle that advances external
+    /// source durability only after the checkpoint manifest is durable.
+    ///
+    /// The handle must be safe to call while [`Self::next`] is in flight. It
+    /// must never acknowledge a position beyond the supplied cursor.
+    fn durable_cursor_acknowledger(&self) -> Option<Arc<dyn DurableCursorAcknowledger>> {
+        None
+    }
+    /// Returns an optional concurrent gate for connector-level atomic cuts.
+    ///
+    /// A source that emits one external transaction or consistent snapshot as
+    /// several batches can keep this gate closed until the complete cut has
+    /// entered the runtime. Checkpoint requests wait without pausing source
+    /// admission, then take the normal exact cursor cut once the gate opens.
+    fn checkpoint_gate(&self) -> Option<Arc<dyn SourceCheckpointGate>> {
+        None
+    }
     /// Releases connector resources.
     async fn close(&mut self) -> Result<()>;
+}
+
+/// Advances a connector-owned durable cursor after manifest publication.
+///
+/// Streaming sources such as logical replication slots use this hook to keep
+/// external retention feedback behind Calc-Flow's durable checkpoint truth.
+#[async_trait]
+pub trait DurableCursorAcknowledger: Send + Sync {
+    /// Acknowledges exactly the supplied durable cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe connector error without advancing the external cursor
+    /// when the acknowledgement cannot be applied.
+    async fn acknowledge(&self, cursor: &Cursor) -> Result<()>;
+}
+
+/// Concurrent readiness gate for a connector-defined atomic checkpoint cut.
+#[async_trait]
+pub trait SourceCheckpointGate: Send + Sync {
+    /// Waits until a checkpoint can cut the source without splitting its
+    /// current external transaction or initial consistent snapshot.
+    async fn wait_ready(&self) -> Result<()>;
 }
 
 struct SourceAdapter<S> {
@@ -370,6 +413,19 @@ impl<S: StreamSource> InternalStreamSource for SourceAdapter<S> {
 
     async fn close(&mut self) -> Result<()> {
         self.source.close().await
+    }
+
+    fn durable_cursor_acknowledger(&self) -> Option<Arc<dyn InternalDurableCursorAcknowledger>> {
+        self.source.durable_cursor_acknowledger().map(|inner| {
+            Arc::new(DurableCursorAcknowledgerAdapter { inner })
+                as Arc<dyn InternalDurableCursorAcknowledger>
+        })
+    }
+
+    fn checkpoint_gate(&self) -> Option<Arc<dyn InternalSourceCheckpointGate>> {
+        self.source.checkpoint_gate().map(|inner| {
+            Arc::new(SourceCheckpointGateAdapter { inner }) as Arc<dyn InternalSourceCheckpointGate>
+        })
     }
 
     fn capabilities(&self) -> InternalSourceCapabilities {
@@ -416,6 +472,32 @@ impl<S: StreamSource> InternalStreamSource for SourceAdapter<S> {
             }
             ReplayPositioning::Unsupported => ReplayPositioningCapability::Unsupported,
         })
+    }
+}
+
+struct DurableCursorAcknowledgerAdapter {
+    inner: Arc<dyn DurableCursorAcknowledger>,
+}
+
+struct SourceCheckpointGateAdapter {
+    inner: Arc<dyn SourceCheckpointGate>,
+}
+
+#[async_trait]
+impl InternalSourceCheckpointGate for SourceCheckpointGateAdapter {
+    async fn wait_ready(&self) -> Result<()> {
+        self.inner.wait_ready().await
+    }
+}
+
+#[async_trait]
+impl InternalDurableCursorAcknowledger for DurableCursorAcknowledgerAdapter {
+    async fn acknowledge(&self, cursor: &InternalCursor) -> Result<()> {
+        self.inner
+            .acknowledge(&Cursor {
+                inner: cursor.clone(),
+            })
+            .await
     }
 }
 
@@ -477,6 +559,7 @@ pub struct SinkRecovery {
     terminal: bool,
     delivery: SinkDelivery,
     pre_commit: JsonMap,
+    segments: BTreeMap<String, Vec<u8>>,
 }
 
 impl fmt::Debug for SinkRecovery {
@@ -487,6 +570,7 @@ impl fmt::Debug for SinkRecovery {
             .field("terminal", &self.terminal)
             .field("delivery", &self.delivery)
             .field("pre_commit", &"<redacted>")
+            .field("segments", &self.segments.keys().collect::<Vec<_>>())
             .finish()
     }
 }
@@ -510,7 +594,15 @@ impl SinkRecovery {
             terminal,
             delivery,
             pre_commit,
+            segments: BTreeMap::new(),
         }
+    }
+    /// Adds the connector-owned committed state-segment bytes used by a
+    /// recovery test or embedding.
+    #[must_use]
+    pub fn with_segments(mut self, segments: BTreeMap<String, Vec<u8>>) -> Self {
+        self.segments = segments;
+        self
     }
     /// Returns the selected recovery epoch.
     pub const fn epoch(&self) -> Epoch {
@@ -528,6 +620,10 @@ impl SinkRecovery {
     pub const fn pre_commit(&self) -> &JsonMap {
         &self.pre_commit
     }
+    /// Returns committed connector state segments by stable segment ID.
+    pub const fn segments(&self) -> &BTreeMap<String, Vec<u8>> {
+        &self.segments
+    }
 }
 
 /// Async transactional sink lifecycle.
@@ -541,6 +637,11 @@ pub trait TransactionalStreamSink: Send {
     async fn write(&mut self, batch: &Batch) -> Result<()>;
     /// Produces bounded connector evidence before durable publication.
     async fn pre_commit(&mut self, epoch: Epoch) -> Result<JsonMap>;
+    /// Produces bounded, connector-owned bytes that the runtime commits as
+    /// immutable state segments before publishing the manifest.
+    async fn pre_commit_segments(&mut self, _epoch: Epoch) -> Result<BTreeMap<String, Vec<u8>>> {
+        Ok(BTreeMap::new())
+    }
     /// Commits one durably published epoch.
     async fn commit(&mut self, epoch: Epoch, pre_commit: &JsonMap) -> Result<()>;
     /// Aborts an unpublished epoch when its outcome is known absent.
@@ -586,6 +687,9 @@ impl<S: TransactionalStreamSink> InternalTransactionalStreamSink for Transaction
     async fn pre_commit(&mut self, epoch: Epoch) -> Result<JsonMap> {
         self.sink.pre_commit(epoch).await
     }
+    async fn pre_commit_segments(&mut self, epoch: Epoch) -> Result<BTreeMap<String, Vec<u8>>> {
+        self.sink.pre_commit_segments(epoch).await
+    }
     async fn commit(&mut self, epoch: Epoch, state: &JsonMap) -> Result<()> {
         self.sink.commit(epoch, state).await
     }
@@ -593,6 +697,13 @@ impl<S: TransactionalStreamSink> InternalTransactionalStreamSink for Transaction
         self.sink.abort(epoch, state).await
     }
     async fn recover(&mut self, manifest: &crate::CheckpointManifest) -> Result<()> {
+        self.recover_with_segments(manifest, BTreeMap::new()).await
+    }
+    async fn recover_with_segments(
+        &mut self,
+        manifest: &crate::CheckpointManifest,
+        segments: BTreeMap<String, Vec<u8>>,
+    ) -> Result<()> {
         let entry = manifest.sinks().get(&self.sink_id).ok_or_else(|| {
             CalcFlowError::CheckpointMismatch {
                 message: "checkpoint is missing expected sink recovery evidence".into(),
@@ -603,6 +714,7 @@ impl<S: TransactionalStreamSink> InternalTransactionalStreamSink for Transaction
             terminal: recovery_is_terminal(manifest)?,
             delivery: self.delivery.clone(),
             pre_commit: entry.pre_commit.clone().unwrap_or_default(),
+            segments,
         };
         self.sink.recover(&recovery).await
     }
@@ -780,11 +892,22 @@ impl StreamingRunner {
     ///
     /// Returns a safe validation error when source or sink bindings do not exactly cover the plan.
     pub fn new(
-        plan: StreamExecutionPlan,
-        sources: BTreeMap<String, SourceBinding>,
-        sinks: BTreeMap<String, Vec<SinkBinding>>,
+        mut plan: StreamExecutionPlan,
+        mut sources: BTreeMap<String, SourceBinding>,
+        mut sinks: BTreeMap<String, Vec<SinkBinding>>,
         checkpoints: ManagedCheckpointRuntime,
     ) -> Result<Self> {
+        if let Some((project_sources, project_sinks)) = plan.take_project_bindings() {
+            if !sources.is_empty() || !sinks.is_empty() {
+                return Err(safe_error(CalcFlowError::InvalidArgument {
+                    field: "bindings".into(),
+                    message: "project-v3 plans own their connector bindings; external bindings must be empty"
+                        .into(),
+                }));
+            }
+            sources = project_sources;
+            sinks = project_sinks;
+        }
         validate_binding_shapes(&plan, &sources, &sinks).map_err(safe_error)?;
         Ok(Self {
             plan,

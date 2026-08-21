@@ -1,12 +1,12 @@
 # Rust API
 
-The `calc-flow` crate is the implementation of Calc Flow 2.0. Its public
+The `calc-flow` crate is the implementation of Calc Flow 3.0. Its public
 surface is re-exported from `calc_flow`; no Python process is required.
 
 ## Build and document
 
 ```bash
-cargo add calc-flow@2.0.0
+cargo add calc-flow@3.0.0
 cargo test -p calc-flow --all-targets
 RUSTDOCFLAGS="-D warnings" cargo doc -p calc-flow --no-deps
 ```
@@ -282,7 +282,7 @@ cargo run -p calc-flow --example continuous_runtime
 
 ## Projects and stores
 
-`ProjectSpec` is the strict v2 data model. Use `validate_project` for a
+`ProjectSpec` is the strict v3 data model. Use `validate_project` for a
 `ValidationReport`, `compile_project` for a `BatchExecutionPlan`, and
 `project_json_schema` for the generated schema.
 

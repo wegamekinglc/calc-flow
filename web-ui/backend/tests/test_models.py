@@ -7,7 +7,6 @@ from pydantic import TypeAdapter, ValidationError
 
 from calc_flow_studio.models import (
     CapabilitiesResponse,
-    CheckpointSummary,
     InputPayload,
     ProjectCreateRequest,
     ProjectSummary,
@@ -21,11 +20,12 @@ from calc_flow_studio.models import (
 
 def _project() -> dict[str, object]:
     return {
-        "format_version": 2,
+        "format_version": 3,
         "id": "project_alpha",
         "name": "Alpha",
-        "description": "A v2 project",
-        "pipeline": {
+        "description": "A v3 project",
+        "runtime": {"mode": "batch", "options": {}},
+        "graph": {
             "name": "Alpha pipeline",
             "nodes": [
                 {
@@ -53,7 +53,7 @@ def test_project_create_request_uses_rust_structural_validation_only() -> None:
     copied = request.to_project()
     copied.root["name"] = "Changed"
 
-    assert request.root["format_version"] == 2
+    assert request.root["format_version"] == 3
     assert request.root["id"] == "project_alpha"
     assert request.root["name"] == "Alpha"
 
@@ -69,14 +69,14 @@ def test_project_create_request_uses_rust_structural_validation_only() -> None:
 
     semantically_invalid = {
         **_project(),
-        "pipeline": {"name": "empty", "nodes": []},
+        "graph": {"name": "empty", "nodes": []},
     }
-    assert not ProjectCreateRequest.model_validate(semantically_invalid).root[
-        "pipeline"
-    ]["nodes"]
+    assert not ProjectCreateRequest.model_validate(semantically_invalid).root["graph"][
+        "nodes"
+    ]
 
 
-def test_transport_models_are_strict_frozen_and_v2_only() -> None:
+def test_transport_models_are_strict_and_frozen() -> None:
     data = [{"value": [1]}]
     payload = InputPayload(format="records", data=data, source_id="sample")
     request = RunRequest(inputs={"input": payload})
@@ -133,13 +133,14 @@ def test_capabilities_response_is_a_closed_camel_case_v1_contract() -> None:
                 "sessionId": "session",
                 "revision": 0,
             },
-            "packageVersion": "2.0.0",
-            "projectFormatVersions": [2],
+            "packageVersion": "3.0.0",
+            "projectFormatVersions": [3],
             "batchKinds": ["array", "table"],
             "portableArrowTypes": ["int64"],
             "operators": [],
             "udfs": [],
             "providers": [],
+            "connectors": [],
         },
         "preview": {
             "inputBatchKinds": ["table"],
@@ -237,26 +238,12 @@ def test_validation_report_discriminator_enforces_status_invariants() -> None:
             adapter.validate_python(malformed)
 
 
-def test_project_and_checkpoint_summaries_are_json_transport_values() -> None:
-    source_cursor = {"offsets": [10]}
+def test_project_summary_is_a_json_transport_value() -> None:
     project = ProjectSummary(
-        id="project_alpha", name="Alpha", description="A v2 project", node_count=1
+        id="project_alpha", name="Alpha", description="A v3 project", node_count=1
     )
-    checkpoint = CheckpointSummary(
-        pipeline_name="Alpha pipeline",
-        exists=True,
-        compatible=True,
-        pipeline_fingerprint="fingerprint",
-        sequence=2,
-        source_cursor=source_cursor,
-        created_at=datetime(2026, 1, 1, tzinfo=UTC),
-        state_nodes=("counter",),
-    )
-    source_cursor["offsets"].append(11)
 
     assert project.node_count == 1
-    assert checkpoint.model_dump(mode="json")["source_cursor"] == {"offsets": [10]}
-    assert checkpoint.model_dump(mode="json")["created_at"] == "2026-01-01T00:00:00Z"
 
 
 def test_run_response_serializes_status_and_timestamps() -> None:
@@ -316,10 +303,6 @@ def test_transport_json_values_reject_non_json_and_non_finite_values(
 ) -> None:
     with pytest.raises(ValidationError):
         InputPayload(format="records", data={"value": invalid})
-    with pytest.raises(ValidationError):
-        CheckpointSummary(
-            pipeline_name="pipeline", exists=True, source_cursor={"value": invalid}
-        )
     with pytest.raises(ValidationError):
         RunResponse(
             id="run",

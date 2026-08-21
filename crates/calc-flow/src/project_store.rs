@@ -24,7 +24,7 @@ pub(crate) enum WriteMode {
     Replace,
 }
 
-/// Asynchronous persistence contract for strict v2 project documents.
+/// Asynchronous persistence contract for strict v3 project documents.
 #[async_trait]
 pub trait ProjectStore: Send + Sync {
     /// Creates a project, returning [`CalcFlowError::Conflict`] when its ID exists.
@@ -39,7 +39,7 @@ pub trait ProjectStore: Send + Sync {
     async fn delete(&self, project_id: &str) -> Result<()>;
 }
 
-/// Atomic file-backed v2 project storage rooted in one canonical directory.
+/// Atomic file-backed v3 project storage rooted in one canonical directory.
 #[derive(Clone, Debug)]
 pub struct FileProjectStore {
     directory: PathBuf,
@@ -69,7 +69,7 @@ impl FileProjectStore {
         })
     }
 
-    /// Imports a bounded strict v2 JSON document.
+    /// Imports a bounded strict v3 JSON document.
     ///
     /// # Errors
     ///
@@ -78,7 +78,7 @@ impl FileProjectStore {
         import_project_json(document.as_ref())
     }
 
-    /// Imports a bounded, single-document, data-only v2 YAML document.
+    /// Imports a bounded, single-document, data-only v3 YAML document.
     ///
     /// # Errors
     ///
@@ -91,7 +91,7 @@ impl FileProjectStore {
     ///
     /// # Errors
     ///
-    /// Returns [`CalcFlowError::Format`] when the project is not a valid v2 document.
+    /// Returns [`CalcFlowError::Format`] when the project is not a valid v3 document.
     pub fn export_json(&self, project: &ProjectSpec) -> Result<String> {
         export_project_json(project)
     }
@@ -214,7 +214,7 @@ impl ProjectStore for FileProjectStore {
     }
 }
 
-/// Serializes a strict v2 project to recursively sorted pretty JSON plus one newline.
+/// Serializes a strict v3 project to recursively sorted pretty JSON plus one newline.
 ///
 /// # Errors
 ///
@@ -244,7 +244,7 @@ pub fn export_project_json(project: &ProjectSpec) -> Result<String> {
     Ok(document)
 }
 
-/// Imports a strict v2 project from JSON using the default byte limit.
+/// Imports a strict v3 project from JSON using the default byte limit.
 ///
 /// # Errors
 ///
@@ -253,7 +253,7 @@ pub fn import_project_json(document: &[u8]) -> Result<ProjectSpec> {
     import_project_json_with_limit(document, MAX_PROJECT_DOCUMENT_BYTES)
 }
 
-/// Imports a strict v2 project from JSON using an explicit inclusive byte limit.
+/// Imports a strict v3 project from JSON using an explicit inclusive byte limit.
 ///
 /// # Errors
 ///
@@ -340,7 +340,7 @@ fn validate_project_json_values(project: &ProjectSpec) -> Result<()> {
             &format!("project data source {:?} data", source.id),
         )?;
     }
-    for node in &project.pipeline.nodes {
+    for node in &project.graph.nodes {
         if let OperatorSpec::External { options, .. } = &node.operator {
             for (key, value) in options {
                 validate_json_depth_at(

@@ -9,10 +9,11 @@ use std::{
 use async_trait::async_trait;
 use calc_flow::{
     ArrowFieldSpec, Batch, BatchKind, BatchOperator, BatchOperatorContext, BatchOperatorFactory,
-    DataFusionConfig, DataSourceSpec, Edge, EdgeSpec, ExpressionOperator, ExternalOperatorSpec,
-    JsonMap, NodeSpec, OperatorMetadata, OperatorSpec, PROJECT_FORMAT_VERSION, PipelineBuilder,
-    PipelineSpec, Port, PortEndpoint, PortSpec, PositionSpec, ProjectSpec, ProviderRegistry,
-    Result, RunOptions, StreamRequirements, UdfKind, UdfReference, UdfRegistry, ValidationReport,
+    ConnectorRegistry, DataFusionConfig, DataSourceSpec, Edge, EdgeSpec, ExpressionOperator,
+    ExternalOperatorSpec, JsonMap, NodeSpec, OperatorMetadata, OperatorSpec,
+    PROJECT_FORMAT_VERSION, PipelineBuilder, PipelineSpec, Port, PortEndpoint, PortSpec,
+    PositionSpec, ProjectSpec, ProviderRegistry, Result, RunOptions, RuntimeSpec, StateConfig,
+    StreamRequirements, StreamRunOptions, UdfKind, UdfReference, UdfRegistry, ValidationReport,
     compile_project, compile_stream_project, project_json_schema, validate_project,
 };
 use datafusion::arrow::datatypes::DataType;
@@ -25,8 +26,9 @@ fn project(node: NodeSpec) -> ProjectSpec {
         id: "project".into(),
         name: "Project".into(),
         description: String::new(),
-        pipeline: PipelineSpec {
-            name: "pipeline".into(),
+        runtime: RuntimeSpec::default(),
+        graph: PipelineSpec {
+            name: "graph".into(),
             nodes: vec![node],
             edges: Vec::new(),
             datafusion: DataFusionConfig::default(),
@@ -37,8 +39,17 @@ fn project(node: NodeSpec) -> ProjectSpec {
             format: "inline_json".into(),
             data: json!([{ "value": 1 }]),
         }],
-        run_options: RunOptions::default(),
+        sources: Vec::new(),
+        sinks: Vec::new(),
+        state: StateConfig::default(),
     }
+}
+
+fn batch_options_mut(project: &mut ProjectSpec) -> &mut RunOptions {
+    let RuntimeSpec::Batch(options) = &mut project.runtime else {
+        panic!("test project must use batch runtime options");
+    };
+    options
 }
 
 fn expression_node(id: &str) -> NodeSpec {
@@ -83,25 +94,25 @@ fn assert_issue(report: &ValidationReport, path: &str, code: &str) {
 
 #[test]
 fn project_rejects_v1_and_unknown_fields_at_every_nested_level() {
-    let v1 = r#"{"format_version":1,"id":"x","name":"x","pipeline":{"name":"p","nodes":[],"edges":[]},"data_sources":[],"run_options":{}}"#;
+    let v1 = r#"{"format_version":1,"id":"x","name":"x","runtime":{"mode":"batch","options":{}},"graph":{"name":"p","nodes":[],"edges":[]},"data_sources":[]}"#;
     assert!(serde_json::from_str::<ProjectSpec>(v1).is_err());
 
     let base = serde_json::to_value(project(expression_node("node"))).unwrap();
     for path in [
         vec![],
-        vec!["pipeline"],
-        vec!["pipeline", "nodes", "0"],
-        vec!["pipeline", "nodes", "0", "operator"],
-        vec!["pipeline", "nodes", "0", "input_ports", "0"],
-        vec!["pipeline", "nodes", "0", "input_ports", "0", "schema", "0"],
-        vec!["pipeline", "nodes", "0", "position"],
+        vec!["graph"],
+        vec!["graph", "nodes", "0"],
+        vec!["graph", "nodes", "0", "operator"],
+        vec!["graph", "nodes", "0", "input_ports", "0"],
+        vec!["graph", "nodes", "0", "input_ports", "0", "schema", "0"],
+        vec!["graph", "nodes", "0", "position"],
         vec!["data_sources", "0"],
-        vec!["run_options"],
-        vec!["pipeline", "datafusion"],
+        vec!["runtime", "options"],
+        vec!["graph", "datafusion"],
     ] {
         let mut value = base.clone();
         if path.contains(&"input_ports") {
-            value["pipeline"]["nodes"][0]["input_ports"] = json!([{
+            value["graph"]["nodes"][0]["input_ports"] = json!([{
                 "name": "input", "kind": "table", "required": true,
                 "schema": [{"name": "value", "data_type": "int64", "nullable": false}]
             }]);
@@ -123,13 +134,13 @@ fn project_rejects_v1_and_unknown_fields_at_every_nested_level() {
 }
 
 #[test]
-fn generated_schema_is_v2_stable_closed_and_contains_no_executable_fields() {
-    assert_eq!(PROJECT_FORMAT_VERSION, 2);
+fn generated_schema_is_v3_stable_closed_and_contains_no_executable_fields() {
+    assert_eq!(PROJECT_FORMAT_VERSION, 3);
     let first = project_json_schema().unwrap();
     let second = project_json_schema().unwrap();
     assert_eq!(first, second);
-    assert_eq!(first["title"], "Calc Flow Project V2");
-    assert_eq!(first["properties"]["format_version"]["const"], 2);
+    assert_eq!(first["title"], "Calc Flow Project V3");
+    assert_eq!(first["properties"]["format_version"]["const"], 3);
     let text = serde_json::to_string(&first).unwrap();
     for forbidden in ["callable", "import_path", "source_code"] {
         assert!(!text.contains(forbidden));
@@ -141,7 +152,7 @@ fn assert_closed_models(value: &Value, path: &str) {
     match value {
         Value::Object(map) => {
             if map.get("type") == Some(&Value::String("object".into()))
-                && !matches!(path, _ if path.ends_with("options") || path.ends_with("data"))
+                && !matches!(path, _ if path.ends_with("options") || path.ends_with("data") || path.ends_with("secrets"))
             {
                 assert_eq!(
                     map.get("additionalProperties"),
@@ -165,18 +176,19 @@ fn assert_closed_models(value: &Value, path: &str) {
 #[test]
 fn defaults_round_trip_canonically() {
     let text = r#"{
-        "format_version": 2,
+        "format_version": 3,
         "id": "project",
         "name": "Project",
-        "pipeline": {"name": "pipeline", "nodes": [{
+        "runtime": {"mode": "batch", "options": {}},
+        "graph": {"name": "graph", "nodes": [{
             "id": "node", "operator": {"kind": "expression", "expression": "x + 1"}
         }]}
     }"#;
     let parsed: ProjectSpec = serde_json::from_str(text).unwrap();
     assert_eq!(parsed.description, "");
-    assert!(parsed.pipeline.edges.is_empty());
+    assert!(parsed.graph.edges.is_empty());
     assert!(parsed.data_sources.is_empty());
-    assert_eq!(parsed.run_options, RunOptions::default());
+    assert_eq!(parsed.runtime, RuntimeSpec::default());
     assert_eq!(
         parsed,
         serde_json::from_value(serde_json::to_value(&parsed).unwrap()).unwrap()
@@ -226,24 +238,25 @@ fn validate_rejects_invalid_constructed_identity_positions_and_limits() {
 
     let mut value = project(expression_node(""));
     value.id.clear();
-    value.pipeline.name.clear();
-    value.pipeline.nodes[0].position = Some(PositionSpec {
+    value.graph.name.clear();
+    value.graph.nodes[0].position = Some(PositionSpec {
         x: f64::NAN,
         y: f64::INFINITY,
     });
-    value.run_options.max_rows = 0;
-    value.run_options.memory_limit_mb = 2_049;
-    value.pipeline.datafusion.batch_size = 0;
+    let options = batch_options_mut(&mut value);
+    options.max_rows = 0;
+    options.memory_limit_mb = 2_049;
+    value.graph.datafusion.batch_size = 0;
     let report = validate_project(&value, &providers, &udfs);
     for (path, code) in [
         ("id", "invalid_id"),
-        ("pipeline.name", "required"),
-        ("pipeline.nodes[0].id", "invalid_id"),
-        ("pipeline.nodes[0].position.x", "not_finite"),
-        ("pipeline.nodes[0].position.y", "not_finite"),
-        ("run_options.max_rows", "out_of_range"),
-        ("run_options.memory_limit_mb", "out_of_range"),
-        ("pipeline.datafusion.batch_size", "out_of_range"),
+        ("graph.name", "required"),
+        ("graph.nodes[0].id", "invalid_id"),
+        ("graph.nodes[0].position.x", "not_finite"),
+        ("graph.nodes[0].position.y", "not_finite"),
+        ("runtime.options.max_rows", "out_of_range"),
+        ("runtime.options.memory_limit_mb", "out_of_range"),
+        ("graph.datafusion.batch_size", "out_of_range"),
     ] {
         assert_issue(&report, path, code);
     }
@@ -253,8 +266,8 @@ fn validate_rejects_invalid_constructed_identity_positions_and_limits() {
 fn validate_rejects_duplicate_nodes_ports_fields_and_sources() {
     let (providers, udfs) = empty_registries();
     let mut value = project(expression_node("node"));
-    value.pipeline.nodes.push(expression_node("node"));
-    value.pipeline.nodes[0].input_ports = vec![
+    value.graph.nodes.push(expression_node("node"));
+    value.graph.nodes[0].input_ports = vec![
         port(
             "input",
             BatchKind::Table,
@@ -277,10 +290,10 @@ fn validate_rejects_duplicate_nodes_ports_fields_and_sources() {
     value.data_sources.push(value.data_sources[0].clone());
     let report = validate_project(&value, &providers, &udfs);
     for (path, code) in [
-        ("pipeline.nodes[1].id", "duplicate_id"),
-        ("pipeline.nodes[0].input_ports[1].name", "duplicate_port"),
+        ("graph.nodes[1].id", "duplicate_id"),
+        ("graph.nodes[0].input_ports[1].name", "duplicate_port"),
         (
-            "pipeline.nodes[0].input_ports[0].schema[1].name",
+            "graph.nodes[0].input_ports[0].schema[1].name",
             "duplicate_field",
         ),
         ("data_sources[1].id", "duplicate_id"),
@@ -294,7 +307,7 @@ fn validate_rejects_duplicate_nodes_ports_fields_and_sources() {
 fn validate_rejects_unsupported_arrow_types_and_array_schemas() {
     let (providers, udfs) = empty_registries();
     let mut value = project(expression_node("node"));
-    value.pipeline.nodes[0].input_ports = vec![port(
+    value.graph.nodes[0].input_ports = vec![port(
         "input",
         BatchKind::Array,
         true,
@@ -307,12 +320,12 @@ fn validate_rejects_unsupported_arrow_types_and_array_schemas() {
     let report = validate_project(&value, &providers, &udfs);
     assert_issue(
         &report,
-        "pipeline.nodes[0].input_ports[0].schema",
+        "graph.nodes[0].input_ports[0].schema",
         "array_schema",
     );
     assert_issue(
         &report,
-        "pipeline.nodes[0].input_ports[0].schema[0].data_type",
+        "graph.nodes[0].input_ports[0].schema[0].data_type",
         "unsupported_arrow_type",
     );
 }
@@ -348,26 +361,31 @@ fn validate_requires_exact_supported_data_source_coverage() {
 }
 
 #[test]
-fn compile_stream_requires_exact_supported_data_source_coverage() {
+fn compile_stream_requires_exact_connector_source_coverage() {
     let (providers, udfs) = empty_registries();
     let mut value = project(expression_node("node"));
-    for data_sources in [
-        Vec::new(),
-        vec![DataSourceSpec {
-            id: "source".into(),
-            input: "wrong".into(),
-            format: "json".into(),
-            data: Value::Null,
-        }],
+    value.runtime = RuntimeSpec::Stream(StreamRunOptions::default());
+    value.data_sources.clear();
+    for sources in [
+        json!([]),
+        json!([{
+            "binding": "wrong",
+            "connector": {"provider": "test", "name": "source", "version": "1"}
+        }]),
     ] {
-        value.data_sources = data_sources;
-        let error =
-            compile_stream_project(&value, &providers, &udfs, &StreamRequirements::default())
-                .expect_err("stream compilation must reject incomplete source coverage");
+        value.sources = serde_json::from_value(sources).unwrap();
+        let error = compile_stream_project(
+            &value,
+            &providers,
+            &udfs,
+            &ConnectorRegistry::new().snapshot(),
+            &StreamRequirements::default(),
+        )
+        .expect_err("stream compilation must reject incomplete source coverage");
         assert!(
             error
                 .to_string()
-                .contains("data_sources [source_input_mismatch]")
+                .contains("sources [source_input_mismatch]")
         );
     }
 }
@@ -381,14 +399,13 @@ fn compile_expression_uses_exact_configured_ports_and_schemas() {
         nullable: false,
     }];
     let mut value = project(expression_node("node"));
-    value.pipeline.nodes[0].input_ports =
-        vec![port("input", BatchKind::Table, true, fields.clone())];
-    value.pipeline.nodes[0].output_ports = vec![port("output", BatchKind::Table, true, fields)];
+    value.graph.nodes[0].input_ports = vec![port("input", BatchKind::Table, true, fields.clone())];
+    value.graph.nodes[0].output_ports = vec![port("output", BatchKind::Table, true, fields)];
     let plan = compile_project(&value, &providers, &udfs).unwrap();
     assert_eq!(plan.external_inputs()["input"].node_id, "node");
     assert_eq!(plan.external_outputs()["output"].node_id, "node");
 
-    let direct = PipelineBuilder::new("pipeline")
+    let direct = PipelineBuilder::new("graph")
         .unwrap()
         .add_node(
             "node",
@@ -435,18 +452,18 @@ fn datafusion_config_is_preserved_and_changes_the_fingerprint() {
     let original_plan = compile_project(&original, &providers, &udfs).unwrap();
 
     let mut changed = original.clone();
-    changed.pipeline.datafusion.batch_size = 4_096;
-    changed.pipeline.datafusion.target_partitions = 2;
+    changed.graph.datafusion.batch_size = 4_096;
+    changed.graph.datafusion.target_partitions = 2;
     let changed_plan = compile_project(&changed, &providers, &udfs).unwrap();
     assert_eq!(
         changed_plan.datafusion_config(),
-        Some(changed.pipeline.datafusion)
+        Some(changed.graph.datafusion)
     );
     assert_ne!(original_plan.fingerprint(), changed_plan.fingerprint());
 
-    let direct = PipelineBuilder::new("pipeline")
+    let direct = PipelineBuilder::new("graph")
         .unwrap()
-        .with_datafusion_config(changed.pipeline.datafusion)
+        .with_datafusion_config(changed.graph.datafusion)
         .add_node(
             "node",
             Box::new(
@@ -461,7 +478,7 @@ fn datafusion_config_is_preserved_and_changes_the_fingerprint() {
 }
 
 #[test]
-fn direct_pipeline_compile_validates_core_datafusion_config() {
+fn direct_graph_compile_validates_core_datafusion_config() {
     let (_, udfs) = empty_registries();
     for config in [
         DataFusionConfig {
@@ -474,7 +491,7 @@ fn direct_pipeline_compile_validates_core_datafusion_config() {
         },
     ] {
         assert!(matches!(
-            PipelineBuilder::new("pipeline")
+            PipelineBuilder::new("graph")
                 .unwrap()
                 .with_datafusion_config(config)
                 .add_node(
@@ -533,14 +550,14 @@ fn compile_sql_honors_alias_ports_and_reports_graph_errors() {
     let plan = compile_project(&value, &providers, &udfs).unwrap();
     assert_eq!(plan.external_inputs().len(), 2);
 
-    value.pipeline.edges.push(EdgeSpec {
+    value.graph.edges.push(EdgeSpec {
         source_node: "missing".into(),
         source_port: "output".into(),
         target_node: "sql".into(),
         target_port: "left".into(),
     });
     let report = validate_project(&value, &providers, &udfs);
-    assert_issue(&report, "pipeline.edges[0]", "graph_compile");
+    assert_issue(&report, "graph.edges[0]", "graph_compile");
 }
 
 struct PassthroughOperator {
@@ -648,7 +665,7 @@ fn external_only_projects_ignore_unused_datafusion_configuration() {
     let original_plan = compile_project(&original, &providers, &udfs).unwrap();
 
     let mut changed = original.clone();
-    changed.pipeline.datafusion = DataFusionConfig {
+    changed.graph.datafusion = DataFusionConfig {
         batch_size: 0,
         target_partitions: 0,
     };
@@ -733,7 +750,7 @@ fn external_nodes_require_exact_provider_and_receive_configured_ports() {
     let value = project(node);
     assert_issue(
         &validate_project(&value, &providers, &udfs),
-        "pipeline.nodes[0].operator",
+        "graph.nodes[0].operator",
         "missing_provider",
     );
     let seen_input = Arc::new(Mutex::new(None));
@@ -767,37 +784,32 @@ fn missing_and_conflicting_udfs_have_stable_paths() {
     let (providers, udfs) = empty_registries();
     let missing = UdfReference::new("acme", "missing", "1", UdfKind::DataFusionScalar).unwrap();
     let mut value = project(expression_node("node"));
-    let OperatorSpec::Expression { udfs: selected, .. } = &mut value.pipeline.nodes[0].operator
-    else {
+    let OperatorSpec::Expression { udfs: selected, .. } = &mut value.graph.nodes[0].operator else {
         unreachable!()
     };
     selected.push(missing);
     assert_issue(
         &validate_project(&value, &providers, &udfs),
-        "pipeline.nodes[0].operator.udfs[0]",
+        "graph.nodes[0].operator.udfs[0]",
         "missing_udf",
     );
 
-    let OperatorSpec::Expression { udfs: selected, .. } = &mut value.pipeline.nodes[0].operator
-    else {
+    let OperatorSpec::Expression { udfs: selected, .. } = &mut value.graph.nodes[0].operator else {
         unreachable!()
     };
     selected.push(UdfReference::new("other", "missing", "2", UdfKind::DataFusionScalar).unwrap());
     assert_issue(
         &validate_project(&value, &providers, &udfs),
-        "pipeline.nodes[0].operator.udfs",
+        "graph.nodes[0].operator.udfs",
         "conflicting_udf",
     );
 }
 
 #[test]
 fn project_schema_artifact_matches_generator() {
-    // M6-10: the v2 schema artifact was removed; the canonical project
-    // schema is v3 and its artifact consistency lives in config_v3.
-    // This test now verifies the v2 generator still produces the model
-    // the Python and Studio surfaces consume.
+    // The public generator is the one canonical v3 schema surface.
     let generated = project_json_schema().unwrap();
-    assert!(generated["properties"]["format_version"]["const"] == 2);
+    assert!(generated["properties"]["format_version"]["const"] == 3);
 }
 
 #[test]
@@ -819,7 +831,7 @@ fn edge_spec_maps_to_public_builder_endpoints() {
 fn constructed_operator_modes_are_validated_without_deserialization() {
     let (providers, udfs) = empty_registries();
     let mut value = project(expression_node("node"));
-    value.pipeline.nodes[0].operator = OperatorSpec::Expression {
+    value.graph.nodes[0].operator = OperatorSpec::Expression {
         expression: "x + 1".into(),
         select: vec!["x".into()],
         filter: None,
@@ -827,7 +839,7 @@ fn constructed_operator_modes_are_validated_without_deserialization() {
     };
     assert_issue(
         &validate_project(&value, &providers, &udfs),
-        "pipeline.nodes[0].operator",
+        "graph.nodes[0].operator",
         "invalid_operator",
     );
 }
@@ -836,11 +848,11 @@ fn constructed_operator_modes_are_validated_without_deserialization() {
 fn builtin_config_inputs_must_be_required() {
     let (providers, udfs) = empty_registries();
     let mut expression = project(expression_node("node"));
-    expression.pipeline.nodes[0].input_ports =
+    expression.graph.nodes[0].input_ports =
         vec![port("input", BatchKind::Table, false, Vec::new())];
     assert_issue(
         &validate_project(&expression, &providers, &udfs),
-        "pipeline.nodes[0].input_ports",
+        "graph.nodes[0].input_ports",
         "invalid_ports",
     );
 
@@ -858,7 +870,7 @@ fn builtin_config_inputs_must_be_required() {
     sql.data_sources[0].input = "input".into();
     assert_issue(
         &validate_project(&sql, &providers, &udfs),
-        "pipeline.nodes[0].input_ports",
+        "graph.nodes[0].input_ports",
         "invalid_ports",
     );
 }
@@ -880,18 +892,18 @@ fn invalid_query_syntax_has_stable_operator_issue_paths() {
     sql.data_sources[0].input = "input".into();
     assert_issue(
         &validate_project(&sql, &providers, &udfs),
-        "pipeline.nodes[0].operator",
+        "graph.nodes[0].operator",
         "invalid_operator",
     );
 
     let mut expression = project(expression_node("node"));
-    let OperatorSpec::Expression { filter, .. } = &mut expression.pipeline.nodes[0].operator else {
+    let OperatorSpec::Expression { filter, .. } = &mut expression.graph.nodes[0].operator else {
         unreachable!()
     };
     *filter = Some("(".into());
     assert_issue(
         &validate_project(&expression, &providers, &udfs),
-        "pipeline.nodes[0].operator",
+        "graph.nodes[0].operator",
         "invalid_operator",
     );
 }
@@ -900,24 +912,24 @@ fn invalid_query_syntax_has_stable_operator_issue_paths() {
 fn duplicate_edges_and_writers_report_the_later_edge_index() {
     let (providers, udfs) = empty_registries();
     let mut duplicate = project(expression_node("source"));
-    duplicate.pipeline.nodes.push(expression_node("target"));
+    duplicate.graph.nodes.push(expression_node("target"));
     let edge = EdgeSpec {
         source_node: "source".into(),
         source_port: "output".into(),
         target_node: "target".into(),
         target_port: "input".into(),
     };
-    duplicate.pipeline.edges = vec![edge.clone(), edge];
+    duplicate.graph.edges = vec![edge.clone(), edge];
     assert_issue(
         &validate_project(&duplicate, &providers, &udfs),
-        "pipeline.edges[1]",
+        "graph.edges[1]",
         "duplicate_edge",
     );
 
     let mut writers = project(expression_node("first"));
-    writers.pipeline.nodes.push(expression_node("second"));
-    writers.pipeline.nodes.push(expression_node("target"));
-    writers.pipeline.edges = vec![
+    writers.graph.nodes.push(expression_node("second"));
+    writers.graph.nodes.push(expression_node("target"));
+    writers.graph.edges = vec![
         EdgeSpec {
             source_node: "first".into(),
             source_port: "output".into(),
@@ -933,7 +945,7 @@ fn duplicate_edges_and_writers_report_the_later_edge_index() {
     ];
     assert_issue(
         &validate_project(&writers, &providers, &udfs),
-        "pipeline.edges[1]",
+        "graph.edges[1]",
         "multiple_writers",
     );
 }
@@ -941,7 +953,7 @@ fn duplicate_edges_and_writers_report_the_later_edge_index() {
 #[test]
 fn serde_rejects_non_finite_position_and_unknown_udf_fields() {
     let mut value = serde_json::to_value(project(expression_node("node"))).unwrap();
-    value["pipeline"]["nodes"][0]["operator"]["udfs"] = json!([{
+    value["graph"]["nodes"][0]["operator"]["udfs"] = json!([{
         "provider": "acme", "name": "f", "version": "1", "kind": "data_fusion_scalar", "import_path": "evil"
     }]);
     assert!(serde_json::from_value::<ProjectSpec>(value).is_err());
@@ -973,7 +985,7 @@ fn supported_v1_arrow_aliases_compile_exactly() {
     let (providers, udfs) = empty_registries();
     for alias in aliases {
         let mut value = project(expression_node("node"));
-        value.pipeline.nodes[0].input_ports = vec![port(
+        value.graph.nodes[0].input_ports = vec![port(
             "input",
             BatchKind::Table,
             true,

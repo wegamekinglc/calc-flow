@@ -67,6 +67,7 @@ fn descriptor(
             .into_iter()
             .collect(),
         secret_slots: ["token".to_string()].into_iter().collect(),
+        required_secret_slots: ["token".to_string()].into_iter().collect(),
     }
 }
 
@@ -620,6 +621,12 @@ fn connector_options_reject_secret_slot_and_unknown_keys() {
     let mut unknown = options.clone();
     unknown.insert("typo".to_string(), Value::Bool(true));
     assert!(validate_connector_options(&file_descriptor, &unknown).is_err());
+
+    let mut wrong_type = BTreeMap::new();
+    wrong_type.insert("path".to_string(), Value::Bool(true));
+    let error = validate_connector_options(&file_descriptor, &wrong_type)
+        .expect_err("declared connector option types are checked during preflight");
+    assert!(error.to_string().contains("path"), "{error}");
 }
 
 #[test]
@@ -686,7 +693,7 @@ fn capabilities_project_onto_runtime_native_types() {
         ledger.sink_delivery(),
         SinkDelivery::EpochIdempotent {
             mechanism: "ledger".into(),
-            retention: RetentionClass::Bounded,
+            retention: RetentionClass::Unbounded,
         }
     );
     let mut ordinary = sink;
@@ -787,6 +794,34 @@ fn at_least_once_never_upgrades_silently() {
     .expect("at-least-once request validates");
     assert_eq!(proof.requested, DeliveryGuarantee::AtLeastOnce);
     assert_eq!(proof.effective, DeliveryGuarantee::AtLeastOnce);
+}
+
+#[test]
+fn at_least_once_request_downgrades_to_best_effort_for_a_lossy_source() {
+    let mut best_effort = source_capabilities();
+    best_effort.delivery = DeliveryCapability::BestEffort;
+    best_effort.replay = ReplayCapability::Unreplayable;
+    let proof = validate_delivery_guarantee(
+        DeliveryGuarantee::AtLeastOnce,
+        &participants(best_effort, transactional_sink_capabilities()),
+    )
+    .expect("lower delivery requests are reported at their attainable level");
+    assert_eq!(proof.requested, DeliveryGuarantee::AtLeastOnce);
+    assert_eq!(proof.effective, DeliveryGuarantee::BestEffort);
+}
+
+#[test]
+fn best_effort_request_never_upgrades_silently() {
+    let mut best_effort = source_capabilities();
+    best_effort.delivery = DeliveryCapability::BestEffort;
+    best_effort.replay = ReplayCapability::Unreplayable;
+    let proof = validate_delivery_guarantee(
+        DeliveryGuarantee::BestEffort,
+        &participants(best_effort, transactional_sink_capabilities()),
+    )
+    .expect("best-effort request accepts a lossy participant");
+    assert_eq!(proof.requested, DeliveryGuarantee::BestEffort);
+    assert_eq!(proof.effective, DeliveryGuarantee::BestEffort);
 }
 
 #[test]

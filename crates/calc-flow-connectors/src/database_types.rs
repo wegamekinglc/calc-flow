@@ -7,8 +7,9 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array,
-    Int32Array, Int64Array, StringArray, TimestampMicrosecondArray,
+    ArrayRef, BinaryArray, BooleanArray, Date32Array, Decimal128Array, FixedSizeBinaryArray,
+    Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, StringArray,
+    TimestampMicrosecondArray,
 };
 use arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -60,9 +61,13 @@ pub fn arrow_data_type(data_type: &PgType) -> Result<DataType> {
         PgType::INT8 => DataType::Int64,
         PgType::FLOAT4 => DataType::Float32,
         PgType::FLOAT8 => DataType::Float64,
-        PgType::TEXT | PgType::VARCHAR | PgType::BPCHAR | PgType::NAME | PgType::NUMERIC => {
-            DataType::Utf8
-        }
+        PgType::TEXT
+        | PgType::VARCHAR
+        | PgType::BPCHAR
+        | PgType::NAME
+        | PgType::NUMERIC
+        | PgType::JSON
+        | PgType::JSONB => DataType::Utf8,
         PgType::BYTEA => DataType::Binary,
         PgType::TIMESTAMP => DataType::Timestamp(TimeUnit::Microsecond, None),
         PgType::TIMESTAMPTZ => DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into())),
@@ -119,12 +124,15 @@ fn column_array(column: &PgColumn, rows: &[Row], index: usize) -> Result<ArrayRe
         PgType::INT8 => typed!(Int64Array, i64),
         PgType::FLOAT4 => typed!(Float32Array, f32),
         PgType::FLOAT8 => typed!(Float64Array, f64),
-        PgType::TEXT | PgType::VARCHAR | PgType::BPCHAR | PgType::NAME | PgType::NUMERIC => {
+        PgType::TEXT | PgType::VARCHAR | PgType::BPCHAR | PgType::NAME => {
             typed!(StringArray, String)
         }
+        PgType::NUMERIC => numeric_array(rows, index, name),
+        PgType::JSON | PgType::JSONB => json_array(rows, index, name),
         PgType::BYTEA => bytea_array(rows, index, name),
         PgType::DATE => date_array(rows, index, name),
-        PgType::TIMESTAMP | PgType::TIMESTAMPTZ => timestamp_array(rows, index, name),
+        PgType::TIMESTAMP => timestamp_array(rows, index, name),
+        PgType::TIMESTAMPTZ => timestamptz_array(rows, index, name),
         PgType::UUID => uuid_array(rows, index, name),
         other => Err(CalcFlowError::InvalidArgument {
             field: format!("column {name}"),
@@ -134,6 +142,28 @@ fn column_array(column: &PgColumn, rows: &[Row], index: usize) -> Result<ArrayRe
             ),
         }),
     }
+}
+
+fn numeric_array(rows: &[Row], index: usize, name: &str) -> Result<ArrayRef> {
+    let mut values = Vec::with_capacity(rows.len());
+    for row in rows {
+        let value: Option<rust_decimal::Decimal> = row
+            .try_get::<_, Option<rust_decimal::Decimal>>(index)
+            .map_err(cell_error(name))?;
+        values.push(value.map(|value| value.to_string()));
+    }
+    Ok(Arc::new(StringArray::from(values)) as ArrayRef)
+}
+
+fn json_array(rows: &[Row], index: usize, name: &str) -> Result<ArrayRef> {
+    let mut values = Vec::with_capacity(rows.len());
+    for row in rows {
+        let value: Option<serde_json::Value> = row
+            .try_get::<_, Option<serde_json::Value>>(index)
+            .map_err(cell_error(name))?;
+        values.push(value.map(|value| value.to_string()));
+    }
+    Ok(Arc::new(StringArray::from(values)) as ArrayRef)
 }
 
 fn bytea_array(rows: &[Row], index: usize, name: &str) -> Result<ArrayRef> {
@@ -171,6 +201,17 @@ fn timestamp_array(rows: &[Row], index: usize, name: &str) -> Result<ArrayRef> {
     Ok(Arc::new(TimestampMicrosecondArray::from(values)) as ArrayRef)
 }
 
+fn timestamptz_array(rows: &[Row], index: usize, name: &str) -> Result<ArrayRef> {
+    let mut values = Vec::with_capacity(rows.len());
+    for row in rows {
+        let value: Option<chrono::DateTime<chrono::Utc>> = row
+            .try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(index)
+            .map_err(cell_error(name))?;
+        values.push(value.map(|stamp| stamp.timestamp_micros()));
+    }
+    Ok(Arc::new(TimestampMicrosecondArray::from(values)) as ArrayRef)
+}
+
 fn uuid_array(rows: &[Row], index: usize, name: &str) -> Result<ArrayRef> {
     let mut values: Vec<Option<Vec<u8>>> = Vec::with_capacity(rows.len());
     for row in rows {
@@ -200,7 +241,7 @@ fn cell_error(column: &str) -> impl Fn(tokio_postgres::Error) -> CalcFlowError +
 
 /// One cell extracted from an Arrow array, ready for parameterized
 /// insertion.
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PgValue {
     /// SQL NULL.
     Null,
@@ -220,6 +261,150 @@ pub enum PgValue {
     Text(String),
     /// A binary cell.
     Bytes(Vec<u8>),
+    /// An exact decimal within the reviewed 28-digit boundary.
+    Numeric(rust_decimal::Decimal),
+    /// Days since the Unix epoch.
+    Date32(i32),
+    /// UTC-naive microseconds since the Unix epoch.
+    Timestamp(i64),
+    /// UTC microseconds since the Unix epoch.
+    TimestampTz(i64),
+    /// A UUID cell.
+    Uuid(uuid::Uuid),
+}
+
+impl PgValue {
+    pub(crate) fn to_evidence(&self) -> serde_json::Value {
+        let (kind, value) = match self {
+            Self::Null => ("null", serde_json::Value::Null),
+            Self::Boolean(value) => ("bool", serde_json::Value::Bool(*value)),
+            Self::Int16(value) => ("i16", serde_json::Value::from(*value)),
+            Self::Int32(value) => ("i32", serde_json::Value::from(*value)),
+            Self::Int64(value) => ("i64", serde_json::Value::from(*value)),
+            Self::Float32(value) => ("f32_bits", serde_json::Value::from(value.to_bits())),
+            Self::Float64(value) => ("f64_bits", serde_json::Value::from(value.to_bits())),
+            Self::Text(value) => ("text", serde_json::Value::String(value.clone())),
+            Self::Bytes(value) => (
+                "bytes",
+                serde_json::Value::Array(
+                    value.iter().copied().map(serde_json::Value::from).collect(),
+                ),
+            ),
+            Self::Numeric(value) => ("numeric", serde_json::Value::String(value.to_string())),
+            Self::Date32(value) => ("date32", serde_json::Value::from(*value)),
+            Self::Timestamp(value) => ("timestamp_us", serde_json::Value::from(*value)),
+            Self::TimestampTz(value) => ("timestamptz_us", serde_json::Value::from(*value)),
+            Self::Uuid(value) => ("uuid", serde_json::Value::String(value.to_string())),
+        };
+        serde_json::json!({"type": kind, "value": value})
+    }
+
+    // This is an exhaustive tagged-value decoder; keeping the tag matrix in one
+    // place makes the durable evidence contract auditable.
+    // #lizard forgives
+    pub(crate) fn from_evidence(value: &serde_json::Value) -> Result<Self> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| invalid_evidence("cell evidence must be an object"))?;
+        if object.len() != 2 || !object.contains_key("type") || !object.contains_key("value") {
+            return Err(invalid_evidence(
+                "cell evidence must contain exactly type and value",
+            ));
+        }
+        let kind = object["type"]
+            .as_str()
+            .ok_or_else(|| invalid_evidence("cell evidence type must be a string"))?;
+        let cell = &object["value"];
+        match kind {
+            "null" if cell.is_null() => Ok(Self::Null),
+            "bool" => cell
+                .as_bool()
+                .map(Self::Boolean)
+                .ok_or_else(|| invalid_evidence("bool evidence must be a boolean")),
+            "i16" => evidence_i64(cell, "i16")
+                .and_then(|value| {
+                    i16::try_from(value).map_err(|_| invalid_evidence("i16 overflow"))
+                })
+                .map(Self::Int16),
+            "i32" => evidence_i64(cell, "i32")
+                .and_then(|value| {
+                    i32::try_from(value).map_err(|_| invalid_evidence("i32 overflow"))
+                })
+                .map(Self::Int32),
+            "i64" => evidence_i64(cell, "i64").map(Self::Int64),
+            "f32_bits" => evidence_u64(cell, "f32_bits")
+                .and_then(|bits| {
+                    u32::try_from(bits).map_err(|_| invalid_evidence("f32 bits overflow"))
+                })
+                .map(f32::from_bits)
+                .map(Self::Float32),
+            "f64_bits" => evidence_u64(cell, "f64_bits")
+                .map(f64::from_bits)
+                .map(Self::Float64),
+            "text" => cell
+                .as_str()
+                .map(|value| Self::Text(value.to_string()))
+                .ok_or_else(|| invalid_evidence("text evidence must be a string")),
+            "bytes" => {
+                let values = cell
+                    .as_array()
+                    .ok_or_else(|| invalid_evidence("bytes evidence must be an array"))?;
+                values
+                    .iter()
+                    .map(|value| {
+                        evidence_u64(value, "byte").and_then(|byte| {
+                            u8::try_from(byte).map_err(|_| invalid_evidence("byte overflow"))
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()
+                    .map(Self::Bytes)
+            }
+            "numeric" => cell
+                .as_str()
+                .ok_or_else(|| invalid_evidence("numeric evidence must be a string"))
+                .and_then(|value| {
+                    value
+                        .parse::<rust_decimal::Decimal>()
+                        .map_err(|_| invalid_evidence("numeric evidence is invalid"))
+                })
+                .map(Self::Numeric),
+            "date32" => evidence_i64(cell, "date32")
+                .and_then(|value| {
+                    i32::try_from(value).map_err(|_| invalid_evidence("date32 overflow"))
+                })
+                .map(Self::Date32),
+            "timestamp_us" => evidence_i64(cell, "timestamp_us").map(Self::Timestamp),
+            "timestamptz_us" => evidence_i64(cell, "timestamptz_us").map(Self::TimestampTz),
+            "uuid" => cell
+                .as_str()
+                .ok_or_else(|| invalid_evidence("uuid evidence must be a string"))
+                .and_then(|value| {
+                    uuid::Uuid::parse_str(value)
+                        .map_err(|_| invalid_evidence("uuid evidence is invalid"))
+                })
+                .map(Self::Uuid),
+            _ => Err(invalid_evidence("unknown or mismatched cell evidence type")),
+        }
+    }
+}
+
+fn evidence_i64(value: &serde_json::Value, field: &str) -> Result<i64> {
+    value
+        .as_i64()
+        .ok_or_else(|| invalid_evidence(&format!("{field} evidence must be an integer")))
+}
+
+fn evidence_u64(value: &serde_json::Value, field: &str) -> Result<u64> {
+    value
+        .as_u64()
+        .ok_or_else(|| invalid_evidence(&format!("{field} evidence must be an unsigned integer")))
+}
+
+fn invalid_evidence(message: &str) -> CalcFlowError {
+    CalcFlowError::InvalidArgument {
+        field: "postgresql pre-commit evidence".into(),
+        message: message.into(),
+    }
 }
 
 type ToSqlResult =
@@ -228,7 +413,7 @@ type ToSqlResult =
 impl ToSql for PgValue {
     fn to_sql(
         &self,
-        _ty: &PgType,
+        ty: &PgType,
         out: &mut tokio_postgres::types::private::BytesMut,
     ) -> ToSqlResult {
         use tokio_postgres::types::IsNull;
@@ -240,8 +425,32 @@ impl ToSql for PgValue {
             PgValue::Int64(v) => v.to_sql(&PgType::INT8, out),
             PgValue::Float32(v) => v.to_sql(&PgType::FLOAT4, out),
             PgValue::Float64(v) => v.to_sql(&PgType::FLOAT8, out),
+            PgValue::Text(v) if matches!(ty.clone(), PgType::JSON | PgType::JSONB) => {
+                let value: serde_json::Value = serde_json::from_str(v)?;
+                value.to_sql(ty, out)
+            }
+            PgValue::Text(v) if ty == &PgType::NUMERIC => {
+                let value: rust_decimal::Decimal = v.parse()?;
+                value.to_sql(ty, out)
+            }
             PgValue::Text(v) => v.to_sql(&PgType::TEXT, out),
             PgValue::Bytes(v) => v.to_sql(&PgType::BYTEA, out),
+            PgValue::Numeric(v) => v.to_sql(&PgType::NUMERIC, out),
+            PgValue::Date32(v) => {
+                let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is valid");
+                epoch
+                    .checked_add_signed(chrono::Duration::days(i64::from(*v)))
+                    .ok_or("date32 value is outside chrono's range")?
+                    .to_sql(&PgType::DATE, out)
+            }
+            PgValue::Timestamp(v) => chrono::DateTime::from_timestamp_micros(*v)
+                .ok_or("timestamp value is outside chrono's range")?
+                .naive_utc()
+                .to_sql(&PgType::TIMESTAMP, out),
+            PgValue::TimestampTz(v) => chrono::DateTime::from_timestamp_micros(*v)
+                .ok_or("timestamptz value is outside chrono's range")?
+                .to_sql(&PgType::TIMESTAMPTZ, out),
+            PgValue::Uuid(v) => v.to_sql(&PgType::UUID, out),
         }
     }
 
@@ -258,6 +467,10 @@ impl ToSql for PgValue {
 ///
 /// Returns [`CalcFlowError::InvalidArgument`] when the column's Arrow
 /// type has no reviewed `PostgreSQL` mapping.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one exhaustive Arrow-to-PostgreSQL type matrix stays reviewable as a single dispatch"
+)]
 pub fn cell_value(column: &dyn arrow::array::Array, row: usize) -> Result<PgValue> {
     use arrow::array::{
         BinaryArray, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
@@ -322,6 +535,57 @@ pub fn cell_value(column: &dyn arrow::array::Array, row: usize) -> Result<PgValu
                 .map(|a| a.value(row).to_vec())
                 .unwrap_or_default(),
         ),
+        DataType::Decimal128(_, scale) if *scale >= 0 => {
+            let value = column
+                .as_any()
+                .downcast_ref::<Decimal128Array>()
+                .map(|array| array.value(row))
+                .unwrap_or_default();
+            let scale = u32::try_from(*scale).map_err(|_| CalcFlowError::InvalidArgument {
+                field: "column".into(),
+                message: "Decimal128 uses a negative scale unsupported by PostgreSQL".into(),
+            })?;
+            PgValue::Numeric(
+                rust_decimal::Decimal::try_from_i128_with_scale(value, scale).map_err(|_| {
+                    CalcFlowError::InvalidArgument {
+                        field: "column".into(),
+                        message: "Decimal128 value exceeds the PostgreSQL sink's reviewed 28-digit boundary".into(),
+                    }
+                })?,
+            )
+        }
+        DataType::Date32 => PgValue::Date32(
+            column
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .map(|array| array.value(row))
+                .unwrap_or_default(),
+        ),
+        DataType::Timestamp(TimeUnit::Microsecond, timezone) => {
+            let value = column
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .map(|array| array.value(row))
+                .unwrap_or_default();
+            if timezone.is_some() {
+                PgValue::TimestampTz(value)
+            } else {
+                PgValue::Timestamp(value)
+            }
+        }
+        DataType::FixedSizeBinary(16) => {
+            let value = column
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .map(|array| array.value(row))
+                .unwrap_or_default();
+            PgValue::Uuid(uuid::Uuid::from_slice(value).map_err(|_| {
+                CalcFlowError::InvalidArgument {
+                    field: "column".into(),
+                    message: "FixedSizeBinary(16) cell is not a UUID".into(),
+                }
+            })?)
+        }
         other => {
             return Err(CalcFlowError::InvalidArgument {
                 field: "column".into(),
@@ -367,4 +631,194 @@ pub fn pg_identifiers(fields: &[ArrowFieldSpec]) -> Result<Vec<String>> {
         .iter()
         .map(|field| pg_identifier(&field.name))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow::array::{
+        BinaryArray, BooleanArray, Date32Array, Decimal128Array, FixedSizeBinaryBuilder,
+        Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, StringArray,
+        TimestampMicrosecondArray, UInt8Array,
+    };
+    use serde_json::json;
+    use tokio_postgres::types::IsNull;
+
+    use super::*;
+
+    fn assert_cell(array: &dyn arrow::array::Array, expected: &PgValue) {
+        assert_eq!(&cell_value(array, 0).unwrap(), expected);
+    }
+
+    #[test]
+    fn reviewed_arrow_cells_convert_to_exact_postgresql_values() {
+        assert_cell(&BooleanArray::from(vec![true]), &PgValue::Boolean(true));
+        assert_cell(&Int16Array::from(vec![-2]), &PgValue::Int16(-2));
+        assert_cell(&Int32Array::from(vec![-3]), &PgValue::Int32(-3));
+        assert_cell(&Int64Array::from(vec![-4]), &PgValue::Int64(-4));
+        assert_cell(&Float32Array::from(vec![1.25]), &PgValue::Float32(1.25));
+        assert_cell(&Float64Array::from(vec![2.5]), &PgValue::Float64(2.5));
+        assert_cell(
+            &StringArray::from(vec!["exact"]),
+            &PgValue::Text("exact".into()),
+        );
+        assert_cell(
+            &BinaryArray::from_vec(vec![b"bytes".as_slice()]),
+            &PgValue::Bytes(b"bytes".to_vec()),
+        );
+        let decimal = Decimal128Array::from(vec![1234_i128])
+            .with_precision_and_scale(10, 2)
+            .unwrap();
+        assert_cell(
+            &decimal,
+            &PgValue::Numeric(rust_decimal::Decimal::new(1234, 2)),
+        );
+        assert_cell(&Date32Array::from(vec![20_000]), &PgValue::Date32(20_000));
+        assert_cell(
+            &TimestampMicrosecondArray::from(vec![42]),
+            &PgValue::Timestamp(42),
+        );
+        assert_cell(
+            &TimestampMicrosecondArray::from(vec![43]).with_timezone_utc(),
+            &PgValue::TimestampTz(43),
+        );
+        let id = uuid::Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap();
+        let mut builder = FixedSizeBinaryBuilder::with_capacity(1, 16);
+        builder.append_value(id.as_bytes()).unwrap();
+        assert_cell(&builder.finish(), &PgValue::Uuid(id));
+
+        assert_eq!(
+            cell_value(&Int64Array::from(vec![None]), 0).unwrap(),
+            PgValue::Null
+        );
+        assert!(cell_value(&UInt8Array::from(vec![1]), 0).is_err());
+    }
+
+    #[test]
+    fn postgresql_value_evidence_round_trips_every_tag() {
+        let id = uuid::Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap();
+        let values = [
+            PgValue::Null,
+            PgValue::Boolean(true),
+            PgValue::Int16(-2),
+            PgValue::Int32(-3),
+            PgValue::Int64(-4),
+            PgValue::Float32(1.25),
+            PgValue::Float64(2.5),
+            PgValue::Text("exact".into()),
+            PgValue::Bytes(vec![0, 127, 255]),
+            PgValue::Numeric(rust_decimal::Decimal::new(1234, 2)),
+            PgValue::Date32(20_000),
+            PgValue::Timestamp(42),
+            PgValue::TimestampTz(43),
+            PgValue::Uuid(id),
+        ];
+        for value in values {
+            assert_eq!(PgValue::from_evidence(&value.to_evidence()).unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn postgresql_value_evidence_rejects_malformed_and_overflowing_tags() {
+        let invalid = [
+            json!(null),
+            json!({"type": "null"}),
+            json!({"type": 1, "value": null}),
+            json!({"type": "null", "value": 1}),
+            json!({"type": "bool", "value": 1}),
+            json!({"type": "i16", "value": 32768}),
+            json!({"type": "i32", "value": 2_147_483_648_i64}),
+            json!({"type": "i64", "value": "1"}),
+            json!({"type": "f32_bits", "value": 4_294_967_296_u64}),
+            json!({"type": "f64_bits", "value": -1}),
+            json!({"type": "text", "value": 1}),
+            json!({"type": "bytes", "value": "00"}),
+            json!({"type": "bytes", "value": [256]}),
+            json!({"type": "numeric", "value": "not-decimal"}),
+            json!({"type": "date32", "value": 2_147_483_648_i64}),
+            json!({"type": "timestamp_us", "value": "1"}),
+            json!({"type": "timestamptz_us", "value": "1"}),
+            json!({"type": "uuid", "value": "not-a-uuid"}),
+            json!({"type": "future", "value": null}),
+        ];
+        for evidence in invalid {
+            assert!(PgValue::from_evidence(&evidence).is_err(), "{evidence}");
+        }
+    }
+
+    #[test]
+    fn postgresql_values_serialize_through_the_reviewed_sql_matrix() {
+        let id = uuid::Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap();
+        let values = [
+            (PgValue::Null, PgType::INT8),
+            (PgValue::Boolean(true), PgType::BOOL),
+            (PgValue::Int16(-2), PgType::INT2),
+            (PgValue::Int32(-3), PgType::INT4),
+            (PgValue::Int64(-4), PgType::INT8),
+            (PgValue::Float32(1.25), PgType::FLOAT4),
+            (PgValue::Float64(2.5), PgType::FLOAT8),
+            (PgValue::Text("plain".into()), PgType::TEXT),
+            (PgValue::Text("{\"ok\":true}".into()), PgType::JSONB),
+            (PgValue::Text("12.34".into()), PgType::NUMERIC),
+            (PgValue::Bytes(vec![0, 255]), PgType::BYTEA),
+            (
+                PgValue::Numeric(rust_decimal::Decimal::new(1234, 2)),
+                PgType::NUMERIC,
+            ),
+            (PgValue::Date32(20_000), PgType::DATE),
+            (PgValue::Timestamp(42), PgType::TIMESTAMP),
+            (PgValue::TimestampTz(43), PgType::TIMESTAMPTZ),
+            (PgValue::Uuid(id), PgType::UUID),
+        ];
+        for (value, data_type) in values {
+            let mut buffer = tokio_postgres::types::private::BytesMut::new();
+            let result = value.to_sql(&data_type, &mut buffer).unwrap();
+            assert_eq!(matches!(result, IsNull::Yes), value == PgValue::Null);
+            assert!(PgValue::accepts(&data_type));
+        }
+    }
+
+    #[test]
+    fn reviewed_postgresql_types_build_the_exact_arrow_schema() {
+        let pairs = [
+            (PgType::BOOL, DataType::Boolean),
+            (PgType::INT2, DataType::Int16),
+            (PgType::INT4, DataType::Int32),
+            (PgType::INT8, DataType::Int64),
+            (PgType::FLOAT4, DataType::Float32),
+            (PgType::FLOAT8, DataType::Float64),
+            (PgType::TEXT, DataType::Utf8),
+            (PgType::VARCHAR, DataType::Utf8),
+            (PgType::BPCHAR, DataType::Utf8),
+            (PgType::NAME, DataType::Utf8),
+            (PgType::NUMERIC, DataType::Utf8),
+            (PgType::JSON, DataType::Utf8),
+            (PgType::JSONB, DataType::Utf8),
+            (PgType::BYTEA, DataType::Binary),
+            (
+                PgType::TIMESTAMP,
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+            ),
+            (
+                PgType::TIMESTAMPTZ,
+                DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into())),
+            ),
+            (PgType::DATE, DataType::Date32),
+            (PgType::UUID, DataType::FixedSizeBinary(16)),
+        ];
+        let columns = pairs
+            .iter()
+            .enumerate()
+            .map(|(index, (data_type, _))| PgColumn {
+                name: format!("column_{index}"),
+                data_type: data_type.clone(),
+                nullable: index % 2 == 0,
+            })
+            .collect::<Vec<_>>();
+        let schema = arrow_schema(&columns).unwrap();
+        for (index, (_, expected)) in pairs.iter().enumerate() {
+            assert_eq!(schema.field(index).data_type(), expected);
+            assert_eq!(schema.field(index).is_nullable(), index % 2 == 0);
+        }
+        assert!(arrow_data_type(&PgType::OID).is_err());
+    }
 }

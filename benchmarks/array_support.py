@@ -142,7 +142,7 @@ def plan_for(
             "1",
             {"expression": workload.expression},
         )
-        .compile(runtime)
+        .compile_batch(runtime)
     )
 
 

@@ -1,12 +1,17 @@
 # Calc-Flow 3.0 持续流计算详细开发计划
 
-> **状态：** M0-M5 internal complete; Public A6 complete; M6-M7 pending
+> **状态：** M0-M5 internal complete; Public A6 complete; M6-M7 implementation
+> closure is present on the 2026-08-19 review candidate. Final acceptance still
+> requires the full repository gates and exact PR-head review. The original
+> current-main findings and their implementation evidence are reconciled in the
+> [current-main acceptance audit](../audits/2026-08-19-continuous-streaming-v3-current-main.md).
 > `a6-public-continuous-runtime` 已通过 Rust、PyO3、Python、Studio 私有持久化、
 > 48-case fault catalog、跨语言恢复和 exact-head 20-minute soak 的集成门禁，并由
 > PR #129 合入 `main`。完成证据和获准的非原子交付偏差记录在
 > [Public A6 implementation evidence](../../../.codex/artifacts/analysis/a6-public-continuous-runtime-implementation-evidence.md)。
-> A6 完成不代表 `3.0.0` 发布：当前 package version、project v2 与 Studio
-> `/api/v2` 按 A6 non-goal 保持不变，分别由 M6/M7 后续替换或发布。
+> A6 完成不代表 `3.0.0` 发布：在 2026-08-14 的 A6 验收边界，package version、
+> project v2 与 Studio `/api/v2` 按 non-goal 保持不变；其后的 M6/M7-labelled
+> changes 仍须通过上述 current-main acceptance audit。
 >
 > **依据：**
 > [`Arroyo / RisingWave 独立调研与 Calc-Flow 流式演进建议`](../../research/2026-08-02-arroyo-risingwave-streaming-research.md)
@@ -349,6 +354,21 @@ M6 才发现：
   且计划明确要求容器测试不混入普通单测。必须在 M0 决定是把
   `calc-flow-connectors` 排除在 workspace 覆盖门之外并给它单独的门槛，还是把容器
   测试纳入覆盖率采集。不做决定就会在 M6 撞上无法通过的门。
+  **最终选择（2026-08-20）**：不排除 connector 源码；由
+  `scripts/run_rust_coverage.py` 通过 `cargo llvm-cov show-env --sh` 建立同一插桩环境，
+  清理旧 profile 后依次用普通 `cargo test --workspace --all-features` 采集 workspace、
+  在同一 debug Cargo profile 以发布 wheel 的默认 feature 集显式构建未 strip 的
+  PyO3 cdylib 并用临时 `target/` 包运行 Python adapter suite，再采集
+  Kafka、PostgreSQL/CDC、ClickHouse 容器测试；随后从同一 profile 集先导出 LCOV、
+  再用文本
+  `cargo llvm-cov report` 对合并结果执行不变的 90% 行覆盖门，使失败日志保留可操作
+  的逐文件与总覆盖率。服务环境不完整时 runner 在编译前失败；不能组合使用工具明确
+  禁止的 `--no-clean --no-report`。`--workspace --all-features` 只用于插桩 build/test；
+  `show-env` 生效后 report-only 命令不再重复传入这些构建选择参数，因为 profile
+  已经固定了实际 workspace 和 feature 集合，且 `cargo-llvm-cov` 在该上下文中会
+  拒绝这些参数。报告只排除 `#[cfg(test)]` 的专用 `runtime/streaming/soak.rs` 测试
+  夹具；core、connector 与 PyO3 生产源码均保留在 90% 分母内，长时 soak 仍属于
+  release gate，不混入普通 coverage CI。
 - **版本与发布**：release invariant 要求各包版本同步。`calc-flow-connectors` 的
   版本策略、是否随核心 crate 发布、以及 crate 打包内容都要一并写入 M7.4。
 
@@ -1994,9 +2014,10 @@ cancellation stress 保持通过。
   覆盖启用全部 connector feature 的配置。
 - [ ] 审查 `rdkafka`、PostgreSQL、ClickHouse、HTTP、WebSocket、Avro、compression 的
   license/platform build。
-- [ ] 按 M6.1 的决定核对 workspace 覆盖率门：确认 `calc-flow-connectors` 是被排除
-  并单独设门，还是已把容器测试纳入采集，且 `--fail-under-lines 90` 在最终配置下
-  真实通过。
+- [x] 按 M6.1 的决定核对 production workspace 覆盖率门：`calc-flow-connectors` 与
+  PyO3 源码不排除，容器测试和 Python adapter suite 由
+  `scripts/run_rust_coverage.py` 纳入同一采集流程，仅排除 `#[cfg(test)]` 的 soak
+  夹具，最终合并报告继续执行 `--fail-under-lines 90`。
 - [ ] checkpoint/state cleanup 不遍历 symlink 或宽泛路径。
 - [ ] fuzz/property test project、checkpoint、format、state metadata decoder。
 

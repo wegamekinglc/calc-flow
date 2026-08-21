@@ -35,6 +35,7 @@ from calc_flow.pipeline import (
     Runtime,
     StreamExecutionPlan,
     StreamRequirements,
+    compile_stream_project,
     project_json_schema,
     validate_project_json,
 )
@@ -114,6 +115,7 @@ __all__ = [
     "ConnectorCapability",
     "OperatorCapability",
     "connector_capabilities",
+    "compile_stream_project",
     "ProviderCapability",
     "ProviderOption",
     "ProviderOptionsSchema",

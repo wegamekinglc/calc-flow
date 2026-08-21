@@ -8,7 +8,7 @@ DataFusion. Run them from a repository checkout with:
 cargo run -p calc-flow --example expression_pipeline
 cargo run -p calc-flow --example sql_join
 cargo run -p calc-flow --example continuous_runtime
-cargo run -p calc-flow --example export_schema
+cargo run -p calc-flow --example gen_v3_schema
 ```
 
 The files cover:
@@ -20,7 +20,7 @@ The files cover:
   `fees`) with one read-only DataFusion `SELECT`.
 - `continuous_runtime.rs` — a replayable `StreamSource`, an ordinary
   `StreamSink`, managed checkpoints, and the one-shot runner/job lifecycle.
-- `export_schema.rs` — prints the canonical v2 project JSON Schema.
+- `gen_v3_schema.rs` — regenerates the canonical v3 project JSON Schema.
 
 The Python binding ships parallel examples under
 [`examples/`](../../../examples/README.md). The expression and SQL examples use

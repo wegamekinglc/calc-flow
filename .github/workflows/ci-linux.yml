@@ -30,8 +30,17 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - name: Install libcurl headers for vendored librdkafka
-        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+      - name: Ensure libcurl headers for vendored librdkafka
+        run: |
+          if dpkg-query -W -f='${Status}' libcurl4-openssl-dev 2>/dev/null \
+            | grep -qx 'install ok installed'; then
+            exit 0
+          fi
+          timeout 5m sudo apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=15 \
+            -o Acquire::https::Timeout=15 \
+            install --no-install-recommends -y libcurl4-openssl-dev
       - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
@@ -77,10 +86,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      - name: Enable logical replication for CDC tests
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$POSTGRES_CONTAINER" psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "ALTER SYSTEM SET wal_level = 'logical'" \
+            -c "ALTER SYSTEM SET max_replication_slots = 10" \
+            -c "ALTER SYSTEM SET max_wal_senders = 10"
+          docker restart "$POSTGRES_CONTAINER"
+          for attempt in $(seq 1 60); do
+            if docker exec "$POSTGRES_CONTAINER" pg_isready -U postgres -d postgres; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "PostgreSQL never became ready after enabling logical replication" >&2
+          exit 1
       - name: Run gated PostgreSQL connector tests
         run: >-
           cargo test -p calc-flow-connectors --features postgresql
-          --test postgresql_connector -- --ignored --test-threads=1
+          --test postgresql_connector --test postgresql_cdc
+          -- --ignored --test-threads=1
 
   connector-containers-ch:
     name: Connector containers (ClickHouse)
@@ -278,7 +305,7 @@ jobs:
           enable-cache: true
       - name: Build wheel and source distribution
         run: |
-          python -m unittest scripts.test_run_rust_tests scripts.test_inspect_wheel scripts.test_release_config
+          python -m unittest scripts.test_run_rust_tests scripts.test_run_rust_coverage scripts.test_inspect_wheel scripts.test_release_config scripts.test_verify_perf_gates scripts.test_verify_security_gates
           uv build
           python scripts/inspect_wheel.py core-wheel dist/calc_flow-*.whl
           python scripts/inspect_wheel.py sdist dist/calc_flow-*.tar.gz
@@ -404,7 +431,42 @@ jobs:
   rust-core:
     name: Rust core parity
     runs-on: ubuntu-latest
+    services:
+      kafka:
+        image: apache/kafka:3.9.0
+        ports:
+          - 9092:9092
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.12
+        env:
+          CLICKHOUSE_USER: default
+          CLICKHOUSE_PASSWORD: ""
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+        ports:
+          - 8123:8123
+        options: >-
+          --health-cmd "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
+      CALC_FLOW_CONNECTOR_CONTAINERS: "1"
+      CALC_FLOW_KAFKA_BOOTSTRAP: localhost:9092
+      CALC_FLOW_PG_TEST_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      CH_TEST_URL: http://localhost:8123
       FROZEN_ALLOCATION_CANDIDATE_TARGET_DIR: ${{ github.workspace }}/target/frozen-allocation-candidate
       FROZEN_ALLOCATION_HARNESS_SHA: "fe34d7dcd5bfd66c9e97c79d540380f58ee1a04d"
       FROZEN_ALLOCATION_HARNESS_TARGET_DIR: ${{ github.workspace }}/target/frozen-allocation-harness
@@ -413,11 +475,47 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
-      - name: Install libcurl headers for vendored librdkafka
+      - name: Ensure libcurl headers for vendored librdkafka
         # librdkafka 2.12's cmake path includes curl/curl.h even with
         # WITH_CURL=0 (rust-rdkafka#829); the headers satisfy the stale
         # include without linking curl.
-        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+        run: |
+          if dpkg-query -W -f='${Status}' libcurl4-openssl-dev 2>/dev/null \
+            | grep -qx 'install ok installed'; then
+            exit 0
+          fi
+          timeout 5m sudo apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=15 \
+            -o Acquire::https::Timeout=15 \
+            install --no-install-recommends -y libcurl4-openssl-dev
+      - name: Wait for Kafka and enable PostgreSQL logical replication
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          for attempt in $(seq 1 60); do
+            if timeout 1 bash -c '</dev/tcp/localhost/9092' 2>/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              echo "broker never became reachable" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          docker exec "$POSTGRES_CONTAINER" psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "ALTER SYSTEM SET wal_level = 'logical'" \
+            -c "ALTER SYSTEM SET max_replication_slots = 10" \
+            -c "ALTER SYSTEM SET max_wal_senders = 10"
+          docker restart "$POSTGRES_CONTAINER"
+          for attempt in $(seq 1 60); do
+            if docker exec "$POSTGRES_CONTAINER" pg_isready -U postgres -d postgres; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "PostgreSQL never became ready after enabling logical replication" >&2
+          exit 1
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version-file: .python-version
@@ -517,17 +615,10 @@ jobs:
           cargo clean
           cargo clean --target-dir "$FROZEN_ALLOCATION_HARNESS_TARGET_DIR"
           cargo clean --target-dir "$FROZEN_ALLOCATION_CANDIDATE_TARGET_DIR"
-      - name: Enforce Rust core line coverage
-        # The kafka transport's runtime surface needs a broker and is
-        # proven by the connector-containers leg; per the M6 delta's
-        # per-connector coverage clause its broker-bound module is
-        # omitted from the line gate while its offline logic stays
-        # measured.
-        run: >-
-          cargo llvm-cov --workspace --all-features --fail-under-lines 90
-          --ignore-filename-regex 'src/(kafka|postgresql|clickhouse(_sink)?|http|websocket|database_types)\.rs'
-          --lcov --output-path rust-lcov.info
+      - name: Enforce combined Rust and connector line coverage
+        run: python3.13 scripts/run_rust_coverage.py
       - name: Upload Rust coverage report
+        if: ${{ always() && hashFiles('rust-lcov.info') != '' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: rust-coverage
@@ -561,6 +652,7 @@ jobs:
           cargo audit
           --ignore RUSTSEC-2026-0176
           --ignore RUSTSEC-2026-0177
+          --ignore RUSTSEC-2026-0235
       - name: Check licenses, sources, advisories, and duplicate policy
         run: cargo deny --locked check
   coveralls-finish:

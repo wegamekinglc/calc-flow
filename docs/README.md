@@ -15,6 +15,8 @@ below.
 - **[Stream message envelope](runtime-envelope.md)** — the v3 stream message
   contract: typed messages, event-time progress, windows, state manifests and
   backends, the operator emission boundary, and current delivery guarantees
+- **[Connectors and stream projects](connectors.md)** — exact connector
+  identities, delivery limits, project fragments, windows, and recovery
 - **[Getting started](getting-started.md)** — published-package and
   from-source installation, Studio startup, and an install smoke test
 - **[Python API guide](python-api.md)** — `PipelineBuilder`, batches, UDFs,
@@ -36,15 +38,15 @@ below.
   workflow, artifact layout, and invocation examples
 - **[Claude agent team](../.claude/agents/README.md)** — preserved Claude
   compatibility roster and workflow
-- **[Examples](../examples/README.md)** — executable v2 Python examples
+- **[Examples](../examples/README.md)** — executable v3 Python examples
 - **[Rust examples](../crates/calc-flow/examples/README.md)** — executable
   `calc-flow` crate examples
 - **[Benchmarks](../benchmarks/README.md)** — informational benchmark harness
 - **[Streaming engine research](research/2026-08-02-arroyo-risingwave-streaming-research.md)**
   — point-in-time Arroyo/RisingWave architecture research and Calc-Flow
   continuous-runtime recommendations
-- **[Project schema](../schemas/project-v2.schema.json)** — the canonical
-  generated v2 project contract
+- **[Project schema](../schemas/project-v3.schema.json)** — the canonical
+  generated v3 project contract
 - **[Studio README](../web-ui/README.md)** — the local calc-flow-studio
   application
 

@@ -23,7 +23,7 @@ def main() -> None:
             "1",
             {"expression": "x - mean(x)"},
         )
-        .compile(runtime)
+        .compile_batch(runtime)
     )
 
     run = plan.execute({"input": values})

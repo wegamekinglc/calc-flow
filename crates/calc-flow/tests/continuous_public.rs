@@ -8,23 +8,23 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
 use async_trait::async_trait;
 use calc_flow::{
     Batch, BatchKind, BatchMetadata, CalcFlowError, ComponentKind, Cursor, DeliveryGuarantee,
-    ExpressionOperator, ExternalPayload, JobState, JsonMap, ManagedCheckpointRuntime,
-    NativeWatermarkCapability, PipelineBuilder, Port, ReplayPositioning, Result, SinkBinding,
-    SinkRecovery, SourceBinding, SourceCapabilities, SourceDeliveryCapability, SourceEvent,
-    SourceSchema, SourceStatus, StreamOperator, StreamRequirements, StreamSink, StreamSource,
-    StreamingErrorCategory, StreamingJob, StreamingRunner, TransactionalStreamSink, UdfRegistry,
-    UnionOperator,
+    DurableCursorAcknowledger, ExpressionOperator, ExternalPayload, JobState, JsonMap,
+    ManagedCheckpointRuntime, NativeWatermarkCapability, PipelineBuilder, Port, ReplayPositioning,
+    Result, SinkBinding, SinkRecovery, SourceBinding, SourceCapabilities, SourceCheckpointGate,
+    SourceDeliveryCapability, SourceEvent, SourceSchema, SourceStatus, StreamOperator,
+    StreamRequirements, StreamSink, StreamSource, StreamingErrorCategory, StreamingJob,
+    StreamingRunner, TransactionalStreamSink, UdfRegistry, UnionOperator,
 };
 use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
 use restart_vector::{RestartRecordVector, RestartVector, restart_vector};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{Notify, oneshot, watch};
 
 const SECRET: &str = "credential-canary-value";
 
@@ -167,6 +167,231 @@ struct LossySource {
 }
 
 struct FailingSource;
+
+#[derive(Default)]
+struct AtomicCheckpointGate {
+    ready: AtomicBool,
+    notify: Notify,
+}
+
+impl AtomicCheckpointGate {
+    fn open(&self) {
+        self.ready.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl SourceCheckpointGate for AtomicCheckpointGate {
+    async fn wait_ready(&self) -> Result<()> {
+        while !self.ready.load(Ordering::Acquire) {
+            let notified = self.notify.notified();
+            if self.ready.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+        Ok(())
+    }
+}
+
+struct GatedTwoBatchSource {
+    offset: usize,
+    emitted_count: Arc<AtomicUsize>,
+    allow_second: watch::Receiver<bool>,
+    checkpoint_gate: Arc<AtomicCheckpointGate>,
+}
+
+impl GatedTwoBatchSource {
+    fn event(offset: u64) -> Result<SourceEvent> {
+        let batch = RecordBatch::try_from_iter([
+            (
+                "a",
+                Arc::new(Int64Array::from(vec![i64::try_from(offset).unwrap()])) as _,
+            ),
+            ("b", Arc::new(Int64Array::from(vec![1])) as _),
+        ])
+        .unwrap();
+        Ok(SourceEvent::Data {
+            batch: Batch::table(
+                vec![batch],
+                BatchMetadata::new("gated-source", offset, BTreeMap::new())?,
+            )?,
+            cursor: Cursor::unbound(
+                offset.to_be_bytes().to_vec(),
+                BTreeMap::from([("offset".into(), offset.into())]),
+            )?,
+        })
+    }
+}
+
+#[async_trait]
+impl StreamSource for GatedTwoBatchSource {
+    fn capabilities(&self) -> SourceCapabilities {
+        exact_source_capabilities()
+    }
+
+    async fn open(&mut self, _cursor: Option<Cursor>) -> Result<()> {
+        Ok(())
+    }
+
+    async fn next(&mut self) -> Result<Option<SourceEvent>> {
+        match self.offset {
+            0 => {
+                self.offset = 1;
+                self.emitted_count.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(Self::event(1)?))
+            }
+            1 => {
+                while !*self.allow_second.borrow() {
+                    self.allow_second
+                        .changed()
+                        .await
+                        .map_err(|_| CalcFlowError::Internal {
+                            message: "test source release channel closed".into(),
+                        })?;
+                }
+                self.offset = 2;
+                self.emitted_count.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(Self::event(2)?))
+            }
+            _ => {
+                self.checkpoint_gate.open();
+                std::future::pending().await
+            }
+        }
+    }
+
+    fn checkpoint_gate(&self) -> Option<Arc<dyn SourceCheckpointGate>> {
+        Some(self.checkpoint_gate.clone())
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+struct ManifestInspectingAcknowledger {
+    manifest_root: PathBuf,
+    log: Arc<Mutex<Vec<&'static str>>>,
+}
+
+#[async_trait]
+impl DurableCursorAcknowledger for ManifestInspectingAcknowledger {
+    async fn acknowledge(&self, cursor: &Cursor) -> Result<()> {
+        if cursor.order() != 1_u64.to_be_bytes()
+            || !self
+                .manifest_root
+                .join("manifest-00000000000000000001.json")
+                .is_file()
+        {
+            return Err(CalcFlowError::Internal {
+                message: "durable source acknowledgement preceded manifest publication".into(),
+            });
+        }
+        self.log.lock().unwrap().push("source-ack");
+        Ok(())
+    }
+}
+
+struct AckingSource {
+    acknowledger: Arc<ManifestInspectingAcknowledger>,
+    emitted: bool,
+    emitted_count: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl StreamSource for AckingSource {
+    fn capabilities(&self) -> SourceCapabilities {
+        exact_source_capabilities()
+    }
+
+    async fn open(&mut self, _cursor: Option<Cursor>) -> Result<()> {
+        Ok(())
+    }
+
+    async fn next(&mut self) -> Result<Option<SourceEvent>> {
+        if self.emitted {
+            return std::future::pending().await;
+        }
+        self.emitted = true;
+        self.emitted_count.fetch_add(1, Ordering::SeqCst);
+        let batch = RecordBatch::try_from_iter([
+            ("a", Arc::new(Int64Array::from(vec![1])) as _),
+            ("b", Arc::new(Int64Array::from(vec![2])) as _),
+        ])
+        .unwrap();
+        Ok(Some(SourceEvent::Data {
+            batch: Batch::table(
+                vec![batch],
+                BatchMetadata::new("ack-source", 0, BTreeMap::new())?,
+            )?,
+            cursor: Cursor::unbound(
+                1_u64.to_be_bytes().to_vec(),
+                BTreeMap::from([("offset".into(), 1.into())]),
+            )?,
+        }))
+    }
+
+    fn durable_cursor_acknowledger(&self) -> Option<Arc<dyn DurableCursorAcknowledger>> {
+        Some(self.acknowledger.clone())
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+struct AckOrderingSink {
+    log: Arc<Mutex<Vec<&'static str>>>,
+    writes: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl TransactionalStreamSink for AckOrderingSink {
+    async fn open(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn begin_epoch(&mut self, _epoch: calc_flow::Epoch) -> Result<()> {
+        Ok(())
+    }
+
+    async fn write(&mut self, _batch: &Batch) -> Result<()> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn pre_commit(&mut self, _epoch: calc_flow::Epoch) -> Result<JsonMap> {
+        Ok(JsonMap::new())
+    }
+
+    async fn commit(&mut self, _epoch: calc_flow::Epoch, _pre_commit: &JsonMap) -> Result<()> {
+        if self.log.lock().unwrap().last() != Some(&"source-ack") {
+            return Err(CalcFlowError::Internal {
+                message: "sink commit preceded durable source acknowledgement".into(),
+            });
+        }
+        self.log.lock().unwrap().push("sink-commit");
+        Ok(())
+    }
+
+    async fn abort(
+        &mut self,
+        _epoch: calc_flow::Epoch,
+        _pre_commit: Option<&JsonMap>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn recover(&mut self, _recovery: &SinkRecovery) -> Result<()> {
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
 
 fn exact_source_capabilities() -> SourceCapabilities {
     SourceCapabilities {
@@ -457,6 +682,123 @@ async fn public_job_checkpoints_and_cancel_settles_connectors() {
     assert_eq!(probe.source_closes.load(Ordering::SeqCst), 1);
     assert_eq!(probe.sink_opens.load(Ordering::SeqCst), 1);
     assert_eq!(probe.sink_closes.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn durable_source_cursor_is_acknowledged_after_manifest_and_before_sink_commit() {
+    let plan = continuous_plan();
+    let source_id = plan.source_binding_ids()[0].to_owned();
+    let output_id = plan.sink_binding_ids()[0].to_owned();
+    let directory = tempfile::tempdir().unwrap();
+    let managed_root = directory.path().join("managed");
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let emitted = Arc::new(AtomicUsize::new(0));
+    let writes = Arc::new(AtomicUsize::new(0));
+    let acknowledger = Arc::new(ManifestInspectingAcknowledger {
+        manifest_root: managed_root.join("manifests"),
+        log: Arc::clone(&log),
+    });
+    let runner = StreamingRunner::new(
+        plan,
+        BTreeMap::from([(
+            source_id,
+            SourceBinding::new(AckingSource {
+                acknowledger,
+                emitted: false,
+                emitted_count: Arc::clone(&emitted),
+            }),
+        )]),
+        BTreeMap::from([(
+            output_id,
+            vec![
+                SinkBinding::transactional(
+                    "sink",
+                    AckOrderingSink {
+                        log: Arc::clone(&log),
+                        writes: Arc::clone(&writes),
+                    },
+                )
+                .unwrap(),
+            ],
+        )]),
+        ManagedCheckpointRuntime::new(&managed_root).unwrap(),
+    )
+    .unwrap();
+
+    let job = runner.start().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while writes.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the data row should reach the sink before checkpointing");
+    assert_eq!(emitted.load(Ordering::SeqCst), 1);
+
+    assert_eq!(
+        job.trigger_checkpoint().await.unwrap(),
+        calc_flow::Epoch::INITIAL
+    );
+    assert_eq!(&*log.lock().unwrap(), &["source-ack", "sink-commit"]);
+    assert_eq!(job.cancel().await.state, JobState::Cancelled);
+}
+
+#[tokio::test]
+async fn checkpoint_gate_delays_the_cut_until_a_multi_batch_source_unit_is_complete() {
+    let plan = continuous_plan();
+    let source_id = plan.source_binding_ids()[0].to_owned();
+    let output_id = plan.sink_binding_ids()[0].to_owned();
+    let directory = tempfile::tempdir().unwrap();
+    let emitted = Arc::new(AtomicUsize::new(0));
+    let checkpoint_gate = Arc::new(AtomicCheckpointGate::default());
+    let (allow_second_tx, allow_second_rx) = watch::channel(false);
+    let runner = StreamingRunner::new(
+        plan,
+        BTreeMap::from([(
+            source_id,
+            SourceBinding::new(GatedTwoBatchSource {
+                offset: 0,
+                emitted_count: Arc::clone(&emitted),
+                allow_second: allow_second_rx,
+                checkpoint_gate,
+            }),
+        )]),
+        BTreeMap::from([(
+            output_id,
+            vec![
+                SinkBinding::transactional(
+                    "sink",
+                    TransactionalSink {
+                        probe: LifecycleProbe::default(),
+                    },
+                )
+                .unwrap(),
+            ],
+        )]),
+        ManagedCheckpointRuntime::new(directory.path().join("managed")).unwrap(),
+    )
+    .unwrap();
+    let job = runner.start().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while emitted.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the first source batch should be produced");
+
+    let checkpoint = job.trigger_checkpoint();
+    tokio::pin!(checkpoint);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut checkpoint)
+            .await
+            .is_err(),
+        "checkpoint must wait while the connector atomic cut is open"
+    );
+    allow_second_tx.send(true).unwrap();
+    assert_eq!(checkpoint.await.unwrap(), calc_flow::Epoch::INITIAL);
+    assert_eq!(emitted.load(Ordering::SeqCst), 2);
+    assert_eq!(job.cancel().await.state, JobState::Cancelled);
 }
 
 #[test]
@@ -1006,13 +1348,13 @@ struct RestartVectorSink {
 }
 
 impl RestartVectorSink {
-    fn values(pre_commit: &JsonMap) -> Vec<i64> {
-        pre_commit["values"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|value| value.as_i64().unwrap())
-            .collect()
+    const SEGMENT_ID: &'static str = "prepared-rows";
+
+    fn validate_count(pre_commit: &JsonMap, values: &[i64]) {
+        assert_eq!(
+            pre_commit["rows"].as_u64(),
+            u64::try_from(values.len()).ok()
+        );
     }
 
     async fn commit_values(&self, epoch: calc_flow::Epoch, values: &[i64]) -> Result<()> {
@@ -1082,13 +1424,24 @@ impl TransactionalStreamSink for RestartVectorSink {
 
     async fn pre_commit(&mut self, _epoch: calc_flow::Epoch) -> Result<JsonMap> {
         Ok(BTreeMap::from([(
-            "values".into(),
-            serde_json::json!(self.pending),
+            "rows".into(),
+            serde_json::json!(self.pending.len()),
+        )]))
+    }
+
+    async fn pre_commit_segments(
+        &mut self,
+        _epoch: calc_flow::Epoch,
+    ) -> Result<BTreeMap<String, Vec<u8>>> {
+        Ok(BTreeMap::from([(
+            Self::SEGMENT_ID.into(),
+            serde_json::to_vec(&self.pending).unwrap(),
         )]))
     }
 
     async fn commit(&mut self, epoch: calc_flow::Epoch, pre_commit: &JsonMap) -> Result<()> {
-        self.commit_values(epoch, &Self::values(pre_commit)).await
+        Self::validate_count(pre_commit, &self.pending);
+        self.commit_values(epoch, &self.pending).await
     }
 
     async fn abort(
@@ -1101,8 +1454,15 @@ impl TransactionalStreamSink for RestartVectorSink {
     }
 
     async fn recover(&mut self, recovery: &SinkRecovery) -> Result<()> {
-        self.commit_values(recovery.epoch(), &Self::values(recovery.pre_commit()))
-            .await
+        let values: Vec<i64> = serde_json::from_slice(
+            recovery
+                .segments()
+                .get(Self::SEGMENT_ID)
+                .expect("runtime loads committed sink segment"),
+        )
+        .unwrap();
+        Self::validate_count(recovery.pre_commit(), &values);
+        self.commit_values(recovery.epoch(), &values).await
     }
 
     async fn close(&mut self) -> Result<()> {

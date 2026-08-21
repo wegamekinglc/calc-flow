@@ -125,6 +125,7 @@ pub(crate) struct SinkCheckpointPort {
     pub(crate) commands: mpsc::Receiver<SinkCheckpointCommand>,
     pub(crate) finalizations: mpsc::Sender<SinkFinalizeAck>,
     pub(crate) terminal_ready: Option<mpsc::Sender<String>>,
+    pub(crate) transaction: Option<Arc<crate::state::ManifestTransaction>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -969,6 +970,11 @@ async fn pre_commit_all(
     BTreeMap<String, SinkManifestEntry>,
     (String, CalcFlowError, BTreeMap<String, SinkManifestEntry>),
 > {
+    let transaction = inputs
+        .checkpoint
+        .as_ref()
+        .and_then(|checkpoint| checkpoint.transaction.clone());
+    let cancellation = inputs.context.job().cancellation().clone();
     let mut prepared = BTreeMap::new();
     for sink in &mut inputs.sinks {
         if sink.binding.is_ordinary() {
@@ -977,6 +983,7 @@ async fn pre_commit_all(
                 SinkManifestEntry {
                     delivery: SinkDeliveryManifest::Ordinary,
                     pre_commit: None,
+                    segments: Vec::new(),
                 },
             );
             continue;
@@ -1001,11 +1008,54 @@ async fn pre_commit_all(
         if let Err(error) = validate_pre_commit_metadata(sink.sink_id.as_str(), &metadata) {
             return Err((sink.sink_id.to_string(), error, prepared));
         }
+        let segment_bytes =
+            match catch_sensitive_sink_unwind(sink.binding.pre_commit_segments(epoch)).await {
+                Ok(Ok(segments)) => segments,
+                Ok(Err(error)) => return Err((sink.sink_id.to_string(), error, prepared)),
+                Err(_) => {
+                    return Err((
+                        sink.sink_id.to_string(),
+                        CalcFlowError::Internal {
+                            message: format!(
+                                "sink pre-commit segment preparation panicked for epoch {}",
+                                epoch.as_u64()
+                            ),
+                        },
+                        prepared,
+                    ));
+                }
+            };
+        let segments = if segment_bytes.is_empty() {
+            Vec::new()
+        } else {
+            let Some(transaction) = transaction.as_ref() else {
+                return Err((
+                    sink.sink_id.to_string(),
+                    CalcFlowError::Internal {
+                        message: "sink state segments require a checkpoint transaction".into(),
+                    },
+                    prepared,
+                ));
+            };
+            match transaction
+                .stage_sink_segments_cancellable(
+                    sink.sink_id.as_str(),
+                    epoch,
+                    &segment_bytes,
+                    &cancellation,
+                )
+                .await
+            {
+                Ok(segments) => segments,
+                Err(error) => return Err((sink.sink_id.to_string(), error, prepared)),
+            }
+        };
         prepared.insert(
             sink.sink_id.to_string(),
             SinkManifestEntry {
                 delivery: sink.binding.capability().into_manifest(),
                 pre_commit: Some(metadata),
+                segments,
             },
         );
     }
@@ -1136,6 +1186,27 @@ pub(crate) async fn recover_transactional_sinks(
     sinks: &mut [ValidatedOrdinarySink],
     manifest: &crate::CheckpointManifest,
 ) -> Result<()> {
+    recover_transactional_sinks_inner(sinks, manifest, None, &CancellationToken::new()).await
+}
+
+pub(crate) async fn recover_transactional_sinks_with_state(
+    sinks: &mut [ValidatedOrdinarySink],
+    manifest: &crate::CheckpointManifest,
+    transaction: &crate::state::ManifestTransaction,
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    recover_transactional_sinks_inner(sinks, manifest, Some(transaction), cancellation).await
+}
+
+// Recovery is an epoch-wide state machine. Keeping all sink evidence and
+// transaction branches together prevents partial recovery decisions.
+// #lizard forgives
+async fn recover_transactional_sinks_inner(
+    sinks: &mut [ValidatedOrdinarySink],
+    manifest: &crate::CheckpointManifest,
+    transaction: Option<&crate::state::ManifestTransaction>,
+    cancellation: &CancellationToken,
+) -> Result<()> {
     for sink in sinks {
         let entry = manifest.sinks().get(sink.sink_id.as_str()).ok_or_else(|| {
             CalcFlowError::CheckpointMismatch {
@@ -1148,7 +1219,27 @@ pub(crate) async fn recover_transactional_sinks(
         if !validate_recovery_entry(sink, entry)? {
             continue;
         }
-        let recovery = catch_sensitive_sink_unwind(sink.binding.recover(manifest)).await;
+        let segments = if entry.segments.is_empty() {
+            BTreeMap::new()
+        } else {
+            let transaction = transaction.ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                message: format!(
+                    "sink {:?} recovery requires its committed state segments",
+                    sink.sink_id.as_str()
+                ),
+            })?;
+            transaction
+                .load_sink_segments_cancellable(
+                    sink.sink_id.as_str(),
+                    manifest.epoch(),
+                    &entry.segments,
+                    cancellation,
+                )
+                .await?
+        };
+        let recovery =
+            catch_sensitive_sink_unwind(sink.binding.recover_with_segments(manifest, segments))
+                .await;
         if !matches!(recovery, Ok(Ok(()))) {
             return Err(CalcFlowError::RecoveryRequired {
                 pipeline_name: manifest.pipeline_name().into(),
@@ -1177,7 +1268,7 @@ fn validate_recovery_entry(
         });
     }
     if matches!(expected_delivery, SinkDeliveryManifest::Ordinary) {
-        if entry.pre_commit.is_some() {
+        if entry.pre_commit.is_some() || !entry.segments.is_empty() {
             return Err(CalcFlowError::CheckpointMismatch {
                 message: format!(
                     "checkpoint manifest ordinary sink {:?} carries transactional state",
@@ -1657,6 +1748,7 @@ mod tests {
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
+                transaction: None,
             }),
         );
         harness.data.send(true).unwrap();
@@ -1726,6 +1818,7 @@ mod tests {
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
+                transaction: None,
             }),
         );
         harness.data.send(true).unwrap();
@@ -1776,6 +1869,7 @@ mod tests {
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
+                transaction: None,
             }),
         );
         harness.data.send(true).unwrap();
@@ -1821,6 +1915,7 @@ mod tests {
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
+                transaction: None,
             }),
         );
         harness.data.send(true).unwrap();
@@ -1864,6 +1959,7 @@ mod tests {
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
+                transaction: None,
             }),
         );
         harness.data.send(true).unwrap();
@@ -1901,6 +1997,7 @@ mod tests {
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
+                transaction: None,
             }),
         );
         harness.data.send(true).unwrap();
@@ -1942,6 +2039,7 @@ mod tests {
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
+                transaction: None,
             }),
         );
         harness.data.send(true).unwrap();
@@ -1984,6 +2082,7 @@ mod tests {
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
+                transaction: None,
             }),
         );
         nonterminal.data.send(true).unwrap();
@@ -2028,6 +2127,7 @@ mod tests {
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: Some(terminal_ready_tx),
+                transaction: None,
             }),
         );
         terminal.data.send(true).unwrap();
@@ -2084,6 +2184,7 @@ mod tests {
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
+                transaction: None,
             }),
         );
         harness.data.send(true).unwrap();
@@ -2179,6 +2280,7 @@ mod tests {
                         retention: RetentionClass::Unbounded,
                     },
                     pre_commit: Some(BTreeMap::from([("prepared".into(), serde_json::json!(1))])),
+                    segments: Vec::new(),
                 },
             )]),
         })
@@ -2257,6 +2359,7 @@ mod tests {
                         "token".into(),
                         serde_json::json!(PRECOMMIT_SENTINEL),
                     )])),
+                    segments: Vec::new(),
                 },
             )]),
         })
@@ -2365,6 +2468,7 @@ mod tests {
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
+                transaction: None,
             }),
         );
         harness.data.send(true).unwrap();
@@ -2408,6 +2512,7 @@ mod tests {
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
+                transaction: None,
             }),
         );
         harness.data.send(true).unwrap();
@@ -2450,6 +2555,7 @@ mod tests {
                         "token".into(),
                         serde_json::json!(PRECOMMIT_SENTINEL),
                     )])),
+                    segments: Vec::new(),
                 },
             )]),
         })
@@ -2503,6 +2609,7 @@ mod tests {
                         retention: RetentionClass::Unbounded,
                     },
                     pre_commit: Some(BTreeMap::from([("prepared".into(), serde_json::json!(1))])),
+                    segments: Vec::new(),
                 },
             )]),
         })
@@ -2557,6 +2664,7 @@ mod tests {
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
+                transaction: None,
             }),
         );
         harness.data.send(true).unwrap();
@@ -2602,6 +2710,7 @@ mod tests {
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
+                transaction: None,
             }),
         );
         harness.data.send(true).unwrap();

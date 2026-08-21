@@ -125,4 +125,5 @@ class TestProjectV3Surface:
             package_version="3.0.0",
             registrations=[],
         )
-        assert 2 in caps.project_format_versions
+        assert caps.project_format_versions == (3,)
+        assert tuple(connector.name for connector in caps.connectors) == ("file",)
