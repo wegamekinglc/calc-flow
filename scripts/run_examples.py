@@ -51,12 +51,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Every executable and argument comes from the fixed inventories above;
         # argparse accepts only the three declared surface choices. Never use a
         # shell here, so example names cannot become command syntax.
-        subprocess.run(  # nosec B603  # nosemgrep
-            command,
-            cwd=REPOSITORY_ROOT,
-            env=environment,
-            check=True,
-        )
+        try:
+            subprocess.run(  # nosec B603  # nosemgrep
+                command,
+                cwd=REPOSITORY_ROOT,
+                env=environment,
+                check=True,
+            )
+        except subprocess.CalledProcessError as error:
+            return error.returncode
     return 0
 
 

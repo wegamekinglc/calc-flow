@@ -5,7 +5,7 @@ engine or Studio capabilities.
 
 ## 2026-08
 
-- 2026-08-22: Add a maintained cross-language example runner, Python terminal
+- 2026-08-21: Add a maintained cross-language example runner, Python terminal
   checkpoint recovery and Rust event-time window examples, a complete
   executable-example inventory, a continuous streaming usage guide, and a
   component-level design and architecture guide. Reconcile current docs with

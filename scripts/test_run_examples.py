@@ -10,7 +10,10 @@ from scripts import run_examples
 
 class RunExamplesTests(unittest.TestCase):
     def test_python_surface_runs_every_numbered_example_in_order(self) -> None:
-        with patch.object(run_examples.subprocess, "run") as run:
+        with (
+            patch.dict(run_examples.os.environ, {}, clear=True),
+            patch.object(run_examples.subprocess, "run") as run,
+        ):
             exit_code = run_examples.main(["--surface", "python"])
 
         self.assertEqual(exit_code, 0)
@@ -30,7 +33,10 @@ class RunExamplesTests(unittest.TestCase):
         )
 
     def test_rust_surface_runs_user_examples_but_not_schema_generators(self) -> None:
-        with patch.object(run_examples.subprocess, "run") as run:
+        with (
+            patch.dict(run_examples.os.environ, {}, clear=True),
+            patch.object(run_examples.subprocess, "run") as run,
+        ):
             exit_code = run_examples.main(["--surface", "rust"])
 
         self.assertEqual(exit_code, 0)
@@ -50,6 +56,19 @@ class RunExamplesTests(unittest.TestCase):
         self.assertFalse(
             any("schema" in part for command in commands for part in command)
         )
+
+    def test_failed_example_exit_code_is_preserved(self) -> None:
+        failure = run_examples.subprocess.CalledProcessError(
+            returncode=17,
+            cmd=[sys.executable, "examples/01_datafusion_pipeline.py"],
+        )
+        with (
+            patch.dict(run_examples.os.environ, {}, clear=True),
+            patch.object(run_examples.subprocess, "run", side_effect=failure),
+        ):
+            exit_code = run_examples.main(["--surface", "python"])
+
+        self.assertEqual(exit_code, 17)
 
 
 if __name__ == "__main__":
