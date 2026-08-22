@@ -108,12 +108,190 @@ following:
 7. the node digest is lowercase SHA-256 over the versioned canonical
    declaration encoding.
 
-A `Program` fingerprint additionally includes ordered input/output names and
-declarations, the normalized symbolic graph, and primitive versions. A
-compile-cache key additionally includes execution mode, exact input schemas,
+### 4.1 Canonical declaration values
+
+The byte format version is exactly
+`calc_flow.symbolic.declaration.v1`. `U64(x)` is the eight-byte unsigned
+big-endian representation of `x`. `BYTES(x)` is `U64(len(x)) || x`.
+`TEXT(s)` is `BYTES(UTF-8(s))` with no Unicode normalization. Every count,
+length, magnitude, rank, and argument index MUST fit `u64`.
+
+Canonical declaration values use these exact tags and payloads:
+
+```text
+0x00 null
+0x01 false
+0x02 true
+0x03 integer  || SIGN || U64(magnitude)
+0x04 float64  || IEEE_BITS
+0x05 string   || TEXT(value)
+0x06 bytes    || BYTES(value)
+0x07 enum     || TEXT(enum_family) || TEXT(variant)
+0x08 sequence || U64(item_count) || VALUE*
+0x09 map      || U64(entry_count) || (TEXT(key) || VALUE)*
+0x0a shape    || U64(rank) || DIMENSION*
+0x0b dtype    || TEXT(canonical_dtype)
+
+SIGN = 0x00                                  # non-negative integer
+     | 0x01                                  # negative integer
+DIMENSION = 0x00 || U64(size)                # known dimension
+          | 0x01 || TEXT(symbol)             # symbolic dimension
+```
+
+Integer values are restricted to the existing portable JSON range
+`[-2^63, 2^64 - 1]`; negative values encode their positive magnitude, so an
+integer has one representation. A declaration float is Python/IEEE binary64.
+Every NaN encodes as big-endian bits `0x7ff8000000000000`; every other value
+uses its exact big-endian IEEE bits. Positive and negative zero and infinity
+sign are therefore retained, while NaN sign, payload, and signaling/quiet
+differences are discarded.
+
+Map keys are unique strings sorted by their raw UTF-8 bytes. Sequences retain
+their declared order. An enum family and variant are the exact case-sensitive
+identifiers frozen by the selected versioned primitive. Dtype values use the
+exact canonical Arrow/provider spelling after aliases have been rejected.
+Shape sizes are non-negative; symbolic dimensions use their exact validated
+identifier and are not Unicode-normalized.
+
+Primitive-catalog metadata assigns each normalized attribute its value kind,
+so, for example, an enum is not encoded as a string and a dtype is not encoded
+as an arbitrary string. All semantic defaults are materialized before
+encoding; omission and an explicit default MUST produce identical bytes.
+Unknown attributes, values without a catalog kind, map-key collisions after
+UTF-8 encoding, and cyclic values fail before hashing.
+
+The bytes and NaN tags make the canonical encoder byte-exact and independently
+testable, but they do not broaden the public declaration language: initial
+public scalar literals and strict JSON attributes continue to reject bytes,
+NaN, and infinity as required by D3.
+
+### 4.2 Node digest
+
+The domain separator and one normalized node are encoded exactly as:
+
+```text
+MAGIC = ASCII("calc_flow.symbolic.declaration.v1") || 0x00
+NODE_BYTES = 0x20
+             || TEXT(primitive_name)
+             || TEXT(primitive_version)
+             || U64(argument_count)
+             || CHILD_DIGEST*
+             || VALUE(normalized_attributes)
+NODE_DIGEST_INPUT = MAGIC || 0x01 || BYTES(NODE_BYTES)
+NODE_DIGEST = SHA256(NODE_DIGEST_INPUT)
+```
+
+Each child digest is the raw 32 SHA-256 bytes, in argument order. The argument
+order is therefore semantic; map insertion order is not. A declaration graph
+MUST be acyclic. Structurally identical nodes are represented once after
+normalization. If equal digest bytes ever identify unequal `NODE_BYTES`, the
+program fails with a digest-collision error rather than treating the nodes as
+identical.
+
+The public `Expr.digest` is the lowercase 64-character hexadecimal encoding of
+`NODE_DIGEST`. It is stable across processes and conforming Python/Rust
+implementations for this encoding version. Changing any tag, normalization
+rule, primitive attribute kind, or byte order requires a new declaration
+encoding version; it MUST NOT silently change v1 digests.
+
+### 4.3 Program fingerprint
+
+A program includes every unique node reachable from a declared input or
+output. Node records sort by raw node-digest bytes. Edge records contain one
+record per child occurrence and sort lexicographically by raw parent digest,
+numeric argument index, then raw child digest. Input and output records retain
+their declaration order.
+
+```text
+PROGRAM_BYTES = 0x21
+                || TEXT(program_name)
+                || U64(input_count)
+                || (TEXT(input_name) || INPUT_NODE_DIGEST)*
+                || U64(output_count)
+                || (TEXT(output_name) || OUTPUT_NODE_DIGEST)*
+                || U64(node_count)
+                || (NODE_DIGEST || BYTES(NODE_BYTES))*
+                || U64(edge_count)
+                || (PARENT_DIGEST || U64(argument_index) || CHILD_DIGEST)*
+PROGRAM_FINGERPRINT_INPUT = MAGIC || 0x02 || BYTES(PROGRAM_BYTES)
+PROGRAM_FINGERPRINT = SHA256(PROGRAM_FINGERPRINT_INPUT)
+```
+
+Declared input names are the names owned by their table-input/parameter nodes;
+output names are the explicit `Program` output names. Duplicate names are
+rejected before encoding. Node/edge order never depends on traversal, mapping
+insertion, memory address, construction history, or the optimizer. CSE follows
+node digest plus exact `NODE_BYTES`; no algebraic rewrite is part of the v1
+declaration fingerprint.
+
+The public `Program.fingerprint` is the lowercase 64-character hexadecimal
+encoding of `PROGRAM_FINGERPRINT`, stable across conforming implementations.
+A compile-cache key additionally includes execution mode, exact input schemas,
 the capability schema version, capability session/revision, and every selected
-operator, provider, and UDF identity/version. Neither fingerprint may depend
-on Python object identity.
+operator, provider, and UDF identity/version. Those compile-time facts are not
+added to `Program.fingerprint`, and neither identity may depend on Python
+object identity.
+
+### 4.4 Cross-implementation golden vectors
+
+The following values are normative v1 fixtures. Hex is lowercase and contains
+no separators. The standalone `VALUE` vector is:
+
+```text
+sequence(
+  null,
+  integer(-1),
+  float64(-0.0),
+  float64(NaN),
+  string("é"),
+  bytes(0x00ff),
+  enum("batch_kind", "array"),
+  shape(2, symbol("n")),
+  dtype("float64"),
+)
+```
+
+```text
+VALUE_BYTES_HEX = 0800000000000000090003010000000000000001048000000000000000047ff8000000000000050000000000000002c3a906000000000000000200ff07000000000000000a62617463685f6b696e64000000000000000561727261790a00000000000000020000000000000000020100000000000000016e0b0000000000000007666c6f61743634
+SHA256(VALUE_BYTES) = b3ec4d3d06b466e01f5e9de9fe2e9d2f77a48257a5bfeda79e9d6b8deee92008
+```
+
+The node fixture is primitive `table_input` version `1`, no arguments, and
+these normalized attributes:
+
+```text
+{
+  "entity_by": sequence(),
+  "event_time": null,
+  "name": string("quotes"),
+  "schema": sequence({
+    "data_type": dtype("float64"),
+    "name": string("x"),
+    "nullable": true,
+  }),
+  "sequence_by": sequence(),
+}
+```
+
+```text
+NODE_BYTES_HEX = 20000000000000000b7461626c655f696e70757400000000000000013100000000000000000900000000000000050000000000000009656e746974795f6279080000000000000000000000000000000a6576656e745f74696d650000000000000000046e616d6505000000000000000671756f7465730000000000000006736368656d610800000000000000010900000000000000030000000000000009646174615f747970650b0000000000000007666c6f6174363400000000000000046e616d650500000000000000017800000000000000086e756c6c61626c6502000000000000000b73657175656e63655f6279080000000000000000
+NODE_DIGEST = 961b52bfdfb340125fa0b241b312521a43c9dce63dcc6b92717e1f1f2cdb7772
+```
+
+The program fixture has name `p`, declared input `quotes` targeting that node,
+declared output `signals` targeting the same node, one node record, and no edge
+records:
+
+```text
+PROGRAM_BYTES_HEX = 210000000000000001700000000000000001000000000000000671756f746573961b52bfdfb340125fa0b241b312521a43c9dce63dcc6b92717e1f1f2cdb7772000000000000000100000000000000077369676e616c73961b52bfdfb340125fa0b241b312521a43c9dce63dcc6b92717e1f1f2cdb77720000000000000001961b52bfdfb340125fa0b241b312521a43c9dce63dcc6b92717e1f1f2cdb777200000000000000fa20000000000000000b7461626c655f696e70757400000000000000013100000000000000000900000000000000050000000000000009656e746974795f6279080000000000000000000000000000000a6576656e745f74696d650000000000000000046e616d6505000000000000000671756f7465730000000000000006736368656d610800000000000000010900000000000000030000000000000009646174615f747970650b0000000000000007666c6f6174363400000000000000046e616d650500000000000000017800000000000000086e756c6c61626c6502000000000000000b73657175656e63655f62790800000000000000000000000000000000
+PROGRAM_FINGERPRINT = f09929c7be3d368981565aca0cfd1a3c5becaba3927d06cc25e330912c1e6888
+```
+
+Python and Rust implementations MUST reproduce all three byte vectors and both
+public hashes before either implementation exposes v1 digest/fingerprint
+values.
+
+### 4.5 Symbolic comparison
 
 Public `==`, `!=`, `<`, `<=`, `>`, and `>=` MUST construct symbolic comparison
 expressions. Converting any expression to `bool` MUST fail with an actionable
@@ -605,6 +783,11 @@ only artifact consistency and `git diff --check`.
 
 - mapping insertion order does not change node identity; ordered declarations
   do change it;
+- independent Python and Rust encoders reproduce the exact D2 v1 value bytes,
+  node bytes/digest, and program bytes/fingerprint golden vectors;
+- reordering graph construction without changing declarations preserves the
+  fingerprint, while changing argument/input/output declaration order changes
+  the corresponding node or program identity;
 - symbolic comparisons build expressions, truth conversion fails, and
   `identical` is a boolean structural check;
 - caller mappings/sequences are not mutated and non-JSON attributes fail;

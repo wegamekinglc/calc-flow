@@ -224,11 +224,19 @@ callable is not retained or serialized:
 def winsorized_zscore(
     value: sf.ColumnExpr,
     *,
+    group: sf.CrossSectionGroup,
     lower: float,
     upper: float,
 ) -> sf.ColumnExpr:
+    winsorized = sf.cs.winsorize(
+        value,
+        group=group,
+        lower=lower,
+        upper=upper,
+    )
     return sf.cs.zscore(
-        sf.cs.winsorize(value, lower=lower, upper=upper),
+        winsorized,
+        group=group,
     )
 ```
 
@@ -240,10 +248,11 @@ Inputs are treated as read-only. Constructors defensively copy caller-owned
 mappings and sequences into immutable tuples or frozen JSON values. Public
 expression objects do not expose their internal collections for mutation.
 
-Python comparison operators return symbolic expressions. Public expressions
-therefore use `identical(other)` for structural identity rather than relying
-on `__eq__` in Python sets or mappings. Compiler-internal node keys retain
-ordinary value equality.
+Column and array comparison operators return symbolic expressions in their own
+domains; table expressions reject scalar operators and require table namespace
+operations. Public expressions use `identical(other)` for structural identity,
+while expression-containing grouping, feature, and program values compare only
+by object identity. Compiler-internal node keys retain ordinary value equality.
 
 ## Symbolic Intermediate Representation
 
@@ -384,7 +393,7 @@ unfinalized reorder buffers.
 ### Cross-Section Transforms
 
 A new `CrossSectionOperator` is required for rank, percentile, z-score,
-demean, top/bottom selection, mean fill, and winsorization.
+demean, and winsorization.
 
 Its semantic group is the exact event time or declared time bucket plus
 optional group keys. Batch execution receives complete groups. Stream
@@ -415,7 +424,7 @@ Streaming matrix support requires:
 - one provider call per fused array segment and micro-batch; and
 - immutable static side inputs for weights.
 
-The proposed runner boundary is:
+The frozen runner boundary is:
 
 ```python
 StreamingRunner(
@@ -426,10 +435,14 @@ StreamingRunner(
 )
 ```
 
-Static inputs are validated and latched before operator tasks start. Their
-schema, backend, and content digest participate in job/checkpoint lineage;
-recovery with different values fails before sources open. Dynamic weights are
-outside the first release.
+Static inputs are validated and latched before operator tasks start. Static
+declarations participate in the semantic plan fingerprint. Payload digests
+participate only in prepared-job identity and manifest compatibility after the
+existing pipeline name and semantic plan fingerprint select a lineage. A
+payload digest never enters `StateLineageKey`, the lineage-directory hash, the
+semantic plan fingerprint, or manifest discovery filters. Recovery with a
+missing, extra, or changed digest therefore reaches the existing lineage and
+fails before sources open. Dynamic weights are outside the first release.
 
 Only row-axis-independent array work is stream safe initially: elementwise
 operations, feature-axis reductions, and per-row multiplication by static
@@ -566,8 +579,8 @@ The first supported catalog is deliberately compositional:
 
 - row: arithmetic, comparison, boolean, `where`, coalesce, log, exp, sqrt,
   abs, clip, and cast;
-- temporal: lag, delta, count, sum, mean, min, max, standard deviation, and
-  correlation;
+- temporal: lag, delta, count, sum, mean, min, max, variance, standard
+  deviation, covariance, and correlation;
 - cross section: rank, percentile, z-score, demean, and winsorization;
 - matrix: explicit column projection, elementwise expressions, static-weight
   matrix multiplication, and explicit attachment to the originating table;
@@ -579,6 +592,13 @@ RSI, MACD, Bollinger bands, momentum, volatility, and comparable factor
 families are expressed as compositions. A new primitive is justified only by
 an unavailable algorithm, materially better native state structure, or a
 measured fusion/performance requirement.
+
+## Deferred Work
+
+Cross-section top/bottom selection and mean fill are not part of the frozen
+initial primitive catalog. They require a separate approved API and semantic
+design after the initial release; implementations must not infer signatures or
+lower them through another primitive.
 
 ## Frozen Decision Gates
 

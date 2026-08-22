@@ -86,14 +86,15 @@ mapping/sequence and never retain a caller-owned mutable collection.
 
 ```python
 from dataclasses import dataclass
-from typing import Generic, Literal, TypeVar, overload
+from typing import Generic, Literal, Never, TypeVar, overload
 from collections.abc import Mapping, Sequence
 
 type BatchKind = Literal["table", "array"]
 type CompileMode = Literal["batch", "stream"]
 type LatePolicy = Literal["error", "drop"]
 type ScalarLiteral = None | bool | int | float | str
-type ExprOperand = Expr[object] | ScalarLiteral
+type ColumnOperand = ColumnExpr | ScalarLiteral
+type ArrayOperand = ArrayExpr | Parameter[ArrayExpr] | ScalarLiteral
 
 T = TypeVar("T")
 
@@ -115,14 +116,14 @@ class DurationFrame:
     micros: int
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class EventTimeBucket:
     event_time: ColumnExpr
     width_micros: int
     partition_by: tuple[ColumnExpr, ...] = ()
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class CrossSectionGroup:
     event_time: ColumnExpr
     bucket: EventTimeBucket | None
@@ -171,32 +172,77 @@ class Expr(Generic[T]):
     def __bool__(self) -> bool: ...
     __hash__ = None
 
-    def __eq__(self, other: ExprOperand, /) -> ColumnExpr: ...
-    def __ne__(self, other: ExprOperand, /) -> ColumnExpr: ...
-    def __lt__(self, other: ExprOperand, /) -> ColumnExpr: ...
-    def __le__(self, other: ExprOperand, /) -> ColumnExpr: ...
-    def __gt__(self, other: ExprOperand, /) -> ColumnExpr: ...
-    def __ge__(self, other: ExprOperand, /) -> ColumnExpr: ...
-    def __add__(self, other: ExprOperand, /) -> ColumnExpr: ...
-    def __sub__(self, other: ExprOperand, /) -> ColumnExpr: ...
-    def __mul__(self, other: ExprOperand, /) -> ColumnExpr: ...
-    def __truediv__(self, other: ExprOperand, /) -> ColumnExpr: ...
+
+@dataclass(frozen=True, slots=True, eq=False)
+class ColumnExpr(Expr[object]):
+    def __eq__(self, other: ColumnOperand, /) -> ColumnExpr: ...
+    def __ne__(self, other: ColumnOperand, /) -> ColumnExpr: ...
+    def __lt__(self, other: ColumnOperand, /) -> ColumnExpr: ...
+    def __le__(self, other: ColumnOperand, /) -> ColumnExpr: ...
+    def __gt__(self, other: ColumnOperand, /) -> ColumnExpr: ...
+    def __ge__(self, other: ColumnOperand, /) -> ColumnExpr: ...
+    def __add__(self, other: ColumnOperand, /) -> ColumnExpr: ...
+    def __radd__(self, other: ColumnOperand, /) -> ColumnExpr: ...
+    def __sub__(self, other: ColumnOperand, /) -> ColumnExpr: ...
+    def __rsub__(self, other: ColumnOperand, /) -> ColumnExpr: ...
+    def __mul__(self, other: ColumnOperand, /) -> ColumnExpr: ...
+    def __rmul__(self, other: ColumnOperand, /) -> ColumnExpr: ...
+    def __truediv__(self, other: ColumnOperand, /) -> ColumnExpr: ...
+    def __rtruediv__(self, other: ColumnOperand, /) -> ColumnExpr: ...
     def __neg__(self) -> ColumnExpr: ...
-    def __and__(self, other: ExprOperand, /) -> ColumnExpr: ...
-    def __or__(self, other: ExprOperand, /) -> ColumnExpr: ...
+    def __and__(self, other: ColumnOperand, /) -> ColumnExpr: ...
+    def __rand__(self, other: ColumnOperand, /) -> ColumnExpr: ...
+    def __or__(self, other: ColumnOperand, /) -> ColumnExpr: ...
+    def __ror__(self, other: ColumnOperand, /) -> ColumnExpr: ...
     def __invert__(self) -> ColumnExpr: ...
 
 
 @dataclass(frozen=True, slots=True, eq=False)
-class ColumnExpr(Expr[object]): ...
-
-
-@dataclass(frozen=True, slots=True, eq=False)
-class ArrayExpr(Expr[object]): ...
+class ArrayExpr(Expr[object]):
+    def __eq__(self, other: ArrayOperand, /) -> ArrayExpr: ...
+    def __ne__(self, other: ArrayOperand, /) -> ArrayExpr: ...
+    def __lt__(self, other: ArrayOperand, /) -> ArrayExpr: ...
+    def __le__(self, other: ArrayOperand, /) -> ArrayExpr: ...
+    def __gt__(self, other: ArrayOperand, /) -> ArrayExpr: ...
+    def __ge__(self, other: ArrayOperand, /) -> ArrayExpr: ...
+    def __add__(self, other: ArrayOperand, /) -> ArrayExpr: ...
+    def __radd__(self, other: ArrayOperand, /) -> ArrayExpr: ...
+    def __sub__(self, other: ArrayOperand, /) -> ArrayExpr: ...
+    def __rsub__(self, other: ArrayOperand, /) -> ArrayExpr: ...
+    def __mul__(self, other: ArrayOperand, /) -> ArrayExpr: ...
+    def __rmul__(self, other: ArrayOperand, /) -> ArrayExpr: ...
+    def __truediv__(self, other: ArrayOperand, /) -> ArrayExpr: ...
+    def __rtruediv__(self, other: ArrayOperand, /) -> ArrayExpr: ...
+    def __neg__(self) -> ArrayExpr: ...
+    def __and__(self, other: ArrayOperand, /) -> ArrayExpr: ...
+    def __rand__(self, other: ArrayOperand, /) -> ArrayExpr: ...
+    def __or__(self, other: ArrayOperand, /) -> ArrayExpr: ...
+    def __ror__(self, other: ArrayOperand, /) -> ArrayExpr: ...
+    def __invert__(self) -> ArrayExpr: ...
 
 
 @dataclass(frozen=True, slots=True, eq=False)
 class TableExpr(Expr[object]):
+    def __eq__(self, other: object, /) -> Never: ...
+    def __ne__(self, other: object, /) -> Never: ...
+    def __lt__(self, other: object, /) -> Never: ...
+    def __le__(self, other: object, /) -> Never: ...
+    def __gt__(self, other: object, /) -> Never: ...
+    def __ge__(self, other: object, /) -> Never: ...
+    def __add__(self, other: object, /) -> Never: ...
+    def __radd__(self, other: object, /) -> Never: ...
+    def __sub__(self, other: object, /) -> Never: ...
+    def __rsub__(self, other: object, /) -> Never: ...
+    def __mul__(self, other: object, /) -> Never: ...
+    def __rmul__(self, other: object, /) -> Never: ...
+    def __truediv__(self, other: object, /) -> Never: ...
+    def __rtruediv__(self, other: object, /) -> Never: ...
+    def __neg__(self) -> Never: ...
+    def __and__(self, other: object, /) -> Never: ...
+    def __rand__(self, other: object, /) -> Never: ...
+    def __or__(self, other: object, /) -> Never: ...
+    def __ror__(self, other: object, /) -> Never: ...
+    def __invert__(self) -> Never: ...
     def __getitem__(self, field: str, /) -> ColumnExpr: ...
     def with_columns(self, features: FeatureSet, /) -> TableExpr: ...
 
@@ -209,7 +255,7 @@ class Parameter(Expr[T], Generic[T]):
     def kind(self) -> BatchKind: ...
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True, eq=False, init=False)
 class FeatureSet:
     def __init__(
         self,
@@ -237,7 +283,7 @@ class AnalysisResult:
     issues: tuple[AnalysisIssue, ...]
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True, eq=False, init=False)
 class Program:
     def __init__(
         self,
@@ -276,12 +322,59 @@ class Program:
 symbolic expressions have no truth value; use &, |, and ~ for symbolic boolean composition, or identical() for structural identity
 ```
 
-`identical()` is the only public boolean structural comparison. Every
-comparison dunder returns a symbolic `ColumnExpr`, including comparisons with
-non-expression scalar literals. Reverse arithmetic dunders have the same
-operand/result contract. Scalars must be strict finite JSON scalars; Python
-`bool` and `int` retain distinct identities, as do integer and float values and
-positive/negative floating zero.
+`identical()` is the only public boolean structural comparison. `ColumnExpr`
+operators accept only `ColumnExpr` or scalar literals and always return
+`ColumnExpr`. `ArrayExpr` operators accept only `ArrayExpr`, an array-kind
+`Parameter[ArrayExpr]`, or scalar literals and always return `ArrayExpr`.
+Reflected arithmetic and boolean composition use the same domain as their
+forward forms. `Parameter` itself does not define scalar operator dunders; an
+array parameter is accepted only when an `ArrayExpr` dunder dispatches or at a
+signature that names `Parameter[ArrayExpr]`, including `linalg.matmul`.
+Scalars must be strict finite JSON scalars; Python `bool` and `int` retain
+distinct identities, as do integer and float values and positive/negative
+floating zero.
+
+Cross-domain operands fail at declaration construction with `TypeError`. The
+message templates are exact; `{operator}` is the Python token and `{type}` is
+the operand's module-qualified type name without a representation or address:
+
+```text
+symbolic column operator {operator} requires ColumnExpr or a strict scalar literal; got {type}
+symbolic array operator {operator} requires ArrayExpr, Parameter[ArrayExpr], or a strict scalar literal; got {type}
+```
+
+`TableExpr` exposes only table namespace/member operations. Every scalar
+arithmetic, comparison, or boolean-composition dunder shown in its signature
+raises `TypeError` with:
+
+```text
+symbolic table expressions do not support scalar operator {operator}; select a column or use table/window operations
+```
+
+For these messages `{operator}` is one of `==`, `!=`, `<`, `<=`, `>`, `>=`,
+`+`, `-`, `*`, `/`, unary `-`, `&`, `|`, or `~`. A table's structural
+identity remains available through `identical()`.
+
+A namespace call that receives an expression from the wrong domain raises
+`TypeError` before node construction with this exact template:
+
+```text
+calc_flow.symbolic.{function}.{parameter}: expected {expected}; got {type}
+```
+
+`{function}` is the public dotted namespace function, `{parameter}` is its
+signature parameter, `{expected}` is the exact annotation spelling from the
+signature, and `{type}` uses the same module-qualified non-representational
+spelling as the operator errors.
+
+Every frozen/slotted dataclass whose stored fields directly or transitively
+contain an `Expr` has generated equality disabled. The exact non-`Expr`
+classes are `EventTimeBucket`, `CrossSectionGroup`, `FeatureSet`, and
+`Program`; their `==`, `!=`, and hash use `object` identity and never compare
+their fields. Thus equal-looking but separately constructed values compare
+unequal, while `value == value` is true, and no comparison can invoke
+`Expr.__bool__`. Expression nodes themselves retain the domain-specific rules
+above, remain unhashable, and use `identical()` for structural identity.
 
 `Program.inputs` and `Program.outputs` preserve declaration order and reject
 duplicates. Every referenced table input/parameter must occur exactly once in
@@ -338,14 +431,14 @@ and an array parameter rejects schema. The only accepted mutability spelling is
 `row` exposes only row-local expressions:
 
 ```text
-row.where(condition: ColumnExpr, when_true: ExprOperand, when_false: ExprOperand, /) -> ColumnExpr
-row.coalesce(*values: ExprOperand) -> ColumnExpr
-row.log(value: ExprOperand, /) -> ColumnExpr
-row.exp(value: ExprOperand, /) -> ColumnExpr
-row.sqrt(value: ExprOperand, /) -> ColumnExpr
-row.abs(value: ExprOperand, /) -> ColumnExpr
-row.clip(value: ExprOperand, /, *, lower: ScalarLiteral, upper: ScalarLiteral) -> ColumnExpr
-row.cast(value: ExprOperand, data_type: str, /) -> ColumnExpr
+row.where(condition: ColumnExpr, when_true: ColumnOperand, when_false: ColumnOperand, /) -> ColumnExpr
+row.coalesce(*values: ColumnOperand) -> ColumnExpr
+row.log(value: ColumnOperand, /) -> ColumnExpr
+row.exp(value: ColumnOperand, /) -> ColumnExpr
+row.sqrt(value: ColumnOperand, /) -> ColumnExpr
+row.abs(value: ColumnOperand, /) -> ColumnExpr
+row.clip(value: ColumnOperand, /, *, lower: ScalarLiteral, upper: ScalarLiteral) -> ColumnExpr
+row.cast(value: ColumnOperand, data_type: str, /) -> ColumnExpr
 ```
 
 `ts` exposes row-preserving temporal primitives. `window` is keyword-only and
@@ -550,6 +643,61 @@ max_lateness_micros) = (2, 1, Some(6))`. After checkpoint/restore, a second
 envelope at `W = 123` with times `(118, 120)` produces `(3, 2, Some(6))`.
 Crashing before that second result is checkpointed and replaying the envelope
 must produce the same tuple, not double count it.
+
+#### Public late-metric projection
+
+Metrics version `1` reuses the existing public continuous-runtime status
+fields; it does not add or rename an `OperatorStatus` field. The semantic-to-
+public mapping is exact:
+
+| D7 semantic name      | Rust `OperatorStatus` field | Python operator-status key | Public value                      |
+| --------------------- | --------------------------- | -------------------------- | --------------------------------- |
+| `dropped_rows`        | `late_rows`                 | `late_rows`                | non-negative `u64` / Python `int` |
+| `affected_envelopes`  | `late_affected_batches`     | `late_affected_batches`    | non-negative `u64` / Python `int` |
+| `max_lateness_micros` | `max_lateness`              | `max_lateness_micros`      | `Option<Duration>` / `int \| None` |
+
+The exact existing Rust subset remains:
+
+```rust
+pub struct OperatorStatus {
+    // Existing fields before these values are unchanged.
+    pub late_rows: u64,
+    pub late_affected_batches: u64,
+    pub max_lateness: Option<Duration>,
+    // Existing fields after these values are unchanged.
+}
+```
+
+The exact Python projection under
+`JobStatus["operators"][operator_id]` remains:
+
+```python
+class OperatorStatus(TypedDict):
+    # Existing keys before these values are unchanged.
+    late_rows: int
+    late_affected_batches: int
+    max_lateness_micros: int | None
+    # Existing keys after these values are unchanged.
+```
+
+For rolling and cross-section operators, one runtime input data batch is the
+atomic input envelope from D7, so `late_affected_batches` is exactly
+`affected_envelopes`; it is not an output-batch count. `late_rows` counts
+operator-input row drop decisions. The existing window operator retains its
+existing row-window-assignment meaning, and no legacy metric is reinterpreted
+for that operator kind.
+
+D7 job totals are checked, re-derived aggregates of the values under the
+public `operators` map. This gate adds no Rust `JobStatus::late_rows`,
+`JobStatus::late_affected_batches`, or `JobStatus::max_lateness` fields and no
+Python top-level `late_rows`, `late_affected_batches`, or
+`max_lateness_micros` keys. Consumers that need a job-wide view use checked
+sums of the first two per-operator keys and the maximum of present third-key
+values, exactly as D7 specifies. The totals are not checkpointed or serialized
+separately; restore reinstalls each operator's values, and status projection
+exposes those values after the internal totals have been re-derived. This
+choice preserves the existing exact Rust `JobStatus` shape and Python status
+key set.
 
 Cross-section types are:
 
@@ -1390,7 +1538,30 @@ and are never duplicated into a checkpoint.
   genuinely fresh lineage requires an explicit operational action outside this
   API contract (new pipeline identity/state root or deliberate state removal).
 
-## 10. Gate disposition
+## 10. Reviewer-blocker acceptance
+
+The public API implementation must carry focused tests for all three corrected
+surfaces:
+
+- every arithmetic, comparison, and boolean-composition dunder on two
+  `ColumnExpr` values or a `ColumnExpr` plus a valid scalar returns
+  `ColumnExpr`; the corresponding `ArrayExpr` cases, including an array-kind
+  parameter on the right, return `ArrayExpr`;
+- every Column/Array cross-domain operand, every array/column namespace
+  mismatch, and every listed scalar dunder on `TableExpr` raises `TypeError`
+  with the exact template above rather than constructing a wrongly typed node;
+- `EventTimeBucket`, `CrossSectionGroup`, `FeatureSet`, and `Program` compare
+  only by object identity, and comparisons of distinct equal-looking values do
+  not invoke `Expr.__eq__` or `Expr.__bool__`;
+- rolling/cross-section drop vectors appear in the existing Rust
+  `OperatorStatus` and Python nested operator keys using the exact mapping
+  above, including `None` versus zero maximum lateness and checkpoint/replay;
+  and
+- the Rust and Python top-level job status shapes gain no late-total fields or
+  keys, while checked aggregation of their operator maps yields the D7 job
+  totals.
+
+## 11. Gate disposition
 
 This note freezes the exact choices delegated by SCE-00:
 
@@ -1403,8 +1574,13 @@ This note freezes the exact choices delegated by SCE-00:
    evidence, and existing-lineage comparison order are byte/field exact.
 5. `late_policy.error.scope = "envelope"` plus the staged processing rule makes
    the D7 no-output/no-state transaction observable and fingerprinted.
+6. Column and array scalar domains, identity-only equality for expression-
+   containing value objects, and the compatibility-preserving late-status
+   projection are exact and have focused acceptance vectors.
 
-No API-note blocker remains. The adversarial critique approved the corrected
-contract after its one blocker-only review round. SCE-00 is approved for
-downstream implementation; none of the frozen public surfaces is implemented
-by this note.
+No API-note blocker remains. The adversarial critique approved B1–B4 after its
+one blocker-only review round, and the formal reviewer blockers on expression
+domains, expression-containing dataclass equality, and late-status projection
+are closed by this targeted correction. SCE-00 is approved for downstream
+implementation; none of the frozen public surfaces is implemented by this
+note.
