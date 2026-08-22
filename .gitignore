@@ -1,5 +1,6 @@
 uv.lock
 .venv
+/.cargo/config.toml
 settings.local.json
 settings.json
 *.pyc
