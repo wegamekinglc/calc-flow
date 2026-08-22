@@ -62,24 +62,24 @@ is deleted after the atomic cutover; it is not a permanent release branch.
 
 ## 3. Phase and Task Map
 
-| Issue    | Phase | Delivery                                  | Depends on       | Single-track weeks |
-| -------- | ----- | ----------------------------------------- | ---------------- | ------------------ |
-| [SCE-00] | P0    | freeze symbolic semantic decisions        | —                | 1.0                |
-| [SCE-01] | P0    | capture table, rolling, and matrix bases  | SCE-00           | 0.5                |
-| [SCE-02] | P1    | immutable expression IR and namespaces    | SCE-00           | 1.0                |
-| [SCE-03] | P1    | program, type/domain/state analysis       | SCE-02           | 1.0                |
-| [SCE-04] | P2    | lifecycle-aware runtime capabilities      | SCE-00           | 1.0                |
-| [SCE-05] | P2    | fused row-local batch/stream lowering     | SCE-03, SCE-04   | 1.5                |
-| [SCE-06] | P3    | rolling row windows with lag/delta        | SCE-05           | 2.0                |
-| [SCE-07] | P3    | rolling numeric aggregates and sharing    | SCE-06           | 2.0                |
-| [SCE-08] | P3    | duration windows, covariance, correlation | SCE-07           | 2.0                |
-| [SCE-09] | P4    | cross-section rank, percentile, z-score   | SCE-05           | 2.0                |
-| [SCE-10] | P4    | cross-section winsorization                | SCE-09           | 1.5                |
-| [SCE-11] | P5    | immutable static stream inputs            | SCE-05           | 2.0                |
-| [SCE-12] | P5    | stateless stream provider lifecycle       | SCE-04, SCE-11   | 1.5                |
-| [SCE-13] | P5    | symbolic table/array bridges and matmul   | SCE-03, SCE-12   | 1.5                |
-| [SCE-14] | P6    | cross-domain CSE, fusion, explain, cache  | SCE-08, SCE-10, SCE-13 | 2.0          |
-| [SCE-15] | P6    | Studio, docs, hardening, release checks   | SCE-14           | 2.0                |
+| Issue    | Phase | Delivery                                  | Depends on             | Single-track weeks |
+| -------- | ----- | ----------------------------------------- | ---------------------- | ------------------ |
+| [SCE-00] | P0    | freeze symbolic semantic decisions        | —                      | 1.0                |
+| [SCE-01] | P0    | capture table, rolling, and matrix bases  | SCE-00                 | 0.5                |
+| [SCE-02] | P1    | immutable expression IR and namespaces    | SCE-00                 | 1.0                |
+| [SCE-03] | P1    | program, type/domain/state analysis       | SCE-02                 | 1.0                |
+| [SCE-04] | P2    | lifecycle-aware runtime capabilities      | SCE-00                 | 1.0                |
+| [SCE-05] | P2    | fused row-local batch/stream lowering     | SCE-03, SCE-04         | 1.5                |
+| [SCE-06] | P3    | rolling row windows with lag/delta        | SCE-05                 | 2.0                |
+| [SCE-07] | P3    | rolling numeric aggregates and sharing    | SCE-06                 | 2.0                |
+| [SCE-08] | P3    | duration windows, covariance, correlation | SCE-07                 | 2.0                |
+| [SCE-09] | P4    | cross-section rank, percentile, z-score   | SCE-05                 | 2.0                |
+| [SCE-10] | P4    | cross-section winsorization               | SCE-09                 | 1.5                |
+| [SCE-11] | P5    | immutable static stream inputs            | SCE-05                 | 2.0                |
+| [SCE-12] | P5    | stateless stream provider lifecycle       | SCE-04, SCE-11         | 1.5                |
+| [SCE-13] | P5    | symbolic table/array bridges and matmul   | SCE-03, SCE-12         | 1.5                |
+| [SCE-14] | P6    | cross-domain CSE, fusion, explain, cache  | SCE-08, SCE-10, SCE-13 | 2.0                |
+| [SCE-15] | P6    | Studio, docs, hardening, release checks   | SCE-14                 | 2.0                |
 
 The single-track median is about 23.5 engineer-weeks. Two engineers split
 between native streaming/state work and Python/compiler/provider work can

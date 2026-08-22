@@ -1,10 +1,10 @@
 # Symbolic Computation Engine Contract Critique
 
-| Field            | Value                                                                  |
-| ---------------- | ---------------------------------------------------------------------- |
-| Status           | **APPROVED — B1–B4 and reviewer API blockers R1/R2/R6 closed**         |
+| Field            | Value                                                                   |
+| ---------------- | ----------------------------------------------------------------------- |
+| Status           | **APPROVED — B1–B4 and reviewer API blockers R1/R2/R6 closed**          |
 | Issue            | GitHub #167 / SCE-00                                                    |
-| Baseline         | `feature/symbolic-contract@f6b8a6f90b7a978de1976f5a163ea689b989caee` |
+| Baseline         | `feature/symbolic-contract@f6b8a6f90b7a978de1976f5a163ea689b989caee`    |
 | Controlling spec | `../specs/symbolic-computation-contract.md`                             |
 | API note         | `../api-notes/symbolic-computation-engine.md`                           |
 

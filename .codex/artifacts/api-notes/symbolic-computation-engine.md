@@ -1,14 +1,14 @@
 # Symbolic Computation Engine API Contract
 
-| Field             | Value                                                                  |
-| ----------------- | ---------------------------------------------------------------------- |
-| Status            | APPROVED — exact API/serialization freeze; implementation not started |
+| Field             | Value                                                                   |
+| ----------------- | ----------------------------------------------------------------------- |
+| Status            | APPROVED — exact API/serialization freeze; implementation not started   |
 | Issue             | GitHub #167 / SCE-00                                                    |
-| Artifact slug     | `symbolic-computation-engine`                                          |
-| Controlling spec  | `.codex/artifacts/specs/symbolic-computation-contract.md`, D1–D13      |
-| Project format    | `3` (unchanged)                                                        |
-| Capability schema | `2`                                                                    |
-| Digest version    | `calc_flow.static_input.digest.v1`                                     |
+| Artifact slug     | `symbolic-computation-engine`                                           |
+| Controlling spec  | `.codex/artifacts/specs/symbolic-computation-contract.md`, D1–D13       |
+| Project format    | `3` (unchanged)                                                         |
+| Capability schema | `2`                                                                     |
+| Digest version    | `calc_flow.static_input.digest.v1`                                      |
 
 ## 1. Authority and scope
 
@@ -650,10 +650,10 @@ Metrics version `1` reuses the existing public continuous-runtime status
 fields; it does not add or rename an `OperatorStatus` field. The semantic-to-
 public mapping is exact:
 
-| D7 semantic name      | Rust `OperatorStatus` field | Python operator-status key | Public value                      |
-| --------------------- | --------------------------- | -------------------------- | --------------------------------- |
-| `dropped_rows`        | `late_rows`                 | `late_rows`                | non-negative `u64` / Python `int` |
-| `affected_envelopes`  | `late_affected_batches`     | `late_affected_batches`    | non-negative `u64` / Python `int` |
+| D7 semantic name      | Rust `OperatorStatus` field | Python operator-status key | Public value                       |
+| --------------------- | --------------------------- | -------------------------- | ---------------------------------- |
+| `dropped_rows`        | `late_rows`                 | `late_rows`                | non-negative `u64` / Python `int`  |
+| `affected_envelopes`  | `late_affected_batches`     | `late_affected_batches`    | non-negative `u64` / Python `int`  |
 | `max_lateness_micros` | `max_lateness`              | `max_lateness_micros`      | `Option<Duration>` / `int \| None` |
 
 The exact existing Rust subset remains:

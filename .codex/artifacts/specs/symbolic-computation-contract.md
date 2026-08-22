@@ -1,12 +1,12 @@
 # Symbolic Computation Contract Freeze
 
-| Field             | Value                                                                 |
-| ----------------- | --------------------------------------------------------------------- |
-| Status            | APPROVED — semantic freeze; implementation not started                |
+| Field             | Value                                                                  |
+| ----------------- | ---------------------------------------------------------------------- |
+| Status            | APPROVED — semantic freeze; implementation not started                 |
 | Issue             | GitHub #167 / SCE-00                                                   |
-| Baseline          | `feature/symbolic-contract@f6b8a6f90b7a978de1976f5a163ea689b989caee` |
-| Artifact slug     | `symbolic-computation-contract`                                       |
-| Intended audience | symbolic API, compiler, operator, runtime, state, and test owners     |
+| Baseline          | `feature/symbolic-contract@f6b8a6f90b7a978de1976f5a163ea689b989caee`   |
+| Artifact slug     | `symbolic-computation-contract`                                        |
+| Intended audience | symbolic API, compiler, operator, runtime, state, and test owners      |
 
 ## 1. Authority and completion boundary
 
