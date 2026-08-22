@@ -4,7 +4,7 @@
 [![Windows CI](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml)
 [![Coverage Status](https://coveralls.io/repos/github/wegamekinglc/calc-flow/badge.svg?branch=main)](https://coveralls.io/github/wegamekinglc/calc-flow?branch=main)
 
-Calc Flow 3.0 is a Rust-native calculation engine for immutable Arrow
+Calc Flow 4.0 is a Rust-native calculation engine for immutable Arrow
 micro-batches and stateful streams. The core crate compiles typed calculation
 graphs, runs every table expression and query with Apache DataFusion, and owns
 checkpoint/recovery semantics. The Python package is a PyO3 binding to that
@@ -30,7 +30,7 @@ Rust:
 
 ```toml
 [dependencies]
-calc-flow = "3.0.0"
+calc-flow = "4.0.0"
 ```
 
 ## Python quickstart
@@ -257,7 +257,7 @@ response types are in `web-ui/src/api/schema.d.ts`.
 
 ## Compatibility
 
-Calc Flow 3.0 accepts only strict project-v3 documents and exposes only the
+Calc Flow 4.0 accepts only strict project-v3 documents and exposes only the
 Studio `/api/v3` surface. It does not load project-v2 documents; see the
 [v2-to-v3 migration guide](docs/migration-v2-to-v3.md) before upgrading.
 Historical v1 behavior remains available at the `v1-python-final` tag and as

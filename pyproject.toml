@@ -1,6 +1,6 @@
 [project]
 name = "calc-flow"
-version = "3.0.0"
+version = "4.0.0"
 description = "Rust-native DataFusion batch and streaming calculation pipelines"
 readme = "README.md"
 license = "Apache-2.0"

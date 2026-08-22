@@ -1,6 +1,6 @@
 # Getting started with Calc Flow
 
-Calc Flow 3.0 is a Rust-native calculation engine with a Python binding and an
+Calc Flow 4.0 is a Rust-native calculation engine with a Python binding and an
 optional local Studio. This guide covers two installation paths:
 
 - install published packages when you want to use Calc Flow in an application;
@@ -112,7 +112,7 @@ Open `http://127.0.0.1:8765`. Stop the server with `Ctrl+C`.
 Rust applications add the published crate from their Cargo project:
 
 ```bash
-cargo add calc-flow@3.0.0
+cargo add calc-flow@4.0.0
 ```
 
 Continue with the [Python API guide](python-api.md) or
@@ -254,7 +254,7 @@ it with the source installation steps before starting Studio.
 
 ## Verify the installation
 
-Confirm that Calc Flow reports version `3.0.0` and that the native extension
+Confirm that Calc Flow reports version `4.0.0` and that the native extension
 loads from the environment rather than `python/calc_flow/`.
 
 ### Linux and WSL

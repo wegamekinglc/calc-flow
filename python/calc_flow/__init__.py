@@ -28,9 +28,12 @@ from calc_flow.errors import (
     StreamingRuntimeError,
 )
 from calc_flow.pipeline import (
+    ArrowFieldSpec,
     BatchExecutionPlan,
     DeliveryGuarantee,
     ExecutionPlan,
+    JoinStateLimits,
+    JoinTimeBounds,
     PipelineBuilder,
     Runtime,
     StreamExecutionPlan,
@@ -63,6 +66,7 @@ from calc_flow.runtime import (
     SourceEvent,
     SourceProvidedWatermarks,
     StreamingError,
+    StreamingFailureReasonCode,
     StreamingJob,
     StreamingRunner,
     StreamRuntimeConfig,
@@ -75,13 +79,14 @@ from calc_flow.runtime import (
 )
 from calc_flow.store import FileProjectStore
 
-__version__ = "3.0.0"
+__version__ = "4.0.0"
 Batch = _native.Batch
 ExecutionOptions = _native.ExecutionOptions
 ProviderContext = _native.ProviderContext
 RunResult = _native.RunResult
 __all__ = [
     "Batch",
+    "ArrowFieldSpec",
     "BatchExecutionPlan",
     "BoundedOutOfOrderness",
     "CalcFlowError",
@@ -103,6 +108,8 @@ __all__ = [
     "JobOutcome",
     "JobStatus",
     "JSONValue",
+    "JoinStateLimits",
+    "JoinTimeBounds",
     "ManagedCheckpointRuntime",
     "NativeWatermarkCapability",
     "OrdinaryDelivery",
@@ -137,6 +144,7 @@ __all__ = [
     "StreamSink",
     "StreamSource",
     "StreamingError",
+    "StreamingFailureReasonCode",
     "StreamingJob",
     "StreamingRunner",
     "StreamingRuntimeError",

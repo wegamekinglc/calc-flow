@@ -26,8 +26,9 @@ use crate::{
 
 const SAFE_EXCEPTION_STORAGE: &str = "_calc_flow_safe_fields";
 const NATIVE_EXCEPTION_STORAGE: &str = "_calc_flow_native_safe_fields";
-const SAFE_EXCEPTION_FIELDS: [&str; 9] = [
+const SAFE_EXCEPTION_FIELDS: [&str; 10] = [
     "category",
+    "reason_code",
     "message",
     "job_id",
     "epoch",
@@ -55,6 +56,7 @@ macro_rules! py_tuple {
 
 struct SafeStreamingErrorFields {
     category: String,
+    reason_code: Option<String>,
     message: String,
     job_id: Option<u64>,
     epoch: Option<u64>,
@@ -69,6 +71,7 @@ impl SafeStreamingErrorFields {
     fn internal(message: &str) -> Self {
         Self {
             category: "internal".to_owned(),
+            reason_code: None,
             message: message.to_owned(),
             job_id: None,
             epoch: None,
@@ -83,6 +86,10 @@ impl SafeStreamingErrorFields {
     fn from_streaming(error: &calc_flow::StreamingError) -> Self {
         Self {
             category: streaming_error_category_name(error.category()).to_owned(),
+            reason_code: error
+                .reason_code()
+                .and_then(streaming_failure_reason_name)
+                .map(str::to_owned),
             message: error.message().to_owned(),
             job_id: error.job_id(),
             epoch: error.epoch().map(calc_flow::Epoch::as_u64),
@@ -1219,6 +1226,7 @@ fn structured_streaming_py_err(
             py,
             [
                 fields.category,
+                fields.reason_code,
                 fields.message,
                 fields.job_id,
                 fields.epoch,
@@ -1427,6 +1435,7 @@ fn streaming_error_value_to_py<'py>(
     let value = PyDict::new(py);
     set_py_items!(value, {
         "category" => streaming_error_category_name(error.category()),
+        "reason_code" => error.reason_code().and_then(streaming_failure_reason_name),
         "message" => error.message(),
         "job_id" => error.job_id(),
         "epoch" => error.epoch().map(calc_flow::Epoch::as_u64),
@@ -1677,6 +1686,24 @@ const fn streaming_error_category_name(
         calc_flow::StreamingErrorCategory::Connector => "connector",
         calc_flow::StreamingErrorCategory::TaskPanicked => "task_panicked",
         calc_flow::StreamingErrorCategory::Internal => "internal",
+    }
+}
+
+const fn streaming_failure_reason_name(
+    reason: calc_flow::StreamingFailureReason,
+) -> Option<&'static str> {
+    match reason {
+        calc_flow::StreamingFailureReason::JoinStateLimitExceeded => {
+            Some("join_state_limit_exceeded")
+        }
+        calc_flow::StreamingFailureReason::JoinMatchLimitExceeded => {
+            Some("join_match_limit_exceeded")
+        }
+        calc_flow::StreamingFailureReason::JoinCounterOverflow => Some("join_counter_overflow"),
+        calc_flow::StreamingFailureReason::JoinTimeConversionFailed => {
+            Some("join_time_conversion_failed")
+        }
+        _ => None,
     }
 }
 

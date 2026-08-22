@@ -461,6 +461,7 @@ export const decodeJobResponse = (value: unknown): JobResponse => {
     'started_at',
     'finished_at',
     'error_code',
+    'reason_code',
     'error',
   ], 'job');
   stringAt(job.id, 'job.id');
@@ -474,23 +475,29 @@ export const decodeJobResponse = (value: unknown): JobResponse => {
   nullableStringAt(job.started_at, 'job.started_at');
   nullableStringAt(job.finished_at, 'job.finished_at');
   nullableStringAt(job.error_code, 'job.error_code');
+  nullableStringAt(job.reason_code, 'job.reason_code');
   nullableStringAt(job.error, 'job.error');
   if (status === 'pending') {
     if (job.started_at !== null || job.finished_at !== null) {
       fail('job', 'pending jobs cannot have start or finish times');
     }
-    if (job.error_code !== null || job.error !== null) {
+    if (job.error_code !== null || job.reason_code !== null || job.error !== null) {
       fail('job', 'pending job payload is inconsistent');
     }
   } else if (status === 'running') {
     stringAt(job.started_at, 'job.started_at');
-    if (job.finished_at !== null || job.error_code !== null || job.error !== null) {
+    if (
+      job.finished_at !== null
+      || job.error_code !== null
+      || job.reason_code !== null
+      || job.error !== null
+    ) {
       fail('job', 'running job payload is inconsistent');
     }
   } else if (status === 'completed') {
     stringAt(job.started_at, 'job.started_at');
     stringAt(job.finished_at, 'job.finished_at');
-    if (job.error_code !== null || job.error !== null) {
+    if (job.error_code !== null || job.reason_code !== null || job.error !== null) {
       fail('job.error', 'completed jobs require null errors');
     }
   } else if (status === 'failed') {
@@ -504,7 +511,7 @@ export const decodeJobResponse = (value: unknown): JobResponse => {
     if (!stringAt(job.error, 'job.error')) fail('job.error', 'must not be empty');
   } else {
     stringAt(job.finished_at, 'job.finished_at');
-    if (job.error_code !== null || job.error !== null) {
+    if (job.error_code !== null || job.reason_code !== null || job.error !== null) {
       fail('job', 'cancelled job payload is inconsistent');
     }
   }

@@ -21,6 +21,12 @@ if TYPE_CHECKING:
 type JSONValue = (
     None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
 )
+type StreamingFailureReasonCode = Literal[
+    "join_state_limit_exceeded",
+    "join_match_limit_exceeded",
+    "join_counter_overflow",
+    "join_time_conversion_failed",
+]
 
 
 async def _raise_after_cancellation_cleanup(
@@ -569,6 +575,7 @@ class StreamingError:
     """Payload-safe structured terminal error projection."""
 
     category: str
+    reason_code: StreamingFailureReasonCode | None
     message: str
     job_id: int | None
     epoch: int | None

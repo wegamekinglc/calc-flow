@@ -27,7 +27,7 @@ const capabilities = {
   schemaVersion: 1,
   runtime: {
     scope: { kind: 'runtimeSession', sessionId: 'session', revision: 0 },
-    packageVersion: '3.0.0',
+    packageVersion: '4.0.0',
     projectFormatVersions: [3],
     batchKinds: ['table', 'array'],
     portableArrowTypes: ['int64'],
@@ -253,6 +253,31 @@ describe('Calc Flow Studio', () => {
 
     expect(screen.getByText('sql')).toBeInTheDocument();
     expect(screen.getByLabelText('DataFusion SQL')).toHaveValue('SELECT * FROM input');
+  });
+
+  it('offers the bounded Join factory only in stream mode with explicit limits', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.endsWith('/catalog')) return response(catalog);
+        if (path.endsWith('/capabilities')) return response(capabilities);
+        if (path.endsWith('/projects')) return response([]);
+        throw new Error(`Unexpected request ${path}`);
+      }),
+    );
+
+    render(<App />);
+
+    await screen.findByText('Build the flow');
+    expect(screen.queryByRole('button', { name: /Stream Join/i })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Stream' }));
+    fireEvent.click(screen.getByRole('button', { name: /Stream Join/i }));
+
+    expect(screen.getByLabelText('before micros')).toHaveValue(0);
+    expect(screen.getByLabelText('max state rows per side')).toHaveValue(100_000);
+    expect(screen.getByLabelText('max state bytes per side')).toHaveValue(134_217_728);
+    expect(screen.getByLabelText('max matches per input batch')).toHaveValue(1_000_000);
   });
 
   it('persists a SQL alias rename across its schema port and incoming edge', async () => {

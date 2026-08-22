@@ -38,7 +38,7 @@ postgresql = [
 ]
 
 [dependencies]
-calc-flow = { path = "../calc-flow", version = "=3.0.0" }
+calc-flow = { path = "../calc-flow", version = "=4.0.0" }
 arrow = { version = "=58.3.0", default-features = false }
 arrow-csv = "=58.3.0"
 arrow-json = "=58.3.0"

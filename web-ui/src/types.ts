@@ -24,6 +24,26 @@ export type ValidationReport = components['schemas']['ValidationReport'];
 export type CapabilitiesResponse = components['schemas']['CapabilitiesResponse'];
 export type JSONValue = components['schemas']['JSONValue-Input'];
 
+export interface StreamJoinSideMetrics {
+  retained_rows: number;
+  retained_bytes: number;
+  evicted_rows: number;
+  late_rows: number;
+  late_affected_batches: number;
+  max_lateness_micros: number | null;
+  null_event_time_rows: number;
+  null_key_rows: number;
+}
+
+export interface StreamJoinMetrics {
+  node_id: string;
+  left: StreamJoinSideMetrics;
+  right: StreamJoinSideMetrics;
+  emitted_match_rows: number;
+  state_limit_failures: number;
+  match_limit_failures: number;
+}
+
 export interface JobEvent {
   sequence: number;
   timestamp: string;
@@ -38,6 +58,7 @@ export interface JobEvent {
   queue_bytes?: number;
   backpressure_events?: number;
   late_rows?: number;
+  stream_joins?: StreamJoinMetrics[] | null;
 }
 
 export interface UdfCatalogEntry {

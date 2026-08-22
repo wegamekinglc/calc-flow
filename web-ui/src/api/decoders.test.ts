@@ -29,7 +29,7 @@ const capabilitiesFixture = () => ({
   schemaVersion: 1,
   runtime: {
     scope: { kind: 'runtimeSession', sessionId: 'session', revision: 0 },
-    packageVersion: '3.0.0',
+    packageVersion: '4.0.0',
     projectFormatVersions: [3],
     batchKinds: ['table', 'array'],
     portableArrowTypes: ['int64'],
@@ -68,6 +68,7 @@ const job = (status: string) => ({
     ? '2026-01-01T00:00:02Z'
     : null,
   error_code: status === 'failed' ? 'worker_failed' : null,
+  reason_code: null,
   error: status === 'failed' ? 'worker exited' : null,
 });
 
@@ -159,5 +160,12 @@ describe('job decoder', () => {
     })).toThrowError(new ApiContractError(
       "job.error_code: expected 'job_limit_exceeded' or 'worker_failed'",
     ));
+  });
+
+  it('preserves a Join reason while retaining a future-string fallback', () => {
+    for (const reasonCode of ['join_match_limit_exceeded', 'future_join_reason']) {
+      const failed = { ...job('failed'), reason_code: reasonCode };
+      expect(decodeJobResponse(failed)).toEqual(failed);
+    }
   });
 });

@@ -1,12 +1,12 @@
-# Calc Flow 3.0 API reference
+# Calc Flow 4.0 API reference
 
 Calc Flow has three supported surfaces:
 
 | Surface          | Package or path           | Purpose                                     |
 | ---------------- | ------------------------- | ------------------------------------------- |
-| Rust core        | `calc-flow = "3.0.0"`     | Native batches, graphs, execution, recovery |
-| Python binding   | `calc-flow==3.0.0`        | PyO3 engine access and Python integrations  |
-| Local Studio API | `calc-flow-studio==3.0.0` | Loopback FastAPI service and React assets   |
+| Rust core        | `calc-flow = "4.0.0"`     | Native batches, graphs, execution, recovery |
+| Python binding   | `calc-flow==4.0.0`        | PyO3 engine access and Python integrations  |
+| Local Studio API | `calc-flow-studio==4.0.0` | Loopback FastAPI service and React assets   |
 
 For examples and lifecycle detail, see the [executable example guide](examples.md),
 [Rust API](rust-api.md), [Python API](python-api.md), and
@@ -323,9 +323,9 @@ manifest publication uses `CheckpointPublicationUnknownError`.
 ## Version and compatibility
 
 The Rust crate, Python binding, Studio package, and frontend are versioned
-`3.0.0`. Project format version `3` and checkpoint-manifest version `3` are
+`4.0.0`. Project format version `3` and checkpoint-manifest version `3` are
 separate protocol values from the package version.
 
-Calc Flow 3.0 does not load project-v2 documents or expose Studio `/api/v2`.
+Calc Flow 4.0 does not load project-v2 documents or expose Studio `/api/v2`.
 See the [v2-to-v3 migration guide](migration-v2-to-v3.md) for the required
 migration boundary.

@@ -23,8 +23,8 @@ connector-websocket = ["dep:calc-flow-connectors", "calc-flow-connectors/websock
 
 [dependencies]
 async-trait.workspace = true
-calc-flow = { path = "../calc-flow", version = "=3.0.0" }
-calc-flow-connectors = { path = "../calc-flow-connectors", version = "=3.0.0", default-features = false, optional = true }
+calc-flow = { path = "../calc-flow", version = "=4.0.0" }
+calc-flow-connectors = { path = "../calc-flow-connectors", version = "=4.0.0", default-features = false, optional = true }
 chrono.workspace = true
 datafusion.workspace = true
 ndarray = "0.17.2"

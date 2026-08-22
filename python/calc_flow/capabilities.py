@@ -232,6 +232,12 @@ def runtime_capabilities(
                 output_kinds=("table",),
                 requires_datafusion=True,
             ),
+            OperatorCapability(
+                kind="stream_join",
+                input_kinds=("table", "table"),
+                output_kinds=("table",),
+                requires_datafusion=True,
+            ),
         ),
         udfs=udfs,
         providers=providers,

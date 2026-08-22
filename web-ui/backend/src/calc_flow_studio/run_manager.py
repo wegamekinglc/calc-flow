@@ -62,6 +62,23 @@ type PreparedInputs = dict[str, PreparedInput]
 type RegistrationRecord = dict[str, Any]
 type LazyBuiltinIdentity = tuple[str, str, str]
 
+_STREAM_JOIN_FAILURE_REASONS = frozenset(
+    {
+        "join_state_limit_exceeded",
+        "join_match_limit_exceeded",
+        "join_counter_overflow",
+        "join_time_conversion_failed",
+    }
+)
+
+
+def _stream_join_failure_reason(value: object) -> str | None:
+    return (
+        value
+        if isinstance(value, str) and value in _STREAM_JOIN_FAILURE_REASONS
+        else None
+    )
+
 
 @dataclass(frozen=True, slots=True)
 class _ProviderRestoration:
@@ -982,6 +999,7 @@ class _JobHandle:
     started_at: datetime | None = None
     finished_at: datetime | None = None
     error_code: str | None = None
+    reason_code: str | None = None
     error: str | None = None
     events: tuple[RunEvent, ...] = ()
     worker: Any = None
@@ -1061,6 +1079,19 @@ def _continuous_progress(status: dict[str, object]) -> dict[str, object]:
 
 # The worker owns the complete native job lifecycle and emits exactly one
 # terminal event across normal, cancellation, and error paths.
+def _continuous_terminal_event(outcome: Any) -> dict[str, object]:
+    errors = getattr(outcome, "errors", ())
+    primary = errors[0] if errors else None
+    reason_code = _stream_join_failure_reason(getattr(primary, "reason_code", None))
+    return {
+        "kind": "terminal",
+        "state": outcome.state,
+        "cause": outcome.cause,
+        "error": getattr(primary, "message", outcome.cause),
+        "reason_code": reason_code,
+    }
+
+
 def _execute_continuous_worker(
     project_json: str,
     command_queue: Any,
@@ -1085,23 +1116,11 @@ def _execute_continuous_worker(
             elif command == "shutdown":
                 output_queue.put({"kind": "state", "state": "draining"})
                 outcome = job.shutdown()
-                output_queue.put(
-                    {
-                        "kind": "terminal",
-                        "state": outcome.state,
-                        "cause": outcome.cause,
-                    }
-                )
+                output_queue.put(_continuous_terminal_event(outcome))
                 return
             elif command == "cancel":
                 outcome = job.cancel()
-                output_queue.put(
-                    {
-                        "kind": "terminal",
-                        "state": outcome.state,
-                        "cause": outcome.cause,
-                    }
-                )
+                output_queue.put(_continuous_terminal_event(outcome))
                 return
             status = job.status()
             progress = _continuous_progress(status)
@@ -1110,13 +1129,7 @@ def _execute_continuous_worker(
                 last_progress = progress
             if status["state"] not in {"running", "draining"}:
                 outcome = job.wait()
-                output_queue.put(
-                    {
-                        "kind": "terminal",
-                        "state": outcome.state,
-                        "cause": outcome.cause,
-                    }
-                )
+                output_queue.put(_continuous_terminal_event(outcome))
                 return
     except BaseException as error:
         if job is not None:
@@ -1128,6 +1141,10 @@ def _execute_continuous_worker(
                     "kind": "terminal",
                     "state": "failed",
                     "cause": f"{type(error).__name__}: {error}"[:4000],
+                    "error": str(error)[:4000],
+                    "reason_code": _stream_join_failure_reason(
+                        getattr(error, "reason_code", None)
+                    ),
                 }
             )
 
@@ -1841,7 +1858,7 @@ class RunManager:
                 )
                 return
             kind = message.get("kind")
-            outcome: tuple[RunStatus, str] | None = None
+            outcome: tuple[RunStatus, str, object] | None = None
             with self._lock:
                 handle = self._require_job(job_id)
                 if kind == "state":
@@ -1881,18 +1898,21 @@ class RunManager:
                         "cancelled": RunStatus.CANCELLED,
                     }.get(native_state, RunStatus.FAILED)
                     cause = str(message.get("cause", native_state))[:4000]
-                    outcome = (terminal, cause)
+                    error = str(message.get("error", cause))[:4000]
+                    outcome = (terminal, error, message.get("reason_code"))
                 else:
                     outcome = (
                         RunStatus.FAILED,
                         "worker emitted an unknown event kind",
+                        None,
                     )
             if outcome is not None:
-                terminal, cause = outcome
+                terminal, error, reason_code = outcome
                 self._finish_job(
                     job_id,
                     terminal,
-                    cause,
+                    error,
+                    reason_code=reason_code,
                     terminate=False,
                 )
                 return
@@ -1930,6 +1950,7 @@ class RunManager:
         status: RunStatus,
         error: str,
         *,
+        reason_code: object = None,
         terminate: bool,
     ) -> None:
         with self._lock:
@@ -1943,6 +1964,11 @@ class RunManager:
                 if status is RunStatus.FAILED
                 and error.startswith("job_limit_exceeded:")
                 else "worker_failed"
+                if status is RunStatus.FAILED
+                else None
+            )
+            handle.reason_code = (
+                _stream_join_failure_reason(reason_code)
                 if status is RunStatus.FAILED
                 else None
             )
@@ -2000,6 +2026,7 @@ class RunManager:
                 "started_at": handle.started_at,
                 "finished_at": handle.finished_at,
                 "error_code": handle.error_code,
+                "reason_code": handle.reason_code,
                 "error": handle.error,
             }
         )

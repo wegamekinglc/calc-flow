@@ -20,7 +20,7 @@ const capabilities = {
   schemaVersion: 1,
   runtime: {
     scope: { kind: 'runtimeSession', sessionId: 'session', revision: 0 },
-    packageVersion: '3.0.0',
+    packageVersion: '4.0.0',
     projectFormatVersions: [3],
     batchKinds: ['array', 'table'],
     portableArrowTypes: ['int64'],

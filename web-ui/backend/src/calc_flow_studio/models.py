@@ -294,6 +294,33 @@ type ValidationReport = Annotated[
     Field(discriminator="kind"),
 ]
 
+type StreamingFailureReasonCode = Literal[
+    "join_state_limit_exceeded",
+    "join_match_limit_exceeded",
+    "join_counter_overflow",
+    "join_time_conversion_failed",
+]
+
+
+class StreamJoinSideMetrics(StrictModel):
+    retained_rows: int = Field(ge=0)
+    retained_bytes: int = Field(ge=0)
+    evicted_rows: int = Field(ge=0)
+    late_rows: int = Field(ge=0)
+    late_affected_batches: int = Field(ge=0)
+    max_lateness_micros: int | None = Field(default=None, ge=0)
+    null_event_time_rows: int = Field(ge=0)
+    null_key_rows: int = Field(ge=0)
+
+
+class StreamJoinMetrics(StrictModel):
+    node_id: str = Field(min_length=1)
+    left: StreamJoinSideMetrics
+    right: StreamJoinSideMetrics
+    emitted_match_rows: int = Field(ge=0)
+    state_limit_failures: int = Field(ge=0)
+    match_limit_failures: int = Field(ge=0)
+
 
 class RunEvent(StrictModel):
     sequence: int
@@ -309,6 +336,7 @@ class RunEvent(StrictModel):
     queue_bytes: int | None = Field(default=None, ge=0)
     backpressure_events: int | None = Field(default=None, ge=0)
     late_rows: int | None = Field(default=None, ge=0)
+    stream_joins: tuple[StreamJoinMetrics, ...] | None = None
 
 
 class OutputFieldPreview(StrictModel):
@@ -499,6 +527,7 @@ class PendingJobResponse(JobResponseBase):
     started_at: None = None
     finished_at: None = None
     error_code: None = None
+    reason_code: None = None
     error: None = None
 
 
@@ -507,6 +536,7 @@ class RunningJobResponse(JobResponseBase):
     started_at: datetime
     finished_at: None = None
     error_code: None = None
+    reason_code: None = None
     error: None = None
 
 
@@ -515,6 +545,7 @@ class CompletedJobResponse(JobResponseBase):
     started_at: datetime
     finished_at: datetime
     error_code: None = None
+    reason_code: None = None
     error: None = None
 
 
@@ -523,6 +554,7 @@ class FailedJobResponse(JobResponseBase):
     started_at: datetime
     finished_at: datetime
     error_code: Literal["job_limit_exceeded", "worker_failed"]
+    reason_code: StreamingFailureReasonCode | None = None
     error: str = Field(min_length=1)
 
 
@@ -531,6 +563,7 @@ class CancelledJobResponse(JobResponseBase):
     started_at: datetime | None = None
     finished_at: datetime
     error_code: None = None
+    reason_code: None = None
     error: None = None
 
 

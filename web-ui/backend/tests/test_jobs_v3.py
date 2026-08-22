@@ -362,6 +362,38 @@ def test_worker_death_without_terminal_event_is_a_typed_failure(
     assert failed["error"] == "worker exited without a terminal event"
 
 
+def test_worker_join_failure_reason_survives_terminal_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def failed_worker(_project_json: str, _commands: object, output: object) -> None:
+        output.put(
+            {
+                "kind": "terminal",
+                "state": "failed",
+                "cause": "failure",
+                "error": "operator failed",
+                "reason_code": "join_state_limit_exceeded",
+            }
+        )
+
+    monkeypatch.setattr(run_manager_module, "_execute_continuous_worker", failed_worker)
+    manager = RunManager(
+        use_processes=False,
+        checkpoint_directory=tmp_path / "checkpoints",
+    )
+    started = manager.submit_job(
+        ProjectDocument.model_validate(_stream_project(tmp_path))
+    )
+
+    _wait_for_status(manager, started.id, RunStatus.FAILED)
+    failed = manager.get_job(started.id).model_dump(mode="json")
+
+    assert failed["error_code"] == "worker_failed"
+    assert failed["reason_code"] == "join_state_limit_exceeded"
+    assert failed["error"] == "operator failed"
+
+
 def test_missing_job_operations_return_not_found(tmp_path: Path) -> None:
     with TestClient(create_app(project_directory=tmp_path / "projects")) as client:
         responses = (

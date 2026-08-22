@@ -142,26 +142,26 @@ class ReleaseConfigTests(unittest.TestCase):
             (ROOT / "web-ui/package-lock.json").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(workspace["workspace"]["package"]["version"], "3.0.0")
-        self.assertEqual(binding["dependencies"]["calc-flow"]["version"], "=3.0.0")
-        self.assertEqual(package["project"]["version"], "3.0.0")
-        self.assertEqual(studio["project"]["version"], "3.0.0")
-        self.assertIn("calc-flow>=3.0.0,<4", studio["project"]["dependencies"])
-        self.assertEqual(frontend["version"], "3.0.0")
-        self.assertEqual(frontend_lock["version"], "3.0.0")
-        self.assertEqual(frontend_lock["packages"][""]["version"], "3.0.0")
+        self.assertEqual(workspace["workspace"]["package"]["version"], "4.0.0")
+        self.assertEqual(binding["dependencies"]["calc-flow"]["version"], "=4.0.0")
+        self.assertEqual(package["project"]["version"], "4.0.0")
+        self.assertEqual(studio["project"]["version"], "4.0.0")
+        self.assertIn("calc-flow>=4.0.0,<5", studio["project"]["dependencies"])
+        self.assertEqual(frontend["version"], "4.0.0")
+        self.assertEqual(frontend_lock["version"], "4.0.0")
+        self.assertEqual(frontend_lock["packages"][""]["version"], "4.0.0")
         self.assertIn(
-            '__version__ = "3.0.0"',
+            '__version__ = "4.0.0"',
             (ROOT / "python/calc_flow/__init__.py").read_text(encoding="utf-8"),
         )
         self.assertIn(
-            'version="3.0.0"',
+            'version="4.0.0"',
             (ROOT / "web-ui/backend/src/calc_flow_studio/app.py").read_text(
                 encoding="utf-8"
             ),
         )
         openapi = json.loads((ROOT / "web-ui/openapi.json").read_text(encoding="utf-8"))
-        self.assertEqual(openapi["info"]["version"], "3.0.0")
+        self.assertEqual(openapi["info"]["version"], "4.0.0")
 
         release_text = "\n".join(
             (ROOT / path).read_text(encoding="utf-8")
@@ -171,16 +171,16 @@ class ReleaseConfigTests(unittest.TestCase):
             )
         )
         self.assertNotIn(">=2.0.0a1", release_text)
-        self.assertIn(">=3.0.0", release_text)
+        self.assertIn(">=4.0.0", release_text)
 
         release_workflow = (ROOT / ".github/workflows/release.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn('- "v3.*"', release_workflow)
-        self.assertNotIn('- "v2.*"', release_workflow)
+        self.assertIn('- "v4.*"', release_workflow)
+        self.assertNotIn('- "v3.*"', release_workflow)
         self.assertIn('assert "/api/v3/catalog"', release_workflow)
-        self.assertIn('and ">=3.0.0" in requirement', release_workflow)
-        self.assertIn('and "<4" in requirement', release_workflow)
+        self.assertIn('and ">=4.0.0" in requirement', release_workflow)
+        self.assertIn('and "<5" in requirement', release_workflow)
         self.assertEqual(release_workflow.count("--save-baseline exact-"), 2)
         self.assertIn("--criterion-dir", release_workflow)
         self.assertIn("--criterion-baseline exact-baseline", release_workflow)
@@ -561,15 +561,15 @@ class ReleaseConfigTests(unittest.TestCase):
 
     def test_normative_docs_use_final_package_and_project_versions(self) -> None:
         documentation = {
-            "README.md": ("Calc Flow 3.0", 'calc-flow = "3.0.0"'),
+            "README.md": ("Calc Flow 4.0", 'calc-flow = "4.0.0"'),
             "docs/api-reference.md": (
-                "Calc Flow 3.0 API reference",
-                "`calc-flow==3.0.0`",
+                "Calc Flow 4.0 API reference",
+                "`calc-flow==4.0.0`",
                 "Project format version `3`",
             ),
-            "docs/getting-started.md": ("cargo add calc-flow@3.0.0",),
-            "docs/python-api.md": ("`calc-flow==3.0.0`",),
-            "docs/rust-api.md": ("Calc Flow 3.0", "cargo add calc-flow@3.0.0"),
+            "docs/getting-started.md": ("cargo add calc-flow@4.0.0",),
+            "docs/python-api.md": ("`calc-flow==4.0.0`",),
+            "docs/rust-api.md": ("Calc Flow 4.0", "cargo add calc-flow@4.0.0"),
         }
         stale_package_claims = (
             "Calc Flow 2.0",

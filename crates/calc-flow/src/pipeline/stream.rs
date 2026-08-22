@@ -19,8 +19,8 @@ use sha2::{Digest, Sha256};
 use crate::continuous::{SinkBinding, SourceBinding};
 use crate::{
     BatchKind, CalcFlowError, DataFusionConfig, Edge, NodeOperator, OperatorMetadata,
-    PipelineBuilder, Port, PortEndpoint, Result, StreamOperator, UdfKind, UdfRegistrySnapshot,
-    UnionOperator, canonical_json,
+    PipelineBuilder, Port, PortEndpoint, Result, StreamJoinOperator, StreamOperator, UdfKind,
+    UdfRegistrySnapshot, UnionOperator, canonical_json,
 };
 
 use super::{NodeDefinition, TablePlanResources, compile_graph};
@@ -152,6 +152,7 @@ pub(crate) enum CompiledStreamOperator {
     Sql(crate::SqlOperator),
     Union(UnionOperator),
     Window(crate::WindowAggregateOperator),
+    StreamJoin(Box<StreamJoinOperator>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -162,6 +163,7 @@ pub(crate) enum OperatorCheckpointCapability {
 }
 
 const OPERATOR_STATE_VERSION_KEY: &str = "__calc_flow_operator_state_version";
+pub(crate) const OUTPUT_FRONTIER_METADATA_KEY_V1: &str = "__calc_flow_output_frontier_micros_v1";
 
 impl OperatorCheckpointCapability {
     pub(crate) const fn supports_deterministic_restore(self) -> bool {
@@ -336,6 +338,40 @@ pub(crate) struct StreamRuntimePlanParts {
 }
 
 impl CompiledStreamOperator {
+    pub(crate) const fn requires_output_frontier_state(&self) -> bool {
+        matches!(self, Self::StreamJoin(_))
+    }
+
+    pub(crate) fn output_frontier_candidate(
+        &self,
+        aggregate_input_frontier: Option<crate::EventTime>,
+        ingress_progress: &crate::IngressProgressSnapshot,
+    ) -> Result<Option<crate::EventTime>> {
+        match self {
+            Self::StreamJoin(operator) => operator.output_frontier_candidate(ingress_progress),
+            Self::External(_)
+            | Self::Expression(_)
+            | Self::Sql(_)
+            | Self::Union(_)
+            | Self::Window(_) => Ok(aggregate_input_frontier),
+        }
+    }
+
+    pub(crate) async fn on_ingress_progress(
+        &mut self,
+        ingress: &str,
+        context: &crate::StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        match self {
+            Self::External(operator) => operator.on_ingress_progress(ingress, context).await,
+            Self::Expression(operator) => operator.on_ingress_progress(ingress, context).await,
+            Self::Sql(operator) => operator.on_ingress_progress(ingress, context).await,
+            Self::Union(operator) => operator.on_ingress_progress(ingress, context).await,
+            Self::Window(operator) => operator.on_ingress_progress(ingress, context).await,
+            Self::StreamJoin(operator) => operator.on_ingress_progress(ingress, context).await,
+        }
+    }
+
     fn convert(definition: NodeDefinition, table: Option<&TablePlanResources>) -> Result<Self> {
         match definition.operator {
             NodeOperator::Expression(mut operator) => {
@@ -360,6 +396,12 @@ impl CompiledStreamOperator {
             }
             NodeOperator::Union(operator) => Ok(Self::Union(operator)),
             NodeOperator::Window(operator) => Ok(Self::Window(operator)),
+            NodeOperator::StreamJoin(mut operator) => {
+                if let Some(table) = table {
+                    operator.set_stream_resources(table.config, table.udfs.clone());
+                }
+                Ok(Self::StreamJoin(operator))
+            }
             NodeOperator::Stream(operator) => Ok(Self::External(operator)),
             NodeOperator::Batch(_) => Err(CalcFlowError::Compile {
                 message: format!(
@@ -377,6 +419,7 @@ impl CompiledStreamOperator {
             Self::Sql(operator) => operator.reset(),
             Self::Union(operator) => operator.reset(),
             Self::Window(operator) => operator.reset(),
+            Self::StreamJoin(operator) => operator.reset(),
         }
     }
 
@@ -394,6 +437,7 @@ impl CompiledStreamOperator {
             Self::Sql(operator) => operator.checkpoint(epoch),
             Self::Union(operator) => operator.checkpoint(epoch),
             Self::Window(operator) => operator.checkpoint(epoch),
+            Self::StreamJoin(operator) => operator.checkpoint(epoch),
         }
     }
 
@@ -408,6 +452,7 @@ impl CompiledStreamOperator {
             Self::Sql(operator) => operator.restore(snapshot),
             Self::Union(operator) => operator.restore(snapshot),
             Self::Window(operator) => operator.restore(snapshot),
+            Self::StreamJoin(operator) => operator.restore(snapshot),
         }
     }
 
@@ -428,6 +473,9 @@ impl CompiledStreamOperator {
             Self::Sql(operator) => operator.process_data(ingress, batch, context, output).await,
             Self::Union(operator) => operator.process_data(ingress, batch, context, output).await,
             Self::Window(operator) => operator.process_data(ingress, batch, context, output).await,
+            Self::StreamJoin(operator) => {
+                operator.process_data(ingress, batch, context, output).await
+            }
         }
     }
 
@@ -443,6 +491,7 @@ impl CompiledStreamOperator {
             Self::Sql(operator) => operator.on_watermark(watermark, context, output).await,
             Self::Union(operator) => operator.on_watermark(watermark, context, output).await,
             Self::Window(operator) => operator.on_watermark(watermark, context, output).await,
+            Self::StreamJoin(operator) => operator.on_watermark(watermark, context, output).await,
         }
     }
 
@@ -457,6 +506,7 @@ impl CompiledStreamOperator {
             Self::Sql(operator) => operator.on_end(context, output).await,
             Self::Union(operator) => operator.on_end(context, output).await,
             Self::Window(operator) => operator.on_end(context, output).await,
+            Self::StreamJoin(operator) => operator.on_end(context, output).await,
         }
     }
 
@@ -464,6 +514,7 @@ impl CompiledStreamOperator {
         match self {
             Self::Expression(operator) => operator.stream_runtime_initialized(),
             Self::Sql(operator) => operator.stream_runtime_initialized(),
+            Self::StreamJoin(operator) => operator.stream_runtime_initialized(),
             Self::External(_) | Self::Union(_) | Self::Window(_) => false,
         }
     }
@@ -639,6 +690,7 @@ fn validate_stream_node(node_id: &str, operator: &NodeOperator) -> Result<()> {
         NodeOperator::Expression(_)
         | NodeOperator::Union(_)
         | NodeOperator::Window(_)
+        | NodeOperator::StreamJoin(_)
         | NodeOperator::Stream(_) => Ok(()),
         NodeOperator::Sql(operator) if operator.input_ports().len() == 1 => Ok(()),
         NodeOperator::Sql(_) => Err(CalcFlowError::Compile {
@@ -786,6 +838,32 @@ impl StreamExecutionPlan {
             return BTreeSet::new();
         };
         let mut nodes = BTreeSet::from([endpoint.node_id.as_str()]);
+        loop {
+            let before = nodes.len();
+            for edge in self.edges.values() {
+                if nodes.contains(edge.target.node_id.as_str()) {
+                    nodes.insert(edge.source.node_id.as_str());
+                }
+            }
+            if nodes.len() == before {
+                break;
+            }
+        }
+        self.external_inputs
+            .iter()
+            .filter_map(|(binding, endpoint)| {
+                nodes
+                    .contains(endpoint.node_id.as_str())
+                    .then_some(binding.as_str())
+            })
+            .collect()
+    }
+
+    pub(crate) fn reachable_source_binding_ids_for_operator(
+        &self,
+        operator_id: &str,
+    ) -> BTreeSet<&str> {
+        let mut nodes = BTreeSet::from([operator_id]);
         loop {
             let before = nodes.len();
             for edge in self.edges.values() {

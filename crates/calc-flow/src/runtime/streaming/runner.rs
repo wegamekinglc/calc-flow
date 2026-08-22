@@ -72,8 +72,8 @@ use crate::state::ManifestParentSyncOsFailureProbe;
 use crate::state::ManifestTransactionFaultPoint;
 use crate::{
     CalcFlowError, CancellationToken, CheckpointManifest, CheckpointManifestFields, Epoch,
-    OperatorManifestEntry, RecoveryStatus, SinkManifestEntry, SourceManifestEntry, StateBackend,
-    StateLineageKey, StreamRuntimeConfig,
+    EventTime, OperatorManifestEntry, RecoveryStatus, SinkManifestEntry, SourceManifestEntry,
+    StateBackend, StateLineageKey, StreamRuntimeConfig,
     state::{
         ManifestPublication, ManifestTransaction, PreparedEpochManifest, PreparedManifestIdentity,
         SelectedManifest,
@@ -2838,7 +2838,15 @@ async fn prepare_checkpoint_recovery(
     let checkpoint_capabilities = plan
         .nodes
         .iter()
-        .map(|node| (node.operator_id.as_str(), node.checkpoint_capability))
+        .map(|node| {
+            (
+                node.operator_id.as_str(),
+                (
+                    node.checkpoint_capability,
+                    node.operator.requires_output_frontier_state(),
+                ),
+            )
+        })
         .collect::<BTreeMap<_, _>>();
     let mut operators = BTreeMap::new();
     for (operator_id, entry) in selected.manifest.operators() {
@@ -2851,19 +2859,49 @@ async fn prepare_checkpoint_recovery(
                 cancellation,
             )
             .await?;
-        let snapshot = checkpoint_capabilities
+        let &(checkpoint_capability, requires_output_frontier) = checkpoint_capabilities
             .get(operator_id.as_str())
             .ok_or_else(|| CalcFlowError::CheckpointMismatch {
                 message: format!(
                     "checkpoint operator {operator_id:?} is absent from the prepared plan"
                 ),
-            })?
-            .decode_snapshot(operator_id, snapshot)?;
+            })?;
+        let mut snapshot = checkpoint_capability.decode_snapshot(operator_id, snapshot)?;
+        let restored_output_frontier = snapshot
+            .inline_metadata
+            .remove(crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1);
+        let output_frontier = match (requires_output_frontier, restored_output_frontier) {
+            (true, Some(serde_json::Value::Null)) | (false, None) => None,
+            (true, Some(value)) => {
+                Some(value.as_i64().map(EventTime::from_micros).ok_or_else(|| {
+                    CalcFlowError::CheckpointMismatch {
+                        message: format!(
+                            "checkpoint operator {operator_id:?} has an invalid output frontier"
+                        ),
+                    }
+                })?)
+            }
+            (true, None) => {
+                return Err(CalcFlowError::CheckpointMismatch {
+                    message: format!(
+                        "checkpoint operator {operator_id:?} is missing its output frontier"
+                    ),
+                });
+            }
+            (false, Some(_)) => {
+                return Err(CalcFlowError::CheckpointMismatch {
+                    message: format!(
+                        "checkpoint operator {operator_id:?} unexpectedly contains an output frontier"
+                    ),
+                });
+            }
+        };
         operators.insert(
             operator_id.clone(),
             OperatorRestoreState {
                 snapshot,
                 progress: entry.progress.clone(),
+                output_frontier,
                 next_epoch: checkpoint.next_epoch,
             },
         );

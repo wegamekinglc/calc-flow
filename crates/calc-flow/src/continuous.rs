@@ -165,7 +165,7 @@ use crate::{
 pub use crate::runtime::streaming::projection::{
     CheckpointPhase, CheckpointStatus, ComponentKind, EdgeStatus, JobOutcome, JobState, JobStatus,
     OperatorStatus, OutputDeliveryStatus, SinkDelivery, SinkStatus, SourceStatus, StreamingError,
-    StreamingErrorCategory, TerminalCause,
+    StreamingErrorCategory, StreamingFailureReason, TerminalCause,
 };
 
 static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);

@@ -20,8 +20,9 @@ pub(crate) use compile::{
     CompiledNode, NodeDefinition, TablePlanResources, build_nodes, compile_graph,
 };
 pub(crate) use stream::{
-    CompiledStreamOperator, OperatorCheckpointCapability, RuntimeProducer, RuntimeSinkRoute,
-    RuntimeSourceRoute, RuntimeStreamNode, StreamRuntimePlanParts,
+    CompiledStreamOperator, OUTPUT_FRONTIER_METADATA_KEY_V1, OperatorCheckpointCapability,
+    RuntimeProducer, RuntimeSinkRoute, RuntimeSourceRoute, RuntimeStreamNode,
+    StreamRuntimePlanParts,
 };
 
 use std::collections::BTreeMap;
@@ -180,6 +181,9 @@ impl PipelineBuilder {
             NodeOperator::Window(_) => OperatorCheckpointCapability::CheckpointedStateful {
                 state_version: crate::operator::WINDOW_STATE_LAYOUT_VERSION,
             },
+            NodeOperator::StreamJoin(_) => {
+                OperatorCheckpointCapability::CheckpointedStateful { state_version: 1 }
+            }
             NodeOperator::Batch(_) | NodeOperator::Stream(_) => {
                 OperatorCheckpointCapability::Unproven
             }

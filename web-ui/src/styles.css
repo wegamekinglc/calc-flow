@@ -97,6 +97,7 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weig
 .node-tool { width: 100%; display: flex; align-items: center; gap: 10px; margin-bottom: 8px; padding: 11px; text-align: left; border: 1px solid var(--line); border-radius: 10px; color: #e5f2ed; background: #11251f; }
 .node-tool > span { display: grid; place-items: center; flex: 0 0 38px; height: 34px; border-radius: 7px; font: 500 11px 'SFMono-Regular', Consolas, ui-monospace, monospace; color: #082019; background: var(--mint); }
 .node-tool.sql > span { background: var(--orange); }
+.node-tool.stream_join > span { background: #56a8d5; }
 .node-tool.array > span { background: var(--violet); }
 .node-tool strong, .node-tool small { display: block; }
 .node-tool strong { font-size: 11px; }
@@ -193,10 +194,12 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weig
 .react-flow__node-calculation { width: 168px !important; color: #e9f5f0; font: 600 11px 'SFMono-Regular', Consolas, ui-monospace, monospace; }
 .calculation-node { position: relative; padding: 13px; border: 1px solid #3e6459; border-radius: 11px; background: linear-gradient(145deg, #17332c, #10231f); box-shadow: 0 14px 35px #0005; }
 .calculation-node.sql { border-color: #88583a; }
+.calculation-node.stream_join { border-color: #3e7188; }
 .calculation-node.external { border-color: #61558f; }
 .calculation-node.selected { outline: 2px solid var(--mint); outline-offset: 2px; }
 .calculation-node .node-kind { display: inline-block; margin-bottom: 8px; padding: 3px 5px; border-radius: 5px; color: #082019; background: var(--mint); font-size: 8px; }
 .calculation-node.sql .node-kind { background: var(--orange); }
+.calculation-node.stream_join .node-kind { background: #56a8d5; }
 .calculation-node.external .node-kind { background: var(--violet); }
 .calculation-node strong, .calculation-node small { display: block; }
 .calculation-node small { margin-top: 5px; color: var(--muted); font-size: 7px; font-weight: 400; }

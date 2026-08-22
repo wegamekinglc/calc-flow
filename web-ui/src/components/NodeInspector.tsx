@@ -21,6 +21,7 @@ interface NodeInspectorProps {
 
 type ExpressionOperator = Extract<OperatorSpec, { kind: 'expression' }>;
 type SqlOperator = Extract<OperatorSpec, { kind: 'sql' }>;
+type StreamJoinOperator = Extract<OperatorSpec, { kind: 'stream_join' }>;
 
 export function NodeInspector({
   node,
@@ -39,6 +40,10 @@ export function NodeInspector({
     if (node.operator.kind !== 'sql') return;
     patchNode({ operator: { ...node.operator, ...change } });
   };
+  const patchStreamJoin = (change: Partial<StreamJoinOperator['spec']>) => {
+    if (node.operator.kind !== 'stream_join') return;
+    patchNode({ operator: { ...node.operator, spec: { ...node.operator.spec, ...change } } });
+  };
   const declaredInputs = node.input_ports.map((port) => port.name);
   const inputNames = declaredInputs.length
     ? declaredInputs
@@ -49,7 +54,7 @@ export function NodeInspector({
         : [];
   const outputNames = node.output_ports.length
     ? node.output_ports.map((port) => port.name)
-    : node.operator.kind === 'external'
+    : node.operator.kind === 'external' || node.operator.kind === 'stream_join'
       ? []
       : ['output'];
   const isTable =
@@ -59,6 +64,7 @@ export function NodeInspector({
     node.operator.kind === 'expression' || node.operator.kind === 'sql'
       ? udfs.filter((entry) => entry.kind === 'data_fusion_scalar')
       : [];
+  const streamJoin = node.operator.kind === 'stream_join' ? node.operator : null;
 
   const schema = (direction: 'input' | 'output', name: string): ArrowFieldConfig[] => {
     const ports = direction === 'input' ? node.input_ports : node.output_ports;
@@ -174,6 +180,92 @@ export function NodeInspector({
           <p className="muted">
             {node.operator.provider} · {node.operator.name} · v{node.operator.version}
           </p>
+        </section>
+      )}
+
+      {streamJoin && (
+        <section className="inspector-section">
+          <h3>Bounded event-time Join</h3>
+          <label>
+            Left keys
+            <input
+              placeholder="account_id, region"
+              value={streamJoin.spec.left_keys.join(', ')}
+              onChange={(event) => patchStreamJoin({
+                left_keys: event.target.value.split(',').map((key) => key.trim()).filter(Boolean),
+              })}
+            />
+          </label>
+          <label>
+            Right keys
+            <input
+              placeholder="account_id, region"
+              value={streamJoin.spec.right_keys.join(', ')}
+              onChange={(event) => patchStreamJoin({
+                right_keys: event.target.value.split(',').map((key) => key.trim()).filter(Boolean),
+              })}
+            />
+          </label>
+          <label>
+            Left event-time column
+            <input
+              value={streamJoin.spec.left_event_time}
+              onChange={(event) => patchStreamJoin({ left_event_time: event.target.value })}
+            />
+          </label>
+          <label>
+            Right event-time column
+            <input
+              value={streamJoin.spec.right_event_time}
+              onChange={(event) => patchStreamJoin({ right_event_time: event.target.value })}
+            />
+          </label>
+          {(['before_micros', 'after_micros'] as const).map((field) => (
+            <label key={field}>
+              {field.replace('_', ' ')}
+              <input
+                type="number"
+                min={0}
+                max={Number.MAX_SAFE_INTEGER}
+                value={streamJoin.spec.bounds[field]}
+                onChange={(event) => patchStreamJoin({
+                  bounds: { ...streamJoin.spec.bounds, [field]: Number(event.target.value) },
+                })}
+              />
+            </label>
+          ))}
+          {([
+            'max_state_rows_per_side',
+            'max_state_bytes_per_side',
+            'max_matches_per_input_batch',
+          ] as const).map((field) => (
+            <label key={field}>
+              {field.replaceAll('_', ' ')}
+              <input
+                type="number"
+                min={1}
+                max={Number.MAX_SAFE_INTEGER}
+                value={streamJoin.spec.limits[field]}
+                onChange={(event) => patchStreamJoin({
+                  limits: { ...streamJoin.spec.limits, [field]: Number(event.target.value) },
+                })}
+              />
+            </label>
+          ))}
+          <label>
+            Left prefix
+            <input
+              value={streamJoin.spec.left_prefix}
+              onChange={(event) => patchStreamJoin({ left_prefix: event.target.value })}
+            />
+          </label>
+          <label>
+            Right prefix
+            <input
+              value={streamJoin.spec.right_prefix}
+              onChange={(event) => patchStreamJoin({ right_prefix: event.target.value })}
+            />
+          </label>
         </section>
       )}
 

@@ -22,6 +22,13 @@ pub enum CalcFlowError {
     Compile { message: String },
     #[error("node {node_id} failed: {message}")]
     Operator { node_id: String, message: String },
+    /// Operator failure with a stable, payload-free public reason code.
+    #[error("node {node_id} failed: {message}")]
+    OperatorReason {
+        node_id: String,
+        reason_code: crate::continuous::StreamingFailureReason,
+        message: String,
+    },
     #[error("DataFusion failed for node {node_id:?}: {message}")]
     DataFusion {
         node_id: Option<String>,

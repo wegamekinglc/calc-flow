@@ -25,6 +25,72 @@ pub struct OperatorStateSnapshot {
     pub segments: BTreeMap<String, Vec<u8>>,
 }
 
+/// One named ingress's current runtime-owned progress state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum IngressState {
+    Active,
+    Idle,
+    Ended,
+}
+
+/// Immutable event-time progress observed for one named ingress.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IngressProgress {
+    state: IngressState,
+    watermark: Option<EventTime>,
+}
+
+impl IngressProgress {
+    pub(crate) const fn new(state: IngressState, watermark: Option<EventTime>) -> Self {
+        Self { state, watermark }
+    }
+
+    /// Returns whether the ingress is active, idle, or ended.
+    pub const fn state(self) -> IngressState {
+        self.state
+    }
+
+    /// Returns the last accepted watermark, if one has been established.
+    pub const fn watermark(self) -> Option<EventTime> {
+        self.watermark
+    }
+}
+
+/// Shared immutable progress for every named ingress of one operator.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct IngressProgressSnapshot {
+    by_ingress: Arc<BTreeMap<String, IngressProgress>>,
+}
+
+impl IngressProgressSnapshot {
+    pub(crate) fn new(by_ingress: BTreeMap<String, IngressProgress>) -> Self {
+        Self {
+            by_ingress: Arc::new(by_ingress),
+        }
+    }
+
+    /// Returns progress for `ingress`, or `None` when it is unknown.
+    pub fn get(&self, ingress: &str) -> Option<IngressProgress> {
+        self.by_ingress.get(ingress).copied()
+    }
+
+    /// Returns all progress in deterministic ingress-name order.
+    pub fn by_ingress(&self) -> &BTreeMap<String, IngressProgress> {
+        &self.by_ingress
+    }
+
+    /// Returns the number of observed ingresses.
+    pub fn len(&self) -> usize {
+        self.by_ingress.len()
+    }
+
+    /// Returns whether the snapshot contains no ingress.
+    pub fn is_empty(&self) -> bool {
+        self.by_ingress.is_empty()
+    }
+}
+
 /// The only way a stream operator emits data (API note A2).
 ///
 /// Control messages can never be emitted through this trait (spec S1.3):
@@ -46,6 +112,7 @@ pub struct StreamOperatorContext<'a> {
     job: &'a StreamJobContext,
     operator_id: &'a str,
     input_watermark: Option<EventTime>,
+    ingress_progress: IngressProgressSnapshot,
     output_budget: EdgeBudget,
     late_metrics: Arc<dyn LateMetricSink>,
 }
@@ -61,6 +128,7 @@ impl<'a> StreamOperatorContext<'a> {
             job,
             operator_id,
             input_watermark,
+            ingress_progress: IngressProgressSnapshot::default(),
             output_budget: EdgeBudget::default(),
             late_metrics: Arc::new(LateMetricRecorder::default()),
         }
@@ -70,6 +138,7 @@ impl<'a> StreamOperatorContext<'a> {
         job: &'a StreamJobContext,
         operator_id: &'a str,
         input_watermark: Option<EventTime>,
+        ingress_progress: IngressProgressSnapshot,
         output_budget: EdgeBudget,
         late_metrics: Arc<dyn LateMetricSink>,
     ) -> Self {
@@ -77,6 +146,7 @@ impl<'a> StreamOperatorContext<'a> {
             job,
             operator_id,
             input_watermark,
+            ingress_progress,
             output_budget,
             late_metrics,
         }
@@ -96,6 +166,11 @@ impl<'a> StreamOperatorContext<'a> {
     /// (spec S5.2).
     pub const fn input_watermark(&self) -> Option<EventTime> {
         self.input_watermark
+    }
+
+    /// Returns the complete immutable per-ingress progress snapshot.
+    pub const fn ingress_progress(&self) -> &IngressProgressSnapshot {
+        &self.ingress_progress
     }
 
     pub(crate) const fn output_budget(&self) -> EdgeBudget {
@@ -231,6 +306,22 @@ fn checked_metric_sum(left: u64, right: u64, field: &str) -> Result<u64> {
 /// see barriers, and their watermarks arrive as typed `EventTime` values.
 #[async_trait]
 pub trait StreamOperator: OperatorMetadata {
+    /// Observes one accepted ingress progress transition before runtime-owned
+    /// control forwarding. The default keeps existing operators unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Stateful operators may reject inconsistent progress before the
+    /// corresponding control is forwarded.
+    async fn on_ingress_progress(
+        &mut self,
+        ingress: &str,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        let _ = (ingress, context);
+        Ok(())
+    }
+
     /// Processes one batch from the named ingress.
     ///
     /// # Errors
@@ -406,6 +497,7 @@ mod tests {
             &job,
             "window",
             None,
+            IngressProgressSnapshot::default(),
             EdgeBudget::default(),
             recorder.clone(),
         );
@@ -437,6 +529,7 @@ mod tests {
             &job,
             "window",
             None,
+            IngressProgressSnapshot::default(),
             EdgeBudget::default(),
             recorder.clone(),
         );
