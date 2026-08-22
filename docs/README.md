@@ -51,6 +51,10 @@ below.
 - **[Streaming engine research](research/2026-08-02-arroyo-risingwave-streaming-research.md)**
   — point-in-time Arroyo/RisingWave architecture research and Calc-Flow
   continuous-runtime recommendations
+- **[Symbolic computation engine proposal](superpowers/specs/2026-08-22-symbolic-computation-engine-design.md)**
+  — point-in-time Python symbolic IR, batch/stream lowering, and native
+  operator design, paired with its
+  [phased implementation plan](superpowers/plans/2026-08-22-symbolic-computation-engine.md)
 - **[Project schema](../schemas/project-v3.schema.json)** — the canonical
   generated v3 project contract
 - **[Studio README](../web-ui/README.md)** — the local calc-flow-studio
