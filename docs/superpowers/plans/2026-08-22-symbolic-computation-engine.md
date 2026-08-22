@@ -1,12 +1,15 @@
 # Symbolic Computation Engine Implementation Plan
 
-> **Status:** Proposed on 2026-08-22. No implementation task in this plan is
-> complete merely because this document exists.
+> **Status:** SCE-00 approved on 2026-08-22. No downstream implementation task
+> is complete merely because its contract is frozen here.
 >
-> **Baseline:** `main@761802a3c074c61a00251211d491137ef8a5f521` after PR #164.
+> **Baseline:** `main@f6b8a6f90b7a978de1976f5a163ea689b989caee` after PR #166.
 >
 > **Design contract:**
-> [Symbolic Computation Engine Design](../specs/2026-08-22-symbolic-computation-engine-design.md).
+> [Symbolic Computation Engine Design](../specs/2026-08-22-symbolic-computation-engine-design.md),
+> [semantic freeze](../../../.codex/artifacts/specs/symbolic-computation-contract.md),
+> [API contract](../../../.codex/artifacts/api-notes/symbolic-computation-engine.md),
+> and [approved critique](../../../.codex/artifacts/critiques/symbolic-computation-engine.md).
 >
 > **Scope:** Deliver a Python symbolic declaration and compiler layer that
 > delegates all data calculation to calc-flow's existing or approved native
@@ -87,6 +90,8 @@ These are planning estimates, not delivery promises.
 
 ### [SCE-00] Freeze the Symbolic Contract
 
+**Status:** Approved on 2026-08-22 after one blocker-only correction round.
+
 **Branch:** `feature/symbolic-contract`
 
 **PR title:** `docs: define symbolic computation contracts`
@@ -111,14 +116,17 @@ project variant, runner parameter, or durable state layout is implemented.
 **Files:**
 
 - this design and implementation-plan pair;
-- an API note under `.codex/artifacts/api-notes/` if the calc-flow specialist
-  workflow is invoked; and
-- a same-slug critique under `.codex/artifacts/critiques/` before implementation
-  if that workflow is invoked.
+- `.codex/artifacts/specs/symbolic-computation-contract.md`;
+- `.codex/artifacts/api-notes/symbolic-computation-engine.md`; and
+- `.codex/artifacts/critiques/symbolic-computation-engine.md`.
 
 **Exit gate:** No unresolved decision affects serialized data, public API,
 durable state, output finality, or recovery. The document continues to state
 that no implementation exists.
+
+**Disposition:** Satisfied. The semantic and API contracts are frozen, the
+critique is approved, and downstream issues remain responsible for every
+runtime, operator, lowerer, runner, schema, and execution change.
 
 ### [SCE-01] Capture Baseline Performance
 
