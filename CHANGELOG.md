@@ -5,6 +5,11 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-22: Release the 4.0 bounded event-time stream Join across Rust,
+  Python, project v3, and Studio. The inner equi-Join has explicit asymmetric
+  time bounds, required state and match limits, deterministic recovery, typed
+  failure reasons, and independently checkpointed output-watermark progress.
+
 - 2026-08-21: Add a maintained cross-language example runner, Python terminal
   checkpoint recovery and Rust event-time window examples, a complete
   executable-example inventory, a continuous streaming usage guide, and a

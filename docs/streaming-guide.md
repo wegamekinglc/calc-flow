@@ -168,6 +168,55 @@ bound sink. The entire route is checked before connector `open()`.
 output. Treat that status as the runtime proof for the compiled route, not as a
 substitute for configuring the external system correctly.
 
+## Bounded event-time Join
+
+Calc Flow 4.0 adds a two-input inner equi-Join for stream plans. Each retained
+row must fall inside the inclusive interval
+`[left_time - before, left_time + after]`. The two source lineages must provide
+watermark progress so the operator can evict rows that cannot match again.
+
+Python declares exact input schemas and explicit limits; no unbounded defaults
+exist:
+
+```python
+from datetime import timedelta
+
+from calc_flow import ArrowFieldSpec, JoinStateLimits, JoinTimeBounds, PipelineBuilder
+
+fields = (
+    ArrowFieldSpec("account_id", "int64", False),
+    ArrowFieldSpec("event_time", "timestamp[us]", False),
+)
+builder = PipelineBuilder("payments").stream_join(
+    "payment_join",
+    left_schema=fields,
+    right_schema=fields,
+    left_keys=("account_id",),
+    right_keys=("account_id",),
+    left_event_time="event_time",
+    right_event_time="event_time",
+    bounds=JoinTimeBounds(
+        before=timedelta(minutes=5),
+        after=timedelta(minutes=1),
+    ),
+    limits=JoinStateLimits(
+        max_state_rows_per_side=100_000,
+        max_state_bytes_per_side=128 * 1024 * 1024,
+        max_matches_per_input_batch=1_000_000,
+    ),
+    left_prefix="authorization",
+    right_prefix="payment",
+)
+```
+
+Null event times, null keys, and rows strictly older than their own ingress
+watermark do not match and are not retained. Equality with the current
+watermark is accepted. Output order is deterministic, and checkpoint restore
+preserves retained rows, row IDs, counters, and the independent output
+frontier. State and match admission failures surface one of the four stable
+`reason_code` values on terminal errors; callers should still retain a fallback
+for future reason strings.
+
 ## Checkpoints and recovery
 
 `ManagedCheckpointRuntime(root)` owns local manifest and state storage. Keep

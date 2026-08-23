@@ -133,7 +133,7 @@ def test_capabilities_response_is_a_closed_camel_case_v1_contract() -> None:
                 "sessionId": "session",
                 "revision": 0,
             },
-            "packageVersion": "3.0.0",
+            "packageVersion": "4.0.0",
             "projectFormatVersions": [3],
             "batchKinds": ["array", "table"],
             "portableArrowTypes": ["int64"],

@@ -29,17 +29,31 @@ export class ApiError extends Error {
 
 const detailMessage = (detail: unknown): string | null => {
   if (typeof detail === 'string') return detail;
-  if (!Array.isArray(detail)) return null;
-  const messages = detail.flatMap((item) => {
-    if (!item || typeof item !== 'object') return [];
-    const error = item as { loc?: unknown; msg?: unknown };
-    if (typeof error.msg !== 'string') return [];
-    const location = Array.isArray(error.loc)
-      ? error.loc.filter((part) => part !== 'body').map(String).join('.')
-      : '';
-    return [`${location ? `${location}: ` : ''}${error.msg}`];
-  });
-  return messages.length ? messages.join('; ') : null;
+  if (Array.isArray(detail)) {
+    const messages = detail.flatMap((item) => {
+      if (!item || typeof item !== 'object') return [];
+      const error = item as { loc?: unknown; msg?: unknown };
+      if (typeof error.msg !== 'string') return [];
+      const location = Array.isArray(error.loc)
+        ? error.loc.filter((part) => part !== 'body').map(String).join('.')
+        : '';
+      return [`${location ? `${location}: ` : ''}${error.msg}`];
+    });
+    return messages.length ? messages.join('; ') : null;
+  }
+  if (detail && typeof detail === 'object') {
+    const report = detail as { issues?: unknown };
+    if (!Array.isArray(report.issues)) return null;
+    const messages = report.issues.flatMap((item) => {
+      if (!item || typeof item !== 'object') return [];
+      const issue = item as { path?: unknown; message?: unknown };
+      if (typeof issue.message !== 'string') return [];
+      const location = typeof issue.path === 'string' ? issue.path : '';
+      return [`${location ? `${location}: ` : ''}${issue.message}`];
+    });
+    return messages.length ? messages.join('; ') : null;
+  }
+  return null;
 };
 
 async function response(path: string, init?: RequestInit): Promise<Response> {

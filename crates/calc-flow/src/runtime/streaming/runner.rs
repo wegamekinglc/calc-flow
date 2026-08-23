@@ -72,8 +72,8 @@ use crate::state::ManifestParentSyncOsFailureProbe;
 use crate::state::ManifestTransactionFaultPoint;
 use crate::{
     CalcFlowError, CancellationToken, CheckpointManifest, CheckpointManifestFields, Epoch,
-    OperatorManifestEntry, RecoveryStatus, SinkManifestEntry, SourceManifestEntry, StateBackend,
-    StateLineageKey, StreamRuntimeConfig,
+    EventTime, OperatorManifestEntry, RecoveryStatus, SinkManifestEntry, SourceManifestEntry,
+    StateBackend, StateLineageKey, StreamRuntimeConfig,
     state::{
         ManifestPublication, ManifestTransaction, PreparedEpochManifest, PreparedManifestIdentity,
         SelectedManifest,
@@ -1034,6 +1034,7 @@ pub(crate) struct OperatorStatus {
     pub(crate) max_lateness_micros: Option<u64>,
     pub(crate) null_event_time_rows: u64,
     pub(crate) null_event_time_batches: u64,
+    pub(crate) stream_join: Option<crate::StreamJoinStatus>,
 }
 
 impl From<OperatorProgressSnapshot> for OperatorStatus {
@@ -1049,6 +1050,7 @@ impl From<OperatorProgressSnapshot> for OperatorStatus {
             max_lateness_micros: progress.max_lateness_micros,
             null_event_time_rows: progress.null_event_time_rows,
             null_event_time_batches: progress.null_event_time_batches,
+            stream_join: progress.stream_join,
         }
     }
 }
@@ -1099,6 +1101,21 @@ impl Drop for JobOwnershipToken {
 impl ContinuousJob {
     pub(crate) fn id(&self) -> u64 {
         self.core.job_id
+    }
+
+    /// Collects the payload-free status of every Join node, keyed by node ID.
+    pub(crate) fn stream_join_status(&self) -> BTreeMap<String, crate::StreamJoinStatus> {
+        let runtime = self.core.runtime_status.lock();
+        runtime
+            .nodes
+            .iter()
+            .filter_map(|(id, progress)| {
+                progress
+                    .snapshot()
+                    .stream_join
+                    .map(|status| (id.clone(), status))
+            })
+            .collect()
     }
 
     pub(crate) fn status(&self) -> ContinuousJobStatus {
@@ -2838,7 +2855,15 @@ async fn prepare_checkpoint_recovery(
     let checkpoint_capabilities = plan
         .nodes
         .iter()
-        .map(|node| (node.operator_id.as_str(), node.checkpoint_capability))
+        .map(|node| {
+            (
+                node.operator_id.as_str(),
+                (
+                    node.checkpoint_capability,
+                    node.operator.requires_output_frontier_state(),
+                ),
+            )
+        })
         .collect::<BTreeMap<_, _>>();
     let mut operators = BTreeMap::new();
     for (operator_id, entry) in selected.manifest.operators() {
@@ -2851,19 +2876,49 @@ async fn prepare_checkpoint_recovery(
                 cancellation,
             )
             .await?;
-        let snapshot = checkpoint_capabilities
+        let &(checkpoint_capability, requires_output_frontier) = checkpoint_capabilities
             .get(operator_id.as_str())
             .ok_or_else(|| CalcFlowError::CheckpointMismatch {
                 message: format!(
                     "checkpoint operator {operator_id:?} is absent from the prepared plan"
                 ),
-            })?
-            .decode_snapshot(operator_id, snapshot)?;
+            })?;
+        let mut snapshot = checkpoint_capability.decode_snapshot(operator_id, snapshot)?;
+        let restored_output_frontier = snapshot
+            .inline_metadata
+            .remove(crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1);
+        let output_frontier = match (requires_output_frontier, restored_output_frontier) {
+            (true, Some(serde_json::Value::Null)) | (false, None) => None,
+            (true, Some(value)) => {
+                Some(value.as_i64().map(EventTime::from_micros).ok_or_else(|| {
+                    CalcFlowError::CheckpointMismatch {
+                        message: format!(
+                            "checkpoint operator {operator_id:?} has an invalid output frontier"
+                        ),
+                    }
+                })?)
+            }
+            (true, None) => {
+                return Err(CalcFlowError::CheckpointMismatch {
+                    message: format!(
+                        "checkpoint operator {operator_id:?} is missing its output frontier"
+                    ),
+                });
+            }
+            (false, Some(_)) => {
+                return Err(CalcFlowError::CheckpointMismatch {
+                    message: format!(
+                        "checkpoint operator {operator_id:?} unexpectedly contains an output frontier"
+                    ),
+                });
+            }
+        };
         operators.insert(
             operator_id.clone(),
             OperatorRestoreState {
                 snapshot,
                 progress: entry.progress.clone(),
+                output_frontier,
                 next_epoch: checkpoint.next_epoch,
             },
         );
@@ -5435,14 +5490,16 @@ mod tests {
         sanitize_managed_preflight_error, settle_durable_manifest, source_cuts_are_terminal,
     };
     use crate::{
-        Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken,
-        CheckpointManifestFields, CursorManifestEntry, Edge, EdgeBudget, EventTime,
-        ExpressionOperator, JsonMap, LocalStateBackend, ManifestIngressState,
-        OperatorIngressManifestEntry, OperatorManifestEntry, OperatorMetadata, PipelineBuilder,
-        Port, PortEndpoint, RecoveryStatus, Result, SinkDeliveryManifest, SinkManifestEntry,
-        SourceManifestEntry, SourceWatermarkManifestState, StateBackend, StateHandle,
-        StateLineageBackend, StateLineageKey, StreamCollector, StreamJobContext, StreamOperator,
+        AggregateFunction, AggregateSpec, Batch, BatchKind, BatchMetadata, CalcFlowError,
+        CancellationToken, CheckpointManifestFields, CursorManifestEntry, Edge, EdgeBudget,
+        EventTime, ExpressionOperator, JoinStateLimits, JoinTimeBounds, JsonMap, LocalStateBackend,
+        ManifestIngressState, OperatorIngressManifestEntry, OperatorManifestEntry,
+        OperatorMetadata, PipelineBuilder, Port, PortEndpoint, RecoveryStatus, Result,
+        SinkDeliveryManifest, SinkManifestEntry, SourceManifestEntry, SourceWatermarkManifestState,
+        StateBackend, StateHandle, StateLineageBackend, StateLineageKey, StreamCollector,
+        StreamJobContext, StreamJoinOperator, StreamJoinSpec, StreamOperator,
         StreamOperatorContext, StreamRequirements, StreamRuntimeConfig, UdfRegistry, UnionOperator,
+        WindowAggregateOperator, WindowSpec,
         runtime::streaming::{
             checkpoint::ManagedCheckpointRuntime,
             checkpoint::coordinator::{
@@ -15073,5 +15130,281 @@ mod tests {
         );
         assert!(cancellation.is_cancelled());
         assert_eq!(injector.trigger_count(), 1);
+    }
+
+    /// One keyed event-time row for the Join->Window AC5 scenarios.
+    fn join_ts_row(key: &str, ts: i64) -> Batch {
+        use datafusion::arrow::array::{StringArray, TimestampMicrosecondArray};
+        let schema = Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
+            datafusion::arrow::datatypes::Field::new(
+                "key",
+                datafusion::arrow::datatypes::DataType::Utf8,
+                false,
+            ),
+            datafusion::arrow::datatypes::Field::new(
+                "ts",
+                datafusion::arrow::datatypes::DataType::Timestamp(
+                    datafusion::arrow::datatypes::TimeUnit::Microsecond,
+                    None,
+                ),
+                false,
+            ),
+        ]));
+        let record = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![key])),
+                Arc::new(TimestampMicrosecondArray::from(vec![ts])),
+            ],
+        )
+        .unwrap();
+        Batch::table(vec![record], BatchMetadata::default()).unwrap()
+    }
+
+    fn ac5_scripted_events(rows: &[(&str, i64)], watermark: i64) -> VecDeque<SourceEvent> {
+        let mut events = VecDeque::new();
+        for (index, (key, ts)) in rows.iter().enumerate() {
+            events.push_back(SourceEvent::Data {
+                batch: join_ts_row(key, *ts),
+                cursor: Cursor::unbound(
+                    u64::try_from(index + 1).unwrap().to_be_bytes().to_vec(),
+                    JsonMap::new(),
+                )
+                .unwrap(),
+            });
+        }
+        events.push_back(SourceEvent::Watermark(EventTime::from_micros(watermark)));
+        events
+    }
+
+    struct PairCountSink {
+        rows: Arc<Mutex<Vec<i64>>>,
+        closed: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl OrdinaryStreamSink for PairCountSink {
+        async fn open(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn write(&mut self, batch: &Batch) -> Result<()> {
+            for record in batch.table_payload()?.batches() {
+                let column = record
+                    .column_by_name("pairs")
+                    .expect("the window emits the pairs aggregate");
+                let counts = column
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::UInt64Array>()
+                    .expect("the pairs aggregate is a UInt64 column");
+                self.rows.lock().extend(
+                    (0..counts.len()).map(|index| i64::try_from(counts.value(index)).unwrap()),
+                );
+            }
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            self.closed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn ac5_job_spec(
+        plan: crate::StreamExecutionPlan,
+        rows: &Arc<Mutex<Vec<i64>>>,
+    ) -> ContinuousJobSpec {
+        ContinuousJobSpec {
+            context: StreamJobContext::new(
+                91,
+                plan.fingerprint(),
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            ),
+            plan,
+            sources: Vec::new(),
+            sinks: vec![NamedSinkBinding {
+                output_id: "output".into(),
+                sink_id: "pairs".into(),
+                binding: OrdinarySinkBinding::new(Box::new(PairCountSink {
+                    rows: Arc::clone(rows),
+                    closed: Arc::new(AtomicUsize::new(0)),
+                })),
+            }],
+            edge_budget: EdgeBudget {
+                max_rows: 1,
+                max_bytes: 1 << 20,
+            },
+            delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+        }
+    }
+
+    /// Runs one AC5 `Join`->Window scenario through a real `StreamingRunner` and
+    /// returns the window's emitted pair counts (spec AC5).
+    async fn run_ac5_join_window(
+        bounds: JoinTimeBounds,
+        window_column: &str,
+        left_rows: &[(&str, i64)],
+        left_watermark: i64,
+        right_rows: &[(&str, i64)],
+        right_watermark: i64,
+    ) -> Vec<i64> {
+        let schema = Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
+            datafusion::arrow::datatypes::Field::new(
+                "key",
+                datafusion::arrow::datatypes::DataType::Utf8,
+                false,
+            ),
+            datafusion::arrow::datatypes::Field::new(
+                "ts",
+                datafusion::arrow::datatypes::DataType::Timestamp(
+                    datafusion::arrow::datatypes::TimeUnit::Microsecond,
+                    None,
+                ),
+                false,
+            ),
+        ]));
+        let join = StreamJoinOperator::new(
+            "match",
+            Arc::clone(&schema),
+            schema,
+            StreamJoinSpec::inner(
+                ["key"],
+                ["key"],
+                "ts",
+                "ts",
+                bounds,
+                JoinStateLimits::new(100_000, 134_217_728, 1_000_000).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let join_output = Arc::clone(join.output_ports()[0].schema().expect("derived schema"));
+        let mut window_spec =
+            WindowSpec::tumbling(window_column, StdDuration::from_micros(10)).unwrap();
+        window_spec.aggregates = vec![AggregateSpec {
+            function: AggregateFunction::Count,
+            column: "left__ts".into(),
+            output: "pairs".into(),
+        }];
+        let window = WindowAggregateOperator::new("agg", join_output, window_spec).unwrap();
+        let plan = PipelineBuilder::new("ac5")
+            .unwrap()
+            .add_node("match", Box::new(join))
+            .unwrap()
+            .add_node("agg", Box::new(window))
+            .unwrap()
+            .connect(Edge::new(
+                PortEndpoint::new("match", "output").unwrap(),
+                PortEndpoint::new("agg", "input").unwrap(),
+            ))
+            .unwrap()
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements::default(),
+            )
+            .unwrap();
+        let rows = Arc::new(Mutex::new(Vec::new()));
+        let mut spec = ac5_job_spec(plan, &rows);
+        spec.sources = vec![
+            NamedSourceBinding {
+                binding_id: "left".into(),
+                binding: SourceBinding::new(
+                    Box::new(FiniteSource {
+                        events: ac5_scripted_events(left_rows, left_watermark),
+                        closed: Arc::new(AtomicUsize::new(0)),
+                    }),
+                    None,
+                    0,
+                )
+                .unwrap(),
+            },
+            NamedSourceBinding {
+                binding_id: "right".into(),
+                binding: SourceBinding::new(
+                    Box::new(FiniteSource {
+                        events: ac5_scripted_events(right_rows, right_watermark),
+                        closed: Arc::new(AtomicUsize::new(0)),
+                    }),
+                    None,
+                    0,
+                )
+                .unwrap(),
+            },
+        ];
+        let runner = ContinuousRunner::new();
+        let job = runner.start(spec).await.unwrap();
+        let outcome = job.wait().await;
+        assert_eq!(outcome.state, ContinuousJobState::Completed);
+        assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+        drop(job);
+        rows.lock().clone()
+    }
+
+    #[tokio::test]
+    async fn ac5_retained_left_after_counterexample_reaches_the_window() {
+        // after=10, left=95, WL=WR=100: the decided frontier is
+        // min(100-0, 100-10)=90, so the [90,100) tumbling window on the
+        // prefixed left event-time column never closes ahead of the pair.
+        let counts = run_ac5_join_window(
+            JoinTimeBounds::new(StdDuration::from_micros(0), StdDuration::from_micros(10)).unwrap(),
+            "left__ts",
+            &[("a", 95)],
+            100,
+            &[("a", 100)],
+            100,
+        )
+        .await;
+        assert_eq!(counts, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn ac5_symmetric_before_counterexample_reaches_the_window() {
+        // before=10, right=95, WL=WR=100: min(100-10, 100-0)=90 keeps the
+        // [90,100) window on the prefixed right event-time column open.
+        let counts = run_ac5_join_window(
+            JoinTimeBounds::new(StdDuration::from_micros(10), StdDuration::from_micros(0)).unwrap(),
+            "right__ts",
+            &[("a", 100)],
+            100,
+            &[("a", 95)],
+            100,
+        )
+        .await;
+        assert_eq!(counts, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn ac5_right_end_uses_left_watermark_minus_before() {
+        // After the right ingress ends, the frontier is WL-before =
+        // 120-10=110, closing the [100,110) window exactly after the pair is
+        // accepted.
+        let counts = run_ac5_join_window(
+            JoinTimeBounds::new(StdDuration::from_micros(10), StdDuration::from_micros(0)).unwrap(),
+            "left__ts",
+            &[("a", 105)],
+            120,
+            &[("a", 104)],
+            100,
+        )
+        .await;
+        assert_eq!(counts, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn ac5_left_end_uses_right_watermark_minus_after() {
+        // After the left ingress ends, the frontier is WR-after =
+        // 120-10=110 for the [100,110) window on the right column.
+        let counts = run_ac5_join_window(
+            JoinTimeBounds::new(StdDuration::from_micros(0), StdDuration::from_micros(10)).unwrap(),
+            "right__ts",
+            &[("a", 104)],
+            100,
+            &[("a", 105)],
+            120,
+        )
+        .await;
+        assert_eq!(counts, vec![1]);
     }
 }

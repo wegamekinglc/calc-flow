@@ -1,6 +1,6 @@
 # Python API
 
-The `calc-flow==3.0.0` Python package is a PyO3 binding to the Rust engine plus
+The `calc-flow==4.0.0` Python package is a PyO3 binding to the Rust engine plus
 small functional adapters. Python 3.13 or newer is required.
 
 ## Install and develop

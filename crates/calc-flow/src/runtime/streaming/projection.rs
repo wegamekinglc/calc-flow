@@ -40,6 +40,17 @@ pub enum StreamingErrorCategory {
     Internal,
 }
 
+/// Stable, payload-free reason for a typed streaming operator failure.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StreamingFailureReason {
+    JoinStateLimitExceeded,
+    JoinMatchLimitExceeded,
+    JoinCounterOverflow,
+    JoinTimeConversionFailed,
+}
+
 /// Public component kind associated with a streaming failure.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -85,6 +96,7 @@ impl From<InternalCheckpointPhase> for CheckpointPhase {
 #[error("{message}")]
 pub struct StreamingError {
     category: StreamingErrorCategory,
+    reason_code: Option<StreamingFailureReason>,
     message: String,
     job_id: Option<u64>,
     epoch: Option<Epoch>,
@@ -99,6 +111,11 @@ impl StreamingError {
     /// Returns the stable failure category.
     pub const fn category(&self) -> StreamingErrorCategory {
         self.category
+    }
+
+    /// Returns the stable operator failure reason, when one was provided.
+    pub const fn reason_code(&self) -> Option<StreamingFailureReason> {
+        self.reason_code
     }
 
     /// Returns the safe engine-authored message.
@@ -146,6 +163,7 @@ pub(crate) fn project_public_error(job_id: Option<u64>, error: &CalcFlowError) -
     let (category, message, component_kind, component_id) = preflight_failure_fields(error);
     StreamingError {
         category,
+        reason_code: failure_reason(error),
         message,
         job_id,
         epoch: None,
@@ -157,6 +175,13 @@ pub(crate) fn project_public_error(job_id: Option<u64>, error: &CalcFlowError) -
     }
 }
 
+const fn failure_reason(error: &CalcFlowError) -> Option<StreamingFailureReason> {
+    match error {
+        CalcFlowError::OperatorReason { reason_code, .. } => Some(*reason_code),
+        _ => None,
+    }
+}
+
 pub(crate) fn validation_error(
     component_kind: ComponentKind,
     component_id: Option<&str>,
@@ -164,6 +189,7 @@ pub(crate) fn validation_error(
 ) -> StreamingError {
     StreamingError {
         category: StreamingErrorCategory::Validation,
+        reason_code: None,
         message,
         job_id: None,
         epoch: None,
@@ -191,6 +217,7 @@ pub(crate) fn manual_checkpoint_failure_error(
             ManualCheckpointFailureCategory::Protocol => StreamingErrorCategory::CheckpointMismatch,
             ManualCheckpointFailureCategory::Internal => StreamingErrorCategory::Internal,
         },
+        reason_code: None,
         message: manual_checkpoint_failure_message(category, epoch),
         job_id: None,
         epoch,
@@ -215,6 +242,7 @@ fn sink_commit_failure(
 ) -> StreamingError {
     StreamingError {
         category: StreamingErrorCategory::Connector,
+        reason_code: None,
         message: format!(
             "sink {sink_id:?} commit failed for checkpoint epoch {}",
             epoch.as_u64()
@@ -265,6 +293,7 @@ pub(crate) fn project_manual_checkpoint_error(
     if let CalcFlowError::Streaming(error) = error {
         return StreamingError {
             category: error.category,
+            reason_code: error.reason_code,
             message: error.message.clone(),
             job_id: Some(job_id),
             epoch: error.epoch,
@@ -319,6 +348,7 @@ pub(crate) fn project_manual_checkpoint_error(
             };
             return StreamingError {
                 category,
+                reason_code: None,
                 message,
                 job_id: Some(job_id),
                 epoch: status.current_epoch,
@@ -387,6 +417,7 @@ fn project_runtime_failure(
     let (category, message, component_kind, component_id) = safe_failure_fields(failure);
     StreamingError {
         category,
+        reason_code: failure_reason(&failure.error),
         message,
         job_id: Some(job_id),
         epoch: None,
@@ -499,6 +530,7 @@ fn project_checkpoint_failure(
     };
     Some(StreamingError {
         category,
+        reason_code: None,
         message,
         job_id: Some(job_id),
         epoch: status.current_epoch,
@@ -615,6 +647,14 @@ fn preflight_failure_fields(
 ) {
     if let CalcFlowError::InvalidArgument { field, message } = error {
         return invalid_argument_failure_fields(field, message);
+    }
+    if let CalcFlowError::OperatorReason { node_id, .. } = error {
+        return (
+            StreamingErrorCategory::Operator,
+            format!("operator {node_id:?} execution failed"),
+            Some(ComponentKind::Operator),
+            Some(node_id.clone()),
+        );
     }
     let category = match error {
         CalcFlowError::Compile { .. } => StreamingErrorCategory::Compile,
@@ -812,6 +852,7 @@ pub(crate) fn checkpoint_publication_unknown(
 ) -> StreamingError {
     StreamingError {
         category: StreamingErrorCategory::CheckpointPublicationUnknown,
+        reason_code: None,
         message: format!(
             "checkpoint epoch {} was installed but publication durability is unknown",
             epoch.as_u64()
@@ -1353,7 +1394,9 @@ mod tests {
 
     use crate::{CalcFlowError, Epoch};
 
-    use super::{ComponentKind, StreamingErrorCategory, project_runtime_failures};
+    use super::{
+        ComponentKind, StreamingErrorCategory, StreamingFailureReason, project_runtime_failures,
+    };
     use crate::runtime::streaming::runner::{FailureOrigin, RuntimeFailure};
     use crate::runtime::streaming::{
         checkpoint::coordinator::CheckpointPhase as InternalCheckpointPhase,
@@ -1670,6 +1713,31 @@ mod tests {
             assert_eq!(projected.component_kind(), Some(kind));
             assert_eq!(projected.component_id(), Some(id));
         }
+    }
+
+    #[test]
+    fn operator_reason_projection_preserves_typed_reason_without_message_parsing() {
+        let projected = super::project_public_error(
+            Some(7),
+            &CalcFlowError::OperatorReason {
+                node_id: "payments".into(),
+                reason_code: StreamingFailureReason::JoinStateLimitExceeded,
+                message: "unstructured private detail".into(),
+            },
+        );
+
+        assert_eq!(projected.category(), StreamingErrorCategory::Operator);
+        assert_eq!(
+            projected.reason_code(),
+            Some(StreamingFailureReason::JoinStateLimitExceeded)
+        );
+        assert_eq!(projected.component_id(), Some("payments"));
+        assert_eq!(projected.job_id(), Some(7));
+        assert!(
+            serde_json::to_string(&projected)
+                .unwrap()
+                .contains("\"reason_code\":\"join_state_limit_exceeded\"")
+        );
     }
 
     #[test]

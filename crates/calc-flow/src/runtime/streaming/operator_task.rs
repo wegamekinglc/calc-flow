@@ -21,8 +21,9 @@ use super::{
     supervisor::{TaskId, TaskSupervisor, panic_message},
 };
 use crate::{
-    Batch, CalcFlowError, CancellationToken, EdgeBudget, Epoch, EventTime, ManifestIngressState,
-    OperatorIngressManifestEntry, Port, Result, StreamCollector, StreamOperatorContext,
+    Batch, CalcFlowError, CancellationToken, EdgeBudget, Epoch, EventTime, IngressProgress,
+    IngressProgressSnapshot, IngressState, ManifestIngressState, OperatorIngressManifestEntry,
+    Port, Result, StreamCollector, StreamOperatorContext,
     operator::{LateMetricDelta, LateMetricSink, accumulate_late_metrics},
     pipeline::{CompiledStreamOperator, OperatorCheckpointCapability},
 };
@@ -59,6 +60,7 @@ pub(crate) enum OperatorCheckpointCommand {
 pub(crate) struct OperatorRestoreState {
     pub(crate) snapshot: crate::OperatorStateSnapshot,
     pub(crate) progress: BTreeMap<String, OperatorIngressManifestEntry>,
+    pub(crate) output_frontier: Option<EventTime>,
     pub(crate) next_epoch: Epoch,
 }
 
@@ -90,6 +92,7 @@ pub(crate) struct OperatorProgressSnapshot {
     pub(crate) max_lateness_micros: Option<u64>,
     pub(crate) null_event_time_rows: u64,
     pub(crate) null_event_time_batches: u64,
+    pub(crate) stream_join: Option<crate::StreamJoinStatus>,
 }
 
 #[derive(Clone, Default)]
@@ -141,6 +144,10 @@ impl OperatorProgress {
 
     fn observe_datafusion_runtime(&self, created: bool) {
         self.0.lock().datafusion_runtime_created |= created;
+    }
+
+    fn observe_stream_join(&self, status: crate::StreamJoinStatus) {
+        self.0.lock().stream_join = Some(status);
     }
 }
 
@@ -225,7 +232,11 @@ fn reset_and_acknowledge(
     task_id: TaskId,
 ) -> Result<Option<OperatorInputProgress>> {
     let preparation_result = reset_operator(inputs, task_id).and_then(|()| match &inputs.restore {
-        Some(restore) => OperatorInputProgress::restore(inputs.ingresses.keys(), &restore.progress),
+        Some(restore) => OperatorInputProgress::restore(
+            inputs.ingresses.keys(),
+            &restore.progress,
+            restore.output_frontier,
+        ),
         None => Ok(OperatorInputProgress::new(inputs.ingresses.keys())),
     });
     let (acknowledgement_result, input_progress) = match preparation_result {
@@ -347,6 +358,7 @@ async fn finish_operator(
         inputs.context.job(),
         &inputs.node_id,
         input_watermark,
+        input_progress.snapshot()?,
         output_budget,
         late_metrics,
     );
@@ -478,25 +490,75 @@ async fn dispatch_message(
     input_progress: &mut OperatorInputProgress,
     barrier_alignment: &mut OperatorBarrierAlignment,
 ) -> Result<()> {
+    let result = dispatch_message_inner(
+        inputs,
+        ingress_name,
+        message,
+        input_progress,
+        barrier_alignment,
+    )
+    .await;
+    if let Some(status) = inputs.operator.stream_join_status() {
+        inputs.progress.observe_stream_join(status);
+    }
+    result
+}
+
+/// Evaluates one watermark/idle input and forwards the resulting transitions.
+async fn dispatch_progress(
+    inputs: &mut OperatorTaskInputs,
+    ingress_name: &str,
+    input: AggregateInput,
+    input_progress: &mut OperatorInputProgress,
+) -> Result<()> {
+    let previous = input_progress.input_watermark();
+    let emissions = input_progress.evaluate(ingress_name, input)?;
+    dispatch_progress_transition(
+        inputs,
+        ingress_name,
+        emissions,
+        previous,
+        input_progress.snapshot()?,
+        input_progress.input_watermark(),
+        &mut input_progress.output_frontier,
+    )
+    .await
+}
+
+async fn dispatch_message_inner(
+    inputs: &mut OperatorTaskInputs,
+    ingress_name: &str,
+    message: StreamMessage,
+    input_progress: &mut OperatorInputProgress,
+    barrier_alignment: &mut OperatorBarrierAlignment,
+) -> Result<()> {
     match message.kind() {
         StreamMessageKind::Data => {
             let watermark = input_progress.input_watermark();
             input_progress.evaluate(ingress_name, AggregateInput::Data)?;
-            dispatch_data(inputs, ingress_name, message, watermark).await
+            dispatch_data(
+                inputs,
+                ingress_name,
+                message,
+                watermark,
+                input_progress.snapshot()?,
+            )
+            .await
         }
         StreamMessageKind::Watermark => {
-            let previous = input_progress.input_watermark();
             let watermark = message
                 .as_watermark()
                 .expect("watermark kind always carries event time");
-            let emissions =
-                input_progress.evaluate(ingress_name, AggregateInput::Watermark(watermark))?;
-            dispatch_progress_emissions(inputs, ingress_name, emissions, previous).await
+            dispatch_progress(
+                inputs,
+                ingress_name,
+                AggregateInput::Watermark(watermark),
+                input_progress,
+            )
+            .await
         }
         StreamMessageKind::Idle => {
-            let previous = input_progress.input_watermark();
-            let emissions = input_progress.evaluate(ingress_name, AggregateInput::Idle)?;
-            dispatch_progress_emissions(inputs, ingress_name, emissions, previous).await
+            dispatch_progress(inputs, ingress_name, AggregateInput::Idle, input_progress).await
         }
         StreamMessageKind::Barrier => {
             dispatch_barrier(
@@ -511,7 +573,16 @@ async fn dispatch_message(
         StreamMessageKind::EndOfInput => {
             let previous = input_progress.input_watermark();
             let emissions = input_progress.evaluate(ingress_name, AggregateInput::End)?;
-            dispatch_progress_emissions(inputs, ingress_name, emissions, previous).await?;
+            dispatch_progress_transition(
+                inputs,
+                ingress_name,
+                emissions,
+                previous,
+                input_progress.snapshot()?,
+                input_progress.input_watermark(),
+                &mut input_progress.output_frontier,
+            )
+            .await?;
             inputs
                 .ingresses
                 .get_mut(ingress_name)
@@ -664,9 +735,31 @@ async fn capture_operator_checkpoint(
         .checkpoint
         .as_ref()
         .and_then(|checkpoint| checkpoint.transaction.clone());
-    let snapshot = inputs
+    let mut snapshot = inputs
         .checkpoint_capability
         .encode_snapshot(&inputs.node_id, inputs.operator.checkpoint(epoch)?)?;
+    if inputs.operator.requires_output_frontier_state() {
+        let value = input_progress
+            .output_frontier
+            .map_or(serde_json::Value::Null, |frontier| {
+                serde_json::Value::from(frontier.as_micros())
+            });
+        if snapshot
+            .inline_metadata
+            .insert(
+                crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1.into(),
+                value,
+            )
+            .is_some()
+        {
+            return Err(CalcFlowError::CheckpointMismatch {
+                message: format!(
+                    "operator {:?} used the reserved output-frontier metadata key",
+                    inputs.node_id
+                ),
+            });
+        }
+    }
     let staged = match transaction {
         Some(transaction) => {
             transaction
@@ -750,6 +843,7 @@ async fn dispatch_data(
     ingress_name: &str,
     message: StreamMessage,
     input_watermark: Option<EventTime>,
+    ingress_progress: IngressProgressSnapshot,
 ) -> Result<()> {
     let batch = message
         .as_data()
@@ -767,6 +861,7 @@ async fn dispatch_data(
         inputs.context.job(),
         &inputs.node_id,
         input_watermark,
+        ingress_progress,
         output_budget,
         late_metrics,
     );
@@ -795,21 +890,20 @@ async fn dispatch_data(
         .record_operator_processing(&inputs.node_id, &processing_timer)
 }
 
-async fn dispatch_watermark(
+async fn dispatch_watermark_handler(
     inputs: &mut OperatorTaskInputs,
     _ingress_name: &str,
-    message: StreamMessage,
-    input_watermark: &mut Option<EventTime>,
+    watermark: EventTime,
+    input_watermark: Option<EventTime>,
+    ingress_progress: IngressProgressSnapshot,
 ) -> Result<()> {
-    let watermark = message
-        .as_watermark()
-        .expect("watermark kind always carries event time");
     let output_budget = effective_output_budget(&inputs.outputs);
     let late_metrics: Arc<dyn LateMetricSink> = Arc::new(inputs.progress.clone());
     let context = StreamOperatorContext::for_task(
         inputs.context.job(),
         &inputs.node_id,
-        *input_watermark,
+        input_watermark,
+        ingress_progress,
         output_budget,
         late_metrics,
     );
@@ -825,10 +919,7 @@ async fn dispatch_watermark(
     inputs
         .operator
         .on_watermark(watermark, &context, &mut collector)
-        .await?;
-    forward_control(&mut inputs.outputs, message, inputs.context.job()).await?;
-    *input_watermark = Some(watermark);
-    Ok(())
+        .await
 }
 
 fn effective_output_budget(outputs: &BTreeMap<String, Vec<EdgeSender>>) -> EdgeBudget {
@@ -851,35 +942,141 @@ async fn dispatch_idle(
     forward_control(&mut inputs.outputs, message, inputs.context.job()).await
 }
 
-async fn dispatch_progress_emissions(
+async fn dispatch_progress_transition(
     inputs: &mut OperatorTaskInputs,
     ingress_name: &str,
     emissions: Vec<ProgressEmissionKind>,
     mut previous_watermark: Option<EventTime>,
+    ingress_progress: IngressProgressSnapshot,
+    aggregate_input_frontier: Option<EventTime>,
+    output_frontier: &mut Option<EventTime>,
 ) -> Result<()> {
+    let output_budget = effective_output_budget(&inputs.outputs);
+    let late_metrics: Arc<dyn LateMetricSink> = Arc::new(inputs.progress.clone());
+    let context = StreamOperatorContext::for_task(
+        inputs.context.job(),
+        &inputs.node_id,
+        previous_watermark,
+        ingress_progress.clone(),
+        output_budget,
+        late_metrics,
+    );
+    inputs
+        .operator
+        .on_ingress_progress(ingress_name, &context)
+        .await?;
+    let emit_idle = apply_progress_emissions(
+        inputs,
+        ingress_name,
+        emissions,
+        &mut previous_watermark,
+        &ingress_progress,
+    )
+    .await?;
+    forward_join_output_frontier(
+        inputs,
+        aggregate_input_frontier,
+        &ingress_progress,
+        output_frontier,
+    )
+    .await?;
+    if emit_idle {
+        dispatch_idle(inputs, ingress_name, StreamMessage::idle()).await?;
+    }
+    Ok(())
+}
+
+/// Applies watermark/idle emissions in order; returns whether an idle forward remains.
+async fn apply_progress_emissions(
+    inputs: &mut OperatorTaskInputs,
+    ingress_name: &str,
+    emissions: Vec<ProgressEmissionKind>,
+    previous_watermark: &mut Option<EventTime>,
+    ingress_progress: &IngressProgressSnapshot,
+) -> Result<bool> {
+    let mut emit_idle = false;
     for emission in emissions {
         match emission {
             ProgressEmissionKind::Watermark(watermark) => {
-                dispatch_watermark(
+                dispatch_watermark_handler(
                     inputs,
                     ingress_name,
-                    StreamMessage::watermark(watermark),
-                    &mut previous_watermark,
+                    watermark,
+                    *previous_watermark,
+                    ingress_progress.clone(),
                 )
                 .await?;
+                *previous_watermark = Some(watermark);
             }
             ProgressEmissionKind::Idle => {
-                dispatch_idle(inputs, ingress_name, StreamMessage::idle()).await?;
+                emit_idle = true;
             }
             ProgressEmissionKind::EndOfInput => {}
         }
     }
+    Ok(emit_idle)
+}
+
+/// Forwards the operator's output-frontier candidate when it strictly advances.
+async fn forward_join_output_frontier(
+    inputs: &mut OperatorTaskInputs,
+    aggregate_input_frontier: Option<EventTime>,
+    ingress_progress: &IngressProgressSnapshot,
+    output_frontier: &mut Option<EventTime>,
+) -> Result<()> {
+    if let Some(candidate) = inputs
+        .operator
+        .output_frontier_candidate(aggregate_input_frontier, ingress_progress)?
+        .filter(|candidate| output_frontier.is_none_or(|previous| *candidate > previous))
+    {
+        forward_control(
+            &mut inputs.outputs,
+            StreamMessage::watermark(candidate),
+            inputs.context.job(),
+        )
+        .await?;
+        *output_frontier = Some(candidate);
+    }
     Ok(())
+}
+
+/// Builds the shared immutable per-ingress snapshot from aggregate activity.
+fn build_ingress_snapshot(
+    ordinal_by_ingress: &BTreeMap<String, BindingOrdinal>,
+    aggregate: &MultiInputProgress,
+) -> Result<IngressProgressSnapshot> {
+    ordinal_by_ingress
+        .iter()
+        .map(|(ingress, ordinal)| {
+            let activity = aggregate
+                .activity(*ordinal)
+                .ok_or_else(|| CalcFlowError::Internal {
+                    message: format!("operator ingress {ingress:?} is missing aggregate progress"),
+                })?;
+            let progress = match activity {
+                IngressActivity::Active { watermark } => {
+                    IngressProgress::new(IngressState::Active, watermark)
+                }
+                IngressActivity::Idle { watermark } => {
+                    IngressProgress::new(IngressState::Idle, watermark)
+                }
+                IngressActivity::Ended { final_watermark } => {
+                    IngressProgress::new(IngressState::Ended, final_watermark)
+                }
+            };
+            Ok((ingress.clone(), progress))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()
+        .map(IngressProgressSnapshot::new)
 }
 
 struct OperatorInputProgress {
     ordinal_by_ingress: BTreeMap<String, BindingOrdinal>,
     aggregate: MultiInputProgress,
+    output_frontier: Option<EventTime>,
+    // Shared immutable snapshot rebuilt only when an ingress transition
+    // changes activity, so per-Data-call reads stay O(1) Arc clones.
+    cached_snapshot: Option<IngressProgressSnapshot>,
 }
 
 impl OperatorInputProgress {
@@ -896,15 +1093,24 @@ impl OperatorInputProgress {
                 )
             })
             .collect::<BTreeMap<_, _>>();
+        let aggregate = MultiInputProgress::new(ordinal_by_ingress.values().copied());
         Self {
-            aggregate: MultiInputProgress::new(ordinal_by_ingress.values().copied()),
+            // Registration covers every ordinal, so the initial snapshot
+            // always builds.
+            cached_snapshot: Some(
+                build_ingress_snapshot(&ordinal_by_ingress, &aggregate)
+                    .expect("registered ingresses always snapshot"),
+            ),
+            aggregate,
             ordinal_by_ingress,
+            output_frontier: None,
         }
     }
 
     fn restore<'a>(
         ingresses: impl IntoIterator<Item = &'a String>,
         persisted: &BTreeMap<String, OperatorIngressManifestEntry>,
+        output_frontier: Option<EventTime>,
     ) -> Result<Self> {
         let ordinal_by_ingress = ingresses
             .into_iter()
@@ -938,9 +1144,12 @@ impl OperatorInputProgress {
             };
             (*ordinal, activity)
         });
+        let aggregate = MultiInputProgress::restore(activities);
         Ok(Self {
-            aggregate: MultiInputProgress::restore(activities),
+            cached_snapshot: Some(build_ingress_snapshot(&ordinal_by_ingress, &aggregate)?),
+            aggregate,
             ordinal_by_ingress,
+            output_frontier,
         })
     }
 
@@ -956,19 +1165,36 @@ impl OperatorInputProgress {
                 .ok_or_else(|| CalcFlowError::Internal {
                     message: format!("unknown operator ingress {ingress:?}"),
                 })?;
-        self.aggregate
+        let activity_before = self.aggregate.activity(ordinal);
+        let emissions = self
+            .aggregate
             .evaluate(ordinal, input)
             .map(|emissions| {
                 emissions
                     .into_iter()
                     .map(|emission| emission.kind)
-                    .collect()
+                    .collect::<Vec<_>>()
             })
-            .map_err(super::progress::types::ProgressFailure::into_existing_error)
+            .map_err(super::progress::types::ProgressFailure::into_existing_error)?;
+        if activity_before != self.aggregate.activity(ordinal) {
+            self.cached_snapshot = Some(build_ingress_snapshot(
+                &self.ordinal_by_ingress,
+                &self.aggregate,
+            )?);
+        }
+        Ok(emissions)
     }
 
     const fn input_watermark(&self) -> Option<EventTime> {
         self.aggregate.last_emitted_watermark()
+    }
+
+    fn snapshot(&self) -> Result<IngressProgressSnapshot> {
+        self.cached_snapshot
+            .clone()
+            .ok_or_else(|| CalcFlowError::Internal {
+                message: "operator ingress snapshot was never initialized".into(),
+            })
     }
 
     fn manifest_entries(&self) -> Result<BTreeMap<String, OperatorIngressManifestEntry>> {
@@ -1166,8 +1392,9 @@ pub(super) mod tests {
     };
     use crate::{
         Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken, EdgeBudget, EventTime,
-        JsonMap, ManifestIngressState, OperatorMetadata, Port, Result, StreamCollector,
-        StreamJobContext, StreamMessage, StreamMessageKind, StreamOperator, StreamOperatorContext,
+        IngressProgressSnapshot, JsonMap, ManifestIngressState, OperatorMetadata, Port, Result,
+        StreamCollector, StreamJobContext, StreamMessage, StreamMessageKind, StreamOperator,
+        StreamOperatorContext,
         pipeline::{CompiledStreamOperator, OperatorCheckpointCapability},
         runtime::streaming::supervisor::{TaskId, TaskSupervisor},
     };
@@ -1199,6 +1426,7 @@ pub(super) mod tests {
             &job,
             "window",
             None,
+            IngressProgressSnapshot::default(),
             EdgeBudget::default(),
             Arc::new(progress.clone()),
         );
@@ -1209,6 +1437,7 @@ pub(super) mod tests {
             &job,
             "window",
             Some(EventTime::from_micros(10)),
+            IngressProgressSnapshot::default(),
             EdgeBudget::default(),
             Arc::new(progress.clone()),
         );
@@ -2471,6 +2700,7 @@ pub(super) mod tests {
                     watermark: Some(EventTime::from_micros(9)),
                 },
             )]),
+            output_frontier: None,
             next_epoch: crate::Epoch::INITIAL.next().unwrap(),
         };
         let mut harness = harness_with_operator(
@@ -2540,6 +2770,7 @@ pub(super) mod tests {
                         watermark: None,
                     },
                 )]),
+                output_frontier: None,
                 next_epoch: crate::Epoch::INITIAL.next().unwrap(),
             }),
         );
@@ -2587,6 +2818,7 @@ pub(super) mod tests {
                         watermark: None,
                     },
                 )]),
+                output_frontier: None,
                 next_epoch: crate::Epoch::INITIAL.next().unwrap(),
             }),
         );

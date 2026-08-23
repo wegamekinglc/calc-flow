@@ -13,6 +13,7 @@ const job = (status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled
     ? '2026-01-01T00:00:02Z'
     : null,
   error_code: status === 'failed' ? 'worker_failed' : null,
+  reason_code: null,
   error: status === 'failed' ? 'worker exited' : null,
 });
 
@@ -20,7 +21,7 @@ const capabilities = {
   schemaVersion: 1,
   runtime: {
     scope: { kind: 'runtimeSession', sessionId: 'session', revision: 0 },
-    packageVersion: '3.0.0',
+    packageVersion: '4.0.0',
     projectFormatVersions: [3],
     batchKinds: ['array', 'table'],
     portableArrowTypes: ['int64'],
@@ -90,6 +91,21 @@ describe('API client', () => {
       }), {
         status: 422,
         statusText: 'Unprocessable Content',
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        detail: {
+          kind: 'invalid',
+          valid: false,
+          fingerprint: null,
+          issues: [{
+            path: 'graph.nodes[0].operator.spec.bounds.before_micros',
+            code: 'invalid_time_bound',
+            message: 'before_micros must be an integer microsecond count in 0..=9007199254740991',
+          }],
+        },
+      }), {
+        status: 422,
+        statusText: 'Unprocessable Content',
       }));
     vi.stubGlobal('fetch', fetchMock);
 
@@ -98,6 +114,12 @@ describe('API client', () => {
     );
     await expect(api.createProject(blankProject())).rejects.toEqual(
       new ApiError('name: Field required', 422),
+    );
+    await expect(api.createProject(blankProject())).rejects.toEqual(
+      new ApiError(
+        'graph.nodes[0].operator.spec.bounds.before_micros: before_micros must be an integer microsecond count in 0..=9007199254740991',
+        422,
+      ),
     );
   });
 

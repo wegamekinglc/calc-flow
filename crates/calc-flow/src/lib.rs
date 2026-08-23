@@ -65,17 +65,20 @@ pub use continuous::{
     NativeWatermarkCapability, OperatorStatus, OutputDeliveryStatus, ReplayPositioning,
     SinkBinding, SinkDelivery, SinkRecovery, SinkStatus, SourceBinding, SourceCapabilities,
     SourceCheckpointGate, SourceDeliveryCapability, SourceEvent, SourceSchema, SourceStatus,
-    StreamSink, StreamSource, StreamingError, StreamingErrorCategory, StreamingJob,
-    StreamingRunner, TerminalCause, TransactionalStreamSink, WatermarkPolicy,
+    StreamSink, StreamSource, StreamingError, StreamingErrorCategory, StreamingFailureReason,
+    StreamingJob, StreamingRunner, TerminalCause, TransactionalStreamSink, WatermarkPolicy,
 };
 pub use datafusion::{DataFusionConfig, DataFusionQueryMetric, DataFusionRuntime};
 pub use error::{CalcFlowError, Result};
 pub use json::{JsonMap, MAX_JSON_DEPTH, canonical_json};
 pub use operator::{
     AggregateFunction, AggregateSpec, BatchOperator, BatchOperatorContext, BatchOperatorFactory,
-    EdgeCollector, ExpressionOperator, ExternalOperatorSpec, MAX_WINDOW_OVERLAP, NodeOperator,
-    OperatorMetadata, OperatorStateSnapshot, Port, ProviderRegistry, SqlOperator, StreamCollector,
-    StreamOperator, StreamOperatorContext, StreamOperatorFactory, UnionOperator,
+    EdgeCollector, ExpressionOperator, ExternalOperatorSpec, IngressProgress,
+    IngressProgressSnapshot, IngressState, JoinStateLimits, JoinTimeBounds, MAX_WINDOW_OVERLAP,
+    NodeOperator, OperatorMetadata, OperatorStateSnapshot, Port, ProviderRegistry,
+    STREAM_JOIN_MAX_SAFE_JSON_INTEGER, STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1, SqlOperator,
+    StreamCollector, StreamJoinOperator, StreamJoinSideStatus, StreamJoinSpec, StreamJoinStatus,
+    StreamJoinType, StreamOperator, StreamOperatorContext, StreamOperatorFactory, UnionOperator,
     WindowAggregateOperator, WindowGeometry, WindowSpec,
 };
 pub use pipeline::{

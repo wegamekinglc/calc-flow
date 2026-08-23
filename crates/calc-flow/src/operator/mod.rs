@@ -2,6 +2,7 @@
 
 mod batch;
 mod expression;
+mod join;
 mod sql;
 mod stream;
 mod union;
@@ -9,9 +10,16 @@ mod window;
 
 pub use batch::{BatchOperator, BatchOperatorContext};
 pub use expression::ExpressionOperator;
+pub(crate) use join::supported_key_type;
+pub use join::{
+    JoinStateLimits, JoinTimeBounds, STREAM_JOIN_MAX_SAFE_JSON_INTEGER,
+    STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1, StreamJoinOperator, StreamJoinSideStatus,
+    StreamJoinSpec, StreamJoinStatus, StreamJoinType,
+};
 pub use sql::SqlOperator;
 pub use stream::{
-    EdgeCollector, OperatorStateSnapshot, StreamCollector, StreamOperator, StreamOperatorContext,
+    EdgeCollector, IngressProgress, IngressProgressSnapshot, IngressState, OperatorStateSnapshot,
+    StreamCollector, StreamOperator, StreamOperatorContext,
 };
 pub use union::UnionOperator;
 pub use window::{
@@ -126,7 +134,7 @@ impl Port {
         required: bool,
         schema: Option<SchemaRef>,
     ) -> Result<Self> {
-        if !is_identifier(name) {
+        if !is_portable_identifier(name) {
             return Err(CalcFlowError::InvalidArgument {
                 field: "port.name".into(),
                 message: "must be a non-empty portable identifier".into(),
@@ -189,7 +197,9 @@ impl Port {
     }
 }
 
-fn is_identifier(value: &str) -> bool {
+/// Reports whether `value` is a non-empty portable `[A-Za-z_][A-Za-z0-9_]*`
+/// identifier.
+pub(crate) fn is_portable_identifier(value: &str) -> bool {
     let mut characters = value.chars();
     characters.next().is_some_and(|first| {
         (first == '_' || first.is_ascii_alphabetic())
@@ -219,11 +229,13 @@ pub trait OperatorMetadata: Send + Sync {
 /// and `Stream` carry external operators through their respective trait
 /// objects; `compile_batch` rejects stream-only nodes and `compile_stream`
 /// rejects batch-only nodes (plan section 2.2).
+#[non_exhaustive]
 pub enum NodeOperator {
     Expression(ExpressionOperator),
     Sql(SqlOperator),
     Union(UnionOperator),
     Window(WindowAggregateOperator),
+    StreamJoin(Box<StreamJoinOperator>),
     Batch(Box<dyn BatchOperator>),
     Stream(Box<dyn StreamOperator>),
 }
@@ -235,6 +247,7 @@ impl NodeOperator {
             Self::Sql(operator) => operator,
             Self::Union(operator) => operator,
             Self::Window(operator) => operator,
+            Self::StreamJoin(operator) => operator.as_ref(),
             Self::Batch(operator) => operator.as_ref(),
             Self::Stream(operator) => operator.as_ref(),
         }
@@ -257,7 +270,10 @@ impl NodeOperator {
     }
 
     pub(crate) const fn requires_datafusion(&self) -> bool {
-        matches!(self, Self::Expression(_) | Self::Sql(_))
+        matches!(
+            self,
+            Self::Expression(_) | Self::Sql(_) | Self::StreamJoin(_)
+        )
     }
 }
 
@@ -288,6 +304,18 @@ impl From<WindowAggregateOperator> for NodeOperator {
 impl From<Box<WindowAggregateOperator>> for NodeOperator {
     fn from(value: Box<WindowAggregateOperator>) -> Self {
         Self::Window(*value)
+    }
+}
+
+impl From<StreamJoinOperator> for NodeOperator {
+    fn from(value: StreamJoinOperator) -> Self {
+        Self::StreamJoin(Box::new(value))
+    }
+}
+
+impl From<Box<StreamJoinOperator>> for NodeOperator {
+    fn from(value: Box<StreamJoinOperator>) -> Self {
+        Self::StreamJoin(value)
     }
 }
 

@@ -998,3 +998,147 @@ fn supported_v1_arrow_aliases_compile_exactly() {
         assert!(validate_project(&value, &providers, &udfs).valid, "{alias}");
     }
 }
+
+fn stream_join_node(id: &str, key_type: &str) -> NodeSpec {
+    NodeSpec {
+        id: id.into(),
+        operator: OperatorSpec::StreamJoin {
+            spec: calc_flow::StreamJoinSpec::inner(
+                ["account_id"],
+                ["account_id"],
+                "authorized_at",
+                "paid_at",
+                calc_flow::JoinTimeBounds::new(
+                    std::time::Duration::from_secs(300),
+                    std::time::Duration::from_secs(60),
+                )
+                .unwrap(),
+                calc_flow::JoinStateLimits::new(100, 1_000_000, 1_000).unwrap(),
+            )
+            .unwrap(),
+        },
+        input_ports: vec![
+            port(
+                "left",
+                BatchKind::Table,
+                true,
+                vec![
+                    ArrowFieldSpec {
+                        name: "account_id".into(),
+                        data_type: key_type.into(),
+                        nullable: false,
+                    },
+                    ArrowFieldSpec {
+                        name: "authorized_at".into(),
+                        data_type: "timestamp[us]".into(),
+                        nullable: false,
+                    },
+                ],
+            ),
+            port(
+                "right",
+                BatchKind::Table,
+                true,
+                vec![
+                    ArrowFieldSpec {
+                        name: "account_id".into(),
+                        data_type: "int64".into(),
+                        nullable: false,
+                    },
+                    ArrowFieldSpec {
+                        name: "paid_at".into(),
+                        data_type: "timestamp[us]".into(),
+                        nullable: false,
+                    },
+                ],
+            ),
+        ],
+        output_ports: Vec::new(),
+        position: Some(PositionSpec { x: 1.0, y: 2.0 }),
+    }
+}
+
+#[test]
+fn validate_reports_stream_join_runtime_port_and_operator_issues() {
+    let (providers, udfs) = empty_registries();
+
+    let batch_mode = project(stream_join_node("join", "int64"));
+    let report = validate_project(&batch_mode, &providers, &udfs);
+    assert_issue(&report, "graph.nodes[0].operator", "incompatible_runtime");
+
+    let mut wrong_ports = batch_mode.clone();
+    wrong_ports.graph.nodes[0].input_ports.truncate(1);
+    assert_issue(
+        &validate_project(&wrong_ports, &providers, &udfs),
+        "graph.nodes[0].input_ports",
+        "invalid_ports",
+    );
+
+    let mut wrong_names = batch_mode.clone();
+    wrong_names.graph.nodes[0].input_ports[0].name = "first".into();
+    assert_issue(
+        &validate_project(&wrong_names, &providers, &udfs),
+        "graph.nodes[0].input_ports",
+        "invalid_ports",
+    );
+
+    let mut wrong_key_type = batch_mode;
+    wrong_key_type.graph.nodes[0].input_ports[0].schema[0].data_type = "float64".into();
+    assert_issue(
+        &validate_project(&wrong_key_type, &providers, &udfs),
+        "graph.nodes[0].operator.spec.left_keys[0]",
+        "incompatible_key_type",
+    );
+}
+
+#[test]
+fn compile_rejects_stream_join_outside_stream_mode_and_with_invalid_ports() {
+    let (providers, udfs) = empty_registries();
+
+    let mut batch_mode = project(stream_join_node("join", "int64"));
+    batch_mode.data_sources.clear();
+    let error = compile_project(&batch_mode, &providers, &udfs)
+        .expect_err("batch compilation must reject stream_join");
+    assert!(
+        error
+            .to_string()
+            .contains("stream_join is available only in stream runtime mode"),
+        "{error}"
+    );
+
+    let mut stream_mode = batch_mode;
+    stream_mode.runtime = RuntimeSpec::Stream(StreamRunOptions::default());
+    let connectors = ConnectorRegistry::new().snapshot();
+    let compile = |project: &ProjectSpec| {
+        compile_stream_project(
+            project,
+            &providers,
+            &udfs,
+            &connectors,
+            &StreamRequirements::default(),
+        )
+    };
+
+    // The well-formed Join itself must clear stream validation: any failure
+    // here has to come from the incomplete surrounding graph, never from the
+    // stream_join port or operator contract.
+    if let Err(error) = compile(&stream_mode) {
+        let message = error.to_string();
+        assert!(!message.contains("left and right"), "{message}");
+        assert!(!message.contains("incompatible_runtime"), "{message}");
+        assert!(
+            !message.contains("identical supported Arrow types"),
+            "{message}"
+        );
+    }
+
+    let mut single_input = stream_mode.clone();
+    single_input.graph.nodes[0].input_ports.truncate(1);
+    let error = compile(&single_input).expect_err("stream_join requires both inputs");
+    assert!(error.to_string().contains("stream_join"), "{error}");
+
+    let mut wrong_names = stream_mode;
+    wrong_names.graph.nodes[0].input_ports[1].name = "second".into();
+    let error = compile(&wrong_names).expect_err("stream_join ports must be left and right");
+    assert!(error.to_string().contains("stream_join"), "{error}");
+}

@@ -338,6 +338,10 @@ impl OwningContinuousJob {
         self.job.public_status()
     }
 
+    pub(crate) fn stream_join_status(&self) -> BTreeMap<String, crate::StreamJoinStatus> {
+        self.job.stream_join_status()
+    }
+
     pub(crate) async fn trigger_checkpoint(&self) -> Result<Epoch> {
         match self.job.trigger_checkpoint().await {
             Ok(epoch) => Ok(epoch),

@@ -44,14 +44,19 @@ def test_empty_runtime_capabilities_are_frozen_and_session_scoped() -> None:
     assert snapshot.scope.kind == "runtime_session"
     assert snapshot.scope.revision == 0
     assert snapshot.scope.session_id == repeated.scope.session_id
-    assert snapshot.package_version == "3.0.0"
+    assert snapshot.package_version == "4.0.0"
     assert snapshot.project_format_versions == (3,)
     assert snapshot.batch_kinds == ("array", "table")
     assert tuple(operator.kind for operator in snapshot.operators) == (
         "expression",
         "sql",
+        "stream_join",
     )
-    assert all(operator.input_kinds == ("table",) for operator in snapshot.operators)
+    assert all(
+        all(kind == "table" for kind in operator.input_kinds)
+        for operator in snapshot.operators
+    )
+    assert snapshot.operators[-1].input_kinds == ("table", "table")
     assert all(operator.output_kinds == ("table",) for operator in snapshot.operators)
     assert all(operator.requires_datafusion for operator in snapshot.operators)
     assert snapshot.udfs == ()

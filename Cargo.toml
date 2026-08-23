@@ -3,7 +3,7 @@ members = ["crates/calc-flow", "crates/calc-flow-connectors", "crates/calc-flow-
 resolver = "3"
 
 [workspace.package]
-version = "3.0.0"
+version = "4.0.0"
 edition = "2024"
 rust-version = "1.88.0"
 license = "Apache-2.0"

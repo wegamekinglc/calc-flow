@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
-from typing import Never, Protocol, TypedDict, final
+from typing import Literal, Never, Protocol, TypedDict, final
 
 import pyarrow as pa
 
@@ -11,6 +11,12 @@ type JSONValue = (
 type _JSONInput = (
     None | bool | int | float | str | list[_JSONInput] | Mapping[str, _JSONInput]
 )
+type StreamingFailureReasonCode = Literal[
+    "join_state_limit_exceeded",
+    "join_match_limit_exceeded",
+    "join_counter_overflow",
+    "join_time_conversion_failed",
+]
 
 class _ArrowCStream(Protocol):
     def __arrow_c_stream__(
@@ -18,7 +24,11 @@ class _ArrowCStream(Protocol):
     ) -> object: ...
 
 class CalcFlowError(Exception): ...
-class ConfigError(CalcFlowError): ...
+
+class ConfigError(CalcFlowError):
+    @property
+    def issues(self) -> tuple[dict[str, str], ...]: ...
+
 class CompileError(CalcFlowError): ...
 class ExecutionError(CalcFlowError): ...
 class ProviderError(ExecutionError): ...
@@ -28,6 +38,8 @@ class CancelledError(ExecutionError): ...
 class StreamingRuntimeError(CalcFlowError):
     @property
     def category(self) -> str: ...
+    @property
+    def reason_code(self) -> StreamingFailureReasonCode | None: ...
     @property
     def message(self) -> str: ...
     @property

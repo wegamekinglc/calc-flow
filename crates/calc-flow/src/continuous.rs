@@ -136,7 +136,7 @@ use datafusion::arrow::datatypes::SchemaRef;
 
 use crate::{
     Batch, CalcFlowError, CancellationToken, Epoch, JsonMap, ManifestIngressState, Result,
-    RetentionClass, StreamExecutionPlan, StreamJobContext, StreamRuntimeConfig,
+    RetentionClass, StreamExecutionPlan, StreamJobContext, StreamJoinStatus, StreamRuntimeConfig,
     runtime::streaming::{
         checkpoint::ManagedCheckpointRuntime as InternalManagedCheckpointRuntime,
         job::{
@@ -165,7 +165,7 @@ use crate::{
 pub use crate::runtime::streaming::projection::{
     CheckpointPhase, CheckpointStatus, ComponentKind, EdgeStatus, JobOutcome, JobState, JobStatus,
     OperatorStatus, OutputDeliveryStatus, SinkDelivery, SinkStatus, SourceStatus, StreamingError,
-    StreamingErrorCategory, TerminalCause,
+    StreamingErrorCategory, StreamingFailureReason, TerminalCause,
 };
 
 static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);
@@ -1056,6 +1056,14 @@ impl StreamingJob {
     /// Returns a cloned, data-only status snapshot without blocking.
     pub fn status(&self) -> JobStatus {
         self.inner.status()
+    }
+
+    /// Returns each Join node's payload-free status keyed by stable node ID.
+    ///
+    /// Values are cloned numeric snapshots without keys, rows, cursors, or
+    /// secrets. Jobs without Join nodes return an empty map.
+    pub fn stream_join_status(&self) -> BTreeMap<String, StreamJoinStatus> {
+        self.inner.stream_join_status()
     }
 
     /// Requests a manual checkpoint and waits for durable completion.

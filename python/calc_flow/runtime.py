@@ -21,6 +21,12 @@ if TYPE_CHECKING:
 type JSONValue = (
     None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
 )
+type StreamingFailureReasonCode = Literal[
+    "join_state_limit_exceeded",
+    "join_match_limit_exceeded",
+    "join_counter_overflow",
+    "join_time_conversion_failed",
+]
 
 
 async def _raise_after_cancellation_cleanup(
@@ -569,6 +575,7 @@ class StreamingError:
     """Payload-safe structured terminal error projection."""
 
     category: str
+    reason_code: StreamingFailureReasonCode | None
     message: str
     job_id: int | None
     epoch: int | None
@@ -614,7 +621,28 @@ class JobStatus(TypedDict):
     sources: dict[str, dict[str, object]]
     operators: dict[str, dict[str, object]]
     sinks: dict[str, dict[str, object]]
+    stream_joins: dict[str, StreamJoinStatus]
     checkpoint: dict[str, object]
+
+
+class StreamJoinSideStatus(TypedDict):
+    retained_rows: int
+    retained_bytes: int
+    evicted_rows: int
+    late_rows: int
+    late_affected_batches: int
+    max_lateness_micros: int | None
+    null_event_time_rows: int
+    null_key_rows: int
+
+
+class StreamJoinStatus(TypedDict):
+    node_id: str
+    left: StreamJoinSideStatus
+    right: StreamJoinSideStatus
+    emitted_match_rows: int
+    state_limit_failures: int
+    match_limit_failures: int
 
 
 def _outcome(value: Mapping[str, object]) -> JobOutcome:

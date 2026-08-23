@@ -30,6 +30,10 @@
             "title": "Project Id",
             "type": "string"
           },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "null"
+          },
           "started_at": {
             "anyOf": [
               {
@@ -109,6 +113,10 @@
           "project_id": {
             "title": "Project Id",
             "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "null"
           },
           "started_at": {
             "format": "date-time",
@@ -285,6 +293,16 @@
           "project_id": {
             "title": "Project Id",
             "type": "string"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StreamingFailureReasonCode"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "started_at": {
             "format": "date-time",
@@ -578,6 +596,10 @@
           "project_id": {
             "title": "Project Id",
             "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "null"
           },
           "started_at": {
             "title": "Started At",
@@ -905,6 +927,59 @@
             ],
             "type": "object"
           },
+          "JoinStateLimits": {
+            "additionalProperties": false,
+            "description": "Hard logical state and per-input fan-out limits.",
+            "properties": {
+              "max_matches_per_input_batch": {
+                "format": "uint64",
+                "maximum": 9007199254740991.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              "max_state_bytes_per_side": {
+                "format": "uint64",
+                "maximum": 9007199254740991.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              "max_state_rows_per_side": {
+                "format": "uint64",
+                "maximum": 9007199254740991.0,
+                "minimum": 1.0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "max_state_rows_per_side",
+              "max_state_bytes_per_side",
+              "max_matches_per_input_batch"
+            ],
+            "type": "object"
+          },
+          "JoinTimeBounds": {
+            "additionalProperties": false,
+            "description": "Inclusive event-time distance around one left row.",
+            "properties": {
+              "after_micros": {
+                "format": "uint64",
+                "maximum": 9007199254740991.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "before_micros": {
+                "format": "uint64",
+                "maximum": 9007199254740991.0,
+                "minimum": 0.0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "before_micros",
+              "after_micros"
+            ],
+            "type": "object"
+          },
           "NodeSpec": {
             "additionalProperties": false,
             "properties": {
@@ -1039,6 +1114,24 @@
                   },
                   "spec": {
                     "$ref": "#/components/schemas/ProjectCreateRequest/$defs/WindowSpec"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "spec"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Bounded two-input event-time inner Join for stream graphs.",
+                "properties": {
+                  "kind": {
+                    "const": "stream_join",
+                    "type": "string"
+                  },
+                  "spec": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/StreamJoinSpec"
                   }
                 },
                 "required": [
@@ -1470,6 +1563,67 @@
             },
             "type": "object"
           },
+          "StreamJoinSpec": {
+            "additionalProperties": false,
+            "description": "Immutable declaration for a two-input bounded inner stream Join.",
+            "properties": {
+              "bounds": {
+                "$ref": "#/components/schemas/ProjectCreateRequest/$defs/JoinTimeBounds"
+              },
+              "join_type": {
+                "$ref": "#/components/schemas/ProjectCreateRequest/$defs/StreamJoinType"
+              },
+              "left_event_time": {
+                "type": "string"
+              },
+              "left_keys": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "left_prefix": {
+                "type": "string"
+              },
+              "limits": {
+                "$ref": "#/components/schemas/ProjectCreateRequest/$defs/JoinStateLimits"
+              },
+              "right_event_time": {
+                "type": "string"
+              },
+              "right_keys": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "right_prefix": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "join_type",
+              "left_keys",
+              "right_keys",
+              "left_event_time",
+              "right_event_time",
+              "bounds",
+              "limits",
+              "left_prefix",
+              "right_prefix"
+            ],
+            "type": "object"
+          },
+          "StreamJoinType": {
+            "description": "Supported Join semantics.",
+            "oneOf": [
+              {
+                "const": "inner",
+                "description": "Emit every pair with equal non-null keys and an event time inside the\nconfigured inclusive interval.",
+                "type": "string"
+              }
+            ]
+          },
           "StreamRunOptions": {
             "additionalProperties": false,
             "description": "Continuous runtime limits carried by project v3.",
@@ -1873,6 +2027,59 @@
             ],
             "type": "object"
           },
+          "JoinStateLimits": {
+            "additionalProperties": false,
+            "description": "Hard logical state and per-input fan-out limits.",
+            "properties": {
+              "max_matches_per_input_batch": {
+                "format": "uint64",
+                "maximum": 9007199254740991.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              "max_state_bytes_per_side": {
+                "format": "uint64",
+                "maximum": 9007199254740991.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              "max_state_rows_per_side": {
+                "format": "uint64",
+                "maximum": 9007199254740991.0,
+                "minimum": 1.0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "max_state_rows_per_side",
+              "max_state_bytes_per_side",
+              "max_matches_per_input_batch"
+            ],
+            "type": "object"
+          },
+          "JoinTimeBounds": {
+            "additionalProperties": false,
+            "description": "Inclusive event-time distance around one left row.",
+            "properties": {
+              "after_micros": {
+                "format": "uint64",
+                "maximum": 9007199254740991.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "before_micros": {
+                "format": "uint64",
+                "maximum": 9007199254740991.0,
+                "minimum": 0.0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "before_micros",
+              "after_micros"
+            ],
+            "type": "object"
+          },
           "NodeSpec": {
             "additionalProperties": false,
             "properties": {
@@ -2007,6 +2214,24 @@
                   },
                   "spec": {
                     "$ref": "#/components/schemas/ProjectDocument/$defs/WindowSpec"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "spec"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Bounded two-input event-time inner Join for stream graphs.",
+                "properties": {
+                  "kind": {
+                    "const": "stream_join",
+                    "type": "string"
+                  },
+                  "spec": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/StreamJoinSpec"
                   }
                 },
                 "required": [
@@ -2438,6 +2663,67 @@
             },
             "type": "object"
           },
+          "StreamJoinSpec": {
+            "additionalProperties": false,
+            "description": "Immutable declaration for a two-input bounded inner stream Join.",
+            "properties": {
+              "bounds": {
+                "$ref": "#/components/schemas/ProjectDocument/$defs/JoinTimeBounds"
+              },
+              "join_type": {
+                "$ref": "#/components/schemas/ProjectDocument/$defs/StreamJoinType"
+              },
+              "left_event_time": {
+                "type": "string"
+              },
+              "left_keys": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "left_prefix": {
+                "type": "string"
+              },
+              "limits": {
+                "$ref": "#/components/schemas/ProjectDocument/$defs/JoinStateLimits"
+              },
+              "right_event_time": {
+                "type": "string"
+              },
+              "right_keys": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "right_prefix": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "join_type",
+              "left_keys",
+              "right_keys",
+              "left_event_time",
+              "right_event_time",
+              "bounds",
+              "limits",
+              "left_prefix",
+              "right_prefix"
+            ],
+            "type": "object"
+          },
+          "StreamJoinType": {
+            "description": "Supported Join semantics.",
+            "oneOf": [
+              {
+                "const": "inner",
+                "description": "Emit every pair with equal non-null keys and an event time inside the\nconfigured inclusive interval.",
+                "type": "string"
+              }
+            ]
+          },
           "StreamRunOptions": {
             "additionalProperties": false,
             "description": "Continuous runtime limits carried by project v3.",
@@ -2647,6 +2933,31 @@
         "title": "Calc Flow Project V3",
         "type": "object"
       },
+      "ProjectInvalidResponse": {
+        "additionalProperties": false,
+        "description": "The 422 body for join validation routes.\n\nThe detail is either the structured invalid `ValidationReport` envelope\n(malformed stream Join input and semantic project issues) or the standard\nrequest-validation error list.",
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InvalidValidationReport"
+              },
+              {
+                "items": {
+                  "$ref": "#/components/schemas/RequestError"
+                },
+                "type": "array"
+              }
+            ],
+            "title": "Detail"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "ProjectInvalidResponse",
+        "type": "object"
+      },
       "ProjectSummary": {
         "additionalProperties": false,
         "properties": {
@@ -2806,6 +3117,50 @@
         "title": "ProviderPortResponse",
         "type": "object"
       },
+      "RequestError": {
+        "additionalProperties": false,
+        "description": "One request-validation error as FastAPI emits it.",
+        "properties": {
+          "input": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input"
+          },
+          "loc": {
+            "default": [],
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Loc",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Msg",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "msg"
+        ],
+        "title": "RequestError",
+        "type": "object"
+      },
       "ResourceLimits": {
         "additionalProperties": false,
         "description": "Hard bounds for long-running continuous jobs.",
@@ -2872,6 +3227,10 @@
           "project_id": {
             "title": "Project Id",
             "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "null"
           },
           "started_at": {
             "format": "date-time",
@@ -3036,6 +3395,15 @@
         ],
         "title": "SerializedWorkerRegistration",
         "type": "object"
+      },
+      "StreamingFailureReasonCode": {
+        "enum": [
+          "join_state_limit_exceeded",
+          "join_match_limit_exceeded",
+          "join_counter_overflow",
+          "join_time_conversion_failed"
+        ],
+        "type": "string"
       },
       "UdfCapabilityResponse": {
         "additionalProperties": false,
@@ -3272,7 +3640,7 @@
   },
   "info": {
     "title": "Calc Flow API",
-    "version": "3.0.0"
+    "version": "4.0.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -3632,11 +4000,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ProjectInvalidResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Invalid project document or request"
           }
         },
         "summary": "Create Project"
@@ -3682,11 +4050,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ProjectInvalidResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Invalid project document or request"
           }
         },
         "summary": "Import Project"
@@ -3798,11 +4166,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ProjectInvalidResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Invalid project document or request"
           }
         },
         "summary": "Put Project"

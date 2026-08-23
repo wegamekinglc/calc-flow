@@ -387,8 +387,8 @@ jobs:
           assert not any("uvicorn" in item.lower() for item in core_requirements)
           assert any(
               item.lower().startswith("calc-flow")
-              and ">=3.0.0" in item
-              and "<4" in item
+              and ">=4.0.0" in item
+              and "<5" in item
               for item in studio_requirements
           )
           index = next(route for route in app.routes if route.path == "/").endpoint()

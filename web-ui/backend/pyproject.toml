@@ -1,12 +1,12 @@
 [project]
 name = "calc-flow-studio"
-version = "3.0.0"
+version = "4.0.0"
 description = "Local FastAPI backend for Calc Flow Studio"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
-    "calc-flow>=3.0.0,<4",
+    "calc-flow>=4.0.0,<5",
     "cloudpickle>=3.1",
     "fastapi>=0.116",
     "pyarrow>=24.0.0,<25",

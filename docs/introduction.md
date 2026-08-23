@@ -1,4 +1,4 @@
-# Calc Flow 3.0 architecture
+# Calc Flow 4.0 architecture
 
 Calc Flow is a Rust-native stateful calculation engine for micro-batch and
 streaming data. The `calc-flow` crate owns the data contract, graph compiler,
@@ -368,7 +368,7 @@ mode.
 
 ## Compatibility
 
-Calc Flow 3.0 does not load project-v2 documents or expose Studio `/api/v2`.
+Calc Flow 4.0 does not load project-v2 documents or expose Studio `/api/v2`.
 Recreate projects with the v3 schema, register connector factories and secret
 resolvers in the trusted runtime, and restart stateful processing from a chosen
 source boundary. No automated converter is provided. See the

@@ -1,4 +1,4 @@
-# Calc Flow 3.0 examples
+# Calc Flow 4.0 examples
 
 These executable examples use the Rust-native 3.0 engine through the PyO3
 Python package. Table batches contain PyArrow tables and every table expression

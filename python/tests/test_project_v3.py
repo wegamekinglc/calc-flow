@@ -122,8 +122,13 @@ class TestProjectV3Surface:
         caps = runtime_capabilities(
             session_id="test",
             revision=1,
-            package_version="3.0.0",
+            package_version="4.0.0",
             registrations=[],
         )
         assert caps.project_format_versions == (3,)
+        assert tuple(operator.kind for operator in caps.operators) == (
+            "expression",
+            "sql",
+            "stream_join",
+        )
         assert tuple(connector.name for connector in caps.connectors) == ("file",)

@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - "v3.*"
+      - "v4.*"
 permissions:
   contents: read
 jobs:
@@ -259,8 +259,8 @@ jobs:
           requirements = requires("calc-flow-studio") or []
           assert any(
               requirement.lower().startswith("calc-flow")
-              and ">=3.0.0" in requirement
-              and "<4" in requirement
+              and ">=4.0.0" in requirement
+              and "<5" in requirement
               for requirement in requirements
           )
           index = next(route for route in app.routes if route.path == "/").endpoint()

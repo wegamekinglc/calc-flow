@@ -22,6 +22,13 @@ pub enum CalcFlowError {
     Compile { message: String },
     #[error("node {node_id} failed: {message}")]
     Operator { node_id: String, message: String },
+    /// Operator failure with a stable, payload-free public reason code.
+    #[error("node {node_id} failed: {message}")]
+    OperatorReason {
+        node_id: String,
+        reason_code: crate::continuous::StreamingFailureReason,
+        message: String,
+    },
     #[error("DataFusion failed for node {node_id:?}: {message}")]
     DataFusion {
         node_id: Option<String>,
@@ -47,6 +54,12 @@ pub enum CalcFlowError {
     },
     #[error("stored document is invalid: {message}")]
     Format { message: String },
+    /// Structured pre-typed project import issues carrying the frozen stable
+    /// paths and codes (bounded event-time stream Join, spec FR58).
+    #[error("project validation failed")]
+    ProjectValidation {
+        issues: Vec<crate::config::ValidationIssue>,
+    },
     #[error("{resource} {key:?} already exists")]
     Conflict { resource: String, key: String },
     #[error("{resource} {key:?} was not found")]

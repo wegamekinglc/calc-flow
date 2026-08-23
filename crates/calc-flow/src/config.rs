@@ -5,12 +5,12 @@ use std::{
 };
 
 use async_trait::async_trait;
-use datafusion::arrow::datatypes::{DataType, Field, TimeUnit};
+use datafusion::arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::{Value, json};
 
-use crate::operator::expression_query;
+use crate::operator::{expression_query, supported_key_type};
 use crate::{
     Batch, BatchExecutionPlan, BatchKind, CalcFlowError, ConnectorIdentity,
     ConnectorRegistrySnapshot, ConnectorSinkFactory, ConnectorSourceFactory, Cursor,
@@ -19,9 +19,9 @@ use crate::{
     Port, PortEndpoint, ProviderRegistry, Result, RetentionClass, SecretHandle, SecretReference,
     SecretResolver, SecretResolverKind, SinkBinding as RuntimeSinkBinding, SinkRecovery,
     SourceBinding as RuntimeSourceBinding, SourceCapabilities, SourceEvent, SourceSchema,
-    SqlOperator, StreamExecutionPlan, StreamRequirements, StreamSink, StreamSource,
-    TransactionSupport, TransactionalStreamSink, UdfKind, UdfReference, UdfRegistrySnapshot,
-    UnionOperator, WatermarkPolicy, WindowAggregateOperator, WindowSpec,
+    SqlOperator, StreamExecutionPlan, StreamJoinOperator, StreamJoinSpec, StreamRequirements,
+    StreamSink, StreamSource, TransactionSupport, TransactionalStreamSink, UdfKind, UdfReference,
+    UdfRegistrySnapshot, UnionOperator, WatermarkPolicy, WindowAggregateOperator, WindowSpec,
     validate_delivery_guarantee, validate_selected_udfs,
 };
 
@@ -123,6 +123,7 @@ pub struct NodeSpec {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[non_exhaustive]
 pub enum OperatorSpec {
     Expression {
         #[serde(default)]
@@ -144,6 +145,8 @@ pub enum OperatorSpec {
     Union,
     /// Stateful event-time aggregation for stream graphs.
     Window { spec: WindowSpec },
+    /// Bounded two-input event-time inner Join for stream graphs.
+    StreamJoin { spec: StreamJoinSpec },
     External {
         provider: String,
         name: String,
@@ -606,8 +609,60 @@ fn validate_project_connectors(
             &mut issues,
         );
     }
+    validate_stream_join_watermarks(project, connectors, plan, &mut issues);
     validate_project_delivery(project, connectors, requirements, plan, &mut issues);
     issues
+}
+
+fn validate_stream_join_watermarks(
+    project: &ProjectSpec,
+    connectors: &ConnectorRegistrySnapshot,
+    plan: &StreamExecutionPlan,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    for node in &project.graph.nodes {
+        if !matches!(node.operator, OperatorSpec::StreamJoin { .. }) {
+            continue;
+        }
+        for binding_id in plan.reachable_source_binding_ids_for_operator(&node.id) {
+            let Some((source_index, binding)) = project
+                .sources
+                .iter()
+                .enumerate()
+                .find(|(_, binding)| binding.binding == binding_id)
+            else {
+                continue;
+            };
+            let has_progress = match binding.watermark {
+                Some(ProjectWatermarkPolicy::Disabled) => false,
+                Some(
+                    ProjectWatermarkPolicy::SourceProvided
+                    | ProjectWatermarkPolicy::BoundedOutOfOrderness { .. },
+                ) => true,
+                None => ConnectorIdentity::new(
+                    &binding.connector.provider,
+                    &binding.connector.name,
+                    &binding.connector.version,
+                )
+                .ok()
+                .and_then(|identity| connectors.resolve_source(&identity).ok())
+                .and_then(|factory| factory.capabilities(&binding.options).ok())
+                .is_some_and(|capabilities| {
+                    capabilities.watermark == crate::WatermarkSupport::Native
+                }),
+            };
+            if !has_progress {
+                issues.push(issue(
+                    format!("sources[{source_index}].watermark"),
+                    "watermark_required",
+                    format!(
+                        "source binding {binding_id:?} reaches stream Join {:?} and must provide watermark progress",
+                        node.id
+                    ),
+                ));
+            }
+        }
+    }
 }
 
 // Delivery validation is an exhaustive capability cross-product whose issues
@@ -1233,6 +1288,7 @@ fn project_node_operator(
         } => sql_node(node, inputs, outputs, query, aliases, references),
         OperatorSpec::Union => union_node(node, inputs, &outputs, mode),
         OperatorSpec::Window { spec } => window_node(node, &inputs, &outputs, spec, mode),
+        OperatorSpec::StreamJoin { spec } => stream_join_node(node, &inputs, &outputs, spec, mode),
         OperatorSpec::External {
             provider,
             name,
@@ -1302,6 +1358,62 @@ fn window_node(
     let operator = WindowAggregateOperator::new(&node.id, schema, spec.clone())?;
     validate_derived_outputs(outputs, crate::OperatorMetadata::output_ports(&operator))?;
     Ok(NodeOperator::Window(operator))
+}
+
+fn stream_join_node(
+    node: &NodeSpec,
+    inputs: &[Port],
+    outputs: &[Port],
+    spec: &StreamJoinSpec,
+    mode: CompileMode,
+) -> Result<NodeOperator> {
+    if mode != CompileMode::Stream {
+        return Err(CalcFlowError::Compile {
+            message: format!("node {:?} uses a stream-only stream_join", node.id),
+        });
+    }
+    let [left, right] = inputs else {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "node.input_ports".into(),
+            message: "stream_join requires required table inputs named left and right".into(),
+        });
+    };
+    require_stream_join_input(left, "left")?;
+    require_stream_join_input(right, "right")?;
+    let operator = build_stream_join_operator(node, left, right, spec)?;
+    validate_derived_outputs(outputs, crate::OperatorMetadata::output_ports(&operator))?;
+    Ok(NodeOperator::StreamJoin(Box::new(operator)))
+}
+
+fn build_stream_join_operator(
+    node: &NodeSpec,
+    left: &Port,
+    right: &Port,
+    spec: &StreamJoinSpec,
+) -> Result<StreamJoinOperator> {
+    let left_schema = exact_stream_join_schema(left, "node.input_ports[0].schema", "left")?;
+    let right_schema = exact_stream_join_schema(right, "node.input_ports[1].schema", "right")?;
+    StreamJoinOperator::new(&node.id, left_schema, right_schema, spec.clone())
+}
+
+fn require_stream_join_input(port: &Port, name: &str) -> Result<()> {
+    if port.name() != name || port.kind() != BatchKind::Table || !port.required() {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "node.input_ports".into(),
+            message: "stream_join requires required table inputs named left and right in order"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
+fn exact_stream_join_schema(port: &Port, field: &str, side: &str) -> Result<SchemaRef> {
+    port.schema()
+        .cloned()
+        .ok_or_else(|| CalcFlowError::InvalidArgument {
+            field: field.into(),
+            message: format!("stream_join requires an exact {side} schema"),
+        })
 }
 
 fn validate_derived_outputs(configured: &[Port], actual: &[Port]) -> Result<()> {
@@ -1569,7 +1681,9 @@ fn project_requires_datafusion(project: &ProjectSpec) -> bool {
     project.graph.nodes.iter().any(|node| {
         matches!(
             node.operator,
-            OperatorSpec::Expression { .. } | OperatorSpec::Sql { .. }
+            OperatorSpec::Expression { .. }
+                | OperatorSpec::Sql { .. }
+                | OperatorSpec::StreamJoin { .. }
         )
     })
 }
@@ -1698,6 +1812,10 @@ fn validate_operator(
             validate_window_operator(node, index, spec, mode, &base, issues);
             (Some(vec!["input"]), Some(vec!["output"]))
         }
+        OperatorSpec::StreamJoin { spec } => {
+            validate_stream_join_operator(node, index, spec, mode, &base, issues);
+            (Some(vec!["left", "right"]), Some(vec!["output"]))
+        }
         OperatorSpec::External {
             provider,
             name,
@@ -1793,6 +1911,231 @@ fn validate_window_operator(
     {
         issues.push(issue(base, "invalid_operator", error.to_string()));
     }
+}
+
+fn validate_stream_join_operator(
+    node: &NodeSpec,
+    index: usize,
+    spec: &StreamJoinSpec,
+    mode: CompileMode,
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if mode != CompileMode::Stream {
+        issues.push(issue(
+            base,
+            "incompatible_runtime",
+            "stream_join is available only in stream runtime mode",
+        ));
+    }
+    if !stream_join_inputs_valid(node) {
+        issues.push(issue(
+            format!("graph.nodes[{index}].input_ports"),
+            "invalid_ports",
+            "stream_join requires required exact-schema table inputs named left and right in that order",
+        ));
+        return;
+    }
+    validate_stream_join_build(node, spec, base, issues);
+}
+
+fn stream_join_inputs_valid(node: &NodeSpec) -> bool {
+    node.input_ports.len() == 2 && stream_join_port_pair_valid(node)
+}
+
+fn stream_join_port_pair_valid(node: &NodeSpec) -> bool {
+    let [left, right] = node.input_ports.as_slice() else {
+        return false;
+    };
+    stream_join_port_valid(left, "left") && stream_join_port_valid(right, "right")
+}
+
+fn stream_join_port_valid(port: &PortSpec, name: &str) -> bool {
+    port.name == name && port.kind == BatchKind::Table && port.required && !port.schema.is_empty()
+}
+
+fn validate_stream_join_build(
+    node: &NodeSpec,
+    spec: &StreamJoinSpec,
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let spec_base = format!("{base}.spec");
+    let base = spec_base.as_str();
+    let reported = issues.len();
+    let (left_schema, right_schema) = (&node.input_ports[0].schema, &node.input_ports[1].schema);
+    validate_join_key_pairs(spec, left_schema, right_schema, base, issues);
+    validate_join_event_times(spec, left_schema, right_schema, base, issues);
+    validate_join_output_prefixes(spec, left_schema, right_schema, base, issues);
+    if issues.len() == reported {
+        validate_stream_join_operator_build(node, spec, base, issues);
+    }
+}
+
+fn validate_join_key_pairs(
+    spec: &StreamJoinSpec,
+    left_schema: &[ArrowFieldSpec],
+    right_schema: &[ArrowFieldSpec],
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    for (index, (left_key, right_key)) in spec.left_keys().iter().zip(spec.right_keys()).enumerate()
+    {
+        validate_join_key_pair(
+            index,
+            left_key,
+            right_key,
+            left_schema,
+            right_schema,
+            base,
+            issues,
+        );
+    }
+}
+
+fn validate_join_key_pair(
+    index: usize,
+    left_key: &str,
+    right_key: &str,
+    left_schema: &[ArrowFieldSpec],
+    right_schema: &[ArrowFieldSpec],
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let sides = [
+        ("left", left_key, unique_field(left_schema, left_key)),
+        ("right", right_key, unique_field(right_schema, right_key)),
+    ];
+    let resolved = sides.map(|(side, key, field)| match field {
+        None => {
+            issues.push(issue(
+                format!("{base}.{side}_keys[{index}]"),
+                "invalid_join_keys",
+                format!("{side}_keys[{index}] names missing or ambiguous column {key}"),
+            ));
+            None
+        }
+        Some(field) => Some((side, field)),
+    });
+    let [Some((_, left_field)), Some((_, right_field))] = resolved else {
+        return;
+    };
+    let left_type = arrow_data_type(&left_field.data_type);
+    let right_type = arrow_data_type(&right_field.data_type);
+    let compatible = left_type
+        .as_ref()
+        .zip(right_type.as_ref())
+        .is_some_and(|(left, right)| left == right && supported_key_type(left));
+    if !compatible {
+        issues.push(issue(
+            format!("{base}.left_keys[{index}]"),
+            "incompatible_key_type",
+            format!(
+                "join key pair {index} requires identical supported Arrow types; left is {} and right is {}",
+                left_type
+                    .as_ref()
+                    .map_or_else(|| left_field.data_type.clone(), ToString::to_string),
+                right_type
+                    .as_ref()
+                    .map_or_else(|| right_field.data_type.clone(), ToString::to_string),
+            ),
+        ));
+    }
+}
+
+fn validate_join_event_times(
+    spec: &StreamJoinSpec,
+    left_schema: &[ArrowFieldSpec],
+    right_schema: &[ArrowFieldSpec],
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    for (side, name, schema) in [
+        ("left", spec.left_event_time(), left_schema),
+        ("right", spec.right_event_time(), right_schema),
+    ] {
+        validate_join_event_time(side, name, schema, base, issues);
+    }
+}
+
+fn validate_join_event_time(
+    side: &str,
+    name: &str,
+    schema: &[ArrowFieldSpec],
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let Some(field) = unique_field(schema, name) else {
+        issues.push(issue(
+            format!("{base}.{side}_event_time"),
+            "invalid_event_time",
+            format!("{side}_event_time names missing or ambiguous column {name}"),
+        ));
+        return;
+    };
+    let timestamp = arrow_data_type(&field.data_type)
+        .is_some_and(|data_type| matches!(data_type, DataType::Timestamp(_, None)));
+    if timestamp {
+        return;
+    }
+    issues.push(issue(
+        format!("{base}.{side}_event_time"),
+        "invalid_event_time",
+        format!(
+            "{side}_event_time must be a timezone-naive or UTC Arrow timestamp; found {}",
+            arrow_data_type(&field.data_type)
+                .map_or_else(|| field.data_type.clone(), |value| value.to_string())
+        ),
+    ));
+}
+
+fn validate_join_output_prefixes(
+    spec: &StreamJoinSpec,
+    left_schema: &[ArrowFieldSpec],
+    right_schema: &[ArrowFieldSpec],
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let collision = left_schema.iter().any(|field| {
+        let prefixed = format!("{}__{}", spec.left_prefix(), field.name);
+        right_schema
+            .iter()
+            .any(|other| format!("{}__{}", spec.right_prefix(), other.name) == prefixed)
+    });
+    if spec.left_prefix() == spec.right_prefix() || collision {
+        issues.push(issue(
+            format!("{base}.right_prefix"),
+            "invalid_output_prefix",
+            "right_prefix must differ from left_prefix and produce no output-field collision",
+        ));
+    }
+}
+
+fn validate_stream_join_operator_build(
+    node: &NodeSpec,
+    spec: &StreamJoinSpec,
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let (left, right) = (
+        port_from_spec(&node.input_ports[0]),
+        port_from_spec(&node.input_ports[1]),
+    );
+    if let (Ok(left), Ok(right)) = (left, right)
+        && let (Some(left_schema), Some(right_schema)) =
+            (left.schema().cloned(), right.schema().cloned())
+        && let Err(error) =
+            StreamJoinOperator::new(&node.id, left_schema, right_schema, spec.clone())
+    {
+        issues.push(issue(base, "invalid_operator", error.to_string()));
+    }
+}
+
+/// Resolves exactly one schema field by name, or `None` when missing/ambiguous.
+fn unique_field<'a>(schema: &'a [ArrowFieldSpec], name: &str) -> Option<&'a ArrowFieldSpec> {
+    let mut matches = schema.iter().filter(|field| field.name == name);
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
 }
 
 fn validate_external_operator(
@@ -2217,7 +2560,10 @@ fn arrow_data_type(value: &str) -> Option<DataType> {
 fn operator_udfs(operator: &OperatorSpec) -> &[UdfReference] {
     match operator {
         OperatorSpec::Expression { udfs, .. } | OperatorSpec::Sql { udfs, .. } => udfs,
-        OperatorSpec::Union | OperatorSpec::Window { .. } | OperatorSpec::External { .. } => &[],
+        OperatorSpec::Union
+        | OperatorSpec::Window { .. }
+        | OperatorSpec::StreamJoin { .. }
+        | OperatorSpec::External { .. } => &[],
     }
 }
 

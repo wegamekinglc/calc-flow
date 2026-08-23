@@ -87,7 +87,10 @@ export const ARROW_TYPES = [
   'uint32',
   'uint64',
 ] as const;
-type EditableNodeKind = Extract<NodeConfig['operator']['kind'], 'expression' | 'sql'>;
+type EditableNodeKind = Extract<
+  NodeConfig['operator']['kind'],
+  'expression' | 'sql' | 'stream_join'
+>;
 type ProjectUpdate = EditableProject | ((current: EditableProject) => EditableProject);
 type SourceDraftUpdate =
   | DataSourceDraft[]
@@ -95,6 +98,7 @@ type SourceDraftUpdate =
 
 const nodeColor = (node: FlowNode) => {
   if (node.data.kind === 'sql') return '#ef9456';
+  if (node.data.kind === 'stream_join') return '#56a8d5';
   if (node.data.kind === 'external') return '#a994ff';
   return '#56d5b2';
 };
@@ -129,6 +133,33 @@ const makeNode = (
         query: 'SELECT * FROM input',
         aliases: ['input'],
         udfs: [],
+      },
+    };
+  }
+  if (kind === 'stream_join') {
+    return {
+      ...shared,
+      input_ports: [
+        { name: 'left', kind: 'table', required: true, schema: [] },
+        { name: 'right', kind: 'table', required: true, schema: [] },
+      ],
+      operator: {
+        kind: 'stream_join',
+        spec: {
+          join_type: 'inner',
+          left_keys: [],
+          right_keys: [],
+          left_event_time: '',
+          right_event_time: '',
+          bounds: { before_micros: 0, after_micros: 0 },
+          limits: {
+            max_state_rows_per_side: 100_000,
+            max_state_bytes_per_side: 134_217_728,
+            max_matches_per_input_batch: 1_000_000,
+          },
+          left_prefix: 'left',
+          right_prefix: 'right',
+        },
       },
     };
   }
@@ -859,6 +890,9 @@ export default function App() {
           <p>Drag connections between typed calculation nodes.</p>
           <button className="node-tool expression" type="button" onClick={() => addNode('expression')}><span>ƒx</span><div><strong>Expression</strong><small>Project · filter · calculate</small></div></button>
           <button className="node-tool sql" type="button" onClick={() => addNode('sql')}><span>SQL</span><div><strong>DataFusion SQL</strong><small>Join · aggregate · window</small></div></button>
+          {project.runtime.mode === 'stream' && (
+            <button className="node-tool stream_join" type="button" onClick={() => { addNode('stream_join'); }}><span>⋈</span><div><strong>Stream Join</strong><small>Bounded · event time · inner</small></div></button>
+          )}
 
           <StreamConfigEditor
             project={project}

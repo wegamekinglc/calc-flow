@@ -26,8 +26,9 @@ use crate::{
 
 const SAFE_EXCEPTION_STORAGE: &str = "_calc_flow_safe_fields";
 const NATIVE_EXCEPTION_STORAGE: &str = "_calc_flow_native_safe_fields";
-const SAFE_EXCEPTION_FIELDS: [&str; 9] = [
+const SAFE_EXCEPTION_FIELDS: [&str; 10] = [
     "category",
+    "reason_code",
     "message",
     "job_id",
     "epoch",
@@ -55,6 +56,7 @@ macro_rules! py_tuple {
 
 struct SafeStreamingErrorFields {
     category: String,
+    reason_code: Option<String>,
     message: String,
     job_id: Option<u64>,
     epoch: Option<u64>,
@@ -69,6 +71,7 @@ impl SafeStreamingErrorFields {
     fn internal(message: &str) -> Self {
         Self {
             category: "internal".to_owned(),
+            reason_code: None,
             message: message.to_owned(),
             job_id: None,
             epoch: None,
@@ -83,6 +86,10 @@ impl SafeStreamingErrorFields {
     fn from_streaming(error: &calc_flow::StreamingError) -> Self {
         Self {
             category: streaming_error_category_name(error.category()).to_owned(),
+            reason_code: error
+                .reason_code()
+                .and_then(streaming_failure_reason_name)
+                .map(str::to_owned),
             message: error.message().to_owned(),
             job_id: error.job_id(),
             epoch: error.epoch().map(calc_flow::Epoch::as_u64),
@@ -1016,7 +1023,12 @@ impl PyStreamingJob {
     }
 
     fn status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        job_status_to_py(py, &self.job()?.status())
+        let job = self.job()?;
+        let status = job_status_to_py(py, &job.status())?;
+        let joins = job.stream_join_status();
+        let join_values = stream_join_status_to_py(py, &joins)?;
+        status.set_item("stream_joins", join_values)?;
+        Ok(status)
     }
 
     fn trigger_checkpoint_async(&self, py: Python<'_>) -> PyResult<Py<PyStreamingJobAwaitable>> {
@@ -1219,6 +1231,7 @@ fn structured_streaming_py_err(
             py,
             [
                 fields.category,
+                fields.reason_code,
                 fields.message,
                 fields.job_id,
                 fields.epoch,
@@ -1427,6 +1440,7 @@ fn streaming_error_value_to_py<'py>(
     let value = PyDict::new(py);
     set_py_items!(value, {
         "category" => streaming_error_category_name(error.category()),
+        "reason_code" => error.reason_code().and_then(streaming_failure_reason_name),
         "message" => error.message(),
         "job_id" => error.job_id(),
         "epoch" => error.epoch().map(calc_flow::Epoch::as_u64),
@@ -1458,6 +1472,52 @@ fn job_status_to_py<'py>(
         "operators" => operator_status_to_py(py, &status.operators)?,
         "sinks" => sink_status_to_py(py, &status.sinks)?,
         "checkpoint" => checkpoint_status_to_py(py, &status.checkpoint)?,
+    });
+    Ok(value)
+}
+
+/// Projects the per-node Join status mapping (api note "Payload-free Join
+/// status").
+fn stream_join_status_to_py<'py>(
+    py: Python<'py>,
+    statuses: &BTreeMap<String, calc_flow::StreamJoinStatus>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let values = PyDict::new(py);
+    for (node_id, status) in statuses {
+        values.set_item(node_id, stream_join_status_value_to_py(py, status)?)?;
+    }
+    Ok(values)
+}
+
+fn stream_join_status_value_to_py<'py>(
+    py: Python<'py>,
+    status: &calc_flow::StreamJoinStatus,
+) -> PyResult<Bound<'py, PyDict>> {
+    let value = PyDict::new(py);
+    set_py_items!(value, {
+        "left" => stream_join_side_to_py(py, &status.left)?,
+        "right" => stream_join_side_to_py(py, &status.right)?,
+        "emitted_match_rows" => status.emitted_match_rows,
+        "state_limit_failures" => status.state_limit_failures,
+        "match_limit_failures" => status.match_limit_failures,
+    });
+    Ok(value)
+}
+
+fn stream_join_side_to_py<'py>(
+    py: Python<'py>,
+    side: &calc_flow::StreamJoinSideStatus,
+) -> PyResult<Bound<'py, PyDict>> {
+    let value = PyDict::new(py);
+    set_py_items!(value, {
+        "retained_rows" => side.retained_rows,
+        "retained_bytes" => side.retained_bytes,
+        "evicted_rows" => side.evicted_rows,
+        "late_rows" => side.late_rows,
+        "late_affected_batches" => side.late_affected_batches,
+        "max_lateness_micros" => side.max_lateness.map(duration_micros),
+        "null_event_time_rows" => side.null_event_time_rows,
+        "null_key_rows" => side.null_key_rows,
     });
     Ok(value)
 }
@@ -1677,6 +1737,24 @@ const fn streaming_error_category_name(
         calc_flow::StreamingErrorCategory::Connector => "connector",
         calc_flow::StreamingErrorCategory::TaskPanicked => "task_panicked",
         calc_flow::StreamingErrorCategory::Internal => "internal",
+    }
+}
+
+const fn streaming_failure_reason_name(
+    reason: calc_flow::StreamingFailureReason,
+) -> Option<&'static str> {
+    match reason {
+        calc_flow::StreamingFailureReason::JoinStateLimitExceeded => {
+            Some("join_state_limit_exceeded")
+        }
+        calc_flow::StreamingFailureReason::JoinMatchLimitExceeded => {
+            Some("join_match_limit_exceeded")
+        }
+        calc_flow::StreamingFailureReason::JoinCounterOverflow => Some("join_counter_overflow"),
+        calc_flow::StreamingFailureReason::JoinTimeConversionFailed => {
+            Some("join_time_conversion_failed")
+        }
+        _ => None,
     }
 }
 
@@ -2392,7 +2470,8 @@ mod tests {
                 .unwrap();
             py.run(
                 &CString::new(
-                    "import asyncio\nasync def exercise():\n    assert 'consumed=false' in repr(runner)\n    job = await runner.start_async()\n    assert job.id > 0\n    while 'transactional.write:1' not in events:\n        await asyncio.sleep(0)\n    epoch = await job.trigger_checkpoint_async()\n    assert epoch >= 1\n    source.release.set()\n    status = job.status()\n    assert status['job_id'] == job.id\n    assert set(status) == {'job_id', 'state', 'terminal_cause', 'delivery', 'task_count', 'task_errors', 'metrics_overflowed', 'watermark_micros', 'edges', 'sources', 'operators', 'sinks', 'checkpoint'}\n    outcome = await job.wait_async()\n    assert outcome['state'] == 'completed', outcome\n    assert outcome['cause'] == 'natural_end'\n    assert outcome['errors'] == ()\n    assert 'state=completed' in repr(job)\nasyncio.run(exercise())\nassert 'source.open' in events\nassert 'sink.open' in events\nassert 'sink.write:1' in events\nassert 'source.close' in events\nassert 'sink.close' in events\nassert any(value.startswith('transactional.begin:') for value in events)\nassert any(value.startswith('transactional.pre_commit:') for value in events)\nassert any(value.startswith('transactional.commit:') for value in events)\nassert 'transactional.close' in events",
+                    "import asyncio\nasync def exercise():\n    assert 'consumed=false' in repr(runner)\n    job = await runner.start_async()\n    assert job.id > 0\n    while 'transactional.write:1' not in events:\n        await asyncio.sleep(0)\n    epoch = await job.trigger_checkpoint_async()\n    assert epoch >= 1\n    source.release.set()\n    status = job.status()\n    assert status['job_id'] == job.id\n    assert set(status) == {'job_id', 'state', 'terminal_cause', 'delivery', 'task_count', 'task_errors', 'metrics_overflowed', 'watermark_micros', 'edges', 'sources', 'operators', 'sinks', 'checkpoint', 'stream_joins'}\n    assert status['stream_joins'] == {}
+    outcome = await job.wait_async()\n    assert outcome['state'] == 'completed', outcome\n    assert outcome['cause'] == 'natural_end'\n    assert outcome['errors'] == ()\n    assert 'state=completed' in repr(job)\nasyncio.run(exercise())\nassert 'source.open' in events\nassert 'sink.open' in events\nassert 'sink.write:1' in events\nassert 'source.close' in events\nassert 'sink.close' in events\nassert any(value.startswith('transactional.begin:') for value in events)\nassert any(value.startswith('transactional.pre_commit:') for value in events)\nassert any(value.startswith('transactional.commit:') for value in events)\nassert 'transactional.close' in events",
                 )
                 .unwrap(),
                 Some(&locals),

@@ -287,6 +287,8 @@ export interface components {
             id: string;
             /** Project Id */
             project_id: string;
+            /** Reason Code */
+            reason_code?: null;
             /** Started At */
             started_at?: string | null;
             /**
@@ -325,6 +327,8 @@ export interface components {
             id: string;
             /** Project Id */
             project_id: string;
+            /** Reason Code */
+            reason_code?: null;
             /**
              * Started At
              * Format: date-time
@@ -411,6 +415,7 @@ export interface components {
             id: string;
             /** Project Id */
             project_id: string;
+            reason_code?: components["schemas"]["StreamingFailureReasonCode"] | null;
             /**
              * Started At
              * Format: date-time
@@ -509,6 +514,8 @@ export interface components {
             id: string;
             /** Project Id */
             project_id: string;
+            /** Reason Code */
+            reason_code?: null;
             /** Started At */
             started_at?: null;
             /**
@@ -631,6 +638,22 @@ export interface components {
                     name: string;
                     version: string;
                 };
+                /** @description Hard logical state and per-input fan-out limits. */
+                JoinStateLimits: {
+                    /** Format: uint64 */
+                    max_matches_per_input_batch: number;
+                    /** Format: uint64 */
+                    max_state_bytes_per_side: number;
+                    /** Format: uint64 */
+                    max_state_rows_per_side: number;
+                };
+                /** @description Inclusive event-time distance around one left row. */
+                JoinTimeBounds: {
+                    /** Format: uint64 */
+                    after_micros: number;
+                    /** Format: uint64 */
+                    before_micros: number;
+                };
                 NodeSpec: {
                     id: string;
                     /** @default [] */
@@ -664,6 +687,10 @@ export interface components {
                     /** @constant */
                     kind: "window";
                     spec: components["schemas"]["ProjectCreateRequest"]["$defs"]["WindowSpec"];
+                } | {
+                    /** @constant */
+                    kind: "stream_join";
+                    spec: components["schemas"]["ProjectCreateRequest"]["$defs"]["StreamJoinSpec"];
                 } | {
                     /** @constant */
                     kind: "external";
@@ -837,6 +864,20 @@ export interface components {
                     /** @default .calc-flow-state */
                     root: string;
                 };
+                /** @description Immutable declaration for a two-input bounded inner stream Join. */
+                StreamJoinSpec: {
+                    bounds: components["schemas"]["ProjectCreateRequest"]["$defs"]["JoinTimeBounds"];
+                    join_type: components["schemas"]["ProjectCreateRequest"]["$defs"]["StreamJoinType"];
+                    left_event_time: string;
+                    left_keys: string[];
+                    left_prefix: string;
+                    limits: components["schemas"]["ProjectCreateRequest"]["$defs"]["JoinStateLimits"];
+                    right_event_time: string;
+                    right_keys: string[];
+                    right_prefix: string;
+                };
+                /** @description Supported Join semantics. */
+                StreamJoinType: "inner";
                 /** @description Continuous runtime limits carried by project v3. */
                 StreamRunOptions: {
                     /**
@@ -984,6 +1025,22 @@ export interface components {
                     name: string;
                     version: string;
                 };
+                /** @description Hard logical state and per-input fan-out limits. */
+                JoinStateLimits: {
+                    /** Format: uint64 */
+                    max_matches_per_input_batch: number;
+                    /** Format: uint64 */
+                    max_state_bytes_per_side: number;
+                    /** Format: uint64 */
+                    max_state_rows_per_side: number;
+                };
+                /** @description Inclusive event-time distance around one left row. */
+                JoinTimeBounds: {
+                    /** Format: uint64 */
+                    after_micros: number;
+                    /** Format: uint64 */
+                    before_micros: number;
+                };
                 NodeSpec: {
                     id: string;
                     /** @default [] */
@@ -1017,6 +1074,10 @@ export interface components {
                     /** @constant */
                     kind: "window";
                     spec: components["schemas"]["ProjectDocument"]["$defs"]["WindowSpec"];
+                } | {
+                    /** @constant */
+                    kind: "stream_join";
+                    spec: components["schemas"]["ProjectDocument"]["$defs"]["StreamJoinSpec"];
                 } | {
                     /** @constant */
                     kind: "external";
@@ -1190,6 +1251,20 @@ export interface components {
                     /** @default .calc-flow-state */
                     root: string;
                 };
+                /** @description Immutable declaration for a two-input bounded inner stream Join. */
+                StreamJoinSpec: {
+                    bounds: components["schemas"]["ProjectDocument"]["$defs"]["JoinTimeBounds"];
+                    join_type: components["schemas"]["ProjectDocument"]["$defs"]["StreamJoinType"];
+                    left_event_time: string;
+                    left_keys: string[];
+                    left_prefix: string;
+                    limits: components["schemas"]["ProjectDocument"]["$defs"]["JoinStateLimits"];
+                    right_event_time: string;
+                    right_keys: string[];
+                    right_prefix: string;
+                };
+                /** @description Supported Join semantics. */
+                StreamJoinType: "inner";
                 /** @description Continuous runtime limits carried by project v3. */
                 StreamRunOptions: {
                     /**
@@ -1251,6 +1326,18 @@ export interface components {
                     group_by: string[];
                 };
             };
+        };
+        /**
+         * ProjectInvalidResponse
+         * @description The 422 body for join validation routes.
+         *
+         *     The detail is either the structured invalid `ValidationReport` envelope
+         *     (malformed stream Join input and semantic project issues) or the standard
+         *     request-validation error list.
+         */
+        ProjectInvalidResponse: {
+            /** Detail */
+            detail: components["schemas"]["InvalidValidationReport"] | components["schemas"]["RequestError"][];
         };
         /** ProjectSummary */
         ProjectSummary: {
@@ -1319,6 +1406,23 @@ export interface components {
             required: boolean;
         };
         /**
+         * RequestError
+         * @description One request-validation error as FastAPI emits it.
+         */
+        RequestError: {
+            /** Input */
+            input?: unknown | null;
+            /**
+             * Loc
+             * @default []
+             */
+            loc: (string | number)[];
+            /** Msg */
+            msg: string;
+            /** Type */
+            type: string;
+        };
+        /**
          * ResourceLimits
          * @description Hard bounds for long-running continuous jobs.
          */
@@ -1367,6 +1471,8 @@ export interface components {
             id: string;
             /** Project Id */
             project_id: string;
+            /** Reason Code */
+            reason_code?: null;
             /**
              * Started At
              * Format: date-time
@@ -1429,6 +1535,8 @@ export interface components {
             /** Version */
             version: string;
         };
+        /** @enum {string} */
+        StreamingFailureReasonCode: "join_state_limit_exceeded" | "join_match_limit_exceeded" | "join_counter_overflow" | "join_time_conversion_failed";
         /** UdfCapabilityResponse */
         UdfCapabilityResponse: {
             /** Inputtypes */
@@ -1821,13 +1929,13 @@ export interface operations {
                     "application/json": components["schemas"]["ProjectDocument"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Invalid project document or request */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ProjectInvalidResponse"];
                 };
             };
         };
@@ -1853,13 +1961,13 @@ export interface operations {
                     "application/json": components["schemas"]["ProjectDocument"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Invalid project document or request */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ProjectInvalidResponse"];
                 };
             };
         };
@@ -1919,13 +2027,13 @@ export interface operations {
                     "application/json": components["schemas"]["ProjectDocument"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Invalid project document or request */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ProjectInvalidResponse"];
                 };
             };
         };
