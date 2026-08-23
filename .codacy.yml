@@ -10,6 +10,9 @@ engines:
     exclude_paths:
       - "python/tests/**"
       - "web-ui/backend/tests/**"
+      # Benchmark scenario files carry the same test-oracle asserts and
+      # constant-only SQL templates with no untrusted input.
+      - "benchmarks/test_*.py"
   biome:
     # The frontend is React and is already governed by the repository ESLint
     # configuration. Biome's default Qwik and no-React patterns misclassify
