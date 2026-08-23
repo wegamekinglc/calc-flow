@@ -40,6 +40,7 @@ from calc_flow_studio.models import (
     JobCreateRequest,
     JobResponse,
     ProjectCreateRequest,
+    ProjectInvalidResponse,
     ProjectSummary,
     ResourceLimits,
     RunEvent,
@@ -55,6 +56,14 @@ from calc_flow_studio.run_manager import (
 API_PREFIX = "/api/v3"
 MAX_PROJECT_IMPORT_BYTES = 10 * 1024 * 1024
 _VALIDATION_REPORT_ADAPTER = TypeAdapter(ValidationReport)
+# The join validation routes answer 422 with either the structured
+# ValidationReport envelope or the standard request-validation error list.
+_PROJECT_INVALID_422 = {
+    422: {
+        "description": "Invalid project document or request",
+        "model": ProjectInvalidResponse,
+    }
+}
 # Stable stream Join validation codes (spec FR58); the 422 envelope for
 # malformed Join input carries these instead of a flattened message.
 _JOIN_ISSUE_CODES = frozenset(
@@ -389,6 +398,7 @@ def create_app(
         f"{API_PREFIX}/projects",
         response_model=ProjectDocument,
         status_code=status.HTTP_201_CREATED,
+        responses=_PROJECT_INVALID_422,
     )
     async def create_project(request: ProjectCreateRequest) -> ProjectDocument:
         project = request.to_project()
@@ -403,6 +413,7 @@ def create_app(
         f"{API_PREFIX}/projects/import",
         response_model=ProjectDocument,
         status_code=status.HTTP_201_CREATED,
+        responses=_PROJECT_INVALID_422,
     )
     async def import_project(
         request: Request,
@@ -427,7 +438,11 @@ def create_app(
     async def get_project(project_id: str) -> ProjectDocument:
         return await stored_project(project_id)
 
-    @app.put(f"{API_PREFIX}/projects/{{project_id}}", response_model=ProjectDocument)
+    @app.put(
+        f"{API_PREFIX}/projects/{{project_id}}",
+        response_model=ProjectDocument,
+        responses=_PROJECT_INVALID_422,
+    )
     async def put_project(
         project_id: str, request: ProjectCreateRequest
     ) -> ProjectDocument:

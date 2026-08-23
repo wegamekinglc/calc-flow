@@ -2933,6 +2933,31 @@
         "title": "Calc Flow Project V3",
         "type": "object"
       },
+      "ProjectInvalidResponse": {
+        "additionalProperties": false,
+        "description": "The 422 body for join validation routes.\n\nThe detail is either the structured invalid `ValidationReport` envelope\n(malformed stream Join input and semantic project issues) or the standard\nrequest-validation error list.",
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InvalidValidationReport"
+              },
+              {
+                "items": {
+                  "$ref": "#/components/schemas/RequestError"
+                },
+                "type": "array"
+              }
+            ],
+            "title": "Detail"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "ProjectInvalidResponse",
+        "type": "object"
+      },
       "ProjectSummary": {
         "additionalProperties": false,
         "properties": {
@@ -3090,6 +3115,50 @@
           "required"
         ],
         "title": "ProviderPortResponse",
+        "type": "object"
+      },
+      "RequestError": {
+        "additionalProperties": false,
+        "description": "One request-validation error as FastAPI emits it.",
+        "properties": {
+          "input": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input"
+          },
+          "loc": {
+            "default": [],
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Loc",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Msg",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "msg"
+        ],
+        "title": "RequestError",
         "type": "object"
       },
       "ResourceLimits": {
@@ -3931,11 +4000,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ProjectInvalidResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Invalid project document or request"
           }
         },
         "summary": "Create Project"
@@ -3981,11 +4050,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ProjectInvalidResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Invalid project document or request"
           }
         },
         "summary": "Import Project"
@@ -4097,11 +4166,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ProjectInvalidResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Invalid project document or request"
           }
         },
         "summary": "Put Project"

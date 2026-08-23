@@ -1327,6 +1327,18 @@ export interface components {
                 };
             };
         };
+        /**
+         * ProjectInvalidResponse
+         * @description The 422 body for join validation routes.
+         *
+         *     The detail is either the structured invalid `ValidationReport` envelope
+         *     (malformed stream Join input and semantic project issues) or the standard
+         *     request-validation error list.
+         */
+        ProjectInvalidResponse: {
+            /** Detail */
+            detail: components["schemas"]["InvalidValidationReport"] | components["schemas"]["RequestError"][];
+        };
         /** ProjectSummary */
         ProjectSummary: {
             /** Description */
@@ -1392,6 +1404,23 @@ export interface components {
             name: string;
             /** Required */
             required: boolean;
+        };
+        /**
+         * RequestError
+         * @description One request-validation error as FastAPI emits it.
+         */
+        RequestError: {
+            /** Input */
+            input?: unknown | null;
+            /**
+             * Loc
+             * @default []
+             */
+            loc: (string | number)[];
+            /** Msg */
+            msg: string;
+            /** Type */
+            type: string;
         };
         /**
          * ResourceLimits
@@ -1900,13 +1929,13 @@ export interface operations {
                     "application/json": components["schemas"]["ProjectDocument"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Invalid project document or request */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ProjectInvalidResponse"];
                 };
             };
         };
@@ -1932,13 +1961,13 @@ export interface operations {
                     "application/json": components["schemas"]["ProjectDocument"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Invalid project document or request */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ProjectInvalidResponse"];
                 };
             };
         };
@@ -1998,13 +2027,13 @@ export interface operations {
                     "application/json": components["schemas"]["ProjectDocument"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Invalid project document or request */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ProjectInvalidResponse"];
                 };
             };
         };

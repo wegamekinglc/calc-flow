@@ -181,3 +181,31 @@ def test_semantic_join_issues_return_the_validation_report_envelope(tmp_path) ->
             "fingerprint": None,
         }
     }
+
+
+def test_join_validation_routes_declare_the_422_union_contract() -> None:
+    from calc_flow_studio.app import create_app as build_app
+
+    app = build_app(project_directory=Path("./.unused-projects"))
+    spec = app.openapi()
+    for path in (
+        "/api/v3/projects",
+        "/api/v3/projects/import",
+    ):
+        responses = spec["paths"][path]["post"]["responses"]
+        assert "422" in responses, (path, sorted(responses))
+        detail = responses["422"]["content"]["application/json"]["schema"]
+        assert detail["$ref"] == "#/components/schemas/ProjectInvalidResponse"
+    put_responses = spec["paths"]["/api/v3/projects/{project_id}"]["put"]["responses"]
+    assert (
+        put_responses["422"]["content"]["application/json"]["schema"]["$ref"]
+        == "#/components/schemas/ProjectInvalidResponse"
+    )
+    component = spec["components"]["schemas"]["ProjectInvalidResponse"]
+    assert set(component["properties"]) == {"detail"}
+    union = component["properties"]["detail"]
+    assert "anyOf" in union, union
+    [report_variant, list_variant] = union["anyOf"]
+    assert report_variant == {"$ref": "#/components/schemas/InvalidValidationReport"}
+    assert list_variant["type"] == "array"
+    assert list_variant["items"] == {"$ref": "#/components/schemas/RequestError"}

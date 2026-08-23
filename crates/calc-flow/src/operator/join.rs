@@ -1067,10 +1067,11 @@ use async_trait::async_trait;
 use datafusion::arrow::{
     array::{
         Array, ArrayAccessor, ArrayRef, BinaryArray, BinaryViewArray, BooleanArray,
-        DictionaryArray, LargeBinaryArray, LargeListArray, LargeStringArray, ListArray, MapArray,
-        PrimitiveArray, RunArray, StringArray, StringViewArray, StructArray,
-        TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-        TimestampSecondArray, UInt64Array, UnionArray,
+        DictionaryArray, FixedSizeListArray, LargeBinaryArray, LargeListArray, LargeListViewArray,
+        LargeStringArray, ListArray, ListViewArray, MapArray, PrimitiveArray, RunArray,
+        StringArray, StringViewArray, StructArray, TimestampMicrosecondArray,
+        TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt64Array,
+        UnionArray,
     },
     compute::concat,
     datatypes::{
@@ -2163,6 +2164,9 @@ impl StreamOperator for StreamJoinOperator {
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
         context.check_cancelled()?;
+        if self.state.deltas.needs_compaction {
+            compact_base(&mut self.state, &self.name)?;
+        }
         let prepared = self.prepare_batch(ingress, &batch, context).await?;
         self.emit_prepared(&prepared, context, output).await?;
         let emitted = u64::try_from(prepared.outputs.len())
@@ -2351,6 +2355,9 @@ impl StreamOperator for StreamJoinOperator {
         restored_retained_metrics_match(&metadata.metrics, &left, &right, &self.name)?;
         self.validate_restored_limits(&left, &right)?;
         let carried = carried_delta_segments(snapshot, &self.name)?;
+        let base = carried_base_segments(snapshot);
+        let segments_since_base =
+            u32::try_from(carried.len()).map_err(|_| counter_overflow(&self.name, "segments"))?;
         self.state = StreamJoinState {
             left,
             right,
@@ -2361,7 +2368,9 @@ impl StreamOperator for StreamJoinOperator {
             ended: metadata.ended,
             last_checkpoint_epoch: Epoch::new(metadata.epoch),
             deltas: DeltaTracking {
+                base,
                 segments: carried,
+                segments_since_base,
                 ..DeltaTracking::default()
             },
         };
@@ -3311,6 +3320,19 @@ fn identity_order(left: &StoredRow, right: &StoredRow) -> std::cmp::Ordering {
 /// next checkpoint carries them forward without re-encoding.
 type CarriedDeltaSegments = BTreeMap<(u64, &'static str), Arc<Vec<u8>>>;
 
+fn carried_base_segments(snapshot: &OperatorStateSnapshot) -> BTreeMap<&'static str, Arc<Vec<u8>>> {
+    let mut base = BTreeMap::new();
+    for (segment_id, bytes) in &snapshot.segments {
+        if let Some(side) = ["left", "right"]
+            .into_iter()
+            .find(|side| segment_id == &format!("{side}-base"))
+        {
+            base.insert(side, Arc::new(bytes.clone()));
+        }
+    }
+    base
+}
+
 fn carried_delta_segments(
     snapshot: &OperatorStateSnapshot,
     operator_id: &str,
@@ -4185,6 +4207,27 @@ fn sized_cell_charge(array: &dyn Array, row_index: usize) -> Result<u64> {
             let entries: &dyn Array = &entries;
             list_cell_charge(entries, 4)
         }
+        DataType::ListView(_) => {
+            let typed = list_array::<ListViewArray>(array)?;
+            let child = typed.value(row_index);
+            let child: &dyn Array = &child;
+            list_cell_charge(child, 8)
+        }
+        DataType::LargeListView(_) => {
+            let typed = list_array::<LargeListViewArray>(array)?;
+            let child = typed.value(row_index);
+            let child: &dyn Array = &child;
+            list_cell_charge(child, 16)
+        }
+        DataType::FixedSizeList(_, _) => {
+            let typed = array
+                .as_any()
+                .downcast_ref::<FixedSizeListArray>()
+                .ok_or_else(|| charge_type_mismatch("FixedSizeList"))?;
+            let child = typed.value(row_index);
+            let child: &dyn Array = &child;
+            list_cell_charge(child, 0)
+        }
         DataType::Struct(_) => {
             let typed = array
                 .as_any()
@@ -4472,8 +4515,9 @@ fn default_right_prefix() -> String {
     "right".into()
 }
 
-/// Encodes one timestamp key value through the checked `EventTime` import
-/// contract so every unit serializes to the same microsecond value bytes.
+/// Encodes one timestamp key value as its native unit's little-endian bytes.
+/// The key block already carries the unit-specific type tag and timezone, so
+/// cross-unit unambiguity does not depend on converting to microseconds here.
 fn timestamp_key_bytes(array: &dyn Array, row_index: usize, unit: TimeUnit) -> Result<Vec<u8>> {
     let raw = match unit {
         TimeUnit::Second => array

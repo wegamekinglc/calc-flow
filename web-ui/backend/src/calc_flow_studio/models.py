@@ -275,6 +275,26 @@ class ValidationIssue(StrictModel):
     message: str
 
 
+class RequestError(StrictModel):
+    """One request-validation error as FastAPI emits it."""
+
+    type: str
+    loc: tuple[str | int, ...] = ()
+    msg: str
+    input: object | None = None
+
+
+class ProjectInvalidResponse(StrictModel):
+    """The 422 body for join validation routes.
+
+    The detail is either the structured invalid `ValidationReport` envelope
+    (malformed stream Join input and semantic project issues) or the standard
+    request-validation error list.
+    """
+
+    detail: InvalidValidationReport | list[RequestError]
+
+
 class ValidValidationReport(StrictModel):
     kind: Literal["valid"] = "valid"
     valid: Literal[True] = True

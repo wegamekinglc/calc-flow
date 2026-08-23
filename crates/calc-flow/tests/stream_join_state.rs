@@ -12,10 +12,10 @@ use calc_flow::{
 };
 use datafusion::arrow::array::Array as _;
 use datafusion::arrow::array::{
-    ArrayRef, Decimal32Array, Decimal64Array, Int32Array, Int64Array, ListArray, StringArray,
-    StructArray, TimestampMicrosecondArray,
+    ArrayRef, Decimal32Array, Decimal64Array, FixedSizeListArray, Int32Array, Int64Array,
+    ListArray, StringArray, StructArray, TimestampMicrosecondArray,
 };
-use datafusion::arrow::buffer::OffsetBuffer;
+use datafusion::arrow::buffer::{OffsetBuffer, ScalarBuffer};
 use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 
@@ -173,6 +173,59 @@ async fn state_charge_charges_null_cells_one_validity_byte() {
     );
 }
 
+#[tokio::test]
+async fn state_charge_covers_list_view_large_list_view_and_fixed_size_list() {
+    let values = Arc::new(Int64Array::from(vec![1, 2, 3])) as ArrayRef;
+    let element = Field::new("element", DataType::Int64, true);
+    // Three child cells of (1 validity + 8 value) bytes each.
+    let children = 3 * (1 + 8);
+
+    let list_view = datafusion::arrow::array::ListViewArray::new(
+        Arc::new(element.clone()),
+        ScalarBuffer::from(vec![0_i32]),
+        ScalarBuffer::from(vec![3_i32]),
+        values.clone(),
+        None,
+    );
+    // ListView cell: 1 validity + 8 prefix + children.
+    assert_eq!(
+        retained_bytes_for(
+            DataType::ListView(Arc::new(element.clone())),
+            Arc::new(list_view),
+        )
+        .await,
+        base_charge(KEY_CELL + TS_CELL + 1 + 8 + children)
+    );
+
+    let large_list_view = datafusion::arrow::array::LargeListViewArray::new(
+        Arc::new(element.clone()),
+        ScalarBuffer::from(vec![0_i64]),
+        ScalarBuffer::from(vec![3_i64]),
+        values.clone(),
+        None,
+    );
+    // LargeListView cell: 1 validity + 16 prefix + children.
+    assert_eq!(
+        retained_bytes_for(
+            DataType::LargeListView(Arc::new(element.clone())),
+            Arc::new(large_list_view),
+        )
+        .await,
+        base_charge(KEY_CELL + TS_CELL + 1 + 16 + children)
+    );
+
+    let fixed = FixedSizeListArray::new(Arc::new(element), 3, values, None);
+    // FixedSizeList cell: 1 validity + children, with no prefix.
+    assert_eq!(
+        retained_bytes_for(
+            DataType::FixedSizeList(Arc::new(Field::new("element", DataType::Int64, true)), 3),
+            Arc::new(fixed),
+        )
+        .await,
+        base_charge(KEY_CELL + TS_CELL + 1 + children)
+    );
+}
+
 fn decimal_type_of_32() -> DataType {
     DataType::Decimal32(9, 0)
 }
@@ -324,8 +377,8 @@ async fn evicted_rows_leave_tombstones_that_survive_restore() {
     let second = operator.checkpoint(Epoch::new(2).unwrap()).unwrap();
     assert!(second.segments.contains_key("left-delta-2"));
 
-    let (mut restored, job_two, collector_two) = state_operator(300);
-    let _ = collector_two;
+    let (mut restored, job_two, _) = state_operator(300);
+    let _ = &job_two;
     restored.restore(&second).unwrap();
     let context_two = StreamOperatorContext::new(&job_two, "match", None);
     let mut collector_three = EdgeCollector::new(restored.output_ports().to_vec());
@@ -482,4 +535,85 @@ async fn watermark_equality_is_on_time_and_eviction_is_strict() {
         .unwrap();
     assert_eq!(operator.status().left.retained_rows, 0);
     assert_eq!(operator.status().left.evicted_rows, 1);
+}
+
+#[tokio::test]
+async fn compaction_survives_restore_checkpoint_restore_cycles() {
+    let (mut operator, job, mut collector) = state_operator(300);
+    let context = StreamOperatorContext::new(&job, "match", None);
+
+    // Four epochs with dirty ops cross the compaction threshold, so the next
+    // data handler rebuilds one canonical base (spec FR45).
+    for epoch in 1..=4_u64 {
+        let stamp = 100_i64 + i64::try_from(epoch).unwrap() * SECOND;
+        operator
+            .process_data(
+                "left",
+                keyed_batch(&[("a", stamp)]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        operator.checkpoint(Epoch::new(epoch).unwrap()).unwrap();
+    }
+    operator
+        .process_data(
+            "left",
+            keyed_batch(&[("a", 500 * SECOND)]),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    let compacted = operator.checkpoint(Epoch::new(5).unwrap()).unwrap();
+    assert!(
+        compacted.segments.contains_key("left-base"),
+        "compaction must emit a canonical base: {:?}",
+        compacted.segments.keys().collect::<Vec<_>>()
+    );
+    // The post-compaction dirty row is a delta on top of the fresh base.
+    assert!(
+        compacted.segments.contains_key("left-delta-5"),
+        "{:?}",
+        compacted.segments.keys().collect::<Vec<_>>()
+    );
+
+    // Restore from the compacted snapshot; the next checkpoint must still
+    // carry the base plus any new deltas instead of an empty inventory.
+    let (mut restored, job_two, _) = state_operator(300);
+    let _ = &job_two;
+    restored.restore(&compacted).unwrap();
+    let after_restore = restored.checkpoint(Epoch::new(6).unwrap()).unwrap();
+    assert!(
+        after_restore.segments.contains_key("left-base"),
+        "restore must carry the base forward: {:?}",
+        after_restore.segments.keys().collect::<Vec<_>>()
+    );
+
+    // The chain restores again from the carried checkpoint.
+    let (mut restored_again, job_three, collector_three) = state_operator(300);
+    let _ = (&job_three, collector_three);
+    restored_again.restore(&after_restore).unwrap();
+    let final_snapshot = restored_again.checkpoint(Epoch::new(7).unwrap()).unwrap();
+    assert!(final_snapshot.segments.contains_key("left-base"));
+
+    // The compacted state still matches newly processed right rows.
+    let (mut matcher, job_four, _) = state_operator(300);
+    let _ = job_four;
+    matcher.restore(&final_snapshot).unwrap();
+    let context_four = StreamOperatorContext::new(&job_four, "match", None);
+    let mut matcher_collector = EdgeCollector::new(matcher.output_ports().to_vec());
+    matcher
+        .process_data(
+            "right",
+            keyed_batch(&[("a", 100 * SECOND)]),
+            &context_four,
+            &mut matcher_collector,
+        )
+        .await
+        .unwrap();
+    // Retained left rows at 101..104 seconds are all inside the interval of
+    // the 100-second right row; the 500-second row is outside.
+    assert_eq!(matcher_collector.drain("output").len(), 4);
 }
