@@ -224,6 +224,11 @@ def encode_value(value: CValue, /) -> bytes:
 
 def _encode_dimension(dimension: CValue, /) -> bytes:
     if isinstance(dimension, CInt):
+        if dimension.value < 0:
+            raise ValueError(
+                "canonical shape dimensions must be non-negative known"
+                f" sizes or symbolic identifiers; got {dimension.value}"
+            )
         return b"\x00" + _u64(dimension.value)
     if isinstance(dimension, CStr):
         return b"\x01" + _text(dimension.value)

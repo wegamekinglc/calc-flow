@@ -162,6 +162,13 @@ def test_shape_rejects_negative_known_dimensions() -> None:
         CShape((CInt(2), CInt(-1)))
 
 
+def test_dimension_encoder_rejects_negative_sizes_directly() -> None:
+    from calc_flow.symbolic.nodes import _encode_dimension
+
+    with pytest.raises(ValueError, match="non-negative"):
+        _encode_dimension(CInt(-1))
+
+
 def test_defaults_materialize_to_identical_digest() -> None:
     explicit = table_input(
         "quotes",
