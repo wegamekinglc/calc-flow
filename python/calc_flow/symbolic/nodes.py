@@ -144,9 +144,21 @@ class CMap:
 
 @dataclass(frozen=True, slots=True)
 class CShape:
-    """A canonical shape with known or symbolic dimensions (tag ``0x0a``)."""
+    """A canonical shape with known or symbolic dimensions (tag ``0x0a``).
+
+    Known dimensions must be non-negative so encoding never reaches a
+    low-level unsigned-conversion failure.
+    """
 
     dims: tuple[CValue, ...]
+
+    def __post_init__(self) -> None:
+        for dimension in self.dims:
+            if isinstance(dimension, CInt) and dimension.value < 0:
+                raise ValueError(
+                    "canonical shape dimensions must be non-negative known"
+                    f" sizes or symbolic identifiers; got {dimension.value}"
+                )
 
 
 @dataclass(frozen=True, slots=True)

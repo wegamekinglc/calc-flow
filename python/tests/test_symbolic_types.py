@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 
+import numpy as np
 import pytest
 
 from calc_flow.symbolic import (
@@ -157,6 +158,46 @@ def test_parameter_rejects_unknown_mutability() -> None:
             dtype="float64",
             shape=(1,),
             mutability="dynamic",  # type: ignore[call-overload]
+        )
+
+
+def test_parameter_rejects_array_like_host_values_stably() -> None:
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "static_inputs.p.shape: invalid_literal: table parameters do"
+            " not accept shape"
+        ),
+    ):
+        parameter(
+            "p",
+            kind="table",
+            schema=[Field("k", "string")],
+            shape=np.array([1, 2]),  # type: ignore[call-overload]
+        )
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "static_inputs.w.schema: invalid_literal: array parameters do"
+            " not accept schema"
+        ),
+    ):
+        parameter(
+            "w",
+            kind="array",
+            backend="numpy",
+            dtype="float64",
+            shape=(1,),
+            schema=np.array([Field("k", "string")]),  # type: ignore[call-overload]
+        )
+    with pytest.raises(TypeError, match=re.escape("static_inputs.w.mutability")):
+        parameter(
+            "w",
+            kind="array",
+            backend="numpy",
+            dtype="float64",
+            shape=(1,),
+            mutability=np.array(["static", "dynamic"]),  # type: ignore[call-overload]
         )
 
 

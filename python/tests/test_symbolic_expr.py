@@ -157,6 +157,11 @@ def test_table_input_node_bytes_and_digest_match_golden_vector() -> None:
     assert quotes.digest == NODE_DIGEST
 
 
+def test_shape_rejects_negative_known_dimensions() -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        CShape((CInt(2), CInt(-1)))
+
+
 def test_defaults_materialize_to_identical_digest() -> None:
     explicit = table_input(
         "quotes",

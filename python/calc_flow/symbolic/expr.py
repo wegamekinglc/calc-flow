@@ -479,6 +479,17 @@ def table_input(
     return TableExpr(node)
 
 
+def _is_absent_or_empty(value: object, /) -> bool:
+    """Type-safe absence check that never triggers element-wise equality.
+
+    Only ``None`` and a genuinely empty ``list``/``tuple`` count as absent;
+    array-like values (for example NumPy arrays) fail without invoking
+    their overloaded ``==`` so the stable rejection path is reached.
+    """
+
+    return value is None or (isinstance(value, (list, tuple)) and len(value) == 0)
+
+
 @overload
 def parameter(
     name: str,
@@ -536,11 +547,11 @@ def parameter(
         raise ValueError(
             f"{base}.kind: invalid_literal: kind must be 'table' or 'array'"
         )
+    if type(mutability) is not str:
+        raise TypeError(
+            f"{base}.mutability must be a string; got {type_name(mutability)}"
+        )
     if mutability != "static":
-        if type(mutability) is not str:
-            raise TypeError(
-                f"{base}.mutability must be a string; got {type_name(mutability)}"
-            )
         raise ValueError(
             f"{base}.mutability: invalid_literal: the only accepted"
             " mutability is 'static'"
@@ -552,7 +563,7 @@ def parameter(
                     f"{base}.{field_name}: invalid_literal: table"
                     f" parameters do not accept {field_name}"
                 )
-        if shape not in ((), None):
+        if not _is_absent_or_empty(shape):
             raise ValueError(
                 f"{base}.shape: invalid_literal: table parameters do not accept shape"
             )
@@ -568,7 +579,7 @@ def parameter(
             },
         )
         return Parameter(node)
-    if schema not in ((), None):
+    if not _is_absent_or_empty(schema):
         raise ValueError(
             f"{base}.schema: invalid_literal: array parameters do not accept schema"
         )

@@ -8,6 +8,7 @@ from calc_flow.symbolic import (
     ArrayExpr,
     ColumnExpr,
     Field,
+    Parameter,
     TableExpr,
     cs,
     event_time_bucket,
@@ -54,7 +55,7 @@ def _array() -> ArrayExpr:
     return linalg.from_columns(_table(), columns=["x"], backend="numpy")
 
 
-def _array_parameter() -> parameter:  # type: ignore[valid-type]
+def _array_parameter() -> Parameter:
     return parameter(
         "weights", kind="array", backend="numpy", dtype="float64", shape=(1,)
     )

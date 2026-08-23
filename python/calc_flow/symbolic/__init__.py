@@ -6,6 +6,12 @@ execution path: there is no ``eval``, ``push``, ``value``, ``transform``,
 preview evaluator, or formula parser. Semantics are frozen by
 ``.codex/artifacts/specs/symbolic-computation-contract.md`` and the exact
 signatures by ``.codex/artifacts/api-notes/symbolic-computation-engine.md``.
+
+``__all__`` currently lists the expression-level subset delivered by the
+SCE-02 stage. The program-level names of the frozen export list
+(``AnalysisIssue``, ``AnalysisResult``, ``FeatureSet``, ``Program``) land
+with SCE-03, which owns ``program.py``, ``analyzer.py``, and ``errors.py``;
+until then they are absent rather than re-exported stubs.
 """
 
 from __future__ import annotations
