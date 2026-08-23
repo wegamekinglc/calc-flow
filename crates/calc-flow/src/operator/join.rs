@@ -687,7 +687,7 @@ mod tests {
             .unwrap();
         let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
 
-        let mut fresh = |snapshot: &OperatorStateSnapshot| {
+        let fresh = |snapshot: &OperatorStateSnapshot| {
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec())
                 .unwrap()
                 .restore(snapshot)

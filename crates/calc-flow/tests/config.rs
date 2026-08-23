@@ -1062,7 +1062,7 @@ fn stream_join_node(id: &str, key_type: &str) -> NodeSpec {
 fn validate_reports_stream_join_runtime_port_and_operator_issues() {
     let (providers, udfs) = empty_registries();
 
-    let mut batch_mode = project(stream_join_node("join", "int64"));
+    let batch_mode = project(stream_join_node("join", "int64"));
     let report = validate_project(&batch_mode, &providers, &udfs);
     assert_issue(&report, "graph.nodes[0].operator", "incompatible_runtime");
 
