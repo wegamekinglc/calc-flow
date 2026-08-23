@@ -192,6 +192,59 @@
       ],
       "type": "object"
     },
+    "JoinStateLimits": {
+      "additionalProperties": false,
+      "description": "Hard logical state and per-input fan-out limits.",
+      "properties": {
+        "max_matches_per_input_batch": {
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_state_bytes_per_side": {
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_state_rows_per_side": {
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_state_rows_per_side",
+        "max_state_bytes_per_side",
+        "max_matches_per_input_batch"
+      ],
+      "type": "object"
+    },
+    "JoinTimeBounds": {
+      "additionalProperties": false,
+      "description": "Inclusive event-time distance around one left row.",
+      "properties": {
+        "after_micros": {
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "before_micros": {
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "before_micros",
+        "after_micros"
+      ],
+      "type": "object"
+    },
     "NodeSpec": {
       "additionalProperties": false,
       "properties": {
@@ -328,6 +381,24 @@
             },
             "spec": {
               "$ref": "#/$defs/WindowSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "spec"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Bounded two-input event-time inner Join for stream graphs.",
+          "properties": {
+            "kind": {
+              "const": "stream_join",
+              "type": "string"
+            },
+            "spec": {
+              "$ref": "#/$defs/StreamJoinSpec"
             }
           },
           "required": [
@@ -762,6 +833,67 @@
         }
       },
       "type": "object"
+    },
+    "StreamJoinSpec": {
+      "additionalProperties": false,
+      "description": "Immutable declaration for a two-input bounded inner stream Join.",
+      "properties": {
+        "bounds": {
+          "$ref": "#/$defs/JoinTimeBounds"
+        },
+        "join_type": {
+          "$ref": "#/$defs/StreamJoinType"
+        },
+        "left_event_time": {
+          "type": "string"
+        },
+        "left_keys": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "left_prefix": {
+          "type": "string"
+        },
+        "limits": {
+          "$ref": "#/$defs/JoinStateLimits"
+        },
+        "right_event_time": {
+          "type": "string"
+        },
+        "right_keys": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "right_prefix": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "join_type",
+        "left_keys",
+        "right_keys",
+        "left_event_time",
+        "right_event_time",
+        "bounds",
+        "limits",
+        "left_prefix",
+        "right_prefix"
+      ],
+      "type": "object"
+    },
+    "StreamJoinType": {
+      "description": "Supported Join semantics.",
+      "oneOf": [
+        {
+          "const": "inner",
+          "description": "Emit every pair with equal non-null keys and an event time inside the\nconfigured inclusive interval.",
+          "type": "string"
+        }
+      ]
     },
     "StreamRunOptions": {
       "additionalProperties": false,

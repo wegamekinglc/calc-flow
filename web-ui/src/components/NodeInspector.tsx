@@ -32,6 +32,9 @@ const parseBoundedInteger = (raw: string, min: number): number => {
   return Math.min(Math.max(parsed, min), Number.MAX_SAFE_INTEGER);
 };
 
+const boundMicros = (bounds: StreamJoinBounds, field: keyof StreamJoinBounds): number =>
+  (field === 'before_micros' ? bounds.before_micros : bounds.after_micros);
+
 const withBound = (
   bounds: StreamJoinBounds,
   field: keyof StreamJoinBounds,
@@ -39,6 +42,17 @@ const withBound = (
 ): StreamJoinBounds => (field === 'before_micros'
   ? { ...bounds, before_micros: parseBoundedInteger(raw, 0) }
   : { ...bounds, after_micros: parseBoundedInteger(raw, 0) });
+
+const limitValue = (limits: StreamJoinLimits, field: keyof StreamJoinLimits): number => {
+  switch (field) {
+    case 'max_state_rows_per_side':
+      return limits.max_state_rows_per_side;
+    case 'max_state_bytes_per_side':
+      return limits.max_state_bytes_per_side;
+    default:
+      return limits.max_matches_per_input_batch;
+  }
+};
 
 const withLimit = (
   limits: StreamJoinLimits,
@@ -268,9 +282,11 @@ export function NodeInspector({
                 type="number"
                 min={0}
                 max={Number.MAX_SAFE_INTEGER}
-                value={streamJoin.spec.bounds[field]}
+                value={boundMicros(streamJoin.spec.bounds, field)}
                 onChange={(event) => {
-                  patchStreamJoin({ bounds: withBound(streamJoin.spec.bounds, field, event.target.value) });
+                  patchStreamJoin({
+                    bounds: withBound(streamJoin.spec.bounds, field, event.target.value),
+                  });
                 }}
               />
             </label>
@@ -286,9 +302,11 @@ export function NodeInspector({
                 type="number"
                 min={1}
                 max={Number.MAX_SAFE_INTEGER}
-                value={streamJoin.spec.limits[field]}
+                value={limitValue(streamJoin.spec.limits, field)}
                 onChange={(event) => {
-                  patchStreamJoin({ limits: withLimit(streamJoin.spec.limits, field, event.target.value) });
+                  patchStreamJoin({
+                    limits: withLimit(streamJoin.spec.limits, field, event.target.value),
+                  });
                 }}
               />
             </label>
