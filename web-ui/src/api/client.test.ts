@@ -91,6 +91,21 @@ describe('API client', () => {
       }), {
         status: 422,
         statusText: 'Unprocessable Content',
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        detail: {
+          kind: 'invalid',
+          valid: false,
+          fingerprint: null,
+          issues: [{
+            path: 'graph.nodes[0].operator.spec.bounds.before_micros',
+            code: 'invalid_time_bound',
+            message: 'before_micros must be an integer microsecond count in 0..=9007199254740991',
+          }],
+        },
+      }), {
+        status: 422,
+        statusText: 'Unprocessable Content',
       }));
     vi.stubGlobal('fetch', fetchMock);
 
@@ -99,6 +114,12 @@ describe('API client', () => {
     );
     await expect(api.createProject(blankProject())).rejects.toEqual(
       new ApiError('name: Field required', 422),
+    );
+    await expect(api.createProject(blankProject())).rejects.toEqual(
+      new ApiError(
+        'graph.nodes[0].operator.spec.bounds.before_micros: before_micros must be an integer microsecond count in 0..=9007199254740991',
+        422,
+      ),
     );
   });
 

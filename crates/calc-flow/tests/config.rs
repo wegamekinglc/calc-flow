@@ -1086,8 +1086,8 @@ fn validate_reports_stream_join_runtime_port_and_operator_issues() {
     wrong_key_type.graph.nodes[0].input_ports[0].schema[0].data_type = "float64".into();
     assert_issue(
         &validate_project(&wrong_key_type, &providers, &udfs),
-        "graph.nodes[0].operator",
-        "invalid_operator",
+        "graph.nodes[0].operator.spec.left_keys[0]",
+        "incompatible_key_type",
     );
 }
 

@@ -5,7 +5,7 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 from urllib.parse import quote
 
 from calc_flow import (
@@ -22,8 +22,15 @@ from calc_flow.store import (
     import_project_yaml,
 )
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    PlainTextResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import TypeAdapter, ValidationError
 from starlette.concurrency import run_in_threadpool
@@ -48,6 +55,72 @@ from calc_flow_studio.run_manager import (
 API_PREFIX = "/api/v3"
 MAX_PROJECT_IMPORT_BYTES = 10 * 1024 * 1024
 _VALIDATION_REPORT_ADAPTER = TypeAdapter(ValidationReport)
+# Stable stream Join validation codes (spec FR58); the 422 envelope for
+# malformed Join input carries these instead of a flattened message.
+_JOIN_ISSUE_CODES = frozenset(
+    {
+        "unsupported_join_type",
+        "invalid_time_bound",
+        "invalid_join_limit",
+        "invalid_join_keys",
+        "incompatible_key_type",
+        "invalid_event_time",
+        "invalid_output_prefix",
+    }
+)
+
+
+def _invalid_report_detail(issues: list[dict[str, str]]) -> dict[str, object]:
+    return {
+        "kind": "invalid",
+        "valid": False,
+        "issues": issues,
+        "fingerprint": None,
+    }
+
+
+def _native_issue_dicts(error: Exception) -> list[dict[str, str]]:
+    raw = getattr(error, "issues", ())
+    return [
+        issue
+        for issue in raw
+        if isinstance(issue, dict)
+        and isinstance(issue.get("path"), str)
+        and isinstance(issue.get("code"), str)
+        and isinstance(issue.get("message"), str)
+    ]
+
+
+def _join_validation_error_detail(error: Any) -> dict[str, object] | None:
+    errors = error.errors()
+    join_errors = [entry for entry in errors if entry.get("type") in _JOIN_ISSUE_CODES]
+    if not join_errors or len(join_errors) != len(errors):
+        return None
+    return _invalid_report_detail(
+        [
+            {
+                "path": _join_issue_path(entry.get("loc", ())),
+                "code": str(entry["type"]),
+                "message": str(entry["msg"]),
+            }
+            for entry in join_errors
+        ]
+    )
+
+
+def _join_issue_path(loc: tuple[Any, ...]) -> str:
+    parts: list[str] = []
+    for part in loc:
+        if part == "body" and not parts:
+            continue
+        if isinstance(part, int):
+            if parts:
+                parts[-1] = f"{parts[-1]}[{part}]"
+            else:
+                parts.append(str(part))
+        else:
+            parts.append(str(part))
+    return ".".join(parts)
 
 
 class ProjectStoreProtocol(Protocol):
@@ -122,6 +195,12 @@ def _native_error(error: Exception, *, operation: str) -> HTTPException:
         return _http_error(status.HTTP_404_NOT_FOUND, message)
     if operation == "create" and "already exists" in message:
         return _http_error(status.HTTP_409_CONFLICT, message)
+    issues = _native_issue_dicts(error)
+    if issues:
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=_invalid_report_detail(issues),
+        )
     return _http_error(status.HTTP_422_UNPROCESSABLE_CONTENT, message)
 
 
@@ -202,6 +281,21 @@ def create_app(
         allow_headers=["Content-Type", "Last-Event-ID"],
     )
 
+    @app.exception_handler(RequestValidationError)
+    async def join_raw_validation_envelope(
+        _: Request, error: RequestValidationError
+    ) -> JSONResponse:
+        detail = _join_validation_error_detail(error)
+        if detail is not None:
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                content={"detail": detail},
+            )
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content={"detail": jsonable_encoder(error.errors())},
+        )
+
     async def stored_project(project_id: str) -> ProjectDocument:
         try:
             return await projects.get(project_id)
@@ -240,12 +334,18 @@ def create_app(
         report = await runtime_validation_report(project)
         if report.valid is True:
             return
-        details = "; ".join(
-            issue.message or "invalid project" for issue in report.issues
-        )
-        raise _http_error(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            details or "project validation failed",
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=_invalid_report_detail(
+                [
+                    {
+                        "path": issue.path,
+                        "code": issue.code,
+                        "message": issue.message,
+                    }
+                    for issue in report.issues
+                ]
+            ),
         )
 
     @app.get(f"{API_PREFIX}/catalog")

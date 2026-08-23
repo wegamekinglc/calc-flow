@@ -10,9 +10,11 @@ mod window;
 
 pub use batch::{BatchOperator, BatchOperatorContext};
 pub use expression::ExpressionOperator;
+pub(crate) use join::supported_key_type;
 pub use join::{
     JoinStateLimits, JoinTimeBounds, STREAM_JOIN_MAX_SAFE_JSON_INTEGER,
-    STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1, StreamJoinOperator, StreamJoinSpec, StreamJoinType,
+    STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1, StreamJoinOperator, StreamJoinSideStatus,
+    StreamJoinSpec, StreamJoinStatus, StreamJoinType,
 };
 pub use sql::SqlOperator;
 pub use stream::{
@@ -132,7 +134,7 @@ impl Port {
         required: bool,
         schema: Option<SchemaRef>,
     ) -> Result<Self> {
-        if !is_identifier(name) {
+        if !is_portable_identifier(name) {
             return Err(CalcFlowError::InvalidArgument {
                 field: "port.name".into(),
                 message: "must be a non-empty portable identifier".into(),
@@ -195,7 +197,9 @@ impl Port {
     }
 }
 
-fn is_identifier(value: &str) -> bool {
+/// Reports whether `value` is a non-empty portable `[A-Za-z_][A-Za-z0-9_]*`
+/// identifier.
+pub(crate) fn is_portable_identifier(value: &str) -> bool {
     let mut characters = value.chars();
     characters.next().is_some_and(|first| {
         (first == '_' || first.is_ascii_alphabetic())

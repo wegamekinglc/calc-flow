@@ -54,6 +54,12 @@ pub enum CalcFlowError {
     },
     #[error("stored document is invalid: {message}")]
     Format { message: String },
+    /// Structured pre-typed project import issues carrying the frozen stable
+    /// paths and codes (bounded event-time stream Join, spec FR58).
+    #[error("project validation failed")]
+    ProjectValidation {
+        issues: Vec<crate::config::ValidationIssue>,
+    },
     #[error("{resource} {key:?} already exists")]
     Conflict { resource: String, key: String },
     #[error("{resource} {key:?} was not found")]

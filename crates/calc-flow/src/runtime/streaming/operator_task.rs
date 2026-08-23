@@ -92,6 +92,7 @@ pub(crate) struct OperatorProgressSnapshot {
     pub(crate) max_lateness_micros: Option<u64>,
     pub(crate) null_event_time_rows: u64,
     pub(crate) null_event_time_batches: u64,
+    pub(crate) stream_join: Option<crate::StreamJoinStatus>,
 }
 
 #[derive(Clone, Default)]
@@ -143,6 +144,10 @@ impl OperatorProgress {
 
     fn observe_datafusion_runtime(&self, created: bool) {
         self.0.lock().datafusion_runtime_created |= created;
+    }
+
+    fn observe_stream_join(&self, status: crate::StreamJoinStatus) {
+        self.0.lock().stream_join = Some(status);
     }
 }
 
@@ -479,6 +484,27 @@ async fn receive_ready(
 }
 
 async fn dispatch_message(
+    inputs: &mut OperatorTaskInputs,
+    ingress_name: &str,
+    message: StreamMessage,
+    input_progress: &mut OperatorInputProgress,
+    barrier_alignment: &mut OperatorBarrierAlignment,
+) -> Result<()> {
+    let result = dispatch_message_inner(
+        inputs,
+        ingress_name,
+        message,
+        input_progress,
+        barrier_alignment,
+    )
+    .await;
+    if let Some(status) = inputs.operator.stream_join_status() {
+        inputs.progress.observe_stream_join(status);
+    }
+    result
+}
+
+async fn dispatch_message_inner(
     inputs: &mut OperatorTaskInputs,
     ingress_name: &str,
     message: StreamMessage,
@@ -1010,10 +1036,43 @@ async fn forward_join_output_frontier(
     Ok(())
 }
 
+/// Builds the shared immutable per-ingress snapshot from aggregate activity.
+fn build_ingress_snapshot(
+    ordinal_by_ingress: &BTreeMap<String, BindingOrdinal>,
+    aggregate: &MultiInputProgress,
+) -> Result<IngressProgressSnapshot> {
+    ordinal_by_ingress
+        .iter()
+        .map(|(ingress, ordinal)| {
+            let activity = aggregate
+                .activity(*ordinal)
+                .ok_or_else(|| CalcFlowError::Internal {
+                    message: format!("operator ingress {ingress:?} is missing aggregate progress"),
+                })?;
+            let progress = match activity {
+                IngressActivity::Active { watermark } => {
+                    IngressProgress::new(IngressState::Active, watermark)
+                }
+                IngressActivity::Idle { watermark } => {
+                    IngressProgress::new(IngressState::Idle, watermark)
+                }
+                IngressActivity::Ended { final_watermark } => {
+                    IngressProgress::new(IngressState::Ended, final_watermark)
+                }
+            };
+            Ok((ingress.clone(), progress))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()
+        .map(IngressProgressSnapshot::new)
+}
+
 struct OperatorInputProgress {
     ordinal_by_ingress: BTreeMap<String, BindingOrdinal>,
     aggregate: MultiInputProgress,
     output_frontier: Option<EventTime>,
+    // Shared immutable snapshot rebuilt only when an ingress transition
+    // changes activity, so per-Data-call reads stay O(1) Arc clones.
+    cached_snapshot: Option<IngressProgressSnapshot>,
 }
 
 impl OperatorInputProgress {
@@ -1030,8 +1089,15 @@ impl OperatorInputProgress {
                 )
             })
             .collect::<BTreeMap<_, _>>();
+        let aggregate = MultiInputProgress::new(ordinal_by_ingress.values().copied());
         Self {
-            aggregate: MultiInputProgress::new(ordinal_by_ingress.values().copied()),
+            // Registration covers every ordinal, so the initial snapshot
+            // always builds.
+            cached_snapshot: Some(
+                build_ingress_snapshot(&ordinal_by_ingress, &aggregate)
+                    .expect("registered ingresses always snapshot"),
+            ),
+            aggregate,
             ordinal_by_ingress,
             output_frontier: None,
         }
@@ -1074,8 +1140,10 @@ impl OperatorInputProgress {
             };
             (*ordinal, activity)
         });
+        let aggregate = MultiInputProgress::restore(activities);
         Ok(Self {
-            aggregate: MultiInputProgress::restore(activities),
+            cached_snapshot: Some(build_ingress_snapshot(&ordinal_by_ingress, &aggregate)?),
+            aggregate,
             ordinal_by_ingress,
             output_frontier,
         })
@@ -1093,15 +1161,24 @@ impl OperatorInputProgress {
                 .ok_or_else(|| CalcFlowError::Internal {
                     message: format!("unknown operator ingress {ingress:?}"),
                 })?;
-        self.aggregate
+        let activity_before = self.aggregate.activity(ordinal);
+        let emissions = self
+            .aggregate
             .evaluate(ordinal, input)
             .map(|emissions| {
                 emissions
                     .into_iter()
                     .map(|emission| emission.kind)
-                    .collect()
+                    .collect::<Vec<_>>()
             })
-            .map_err(super::progress::types::ProgressFailure::into_existing_error)
+            .map_err(super::progress::types::ProgressFailure::into_existing_error)?;
+        if activity_before != self.aggregate.activity(ordinal) {
+            self.cached_snapshot = Some(build_ingress_snapshot(
+                &self.ordinal_by_ingress,
+                &self.aggregate,
+            )?);
+        }
+        Ok(emissions)
     }
 
     const fn input_watermark(&self) -> Option<EventTime> {
@@ -1109,32 +1186,11 @@ impl OperatorInputProgress {
     }
 
     fn snapshot(&self) -> Result<IngressProgressSnapshot> {
-        self.ordinal_by_ingress
-            .iter()
-            .map(|(ingress, ordinal)| {
-                let activity =
-                    self.aggregate
-                        .activity(*ordinal)
-                        .ok_or_else(|| CalcFlowError::Internal {
-                            message: format!(
-                                "operator ingress {ingress:?} is missing aggregate progress"
-                            ),
-                        })?;
-                let progress = match activity {
-                    IngressActivity::Active { watermark } => {
-                        IngressProgress::new(IngressState::Active, watermark)
-                    }
-                    IngressActivity::Idle { watermark } => {
-                        IngressProgress::new(IngressState::Idle, watermark)
-                    }
-                    IngressActivity::Ended { final_watermark } => {
-                        IngressProgress::new(IngressState::Ended, final_watermark)
-                    }
-                };
-                Ok((ingress.clone(), progress))
+        self.cached_snapshot
+            .clone()
+            .ok_or_else(|| CalcFlowError::Internal {
+                message: "operator ingress snapshot was never initialized".into(),
             })
-            .collect::<Result<BTreeMap<_, _>>>()
-            .map(IngressProgressSnapshot::new)
     }
 
     fn manifest_entries(&self) -> Result<BTreeMap<String, OperatorIngressManifestEntry>> {

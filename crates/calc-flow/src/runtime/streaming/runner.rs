@@ -1034,6 +1034,7 @@ pub(crate) struct OperatorStatus {
     pub(crate) max_lateness_micros: Option<u64>,
     pub(crate) null_event_time_rows: u64,
     pub(crate) null_event_time_batches: u64,
+    pub(crate) stream_join: Option<crate::StreamJoinStatus>,
 }
 
 impl From<OperatorProgressSnapshot> for OperatorStatus {
@@ -1049,6 +1050,7 @@ impl From<OperatorProgressSnapshot> for OperatorStatus {
             max_lateness_micros: progress.max_lateness_micros,
             null_event_time_rows: progress.null_event_time_rows,
             null_event_time_batches: progress.null_event_time_batches,
+            stream_join: progress.stream_join,
         }
     }
 }
@@ -1099,6 +1101,21 @@ impl Drop for JobOwnershipToken {
 impl ContinuousJob {
     pub(crate) fn id(&self) -> u64 {
         self.core.job_id
+    }
+
+    /// Collects the payload-free status of every Join node, keyed by node ID.
+    pub(crate) fn stream_join_status(&self) -> BTreeMap<String, crate::StreamJoinStatus> {
+        let runtime = self.core.runtime_status.lock();
+        runtime
+            .nodes
+            .iter()
+            .filter_map(|(id, progress)| {
+                progress
+                    .snapshot()
+                    .stream_join
+                    .map(|status| (id.clone(), status))
+            })
+            .collect()
     }
 
     pub(crate) fn status(&self) -> ContinuousJobStatus {

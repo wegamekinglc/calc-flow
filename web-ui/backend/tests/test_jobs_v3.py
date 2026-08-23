@@ -405,3 +405,81 @@ def test_missing_job_operations_return_not_found(tmp_path: Path) -> None:
         )
 
     assert all(response.status_code == 404 for response in responses)
+
+
+def test_join_metrics_reach_progress_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def metrics_worker(_project_json: str, _commands: object, output: object) -> None:
+        output.put({"kind": "state", "state": "running"})
+        output.put(
+            {
+                "kind": "progress",
+                "state": "running",
+                "epoch": 1,
+                "watermark": None,
+                "throughput_rows": 2,
+                "queue_envelopes": 0,
+                "queue_rows": 0,
+                "queue_bytes": 0,
+                "backpressure_events": 0,
+                "late_rows": 0,
+                "stream_joins": (
+                    {
+                        "node_id": "match",
+                        "left": {
+                            "retained_rows": 1,
+                            "retained_bytes": 124,
+                            "evicted_rows": 0,
+                            "late_rows": 0,
+                            "late_affected_batches": 0,
+                            "max_lateness_micros": None,
+                            "null_event_time_rows": 0,
+                            "null_key_rows": 0,
+                        },
+                        "right": {
+                            "retained_rows": 0,
+                            "retained_bytes": 0,
+                            "evicted_rows": 0,
+                            "late_rows": 0,
+                            "late_affected_batches": 0,
+                            "max_lateness_micros": None,
+                            "null_event_time_rows": 0,
+                            "null_key_rows": 0,
+                        },
+                        "emitted_match_rows": 1,
+                        "state_limit_failures": 0,
+                        "match_limit_failures": 0,
+                    },
+                ),
+            }
+        )
+        output.put(
+            {
+                "kind": "terminal",
+                "state": "completed",
+                "cause": "graceful_shutdown",
+            }
+        )
+
+    monkeypatch.setattr(
+        run_manager_module, "_execute_continuous_worker", metrics_worker
+    )
+    manager = RunManager(
+        use_processes=False,
+        checkpoint_directory=tmp_path / "checkpoints",
+    )
+    started = manager.submit_job(
+        ProjectDocument.model_validate(_stream_project(tmp_path))
+    )
+
+    _wait_for_status(manager, started.id, RunStatus.COMPLETED)
+    events = [event.model_dump(mode="json") for event in manager.events(started.id)]
+    progress = [event for event in events if event["type"] == "progress"]
+    assert progress, events
+    joins = progress[0]["stream_joins"]
+    assert joins is not None
+    assert joins[0]["node_id"] == "match"
+    assert joins[0]["left"]["retained_rows"] == 1
+    assert joins[0]["emitted_match_rows"] == 1

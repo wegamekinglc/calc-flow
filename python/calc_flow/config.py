@@ -5,7 +5,7 @@ import math
 from typing import Any
 
 from pydantic import GetJsonSchemaHandler, RootModel, ValidationError, model_validator
-from pydantic_core import CoreSchema
+from pydantic_core import CoreSchema, PydanticCustomError
 
 from calc_flow import _native
 
@@ -17,6 +17,42 @@ _MAX_JSON_DEPTH = 32
 
 def _json_error(message: str) -> ValueError:
     return ValueError(message)
+
+
+def _parse_issue_path(path: str) -> tuple[str | int, ...]:
+    dotted = path.replace("[", ".").replace("]", "")
+    parts: list[str | int] = []
+    for segment in dotted.split("."):
+        if segment == "":
+            continue
+        parts.append(int(segment) if segment.isdigit() else segment)
+    return tuple(parts)
+
+
+def _native_issues(error: Exception) -> tuple[dict[str, str], ...]:
+    raw = getattr(error, "issues", ())
+    return tuple(
+        issue
+        for issue in raw
+        if isinstance(issue, dict)
+        and isinstance(issue.get("path"), str)
+        and isinstance(issue.get("code"), str)
+        and isinstance(issue.get("message"), str)
+    )
+
+
+def _structured_project_error(issues: tuple[dict[str, str], ...]) -> ValidationError:
+    return ValidationError.from_exception_data(
+        "ProjectDocument",
+        [
+            {
+                "type": PydanticCustomError(issue["code"], issue["message"]),
+                "loc": _parse_issue_path(issue["path"]),
+                "input": None,
+            }
+            for issue in issues
+        ],
+    )
 
 
 def _validate_json_value(value: object) -> None:
@@ -66,6 +102,11 @@ def _canonicalize(value: object) -> dict[str, JSONValue]:
             value, allow_nan=False, separators=(",", ":"), sort_keys=True
         )
         canonical = _native.validate_project_json(encoded)
+    except _native.ConfigError as error:
+        issues = _native_issues(error)
+        if issues:
+            raise _structured_project_error(issues) from error
+        raise _json_error(str(error)) from error
     except Exception as error:
         raise _json_error(str(error)) from error
     parsed = json.loads(canonical)

@@ -42,7 +42,7 @@ pub struct IngressProgress {
 }
 
 impl IngressProgress {
-    pub(crate) const fn new(state: IngressState, watermark: Option<EventTime>) -> Self {
+    pub const fn new(state: IngressState, watermark: Option<EventTime>) -> Self {
         Self { state, watermark }
     }
 
@@ -64,7 +64,7 @@ pub struct IngressProgressSnapshot {
 }
 
 impl IngressProgressSnapshot {
-    pub(crate) fn new(by_ingress: BTreeMap<String, IngressProgress>) -> Self {
+    pub fn new(by_ingress: BTreeMap<String, IngressProgress>) -> Self {
         Self {
             by_ingress: Arc::new(by_ingress),
         }
@@ -129,6 +129,23 @@ impl<'a> StreamOperatorContext<'a> {
             operator_id,
             input_watermark,
             ingress_progress: IngressProgressSnapshot::default(),
+            output_budget: EdgeBudget::default(),
+            late_metrics: Arc::new(LateMetricRecorder::default()),
+        }
+    }
+
+    /// Creates a context carrying an explicit ingress-progress snapshot.
+    pub fn with_ingress_progress(
+        job: &'a StreamJobContext,
+        operator_id: &'a str,
+        input_watermark: Option<EventTime>,
+        ingress_progress: IngressProgressSnapshot,
+    ) -> Self {
+        Self {
+            job,
+            operator_id,
+            input_watermark,
+            ingress_progress,
             output_budget: EdgeBudget::default(),
             late_metrics: Arc::new(LateMetricRecorder::default()),
         }

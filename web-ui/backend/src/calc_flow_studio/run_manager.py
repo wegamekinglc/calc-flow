@@ -1074,7 +1074,20 @@ def _continuous_progress(status: dict[str, object]) -> dict[str, object]:
         "queue_bytes": queue_bytes,
         "backpressure_events": backpressure,
         "late_rows": late_rows,
+        "stream_joins": _stream_join_progress(status.get("stream_joins")),
     }
+
+
+def _stream_join_progress(raw: object) -> tuple[dict[str, object], ...] | None:
+    if isinstance(raw, tuple | list):
+        return tuple(raw)
+    if not isinstance(raw, dict):
+        return None
+    entries = []
+    for node_id, metrics in sorted(raw.items()):
+        if isinstance(metrics, dict):
+            entries.append({"node_id": str(node_id), **metrics})
+    return tuple(entries)
 
 
 # The worker owns the complete native job lifecycle and emits exactly one
@@ -1882,6 +1895,7 @@ class RunManager:
                         queue_bytes=int(message.get("queue_bytes", 0)),
                         backpressure_events=int(message.get("backpressure_events", 0)),
                         late_rows=int(message.get("late_rows", 0)),
+                        stream_joins=_stream_join_progress(message.get("stream_joins")),
                     )
                 elif kind == "checkpoint":
                     self._job_event(

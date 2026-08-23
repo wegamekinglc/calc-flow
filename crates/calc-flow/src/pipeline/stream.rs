@@ -342,6 +342,14 @@ impl CompiledStreamOperator {
         matches!(self, Self::StreamJoin(_))
     }
 
+    /// Returns the Join node's payload-free status, when this is a Join.
+    pub(crate) fn stream_join_status(&self) -> Option<crate::StreamJoinStatus> {
+        match self {
+            Self::StreamJoin(operator) => Some(operator.status()),
+            _ => None,
+        }
+    }
+
     pub(crate) fn output_frontier_candidate(
         &self,
         aggregate_input_frontier: Option<crate::EventTime>,

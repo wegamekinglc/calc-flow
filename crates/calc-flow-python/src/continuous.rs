@@ -1023,7 +1023,12 @@ impl PyStreamingJob {
     }
 
     fn status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        job_status_to_py(py, &self.job()?.status())
+        let job = self.job()?;
+        let mut status = job_status_to_py(py, &job.status())?;
+        let joins = job.stream_join_status();
+        let join_values = stream_join_status_to_py(py, &joins)?;
+        status.set_item("stream_joins", join_values)?;
+        Ok(status)
     }
 
     fn trigger_checkpoint_async(&self, py: Python<'_>) -> PyResult<Py<PyStreamingJobAwaitable>> {
@@ -1467,6 +1472,52 @@ fn job_status_to_py<'py>(
         "operators" => operator_status_to_py(py, &status.operators)?,
         "sinks" => sink_status_to_py(py, &status.sinks)?,
         "checkpoint" => checkpoint_status_to_py(py, &status.checkpoint)?,
+    });
+    Ok(value)
+}
+
+/// Projects the per-node Join status mapping (api note "Payload-free Join
+/// status").
+fn stream_join_status_to_py<'py>(
+    py: Python<'py>,
+    statuses: &BTreeMap<String, calc_flow::StreamJoinStatus>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let values = PyDict::new(py);
+    for (node_id, status) in statuses {
+        values.set_item(node_id, stream_join_status_value_to_py(py, status)?)?;
+    }
+    Ok(values)
+}
+
+fn stream_join_status_value_to_py<'py>(
+    py: Python<'py>,
+    status: &calc_flow::StreamJoinStatus,
+) -> PyResult<Bound<'py, PyDict>> {
+    let value = PyDict::new(py);
+    set_py_items!(value, {
+        "left" => stream_join_side_to_py(py, &status.left)?,
+        "right" => stream_join_side_to_py(py, &status.right)?,
+        "emitted_match_rows" => status.emitted_match_rows,
+        "state_limit_failures" => status.state_limit_failures,
+        "match_limit_failures" => status.match_limit_failures,
+    });
+    Ok(value)
+}
+
+fn stream_join_side_to_py<'py>(
+    py: Python<'py>,
+    side: &calc_flow::StreamJoinSideStatus,
+) -> PyResult<Bound<'py, PyDict>> {
+    let value = PyDict::new(py);
+    set_py_items!(value, {
+        "retained_rows" => side.retained_rows,
+        "retained_bytes" => side.retained_bytes,
+        "evicted_rows" => side.evicted_rows,
+        "late_rows" => side.late_rows,
+        "late_affected_batches" => side.late_affected_batches,
+        "max_lateness_micros" => side.max_lateness.map(duration_micros),
+        "null_event_time_rows" => side.null_event_time_rows,
+        "null_key_rows" => side.null_key_rows,
     });
     Ok(value)
 }

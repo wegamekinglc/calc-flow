@@ -10,7 +10,7 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::{Value, json};
 
-use crate::operator::expression_query;
+use crate::operator::{expression_query, supported_key_type};
 use crate::{
     Batch, BatchExecutionPlan, BatchKind, CalcFlowError, ConnectorIdentity,
     ConnectorRegistrySnapshot, ConnectorSinkFactory, ConnectorSourceFactory, Cursor,
@@ -1960,16 +1960,109 @@ fn validate_stream_join_build(
     base: &str,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    let left = port_from_spec(&node.input_ports[0]);
-    let right = port_from_spec(&node.input_ports[1]);
-    if let (Ok(left), Ok(right)) = (left, right)
-        && let (Some(left_schema), Some(right_schema)) =
-            (left.schema().cloned(), right.schema().cloned())
-        && let Err(error) =
-            StreamJoinOperator::new(&node.id, left_schema, right_schema, spec.clone())
+    let spec_base = format!("{base}.spec");
+    let base = spec_base.as_str();
+    let reported = issues.len();
+    let (left_schema, right_schema) = (&node.input_ports[0].schema, &node.input_ports[1].schema);
+    for (index, (left_key, right_key)) in spec.left_keys().iter().zip(spec.right_keys()).enumerate()
     {
-        issues.push(issue(base, "invalid_operator", error.to_string()));
+        let sides = [
+            ("left", left_key, unique_field(left_schema, left_key)),
+            ("right", right_key, unique_field(right_schema, right_key)),
+        ];
+        let resolved = sides.map(|(side, key, field)| match field {
+            None => {
+                issues.push(issue(
+                    format!("{base}.{side}_keys[{index}]"),
+                    "invalid_join_keys",
+                    format!("{side}_keys[{index}] names missing or ambiguous column {key}"),
+                ));
+                None
+            }
+            Some(field) => Some((side, field)),
+        });
+        let [Some((_, left_field)), Some((_, right_field))] = resolved else {
+            continue;
+        };
+        let left_type = arrow_data_type(&left_field.data_type);
+        let right_type = arrow_data_type(&right_field.data_type);
+        let compatible = left_type
+            .as_ref()
+            .zip(right_type.as_ref())
+            .is_some_and(|(left, right)| left == right && supported_key_type(left));
+        if !compatible {
+            issues.push(issue(
+                format!("{base}.left_keys[{index}]"),
+                "incompatible_key_type",
+                format!(
+                    "join key pair {index} requires identical supported Arrow types; left is {} and right is {}",
+                    left_type.as_ref().map_or_else(|| left_field.data_type.clone(), ToString::to_string),
+                    right_type.as_ref().map_or_else(|| right_field.data_type.clone(), ToString::to_string),
+                ),
+            ));
+        }
     }
+    for (side, name, schema) in [
+        ("left", spec.left_event_time(), left_schema),
+        ("right", spec.right_event_time(), right_schema),
+    ] {
+        match unique_field(schema, name) {
+            None => issues.push(issue(
+                format!("{base}.{side}_event_time"),
+                "invalid_event_time",
+                format!("{side}_event_time names missing or ambiguous column {name}"),
+            )),
+            Some(field) => {
+                let timestamp = arrow_data_type(&field.data_type)
+                    .is_some_and(|data_type| matches!(data_type, DataType::Timestamp(_, None)));
+                if !timestamp {
+                    issues.push(issue(
+                        format!("{base}.{side}_event_time"),
+                        "invalid_event_time",
+                        format!(
+                            "{side}_event_time must be a timezone-naive or UTC Arrow timestamp; found {}",
+                            arrow_data_type(&field.data_type)
+                                .map_or_else(|| field.data_type.clone(), |value| value.to_string())
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    let collision = left_schema.iter().any(|field| {
+        let prefixed = format!("{}__{}", spec.left_prefix(), field.name);
+        right_schema
+            .iter()
+            .any(|other| format!("{}__{}", spec.right_prefix(), other.name) == prefixed)
+    });
+    if spec.left_prefix() == spec.right_prefix() || collision {
+        issues.push(issue(
+            format!("{base}.right_prefix"),
+            "invalid_output_prefix",
+            "right_prefix must differ from left_prefix and produce no output-field collision",
+        ));
+    }
+    if issues.len() == reported {
+        let (left, right) = (
+            port_from_spec(&node.input_ports[0]),
+            port_from_spec(&node.input_ports[1]),
+        );
+        if let (Ok(left), Ok(right)) = (left, right)
+            && let (Some(left_schema), Some(right_schema)) =
+                (left.schema().cloned(), right.schema().cloned())
+            && let Err(error) =
+                StreamJoinOperator::new(&node.id, left_schema, right_schema, spec.clone())
+        {
+            issues.push(issue(base, "invalid_operator", error.to_string()));
+        }
+    }
+}
+
+/// Resolves exactly one schema field by name, or `None` when missing/ambiguous.
+fn unique_field<'a>(schema: &'a [ArrowFieldSpec], name: &str) -> Option<&'a ArrowFieldSpec> {
+    let mut matches = schema.iter().filter(|field| field.name == name);
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
 }
 
 fn validate_external_operator(

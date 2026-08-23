@@ -12,7 +12,8 @@ use tokio::sync::Mutex;
 
 use crate::json::{parse_json_value, validate_json_depth, validate_json_depth_at};
 use crate::{
-    CalcFlowError, OperatorSpec, PROJECT_FORMAT_VERSION, ProjectSpec, Result, canonical_json,
+    CalcFlowError, OperatorSpec, PROJECT_FORMAT_VERSION, ProjectSpec, Result, ValidationIssue,
+    canonical_json,
 };
 
 /// Maximum accepted size of one stored or imported project document.
@@ -267,6 +268,12 @@ pub fn import_project_json_with_limit(document: &[u8], max_bytes: usize) -> Resu
         ));
     }
     reject_project_version(&value)?;
+    let join_issues = collect_raw_stream_join_issues(&value)?;
+    if !join_issues.is_empty() {
+        return Err(CalcFlowError::ProjectValidation {
+            issues: join_issues,
+        });
+    }
     let project = serde_json::from_value(value).map_err(|error| format_error(error.to_string()))?;
     validate_project_identity(&project)?;
     validate_project_json_values(&project)?;
@@ -321,6 +328,13 @@ pub fn import_project_yaml_with_limit(document: &[u8], max_bytes: usize) -> Resu
                     yaml_options(max_bytes),
                 ) {
                     reject_project_version(&value)?;
+                    if let Ok(join_issues) = collect_raw_stream_join_issues(&value)
+                        && !join_issues.is_empty()
+                    {
+                        return Err(CalcFlowError::ProjectValidation {
+                            issues: join_issues,
+                        });
+                    }
                 }
                 return Err(format_error(error.to_string()));
             }
@@ -417,6 +431,301 @@ fn validate_project_identity(project: &ProjectSpec) -> Result<()> {
         });
     }
     Ok(())
+}
+
+/// Inclusive JSON-safe ceiling shared by every stream Join bound and limit.
+const STREAM_JOIN_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// Pre-typed raw stream Join declaration (spec FR58).
+///
+/// `join_type`, bounds, and limits stay raw scalar values so malformed input
+/// reports the frozen field-level issue paths and codes instead of a Serde
+/// format error. This DTO never appears in the public crate surface.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(
+    dead_code,
+    reason = "typed fields keep unknown-field rejection strict without raw re-validation"
+)]
+struct RawStreamJoinSpec {
+    join_type: Option<Value>,
+    #[serde(default)]
+    left_keys: Option<Vec<String>>,
+    #[serde(default)]
+    right_keys: Option<Vec<String>>,
+    left_event_time: Option<String>,
+    right_event_time: Option<String>,
+    bounds: Option<RawJoinTimeBounds>,
+    limits: Option<RawJoinStateLimits>,
+    left_prefix: Option<String>,
+    right_prefix: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawJoinTimeBounds {
+    before_micros: Option<Value>,
+    after_micros: Option<Value>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(
+    clippy::struct_field_names,
+    reason = "the frozen public JSON field names all use the max_ limit prefix"
+)]
+struct RawJoinStateLimits {
+    max_state_rows_per_side: Option<Value>,
+    max_state_bytes_per_side: Option<Value>,
+    max_matches_per_input_batch: Option<Value>,
+}
+
+/// Collects pre-typed stream Join issues from one parsed project document.
+///
+/// Unknown fields, duplicate keys, and object/array values where a scalar is
+/// required remain strict project-format errors (spec FR58).
+fn collect_raw_stream_join_issues(document: &Value) -> Result<Vec<ValidationIssue>> {
+    let Some(nodes) = document
+        .get("graph")
+        .and_then(|graph| graph.get("nodes"))
+        .and_then(Value::as_array)
+    else {
+        return Ok(Vec::new());
+    };
+    let mut issues = Vec::new();
+    for (index, node) in nodes.iter().enumerate() {
+        let Some(operator) = node.get("operator") else {
+            continue;
+        };
+        if operator.get("kind").and_then(Value::as_str) != Some("stream_join") {
+            continue;
+        }
+        let Some(spec) = operator.get("spec") else {
+            continue;
+        };
+        let base = format!("graph.nodes[{index}].operator.spec");
+        let raw: RawStreamJoinSpec = serde_json::from_value(spec.clone())
+            .map_err(|error| format_error(error.to_string()))?;
+        validate_raw_join_scalars(&raw, &base, &mut issues)?;
+        validate_raw_join_keys(&raw, &base, &mut issues);
+        validate_raw_join_prefixes(&raw, node, &base, &mut issues);
+    }
+    Ok(issues)
+}
+
+/// Emits the frozen `join_type`/bounds/limits issues in table field order.
+fn validate_raw_join_scalars(
+    raw: &RawStreamJoinSpec,
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) -> Result<()> {
+    match &raw.join_type {
+        None => issues.push(raw_issue(
+            format!("{base}.join_type"),
+            "unsupported_join_type",
+            "join_type must be the string inner",
+        )),
+        Some(value) => {
+            require_scalar(value, "join_type")?;
+            if value.as_str() != Some("inner") {
+                issues.push(raw_issue(
+                    format!("{base}.join_type"),
+                    "unsupported_join_type",
+                    "join_type must be the string inner",
+                ));
+            }
+        }
+    }
+    let bounds = raw.bounds.as_ref();
+    validate_raw_bound(
+        bounds.and_then(|bounds| bounds.before_micros.as_ref()),
+        "before_micros",
+        base,
+        issues,
+    )?;
+    validate_raw_bound(
+        bounds.and_then(|bounds| bounds.after_micros.as_ref()),
+        "after_micros",
+        base,
+        issues,
+    )?;
+    let limits = raw.limits.as_ref();
+    validate_raw_limit(
+        limits.and_then(|limits| limits.max_state_rows_per_side.as_ref()),
+        "max_state_rows_per_side",
+        base,
+        issues,
+    )?;
+    validate_raw_limit(
+        limits.and_then(|limits| limits.max_state_bytes_per_side.as_ref()),
+        "max_state_bytes_per_side",
+        base,
+        issues,
+    )?;
+    validate_raw_limit(
+        limits.and_then(|limits| limits.max_matches_per_input_batch.as_ref()),
+        "max_matches_per_input_batch",
+        base,
+        issues,
+    )
+}
+
+/// Emits one `invalid_time_bound` issue unless the raw value is a safe integer.
+fn validate_raw_bound(
+    raw: Option<&Value>,
+    field: &str,
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) -> Result<()> {
+    if let Some(value) = raw {
+        require_scalar(value, field)?;
+    }
+    let valid = raw.is_some_and(|value| {
+        value
+            .as_u64()
+            .is_some_and(|number| number <= STREAM_JOIN_SAFE_JSON_INTEGER)
+    });
+    if !valid {
+        issues.push(raw_issue(
+            format!("{base}.bounds.{field}"),
+            "invalid_time_bound",
+            format!("{field} must be an integer microsecond count in 0..=9007199254740991"),
+        ));
+    }
+    Ok(())
+}
+
+/// Emits one `invalid_join_limit` issue unless the raw value is a positive
+/// safe integer.
+fn validate_raw_limit(
+    raw: Option<&Value>,
+    field: &str,
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) -> Result<()> {
+    if let Some(value) = raw {
+        require_scalar(value, field)?;
+    }
+    let valid = raw.is_some_and(|value| {
+        value
+            .as_u64()
+            .is_some_and(|number| (1..=STREAM_JOIN_SAFE_JSON_INTEGER).contains(&number))
+    });
+    if !valid {
+        issues.push(raw_issue(
+            format!("{base}.limits.{field}"),
+            "invalid_join_limit",
+            format!("{field} must be an integer in 1..=9007199254740991"),
+        ));
+    }
+    Ok(())
+}
+
+/// Emits the frozen empty/duplicate/mismatched key-list issues.
+fn validate_raw_join_keys(raw: &RawStreamJoinSpec, base: &str, issues: &mut Vec<ValidationIssue>) {
+    let unique_non_empty = |keys: &Vec<String>| {
+        !keys.is_empty()
+            && !keys.iter().any(String::is_empty)
+            && keys.iter().collect::<std::collections::BTreeSet<_>>().len() == keys.len()
+    };
+    let left_valid = raw.left_keys.as_ref().is_some_and(unique_non_empty);
+    if raw.left_keys.is_some() && !left_valid {
+        issues.push(raw_issue(
+            format!("{base}.left_keys"),
+            "invalid_join_keys",
+            "left_keys must contain at least one unique column name",
+        ));
+    }
+    let right_mismatches = raw.right_keys.as_ref().is_some_and(|right| {
+        !unique_non_empty(right) || Some(right.len()) != raw.left_keys.as_ref().map(Vec::len)
+    });
+    if left_valid && right_mismatches {
+        let count = raw.left_keys.as_ref().map_or(0, Vec::len);
+        issues.push(raw_issue(
+            format!("{base}.right_keys"),
+            "invalid_join_keys",
+            format!(
+                "right_keys must contain exactly {count} unique column names to match left_keys"
+            ),
+        ));
+    }
+}
+
+/// Emits the frozen prefix issues and the differ/collision row.
+fn validate_raw_join_prefixes(
+    raw: &RawStreamJoinSpec,
+    node: &Value,
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    for (side, prefix) in [("left", &raw.left_prefix), ("right", &raw.right_prefix)] {
+        if let Some(prefix) = prefix
+            && !crate::operator::is_portable_identifier(prefix)
+        {
+            issues.push(raw_issue(
+                format!("{base}.{side}_prefix"),
+                "invalid_output_prefix",
+                format!("{side}_prefix must be a non-empty portable identifier"),
+            ));
+        }
+    }
+    let left = raw
+        .left_prefix
+        .as_deref()
+        .unwrap_or(crate::operator::StreamJoinSpec::DEFAULT_LEFT_PREFIX);
+    let right = raw
+        .right_prefix
+        .as_deref()
+        .unwrap_or(crate::operator::StreamJoinSpec::DEFAULT_RIGHT_PREFIX);
+    if left == right || raw_output_fields_collide(node, left, right) {
+        issues.push(raw_issue(
+            format!("{base}.right_prefix"),
+            "invalid_output_prefix",
+            "right_prefix must differ from left_prefix and produce no output-field collision",
+        ));
+    }
+}
+
+/// Detects `<left_prefix>__<name>` output collisions across both input schemas.
+fn raw_output_fields_collide(node: &Value, left: &str, right: &str) -> bool {
+    let fields = |port: usize| -> Option<Vec<String>> {
+        node.get("input_ports")?
+            .as_array()?
+            .get(port)?
+            .get("schema")?
+            .as_array()?
+            .iter()
+            .map(|field| field.get("name")?.as_str().map(str::to_owned))
+            .collect()
+    };
+    let (Some(left_fields), Some(right_fields)) = (fields(0), fields(1)) else {
+        return false;
+    };
+    left_fields.iter().any(|name| {
+        let prefixed = format!("{left}__{name}");
+        right_fields
+            .iter()
+            .map(|other| format!("{right}__{other}"))
+            .any(|candidate| candidate == prefixed)
+    })
+}
+
+/// Rejects object/array values in scalar positions as format errors.
+fn require_scalar(value: &Value, field: &str) -> Result<()> {
+    if value.is_object() || value.is_array() {
+        return Err(format_error(format!(
+            "stream_join {field} must be a scalar JSON value"
+        )));
+    }
+    Ok(())
+}
+
+fn raw_issue(path: String, code: &str, message: impl Into<String>) -> ValidationIssue {
+    ValidationIssue {
+        path,
+        code: code.into(),
+        message: message.into(),
+    }
 }
 
 fn reject_project_version(value: &Value) -> Result<()> {

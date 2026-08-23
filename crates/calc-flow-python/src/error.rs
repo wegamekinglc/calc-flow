@@ -41,6 +41,28 @@ pub(crate) fn to_py_err(error: calc_flow::CalcFlowError) -> PyErr {
         | calc_flow::CalcFlowError::Format { .. }
         | calc_flow::CalcFlowError::Conflict { .. }
         | calc_flow::CalcFlowError::NotFound { .. } => ConfigError::new_err(message),
+        calc_flow::CalcFlowError::ProjectValidation { issues } => {
+            Python::attach(|py| {
+                let translated = ConfigError::new_err(message);
+                let entries = issues
+                    .iter()
+                    .map(|issue| {
+                        let entry = pyo3::types::PyDict::new(py);
+                        entry.set_item("path", &issue.path)?;
+                        entry.set_item("code", &issue.code)?;
+                        entry.set_item("message", &issue.message)?;
+                        Ok(entry.into_any().unbind())
+                    })
+                    .collect::<Result<Vec<_>, PyErr>>()
+                    .unwrap_or_default();
+                if let Ok(tuple) = pyo3::types::PyTuple::new(py, entries) {
+                    // The attribute stays absent when attachment is impossible;
+                    // Python consumers read it through a `getattr` default.
+                    let _ = translated.value(py).setattr("issues", tuple);
+                }
+                translated
+            })
+        }
         calc_flow::CalcFlowError::Compile { .. } => CompileError::new_err(message),
         calc_flow::CalcFlowError::Operator { .. }
         | calc_flow::CalcFlowError::DataFusion { .. }
