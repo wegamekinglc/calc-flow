@@ -11,6 +11,7 @@ from calc_flow.symbolic import (
     Field,
     TableExpr,
     cs,
+    duration,
     event_time_bucket,
     exact_time,
     linalg,
@@ -377,6 +378,36 @@ def test_explain_is_deterministic_and_address_free() -> None:
     assert "mean" in explained
     assert "20" in explained
     assert "0x" not in explained
+
+
+def test_remaining_namespace_primitives_compose() -> None:
+    quotes = _quotes()
+    x = quotes["x"]
+    group = exact_time(quotes["ts"])
+    temporal = [
+        ts.delta(x, periods=2),
+        ts.sum(x, window=rows(5)),
+        ts.min(x, window=rows(5)),
+        ts.max(x, window=duration(1_000)),
+        ts.variance(x, window=rows(5), ddof=0),
+        ts.stddev(x, window=rows(5)),
+        ts.correlation(x, quotes["y"], window=rows(5), ddof=0),
+        cs.percentile(x, group=group, direction="descending"),
+        cs.demean(x, group=group, min_samples=2),
+        row.log(x),
+        row.exp(x),
+        row.sqrt(x),
+        row.abs(x),
+    ]
+    assert all(isinstance(value, ColumnExpr) for value in temporal)
+    hopping = window.hopping(
+        quotes,
+        event_time="ts",
+        size_micros=120_000_000,
+        slide_micros=60_000_000,
+        group_by=["symbol"],
+    )
+    assert isinstance(hopping, TableExpr)
 
 
 def test_identical_compares_normalized_structure() -> None:

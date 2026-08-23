@@ -518,35 +518,20 @@ def parameter(
 ) -> Parameter[ArrayExpr]: ...
 
 
-def parameter(
-    name: str,
-    /,
-    *,
-    kind: object,
-    schema: object = (),
-    backend: object = None,
-    dtype: object = None,
-    shape: object = (),
-    mutability: object = "static",
-) -> Parameter[object]:
-    """Declare one named static external parameter of table or array kind."""
-
-    if type(name) is not str or not name:
-        if type(name) is not str:
-            raise TypeError(
-                "static_inputs.parameter.name must be a non-empty string;"
-                f" got {type_name(name)}"
-            )
+def _require_parameter_name(name: object, /) -> str:
+    if type(name) is not str:
+        raise TypeError(
+            "static_inputs.parameter.name must be a non-empty string;"
+            f" got {type_name(name)}"
+        )
+    if not name:
         raise ValueError(
             "static_inputs.parameter.name: invalid_literal: must be a non-empty string"
         )
-    base = f"static_inputs.{name}"
-    if type(kind) is not str or kind not in ("table", "array"):
-        if type(kind) is not str:
-            raise TypeError(f"{base}.kind must be a string; got {type_name(kind)}")
-        raise ValueError(
-            f"{base}.kind: invalid_literal: kind must be 'table' or 'array'"
-        )
+    return name
+
+
+def _require_parameter_mutability(mutability: object, base: str, /) -> None:
     if type(mutability) is not str:
         raise TypeError(
             f"{base}.mutability must be a string; got {type_name(mutability)}"
@@ -556,29 +541,50 @@ def parameter(
             f"{base}.mutability: invalid_literal: the only accepted"
             " mutability is 'static'"
         )
-    if kind == "table":
-        for field_name, value in (("backend", backend), ("dtype", dtype)):
-            if value is not None:
-                raise ValueError(
-                    f"{base}.{field_name}: invalid_literal: table"
-                    f" parameters do not accept {field_name}"
-                )
-        if not _is_absent_or_empty(shape):
+
+
+def _table_parameter(
+    name: str,
+    base: str,
+    schema: object,
+    backend: object,
+    dtype: object,
+    shape: object,
+    /,
+) -> Parameter[object]:
+    for field_name, value in (("backend", backend), ("dtype", dtype)):
+        if value is not None:
             raise ValueError(
-                f"{base}.shape: invalid_literal: table parameters do not accept shape"
+                f"{base}.{field_name}: invalid_literal: table"
+                f" parameters do not accept {field_name}"
             )
-        fields = _validate_schema(schema, f"{base}.schema")  # type: ignore[arg-type]
-        node = build(
-            "parameter",
-            (),
-            {
-                "name": CStr(name),
-                "kind": CEnum("batch_kind", "table"),
-                "mutability": CEnum("mutability", "static"),
-                "schema": _cv_schema(fields),
-            },
+    if not _is_absent_or_empty(shape):
+        raise ValueError(
+            f"{base}.shape: invalid_literal: table parameters do not accept shape"
         )
-        return Parameter(node)
+    fields = _validate_schema(schema, f"{base}.schema")  # type: ignore[arg-type]
+    node = build(
+        "parameter",
+        (),
+        {
+            "name": CStr(name),
+            "kind": CEnum("batch_kind", "table"),
+            "mutability": CEnum("mutability", "static"),
+            "schema": _cv_schema(fields),
+        },
+    )
+    return Parameter(node)
+
+
+def _array_parameter(
+    name: str,
+    base: str,
+    schema: object,
+    backend: object,
+    dtype: object,
+    shape: object,
+    /,
+) -> Parameter[object]:
     if not _is_absent_or_empty(schema):
         raise ValueError(
             f"{base}.schema: invalid_literal: array parameters do not accept schema"
@@ -607,3 +613,30 @@ def parameter(
         },
     )
     return Parameter(node)
+
+
+def parameter(
+    name: str,
+    /,
+    *,
+    kind: object,
+    schema: object = (),
+    backend: object = None,
+    dtype: object = None,
+    shape: object = (),
+    mutability: object = "static",
+) -> Parameter[object]:
+    """Declare one named static external parameter of table or array kind."""
+
+    validated_name = _require_parameter_name(name)
+    base = f"static_inputs.{validated_name}"
+    if type(kind) is not str or kind not in ("table", "array"):
+        if type(kind) is not str:
+            raise TypeError(f"{base}.kind must be a string; got {type_name(kind)}")
+        raise ValueError(
+            f"{base}.kind: invalid_literal: kind must be 'table' or 'array'"
+        )
+    _require_parameter_mutability(mutability, base)
+    if kind == "table":
+        return _table_parameter(validated_name, base, schema, backend, dtype, shape)
+    return _array_parameter(validated_name, base, schema, backend, dtype, shape)

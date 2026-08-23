@@ -13,8 +13,9 @@ import hashlib
 import json
 import math
 import struct
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Final
 
 from calc_flow.symbolic.domains import type_name
 
@@ -182,44 +183,63 @@ CValue = (
     | CDType
 )
 
+type ValueEncoder = Callable[[CValue], bytes]
+type ValueFormatter = Callable[[CValue], str]
+
+
+def _encode_cbool(value: CBool, /) -> bytes:
+    return b"\x02" if value.value else b"\x01"
+
+
+def _encode_cint(value: CInt, /) -> bytes:
+    if value.value < 0:
+        return b"\x03\x01" + _u64(-value.value)
+    return b"\x03\x00" + _u64(value.value)
+
+
+def _encode_cseq(value: CSeq, /) -> bytes:
+    return (
+        b"\x08"
+        + _u64(len(value.items))
+        + b"".join(encode_value(item) for item in value.items)
+    )
+
+
+def _encode_cmap(value: CMap, /) -> bytes:
+    return (
+        b"\x09"
+        + _u64(len(value.entries))
+        + b"".join(_text(key) + encode_value(item) for key, item in value.entries)
+    )
+
+
+def _encode_cshape(value: CShape, /) -> bytes:
+    dimensions = b"".join(_encode_dimension(dim) for dim in value.dims)
+    return b"\x0a" + _u64(len(value.dims)) + dimensions
+
+
+_VALUE_ENCODERS: Final[dict[type, ValueEncoder]] = {
+    CNull: lambda _value: b"\x00",
+    CBool: _encode_cbool,
+    CInt: _encode_cint,
+    CFloat: lambda value: b"\x04" + struct.pack(">d", value.value),
+    CStr: lambda value: b"\x05" + _text(value.value),
+    CBytes: lambda value: b"\x06" + _u64(len(value.value)) + value.value,
+    CEnum: lambda value: b"\x07" + _text(value.family) + _text(value.variant),
+    CSeq: _encode_cseq,
+    CMap: _encode_cmap,
+    CShape: _encode_cshape,
+    CDType: lambda value: b"\x0b" + _text(value.name),
+}
+
 
 def encode_value(value: CValue, /) -> bytes:
     """Encode one canonical declaration value to its exact v1 bytes."""
 
-    if isinstance(value, CNull):
-        return b"\x00"
-    if isinstance(value, CBool):
-        return b"\x02" if value.value else b"\x01"
-    if isinstance(value, CInt):
-        if value.value < 0:
-            return b"\x03\x01" + _u64(-value.value)
-        return b"\x03\x00" + _u64(value.value)
-    if isinstance(value, CFloat):
-        return b"\x04" + struct.pack(">d", value.value)
-    if isinstance(value, CStr):
-        return b"\x05" + _text(value.value)
-    if isinstance(value, CBytes):
-        return b"\x06" + _u64(len(value.value)) + value.value
-    if isinstance(value, CEnum):
-        return b"\x07" + _text(value.family) + _text(value.variant)
-    if isinstance(value, CSeq):
-        return (
-            b"\x08"
-            + _u64(len(value.items))
-            + b"".join(encode_value(item) for item in value.items)
-        )
-    if isinstance(value, CMap):
-        return (
-            b"\x09"
-            + _u64(len(value.entries))
-            + b"".join(_text(key) + encode_value(item) for key, item in value.entries)
-        )
-    if isinstance(value, CShape):
-        dimensions = b"".join(_encode_dimension(dim) for dim in value.dims)
-        return b"\x0a" + _u64(len(value.dims)) + dimensions
-    if isinstance(value, CDType):
-        return b"\x0b" + _text(value.name)
-    raise TypeError(f"unsupported canonical value; got {type_name(value)}")
+    encoder = _VALUE_ENCODERS.get(type(value))
+    if encoder is None:
+        raise TypeError(f"unsupported canonical value; got {type_name(value)}")
+    return encoder(value)
 
 
 def _encode_dimension(dimension: CValue, /) -> bytes:
@@ -470,36 +490,42 @@ def literal_value(value: object, /) -> CValue:
     )
 
 
+def _format_cseq(value: CSeq, /) -> str:
+    return "[" + ", ".join(format_value(item) for item in value.items) + "]"
+
+
+def _format_cmap(value: CMap, /) -> str:
+    return (
+        "{"
+        + ", ".join(f"{key}={format_value(item)}" for key, item in value.entries)
+        + "}"
+    )
+
+
+_VALUE_FORMATTERS: Final[dict[type, ValueFormatter]] = {
+    CNull: lambda _value: "null",
+    CBool: lambda value: "true" if value.value else "false",
+    CInt: lambda value: str(value.value),
+    CFloat: lambda value: repr(value.value),
+    CStr: lambda value: json.dumps(value.value),
+    CDType: lambda value: value.name,
+    CBytes: lambda value: f"bytes({value.value.hex()})",
+    CEnum: lambda value: f"{value.family}.{value.variant}",
+    CSeq: _format_cseq,
+    CMap: _format_cmap,
+    CShape: lambda value: (
+        "shape(" + ", ".join(format_value(dim) for dim in value.dims) + ")"
+    ),
+}
+
+
 def format_value(value: CValue, /) -> str:
     """Render one canonical value deterministically for ``explain`` output."""
 
-    if isinstance(value, CNull):
-        return "null"
-    if isinstance(value, CBool):
-        return "true" if value.value else "false"
-    if isinstance(value, CInt):
-        return str(value.value)
-    if isinstance(value, CFloat):
-        return repr(value.value)
-    if isinstance(value, CStr):
-        return json.dumps(value.value)
-    if isinstance(value, CDType):
-        return value.name
-    if isinstance(value, CBytes):
-        return f"bytes({value.value.hex()})"
-    if isinstance(value, CEnum):
-        return f"{value.family}.{value.variant}"
-    if isinstance(value, CSeq):
-        return "[" + ", ".join(format_value(item) for item in value.items) + "]"
-    if isinstance(value, CMap):
-        return (
-            "{"
-            + ", ".join(f"{key}={format_value(item)}" for key, item in value.entries)
-            + "}"
-        )
-    if isinstance(value, CShape):
-        return "shape(" + ", ".join(format_value(dim) for dim in value.dims) + ")"
-    raise TypeError(f"unsupported canonical value; got {type_name(value)}")
+    formatter = _VALUE_FORMATTERS.get(type(value))
+    if formatter is None:
+        raise TypeError(f"unsupported canonical value; got {type_name(value)}")
+    return formatter(value)
 
 
 def explain_node(node: Node, /) -> str:
