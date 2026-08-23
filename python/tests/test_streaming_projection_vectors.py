@@ -47,6 +47,7 @@ def test_streaming_error_vectors_freeze_python_safe_projection() -> None:
             "component_id",
             "diagnostic_id",
             "position",
+            "reason_code",
         }
         assert expected["category"] in _EXPECTED_CATEGORIES  # nosec B101
         rendered = json.dumps(expected, sort_keys=True)

@@ -13,6 +13,7 @@ const job = (status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled
     ? '2026-01-01T00:00:02Z'
     : null,
   error_code: status === 'failed' ? 'worker_failed' : null,
+  reason_code: null,
   error: status === 'failed' ? 'worker exited' : null,
 });
 

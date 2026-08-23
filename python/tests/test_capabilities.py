@@ -50,8 +50,13 @@ def test_empty_runtime_capabilities_are_frozen_and_session_scoped() -> None:
     assert tuple(operator.kind for operator in snapshot.operators) == (
         "expression",
         "sql",
+        "stream_join",
     )
-    assert all(operator.input_kinds == ("table",) for operator in snapshot.operators)
+    assert all(
+        all(kind == "table" for kind in operator.input_kinds)
+        for operator in snapshot.operators
+    )
+    assert snapshot.operators[-1].input_kinds == ("table", "table")
     assert all(operator.output_kinds == ("table",) for operator in snapshot.operators)
     assert all(operator.requires_datafusion for operator in snapshot.operators)
     assert snapshot.udfs == ()

@@ -539,6 +539,7 @@ describe('Calc Flow Studio', () => {
             started_at: null,
             finished_at: null,
             error_code: null,
+            reason_code: null,
             error: null,
           },
           202,
@@ -553,6 +554,7 @@ describe('Calc Flow Studio', () => {
           started_at: null,
           finished_at: null,
           error_code: null,
+          reason_code: null,
           error: null,
         });
       }
