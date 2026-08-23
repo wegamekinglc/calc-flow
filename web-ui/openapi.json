@@ -928,6 +928,7 @@
             "type": "object"
           },
           "JoinStateLimits": {
+            "additionalProperties": false,
             "description": "Hard logical state and per-input fan-out limits.",
             "properties": {
               "max_matches_per_input_batch": {
@@ -957,6 +958,7 @@
             "type": "object"
           },
           "JoinTimeBounds": {
+            "additionalProperties": false,
             "description": "Inclusive event-time distance around one left row.",
             "properties": {
               "after_micros": {
@@ -1562,6 +1564,7 @@
             "type": "object"
           },
           "StreamJoinSpec": {
+            "additionalProperties": false,
             "description": "Immutable declaration for a two-input bounded inner stream Join.",
             "properties": {
               "bounds": {
@@ -2025,6 +2028,7 @@
             "type": "object"
           },
           "JoinStateLimits": {
+            "additionalProperties": false,
             "description": "Hard logical state and per-input fan-out limits.",
             "properties": {
               "max_matches_per_input_batch": {
@@ -2054,6 +2058,7 @@
             "type": "object"
           },
           "JoinTimeBounds": {
+            "additionalProperties": false,
             "description": "Inclusive event-time distance around one left row.",
             "properties": {
               "after_micros": {
@@ -2659,6 +2664,7 @@
             "type": "object"
           },
           "StreamJoinSpec": {
+            "additionalProperties": false,
             "description": "Immutable declaration for a two-input bounded inner stream Join.",
             "properties": {
               "bounds": {
