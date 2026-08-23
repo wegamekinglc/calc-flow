@@ -116,7 +116,22 @@ The operator keeps deterministic incremental state keyed by window bounds and
 group values. A watermark closes eligible windows; end-of-input closes the
 remaining non-empty windows. Assignments whose window end is not later than
 the current input watermark are late and are not applied. Session windows,
-allowed-lateness updates, retractions, and early triggers are not part of 3.0.
+allowed-lateness updates, retractions, and early triggers remain unavailable.
+
+## Stateful stream join
+
+`StreamJoinOperator` is the other stateful stream component. Its
+`StreamJoinSpec` declares a two-input inner equi-Join over inclusive asymmetric
+event-time bounds, explicit per-side state and per-batch match limits, and
+output prefixes; the output schema is derived from the prefixed input columns.
+Retained state is keyed and charged through a versioned logical encoding, so
+admission decisions are deterministic across restarts.
+
+Watermark progress evicts rows that can no longer match; null event times,
+null keys, and rows strictly older than their own ingress watermark are never
+retained. The operator checkpoints its delta-based state and an independent
+output frontier, and exposes a payload-free per-node status through the job
+status surface.
 
 ## Checkpoint transaction
 

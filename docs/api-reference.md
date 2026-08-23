@@ -52,8 +52,9 @@ The `calc_flow` crate re-exports its supported public types from
 | Batch graph        | `PipelineBuilder`, `Edge`, `PortEndpoint`, `BatchExecutionPlan`                                                    |
 | Stream plan        | `StreamExecutionPlan`, `StreamRequirements`, `DeliveryGuarantee`, `StreamRuntimeConfig`                            |
 | Operator traits    | `Port`, `OperatorMetadata`, `NodeOperator`, `BatchOperator`, `StreamOperator`, `OperatorStateSnapshot`             |
-| Built-in operators | `ExpressionOperator`, `SqlOperator`, `UnionOperator`, `WindowAggregateOperator`                                    |
+| Built-in operators | `ExpressionOperator`, `SqlOperator`, `UnionOperator`, `WindowAggregateOperator`, `StreamJoinOperator`             |
 | Window model       | `WindowSpec`, `WindowGeometry`, `AggregateSpec`, `AggregateFunction`, `MAX_WINDOW_OVERLAP`                         |
+| Stream join model  | `StreamJoinSpec`, `StreamJoinType`, `JoinTimeBounds`, `JoinStateLimits`, `StreamJoinStatus`                        |
 | Execution          | `ExecutionOptions`, `RunResult`, `RunMetadata`, `NodeTiming`                                                       |
 | Stream model       | `StreamMessage`, `StreamMessageKind`, `StreamJobContext`, `EventTime`, `Epoch`                                     |
 | Stream channel     | `EdgeBudget`, `EnvelopeCost`, `ChannelMetrics`, `EdgeSender`, `EdgeReceiver`, `edge_channel`                       |
@@ -297,6 +298,15 @@ Capability schema version 1 is closed. The browser decoder rejects an unknown
 version or any extra field before React receives it. Validation, job, and SSE
 responses use generated discriminated unions, so backend and frontend must be
 deployed from the same generated contract.
+
+Project writes that fail validation answer `422` with a structured envelope on
+`POST /projects`, `POST /projects/import`, and `PUT /projects/{id}`: the
+`detail` field is either an invalid `ValidationReport`
+(`kind: "invalid"`, `issues` of `path`/`code`/`message`, `fingerprint: null`)
+or the standard request-validation error list. Malformed stream Join input
+carries the stable issue codes `unsupported_join_type`, `invalid_time_bound`,
+`invalid_join_limit`, `invalid_join_keys`, `incompatible_key_type`,
+`invalid_event_time`, and `invalid_output_prefix`.
 
 The checked contract is [web-ui/openapi.json](../web-ui/openapi.json).
 `npm run sync:api` regenerates it and

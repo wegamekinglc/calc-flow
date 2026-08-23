@@ -258,9 +258,10 @@ compile time, before any source opens:
   exactly-once delivery.
 
 Stream graphs compose unary expression nodes, single-input SQL nodes,
-explicit stream providers, `UnionOperator`, and `WindowAggregateOperator`.
-A union's two or more input ports share one kind, one required flag, and one
-exact schema, or are all schema-less.
+explicit stream providers, `UnionOperator`, `WindowAggregateOperator`, and
+the two-input bounded event-time `StreamJoinOperator`. A union's two or more
+input ports share one kind, one required flag, and one exact schema, or are
+all schema-less.
 
 The compiled plan records the deterministic topology, stable edge IDs, the
 source and sink binding slots (external input and output names in
