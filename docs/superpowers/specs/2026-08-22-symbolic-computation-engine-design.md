@@ -2,9 +2,16 @@
 
 ## Status
 
-Proposed on 2026-08-22. This document is a point-in-time design record, not
+The SCE-00 contract was approved on 2026-08-22 after one blocker-only
+correction round. This document remains a point-in-time design record, not
 current API guidance and not evidence that the described symbolic surface or
-native operators have been implemented. The phased delivery plan is
+native operators have been implemented. The controlling semantic freeze is
+[Symbolic Computation Contract Freeze](../../../.codex/artifacts/specs/symbolic-computation-contract.md),
+the exact public and serialized shape is
+[Symbolic Computation Engine API Contract](../../../.codex/artifacts/api-notes/symbolic-computation-engine.md),
+and the final gate is
+[Symbolic Computation Engine Contract Critique](../../../.codex/artifacts/critiques/symbolic-computation-engine.md).
+The phased delivery plan is
 [Symbolic Computation Engine Implementation Plan](../plans/2026-08-22-symbolic-computation-engine.md).
 
 ## Problem
@@ -138,14 +145,14 @@ from calc_flow import symbolic as sf
 
 quotes = sf.table_input(
     "quotes",
-    schema={
-        "ts": "timestamp[us, UTC]",
-        "sequence": "uint64",
-        "symbol": "utf8",
-        "industry": "utf8",
-        "close": "float64",
-        "volume": "float64",
-    },
+    schema=(
+        sf.Field("ts", "timestamp[us, UTC]", nullable=False),
+        sf.Field("sequence", "uint64", nullable=False),
+        sf.Field("symbol", "string", nullable=False),
+        sf.Field("industry", "string"),
+        sf.Field("close", "float64"),
+        sf.Field("volume", "float64"),
+    ),
     entity_by=("symbol",),
     event_time="ts",
     sequence_by=("sequence",),
@@ -160,19 +167,26 @@ momentum_20 = sf.ts.mean(
 )
 alpha = sf.cs.zscore(
     momentum_20,
-    at=quotes["ts"],
-    partition_by=(quotes["industry"],),
+    group=sf.exact_time(
+        quotes["ts"],
+        partition_by=(quotes["industry"],),
+    ),
 )
 
 features = quotes.with_columns(
-    return_1=return_1,
-    momentum_20=momentum_20,
-    alpha=alpha,
+    sf.FeatureSet(
+        (
+            ("return_1", return_1),
+            ("momentum_20", momentum_20),
+            ("alpha", alpha),
+        )
+    )
 )
 
 weights = sf.parameter(
     "weights",
     kind="array",
+    backend="numpy",
     dtype="float64",
     shape=(3, 1),
     mutability="static",
@@ -180,21 +194,26 @@ weights = sf.parameter(
 matrix = sf.linalg.from_columns(
     features,
     columns=("return_1", "momentum_20", "alpha"),
+    backend="numpy",
 )
 score = sf.linalg.matmul(matrix, weights)
 signals = sf.table.attach_columns(features, score, names=("score",))
 
-program = sf.Program("alpha-signals").output("signals", signals)
+program = sf.Program(
+    "alpha-signals",
+    inputs=(quotes, weights),
+    outputs=(("signals", signals),),
+)
 batch_plan = program.compile_batch(Runtime())
 stream_plan = program.compile_stream(
     Runtime(),
-    allowed_lateness=sf.seconds(2),
+    allowed_lateness_micros=2_000_000,
     late_policy="error",
 )
 ```
 
-This is a proposed surface. Exact signatures remain subject to the API review
-gate in the implementation plan.
+These signatures are frozen by the SCE-00 API contract, but the surface remains
+proposed until its dependent implementation issues land.
 
 ## Composition Model
 
@@ -205,11 +224,19 @@ callable is not retained or serialized:
 def winsorized_zscore(
     value: sf.ColumnExpr,
     *,
+    group: sf.CrossSectionGroup,
     lower: float,
     upper: float,
 ) -> sf.ColumnExpr:
+    winsorized = sf.cs.winsorize(
+        value,
+        group=group,
+        lower=lower,
+        upper=upper,
+    )
     return sf.cs.zscore(
-        sf.cs.winsorize(value, lower=lower, upper=upper),
+        winsorized,
+        group=group,
     )
 ```
 
@@ -221,10 +248,11 @@ Inputs are treated as read-only. Constructors defensively copy caller-owned
 mappings and sequences into immutable tuples or frozen JSON values. Public
 expression objects do not expose their internal collections for mutation.
 
-Python comparison operators return symbolic expressions. Public expressions
-therefore use `identical(other)` for structural identity rather than relying
-on `__eq__` in Python sets or mappings. Compiler-internal node keys retain
-ordinary value equality.
+Column and array comparison operators return symbolic expressions in their own
+domains; table expressions reject scalar operators and require table namespace
+operations. Public expressions use `identical(other)` for structural identity,
+while expression-containing grouping, feature, and program values compare only
+by object identity. Compiler-internal node keys retain ordinary value equality.
 
 ## Symbolic Intermediate Representation
 
@@ -365,7 +393,7 @@ unfinalized reorder buffers.
 ### Cross-Section Transforms
 
 A new `CrossSectionOperator` is required for rank, percentile, z-score,
-demean, top/bottom selection, mean fill, and winsorization.
+demean, and winsorization.
 
 Its semantic group is the exact event time or declared time bucket plus
 optional group keys. Batch execution receives complete groups. Stream
@@ -396,7 +424,7 @@ Streaming matrix support requires:
 - one provider call per fused array segment and micro-batch; and
 - immutable static side inputs for weights.
 
-The proposed runner boundary is:
+The frozen runner boundary is:
 
 ```python
 StreamingRunner(
@@ -407,10 +435,14 @@ StreamingRunner(
 )
 ```
 
-Static inputs are validated and latched before operator tasks start. Their
-schema, backend, and content digest participate in job/checkpoint lineage;
-recovery with different values fails before sources open. Dynamic weights are
-outside the first release.
+Static inputs are validated and latched before operator tasks start. Static
+declarations participate in the semantic plan fingerprint. Payload digests
+participate only in prepared-job identity and manifest compatibility after the
+existing pipeline name and semantic plan fingerprint select a lineage. A
+payload digest never enters `StateLineageKey`, the lineage-directory hash, the
+semantic plan fingerprint, or manifest discovery filters. Recovery with a
+missing, extra, or changed digest therefore reaches the existing lineage and
+fails before sources open. Dynamic weights are outside the first release.
 
 Only row-axis-independent array work is stream safe initially: elementwise
 operations, feature-axis reductions, and per-row multiplication by static
@@ -442,20 +474,27 @@ The next schema includes, at minimum:
 ```python
 OperatorCapability(
     kind="rolling",
+    version="1",
+    input_ports=(ProviderPort("input", "table", required=True),),
+    output_ports=(ProviderPort("output", "table", required=True),),
     modes=("batch", "stream"),
-    input_kinds=("table",),
-    output_kinds=("table",),
+    finality="per_row_final",
     requires_datafusion=False,
     stateful=True,
     microbatch_invariant=True,
     requires_watermark=True,
-    supports_checkpoint=True,
+    checkpoint_support="checkpointed_stateful",
+    state_version=1,
     deterministic=True,
+    replay_safe=True,
 )
 ```
 
 Provider capabilities carry the same lifecycle and partition contract. A
 batch-only NumPy/JAX registration cannot be selected by `compile_stream()`.
+An existing provider with no finality proof reports `finality="unproven"`,
+remains usable in batch mode, and is rejected by stream compilation before its
+factory or callback runs.
 Capability output stays immutable, defensively copied, session-scoped, and
 deterministically ordered.
 
@@ -540,8 +579,8 @@ The first supported catalog is deliberately compositional:
 
 - row: arithmetic, comparison, boolean, `where`, coalesce, log, exp, sqrt,
   abs, clip, and cast;
-- temporal: lag, delta, count, sum, mean, min, max, standard deviation, and
-  correlation;
+- temporal: lag, delta, count, sum, mean, min, max, variance, standard
+  deviation, covariance, and correlation;
 - cross section: rank, percentile, z-score, demean, and winsorization;
 - matrix: explicit column projection, elementwise expressions, static-weight
   matrix multiplication, and explicit attachment to the originating table;
@@ -554,18 +593,36 @@ families are expressed as compositions. A new primitive is justified only by
 an unavailable algorithm, materially better native state structure, or a
 measured fusion/performance requirement.
 
-## Decision Gates
+## Deferred Work
 
-Implementation is blocked until review freezes:
+Cross-section top/bottom selection and mean fill are not part of the frozen
+initial primitive catalog. They require a separate approved API and semantic
+design after the initial release; implementations must not infer signatures or
+lower them through another primitive.
 
-1. exact public Python signatures and names;
-2. row/time window interval and `min_periods` semantics;
-3. cross-section completeness, tie, and ordering rules;
-4. late-event policy and final-only guarantees;
-5. rolling and cross-section project-v3 shapes;
-6. capability schema revision and lifecycle vocabulary;
-7. static input ownership, fingerprint, and recovery contract; and
-8. per-primitive floating-point equivalence tolerances.
+## Frozen Decision Gates
 
-The paired implementation plan identifies the PR that owns each gate and does
-not authorize downstream implementation before its dependencies are approved.
+SCE-00 closed every decision that can affect a public API, serialized data,
+durable state, finality, or recovery:
+
+1. the API contract sections 2 and 3 freeze exact Python and Rust names,
+   signatures, and exports;
+2. semantic contract D5 freezes row frames as inclusive `[i-n+1, i]`, duration
+   frames as `(t-d, t]`, positive minimum counts, and deterministic order;
+3. D6 freezes exact-time/fixed-bucket completeness, ties, null/NaN treatment,
+   statistics, and canonical row order;
+4. D7 freezes append-only final output, `error`/`drop`, envelope atomicity,
+   redacted row-index diagnostics, and checked `max(W - t)` late metrics;
+5. API contract section 5 freezes strict additive `rolling` and
+   `cross_section` project-v3 variants with explicit defaults;
+6. D9 and API contract section 6 freeze capability schema v2, including
+   conservative legacy-provider `finality="unproven"`;
+7. D10–D11 and API contract sections 7–8 freeze static-input ownership,
+   canonical digest bytes, existing-lineage comparison, and recovery; and
+8. D13 freezes per-primitive floating-point tolerances while keeping schemas,
+   ordering, missing-value positions, and non-floating values exact.
+
+The adversarial critique approved these choices after closing four blocking
+findings in the permitted correction round. This gate authorizes only the
+downstream tasks and does not claim that any symbolic engine surface or native
+operator is implemented today.

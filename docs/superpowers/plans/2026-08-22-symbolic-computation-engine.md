@@ -1,12 +1,15 @@
 # Symbolic Computation Engine Implementation Plan
 
-> **Status:** Proposed on 2026-08-22. No implementation task in this plan is
-> complete merely because this document exists.
+> **Status:** SCE-00 approved on 2026-08-22. No downstream implementation task
+> is complete merely because its contract is frozen here.
 >
-> **Baseline:** `main@761802a3c074c61a00251211d491137ef8a5f521` after PR #164.
+> **Baseline:** `main@f6b8a6f90b7a978de1976f5a163ea689b989caee` after PR #166.
 >
 > **Design contract:**
-> [Symbolic Computation Engine Design](../specs/2026-08-22-symbolic-computation-engine-design.md).
+> [Symbolic Computation Engine Design](../specs/2026-08-22-symbolic-computation-engine-design.md),
+> [semantic freeze](../../../.codex/artifacts/specs/symbolic-computation-contract.md),
+> [API contract](../../../.codex/artifacts/api-notes/symbolic-computation-engine.md),
+> and [approved critique](../../../.codex/artifacts/critiques/symbolic-computation-engine.md).
 >
 > **Scope:** Deliver a Python symbolic declaration and compiler layer that
 > delegates all data calculation to calc-flow's existing or approved native
@@ -59,24 +62,24 @@ is deleted after the atomic cutover; it is not a permanent release branch.
 
 ## 3. Phase and Task Map
 
-| Issue    | Phase | Delivery                                  | Depends on       | Single-track weeks |
-| -------- | ----- | ----------------------------------------- | ---------------- | ------------------ |
-| [SCE-00] | P0    | freeze symbolic semantic decisions        | —                | 1.0                |
-| [SCE-01] | P0    | capture table, rolling, and matrix bases  | SCE-00           | 0.5                |
-| [SCE-02] | P1    | immutable expression IR and namespaces    | SCE-00           | 1.0                |
-| [SCE-03] | P1    | program, type/domain/state analysis       | SCE-02           | 1.0                |
-| [SCE-04] | P2    | lifecycle-aware runtime capabilities      | SCE-00           | 1.0                |
-| [SCE-05] | P2    | fused row-local batch/stream lowering     | SCE-03, SCE-04   | 1.5                |
-| [SCE-06] | P3    | rolling row windows with lag/delta        | SCE-05           | 2.0                |
-| [SCE-07] | P3    | rolling numeric aggregates and sharing    | SCE-06           | 2.0                |
-| [SCE-08] | P3    | duration windows, covariance, correlation | SCE-07           | 2.0                |
-| [SCE-09] | P4    | cross-section rank, percentile, z-score   | SCE-05           | 2.0                |
-| [SCE-10] | P4    | grouped cross sections and winsorization  | SCE-09           | 1.5                |
-| [SCE-11] | P5    | immutable static stream inputs            | SCE-05           | 2.0                |
-| [SCE-12] | P5    | stateless stream provider lifecycle       | SCE-04, SCE-11   | 1.5                |
-| [SCE-13] | P5    | symbolic table/array bridges and matmul   | SCE-03, SCE-12   | 1.5                |
-| [SCE-14] | P6    | cross-domain CSE, fusion, explain, cache  | SCE-08, SCE-10, SCE-13 | 2.0          |
-| [SCE-15] | P6    | Studio, docs, hardening, release checks   | SCE-14           | 2.0                |
+| Issue    | Phase | Delivery                                  | Depends on             | Single-track weeks |
+| -------- | ----- | ----------------------------------------- | ---------------------- | ------------------ |
+| [SCE-00] | P0    | freeze symbolic semantic decisions        | —                      | 1.0                |
+| [SCE-01] | P0    | capture table, rolling, and matrix bases  | SCE-00                 | 0.5                |
+| [SCE-02] | P1    | immutable expression IR and namespaces    | SCE-00                 | 1.0                |
+| [SCE-03] | P1    | program, type/domain/state analysis       | SCE-02                 | 1.0                |
+| [SCE-04] | P2    | lifecycle-aware runtime capabilities      | SCE-00                 | 1.0                |
+| [SCE-05] | P2    | fused row-local batch/stream lowering     | SCE-03, SCE-04         | 1.5                |
+| [SCE-06] | P3    | rolling row windows with lag/delta        | SCE-05                 | 2.0                |
+| [SCE-07] | P3    | rolling numeric aggregates and sharing    | SCE-06                 | 2.0                |
+| [SCE-08] | P3    | duration windows, covariance, correlation | SCE-07                 | 2.0                |
+| [SCE-09] | P4    | cross-section rank, percentile, z-score   | SCE-05                 | 2.0                |
+| [SCE-10] | P4    | cross-section winsorization               | SCE-09                 | 1.5                |
+| [SCE-11] | P5    | immutable static stream inputs            | SCE-05                 | 2.0                |
+| [SCE-12] | P5    | stateless stream provider lifecycle       | SCE-04, SCE-11         | 1.5                |
+| [SCE-13] | P5    | symbolic table/array bridges and matmul   | SCE-03, SCE-12         | 1.5                |
+| [SCE-14] | P6    | cross-domain CSE, fusion, explain, cache  | SCE-08, SCE-10, SCE-13 | 2.0                |
+| [SCE-15] | P6    | Studio, docs, hardening, release checks   | SCE-14                 | 2.0                |
 
 The single-track median is about 23.5 engineer-weeks. Two engineers split
 between native streaming/state work and Python/compiler/provider work can
@@ -86,6 +89,8 @@ These are planning estimates, not delivery promises.
 ## 4. Phase P0: Semantic Freeze and Baselines
 
 ### [SCE-00] Freeze the Symbolic Contract
+
+**Status:** Approved on 2026-08-22 after one blocker-only correction round.
 
 **Branch:** `feature/symbolic-contract`
 
@@ -111,14 +116,17 @@ project variant, runner parameter, or durable state layout is implemented.
 **Files:**
 
 - this design and implementation-plan pair;
-- an API note under `.codex/artifacts/api-notes/` if the calc-flow specialist
-  workflow is invoked; and
-- a same-slug critique under `.codex/artifacts/critiques/` before implementation
-  if that workflow is invoked.
+- `.codex/artifacts/specs/symbolic-computation-contract.md`;
+- `.codex/artifacts/api-notes/symbolic-computation-engine.md`; and
+- `.codex/artifacts/critiques/symbolic-computation-engine.md`.
 
 **Exit gate:** No unresolved decision affects serialized data, public API,
 durable state, output finality, or recovery. The document continues to state
 that no implementation exists.
+
+**Disposition:** Satisfied. The semantic and API contracts are frozen, the
+critique is approved, and downstream issues remain responsible for every
+runtime, operator, lowerer, runner, schema, and execution change.
 
 ### [SCE-01] Capture Baseline Performance
 
@@ -220,15 +228,19 @@ python/tests/test_symbolic_analysis.py
 - table-derived arrays retain row-axis lineage;
 - incompatible attachment is rejected;
 - stream mode rejects unbounded state and missing event-time/sequence facts;
+- `analyze()` and `explain()` require an explicit `Runtime` and capture one
+  immutable capability session/revision snapshot;
 - error paths begin at the named program output;
 - analysis results are immutable and deterministic.
 
 **Implementation:** `table_input`, `parameter`, `FeatureSet`, `Program`, value
 type/domain/lineage inference, state requirement propagation, stream-safety
-analysis, and `explain()` facts. Do not add a project lowerer in this task.
+analysis, one explicit immutable `Runtime` capability snapshot per analysis,
+and `explain()` facts. Do not add a project lowerer in this task.
 
-**Exit gate:** A complete program can be validated, fingerprinted, and
-explained without invoking a runtime or accepting data.
+**Exit gate:** A declaration fingerprint remains runtime independent. A
+complete program can be analyzed and explained against the explicitly supplied
+`Runtime` capability snapshot without accepting data or executing a job.
 
 ## 6. Phase P2: Lifecycle Capabilities and Row-Local MVP
 
@@ -325,10 +337,10 @@ batch, stream, project, checkpoint, Python lowering, and generated contracts.
 - Rust/Python integration tests.
 
 **Initial spec:** partition columns, event-time column, sequence columns,
-row-window width, minimum periods, ordered output declarations, lag/delta
-function, input field, and output field.
+ordered output declarations with primitive version, lag/delta function, input
+field, output field, and positive `periods`.
 
-**RED tests:** duplicate names, invalid windows, missing exact schema,
+**RED tests:** duplicate names, invalid periods, missing exact schema,
 unsupported type, entity interleaving, duplicate timestamps, segmentation
 invariance, watermark progress, checkpoint/restore/reset, output order, and
 project canonicalization.
@@ -342,12 +354,12 @@ rows across segmentation and recovery.
 
 **PR title:** `feat: add rolling numeric aggregates`
 
-**Goal:** Add count, sum, mean, variance, and standard deviation while sharing
-history for compatible outputs.
+**Goal:** Add count, sum, mean, min, max, variance, and standard deviation while
+sharing history for compatible outputs.
 
 **Implementation:** compact per-entity row history, reversible count/sum,
-stable add/remove variance state, batched Arrow output builders, exact
-null/NaN/minimum-period rules, and immutable snapshot segments.
+stable add/remove variance state, min/max monotonic queues, batched Arrow output
+builders, exact null/NaN/minimum-period rules, and immutable snapshot segments.
 
 **RED tests:** overflow, all-null windows, NaN policy, insufficient samples,
 multiple columns, multiple compatible outputs, high-cardinality entities,
@@ -364,9 +376,10 @@ active entities and retained rows. No Python object is allocated per entity.
 
 **Goal:** Complete the initial temporal catalog.
 
-**Implementation:** duration-window eviction, bounded reorder buffer,
-open/closed interval rules, min/max monotonic queues, covariance/correlation,
-allowed lateness, error/drop policies, and deterministic late-row metrics.
+**Implementation:** duration-window support for the delivered rolling
+primitives, bounded reorder buffers, open/closed interval rules,
+covariance/correlation, allowed lateness, error/drop policies, and
+deterministic late-row metrics.
 
 **RED tests:** interval boundaries, watermark at exact boundary, bounded
 out-of-order arrival, too-late rows, zero variance, numerical stability,
@@ -404,14 +417,13 @@ interleaved groups, ties, nulls, incomplete group before watermark, final
 emission after watermark, half-built group checkpoint, and deterministic row
 order.
 
-### [SCE-10] Add Grouped Cross-Section Features
+### [SCE-10] Add Cross-Section Winsorization
 
-**Branch:** `feature/cross-section-groups`
+**Branch:** `feature/cross-section-winsorization`
 
-**PR title:** `feat: add grouped cross-section features`
+**PR title:** `feat: add cross-section winsorization`
 
-**Goal:** Add winsorize, top/bottom selection, and mean fill while sharing one
-grouping and sort pass.
+**Goal:** Add winsorize while sharing the existing grouping and sort pass.
 
 **RED tests:** industry/group partitioning, exact versus bucketed event time,
 multiple outputs, late-event error/drop, released state after watermark,
@@ -431,8 +443,9 @@ groups release state promptly, and batch/stream tie/null rules are identical.
 **Goal:** Supply immutable weights/configuration batches once per job without
 pretending they are infinite sources.
 
-**Public decision gate:** Review the proposed
-`StreamingRunner(..., static_inputs=...)` signature before implementation.
+**Frozen public contract:** Implement the exact additive, keyword-only
+`StreamingRunner(..., static_inputs=...)` signature from the approved API note;
+do not reopen its name, ownership, digest, or recovery semantics here.
 
 **Implementation areas:** stream plan external-input descriptors, whole-job
 preflight, runner/source coverage, operator startup, job/checkpoint lineage,
@@ -633,6 +646,7 @@ These items require separate approved designs after the initial release:
 - arbitrary user-defined stateful providers;
 - sparse arrays and distributed device placement;
 - cross-row array reductions without explicit windows;
+- cross-section top/bottom selection and mean fill;
 - a portable serialized formula document; and
 - compatibility aliases for external symbolic libraries.
 
