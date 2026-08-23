@@ -1,6 +1,6 @@
 # Repository Guidance
 
-Calc Flow 3.0 is a Rust-native micro-batch and streaming calculation engine.
+Calc Flow 4.0 is a Rust-native micro-batch and streaming calculation engine.
 The `calc-flow` crate owns immutable `Batch` values, graph compilation,
 DataFusion execution, projects, stores, checkpoints, and runners. The Python
 package under `python/calc_flow/` is a PyO3 binding plus functional adapters;
@@ -180,7 +180,8 @@ dashes span the full column width, including cell spaces.
 - `OperatorMetadata` owns shared graph metadata. `BatchOperator` and
   `StreamOperator` split finite processing from continuous processing and
   checkpoint lifecycle. `ExpressionOperator` and `SqlOperator` implement both
-  lifecycles; `UnionOperator` and `WindowAggregateOperator` are stream-only.
+  lifecycles; `UnionOperator`, `WindowAggregateOperator`, and
+  `StreamJoinOperator` are stream-only.
   External operators resolve through lifecycle-specific factories in
   `ProviderRegistry`.
 - `PipelineBuilder` consumes immutable graph-building steps.

@@ -14,7 +14,7 @@ trailers to commits unless explicitly requested.
 
 ## What this is
 
-Calc Flow 3.0 is a Rust-native micro-batch and streaming calculation engine.
+Calc Flow 4.0 is a Rust-native micro-batch and streaming calculation engine.
 The `calc-flow` crate owns immutable `Batch` values, graph compilation,
 DataFusion execution, project validation, checkpointing, and runner semantics.
 The Python package under `python/calc_flow/` is a PyO3 binding plus functional

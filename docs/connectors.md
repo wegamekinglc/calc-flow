@@ -273,6 +273,56 @@ tumbling window.
 }
 ```
 
+Stream Join nodes are the other two-input table operator. Both inputs carry an
+exact schema, the bounds and limits are required with no defaults, and the
+output schema is derived from the prefixes rather than declared:
+
+```json
+{
+  "id": "match",
+  "input_ports": [
+    {
+      "name": "left",
+      "kind": "table",
+      "required": true,
+      "schema": [
+        {"name": "account_id", "data_type": "int64", "nullable": false},
+        {"name": "authorized_at", "data_type": "timestamp[us]",
+         "nullable": false}
+      ]
+    },
+    {
+      "name": "right",
+      "kind": "table",
+      "required": true,
+      "schema": [
+        {"name": "account_id", "data_type": "int64", "nullable": false},
+        {"name": "paid_at", "data_type": "timestamp[us]", "nullable": false}
+      ]
+    }
+  ],
+  "output_ports": [],
+  "operator": {
+    "kind": "stream_join",
+    "spec": {
+      "join_type": "inner",
+      "left_keys": ["account_id"],
+      "right_keys": ["account_id"],
+      "left_event_time": "authorized_at",
+      "right_event_time": "paid_at",
+      "bounds": {"before_micros": 300000000, "after_micros": 30000000},
+      "limits": {
+        "max_state_rows_per_side": 100000,
+        "max_state_bytes_per_side": 134217728,
+        "max_matches_per_input_batch": 1000000
+      },
+      "left_prefix": "authorization",
+      "right_prefix": "payment"
+    }
+  }
+}
+```
+
 ## Recovery ownership
 
 Set stream runtime and managed state once at the project root:
