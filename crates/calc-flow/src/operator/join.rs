@@ -281,11 +281,12 @@ use std::{
 use async_trait::async_trait;
 use datafusion::arrow::{
     array::{
-        Array, BinaryArray, BinaryViewArray, LargeBinaryArray, LargeStringArray, StringArray,
-        StringViewArray, TimestampMicrosecondArray, TimestampMillisecondArray,
-        TimestampNanosecondArray, TimestampSecondArray,
+        Array, ArrayRef, BinaryArray, BinaryViewArray, LargeBinaryArray, LargeStringArray,
+        StringArray, StringViewArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+        TimestampNanosecondArray, TimestampSecondArray, UInt64Array,
     },
-    datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
+    compute::concat,
+    datatypes::{DataType, Field, IntervalUnit, Schema, SchemaRef, TimeUnit},
     ipc::{reader::StreamReader, writer::StreamWriter},
     record_batch::RecordBatch,
 };
@@ -294,9 +295,9 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 
 use crate::{
-    Batch, BatchKind, BatchMetadata, CalcFlowError, DataFusionConfig, Epoch, EventTime,
-    IngressProgress, JsonMap, OperatorStateSnapshot, Port, Result, StreamCollector, StreamOperator,
-    StreamOperatorContext, UdfRegistrySnapshot,
+    Batch, BatchKind, BatchMetadata, CalcFlowError, DataFusionConfig, DataFusionRuntime, Epoch,
+    EventTime, IngressProgress, JsonMap, OperatorStateSnapshot, Port, Result, StreamCollector,
+    StreamOperator, StreamOperatorContext, UdfRegistrySnapshot,
 };
 
 use super::{OperatorMetadata, StreamRuntimeState, is_identifier, validate_operator_name};
@@ -319,6 +320,7 @@ pub enum StreamJoinType {
 
 /// Inclusive event-time distance around one left row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct JoinTimeBounds {
     #[schemars(range(min = 0, max = 9_007_199_254_740_991_u64))]
     before_micros: u64,
@@ -400,6 +402,7 @@ impl<'de> Deserialize<'de> for JoinTimeBounds {
     clippy::struct_field_names,
     reason = "the frozen public JSON field names all use the max_ limit prefix"
 )]
+#[serde(deny_unknown_fields)]
 pub struct JoinStateLimits {
     #[schemars(range(min = 1, max = 9_007_199_254_740_991_u64))]
     max_state_rows_per_side: u64,
@@ -488,6 +491,7 @@ impl<'de> Deserialize<'de> for JoinStateLimits {
 
 /// Immutable declaration for a two-input bounded inner stream Join.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StreamJoinSpec {
     join_type: StreamJoinType,
     left_keys: Vec<String>,
@@ -645,6 +649,53 @@ struct CompiledJoin {
     left_event_time_index: usize,
     right_event_time_index: usize,
     equality_query: String,
+}
+
+/// Scratch-table alias holding the admitted rows of the current input batch.
+const PROBE_TABLE: &str = "probe_input";
+/// Scratch-table alias holding the opposite side's retained state rows.
+const STATE_TABLE: &str = "state_input";
+/// Renamed key column prefix shared by both scratch tables.
+const KEY_COLUMN_PREFIX: &str = "__cf_join_key_";
+/// Position of one admitted row inside [`PROBE_TABLE`].
+const PROBE_POS_COLUMN: &str = "__cf_join_pos";
+/// Retained-state row id inside [`STATE_TABLE`].
+const STATE_RID_COLUMN: &str = "__cf_join_row_id";
+
+/// One incoming row that passed null-key, null-event-time, and lateness admission.
+struct AdmittedRow {
+    record: RecordBatch,
+    event_time: EventTime,
+    row_id: u64,
+    retain: bool,
+}
+
+/// Scratch accumulator for one input batch's admission pass.
+struct AdmissionBundle {
+    next_row_id: u64,
+    metrics: SideMetrics,
+    admitted: Vec<AdmittedRow>,
+    had_late: bool,
+}
+
+/// Why an incoming physical row was dropped during admission.
+#[derive(Clone, Copy)]
+enum DropKind {
+    NullEventTime,
+    NullKey,
+    Late(u64),
+}
+
+/// Classified disposition of one incoming physical row.
+enum RowAdmission {
+    Dropped(DropKind),
+    Admitted(EventTime),
+}
+
+/// One time-qualified key-equal pair, ordered for emission.
+struct MatchedPair {
+    pos: usize,
+    opposite_index: usize,
 }
 
 #[derive(Clone)]
@@ -806,218 +857,199 @@ impl StreamJoinOperator {
             .transpose()
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "transactional Join admission keeps row IDs, matches, and limits in one scratch-state boundary"
-    )]
     async fn prepare_batch(
         &mut self,
         ingress: &str,
         batch: &Batch,
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedJoinBatch> {
+        let plan = self.begin_batch(ingress, batch)?;
+        let mut bundle = self.admission_bundle(&plan);
+        for record in batch.table_payload()?.batches() {
+            self.admit_record(record, &plan, ingress, context, &mut bundle)?;
+        }
+        bundle.finish(&self.name)?;
+        let outputs = self.evaluate_matches(&plan, &bundle.admitted).await?;
+        self.finish_prepared(&plan, bundle, outputs)
+    }
+
+    fn finish_prepared(
+        &mut self,
+        plan: &SidePlan,
+        bundle: AdmissionBundle,
+        outputs: Vec<RecordBatch>,
+    ) -> Result<PreparedJoinBatch> {
+        let retained = retained_rows(&bundle.admitted, &plan.key_indices, &self.name)?;
+        self.validate_state_admission(plan.incoming_is_left, &retained)?;
+        Ok(PreparedJoinBatch {
+            outputs,
+            retained,
+            next_row_id: bundle.next_row_id,
+            metrics: bundle.metrics,
+        })
+    }
+
+    /// Validates the ingress and port contract before any admission work.
+    fn begin_batch(&self, ingress: &str, batch: &Batch) -> Result<SidePlan> {
         if self.state.ended {
             return Err(operator_error(
                 &self.name,
                 "received data after end-of-input",
             ));
         }
-        let (input_port_index, event_index, key_indices, opposite, incoming_is_left) = match ingress
-        {
-            "left" => (
-                0,
-                self.compiled.left_event_time_index,
-                self.compiled.left_key_indices.clone(),
-                self.state.right.clone(),
-                true,
-            ),
-            "right" => (
-                1,
-                self.compiled.right_event_time_index,
-                self.compiled.right_key_indices.clone(),
-                self.state.left.clone(),
-                false,
-            ),
-            _ => {
-                return Err(operator_error(
-                    &self.name,
-                    &format!("unknown ingress {ingress:?}; expected left or right"),
-                ));
-            }
-        };
-        self.input_ports[input_port_index]
-            .validate(batch, &format!("{}.{}", self.name, ingress))?;
-        let side_progress = context.ingress_progress().get(ingress);
-        let opposite_progress =
-            context
-                .ingress_progress()
-                .get(if incoming_is_left { "right" } else { "left" });
-        let mut next_row_id = if incoming_is_left {
-            self.state.next_left_row_id
-        } else {
-            self.state.next_right_row_id
-        };
-        let mut metrics = if incoming_is_left {
-            self.state.metrics.left.clone()
-        } else {
-            self.state.metrics.right.clone()
-        };
-        let mut outputs = Vec::new();
-        let mut retained = Vec::new();
-        let mut batch_had_late = false;
-        for record in batch.table_payload()?.batches() {
-            for row_index in 0..record.num_rows() {
-                let row_id = next_row_id;
-                next_row_id = next_row_id
-                    .checked_add(1)
-                    .ok_or_else(|| counter_overflow(&self.name, "row_id"))?;
-                let Some(event_time) =
-                    event_time_at(record, event_index, row_index, &self.name, ingress)?
-                else {
-                    metrics.null_event_time_rows = checked_metric(
-                        metrics.null_event_time_rows,
-                        1,
-                        &self.name,
-                        "null_event_time_rows",
-                    )?;
-                    continue;
-                };
-                if key_indices
-                    .iter()
-                    .any(|&index| record.column(index).is_null(row_index))
-                {
-                    metrics.null_key_rows =
-                        checked_metric(metrics.null_key_rows, 1, &self.name, "null_key_rows")?;
-                    continue;
-                }
-                if let Some(watermark) = side_progress.and_then(IngressProgress::watermark)
-                    && event_time < watermark
-                {
-                    let lateness = u64::try_from(
-                        i128::from(watermark.as_micros()) - i128::from(event_time.as_micros()),
-                    )
-                    .map_err(|_| counter_overflow(&self.name, "lateness"))?;
-                    metrics.late_rows =
-                        checked_metric(metrics.late_rows, 1, &self.name, "late_rows")?;
-                    metrics.max_lateness_micros = Some(
-                        metrics
-                            .max_lateness_micros
-                            .map_or(lateness, |current| current.max(lateness)),
-                    );
-                    batch_had_late = true;
-                    continue;
-                }
-                let incoming = record.slice(row_index, 1);
-                let mut candidates = opposite
-                    .iter()
-                    .filter(|candidate| {
-                        if incoming_is_left {
-                            self.spec.bounds.contains_pair(
-                                event_time.as_micros(),
-                                candidate.event_time.as_micros(),
-                            )
-                        } else {
-                            self.spec.bounds.contains_pair(
-                                candidate.event_time.as_micros(),
-                                event_time.as_micros(),
-                            )
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                candidates.sort_by_key(|candidate| (candidate.event_time, candidate.row_id));
-                for candidate in candidates {
-                    let (left, right) = if incoming_is_left {
-                        (&incoming, &candidate.record)
-                    } else {
-                        (&candidate.record, &incoming)
-                    };
-                    if self.pair_matches(left, right).await? {
-                        outputs.push(self.output_record(left, right)?);
-                        let match_count = u64::try_from(outputs.len())
-                            .map_err(|_| counter_overflow(&self.name, "match_count"))?;
-                        if match_count > self.spec.limits.max_matches_per_input_batch {
-                            self.state.metrics.match_limit_failures = checked_metric(
-                                self.state.metrics.match_limit_failures,
-                                1,
-                                &self.name,
-                                "match_limit_failures",
-                            )?;
-                            return Err(operator_reason(
-                                &self.name,
-                                crate::StreamingFailureReason::JoinMatchLimitExceeded,
-                                "input batch match limit exceeded",
-                            ));
-                        }
-                    }
-                }
-                if should_retain(
-                    incoming_is_left,
-                    event_time,
-                    opposite_progress,
-                    self.spec.bounds,
-                ) {
-                    let charge = state_row_charge(record, row_index, &key_indices, &self.name)?;
-                    retained.push(StoredRow {
-                        record: incoming,
-                        event_time,
-                        row_id,
-                        charge,
-                    });
-                }
-            }
-        }
-        if batch_had_late {
-            metrics.late_affected_batches = checked_metric(
-                metrics.late_affected_batches,
-                1,
+        let plan = self.side_plan(ingress)?;
+        self.input_ports[plan.port_index].validate(batch, &format!("{}.{}", self.name, ingress))?;
+        Ok(plan)
+    }
+
+    fn side_plan(&self, ingress: &str) -> Result<SidePlan> {
+        match ingress {
+            "left" => Ok(SidePlan {
+                incoming_is_left: true,
+                port_index: 0,
+                event_time_index: self.compiled.left_event_time_index,
+                key_indices: self.compiled.left_key_indices.clone(),
+            }),
+            "right" => Ok(SidePlan {
+                incoming_is_left: false,
+                port_index: 1,
+                event_time_index: self.compiled.right_event_time_index,
+                key_indices: self.compiled.right_key_indices.clone(),
+            }),
+            _ => Err(operator_error(
                 &self.name,
-                "late_affected_batches",
-            )?;
+                &format!("unknown ingress {ingress:?}; expected left or right"),
+            )),
         }
-        self.validate_state_admission(incoming_is_left, &retained)?;
-        Ok(PreparedJoinBatch {
-            outputs,
-            retained,
+    }
+
+    fn admission_bundle(&self, plan: &SidePlan) -> AdmissionBundle {
+        let (next_row_id, metrics) = if plan.incoming_is_left {
+            (self.state.next_left_row_id, self.state.metrics.left.clone())
+        } else {
+            (
+                self.state.next_right_row_id,
+                self.state.metrics.right.clone(),
+            )
+        };
+        AdmissionBundle {
             next_row_id,
             metrics,
-        })
+            admitted: Vec::new(),
+            had_late: false,
+        }
     }
 
-    async fn pair_matches(&mut self, left: &RecordBatch, right: &RecordBatch) -> Result<bool> {
-        let tables = BTreeMap::from([
-            (
-                "left_input".into(),
-                Batch::table(vec![left.clone()], BatchMetadata::default())?,
-            ),
-            (
-                "right_input".into(),
-                Batch::table(vec![right.clone()], BatchMetadata::default())?,
-            ),
-        ]);
-        let result = self
-            .runtime
-            .runtime()?
-            .sql(&self.compiled.equality_query, &tables, Some(&self.name))
-            .await?;
-        Ok(result.num_rows() == 1)
+    fn admit_record(
+        &self,
+        record: &RecordBatch,
+        plan: &SidePlan,
+        ingress: &str,
+        context: &StreamOperatorContext<'_>,
+        bundle: &mut AdmissionBundle,
+    ) -> Result<()> {
+        let side_progress = context.ingress_progress().get(ingress);
+        let opposite_progress = context.ingress_progress().get(if plan.incoming_is_left {
+            "right"
+        } else {
+            "left"
+        });
+        for row_index in 0..record.num_rows() {
+            let row_id = bundle.reserve_row_id(&self.name)?;
+            match self.classify_row(record, plan, row_index, side_progress, ingress)? {
+                RowAdmission::Dropped(kind) => bundle.note_dropped(kind, &self.name)?,
+                RowAdmission::Admitted(event_time) => bundle.push_admitted(AdmittedRow {
+                    record: record.slice(row_index, 1),
+                    event_time,
+                    row_id,
+                    retain: should_retain(
+                        plan.incoming_is_left,
+                        event_time,
+                        opposite_progress,
+                        self.spec.bounds,
+                    ),
+                }),
+            }
+        }
+        Ok(())
     }
 
-    fn output_record(&self, left: &RecordBatch, right: &RecordBatch) -> Result<RecordBatch> {
-        let columns = left
-            .columns()
+    fn classify_row(
+        &self,
+        record: &RecordBatch,
+        plan: &SidePlan,
+        row_index: usize,
+        side_progress: Option<IngressProgress>,
+        ingress: &str,
+    ) -> Result<RowAdmission> {
+        let Some(event_time) = event_time_at(
+            record,
+            plan.event_time_index,
+            row_index,
+            &self.name,
+            ingress,
+        )?
+        else {
+            return Ok(RowAdmission::Dropped(DropKind::NullEventTime));
+        };
+        if plan
+            .key_indices
             .iter()
-            .chain(right.columns())
-            .cloned()
-            .collect::<Vec<_>>();
-        RecordBatch::try_new(
-            Arc::clone(
-                self.output_ports[0]
-                    .schema()
-                    .expect("stream Join output always has an exact schema"),
-            ),
-            columns,
+            .any(|&index| record.column(index).is_null(row_index))
+        {
+            return Ok(RowAdmission::Dropped(DropKind::NullKey));
+        }
+        match late_lateness(event_time, side_progress, &self.name)? {
+            Some(lateness) => Ok(RowAdmission::Dropped(DropKind::Late(lateness))),
+            None => Ok(RowAdmission::Admitted(event_time)),
+        }
+    }
+
+    /// Runs the batched key-equality probe and emits one output row per pair.
+    ///
+    /// Key equality executes as one `DataFusion` join over scratch tables per
+    /// input batch; the time bound stays in checked `i128` Rust arithmetic.
+    async fn evaluate_matches(
+        &mut self,
+        plan: &SidePlan,
+        admitted: &[AdmittedRow],
+    ) -> Result<Vec<RecordBatch>> {
+        let runtime = self.runtime.runtime()?;
+        let opposite = if plan.incoming_is_left {
+            self.state.right.as_slice()
+        } else {
+            self.state.left.as_slice()
+        };
+        if admitted.is_empty() || opposite.is_empty() {
+            return Ok(Vec::new());
+        }
+        let matched = matched_pairs(
+            runtime,
+            &self.compiled,
+            &self.spec,
+            plan,
+            admitted,
+            opposite,
+            &self.name,
         )
-        .map_err(|error| operator_error(&self.name, &format!("output projection failed: {error}")))
+        .await?;
+        enforce_match_limit(
+            matched.len(),
+            &mut self.state.metrics.match_limit_failures,
+            self.spec.limits.max_matches_per_input_batch,
+            &self.name,
+        )?;
+        let output_schema = self.output_ports[0]
+            .schema()
+            .expect("stream Join output always has an exact schema");
+        materialize_outputs(
+            output_schema,
+            admitted,
+            opposite,
+            &matched,
+            plan.incoming_is_left,
+            &self.name,
+        )
     }
 
     fn validate_state_admission(
@@ -1030,15 +1062,7 @@ impl StreamJoinOperator {
         } else {
             &self.state.right
         };
-        let rows = u64::try_from(current.len())
-            .ok()
-            .and_then(|count| count.checked_add(u64::try_from(retained.len()).ok()?))
-            .ok_or_else(|| counter_overflow(&self.name, "state rows"))?;
-        let bytes = current
-            .iter()
-            .chain(retained)
-            .try_fold(0_u64, |total, row| total.checked_add(row.charge))
-            .ok_or_else(|| counter_overflow(&self.name, "state bytes"))?;
+        let (rows, bytes) = prospective_state_charge(current, retained, &self.name)?;
         if rows > self.spec.limits.max_state_rows_per_side
             || bytes > self.spec.limits.max_state_bytes_per_side
         {
@@ -1096,23 +1120,87 @@ impl StreamJoinOperator {
             .checked_add(sequence_count)
             .ok_or_else(|| counter_overflow(&self.name, "output sequence"))?;
         for record in &prepared.outputs {
-            let metadata = BatchMetadata::new(
-                context.operator_id(),
-                self.state.next_output_sequence,
-                BTreeMap::new(),
-            )?;
-            let batch = Batch::table(vec![record.clone()], metadata)?;
-            if batch.estimated_bytes()? > context.output_budget().max_bytes {
-                return Err(CalcFlowError::InvalidArgument {
-                    field: "message.bytes".into(),
-                    message: "one stream Join output row exceeds the effective edge byte budget"
-                        .into(),
-                });
-            }
-            output.emit("output", batch).await?;
+            let sequence = self.state.next_output_sequence;
+            emit_output_row(record, sequence, context, output).await?;
             self.state.next_output_sequence += 1;
         }
         Ok(())
+    }
+
+    fn commit_prepared(&mut self, ingress: &str, prepared: PreparedJoinBatch) -> Result<()> {
+        let metrics = prepared.metrics;
+        if ingress == "left" {
+            self.state.next_left_row_id = prepared.next_row_id;
+            self.state.left.extend(prepared.retained);
+            self.state.metrics.left = metrics;
+            refresh_retained_metrics(&mut self.state.metrics.left, &self.state.left, &self.name)?;
+        } else {
+            self.state.next_right_row_id = prepared.next_row_id;
+            self.state.right.extend(prepared.retained);
+            self.state.metrics.right = metrics;
+            refresh_retained_metrics(&mut self.state.metrics.right, &self.state.right, &self.name)?;
+        }
+        Ok(())
+    }
+
+    fn decode_restored_sides(
+        &self,
+        snapshot: &OperatorStateSnapshot,
+    ) -> Result<(Vec<StoredRow>, Vec<StoredRow>)> {
+        if snapshot
+            .segments
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            != ["left-v1", "right-v1"]
+        {
+            return Err(CalcFlowError::CheckpointMismatch {
+                message: format!("stream Join {:?} segment inventory is invalid", self.name),
+            });
+        }
+        let left = decode_side(
+            &snapshot.segments["left-v1"],
+            self.input_schema(0),
+            &self.name,
+            "left",
+        )?;
+        let right = decode_side(
+            &snapshot.segments["right-v1"],
+            self.input_schema(1),
+            &self.name,
+            "right",
+        )?;
+        Ok((left, right))
+    }
+
+    fn input_schema(&self, port_index: usize) -> &SchemaRef {
+        self.input_ports[port_index]
+            .schema()
+            .expect("stream Join inputs always have an exact schema")
+    }
+
+    fn validate_restored_join_rows(
+        &self,
+        metadata: &JoinCheckpointMetadata,
+        left: &[StoredRow],
+        right: &[StoredRow],
+    ) -> Result<()> {
+        validate_restored_rows(
+            left,
+            metadata.next_left_row_id,
+            self.compiled.left_event_time_index,
+            &self.compiled.left_key_indices,
+            &self.name,
+            "left",
+        )?;
+        validate_restored_rows(
+            right,
+            metadata.next_right_row_id,
+            self.compiled.right_event_time_index,
+            &self.compiled.right_key_indices,
+            &self.name,
+            "right",
+        )
     }
 }
 
@@ -1171,17 +1259,7 @@ impl StreamOperator for StreamJoinOperator {
             &self.name,
             "emitted_match_rows",
         )?;
-        if ingress == "left" {
-            self.state.next_left_row_id = prepared.next_row_id;
-            self.state.left.extend(prepared.retained);
-            self.state.metrics.left = prepared.metrics;
-            refresh_retained_metrics(&mut self.state.metrics.left, &self.state.left, &self.name)?;
-        } else {
-            self.state.next_right_row_id = prepared.next_row_id;
-            self.state.right.extend(prepared.retained);
-            self.state.metrics.right = prepared.metrics;
-            refresh_retained_metrics(&mut self.state.metrics.right, &self.state.right, &self.name)?;
-        }
+        self.commit_prepared(ingress, prepared)?;
         Ok(())
     }
 
@@ -1302,13 +1380,8 @@ impl StreamOperator for StreamJoinOperator {
     }
 
     fn restore(&mut self, snapshot: &OperatorStateSnapshot) -> Result<()> {
-        let metadata = serde_json::from_value::<JoinCheckpointMetadata>(Value::Object(
-            snapshot.inline_metadata.clone().into_iter().collect(),
-        ))
-        .map_err(|error| CalcFlowError::CheckpointMismatch {
-            message: format!("stream Join {:?} metadata is invalid: {error}", self.name),
-        })?;
-        if metadata.layout_version != 1 || metadata.spec != self.spec {
+        let metadata = decode_join_metadata(snapshot, &self.name)?;
+        if !checkpoint_metadata_compatible(&metadata, &self.spec) {
             return Err(CalcFlowError::CheckpointMismatch {
                 message: format!(
                     "stream Join {:?} checkpoint layout or specification is incompatible",
@@ -1316,67 +1389,9 @@ impl StreamOperator for StreamJoinOperator {
                 ),
             });
         }
-        if snapshot
-            .segments
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            != ["left-v1", "right-v1"]
-        {
-            return Err(CalcFlowError::CheckpointMismatch {
-                message: format!("stream Join {:?} segment inventory is invalid", self.name),
-            });
-        }
-        let left_schema = self.input_ports[0]
-            .schema()
-            .expect("stream Join left input always has an exact schema");
-        let right_schema = self.input_ports[1]
-            .schema()
-            .expect("stream Join right input always has an exact schema");
-        let left = decode_side(
-            &snapshot.segments["left-v1"],
-            left_schema,
-            &self.name,
-            "left",
-        )?;
-        let right = decode_side(
-            &snapshot.segments["right-v1"],
-            right_schema,
-            &self.name,
-            "right",
-        )?;
-        validate_restored_rows(
-            &left,
-            metadata.next_left_row_id,
-            self.compiled.left_event_time_index,
-            &self.compiled.left_key_indices,
-            &self.name,
-            "left",
-        )?;
-        validate_restored_rows(
-            &right,
-            metadata.next_right_row_id,
-            self.compiled.right_event_time_index,
-            &self.compiled.right_key_indices,
-            &self.name,
-            "right",
-        )?;
-        let mut left_metrics = metadata.metrics.left.clone();
-        let mut right_metrics = metadata.metrics.right.clone();
-        refresh_retained_metrics(&mut left_metrics, &left, &self.name)?;
-        refresh_retained_metrics(&mut right_metrics, &right, &self.name)?;
-        if left_metrics.retained_rows != metadata.metrics.left.retained_rows
-            || left_metrics.retained_bytes != metadata.metrics.left.retained_bytes
-            || right_metrics.retained_rows != metadata.metrics.right.retained_rows
-            || right_metrics.retained_bytes != metadata.metrics.right.retained_bytes
-        {
-            return Err(CalcFlowError::CheckpointMismatch {
-                message: format!(
-                    "stream Join {:?} restored state charge is inconsistent",
-                    self.name
-                ),
-            });
-        }
+        let (left, right) = self.decode_restored_sides(snapshot)?;
+        self.validate_restored_join_rows(&metadata, &left, &right)?;
+        restored_retained_metrics_match(&metadata.metrics, &left, &right, &self.name)?;
         self.validate_restored_limits(&left, &right)?;
         self.state = StreamJoinState {
             left,
@@ -1390,6 +1405,427 @@ impl StreamOperator for StreamJoinOperator {
         };
         Ok(())
     }
+}
+
+/// Compile-time per-ingress lookup for one input batch.
+struct SidePlan {
+    incoming_is_left: bool,
+    port_index: usize,
+    event_time_index: usize,
+    key_indices: Vec<usize>,
+}
+
+impl AdmissionBundle {
+    fn reserve_row_id(&mut self, operator_id: &str) -> Result<u64> {
+        let row_id = self.next_row_id;
+        self.next_row_id = self
+            .next_row_id
+            .checked_add(1)
+            .ok_or_else(|| counter_overflow(operator_id, "row_id"))?;
+        Ok(row_id)
+    }
+
+    fn note_dropped(&mut self, kind: DropKind, operator_id: &str) -> Result<()> {
+        match kind {
+            DropKind::NullEventTime => {
+                self.metrics.null_event_time_rows = checked_metric(
+                    self.metrics.null_event_time_rows,
+                    1,
+                    operator_id,
+                    "null_event_time_rows",
+                )?;
+            }
+            DropKind::NullKey => {
+                self.metrics.null_key_rows =
+                    checked_metric(self.metrics.null_key_rows, 1, operator_id, "null_key_rows")?;
+            }
+            DropKind::Late(lateness) => {
+                self.metrics.late_rows =
+                    checked_metric(self.metrics.late_rows, 1, operator_id, "late_rows")?;
+                self.metrics.max_lateness_micros = Some(
+                    self.metrics
+                        .max_lateness_micros
+                        .map_or(lateness, |current| current.max(lateness)),
+                );
+                self.had_late = true;
+            }
+        }
+        Ok(())
+    }
+
+    fn push_admitted(&mut self, row: AdmittedRow) {
+        self.admitted.push(row);
+    }
+
+    fn finish(&mut self, operator_id: &str) -> Result<()> {
+        if self.had_late {
+            self.metrics.late_affected_batches = checked_metric(
+                self.metrics.late_affected_batches,
+                1,
+                operator_id,
+                "late_affected_batches",
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn checkpoint_metadata_compatible(
+    metadata: &JoinCheckpointMetadata,
+    spec: &StreamJoinSpec,
+) -> bool {
+    metadata.layout_version == 1 && metadata.spec == *spec
+}
+
+fn decode_join_metadata(
+    snapshot: &OperatorStateSnapshot,
+    operator_id: &str,
+) -> Result<JoinCheckpointMetadata> {
+    serde_json::from_value::<JoinCheckpointMetadata>(Value::Object(
+        snapshot.inline_metadata.clone().into_iter().collect(),
+    ))
+    .map_err(|error| CalcFlowError::CheckpointMismatch {
+        message: format!("stream Join {operator_id:?} metadata is invalid: {error}"),
+    })
+}
+
+/// Recomputes retained charges and rejects checkpoints that disagree with them.
+fn restored_retained_metrics_match(
+    metrics: &JoinMetrics,
+    left: &[StoredRow],
+    right: &[StoredRow],
+    operator_id: &str,
+) -> Result<()> {
+    let mut left_metrics = metrics.left.clone();
+    let mut right_metrics = metrics.right.clone();
+    refresh_retained_metrics(&mut left_metrics, left, operator_id)?;
+    refresh_retained_metrics(&mut right_metrics, right, operator_id)?;
+    if side_retained_matches(&metrics.left, &left_metrics)
+        && side_retained_matches(&metrics.right, &right_metrics)
+    {
+        return Ok(());
+    }
+    Err(CalcFlowError::CheckpointMismatch {
+        message: format!("stream Join {operator_id:?} restored state charge is inconsistent"),
+    })
+}
+
+fn side_retained_matches(recorded: &SideMetrics, recomputed: &SideMetrics) -> bool {
+    recorded.retained_rows == recomputed.retained_rows
+        && recorded.retained_bytes == recomputed.retained_bytes
+}
+
+/// Prospective (rows, bytes) charge if `retained` were installed next to `current`.
+fn prospective_state_charge(
+    current: &[StoredRow],
+    retained: &[StoredRow],
+    operator_id: &str,
+) -> Result<(u64, u64)> {
+    let rows = state_row_count(current, operator_id)?
+        .checked_add(state_row_count(retained, operator_id)?)
+        .ok_or_else(|| counter_overflow(operator_id, "state rows"))?;
+    let bytes = current
+        .iter()
+        .chain(retained)
+        .try_fold(0_u64, |total, row| total.checked_add(row.charge))
+        .ok_or_else(|| counter_overflow(operator_id, "state bytes"))?;
+    Ok((rows, bytes))
+}
+
+fn state_row_count(rows: &[StoredRow], operator_id: &str) -> Result<u64> {
+    u64::try_from(rows.len()).map_err(|_| counter_overflow(operator_id, "state rows"))
+}
+
+/// Emits one prepared output row under the effective edge byte budget.
+async fn emit_output_row(
+    record: &RecordBatch,
+    sequence: u64,
+    context: &StreamOperatorContext<'_>,
+    output: &mut dyn StreamCollector,
+) -> Result<()> {
+    let metadata = BatchMetadata::new(context.operator_id(), sequence, BTreeMap::new())?;
+    let batch = Batch::table(vec![record.clone()], metadata)?;
+    if batch.estimated_bytes()? > context.output_budget().max_bytes {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "message.bytes".into(),
+            message: "one stream Join output row exceeds the effective edge byte budget".into(),
+        });
+    }
+    output.emit("output", batch).await
+}
+
+fn late_lateness(
+    event_time: EventTime,
+    progress: Option<IngressProgress>,
+    operator_id: &str,
+) -> Result<Option<u64>> {
+    let Some(watermark) = progress.and_then(IngressProgress::watermark) else {
+        return Ok(None);
+    };
+    if event_time >= watermark {
+        return Ok(None);
+    }
+    let lateness =
+        u64::try_from(i128::from(watermark.as_micros()) - i128::from(event_time.as_micros()))
+            .map_err(|_| counter_overflow(operator_id, "lateness"))?;
+    Ok(Some(lateness))
+}
+
+/// Runs the batched key-equality probe and returns the time-qualified pairs
+/// in emission order.
+async fn matched_pairs(
+    runtime: &DataFusionRuntime,
+    compiled: &CompiledJoin,
+    spec: &StreamJoinSpec,
+    plan: &SidePlan,
+    admitted: &[AdmittedRow],
+    opposite: &[StoredRow],
+    operator_id: &str,
+) -> Result<Vec<MatchedPair>> {
+    let probe = probe_key_batch(admitted, &plan.key_indices)?;
+    let state_keys = state_key_batch(opposite, compiled, plan)?;
+    let tables = equality_tables(probe, state_keys)?;
+    let result = runtime
+        .sql(&compiled.equality_query, &tables, Some(operator_id))
+        .await?;
+    let equal_pairs = decode_key_pairs(&result)?;
+    Ok(filter_and_order_pairs(
+        &spec.bounds,
+        plan,
+        admitted,
+        opposite,
+        equal_pairs,
+    ))
+}
+
+fn retained_rows(
+    admitted: &[AdmittedRow],
+    key_indices: &[usize],
+    operator_id: &str,
+) -> Result<Vec<StoredRow>> {
+    admitted
+        .iter()
+        .filter(|row| row.retain)
+        .map(|row| {
+            let charge = state_row_charge(&row.record, 0, key_indices, operator_id)?;
+            Ok(StoredRow {
+                record: row.record.clone(),
+                event_time: row.event_time,
+                row_id: row.row_id,
+                charge,
+            })
+        })
+        .collect()
+}
+
+fn enforce_match_limit(
+    count: usize,
+    failures: &mut u64,
+    limit: u64,
+    operator_id: &str,
+) -> Result<()> {
+    let count = u64::try_from(count).map_err(|_| counter_overflow(operator_id, "match_count"))?;
+    if count > limit {
+        *failures = checked_metric(*failures, 1, operator_id, "match_limit_failures")?;
+        return Err(operator_reason(
+            operator_id,
+            crate::StreamingFailureReason::JoinMatchLimitExceeded,
+            "input batch match limit exceeded",
+        ));
+    }
+    Ok(())
+}
+
+/// Builds the admitted-row scratch table with renamed key columns.
+fn probe_key_batch(admitted: &[AdmittedRow], key_indices: &[usize]) -> Result<RecordBatch> {
+    let records = admitted.iter().map(|row| &row.record).collect::<Vec<_>>();
+    let positions = UInt64Array::from_iter_values(
+        (0..admitted.len()).map(|index| u64::try_from(index).expect("row count fits u64")),
+    );
+    key_probe_batch(&records, key_indices, PROBE_POS_COLUMN, &positions)
+}
+
+/// Builds the retained-state scratch table with renamed key columns and row ids.
+fn state_key_batch(
+    opposite: &[StoredRow],
+    compiled: &CompiledJoin,
+    plan: &SidePlan,
+) -> Result<RecordBatch> {
+    let key_indices = if plan.incoming_is_left {
+        &compiled.right_key_indices
+    } else {
+        &compiled.left_key_indices
+    };
+    let records = opposite.iter().map(|row| &row.record).collect::<Vec<_>>();
+    let row_ids = UInt64Array::from_iter_values(opposite.iter().map(|row| row.row_id));
+    key_probe_batch(&records, key_indices, STATE_RID_COLUMN, &row_ids)
+}
+
+fn key_probe_batch(
+    records: &[&RecordBatch],
+    key_indices: &[usize],
+    extra_name: &str,
+    extra: &UInt64Array,
+) -> Result<RecordBatch> {
+    let first = records
+        .first()
+        .expect("join probe batches always have at least one row");
+    let source_schema = first.schema();
+    let mut fields = Vec::with_capacity(key_indices.len() + 1);
+    let mut columns = Vec::with_capacity(key_indices.len() + 1);
+    for (position, &key_index) in key_indices.iter().enumerate() {
+        let source = source_schema.field(key_index);
+        fields.push(Field::new(
+            format!("{KEY_COLUMN_PREFIX}{position}"),
+            source.data_type().clone(),
+            source.is_nullable(),
+        ));
+        let slices = records
+            .iter()
+            .map(|record| record.column(key_index).as_ref())
+            .collect::<Vec<_>>();
+        columns.push(concat_key_column(&slices)?);
+    }
+    fields.push(Field::new(extra_name, DataType::UInt64, false));
+    columns.push(Arc::new(extra.clone()));
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).map_err(|error| {
+        CalcFlowError::Internal {
+            message: format!("stream Join equality probe assembly failed: {error}"),
+        }
+    })
+}
+
+fn concat_key_column(slices: &[&dyn Array]) -> Result<ArrayRef> {
+    concat(slices).map_err(|error| CalcFlowError::Internal {
+        message: format!("stream Join key column concatenation failed: {error}"),
+    })
+}
+
+fn equality_tables(probe: RecordBatch, state_keys: RecordBatch) -> Result<BTreeMap<String, Batch>> {
+    Ok(BTreeMap::from([
+        (
+            PROBE_TABLE.into(),
+            Batch::table(vec![probe], BatchMetadata::default())?,
+        ),
+        (
+            STATE_TABLE.into(),
+            Batch::table(vec![state_keys], BatchMetadata::default())?,
+        ),
+    ]))
+}
+
+fn decode_key_pairs(result: &Batch) -> Result<Vec<(u64, u64)>> {
+    let mut pairs = Vec::new();
+    for record in result.table_payload()?.batches() {
+        let positions = u64_column(record, 0, "probe position")?;
+        let row_ids = u64_column(record, 1, "state row id")?;
+        for row_index in 0..record.num_rows() {
+            pairs.push((positions.value(row_index), row_ids.value(row_index)));
+        }
+    }
+    Ok(pairs)
+}
+
+fn u64_column<'a>(
+    record: &'a RecordBatch,
+    column_index: usize,
+    field: &str,
+) -> Result<&'a UInt64Array> {
+    record
+        .column(column_index)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| CalcFlowError::Internal {
+            message: format!("stream Join equality result is missing the {field} column"),
+        })
+}
+
+fn filter_and_order_pairs(
+    bounds: &JoinTimeBounds,
+    plan: &SidePlan,
+    admitted: &[AdmittedRow],
+    opposite: &[StoredRow],
+    equal_pairs: Vec<(u64, u64)>,
+) -> Vec<MatchedPair> {
+    let row_id_index = index_by_row_id(opposite);
+    let mut matched = equal_pairs
+        .into_iter()
+        .filter_map(|(pos, rid)| {
+            let pos = usize::try_from(pos).expect("probe positions index admitted rows");
+            let opposite_index = *row_id_index
+                .get(&rid)
+                .expect("state row ids index retained rows");
+            let incoming = &admitted[pos];
+            let candidate = &opposite[opposite_index];
+            let in_bounds = if plan.incoming_is_left {
+                bounds.contains_pair(
+                    incoming.event_time.as_micros(),
+                    candidate.event_time.as_micros(),
+                )
+            } else {
+                bounds.contains_pair(
+                    candidate.event_time.as_micros(),
+                    incoming.event_time.as_micros(),
+                )
+            };
+            in_bounds.then_some(MatchedPair {
+                pos,
+                opposite_index,
+            })
+        })
+        .collect::<Vec<_>>();
+    matched.sort_by_key(|pair| {
+        let row = &opposite[pair.opposite_index];
+        (pair.pos, row.event_time, row.row_id)
+    });
+    matched
+}
+
+fn index_by_row_id(opposite: &[StoredRow]) -> BTreeMap<u64, usize> {
+    opposite
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (row.row_id, index))
+        .collect()
+}
+
+fn materialize_outputs(
+    output_schema: &SchemaRef,
+    admitted: &[AdmittedRow],
+    opposite: &[StoredRow],
+    matched: &[MatchedPair],
+    incoming_is_left: bool,
+    operator_id: &str,
+) -> Result<Vec<RecordBatch>> {
+    matched
+        .iter()
+        .map(|pair| {
+            let incoming = &admitted[pair.pos];
+            let candidate = &opposite[pair.opposite_index];
+            let (left, right) = if incoming_is_left {
+                (&incoming.record, &candidate.record)
+            } else {
+                (&candidate.record, &incoming.record)
+            };
+            output_record(output_schema, left, right, operator_id)
+        })
+        .collect()
+}
+
+fn output_record(
+    output_schema: &SchemaRef,
+    left: &RecordBatch,
+    right: &RecordBatch,
+    operator_id: &str,
+) -> Result<RecordBatch> {
+    let columns = left
+        .columns()
+        .iter()
+        .chain(right.columns())
+        .cloned()
+        .collect::<Vec<_>>();
+    RecordBatch::try_new(Arc::clone(output_schema), columns)
+        .map_err(|error| operator_error(operator_id, &format!("output projection failed: {error}")))
 }
 
 fn exact_safe_duration_micros(duration: Duration, field: &str) -> Result<u64> {
@@ -1470,22 +1906,34 @@ fn compile_schemas(
 ) -> Result<(SchemaRef, CompiledJoin)> {
     validate_unique_fields(left, "left")?;
     validate_unique_fields(right, "right")?;
+    let (left_key_indices, right_key_indices) = compile_key_pair_indices(left, right, spec)?;
+    let left_event_time_index = event_time_index(left, &spec.left_event_time, "left_event_time")?;
+    let right_event_time_index =
+        event_time_index(right, &spec.right_event_time, "right_event_time")?;
+    let fields = prefixed_output_fields(left, right, spec);
+    Ok((
+        Arc::new(Schema::new(fields)),
+        CompiledJoin {
+            left_key_indices,
+            right_key_indices,
+            left_event_time_index,
+            right_event_time_index,
+            equality_query: equality_query(spec.left_keys.len()),
+        },
+    ))
+}
+
+fn compile_key_pair_indices(
+    left: &Schema,
+    right: &Schema,
+    spec: &StreamJoinSpec,
+) -> Result<(Vec<usize>, Vec<usize>)> {
     let mut left_key_indices = Vec::with_capacity(spec.left_keys.len());
     let mut right_key_indices = Vec::with_capacity(spec.right_keys.len());
     for (index, (left_key, right_key)) in spec.left_keys.iter().zip(&spec.right_keys).enumerate() {
         let left_field = field_by_name(left, left_key, "left_keys", index)?;
         let right_field = field_by_name(right, right_key, "right_keys", index)?;
-        if left_field.data_type() != right_field.data_type()
-            || !supported_key_type(left_field.data_type())
-        {
-            return Err(CalcFlowError::Compile {
-                message: format!(
-                    "stream Join key pair {index} requires identical supported Arrow types; left is {} and right is {}",
-                    left_field.data_type(),
-                    right_field.data_type()
-                ),
-            });
-        }
+        validate_key_pair_types(index, left_field, right_field)?;
         left_key_indices.push(
             left.index_of(left_key)
                 .expect("field lookup succeeded above"),
@@ -1496,16 +1944,33 @@ fn compile_schemas(
                 .expect("field lookup succeeded above"),
         );
     }
-    validate_event_time(left, &spec.left_event_time, "left_event_time")?;
-    validate_event_time(right, &spec.right_event_time, "right_event_time")?;
-    let left_event_time_index = left
-        .index_of(&spec.left_event_time)
-        .expect("event-time lookup succeeded above");
-    let right_event_time_index = right
-        .index_of(&spec.right_event_time)
-        .expect("event-time lookup succeeded above");
-    let fields = left
-        .fields()
+    Ok((left_key_indices, right_key_indices))
+}
+
+fn validate_key_pair_types(index: usize, left_field: &Field, right_field: &Field) -> Result<()> {
+    if left_field.data_type() != right_field.data_type()
+        || !supported_key_type(left_field.data_type())
+    {
+        return Err(CalcFlowError::Compile {
+            message: format!(
+                "stream Join key pair {index} requires identical supported Arrow types; left is {} and right is {}",
+                left_field.data_type(),
+                right_field.data_type()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn event_time_index(schema: &Schema, name: &str, field: &str) -> Result<usize> {
+    validate_event_time(schema, name, field)?;
+    Ok(schema
+        .index_of(name)
+        .expect("event-time lookup succeeded above"))
+}
+
+fn prefixed_output_fields(left: &Schema, right: &Schema, spec: &StreamJoinSpec) -> Vec<Arc<Field>> {
+    left.fields()
         .iter()
         .map(|field| {
             Arc::new(field.as_ref().clone().with_name(format!(
@@ -1521,32 +1986,27 @@ fn compile_schemas(
                 field.name()
             )))
         }))
-        .collect::<Vec<_>>();
-    let equality = spec
-        .left_keys
-        .iter()
-        .zip(&spec.right_keys)
-        .map(|(left, right)| {
-            format!(
-                "left_input.{} = right_input.{}",
-                quote_identifier(left),
-                quote_identifier(right)
-            )
+        .collect()
+}
+
+/// One batched key-equality probe over the per-batch scratch tables.
+///
+/// The query returns the admitted-row position and the retained-state row id
+/// for every key-equal pair; the closed time bound is applied afterwards in
+/// checked `i128` Rust arithmetic.
+fn equality_query(key_count: usize) -> String {
+    let equality = (0..key_count)
+        .map(|position| {
+            let column = quote_identifier(&format!("{KEY_COLUMN_PREFIX}{position}"));
+            format!("{PROBE_TABLE}.{column} = {STATE_TABLE}.{column}")
         })
         .collect::<Vec<_>>()
         .join(" AND ");
-    Ok((
-        Arc::new(Schema::new(fields)),
-        CompiledJoin {
-            left_key_indices,
-            right_key_indices,
-            left_event_time_index,
-            right_event_time_index,
-            equality_query: format!(
-                "SELECT 1 AS matched FROM left_input INNER JOIN right_input ON {equality}"
-            ),
-        },
-    ))
+    format!(
+        "SELECT {PROBE_TABLE}.{pos}, {STATE_TABLE}.{rid} FROM {PROBE_TABLE} INNER JOIN {STATE_TABLE} ON {equality}",
+        pos = quote_identifier(PROBE_POS_COLUMN),
+        rid = quote_identifier(STATE_RID_COLUMN),
+    )
 }
 
 fn quote_identifier(value: &str) -> String {
@@ -1673,62 +2133,15 @@ fn decode_side(
     side: &str,
 ) -> Result<Vec<StoredRow>> {
     let mut offset = 0_usize;
-    if take_segment_bytes(bytes, &mut offset, JOIN_STATE_MAGIC.len())? != JOIN_STATE_MAGIC {
-        return Err(checkpoint_error(
-            operator_id,
-            side,
-            "state magic is invalid",
-        ));
-    }
-    let row_count = read_segment_u64(bytes, &mut offset)?;
-    let row_capacity = usize::try_from(row_count)
-        .ok()
-        .filter(|count| *count <= bytes.len())
-        .ok_or_else(|| checkpoint_error(operator_id, side, "row count is invalid"))?;
-    let mut rows = Vec::with_capacity(row_capacity);
-    for _ in 0..row_count {
-        let row_id = read_segment_u64(bytes, &mut offset)?;
-        let event_time = EventTime::from_micros(read_segment_i64(bytes, &mut offset)?);
-        let charge = read_segment_u64(bytes, &mut offset)?;
-        let ipc_length = usize::try_from(read_segment_u64(bytes, &mut offset)?)
-            .map_err(|_| checkpoint_error(operator_id, side, "IPC length is invalid"))?;
-        let ipc = take_segment_bytes(bytes, &mut offset, ipc_length)?;
-        let mut reader = StreamReader::try_new(Cursor::new(ipc), None).map_err(|error| {
-            checkpoint_error(
-                operator_id,
-                side,
-                &format!("IPC header is invalid: {error}"),
-            )
-        })?;
-        if reader.schema().as_ref() != expected_schema.as_ref() {
-            return Err(checkpoint_error(
-                operator_id,
-                side,
-                "IPC schema is incompatible",
-            ));
-        }
-        let record = reader
-            .next()
-            .transpose()
-            .map_err(|error| {
-                checkpoint_error(operator_id, side, &format!("IPC row is invalid: {error}"))
-            })?
-            .filter(|record| record.num_rows() == 1)
-            .ok_or_else(|| checkpoint_error(operator_id, side, "IPC must contain one row"))?;
-        if reader.next().is_some() {
-            return Err(checkpoint_error(
-                operator_id,
-                side,
-                "IPC contains extra record batches",
-            ));
-        }
-        rows.push(StoredRow {
-            record,
-            event_time,
-            row_id,
-            charge,
-        });
-    }
+    let row_count = decode_side_header(bytes, &mut offset, operator_id, side)?;
+    let rows = decode_side_rows(
+        bytes,
+        &mut offset,
+        row_count,
+        expected_schema,
+        operator_id,
+        side,
+    )?;
     if offset != bytes.len() {
         return Err(checkpoint_error(
             operator_id,
@@ -1737,6 +2150,117 @@ fn decode_side(
         ));
     }
     Ok(rows)
+}
+
+/// Validates the state magic and returns the declared row count.
+fn decode_side_header(
+    bytes: &[u8],
+    offset: &mut usize,
+    operator_id: &str,
+    side: &str,
+) -> Result<u64> {
+    if take_segment_bytes(bytes, offset, JOIN_STATE_MAGIC.len())? != JOIN_STATE_MAGIC {
+        return Err(checkpoint_error(
+            operator_id,
+            side,
+            "state magic is invalid",
+        ));
+    }
+    read_segment_u64(bytes, offset)
+}
+
+fn decode_side_rows(
+    bytes: &[u8],
+    offset: &mut usize,
+    row_count: u64,
+    expected_schema: &SchemaRef,
+    operator_id: &str,
+    side: &str,
+) -> Result<Vec<StoredRow>> {
+    let row_capacity = decode_row_capacity(row_count, bytes.len(), operator_id, side)?;
+    let mut rows = Vec::with_capacity(row_capacity);
+    for _ in 0..row_count {
+        rows.push(decode_stored_row(
+            bytes,
+            offset,
+            expected_schema,
+            operator_id,
+            side,
+        )?);
+    }
+    Ok(rows)
+}
+
+fn decode_row_capacity(
+    row_count: u64,
+    segment_len: usize,
+    operator_id: &str,
+    side: &str,
+) -> Result<usize> {
+    usize::try_from(row_count)
+        .ok()
+        .filter(|count| *count <= segment_len)
+        .ok_or_else(|| checkpoint_error(operator_id, side, "row count is invalid"))
+}
+
+fn decode_stored_row(
+    bytes: &[u8],
+    offset: &mut usize,
+    expected_schema: &SchemaRef,
+    operator_id: &str,
+    side: &str,
+) -> Result<StoredRow> {
+    let row_id = read_segment_u64(bytes, offset)?;
+    let event_time = EventTime::from_micros(read_segment_i64(bytes, offset)?);
+    let charge = read_segment_u64(bytes, offset)?;
+    let ipc_length = usize::try_from(read_segment_u64(bytes, offset)?)
+        .map_err(|_| checkpoint_error(operator_id, side, "IPC length is invalid"))?;
+    let ipc = take_segment_bytes(bytes, offset, ipc_length)?;
+    let record = decode_ipc_row(ipc, expected_schema, operator_id, side)?;
+    Ok(StoredRow {
+        record,
+        event_time,
+        row_id,
+        charge,
+    })
+}
+
+fn decode_ipc_row(
+    ipc: &[u8],
+    expected_schema: &SchemaRef,
+    operator_id: &str,
+    side: &str,
+) -> Result<RecordBatch> {
+    let mut reader = StreamReader::try_new(Cursor::new(ipc), None).map_err(|error| {
+        checkpoint_error(
+            operator_id,
+            side,
+            &format!("IPC header is invalid: {error}"),
+        )
+    })?;
+    if reader.schema().as_ref() != expected_schema.as_ref() {
+        return Err(checkpoint_error(
+            operator_id,
+            side,
+            "IPC schema is incompatible",
+        ));
+    }
+    let record = reader
+        .next()
+        .transpose()
+        .map_err(|error| {
+            checkpoint_error(operator_id, side, &format!("IPC row is invalid: {error}"))
+        })?
+        .filter(|record| record.num_rows() == 1)
+        .ok_or_else(|| checkpoint_error(operator_id, side, "IPC must contain one row"))?;
+    if reader.next().is_some() {
+        return Err(checkpoint_error(
+            operator_id,
+            side,
+            "IPC contains extra record batches",
+        ));
+    }
+    Ok(record)
 }
 
 fn take_segment_bytes<'a>(bytes: &'a [u8], offset: &mut usize, length: usize) -> Result<&'a [u8]> {
@@ -1778,23 +2302,45 @@ fn validate_restored_rows(
 ) -> Result<()> {
     let mut identities = BTreeSet::new();
     for row in rows {
-        if row.row_id >= next_row_id || !identities.insert((row.event_time, row.row_id)) {
-            return Err(checkpoint_error(
-                operator_id,
-                side,
-                "row identity is invalid",
-            ));
-        }
-        let restored_event_time = event_time_at(&row.record, event_index, 0, operator_id, side)?
-            .ok_or_else(|| checkpoint_error(operator_id, side, "stored event time is null"))?;
-        let restored_charge = state_row_charge(&row.record, 0, key_indices, operator_id)?;
-        if restored_event_time != row.event_time || restored_charge != row.charge {
-            return Err(checkpoint_error(
-                operator_id,
-                side,
-                "row event time or charge is inconsistent",
-            ));
-        }
+        validate_restored_row_identity(row, &mut identities, next_row_id, operator_id, side)?;
+        validate_restored_row_payload(row, event_index, key_indices, operator_id, side)?;
+    }
+    Ok(())
+}
+
+fn validate_restored_row_identity(
+    row: &StoredRow,
+    identities: &mut BTreeSet<(EventTime, u64)>,
+    next_row_id: u64,
+    operator_id: &str,
+    side: &str,
+) -> Result<()> {
+    if row.row_id >= next_row_id || !identities.insert((row.event_time, row.row_id)) {
+        return Err(checkpoint_error(
+            operator_id,
+            side,
+            "row identity is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_restored_row_payload(
+    row: &StoredRow,
+    event_index: usize,
+    key_indices: &[usize],
+    operator_id: &str,
+    side: &str,
+) -> Result<()> {
+    let restored_event_time = event_time_at(&row.record, event_index, 0, operator_id, side)?
+        .ok_or_else(|| checkpoint_error(operator_id, side, "stored event time is null"))?;
+    let restored_charge = state_row_charge(&row.record, 0, key_indices, operator_id)?;
+    if restored_event_time != row.event_time || restored_charge != row.charge {
+        return Err(checkpoint_error(
+            operator_id,
+            side,
+            "row event time or charge is inconsistent",
+        ));
     }
     Ok(())
 }
@@ -1977,133 +2523,214 @@ fn state_row_charge(
         .ok_or_else(|| counter_overflow(operator_id, "state row charge"))
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "the exhaustive Arrow charging table mirrors the frozen V1 accounting contract"
-)]
+/// Logical charge of one non-null cell under the frozen V1 accounting table,
+/// including its validity byte.
 fn logical_cell_charge(array: &dyn Array, row_index: usize) -> Result<u64> {
     if array.is_null(row_index) {
         return Ok(1);
     }
-    let value_bytes = match array.data_type() {
-        DataType::Null => 0,
-        DataType::Boolean | DataType::Int8 | DataType::UInt8 => 1,
-        DataType::Int16 | DataType::UInt16 | DataType::Float16 => 2,
-        DataType::Int32
-        | DataType::UInt32
-        | DataType::Float32
-        | DataType::Date32
-        | DataType::Time32(_)
-        | DataType::Interval(datafusion::arrow::datatypes::IntervalUnit::YearMonth)
-        | DataType::Decimal32(_, _) => 4,
-        DataType::Int64
-        | DataType::UInt64
-        | DataType::Float64
-        | DataType::Date64
-        | DataType::Time64(_)
-        | DataType::Timestamp(_, _)
-        | DataType::Duration(_)
-        | DataType::Interval(datafusion::arrow::datatypes::IntervalUnit::DayTime)
-        | DataType::Decimal64(_, _) => 8,
-        DataType::Interval(datafusion::arrow::datatypes::IntervalUnit::MonthDayNano)
-        | DataType::Decimal128(_, _) => 16,
-        DataType::Decimal256(_, _) => 32,
-        DataType::FixedSizeBinary(size) => {
-            u64::try_from(*size).map_err(|_| CalcFlowError::Internal {
-                message: "negative FixedSizeBinary width".into(),
-            })?
-        }
-        DataType::Utf8 => {
-            let array = array
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| CalcFlowError::Internal {
-                    message: "Utf8 array type mismatch".into(),
-                })?;
-            4_u64
-                .checked_add(u64::try_from(array.value(row_index).len()).unwrap_or(u64::MAX))
-                .ok_or_else(|| CalcFlowError::Internal {
-                    message: "Utf8 cell charge overflow".into(),
-                })?
-        }
-        DataType::LargeUtf8 => {
-            let array = array
-                .as_any()
-                .downcast_ref::<LargeStringArray>()
-                .ok_or_else(|| CalcFlowError::Internal {
-                    message: "LargeUtf8 array type mismatch".into(),
-                })?;
-            8_u64
-                .checked_add(u64::try_from(array.value(row_index).len()).unwrap_or(u64::MAX))
-                .ok_or_else(|| CalcFlowError::Internal {
-                    message: "LargeUtf8 cell charge overflow".into(),
-                })?
-        }
-        DataType::Binary => {
-            let array = array
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .ok_or_else(|| CalcFlowError::Internal {
-                    message: "Binary array type mismatch".into(),
-                })?;
-            4_u64
-                .checked_add(u64::try_from(array.value(row_index).len()).unwrap_or(u64::MAX))
-                .ok_or_else(|| CalcFlowError::Internal {
-                    message: "Binary cell charge overflow".into(),
-                })?
-        }
-        DataType::LargeBinary => {
-            let array = array
-                .as_any()
-                .downcast_ref::<LargeBinaryArray>()
-                .ok_or_else(|| CalcFlowError::Internal {
-                    message: "LargeBinary array type mismatch".into(),
-                })?;
-            8_u64
-                .checked_add(u64::try_from(array.value(row_index).len()).unwrap_or(u64::MAX))
-                .ok_or_else(|| CalcFlowError::Internal {
-                    message: "LargeBinary cell charge overflow".into(),
-                })?
-        }
-        DataType::Utf8View => {
-            let array = array
-                .as_any()
-                .downcast_ref::<StringViewArray>()
-                .ok_or_else(|| CalcFlowError::Internal {
-                    message: "Utf8View array type mismatch".into(),
-                })?;
-            16_u64
-                .checked_add(u64::try_from(array.value(row_index).len()).unwrap_or(u64::MAX))
-                .ok_or_else(|| CalcFlowError::Internal {
-                    message: "Utf8View cell charge overflow".into(),
-                })?
-        }
-        DataType::BinaryView => {
-            let array = array
-                .as_any()
-                .downcast_ref::<BinaryViewArray>()
-                .ok_or_else(|| CalcFlowError::Internal {
-                    message: "BinaryView array type mismatch".into(),
-                })?;
-            16_u64
-                .checked_add(u64::try_from(array.value(row_index).len()).unwrap_or(u64::MAX))
-                .ok_or_else(|| CalcFlowError::Internal {
-                    message: "BinaryView cell charge overflow".into(),
-                })?
-        }
-        _ => u64::try_from(
-            array
-                .slice(row_index, 1)
-                .to_data()
-                .get_slice_memory_size()
-                .map_err(|error| CalcFlowError::Internal {
-                    message: format!("logical payload charge failed: {error}"),
-                })?,
-        )
-        .map_err(|_| CalcFlowError::Internal {
-            message: "logical payload charge exceeds UInt64".into(),
-        })?,
+    let data_type = array.data_type();
+    if let Some(value) = fixed_cell_charge(data_type) {
+        return validity_wrapped(value);
+    }
+    let Some(value) = variable_cell_charge(array, row_index)? else {
+        return sized_cell_charge(array, row_index);
     };
+    validity_wrapped(value)
+}
+
+fn fixed_cell_charge(data_type: &DataType) -> Option<u64> {
+    if matches!(data_type, DataType::Null) {
+        return Some(0);
+    }
+    if matches!(
+        data_type,
+        DataType::Boolean | DataType::Int8 | DataType::UInt8
+    ) {
+        return Some(1);
+    }
+    if matches!(
+        data_type,
+        DataType::Int16 | DataType::UInt16 | DataType::Float16
+    ) {
+        return Some(2);
+    }
+    if is_four_byte_cell(data_type) {
+        return Some(4);
+    }
+    if is_eight_byte_cell(data_type) {
+        return Some(8);
+    }
+    fixed_wide_cell_charge(data_type)
+}
+
+fn fixed_wide_cell_charge(data_type: &DataType) -> Option<u64> {
+    if is_sixteen_byte_cell(data_type) {
+        return Some(16);
+    }
+    if matches!(data_type, DataType::Decimal256(_, _)) {
+        return Some(32);
+    }
+    None
+}
+
+fn is_four_byte_cell(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Int32
+            | DataType::UInt32
+            | DataType::Float32
+            | DataType::Date32
+            | DataType::Time32(_)
+            | DataType::Interval(IntervalUnit::YearMonth)
+            | DataType::Decimal32(_, _)
+    )
+}
+
+fn is_eight_byte_cell(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Int64
+            | DataType::UInt64
+            | DataType::Float64
+            | DataType::Date64
+            | DataType::Time64(_)
+            | DataType::Timestamp(_, _)
+            | DataType::Duration(_)
+            | DataType::Interval(IntervalUnit::DayTime)
+            | DataType::Decimal64(_, _)
+    )
+}
+
+fn is_sixteen_byte_cell(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Interval(IntervalUnit::MonthDayNano) | DataType::Decimal128(_, _)
+    )
+}
+
+fn variable_cell_charge(array: &dyn Array, row_index: usize) -> Result<Option<u64>> {
+    if let DataType::FixedSizeBinary(size) = array.data_type() {
+        return fixed_size_binary_charge(*size).map(Some);
+    }
+    string_cell_charge(array, row_index)
+        .or(binary_cell_charge(array, row_index))
+        .transpose()
+}
+
+fn fixed_size_binary_charge(size: i32) -> Result<u64> {
+    u64::try_from(size).map_err(|_| CalcFlowError::Internal {
+        message: "negative FixedSizeBinary width".into(),
+    })
+}
+
+fn string_cell_charge(array: &dyn Array, row_index: usize) -> Option<Result<u64>> {
+    match array.data_type() {
+        DataType::Utf8 => Some(downcast_cell_charge::<StringArray>(
+            array, row_index, 4, "Utf8",
+        )),
+        DataType::LargeUtf8 => Some(downcast_cell_charge::<LargeStringArray>(
+            array,
+            row_index,
+            8,
+            "LargeUtf8",
+        )),
+        DataType::Utf8View => Some(downcast_cell_charge::<StringViewArray>(
+            array, row_index, 16, "Utf8View",
+        )),
+        _ => None,
+    }
+}
+
+fn binary_cell_charge(array: &dyn Array, row_index: usize) -> Option<Result<u64>> {
+    match array.data_type() {
+        DataType::Binary => Some(downcast_cell_charge::<BinaryArray>(
+            array, row_index, 4, "Binary",
+        )),
+        DataType::LargeBinary => Some(downcast_cell_charge::<LargeBinaryArray>(
+            array,
+            row_index,
+            8,
+            "LargeBinary",
+        )),
+        DataType::BinaryView => Some(downcast_cell_charge::<BinaryViewArray>(
+            array,
+            row_index,
+            16,
+            "BinaryView",
+        )),
+        _ => None,
+    }
+}
+
+/// Downcasts one variable-length array kind and charges prefix plus value.
+fn downcast_cell_charge<T>(
+    array: &dyn Array,
+    row_index: usize,
+    prefix: u64,
+    label: &str,
+) -> Result<u64>
+where
+    T: Array + 'static,
+    for<'a> &'a T: CellBytes,
+{
+    let typed = array
+        .as_any()
+        .downcast_ref::<T>()
+        .ok_or_else(|| CalcFlowError::Internal {
+            message: format!("{label} array type mismatch"),
+        })?;
+    prefix_cell_charge(prefix, typed.cell_len(row_index), label)
+}
+
+fn prefix_cell_charge(prefix: u64, len: usize, label: &str) -> Result<u64> {
+    prefix
+        .checked_add(u64::try_from(len).unwrap_or(u64::MAX))
+        .ok_or_else(|| CalcFlowError::Internal {
+            message: format!("{label} cell charge overflow"),
+        })
+}
+
+trait CellBytes {
+    fn cell_len(self, row_index: usize) -> usize;
+}
+
+macro_rules! impl_cell_bytes {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl CellBytes for &$ty {
+                fn cell_len(self, row_index: usize) -> usize {
+                    self.value(row_index).len()
+                }
+            }
+        )+
+    };
+}
+
+impl_cell_bytes!(
+    StringArray,
+    LargeStringArray,
+    StringViewArray,
+    BinaryArray,
+    LargeBinaryArray,
+    BinaryViewArray,
+);
+
+/// Charges a variable-length cell from its raw slice memory footprint.
+fn sized_cell_charge(array: &dyn Array, row_index: usize) -> Result<u64> {
+    let sized = array
+        .slice(row_index, 1)
+        .to_data()
+        .get_slice_memory_size()
+        .map_err(|error| CalcFlowError::Internal {
+            message: format!("logical payload charge failed: {error}"),
+        })?;
+    u64::try_from(sized).map_err(|_| CalcFlowError::Internal {
+        message: "logical payload charge exceeds UInt64".into(),
+    })
+}
+
+fn validity_wrapped(value_bytes: u64) -> Result<u64> {
     value_bytes
         .checked_add(1)
         .ok_or_else(|| CalcFlowError::Internal {

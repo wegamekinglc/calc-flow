@@ -520,6 +520,43 @@ class JoinStateLimits:
                 )
 
 
+def _require_equal_key_counts(
+    left_keys: Sequence[str], right_keys: Sequence[str]
+) -> None:
+    if len(left_keys) != len(right_keys):
+        raise ValueError("left_keys and right_keys must have equal length")
+
+
+def _require_event_time_columns(left_event_time: str, right_event_time: str) -> None:
+    for field_name, value in (
+        ("left_event_time", left_event_time),
+        ("right_event_time", right_event_time),
+    ):
+        if not isinstance(value, str) or not value:
+            raise TypeError(f"{field_name} must be a non-empty string")
+
+
+def _require_join_bounds(bounds: JoinTimeBounds) -> None:
+    if not isinstance(bounds, JoinTimeBounds):
+        raise TypeError("bounds must be a calc_flow.JoinTimeBounds")
+
+
+def _require_join_limits(limits: JoinStateLimits) -> None:
+    if not isinstance(limits, JoinStateLimits):
+        raise TypeError("limits must be a calc_flow.JoinStateLimits")
+
+
+def _portable_identifier(value: object) -> bool:
+    return isinstance(value, str) and value.isidentifier() and value.isascii()
+
+
+def _require_distinct_prefixes(left_prefix: str, right_prefix: str) -> None:
+    if not _portable_identifier(left_prefix) or not _portable_identifier(right_prefix):
+        raise ValueError("prefixes must be distinct portable identifiers")
+    if left_prefix == right_prefix:
+        raise ValueError("prefixes must be distinct portable identifiers")
+
+
 def _timedelta_micros(value: timedelta, field_name: str) -> int:
     if type(value) is not timedelta:
         raise TypeError(f"{field_name} must be an exact datetime.timedelta")
@@ -807,28 +844,11 @@ class PipelineBuilder:
         copied_right_schema = _arrow_fields(right_schema, "right_schema")
         copied_left_keys = _join_keys(left_keys, "left_keys")
         copied_right_keys = _join_keys(right_keys, "right_keys")
-        if len(copied_left_keys) != len(copied_right_keys):
-            raise ValueError("left_keys and right_keys must have equal length")
-        for field_name, value in (
-            ("left_event_time", left_event_time),
-            ("right_event_time", right_event_time),
-        ):
-            if not isinstance(value, str) or not value:
-                raise TypeError(f"{field_name} must be a non-empty string")
-        if not isinstance(bounds, JoinTimeBounds):
-            raise TypeError("bounds must be a calc_flow.JoinTimeBounds")
-        if not isinstance(limits, JoinStateLimits):
-            raise TypeError("limits must be a calc_flow.JoinStateLimits")
-        if (
-            not isinstance(left_prefix, str)
-            or not left_prefix.isidentifier()
-            or not left_prefix.isascii()
-            or not isinstance(right_prefix, str)
-            or not right_prefix.isidentifier()
-            or not right_prefix.isascii()
-            or left_prefix == right_prefix
-        ):
-            raise ValueError("prefixes must be distinct portable identifiers")
+        _require_equal_key_counts(copied_left_keys, copied_right_keys)
+        _require_event_time_columns(left_event_time, right_event_time)
+        _require_join_bounds(bounds)
+        _require_join_limits(limits)
+        _require_distinct_prefixes(left_prefix, right_prefix)
 
         def add(project: dict[str, Any]) -> None:
             project["graph"]["nodes"].append(

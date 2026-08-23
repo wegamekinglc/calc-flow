@@ -177,4 +177,73 @@ describe('NodeInspector', () => {
       alias: 'left',
     });
   });
+
+  it('serializes bounded integers for stream join numeric fields', () => {
+    const base = blankProject().graph.nodes[0];
+    const node = {
+      ...base,
+      operator: {
+        kind: 'stream_join' as const,
+        spec: {
+          join_type: 'inner' as const,
+          left_keys: ['account_id'],
+          right_keys: ['account_id'],
+          left_event_time: 'authorized_at',
+          right_event_time: 'paid_at',
+          bounds: { before_micros: 300_000_000, after_micros: 60_000_000 },
+          limits: {
+            max_state_rows_per_side: 100_000,
+            max_state_bytes_per_side: 134_217_728,
+            max_matches_per_input_batch: 1_000_000,
+          },
+          left_prefix: 'left',
+          right_prefix: 'right',
+        },
+      },
+    };
+    const onChange = vi.fn();
+
+    render(
+      <NodeInspector
+        node={node}
+        arrowTypes={['int64']}
+        udfs={[]}
+        onChange={onChange}
+        onSqlAliasEdit={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText('before micros'), {
+      target: { value: '150.75' },
+    });
+    expect(onChange).toHaveBeenLastCalledWith({
+      ...node,
+      operator: {
+        ...node.operator,
+        spec: {
+          ...node.operator.spec,
+          bounds: { before_micros: 150, after_micros: 60_000_000 },
+        },
+      },
+    });
+
+    fireEvent.change(screen.getByLabelText('max state rows per side'), {
+      target: { value: '' },
+    });
+    expect(onChange).toHaveBeenLastCalledWith({
+      ...node,
+      operator: {
+        ...node.operator,
+        spec: {
+          ...node.operator.spec,
+          limits: {
+            max_state_rows_per_side: 1,
+            max_state_bytes_per_side: 134_217_728,
+            max_matches_per_input_batch: 1_000_000,
+          },
+        },
+      },
+    });
+  });
 });

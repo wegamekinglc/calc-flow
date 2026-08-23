@@ -22,6 +22,39 @@ interface NodeInspectorProps {
 type ExpressionOperator = Extract<OperatorSpec, { kind: 'expression' }>;
 type SqlOperator = Extract<OperatorSpec, { kind: 'sql' }>;
 type StreamJoinOperator = Extract<OperatorSpec, { kind: 'stream_join' }>;
+type StreamJoinBounds = StreamJoinOperator['spec']['bounds'];
+type StreamJoinLimits = StreamJoinOperator['spec']['limits'];
+
+/** Parses one integer input, truncating fractions and clamping to [min, MAX_SAFE_INTEGER]. */
+const parseBoundedInteger = (raw: string, min: number): number => {
+  const parsed = Math.trunc(Number(raw));
+  if (!Number.isFinite(parsed)) return min;
+  return Math.min(Math.max(parsed, min), Number.MAX_SAFE_INTEGER);
+};
+
+const withBound = (
+  bounds: StreamJoinBounds,
+  field: keyof StreamJoinBounds,
+  raw: string,
+): StreamJoinBounds => (field === 'before_micros'
+  ? { ...bounds, before_micros: parseBoundedInteger(raw, 0) }
+  : { ...bounds, after_micros: parseBoundedInteger(raw, 0) });
+
+const withLimit = (
+  limits: StreamJoinLimits,
+  field: keyof StreamJoinLimits,
+  raw: string,
+): StreamJoinLimits => {
+  const value = parseBoundedInteger(raw, 1);
+  switch (field) {
+    case 'max_state_rows_per_side':
+      return { ...limits, max_state_rows_per_side: value };
+    case 'max_state_bytes_per_side':
+      return { ...limits, max_state_bytes_per_side: value };
+    default:
+      return { ...limits, max_matches_per_input_batch: value };
+  }
+};
 
 export function NodeInspector({
   node,
@@ -191,9 +224,11 @@ export function NodeInspector({
             <input
               placeholder="account_id, region"
               value={streamJoin.spec.left_keys.join(', ')}
-              onChange={(event) => patchStreamJoin({
-                left_keys: event.target.value.split(',').map((key) => key.trim()).filter(Boolean),
-              })}
+              onChange={(event) => {
+                patchStreamJoin({
+                  left_keys: event.target.value.split(',').map((key) => key.trim()).filter(Boolean),
+                });
+              }}
             />
           </label>
           <label>
@@ -201,23 +236,29 @@ export function NodeInspector({
             <input
               placeholder="account_id, region"
               value={streamJoin.spec.right_keys.join(', ')}
-              onChange={(event) => patchStreamJoin({
-                right_keys: event.target.value.split(',').map((key) => key.trim()).filter(Boolean),
-              })}
+              onChange={(event) => {
+                patchStreamJoin({
+                  right_keys: event.target.value.split(',').map((key) => key.trim()).filter(Boolean),
+                });
+              }}
             />
           </label>
           <label>
             Left event-time column
             <input
               value={streamJoin.spec.left_event_time}
-              onChange={(event) => patchStreamJoin({ left_event_time: event.target.value })}
+              onChange={(event) => {
+                patchStreamJoin({ left_event_time: event.target.value });
+              }}
             />
           </label>
           <label>
             Right event-time column
             <input
               value={streamJoin.spec.right_event_time}
-              onChange={(event) => patchStreamJoin({ right_event_time: event.target.value })}
+              onChange={(event) => {
+                patchStreamJoin({ right_event_time: event.target.value });
+              }}
             />
           </label>
           {(['before_micros', 'after_micros'] as const).map((field) => (
@@ -228,9 +269,9 @@ export function NodeInspector({
                 min={0}
                 max={Number.MAX_SAFE_INTEGER}
                 value={streamJoin.spec.bounds[field]}
-                onChange={(event) => patchStreamJoin({
-                  bounds: { ...streamJoin.spec.bounds, [field]: Number(event.target.value) },
-                })}
+                onChange={(event) => {
+                  patchStreamJoin({ bounds: withBound(streamJoin.spec.bounds, field, event.target.value) });
+                }}
               />
             </label>
           ))}
@@ -246,9 +287,9 @@ export function NodeInspector({
                 min={1}
                 max={Number.MAX_SAFE_INTEGER}
                 value={streamJoin.spec.limits[field]}
-                onChange={(event) => patchStreamJoin({
-                  limits: { ...streamJoin.spec.limits, [field]: Number(event.target.value) },
-                })}
+                onChange={(event) => {
+                  patchStreamJoin({ limits: withLimit(streamJoin.spec.limits, field, event.target.value) });
+                }}
               />
             </label>
           ))}
@@ -256,14 +297,18 @@ export function NodeInspector({
             Left prefix
             <input
               value={streamJoin.spec.left_prefix}
-              onChange={(event) => patchStreamJoin({ left_prefix: event.target.value })}
+              onChange={(event) => {
+                patchStreamJoin({ left_prefix: event.target.value });
+              }}
             />
           </label>
           <label>
             Right prefix
             <input
               value={streamJoin.spec.right_prefix}
-              onChange={(event) => patchStreamJoin({ right_prefix: event.target.value })}
+              onChange={(event) => {
+                patchStreamJoin({ right_prefix: event.target.value });
+              }}
             />
           </label>
         </section>

@@ -5,7 +5,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use datafusion::arrow::datatypes::{DataType, Field, TimeUnit};
+use datafusion::arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::{Value, json};
@@ -1378,36 +1378,42 @@ fn stream_join_node(
             message: "stream_join requires required table inputs named left and right".into(),
         });
     };
-    if left.name() != "left"
-        || right.name() != "right"
-        || left.kind() != BatchKind::Table
-        || right.kind() != BatchKind::Table
-        || !left.required()
-        || !right.required()
-    {
+    require_stream_join_input(left, "left")?;
+    require_stream_join_input(right, "right")?;
+    let operator = build_stream_join_operator(node, left, right, spec)?;
+    validate_derived_outputs(outputs, crate::OperatorMetadata::output_ports(&operator))?;
+    Ok(NodeOperator::StreamJoin(Box::new(operator)))
+}
+
+fn build_stream_join_operator(
+    node: &NodeSpec,
+    left: &Port,
+    right: &Port,
+    spec: &StreamJoinSpec,
+) -> Result<StreamJoinOperator> {
+    let left_schema = exact_stream_join_schema(left, "node.input_ports[0].schema", "left")?;
+    let right_schema = exact_stream_join_schema(right, "node.input_ports[1].schema", "right")?;
+    StreamJoinOperator::new(&node.id, left_schema, right_schema, spec.clone())
+}
+
+fn require_stream_join_input(port: &Port, name: &str) -> Result<()> {
+    if port.name() != name || port.kind() != BatchKind::Table || !port.required() {
         return Err(CalcFlowError::InvalidArgument {
             field: "node.input_ports".into(),
             message: "stream_join requires required table inputs named left and right in order"
                 .into(),
         });
     }
-    let left_schema = left
-        .schema()
+    Ok(())
+}
+
+fn exact_stream_join_schema(port: &Port, field: &str, side: &str) -> Result<SchemaRef> {
+    port.schema()
         .cloned()
         .ok_or_else(|| CalcFlowError::InvalidArgument {
-            field: "node.input_ports[0].schema".into(),
-            message: "stream_join requires an exact left schema".into(),
-        })?;
-    let right_schema = right
-        .schema()
-        .cloned()
-        .ok_or_else(|| CalcFlowError::InvalidArgument {
-            field: "node.input_ports[1].schema".into(),
-            message: "stream_join requires an exact right schema".into(),
-        })?;
-    let operator = StreamJoinOperator::new(&node.id, left_schema, right_schema, spec.clone())?;
-    validate_derived_outputs(outputs, crate::OperatorMetadata::output_ports(&operator))?;
-    Ok(NodeOperator::StreamJoin(Box::new(operator)))
+            field: field.into(),
+            message: format!("stream_join requires an exact {side} schema"),
+        })
 }
 
 fn validate_derived_outputs(configured: &[Port], actual: &[Port]) -> Result<()> {
@@ -1922,19 +1928,7 @@ fn validate_stream_join_operator(
             "stream_join is available only in stream runtime mode",
         ));
     }
-    let valid_inputs = matches!(
-        node.input_ports.as_slice(),
-        [left, right]
-            if left.name == "left"
-                && right.name == "right"
-                && left.kind == BatchKind::Table
-                && right.kind == BatchKind::Table
-                && left.required
-                && right.required
-                && !left.schema.is_empty()
-                && !right.schema.is_empty()
-    );
-    if !valid_inputs {
+    if !stream_join_inputs_valid(node) {
         issues.push(issue(
             format!("graph.nodes[{index}].input_ports"),
             "invalid_ports",
@@ -1942,6 +1936,30 @@ fn validate_stream_join_operator(
         ));
         return;
     }
+    validate_stream_join_build(node, spec, base, issues);
+}
+
+fn stream_join_inputs_valid(node: &NodeSpec) -> bool {
+    node.input_ports.len() == 2 && stream_join_port_pair_valid(node)
+}
+
+fn stream_join_port_pair_valid(node: &NodeSpec) -> bool {
+    let [left, right] = node.input_ports.as_slice() else {
+        return false;
+    };
+    stream_join_port_valid(left, "left") && stream_join_port_valid(right, "right")
+}
+
+fn stream_join_port_valid(port: &PortSpec, name: &str) -> bool {
+    port.name == name && port.kind == BatchKind::Table && port.required && !port.schema.is_empty()
+}
+
+fn validate_stream_join_build(
+    node: &NodeSpec,
+    spec: &StreamJoinSpec,
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
     let left = port_from_spec(&node.input_ports[0]);
     let right = port_from_spec(&node.input_ports[1]);
     if let (Ok(left), Ok(right)) = (left, right)

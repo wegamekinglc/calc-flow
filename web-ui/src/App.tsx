@@ -891,7 +891,7 @@ export default function App() {
           <button className="node-tool expression" type="button" onClick={() => addNode('expression')}><span>ƒx</span><div><strong>Expression</strong><small>Project · filter · calculate</small></div></button>
           <button className="node-tool sql" type="button" onClick={() => addNode('sql')}><span>SQL</span><div><strong>DataFusion SQL</strong><small>Join · aggregate · window</small></div></button>
           {project.runtime.mode === 'stream' && (
-            <button className="node-tool stream_join" type="button" onClick={() => addNode('stream_join')}><span>⋈</span><div><strong>Stream Join</strong><small>Bounded · event time · inner</small></div></button>
+            <button className="node-tool stream_join" type="button" onClick={() => { addNode('stream_join'); }}><span>⋈</span><div><strong>Stream Join</strong><small>Bounded · event time · inner</small></div></button>
           )}
 
           <StreamConfigEditor

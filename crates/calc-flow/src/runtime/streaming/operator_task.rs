@@ -935,6 +935,35 @@ async fn dispatch_progress_transition(
         .operator
         .on_ingress_progress(ingress_name, &context)
         .await?;
+    let emit_idle = apply_progress_emissions(
+        inputs,
+        ingress_name,
+        emissions,
+        &mut previous_watermark,
+        &ingress_progress,
+    )
+    .await?;
+    forward_join_output_frontier(
+        inputs,
+        aggregate_input_frontier,
+        &ingress_progress,
+        output_frontier,
+    )
+    .await?;
+    if emit_idle {
+        dispatch_idle(inputs, ingress_name, StreamMessage::idle()).await?;
+    }
+    Ok(())
+}
+
+/// Applies watermark/idle emissions in order; returns whether an idle forward remains.
+async fn apply_progress_emissions(
+    inputs: &mut OperatorTaskInputs,
+    ingress_name: &str,
+    emissions: Vec<ProgressEmissionKind>,
+    previous_watermark: &mut Option<EventTime>,
+    ingress_progress: &IngressProgressSnapshot,
+) -> Result<bool> {
     let mut emit_idle = false;
     for emission in emissions {
         match emission {
@@ -943,11 +972,11 @@ async fn dispatch_progress_transition(
                     inputs,
                     ingress_name,
                     watermark,
-                    previous_watermark,
+                    *previous_watermark,
                     ingress_progress.clone(),
                 )
                 .await?;
-                previous_watermark = Some(watermark);
+                *previous_watermark = Some(watermark);
             }
             ProgressEmissionKind::Idle => {
                 emit_idle = true;
@@ -955,9 +984,19 @@ async fn dispatch_progress_transition(
             ProgressEmissionKind::EndOfInput => {}
         }
     }
+    Ok(emit_idle)
+}
+
+/// Forwards the operator's output-frontier candidate when it strictly advances.
+async fn forward_join_output_frontier(
+    inputs: &mut OperatorTaskInputs,
+    aggregate_input_frontier: Option<EventTime>,
+    ingress_progress: &IngressProgressSnapshot,
+    output_frontier: &mut Option<EventTime>,
+) -> Result<()> {
     if let Some(candidate) = inputs
         .operator
-        .output_frontier_candidate(aggregate_input_frontier, &ingress_progress)?
+        .output_frontier_candidate(aggregate_input_frontier, ingress_progress)?
         .filter(|candidate| output_frontier.is_none_or(|previous| *candidate > previous))
     {
         forward_control(
@@ -967,9 +1006,6 @@ async fn dispatch_progress_transition(
         )
         .await?;
         *output_frontier = Some(candidate);
-    }
-    if emit_idle {
-        dispatch_idle(inputs, ingress_name, StreamMessage::idle()).await?;
     }
     Ok(())
 }
