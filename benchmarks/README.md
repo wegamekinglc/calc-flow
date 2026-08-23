@@ -91,3 +91,41 @@ runner samples. Do not compare results across different machines, dependency
 versions, power modes, or benchmark scales. CI publishes these measurements as
 informational artifacts; it does not fail builds on benchmark deltas until at
 least 20 comparable main-branch samples exist on stable runners.
+
+## Symbolic execution baselines
+
+`test_symbolic_baseline.py` measures hand-built calc-flow plans that compute
+what the future symbolic layer will compile. The scenarios, their metrics, and
+the paired-comparison method for later symbolic-engine phases are documented
+in [symbolic/BASELINE.md](symbolic/BASELINE.md); the two recorded `standard`
+runs live beside it as raw `pytest-benchmark` JSON.
+
+| Scenario                                | Timed boundary                                        |
+| --------------------------------------- | ----------------------------------------------------- |
+| `symbolic_projection_20_columns`        | one DataFusion execute of a 20-column row-local SQL   |
+| `symbolic_rolling_20_60_row_features`   | one DataFusion execute of rolling window SQL          |
+| `symbolic_cross_section_rank_zscore`    | one DataFusion execute of complete-group rank/z-score |
+| `symbolic_table_matmul_numpy`/`_jax`    | SQL features plus one counting table_matmul call      |
+| `symbolic_stream_window_checkpoint`     | full stream lifecycle (see below)                     |
+
+Every scenario records rows, batches, peak RSS (`VmHWM`), provider or
+DataFusion query counts, and Arrow/dense copy bytes in `extra_info`. The
+stream scenario additionally records checkpoint duration, checkpoint bytes,
+and recovery duration from a dedicated measured lifecycle: run to half the
+batches, checkpoint, cancel, then restore from the durable checkpoint in a
+second runner. Cancelling drops the unconsumed half by design, so its output
+expectation counts only the windows accumulated before the checkpoint.
+
+The stream workload is capped at 50,000 rows regardless of scale so the
+`nightly` matrix stays bounded; every other dimension (seed, entity count,
+batch size, window size) is fixed in `symbolic_support.py` and identical
+across scales, which keeps paired comparisons valid.
+
+Reproduce a recorded run with:
+
+```bash
+CALC_FLOW_BENCHMARK_SCALE=standard \
+  JAX_PLATFORMS=cpu \
+  uv run pytest benchmarks/test_symbolic_baseline.py -q --benchmark-only \
+  --benchmark-json=<output>.json
+```
