@@ -115,7 +115,9 @@ def quote_workload(rows: int | None = None) -> QuoteWorkload:
     )
 
 
-def stream_batches(rows: int | None = None) -> tuple[list[pa.Table], int]:
+def stream_batches(
+    rows: int | None = None,
+) -> tuple[list[tuple[pa.Table, int]], int]:
     """Split one stream workload into bounded interleaved-entity batches.
 
     Each entity contributes one row per second and the tumbling window spans

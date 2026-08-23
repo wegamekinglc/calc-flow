@@ -370,10 +370,9 @@ def test_table_matmul(benchmark: BenchmarkFixture, backend: str, _scale: str) ->
 class _BaselineSource:
     """Replayable source emitting interleaved-entity batches.
 
-    Watermarks are disabled: the tumbling windows close during the drain
-    phase, and a cancelled job keeps a replayable checkpoint (a
-    source-provided watermark policy would let cancel publish a terminal
-    manifest whose recovery never re-reads the source).
+    Watermarks are disabled so the tumbling windows close during the drain
+    phase; a cancelled job keeps a replayable checkpoint (only end-of-input
+    marks the source ended) and recovery reopens at the exact cursor.
     """
 
     def __init__(

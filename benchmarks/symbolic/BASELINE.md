@@ -6,7 +6,7 @@ workloads the symbolic layer will compile ([GitHub #168], SCE-01 of the
 runtime does; they make no absolute performance claim and gate nothing.
 
 [GitHub #168]: https://github.com/wegamekinglc/calc-flow/issues/168
-[symbolic computation engine plan]: ../superpowers/plans/2026-08-22-symbolic-computation-engine.md
+[symbolic computation engine plan]: ../../docs/superpowers/plans/2026-08-22-symbolic-computation-engine.md
 
 ## Recorded runs
 
@@ -70,6 +70,9 @@ deterministic workload properties):
 | Arrow/dense bytes (JAX float32)           | 7,997,440                      |
 | Peak process RSS (stream scenario)        | ≈577 MB (includes JAX import)  |
 
+Peak RSS is the process-wide monotonic high-water mark, not a per-scenario
+attribution; the stream reading includes the resident JAX runtime.
+
 Stream checkpoint metrics from the measured (non-timed) lifecycle:
 
 | Metric                 | Run 1      | Run 2      |
@@ -86,6 +89,10 @@ operator state and flushes it at drain. `pytest-benchmark` times that whole
 lifecycle; checkpoint duration, checkpoint bytes, and recovery duration come
 from `perf_counter`/disk scans inside the dedicated measured lifecycle
 recorded in each benchmark's `extra_info`.
+
+The recorded `recovery_resumed_batches` (11 in both runs) counts in-flight
+source reads discarded by the recovery drain — a timing artifact, not a
+stable workload property.
 
 ## Noise and confidence
 
@@ -106,7 +113,8 @@ recorded in each benchmark's `extra_info`.
 1. Re-run the same command on the same machine and process state against
    both `origin/main` (these baselines) and the symbolic-compiler branch.
 2. Compare paired means per scenario; the initial row-local regression gate
-   is five percent ([design](../superpowers/specs/2026-08-22-symbolic-computation-engine-design.md)).
+   is five percent
+   ([design](../../docs/superpowers/specs/2026-08-22-symbolic-computation-engine-design.md)).
    Stateful and matrix gates must be set from these baselines before their
    implementations begin, not from absolute targets.
 3. For the stream scenario compare `checkpoint_duration_seconds`,
