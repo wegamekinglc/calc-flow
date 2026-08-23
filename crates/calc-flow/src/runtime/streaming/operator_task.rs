@@ -504,6 +504,27 @@ async fn dispatch_message(
     result
 }
 
+/// Evaluates one watermark/idle input and forwards the resulting transitions.
+async fn dispatch_progress(
+    inputs: &mut OperatorTaskInputs,
+    ingress_name: &str,
+    input: AggregateInput,
+    input_progress: &mut OperatorInputProgress,
+) -> Result<()> {
+    let previous = input_progress.input_watermark();
+    let emissions = input_progress.evaluate(ingress_name, input)?;
+    dispatch_progress_transition(
+        inputs,
+        ingress_name,
+        emissions,
+        previous,
+        input_progress.snapshot()?,
+        input_progress.input_watermark(),
+        &mut input_progress.output_frontier,
+    )
+    .await
+}
+
 async fn dispatch_message_inner(
     inputs: &mut OperatorTaskInputs,
     ingress_name: &str,
@@ -525,36 +546,19 @@ async fn dispatch_message_inner(
             .await
         }
         StreamMessageKind::Watermark => {
-            let previous = input_progress.input_watermark();
             let watermark = message
                 .as_watermark()
                 .expect("watermark kind always carries event time");
-            let emissions =
-                input_progress.evaluate(ingress_name, AggregateInput::Watermark(watermark))?;
-            dispatch_progress_transition(
+            dispatch_progress(
                 inputs,
                 ingress_name,
-                emissions,
-                previous,
-                input_progress.snapshot()?,
-                input_progress.input_watermark(),
-                &mut input_progress.output_frontier,
+                AggregateInput::Watermark(watermark),
+                input_progress,
             )
             .await
         }
         StreamMessageKind::Idle => {
-            let previous = input_progress.input_watermark();
-            let emissions = input_progress.evaluate(ingress_name, AggregateInput::Idle)?;
-            dispatch_progress_transition(
-                inputs,
-                ingress_name,
-                emissions,
-                previous,
-                input_progress.snapshot()?,
-                input_progress.input_watermark(),
-                &mut input_progress.output_frontier,
-            )
-            .await
+            dispatch_progress(inputs, ingress_name, AggregateInput::Idle, input_progress).await
         }
         StreamMessageKind::Barrier => {
             dispatch_barrier(

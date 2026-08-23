@@ -1964,71 +1964,138 @@ fn validate_stream_join_build(
     let base = spec_base.as_str();
     let reported = issues.len();
     let (left_schema, right_schema) = (&node.input_ports[0].schema, &node.input_ports[1].schema);
+    validate_join_key_pairs(spec, left_schema, right_schema, base, issues);
+    validate_join_event_times(spec, left_schema, right_schema, base, issues);
+    validate_join_output_prefixes(spec, left_schema, right_schema, base, issues);
+    if issues.len() == reported {
+        validate_stream_join_operator_build(node, spec, base, issues);
+    }
+}
+
+fn validate_join_key_pairs(
+    spec: &StreamJoinSpec,
+    left_schema: &[ArrowFieldSpec],
+    right_schema: &[ArrowFieldSpec],
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
     for (index, (left_key, right_key)) in spec.left_keys().iter().zip(spec.right_keys()).enumerate()
     {
-        let sides = [
-            ("left", left_key, unique_field(left_schema, left_key)),
-            ("right", right_key, unique_field(right_schema, right_key)),
-        ];
-        let resolved = sides.map(|(side, key, field)| match field {
-            None => {
-                issues.push(issue(
-                    format!("{base}.{side}_keys[{index}]"),
-                    "invalid_join_keys",
-                    format!("{side}_keys[{index}] names missing or ambiguous column {key}"),
-                ));
-                None
-            }
-            Some(field) => Some((side, field)),
-        });
-        let [Some((_, left_field)), Some((_, right_field))] = resolved else {
-            continue;
-        };
-        let left_type = arrow_data_type(&left_field.data_type);
-        let right_type = arrow_data_type(&right_field.data_type);
-        let compatible = left_type
-            .as_ref()
-            .zip(right_type.as_ref())
-            .is_some_and(|(left, right)| left == right && supported_key_type(left));
-        if !compatible {
-            issues.push(issue(
-                format!("{base}.left_keys[{index}]"),
-                "incompatible_key_type",
-                format!(
-                    "join key pair {index} requires identical supported Arrow types; left is {} and right is {}",
-                    left_type.as_ref().map_or_else(|| left_field.data_type.clone(), ToString::to_string),
-                    right_type.as_ref().map_or_else(|| right_field.data_type.clone(), ToString::to_string),
-                ),
-            ));
-        }
+        validate_join_key_pair(
+            index,
+            left_key,
+            right_key,
+            left_schema,
+            right_schema,
+            base,
+            issues,
+        );
     }
+}
+
+fn validate_join_key_pair(
+    index: usize,
+    left_key: &str,
+    right_key: &str,
+    left_schema: &[ArrowFieldSpec],
+    right_schema: &[ArrowFieldSpec],
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let sides = [
+        ("left", left_key, unique_field(left_schema, left_key)),
+        ("right", right_key, unique_field(right_schema, right_key)),
+    ];
+    let resolved = sides.map(|(side, key, field)| match field {
+        None => {
+            issues.push(issue(
+                format!("{base}.{side}_keys[{index}]"),
+                "invalid_join_keys",
+                format!("{side}_keys[{index}] names missing or ambiguous column {key}"),
+            ));
+            None
+        }
+        Some(field) => Some((side, field)),
+    });
+    let [Some((_, left_field)), Some((_, right_field))] = resolved else {
+        return;
+    };
+    let left_type = arrow_data_type(&left_field.data_type);
+    let right_type = arrow_data_type(&right_field.data_type);
+    let compatible = left_type
+        .as_ref()
+        .zip(right_type.as_ref())
+        .is_some_and(|(left, right)| left == right && supported_key_type(left));
+    if !compatible {
+        issues.push(issue(
+            format!("{base}.left_keys[{index}]"),
+            "incompatible_key_type",
+            format!(
+                "join key pair {index} requires identical supported Arrow types; left is {} and right is {}",
+                left_type
+                    .as_ref()
+                    .map_or_else(|| left_field.data_type.clone(), ToString::to_string),
+                right_type
+                    .as_ref()
+                    .map_or_else(|| right_field.data_type.clone(), ToString::to_string),
+            ),
+        ));
+    }
+}
+
+fn validate_join_event_times(
+    spec: &StreamJoinSpec,
+    left_schema: &[ArrowFieldSpec],
+    right_schema: &[ArrowFieldSpec],
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
     for (side, name, schema) in [
         ("left", spec.left_event_time(), left_schema),
         ("right", spec.right_event_time(), right_schema),
     ] {
-        match unique_field(schema, name) {
-            None => issues.push(issue(
-                format!("{base}.{side}_event_time"),
-                "invalid_event_time",
-                format!("{side}_event_time names missing or ambiguous column {name}"),
-            )),
-            Some(field) => {
-                let timestamp = arrow_data_type(&field.data_type)
-                    .is_some_and(|data_type| matches!(data_type, DataType::Timestamp(_, None)));
-                if !timestamp {
-                    issues.push(issue(
-                        format!("{base}.{side}_event_time"),
-                        "invalid_event_time",
-                        format!(
-                            "{side}_event_time must be a timezone-naive or UTC Arrow timestamp; found {}",
-                            arrow_data_type(&field.data_type)
-                                .map_or_else(|| field.data_type.clone(), |value| value.to_string())
-                        ),
-                    ));
-                }
-            }
-        }
+        validate_join_event_time(side, name, schema, base, issues);
     }
+}
+
+fn validate_join_event_time(
+    side: &str,
+    name: &str,
+    schema: &[ArrowFieldSpec],
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let Some(field) = unique_field(schema, name) else {
+        issues.push(issue(
+            format!("{base}.{side}_event_time"),
+            "invalid_event_time",
+            format!("{side}_event_time names missing or ambiguous column {name}"),
+        ));
+        return;
+    };
+    let timestamp = arrow_data_type(&field.data_type)
+        .is_some_and(|data_type| matches!(data_type, DataType::Timestamp(_, None)));
+    if timestamp {
+        return;
+    }
+    issues.push(issue(
+        format!("{base}.{side}_event_time"),
+        "invalid_event_time",
+        format!(
+            "{side}_event_time must be a timezone-naive or UTC Arrow timestamp; found {}",
+            arrow_data_type(&field.data_type)
+                .map_or_else(|| field.data_type.clone(), |value| value.to_string())
+        ),
+    ));
+}
+
+fn validate_join_output_prefixes(
+    spec: &StreamJoinSpec,
+    left_schema: &[ArrowFieldSpec],
+    right_schema: &[ArrowFieldSpec],
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
     let collision = left_schema.iter().any(|field| {
         let prefixed = format!("{}__{}", spec.left_prefix(), field.name);
         right_schema
@@ -2042,19 +2109,25 @@ fn validate_stream_join_build(
             "right_prefix must differ from left_prefix and produce no output-field collision",
         ));
     }
-    if issues.len() == reported {
-        let (left, right) = (
-            port_from_spec(&node.input_ports[0]),
-            port_from_spec(&node.input_ports[1]),
-        );
-        if let (Ok(left), Ok(right)) = (left, right)
-            && let (Some(left_schema), Some(right_schema)) =
-                (left.schema().cloned(), right.schema().cloned())
-            && let Err(error) =
-                StreamJoinOperator::new(&node.id, left_schema, right_schema, spec.clone())
-        {
-            issues.push(issue(base, "invalid_operator", error.to_string()));
-        }
+}
+
+fn validate_stream_join_operator_build(
+    node: &NodeSpec,
+    spec: &StreamJoinSpec,
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let (left, right) = (
+        port_from_spec(&node.input_ports[0]),
+        port_from_spec(&node.input_ports[1]),
+    );
+    if let (Ok(left), Ok(right)) = (left, right)
+        && let (Some(left_schema), Some(right_schema)) =
+            (left.schema().cloned(), right.schema().cloned())
+        && let Err(error) =
+            StreamJoinOperator::new(&node.id, left_schema, right_schema, spec.clone())
+    {
+        issues.push(issue(base, "invalid_operator", error.to_string()));
     }
 }
 
