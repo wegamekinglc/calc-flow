@@ -42,6 +42,9 @@ The quote workload at `standard` resolves to 99,968 rows over 64 entities in
 8 industries (complete 8-member cross sections). The stream workload is
 40 entities × 1 row/second with 60-second tumbling windows and 2,500-row
 batches, so active operator state per entity is bounded by a 60-row history.
+The matmul scenarios cap rows at 400,000 regardless of scale, keeping the
+dense 20-column matrix under the runtime's owned-NumPy 10,000,000-element
+conversion limit; `standard` and below are unaffected.
 
 ## Scenario results (per-execute mean over pytest-benchmark rounds)
 

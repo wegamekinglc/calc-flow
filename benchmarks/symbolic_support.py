@@ -33,6 +33,9 @@ STREAM_WINDOW_SECONDS = 60
 STREAM_ROW_MICROS = 1_000_000
 STREAM_BATCH_ROWS = 2_500
 STREAM_MAX_ROWS = 50_000
+# Keeps the dense feature matrix (rows x 20 columns) under the owned-NumPy
+# 10,000,000-element conversion cap in crates/calc-flow-python/src/batch.rs.
+MATMUL_MAX_ROWS = 400_000
 
 _QUOTE_SCHEMA = pa.schema(
     (
@@ -113,6 +116,11 @@ def quote_workload(rows: int | None = None) -> QuoteWorkload:
         industries=industries,
         rows=total,
     )
+
+
+def matmul_workload() -> QuoteWorkload:
+    """Quote workload capped to the dense-matrix budget of the matmul scenario."""
+    return quote_workload(rows=min(selected_scale().table_rows, MATMUL_MAX_ROWS))
 
 
 def stream_batches(

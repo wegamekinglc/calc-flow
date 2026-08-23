@@ -32,6 +32,7 @@ from benchmarks.symbolic_support import (
     arrow_column_bytes,
     counting_matmul_runtime,
     directory_bytes,
+    matmul_workload,
     quote_workload,
     record_symbolic_benchmark,
     stream_batches,
@@ -303,7 +304,7 @@ def test_cross_section_rank_and_zscore(
 )
 @pytest.mark.parametrize("_scale", [selected_scale().name])
 def test_table_matmul(benchmark: BenchmarkFixture, backend: str, _scale: str) -> None:
-    workload = quote_workload()
+    workload = matmul_workload()
     runtime, counting = counting_matmul_runtime(backend)
     feature_query = _matmul_feature_query(backend)
     plan = (

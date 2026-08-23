@@ -119,7 +119,9 @@ expectation counts only the windows accumulated before the checkpoint.
 The stream workload is capped at 50,000 rows regardless of scale so the
 `nightly` matrix stays bounded; every other dimension (seed, entity count,
 batch size, window size) is fixed in `symbolic_support.py` and identical
-across scales, which keeps paired comparisons valid.
+across scales, which keeps paired comparisons valid. The matmul scenarios
+likewise cap rows at 400,000 so the dense 20-column feature matrix stays
+under the runtime's owned-NumPy 10,000,000-element conversion limit.
 
 Reproduce a recorded run with:
 
