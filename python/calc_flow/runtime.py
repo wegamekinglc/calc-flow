@@ -637,7 +637,6 @@ class StreamJoinSideStatus(TypedDict):
 
 
 class StreamJoinStatus(TypedDict):
-    node_id: str
     left: StreamJoinSideStatus
     right: StreamJoinSideStatus
     emitted_match_rows: int

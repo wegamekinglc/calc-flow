@@ -189,3 +189,26 @@ def test_execution_plan_lifecycle_is_async_defensive_and_guarded() -> None:
     assert plan.snapshot() == {"calc": None}
     plan.restore({"calc": None})
     plan.reset()
+
+
+def test_stream_join_status_typeddict_matches_the_native_mapping_value() -> None:
+    """The node ID is the outer mapping key, not a value field (api note)."""
+    from calc_flow.runtime import StreamJoinSideStatus, StreamJoinStatus
+
+    assert set(StreamJoinStatus.__annotations__) == {
+        "left",
+        "right",
+        "emitted_match_rows",
+        "state_limit_failures",
+        "match_limit_failures",
+    }
+    assert set(StreamJoinSideStatus.__annotations__) == {
+        "retained_rows",
+        "retained_bytes",
+        "evicted_rows",
+        "late_rows",
+        "late_affected_batches",
+        "max_lateness_micros",
+        "null_event_time_rows",
+        "null_key_rows",
+    }
