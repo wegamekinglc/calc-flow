@@ -11,13 +11,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal, overload
+from typing import TYPE_CHECKING, Literal, overload
 
 from calc_flow.symbolic.domains import (
     array_operator_error,
     bool_error,
     column_operator_error,
     is_strict_scalar_type,
+    namespace_error,
     table_operator_error,
     type_name,
 )
@@ -44,6 +45,9 @@ from calc_flow.symbolic.types import (
     require_non_empty_str,
     require_non_negative_int,
 )
+
+if TYPE_CHECKING:
+    from calc_flow.symbolic.program import FeatureSet
 
 type ColumnOperand = ColumnExpr | ScalarLiteral
 type ArrayOperand = ArrayExpr | Parameter[ArrayExpr] | ScalarLiteral
@@ -369,6 +373,22 @@ class TableExpr(Expr[object]):
                 f" got {type_name(field)}"
             )
         return ColumnExpr(build("column_ref", (self._node,), {"name": CStr(field)}))
+
+    def with_columns(self, features: FeatureSet, /) -> TableExpr:
+        from calc_flow.symbolic.program import FeatureSet
+
+        if not isinstance(features, FeatureSet):
+            raise namespace_error(
+                "TableExpr.with_columns", "features", "FeatureSet", features
+            )
+        names = CSeq(tuple(CStr(name) for name, _ in features.features))
+        return TableExpr(
+            build(
+                "with_columns",
+                (self._node, *(value._node for _, value in features.features)),
+                {"names": names},
+            )
+        )
 
 
 @dataclass(frozen=True, slots=True, eq=False, repr=False)

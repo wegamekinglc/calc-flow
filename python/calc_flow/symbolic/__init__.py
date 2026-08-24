@@ -1,21 +1,17 @@
 """The public symbolic declaration surface of ``calc_flow``.
 
 ``calc_flow.symbolic`` is the only public declaration module. It builds
-immutable expression IR with canonical v1 digests and offers no data
-execution path: there is no ``eval``, ``push``, ``value``, ``transform``,
-preview evaluator, or formula parser. Semantics are frozen by
+immutable expression IR with canonical v1 digests, programs with canonical v1
+fingerprints, and static analysis over the declaration graph. There is no data
+execution path: no ``eval``, ``push``, ``value``, ``transform``, preview
+evaluator, or formula parser exists. Semantics are frozen by
 ``.codex/artifacts/specs/symbolic-computation-contract.md`` and the exact
 signatures by ``.codex/artifacts/api-notes/symbolic-computation-engine.md``.
-
-``__all__`` currently lists the expression-level subset delivered by the
-SCE-02 stage. The program-level names of the frozen export list
-(``AnalysisIssue``, ``AnalysisResult``, ``FeatureSet``, ``Program``) land
-with SCE-03, which owns ``program.py``, ``analyzer.py``, and ``errors.py``;
-until then they are absent rather than re-exported stubs.
 """
 
 from __future__ import annotations
 
+from calc_flow.symbolic.analyzer import AnalysisIssue, AnalysisResult
 from calc_flow.symbolic.expr import (
     ArrayExpr,
     ColumnExpr,
@@ -26,6 +22,7 @@ from calc_flow.symbolic.expr import (
     table_input,
 )
 from calc_flow.symbolic.ops import cs, linalg, row, table, ts, window
+from calc_flow.symbolic.program import FeatureSet, Program
 from calc_flow.symbolic.types import Field
 from calc_flow.symbolic.windows import (
     CrossSectionGroup,
@@ -39,14 +36,18 @@ from calc_flow.symbolic.windows import (
 )
 
 __all__ = [
+    "AnalysisIssue",
+    "AnalysisResult",
     "ArrayExpr",
     "ColumnExpr",
     "CrossSectionGroup",
     "DurationFrame",
     "EventTimeBucket",
     "Expr",
+    "FeatureSet",
     "Field",
     "Parameter",
+    "Program",
     "RowFrame",
     "TableExpr",
     "cs",

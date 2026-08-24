@@ -5,6 +5,23 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-24: Add the public symbolic declaration surface
+  `calc_flow.symbolic`. Typed immutable column, table, array, and parameter
+  expressions carry canonical v1 digests; an ordered `FeatureSet` of uniquely
+  named features feeds `TableExpr.with_columns` as derived columns; and an
+  immutable `Program` over declared inputs and outputs carries a
+  runtime-independent v1 fingerprint that conforming implementations reproduce
+  byte-for-byte. A complete program verifies, fingerprints, and explains with
+  no data or runner: `Program.analyze(runtime, mode=...)` and
+  `Program.explain(runtime, mode=...)` take one explicit runtime capability
+  snapshot and statically infer value types, domains and lineages, symbolic
+  dimensions, attachment compatibility, state requirements, and stream safety,
+  reporting immutable `AnalysisIssue` findings on stable output- or
+  input-rooted paths. Type inference proves only what the capability snapshot
+  proves, so cross-type arithmetic requires an explicit `row.cast`. The
+  package has no data execution path; execution remains owned by the existing
+  execution plans and runners.
+
 - 2026-08-22: Release the 4.0 bounded event-time stream Join across Rust,
   Python, project v3, and Studio. The inner equi-Join has explicit asymmetric
   time bounds, required state and match limits, deterministic recovery, typed
