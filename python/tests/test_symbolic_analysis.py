@@ -1040,3 +1040,458 @@ def test_elementwise_shape_paths_index_from_the_left() -> None:
         issue for issue in result.issues if issue.code == "unresolved_type"
     )
     assert unresolved.path == "outputs.scores.mul.right.shape[0]"
+
+
+# --- coverage-closure behaviors over the public API ------------------------
+
+
+def _quotes_typed() -> TableExpr:
+    return table_input(
+        "quotes",
+        schema=[
+            Field("ts", "timestamp[us, UTC]", nullable=False),
+            Field("symbol", "string", nullable=False),
+            Field("seq", "uint64", nullable=False),
+            Field("px", "float64", nullable=False),
+            Field("x", "float64"),
+            Field("qty", "int64"),
+            Field("flag", "bool"),
+        ],
+        entity_by=["symbol"],
+        event_time="ts",
+        sequence_by=["seq"],
+    )
+
+
+def test_projection_resolves_columns_and_preserves_field_types() -> None:
+    quotes = _quotes_typed()
+    narrow = table.project(quotes, ["symbol", "x"])
+    program = Program(
+        "p",
+        inputs=[quotes],
+        outputs=[("signals", narrow.with_columns(FeatureSet([("s", narrow["x"])])))],
+    )
+    result = program.analyze(Runtime(), mode="batch")
+
+    assert result.issues == ()
+    explanation = program.explain(Runtime(), mode="batch")
+    assert "field symbol string nullable=false" in explanation
+    assert "field x float64 nullable=true" in explanation
+
+    broken = Program(
+        "p",
+        inputs=[quotes],
+        outputs=[
+            (
+                "signals",
+                table.project(quotes, ["x", "missing"]).with_columns(FeatureSet()),
+            )
+        ],
+    )
+    broken_result = broken.analyze(Runtime(), mode="batch")
+    assert "outputs.signals.with_columns.value.project.columns[1]" in _issue_paths(
+        broken_result
+    )
+
+
+def test_row_local_scalar_functions_infer_types() -> None:
+    quotes = _quotes_typed()
+    program = Program(
+        "p",
+        inputs=[quotes],
+        outputs=[
+            (
+                "signals",
+                quotes.with_columns(
+                    FeatureSet(
+                        [
+                            ("logged", row.log(quotes["x"])),
+                            ("expanded", row.exp(quotes["x"])),
+                            ("rooted", row.sqrt(quotes["px"])),
+                            ("absolute", row.abs(quotes["qty"])),
+                            ("inverted", -quotes["qty"]),
+                            ("negated", -quotes["x"]),
+                            ("flagged", ~quotes["flag"]),
+                            ("both", quotes["flag"] & quotes["flag"]),
+                        ]
+                    )
+                ),
+            )
+        ],
+    )
+    result = program.analyze(Runtime(), mode="batch")
+
+    assert result.issues == ()
+    explanation = program.explain(Runtime(), mode="batch")
+    for name in ("logged", "expanded", "negated"):
+        assert f"field {name} float64 nullable=true" in explanation
+    assert "field rooted float64 nullable=false" in explanation
+    assert "field absolute int64 nullable=true" in explanation
+    assert "field inverted int64 nullable=true" in explanation
+    assert "field flagged bool nullable=true" in explanation
+    assert "field both bool nullable=true" in explanation
+
+
+def test_scalar_functions_reject_non_numeric_operands() -> None:
+    quotes = _quotes_typed()
+    cases = [
+        ("log", row.log(quotes["symbol"])),
+        ("exp", row.exp(quotes["flag"])),
+        ("sqrt", row.sqrt(quotes["symbol"])),
+        ("abs", row.abs(quotes["symbol"])),
+        ("neg", -quotes["symbol"]),
+        ("not", ~quotes["x"]),
+        ("and", quotes["x"] & quotes["x"]),
+        ("clip", row.clip(quotes["symbol"], lower=0.0, upper=1.0)),
+        ("truediv", quotes["qty"] / quotes["qty"]),
+    ]
+    for name, value in cases:
+        program = _feature_program(quotes, "score", value)
+        result = program.analyze(Runtime(), mode="batch")
+        dtype_issues = [
+            issue
+            for issue in result.issues
+            if issue.code == "unsupported_type" and issue.path.endswith(".dtype")
+        ]
+        assert dtype_issues, name
+
+    clean = Program(
+        "p",
+        inputs=[quotes],
+        outputs=[
+            (
+                "signals",
+                quotes.with_columns(
+                    FeatureSet(
+                        [
+                            ("clipped", row.clip(quotes["x"], lower=0.0, upper=1.0)),
+                            ("ratio", quotes["x"] / quotes["px"]),
+                        ]
+                    )
+                ),
+            )
+        ],
+    )
+    assert clean.analyze(Runtime(), mode="batch").issues == ()
+    explanation = clean.explain(Runtime(), mode="batch")
+    assert "field clipped float64 nullable=true" in explanation
+    assert "field ratio float64 nullable=true" in explanation
+
+
+def test_where_and_coalesce_report_operand_type_mismatches() -> None:
+    quotes = _quotes_typed()
+    mismatched = Program(
+        "p",
+        inputs=[quotes],
+        outputs=[
+            (
+                "signals",
+                quotes.with_columns(
+                    FeatureSet(
+                        [
+                            (
+                                "score",
+                                row.where(
+                                    quotes["flag"], quotes["x"], quotes["symbol"]
+                                ),
+                            ),
+                            (
+                                "fallback",
+                                row.coalesce(quotes["x"], quotes["symbol"]),
+                            ),
+                        ]
+                    )
+                ),
+            )
+        ],
+    )
+    mismatched_result = mismatched.analyze(Runtime(), mode="batch")
+    assert "outputs.signals.score.where.when_false.dtype" in _issue_paths(
+        mismatched_result
+    )
+    assert "outputs.signals.fallback.coalesce.values[1].dtype" in _issue_paths(
+        mismatched_result
+    )
+
+    non_bool = Program(
+        "p",
+        inputs=[quotes],
+        outputs=[
+            (
+                "signals",
+                quotes.with_columns(
+                    FeatureSet(
+                        [("score", row.where(quotes["x"], quotes["x"], quotes["x"]))]
+                    )
+                ),
+            )
+        ],
+    )
+    non_bool_result = non_bool.analyze(Runtime(), mode="batch")
+    assert "outputs.signals.score.where.condition.dtype" in _issue_paths(
+        non_bool_result
+    )
+
+    null_fallback = Program(
+        "p",
+        inputs=[quotes],
+        outputs=[
+            (
+                "signals",
+                quotes.with_columns(
+                    FeatureSet([("score", row.coalesce(quotes["px"], None))])
+                ),
+            )
+        ],
+    )
+    null_result = null_fallback.analyze(Runtime(), mode="batch")
+    assert null_result.issues == ()
+    explanation = null_fallback.explain(Runtime(), mode="batch")
+    assert "field score float64 nullable=false" in explanation
+
+
+def test_from_columns_requires_one_resolvable_dtype() -> None:
+    quotes = _quotes_typed()
+
+    mixed = Program(
+        "p",
+        inputs=[quotes],
+        outputs=[
+            (
+                "scores",
+                linalg.from_columns(quotes, columns=["x", "symbol"], backend="numpy"),
+            )
+        ],
+    )
+    mixed_result = mixed.analyze(Runtime(), mode="batch")
+    assert "outputs.scores.from_columns.columns[1].dtype" in _issue_paths(mixed_result)
+
+    unknown = Program(
+        "p",
+        inputs=[quotes],
+        outputs=[
+            (
+                "scores",
+                linalg.from_columns(quotes, columns=["missing"], backend="numpy"),
+            )
+        ],
+    )
+    unknown_result = unknown.analyze(Runtime(), mode="batch")
+    assert "outputs.scores.from_columns.columns[0]" in _issue_paths(unknown_result)
+
+
+def test_window_group_fields_propagate_into_window_schema() -> None:
+    quotes = _quotes_typed()
+    program = Program(
+        "p",
+        inputs=[quotes],
+        outputs=[
+            (
+                "windows",
+                window.tumbling(
+                    quotes,
+                    event_time="ts",
+                    size_micros=60_000_000,
+                    group_by=["symbol"],
+                ),
+            )
+        ],
+    )
+    result = program.analyze(Runtime(), mode="batch")
+
+    assert result.issues == ()
+    explanation = program.explain(Runtime(), mode="batch")
+    assert "field symbol string nullable=false" in explanation
+
+    broken = Program(
+        "p",
+        inputs=[quotes],
+        outputs=[
+            (
+                "windows",
+                window.tumbling(
+                    quotes,
+                    event_time="ts",
+                    size_micros=60_000_000,
+                    group_by=["nope"],
+                ),
+            )
+        ],
+    )
+    broken_result = broken.analyze(Runtime(), mode="batch")
+    assert "outputs.windows.window_tumbling.group_by[0]" in _issue_paths(broken_result)
+
+
+def test_matmul_rejects_mixed_row_lineages() -> None:
+    quotes = _quotes_typed()
+    trades = table_input(
+        "trades",
+        schema=[
+            Field("ts", "timestamp[us, UTC]", nullable=False),
+            Field("symbol", "string", nullable=False),
+            Field("y", "float64"),
+        ],
+        entity_by=["symbol"],
+        event_time="ts",
+        sequence_by=["ts"],
+    )
+    program = Program(
+        "p",
+        inputs=[quotes, trades],
+        outputs=[
+            (
+                "scores",
+                linalg.matmul(
+                    linalg.from_columns(quotes, columns=["x"], backend="numpy"),
+                    linalg.from_columns(trades, columns=["y"], backend="numpy"),
+                ),
+            )
+        ],
+    )
+    result = program.analyze(Runtime(), mode="batch")
+
+    assert "outputs.scores.matmul.right.lineage" in _issue_paths(result)
+
+
+def test_elementwise_broadcast_expands_unit_dimensions() -> None:
+    quotes = _quotes_typed()
+    unit = parameter(
+        "unit",
+        kind="array",
+        backend="numpy",
+        dtype="float64",
+        shape=(1, 1),
+    )
+    base = linalg.from_columns(quotes, columns=["px", "x"], backend="numpy")
+    program = Program(
+        "p",
+        inputs=[quotes, unit],
+        outputs=[("scores", base * unit), ("flags", base == base)],
+    )
+    result = program.analyze(Runtime(), mode="batch")
+
+    assert result.issues == ()
+    explanation = program.explain(Runtime(), mode="batch")
+    assert (
+        "output scores array backend numpy dtype float64 shape (quotes, 2)"
+        " lineage quotes" in explanation
+    )
+    assert "output flags array backend numpy dtype bool" in explanation
+
+
+def test_stream_ordering_checks_field_existence_and_nullability() -> None:
+    quotes = table_input(
+        "quotes",
+        schema=[
+            Field("ts", "timestamp[us, UTC]", nullable=False),
+            Field("symbol", "string", nullable=False),
+            Field("seq", "uint64"),
+            Field("x", "float64"),
+        ],
+        entity_by=["symbol", "industry"],
+        event_time="ts",
+        sequence_by=["seq"],
+    )
+    program = Program(
+        "p",
+        inputs=[quotes],
+        outputs=[
+            (
+                "signals",
+                quotes.with_columns(
+                    FeatureSet([("score", ts.mean(quotes["x"], window=rows(3)))])
+                ),
+            )
+        ],
+    )
+    result = program.analyze(Runtime(), mode="stream")
+
+    paths = _issue_paths(result)
+    assert "inputs.quotes.entity_by[1]" in paths
+    assert "inputs.quotes.sequence_by[0]" in paths
+    assert all(issue.code == "ordering_required" for issue in result.issues)
+
+
+def test_winsorize_requires_floating_input() -> None:
+    quotes = _quotes_typed()
+
+    broken = Program(
+        "p",
+        inputs=[quotes],
+        outputs=[
+            (
+                "signals",
+                quotes.with_columns(
+                    FeatureSet(
+                        [
+                            (
+                                "score",
+                                cs.winsorize(
+                                    quotes["qty"],
+                                    group=exact_time(quotes["ts"]),
+                                    lower=0.1,
+                                    upper=0.9,
+                                ),
+                            )
+                        ]
+                    )
+                ),
+            )
+        ],
+    )
+    broken_result = broken.analyze(Runtime(), mode="batch")
+    assert "outputs.signals.score.winsorize.value.dtype" in _issue_paths(broken_result)
+
+    clean = Program(
+        "p",
+        inputs=[quotes],
+        outputs=[
+            (
+                "signals",
+                quotes.with_columns(
+                    FeatureSet(
+                        [
+                            (
+                                "score",
+                                cs.winsorize(
+                                    quotes["x"],
+                                    group=exact_time(quotes["ts"]),
+                                    lower=0.1,
+                                    upper=0.9,
+                                ),
+                            )
+                        ]
+                    )
+                ),
+            )
+        ],
+    )
+    assert clean.analyze(Runtime(), mode="batch").issues == ()
+
+
+def test_explain_renders_static_input_declarations() -> None:
+    quotes = _quotes_typed()
+    weights = parameter(
+        "weights",
+        kind="array",
+        backend="numpy",
+        dtype="float64",
+        shape=(2, 1),
+    )
+    lookup = parameter(
+        "lookup",
+        kind="table",
+        schema=[Field("k", "string", nullable=False), Field("v", "float64")],
+    )
+    program = Program(
+        "p",
+        inputs=[quotes, weights, lookup],
+        outputs=[("signals", quotes.with_columns(FeatureSet()))],
+    )
+    explanation = program.explain(Runtime(), mode="batch")
+
+    assert (
+        "static_input weights array backend numpy dtype float64 shape (2, 1)"
+        in explanation
+    )
+    assert "static_input lookup table fields 2" in explanation
