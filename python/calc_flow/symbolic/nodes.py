@@ -458,6 +458,33 @@ def build(
     return Node(OpRef(name, version), children, attr_map, body, digest)
 
 
+def _int_literal(value: int, /) -> CValue:
+    if not _INT64_MIN <= value <= _UINT64_MAX:
+        raise ValueError(
+            "calc_flow.symbolic.literal.value: invalid_literal: integer"
+            " literals must fit the portable JSON range [-2^63, 2^64 - 1]"
+        )
+    return CInt(value)
+
+
+def _float_literal(value: float, /) -> CValue:
+    if not math.isfinite(value):
+        raise ValueError(
+            "calc_flow.symbolic.literal.value: invalid_literal:"
+            " floating-point literals must be finite"
+        )
+    return CFloat(value)
+
+
+_LITERAL_HANDLERS: Final[dict[type, Callable[[object], CValue]]] = {
+    type(None): lambda _value: CNull(),
+    bool: lambda value: CBool(value),
+    int: _int_literal,
+    float: _float_literal,
+    str: lambda value: CStr(value),
+}
+
+
 def literal_value(value: object, /) -> CValue:
     """Convert one strict JSON scalar to its canonical value.
 
@@ -465,30 +492,13 @@ def literal_value(value: object, /) -> CValue:
     rejected before any node is built.
     """
 
-    if value is None:
-        return CNull()
-    if type(value) is bool:
-        return CBool(value)
-    if type(value) is int:
-        if not _INT64_MIN <= value <= _UINT64_MAX:
-            raise ValueError(
-                "calc_flow.symbolic.literal.value: invalid_literal: integer"
-                " literals must fit the portable JSON range [-2^63, 2^64 - 1]"
-            )
-        return CInt(value)
-    if type(value) is float:
-        if not math.isfinite(value):
-            raise ValueError(
-                "calc_flow.symbolic.literal.value: invalid_literal:"
-                " floating-point literals must be finite"
-            )
-        return CFloat(value)
-    if type(value) is str:
-        return CStr(value)
-    raise ValueError(
-        "calc_flow.symbolic.literal.value: invalid_literal: declaration"
-        f" literals must be strict JSON scalars; got {type_name(value)}"
-    )
+    handler = _LITERAL_HANDLERS.get(type(value))
+    if handler is None:
+        raise ValueError(
+            "calc_flow.symbolic.literal.value: invalid_literal: declaration"
+            f" literals must be strict JSON scalars; got {type_name(value)}"
+        )
+    return handler(value)
 
 
 def _format_cseq(value: CSeq, /) -> str:

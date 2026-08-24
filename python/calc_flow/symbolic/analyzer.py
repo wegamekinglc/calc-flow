@@ -52,6 +52,29 @@ _NUMERIC_TYPES: Final = frozenset(
 )
 
 
+def _is_array_parameter(node: Node, /) -> bool:
+    kind = node.attr("kind") if node.op.name == "parameter" else None
+    return isinstance(kind, CEnum) and kind.variant == "array"
+
+
+def _sum_output_type(input_type: str | None, /) -> str:
+    if input_type in _SIGNED_INT_TYPES:
+        return "int64"
+    if input_type in _UNSIGNED_INT_TYPES:
+        return "uint64"
+    return "float64"
+
+
+def _rolling_output_type(primitive: str, input_type: str | None, /) -> str | None:
+    if primitive == "count":
+        return "uint64"
+    if primitive == "sum":
+        return _sum_output_type(input_type)
+    if primitive in ("min", "max"):
+        return input_type
+    return "float64"
+
+
 def _entity_field_is_valid(field: Field | None, /) -> bool:
     return field is not None
 
@@ -75,6 +98,7 @@ def _sequence_field_message(_field_name: str, /) -> str:
     )
 
 
+_FRAME_ATTRIBUTES: Final[dict[str, str]] = {"rows": "size", "duration": "micros"}
 _ARITHMETIC: Final = frozenset({"add", "sub", "mul", "truediv"})
 _COMPARISONS: Final = frozenset({"eq", "ne", "lt", "le", "gt", "ge"})
 _BOOLEANS: Final = frozenset({"and", "or"})
@@ -163,26 +187,33 @@ def _cstr_seq(value: CValue, /) -> tuple[str, ...]:
     return ()
 
 
+def _declared_type_name(data_type: CValue, /) -> str | None:
+    if isinstance(data_type, CStr):
+        return data_type.value
+    if isinstance(data_type, CDType):
+        return data_type.name
+    return None
+
+
+def _declared_field(item: CValue, /) -> Field | None:
+    if not isinstance(item, CMap):
+        return None
+    name = item.get("name")
+    nullable = item.get("nullable")
+    if not isinstance(name, CStr) or not isinstance(nullable, CBool):
+        return None
+    type_name_value = _declared_type_name(item.get("data_type"))
+    if type_name_value is None:
+        return None
+    return Field(name.value, type_name_value, nullable.value)
+
+
 def _schema_fields(value: CValue, /) -> tuple[Field, ...]:
     if not isinstance(value, CSeq):
         return ()
-    fields: list[Field] = []
-    for item in value.items:
-        if not isinstance(item, CMap):
-            continue
-        name = item.get("name")
-        data_type = item.get("data_type")
-        nullable = item.get("nullable")
-        if isinstance(name, CStr) and isinstance(nullable, CBool):
-            type_name_value = (
-                data_type.value
-                if isinstance(data_type, CStr)
-                else data_type.name
-                if isinstance(data_type, CDType)
-                else None
-            )
-            if type_name_value is not None:
-                fields.append(Field(name.value, type_name_value, nullable.value))
+    fields = [
+        field for item in value.items if (field := _declared_field(item)) is not None
+    ]
     return tuple(fields)
 
 
@@ -213,14 +244,7 @@ class _Analyzer:
     # -- declaration-level checks ------------------------------------------
 
     def check_input_declaration(self, node: Node, root: str, name: str, /) -> None:
-        kind = (
-            "array"
-            if node.op.name == "parameter"
-            and isinstance(node.attr("kind"), CEnum)
-            and node.attr("kind").variant == "array"
-            else "table"
-        )
-        if kind == "array" and not self._supports_array_kind:
+        if _is_array_parameter(node) and not self._supports_array_kind:
             self.issue(
                 f"{root}.{name}",
                 "capability_mismatch",
@@ -459,6 +483,21 @@ class _Analyzer:
         child = self.table(node.args[0], f"{path}.attach_columns.value")
         array = self.array(node.args[1], f"{path}.attach_columns.array")
         names = _cstr_seq(node.attr("names"))
+        self._attach_lineage_check(array, child, path)
+        self._attach_width_check(array, names, path)
+        fields = self._attached_fields(child, array, names, path)
+        return TableFacts(
+            tuple(fields),
+            child.lineage,
+            child.state | array.state,
+            child.event_time,
+            child.entity_by,
+            child.sequence_by,
+        )
+
+    def _attach_lineage_check(
+        self, array: ArrayFacts, child: TableFacts, path: str, /
+    ) -> None:
         if array.lineage is None or array.lineage != child.lineage:
             self.issue(
                 f"{path}.attach_columns.array.lineage",
@@ -466,21 +505,36 @@ class _Analyzer:
                 "an attached array must carry the row-axis lineage of the"
                 f" target table {child.lineage!r}",
             )
-        elif array.shape:
-            width = array.shape[-1]
-            if isinstance(width, str):
-                self.issue(
-                    f"{path}.attach_columns.array.shape[{len(array.shape) - 1}]",
-                    "unresolved_type",
-                    "the attached array width is symbolic and cannot be proved"
-                    " to match the declared names",
-                )
-            elif width != len(names):
-                self.issue(
-                    f"{path}.attach_columns.array.shape[{len(array.shape) - 1}]",
-                    "schema_mismatch",
-                    f"array width {width} does not match {len(names)} declared names",
-                )
+
+    def _attach_width_check(
+        self, array: ArrayFacts, names: tuple[str, ...], path: str, /
+    ) -> None:
+        if not array.shape:
+            return
+        width_path = f"{path}.attach_columns.array.shape[{len(array.shape) - 1}]"
+        width = array.shape[-1]
+        if isinstance(width, str):
+            self.issue(
+                width_path,
+                "unresolved_type",
+                "the attached array width is symbolic and cannot be proved"
+                " to match the declared names",
+            )
+        elif width != len(names):
+            self.issue(
+                width_path,
+                "schema_mismatch",
+                f"array width {width} does not match {len(names)} declared names",
+            )
+
+    def _attached_fields(
+        self,
+        child: TableFacts,
+        array: ArrayFacts,
+        names: tuple[str, ...],
+        path: str,
+        /,
+    ) -> list[Field]:
         fields = list(child.schema)
         existing = {field.name for field in child.schema}
         for name in names:
@@ -493,14 +547,7 @@ class _Analyzer:
             elif array.dtype is not None:
                 fields.append(Field(name, array.dtype, nullable=True))
                 existing.add(name)
-        return TableFacts(
-            tuple(fields),
-            child.lineage,
-            child.state | array.state,
-            child.event_time,
-            child.entity_by,
-            child.sequence_by,
-        )
+        return fields
 
     def _window_table(self, node: Node, path: str, /) -> TableFacts:
         child = self.table(node.args[0], f"{path}.{node.op.name}.value")
@@ -863,13 +910,13 @@ class _Analyzer:
         if not isinstance(frame, CMap):
             return None
         kind = frame.get("frame")
-        if isinstance(kind, CEnum) and kind.variant == "rows":
-            size = _cint(frame.get("size"))
-            return f"rows({size})" if size is not None else None
-        if isinstance(kind, CEnum) and kind.variant == "duration":
-            micros = _cint(frame.get("micros"))
-            return f"duration({micros})" if micros is not None else None
-        return None
+        attribute = (
+            _FRAME_ATTRIBUTES.get(kind.variant) if isinstance(kind, CEnum) else None
+        )
+        if attribute is None:
+            return None
+        value = _cint(frame.get(attribute))
+        return None if value is None else f"{kind.variant}({value})"
 
     def _rolling_aggregate(self, node: Node, path: str, /) -> ColumnFacts:
         operand = self._operand(node.args[0], f"{path}.{node.op.name}.value", None)
@@ -885,20 +932,12 @@ class _Analyzer:
             input_type, f"{path}.{primitive}.value", primitive
         ):
             return ColumnFacts(None, True, operand.lineage, states)
-        if primitive == "count":
-            output_type: str | None = "uint64"
-        elif primitive == "sum":
-            if input_type in _SIGNED_INT_TYPES:
-                output_type = "int64"
-            elif input_type in _UNSIGNED_INT_TYPES:
-                output_type = "uint64"
-            else:
-                output_type = "float64"
-        elif primitive in ("min", "max"):
-            output_type = input_type
-        else:
-            output_type = "float64"
-        return ColumnFacts(output_type, True, operand.lineage, states)
+        return ColumnFacts(
+            _rolling_output_type(primitive, input_type),
+            True,
+            operand.lineage,
+            states,
+        )
 
     def _rolling_pair(self, node: Node, path: str, /) -> ColumnFacts:
         role = f"{path}.{node.op.name}"
@@ -932,7 +971,18 @@ class _Analyzer:
         states = (
             operand.state | _column_state_union(group) | frozenset({"cross_section"})
         )
-        if node.op.name == "winsorize":
+        return self._cross_section_output(node.op.name, operand, role, states)
+
+    def _cross_section_output(
+        self,
+        primitive: str,
+        operand: ColumnFacts,
+        role: str,
+        states: frozenset[str],
+        /,
+    ) -> ColumnFacts:
+        unresolved = ColumnFacts(None, True, operand.lineage, states)
+        if primitive == "winsorize":
             if operand.data_type is not None and operand.data_type not in (
                 "float32",
                 "float64",
@@ -942,12 +992,12 @@ class _Analyzer:
                     "unsupported_type",
                     "winsorization is only provable for floating columns",
                 )
-                return ColumnFacts(None, True, operand.lineage, states)
+                return unresolved
             return ColumnFacts(operand.data_type, True, operand.lineage, states)
-        if node.op.name in ("zscore", "demean") and not self._numeric_or_issue(
-            operand.data_type, f"{role}.value", node.op.name
+        if primitive in ("zscore", "demean") and not self._numeric_or_issue(
+            operand.data_type, f"{role}.value", primitive
         ):
-            return ColumnFacts(None, True, operand.lineage, states)
+            return unresolved
         return ColumnFacts("float64", True, operand.lineage, states)
 
     # -- array analysis ------------------------------------------------------
@@ -961,26 +1011,15 @@ class _Analyzer:
         return facts
 
     def _analyze_array(self, node: Node, path: str, /) -> ArrayFacts:
-        name = node.op.name
-        if name == "parameter":
-            return self._array_parameter(node, path)
-        if name == "from_columns":
-            return self._from_columns(node, path)
-        if name == "matmul":
-            return self._matmul(node, path)
-        if (
-            name in _ARITHMETIC
-            or name in _COMPARISONS
-            or name in _BOOLEANS
-            or name in ("neg", "not")
-        ):
-            return self._elementwise(node, path)
-        self.issue(
-            path,
-            "unknown_primitive_version",
-            f"primitive {name!r} does not produce an array value",
-        )
-        return ArrayFacts(None, None, (), None, frozenset())
+        handler = _ARRAY_HANDLERS.get(node.op.name)
+        if handler is None:
+            self.issue(
+                path,
+                "unknown_primitive_version",
+                f"primitive {node.op.name!r} does not produce an array value",
+            )
+            return ArrayFacts(None, None, (), None, frozenset())
+        return handler(self, node, path)
 
     def _array_parameter(self, node: Node, path: str, /) -> ArrayFacts:
         name = _cstr(node.attr("name"))
@@ -1015,9 +1054,26 @@ class _Analyzer:
         role = f"{path}.from_columns"
         table = self.table(node.args[0], f"{role}.value")
         columns = _cstr_seq(node.attr("columns"))
+        data_type = self._from_columns_dtype(columns, table.schema, role)
+        rows: int | str = table.lineage if table.lineage is not None else "rows"
+        return ArrayFacts(
+            _cstr(node.attr("backend")),
+            data_type,
+            (rows, len(columns)),
+            table.lineage,
+            table.state,
+        )
+
+    def _from_columns_dtype(
+        self,
+        columns: tuple[str, ...],
+        schema: tuple[Field, ...],
+        role: str,
+        /,
+    ) -> str | None:
         data_type: str | None = None
         for index, column in enumerate(columns):
-            field = next((item for item in table.schema if item.name == column), None)
+            field = next((item for item in schema if item.name == column), None)
             if field is None:
                 self.issue(
                     f"{role}.columns[{index}]",
@@ -1034,16 +1090,8 @@ class _Analyzer:
                     f"from_columns requires one dtype; found {data_type!r} and"
                     f" {field.data_type!r}",
                 )
-                data_type = None
-                break
-        rows: int | str = table.lineage if table.lineage is not None else "rows"
-        return ArrayFacts(
-            _cstr(node.attr("backend")),
-            data_type,
-            (rows, len(columns)),
-            table.lineage,
-            table.state,
-        )
+                return None
+        return data_type
 
     def _array_pair_compat(
         self,
@@ -1055,37 +1103,30 @@ class _Analyzer:
     ) -> None:
         """Report dtype, backend, and row-lineage incompatibilities."""
 
-        if (
-            left.dtype is not None
-            and right.dtype is not None
-            and left.dtype != right.dtype
-        ):
-            self.issue(
-                f"{role}.right.dtype",
-                "unsupported_type",
-                f"no provable result dtype for {left.dtype!r} and {right.dtype!r}",
-            )
-        if (
-            left.backend is not None
-            and right.backend is not None
-            and left.backend != right.backend
-        ):
-            self.issue(
-                f"{role}.right.backend",
-                "unsupported_type",
-                f"implicit cross-backend conversion between {left.backend!r}"
-                f" and {right.backend!r} is rejected",
-            )
+        self._aspect_mismatch(
+            left.dtype,
+            right.dtype,
+            f"{role}.right.dtype",
+            "no provable result dtype for {!r} and {!r}",
+        )
+        self._aspect_mismatch(
+            left.backend,
+            right.backend,
+            f"{role}.right.backend",
+            "implicit cross-backend conversion between {!r} and {!r} is rejected",
+        )
         if (
             left.lineage is not None
             and right.lineage is not None
             and left.lineage != right.lineage
         ):
-            self.issue(
-                f"{role}.right.lineage",
-                "schema_mismatch",
-                lineage_message,
-            )
+            self.issue(f"{role}.right.lineage", "schema_mismatch", lineage_message)
+
+    def _aspect_mismatch(
+        self, left: object, right: object, path: str, template: str, /
+    ) -> None:
+        if left is not None and right is not None and left != right:
+            self.issue(path, "unsupported_type", template.format(left, right))
 
     def _matmul_inner_dims(
         self, left: ArrayFacts, right: ArrayFacts, role: str, /
@@ -1175,6 +1216,17 @@ class _Analyzer:
 def _literal_column(node: Node, _path: str, /) -> ColumnFacts:
     return _literal_facts(node)
 
+
+_ELEMENTWISE_PRIMITIVES: Final[frozenset[str]] = (
+    _ARITHMETIC | _COMPARISONS | _BOOLEANS | frozenset({"neg", "not"})
+)
+
+_ARRAY_HANDLERS: Final[dict[str, Callable[[_Analyzer, Node, str], ArrayFacts]]] = {
+    "parameter": _Analyzer._array_parameter,
+    "from_columns": _Analyzer._from_columns,
+    "matmul": _Analyzer._matmul,
+    **dict.fromkeys(_ELEMENTWISE_PRIMITIVES, _Analyzer._elementwise),
+}
 
 _COLUMN_HANDLERS: Final[dict[str, Callable[[_Analyzer, Node, str], ColumnFacts]]] = {
     "column_ref": _Analyzer._column_ref,
@@ -1307,8 +1359,6 @@ def _require_mode(mode: object, /) -> CompileMode:
 def _run(
     program: object, runtime: Runtime, mode: CompileMode, /
 ) -> tuple[_Analyzer, RuntimeCapabilities]:
-    from calc_flow.symbolic.expr import ArrayExpr, TableExpr
-
     capabilities = runtime.capabilities()
     declared = frozenset(value._node.digest for value in program.inputs)
     portable = frozenset((*capabilities.portable_arrow_types, _EVENT_TIME_TYPE))
@@ -1323,16 +1373,23 @@ def _run(
         root = _declaration_root(node)
         name = _cstr(node.attr("name")) or ""
         analyzer.check_input_declaration(node, root, name)
-    for output_name, value in program.outputs:
-        if isinstance(value, TableExpr):
-            analyzer.table(value._node, f"outputs.{output_name}")
-        elif isinstance(value, ArrayExpr):
-            facts = analyzer.array(value._node, f"outputs.{output_name}")
-            analyzer.check_array_output_kind(output_name)
-            analyzer.check_unbounded_output(output_name, facts)
+    _analyze_outputs(program, analyzer)
     if mode == "stream":
         _check_stream_ordering_for_inputs(program, analyzer)
     return analyzer, capabilities
+
+
+def _analyze_outputs(program: object, analyzer: _Analyzer, /) -> None:
+    from calc_flow.symbolic.expr import ArrayExpr, TableExpr
+
+    for output_name, value in program.outputs:
+        path = f"outputs.{output_name}"
+        if isinstance(value, TableExpr):
+            analyzer.table(value._node, path)
+        elif isinstance(value, ArrayExpr):
+            facts = analyzer.array(value._node, path)
+            analyzer.check_array_output_kind(output_name)
+            analyzer.check_unbounded_output(output_name, facts)
 
 
 def _declaration_root(node: Node, /) -> str:
@@ -1367,33 +1424,16 @@ def analyze_program(
 def explain_program(program: object, runtime: object, mode: object, /) -> str:
     """Render deterministic analysis facts for one program."""
 
-    from calc_flow.symbolic.expr import ArrayExpr, TableExpr
-
     runtime_value = _require_runtime(runtime)
     mode_value = _require_mode(mode)
     analyzer, capabilities = _run(program, runtime_value, mode_value)
-    lines = [
-        f"program {program.name}",
-        f"  mode {mode_value}",
-        f"  fingerprint {program.fingerprint}",
-        "capability session"
-        f" {capabilities.scope.session_id} revision"
-        f" {capabilities.scope.revision}",
-    ]
+    lines = _explain_header(program, mode_value, capabilities)
     if program.inputs:
         lines.append("  inputs")
         lines.extend(_explain_input(value) for value in program.inputs)
     lines.append("  outputs")
     for output_name, value in program.outputs:
-        path = f"outputs.{output_name}"
-        if isinstance(value, TableExpr):
-            lines.extend(
-                _explain_table_output(output_name, analyzer.table(value._node, path))
-            )
-        elif isinstance(value, ArrayExpr):
-            lines.extend(
-                _explain_array_output(output_name, analyzer.array(value._node, path))
-            )
+        lines.extend(_explain_output(output_name, value, analyzer))
     issues = analyzer.issues
     if issues:
         lines.append("  issues")
@@ -1401,6 +1441,32 @@ def explain_program(program: object, runtime: object, mode: object, /) -> str:
             f"    {issue.path}: {issue.code}: {issue.message}" for issue in issues
         )
     return "\n".join(lines)
+
+
+def _explain_header(
+    program: object, mode: CompileMode, capabilities: RuntimeCapabilities, /
+) -> list[str]:
+    return [
+        f"program {program.name}",
+        f"  mode {mode}",
+        f"  fingerprint {program.fingerprint}",
+        "capability session"
+        f" {capabilities.scope.session_id} revision"
+        f" {capabilities.scope.revision}",
+    ]
+
+
+def _explain_output(
+    output_name: str, value: object, analyzer: _Analyzer, /
+) -> list[str]:
+    from calc_flow.symbolic.expr import ArrayExpr, TableExpr
+
+    path = f"outputs.{output_name}"
+    if isinstance(value, TableExpr):
+        return _explain_table_output(output_name, analyzer.table(value._node, path))
+    if isinstance(value, ArrayExpr):
+        return _explain_array_output(output_name, analyzer.array(value._node, path))
+    return []
 
 
 def _explain_input(value: object, /) -> str:

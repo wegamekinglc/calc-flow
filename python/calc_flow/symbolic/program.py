@@ -127,17 +127,7 @@ def _program_fingerprint(
     """Compute the frozen v1 program fingerprint over the declaration graph."""
 
     nodes = _collect_program_nodes(inputs, outputs)
-    edges: list[tuple[bytes, int, bytes]] = []
-    for _, node in nodes.values():
-        for index, child in enumerate(node.args):
-            edges.append(
-                (
-                    bytes.fromhex(node.digest),
-                    index,
-                    bytes.fromhex(child.digest),
-                )
-            )
-    edges.sort()
+    edges = _program_edges(nodes)
     node_records = sorted(
         ((bytes.fromhex(digest), record) for digest, record in nodes.items()),
         key=lambda item: item[0],
@@ -146,10 +136,7 @@ def _program_fingerprint(
         bytes((_PROGRAM_TAG,))
         + _text(name)
         + _u64(len(inputs))
-        + b"".join(
-            _text(_node_name(value._node)) + bytes.fromhex(value._node.digest)
-            for value in inputs
-        )
+        + b"".join(_input_records(inputs))
         + _u64(len(outputs))
         + b"".join(
             _text(output_name) + bytes.fromhex(value._node.digest)
@@ -163,6 +150,34 @@ def _program_fingerprint(
         + b"".join(parent + _u64(index) + child for parent, index, child in edges)
     )
     return hashlib.sha256(_MAGIC + b"\x02" + _u64(len(body)) + body).hexdigest()
+
+
+def _program_edges(
+    nodes: dict[str, tuple[bytes, Node]],
+    /,
+) -> list[tuple[bytes, int, bytes]]:
+    edges: list[tuple[bytes, int, bytes]] = []
+    for _, node in nodes.values():
+        for index, child in enumerate(node.args):
+            edges.append(
+                (
+                    bytes.fromhex(node.digest),
+                    index,
+                    bytes.fromhex(child.digest),
+                )
+            )
+    edges.sort()
+    return edges
+
+
+def _input_records(
+    inputs: tuple[TableExpr | Parameter[object], ...],
+    /,
+) -> list[bytes]:
+    return [
+        _text(_node_name(value._node)) + bytes.fromhex(value._node.digest)
+        for value in inputs
+    ]
 
 
 def _validated_inputs(
@@ -194,33 +209,38 @@ def _validated_inputs(
     return tuple(copied)
 
 
+def _validated_output(index: int, item: object, /) -> tuple[str, TableExpr | ArrayExpr]:
+    if not isinstance(item, tuple) or len(item) != 2:
+        raise TypeError(
+            f"Program.outputs[{index}]: must be a (name, TableExpr |"
+            f" ArrayExpr) pair; got {type_name(item)}"
+        )
+    output_name, value = item
+    if type(output_name) is not str:
+        raise TypeError(
+            f"Program.outputs[{index}].name: must be a string; got"
+            f" {type_name(output_name)}"
+        )
+    if not output_name:
+        raise ValueError(
+            f"Program.outputs[{index}].name: invalid_literal: must be a"
+            " non-empty string"
+        )
+    if not isinstance(value, (TableExpr, ArrayExpr)):
+        raise TypeError(
+            f"Program.outputs[{index}].value: expected TableExpr |"
+            f" ArrayExpr; got {type_name(value)}"
+        )
+    return output_name, value
+
+
 def _validated_outputs(
     outputs: Sequence[tuple[str, TableExpr | ArrayExpr]], /
 ) -> tuple[tuple[str, TableExpr | ArrayExpr], ...]:
     copied: list[tuple[str, TableExpr | ArrayExpr]] = []
     names: set[str] = set()
     for index, item in enumerate(outputs):
-        if not isinstance(item, tuple) or len(item) != 2:
-            raise TypeError(
-                f"Program.outputs[{index}]: must be a (name, TableExpr |"
-                f" ArrayExpr) pair; got {type_name(item)}"
-            )
-        output_name, value = item
-        if type(output_name) is not str:
-            raise TypeError(
-                f"Program.outputs[{index}].name: must be a string; got"
-                f" {type_name(output_name)}"
-            )
-        if not output_name:
-            raise ValueError(
-                f"Program.outputs[{index}].name: invalid_literal: must be a"
-                " non-empty string"
-            )
-        if not isinstance(value, (TableExpr, ArrayExpr)):
-            raise TypeError(
-                f"Program.outputs[{index}].value: expected TableExpr |"
-                f" ArrayExpr; got {type_name(value)}"
-            )
+        output_name, value = _validated_output(index, item)
         if output_name in names:
             raise ValueError(
                 f"outputs.{output_name}: duplicate_name: duplicate output"
