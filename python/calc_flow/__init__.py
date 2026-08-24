@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from calc_flow import _native as _native
+from calc_flow import symbolic
 from calc_flow.array import register_jax, register_numpy
 from calc_flow.capabilities import (
     ConnectorCapabilities,
@@ -155,6 +156,7 @@ __all__ = [
     "UdfCapability",
     "register_jax",
     "register_numpy",
+    "symbolic",
     "project_json_schema",
     "validate_project_json",
     "Watermark",
