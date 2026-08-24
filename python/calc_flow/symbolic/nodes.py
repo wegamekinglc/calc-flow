@@ -409,6 +409,7 @@ _PRIMITIVES: dict[str, PrimitiveSpec] = {
         CMap.from_mapping({"min_samples": CInt(1)}),
     ),
     "project": PrimitiveSpec(frozenset({"columns"}), CMap(())),
+    "with_columns": PrimitiveSpec(frozenset({"names"}), CMap(())),
     "attach_columns": PrimitiveSpec(frozenset({"names"}), CMap(())),
     "from_columns": PrimitiveSpec(frozenset({"columns", "backend"}), CMap(())),
     "window_tumbling": PrimitiveSpec(
