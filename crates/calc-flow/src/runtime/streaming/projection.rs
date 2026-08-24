@@ -1295,9 +1295,11 @@ impl StatusProjection {
             .metrics
             .nodes
             .iter()
-            .map(|(node_id, metrics)| {
-                let progress = &status.nodes[node_id];
-                (
+            .filter_map(|(node_id, metrics)| {
+                // Metrics registers the full topology while per-node progress
+                // still fills during launch; skip that transient tail.
+                let progress = status.nodes.get(node_id)?;
+                Some((
                     node_id.clone(),
                     OperatorStatus {
                         input_batches: metrics.input_batches,
@@ -1316,7 +1318,7 @@ impl StatusProjection {
                         null_event_time_batches: metrics.null_event_time_batches,
                         datafusion_runtime_created: progress.datafusion_runtime_created,
                     },
-                )
+                ))
             })
             .collect()
     }
@@ -1400,10 +1402,10 @@ mod tests {
     use crate::runtime::streaming::runner::{FailureOrigin, RuntimeFailure};
     use crate::runtime::streaming::{
         checkpoint::coordinator::CheckpointPhase as InternalCheckpointPhase,
-        metrics::M2MetricsSnapshot,
+        metrics::{M2MetricsSnapshot, OperatorMetrics},
         runner::{
             CheckpointFailureCategory, CheckpointStatus as InternalCheckpointStatus,
-            ContinuousJobOutcome, ContinuousJobState, ContinuousJobStatus,
+            ContinuousJobOutcome, ContinuousJobState, ContinuousJobStatus, OperatorStatus,
             TerminalCause as InternalTerminalCause,
         },
         supervisor::TaskId,
@@ -1790,6 +1792,44 @@ mod tests {
 
         assert_eq!(status.state, super::JobState::Running);
         assert_eq!(status.terminal_cause, None);
+    }
+
+    #[test]
+    fn operator_projection_skips_metrics_nodes_without_registered_progress() {
+        // Launch registers the full topology in the metrics registry while
+        // per-node progress still fills one node at a time, so a status
+        // snapshot between the two must skip the unregistered tail.
+        let mut metrics = M2MetricsSnapshot::default();
+        metrics
+            .nodes
+            .insert("windows".into(), OperatorMetrics::default());
+        metrics
+            .nodes
+            .insert("still-registering".into(), OperatorMetrics::default());
+        let internal = ContinuousJobStatus {
+            job_id: 17,
+            state: ContinuousJobState::Running,
+            terminal_cause: None,
+            tasks: BTreeMap::new(),
+            edges: BTreeMap::new(),
+            sources: BTreeMap::new(),
+            nodes: BTreeMap::from([(
+                "windows".to_string(),
+                OperatorStatus {
+                    ended: true,
+                    ..OperatorStatus::default()
+                },
+            )]),
+            sinks: BTreeMap::new(),
+            progress: None,
+            checkpoint: None,
+            metrics,
+        };
+
+        let status = super::StatusProjection::default().project(&internal);
+
+        assert_eq!(status.operators.len(), 1);
+        assert!(status.operators["windows"].ended);
     }
 
     #[test]
