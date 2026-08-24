@@ -20,6 +20,7 @@ competing Python promotion table exists here.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final
 
@@ -49,6 +50,31 @@ _UNSIGNED_INT_TYPES: Final = ("uint8", "uint16", "uint32", "uint64")
 _NUMERIC_TYPES: Final = frozenset(
     (*_SIGNED_INT_TYPES, *_UNSIGNED_INT_TYPES, *_FLOATING_TYPES)
 )
+
+
+def _entity_field_is_valid(field: Field | None, /) -> bool:
+    return field is not None
+
+
+def _entity_field_message(field_name: str, /) -> str:
+    return f"entity field {field_name!r} is not in the input schema"
+
+
+def _sequence_field_is_valid(field: Field | None, /) -> bool:
+    return (
+        field is not None
+        and not field.nullable
+        and field.data_type not in _FLOATING_TYPES
+    )
+
+
+def _sequence_field_message(_field_name: str, /) -> str:
+    return (
+        "sequence fields must be non-null with a portable total order;"
+        " floating sequence fields are forbidden"
+    )
+
+
 _ARITHMETIC: Final = frozenset({"add", "sub", "mul", "truediv"})
 _COMPARISONS: Final = frozenset({"eq", "ne", "lt", "le", "gt", "ge"})
 _BOOLEANS: Final = frozenset({"and", "or"})
@@ -219,50 +245,58 @@ class _Analyzer:
 
     def check_stream_ordering(self, node: Node, root: str, name: str, /) -> None:
         schema = {field.name: field for field in _schema_fields(node.attr("schema"))}
+        base = f"{root}.{name}"
+        self._ordering_event_time(node, schema, base)
+        self._ordering_key_fields(
+            node.attr("entity_by"),
+            schema,
+            f"{base}.entity_by",
+            "temporal work in stream mode requires a non-empty entity key",
+            _entity_field_is_valid,
+            _entity_field_message,
+        )
+        self._ordering_key_fields(
+            node.attr("sequence_by"),
+            schema,
+            f"{base}.sequence_by",
+            "temporal work in stream mode requires a non-empty sequence key",
+            _sequence_field_is_valid,
+            _sequence_field_message,
+        )
+
+    def _ordering_event_time(
+        self, node: Node, schema: dict[str, Field], base: str, /
+    ) -> None:
         event_time = _cstr(node.attr("event_time"))
-        if event_time is None:
-            self.issue(
-                f"{root}.{name}.event_time",
-                "ordering_required",
-                "temporal work in stream mode requires a declared event-time column",
+        field = None if event_time is None else schema.get(event_time)
+        if field is None or field.data_type != _EVENT_TIME_TYPE or field.nullable:
+            message = (
+                "temporal work in stream mode requires a declared event-time column"
+                if event_time is None
+                else "the event-time column must be a non-null timestamp[us, UTC] field"
             )
-        else:
-            field = schema.get(event_time)
-            if field is None or field.data_type != _EVENT_TIME_TYPE or field.nullable:
+            self.issue(f"{base}.event_time", "ordering_required", message)
+
+    def _ordering_key_fields(
+        self,
+        declared: CValue,
+        schema: dict[str, Field],
+        base: str,
+        empty_message: str,
+        field_is_valid,
+        field_message,
+        /,
+    ) -> None:
+        names = _cstr_seq(declared)
+        if not names:
+            self.issue(base, "ordering_required", empty_message)
+            return
+        for index, field_name in enumerate(names):
+            if not field_is_valid(schema.get(field_name)):
                 self.issue(
-                    f"{root}.{name}.event_time",
+                    f"{base}[{index}]",
                     "ordering_required",
-                    "the event-time column must be a non-null timestamp[us, UTC] field",
-                )
-        entity_by = _cstr_seq(node.attr("entity_by"))
-        if not entity_by:
-            self.issue(
-                f"{root}.{name}.entity_by",
-                "ordering_required",
-                "temporal work in stream mode requires a non-empty entity key",
-            )
-        for index, field_name in enumerate(entity_by):
-            if field_name not in schema:
-                self.issue(
-                    f"{root}.{name}.entity_by[{index}]",
-                    "ordering_required",
-                    f"entity field {field_name!r} is not in the input schema",
-                )
-        sequence_by = _cstr_seq(node.attr("sequence_by"))
-        if not sequence_by:
-            self.issue(
-                f"{root}.{name}.sequence_by",
-                "ordering_required",
-                "temporal work in stream mode requires a non-empty sequence key",
-            )
-        for index, field_name in enumerate(sequence_by):
-            field = schema.get(field_name)
-            if field is None or field.nullable or field.data_type in _FLOATING_TYPES:
-                self.issue(
-                    f"{root}.{name}.sequence_by[{index}]",
-                    "ordering_required",
-                    "sequence fields must be non-null with a portable total"
-                    " order; floating sequence fields are forbidden",
+                    field_message(field_name),
                 )
 
     def check_unbounded_output(self, output_name: str, facts: ArrayFacts, /) -> None:
@@ -514,45 +548,15 @@ class _Analyzer:
         return facts
 
     def _analyze_column(self, node: Node, path: str, /) -> ColumnFacts:
-        name = node.op.name
-        if name == "column_ref":
-            return self._column_ref(node, path)
-        if name == "literal":
-            return _literal_facts(node)
-        if name in ("add", "sub", "mul", "truediv"):
-            return self._arithmetic(node, path)
-        if name in _COMPARISONS:
-            return self._comparison(node, path)
-        if name in _BOOLEANS:
-            return self._boolean_pair(node, path)
-        if name in ("neg", "not"):
-            return self._unary(node, path)
-        if name == "where":
-            return self._where(node, path)
-        if name == "coalesce":
-            return self._coalesce(node, path)
-        if name in _UNARY_NUMERIC:
-            return self._scalar_function(node, path)
-        if name == "abs":
-            return self._arithmetic_like_unary(node, path)
-        if name == "clip":
-            return self._clip(node, path)
-        if name == "cast":
-            return self._cast(node, path)
-        if name in ("lag", "delta"):
-            return self._lag_like(node, path)
-        if name in _ROLLING_AGGREGATES:
-            return self._rolling_aggregate(node, path)
-        if name in ("covariance", "correlation"):
-            return self._rolling_pair(node, path)
-        if name in _CROSS_SECTION:
-            return self._cross_section(node, path)
-        self.issue(
-            path,
-            "unknown_primitive_version",
-            f"primitive {name!r} does not produce a column value",
-        )
-        return ColumnFacts(None, True, None, frozenset())
+        handler = _COLUMN_HANDLERS.get(node.op.name)
+        if handler is None:
+            self.issue(
+                path,
+                "unknown_primitive_version",
+                f"primitive {node.op.name!r} does not produce a column value",
+            )
+            return ColumnFacts(None, True, None, frozenset())
+        return handler(self, node, path)
 
     def _column_ref(self, node: Node, path: str, /) -> ColumnFacts:
         table = self.table(node.args[0], f"{path}.column_ref.value")
@@ -1041,100 +1045,16 @@ class _Analyzer:
             table.state,
         )
 
-    def _matmul(self, node: Node, path: str, /) -> ArrayFacts:
-        role = f"{path}.matmul"
-        left = self.array(node.args[0], f"{role}.left")
-        right = self.array(node.args[1], f"{role}.right")
-        if len(left.shape) != 2 or len(right.shape) != 2:
-            side = "left" if len(left.shape) != 2 else "right"
-            self.issue(
-                f"{role}.{side}.shape",
-                "schema_mismatch",
-                f"matmul requires rank-2 operands; got rank"
-                f" {len(left.shape) if side == 'left' else len(right.shape)}",
-            )
-            return ArrayFacts(None, None, (), None, left.state | right.state)
-        if (
-            right.dtype is not None
-            and left.dtype is not None
-            and left.dtype != right.dtype
-        ):
-            self.issue(
-                f"{role}.right.dtype",
-                "unsupported_type",
-                f"no provable result dtype for {left.dtype!r} and {right.dtype!r}",
-            )
-        if (
-            right.backend is not None
-            and left.backend is not None
-            and left.backend != right.backend
-        ):
-            self.issue(
-                f"{role}.right.backend",
-                "unsupported_type",
-                f"implicit cross-backend conversion between {left.backend!r}"
-                f" and {right.backend!r} is rejected",
-            )
-        if (
-            right.lineage is not None
-            and left.lineage is not None
-            and left.lineage != right.lineage
-        ):
-            self.issue(
-                f"{role}.right.lineage",
-                "schema_mismatch",
-                "matmul operands carry different row-axis lineages",
-            )
-        inner_left = left.shape[1]
-        inner_right = right.shape[0]
-        if isinstance(inner_left, int) and isinstance(inner_right, int):
-            if inner_left != inner_right:
-                self.issue(
-                    f"{role}.right.shape[0]",
-                    "schema_mismatch",
-                    f"matmul inner dimensions {inner_left} and {inner_right} do"
-                    " not match",
-                )
-                return ArrayFacts(
-                    left.backend,
-                    left.dtype,
-                    (),
-                    left.lineage,
-                    left.state | right.state,
-                )
-        elif inner_left != inner_right:
-            self.issue(
-                f"{role}.right.shape[0]",
-                "unresolved_type",
-                f"matmul inner dimensions {inner_left!r} and {inner_right!r}"
-                " cannot be proved equal",
-            )
-        return ArrayFacts(
-            left.backend,
-            left.dtype,
-            (left.shape[0], right.shape[1]),
-            left.lineage,
-            left.state | right.state,
-        )
+    def _array_pair_compat(
+        self,
+        left: ArrayFacts,
+        right: ArrayFacts,
+        role: str,
+        lineage_message: str,
+        /,
+    ) -> None:
+        """Report dtype, backend, and row-lineage incompatibilities."""
 
-    def _elementwise(self, node: Node, path: str, /) -> ArrayFacts:
-        role = f"{path}.{node.op.name}"
-        primitive = node.op.name
-        left_node = node.args[0]
-        left = (
-            _array_literal_facts(left_node)
-            if left_node.op.name == "literal"
-            else self.array(left_node, f"{role}.left")
-        )
-        if len(node.args) == 1:
-            dtype = "bool" if primitive == "not" else left.dtype
-            return ArrayFacts(left.backend, dtype, left.shape, left.lineage, left.state)
-        right_node = node.args[1]
-        right = (
-            _array_literal_facts(right_node)
-            if right_node.op.name == "literal"
-            else self.array(right_node, f"{role}.right")
-        )
         if (
             left.dtype is not None
             and right.dtype is not None
@@ -1146,18 +1066,8 @@ class _Analyzer:
                 f"no provable result dtype for {left.dtype!r} and {right.dtype!r}",
             )
         if (
-            right.lineage is not None
-            and left.lineage is not None
-            and left.lineage != right.lineage
-        ):
-            self.issue(
-                f"{role}.right.lineage",
-                "schema_mismatch",
-                "array operands carry different row-axis lineages",
-            )
-        if (
-            right.backend is not None
-            and left.backend is not None
+            left.backend is not None
+            and right.backend is not None
             and left.backend != right.backend
         ):
             self.issue(
@@ -1166,17 +1076,93 @@ class _Analyzer:
                 f"implicit cross-backend conversion between {left.backend!r}"
                 f" and {right.backend!r} is rejected",
             )
-        shape = _broadcast_shapes(
-            left.shape,
-            right.shape,
-            role,
-            self,
+        if (
+            left.lineage is not None
+            and right.lineage is not None
+            and left.lineage != right.lineage
+        ):
+            self.issue(
+                f"{role}.right.lineage",
+                "schema_mismatch",
+                lineage_message,
+            )
+
+    def _matmul_inner_dims(
+        self, left: ArrayFacts, right: ArrayFacts, role: str, /
+    ) -> tuple[int | str, int | str] | None:
+        """Check the inner-dimension contract; None marks a known mismatch."""
+
+        inner_left = left.shape[1]
+        inner_right = right.shape[0]
+        if inner_left == inner_right:
+            return left.shape[0], right.shape[1]
+        if isinstance(inner_left, int) and isinstance(inner_right, int):
+            self.issue(
+                f"{role}.right.shape[0]",
+                "schema_mismatch",
+                f"matmul inner dimensions {inner_left} and {inner_right} do not match",
+            )
+            return None
+        self.issue(
+            f"{role}.right.shape[0]",
+            "unresolved_type",
+            f"matmul inner dimensions {inner_left!r} and {inner_right!r}"
+            " cannot be proved equal",
         )
-        dtype: str | None
-        if primitive in _COMPARISONS or primitive in _BOOLEANS:
-            dtype = "bool"
-        else:
-            dtype = left.dtype
+        return left.shape[0], right.shape[1]
+
+    def _matmul(self, node: Node, path: str, /) -> ArrayFacts:
+        role = f"{path}.matmul"
+        left = self.array(node.args[0], f"{role}.left")
+        right = self.array(node.args[1], f"{role}.right")
+        states = left.state | right.state
+        if len(left.shape) != 2 or len(right.shape) != 2:
+            side = "left" if len(left.shape) != 2 else "right"
+            rank = len(left.shape) if side == "left" else len(right.shape)
+            self.issue(
+                f"{role}.{side}.shape",
+                "schema_mismatch",
+                f"matmul requires rank-2 operands; got rank {rank}",
+            )
+            return ArrayFacts(None, None, (), None, states)
+        self._array_pair_compat(
+            left, right, role, "matmul operands carry different row-axis lineages"
+        )
+        output_dims = self._matmul_inner_dims(left, right, role)
+        shape = () if output_dims is None else output_dims
+        return ArrayFacts(
+            left.backend,
+            left.dtype,
+            shape,
+            left.lineage,
+            states,
+        )
+
+    def _array_operand(self, node: Node, operand_path: str, /) -> ArrayFacts:
+        if node.op.name == "literal":
+            return _array_literal_facts(node)
+        return self.array(node, operand_path)
+
+    def _elementwise(self, node: Node, path: str, /) -> ArrayFacts:
+        role = f"{path}.{node.op.name}"
+        primitive = node.op.name
+        left = self._array_operand(node.args[0], f"{role}.left")
+        if len(node.args) == 1:
+            dtype = "bool" if primitive == "not" else left.dtype
+            return ArrayFacts(left.backend, dtype, left.shape, left.lineage, left.state)
+        right = self._array_operand(node.args[1], f"{role}.right")
+        self._array_pair_compat(
+            left,
+            right,
+            role,
+            "array operands carry different row-axis lineages",
+        )
+        shape = _broadcast_shapes(left.shape, right.shape, role, self)
+        dtype: str | None = (
+            "bool"
+            if primitive in _COMPARISONS or primitive in _BOOLEANS
+            else left.dtype
+        )
         return ArrayFacts(
             left.backend,
             dtype,
@@ -1184,6 +1170,30 @@ class _Analyzer:
             left.lineage if left.lineage is not None else right.lineage,
             left.state | right.state,
         )
+
+
+def _literal_column(node: Node, _path: str, /) -> ColumnFacts:
+    return _literal_facts(node)
+
+
+_COLUMN_HANDLERS: Final[dict[str, Callable[[_Analyzer, Node, str], ColumnFacts]]] = {
+    "column_ref": _Analyzer._column_ref,
+    "literal": _literal_column,
+    **dict.fromkeys(("add", "sub", "mul", "truediv"), _Analyzer._arithmetic),
+    **dict.fromkeys(_COMPARISONS, _Analyzer._comparison),
+    **dict.fromkeys(_BOOLEANS, _Analyzer._boolean_pair),
+    **dict.fromkeys(("neg", "not"), _Analyzer._unary),
+    "where": _Analyzer._where,
+    "coalesce": _Analyzer._coalesce,
+    **dict.fromkeys(_UNARY_NUMERIC, _Analyzer._scalar_function),
+    "abs": _Analyzer._arithmetic_like_unary,
+    "clip": _Analyzer._clip,
+    "cast": _Analyzer._cast,
+    **dict.fromkeys(("lag", "delta"), _Analyzer._lag_like),
+    **dict.fromkeys(_ROLLING_AGGREGATES, _Analyzer._rolling_aggregate),
+    **dict.fromkeys(("covariance", "correlation"), _Analyzer._rolling_pair),
+    **dict.fromkeys(_CROSS_SECTION, _Analyzer._cross_section),
+}
 
 
 def _column_state_union(
@@ -1310,7 +1320,7 @@ def _run(
     )
     for value in program.inputs:
         node = value._node
-        root = "static_inputs" if node.op.name == "parameter" else "inputs"
+        root = _declaration_root(node)
         name = _cstr(node.attr("name")) or ""
         analyzer.check_input_declaration(node, root, name)
     for output_name, value in program.outputs:
@@ -1321,13 +1331,20 @@ def _run(
             analyzer.check_array_output_kind(output_name)
             analyzer.check_unbounded_output(output_name, facts)
     if mode == "stream":
-        for value in program.inputs:
-            node = value._node
-            root = "static_inputs" if node.op.name == "parameter" else "inputs"
-            name = _cstr(node.attr("name")) or ""
-            if name in analyzer.temporal_lineages:
-                analyzer.check_stream_ordering(node, root, name)
+        _check_stream_ordering_for_inputs(program, analyzer)
     return analyzer, capabilities
+
+
+def _declaration_root(node: Node, /) -> str:
+    return "static_inputs" if node.op.name == "parameter" else "inputs"
+
+
+def _check_stream_ordering_for_inputs(program: object, analyzer: _Analyzer, /) -> None:
+    for value in program.inputs:
+        node = value._node
+        name = _cstr(node.attr("name")) or ""
+        if name in analyzer.temporal_lineages:
+            analyzer.check_stream_ordering(node, _declaration_root(node), name)
 
 
 def analyze_program(
@@ -1365,56 +1382,70 @@ def explain_program(program: object, runtime: object, mode: object, /) -> str:
     ]
     if program.inputs:
         lines.append("  inputs")
-        for value in program.inputs:
-            node = value._node
-            name = _cstr(node.attr("name")) or ""
-            if node.op.name == "parameter":
-                kind = node.attr("kind")
-                if isinstance(kind, CEnum) and kind.variant == "array":
-                    lines.append(
-                        f"    static_input {name} array backend"
-                        f" {_cstr(node.attr('backend'))} dtype"
-                        f" {_ctype_str(node.attr('dtype'))} shape"
-                        f" {_render_shape(_parameter_shape(node))}"
-                    )
-                else:
-                    lines.append(
-                        f"    static_input {name} table fields"
-                        f" {len(_schema_fields(node.attr('schema')))}"
-                    )
-            else:
-                lines.append(
-                    f"    input {name} event_time"
-                    f" {_cstr(node.attr('event_time')) or 'none'} entity_by"
-                    f" {_render_names(_cstr_seq(node.attr('entity_by')))}"
-                    f" sequence_by"
-                    f" {_render_names(_cstr_seq(node.attr('sequence_by')))}"
-                )
+        lines.extend(_explain_input(value) for value in program.inputs)
     lines.append("  outputs")
     for output_name, value in program.outputs:
+        path = f"outputs.{output_name}"
         if isinstance(value, TableExpr):
-            facts = analyzer.table(value._node, f"outputs.{output_name}")
-            lines.append(f"    output {output_name} table")
-            for field in facts.schema:
-                lines.append(
-                    f"      field {field.name} {field.data_type}"
-                    f" nullable={'true' if field.nullable else 'false'}"
-                )
-            lines.append(f"      state {_render_state(facts.state)}")
-        elif isinstance(value, ArrayExpr):
-            facts = analyzer.array(value._node, f"outputs.{output_name}")
-            lines.append(
-                f"    output {output_name} array backend {facts.backend}"
-                f" dtype {facts.dtype} shape {_render_shape(facts.shape)}"
-                f" lineage {facts.lineage if facts.lineage is not None else 'none'}"
+            lines.extend(
+                _explain_table_output(output_name, analyzer.table(value._node, path))
             )
-            lines.append(f"      state {_render_state(facts.state)}")
+        elif isinstance(value, ArrayExpr):
+            lines.extend(
+                _explain_array_output(output_name, analyzer.array(value._node, path))
+            )
     issues = analyzer.issues
     if issues:
         lines.append("  issues")
-        for issue in issues:
-            lines.append(f"    {issue.path}: {issue.code}: {issue.message}")
+        lines.extend(
+            f"    {issue.path}: {issue.code}: {issue.message}" for issue in issues
+        )
     return "\n".join(lines)
+
+
+def _explain_input(value: object, /) -> str:
+    node = value._node
+    name = _cstr(node.attr("name")) or ""
+    if node.op.name != "parameter":
+        return (
+            f"    input {name} event_time"
+            f" {_cstr(node.attr('event_time')) or 'none'} entity_by"
+            f" {_render_names(_cstr_seq(node.attr('entity_by')))} sequence_by"
+            f" {_render_names(_cstr_seq(node.attr('sequence_by')))}"
+        )
+    kind = node.attr("kind")
+    if isinstance(kind, CEnum) and kind.variant == "array":
+        return (
+            f"    static_input {name} array backend"
+            f" {_cstr(node.attr('backend'))} dtype"
+            f" {_ctype_str(node.attr('dtype'))} shape"
+            f" {_render_shape(_parameter_shape(node))}"
+        )
+    return (
+        f"    static_input {name} table fields"
+        f" {len(_schema_fields(node.attr('schema')))}"
+    )
+
+
+def _explain_table_output(output_name: str, facts: TableFacts, /) -> list[str]:
+    lines = [f"    output {output_name} table"]
+    lines.extend(
+        f"      field {field.name} {field.data_type}"
+        f" nullable={'true' if field.nullable else 'false'}"
+        for field in facts.schema
+    )
+    lines.append(f"      state {_render_state(facts.state)}")
+    return lines
+
+
+def _explain_array_output(output_name: str, facts: ArrayFacts, /) -> list[str]:
+    lineage = facts.lineage if facts.lineage is not None else "none"
+    return [
+        f"    output {output_name} array backend {facts.backend}"
+        f" dtype {facts.dtype} shape {_render_shape(facts.shape)}"
+        f" lineage {lineage}",
+        f"      state {_render_state(facts.state)}",
+    ]
 
 
 def _parameter_shape(node: Node, /) -> tuple[int | str, ...]:

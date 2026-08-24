@@ -165,6 +165,72 @@ def _program_fingerprint(
     return hashlib.sha256(_MAGIC + b"\x02" + _u64(len(body)) + body).hexdigest()
 
 
+def _validated_inputs(
+    inputs: Sequence[TableExpr | Parameter[object]], /
+) -> tuple[TableExpr | Parameter[object], ...]:
+    declared: dict[str, str] = {}
+    copied: list[TableExpr | Parameter[object]] = []
+    for index, value in enumerate(inputs):
+        if not isinstance(value, (TableExpr, Parameter)):
+            raise TypeError(
+                f"Program.inputs[{index}]: expected TableExpr |"
+                f" Parameter[object]; got {type_name(value)}"
+            )
+        if value._node.op.name not in ("table_input", "parameter"):
+            raise ValueError(
+                f"Program.inputs[{index}]: invalid_literal: program inputs"
+                " must be declared table_input or parameter values; got"
+                f" {value._node.op.name}"
+            )
+        input_name = _node_name(value._node)
+        root = "static_inputs" if isinstance(value, Parameter) else "inputs"
+        if input_name in declared:
+            raise ValueError(
+                f"{root}.{input_name}: duplicate_name: duplicate input name"
+                f" {input_name!r}"
+            )
+        declared[input_name] = root
+        copied.append(value)
+    return tuple(copied)
+
+
+def _validated_outputs(
+    outputs: Sequence[tuple[str, TableExpr | ArrayExpr]], /
+) -> tuple[tuple[str, TableExpr | ArrayExpr], ...]:
+    copied: list[tuple[str, TableExpr | ArrayExpr]] = []
+    names: set[str] = set()
+    for index, item in enumerate(outputs):
+        if not isinstance(item, tuple) or len(item) != 2:
+            raise TypeError(
+                f"Program.outputs[{index}]: must be a (name, TableExpr |"
+                f" ArrayExpr) pair; got {type_name(item)}"
+            )
+        output_name, value = item
+        if type(output_name) is not str:
+            raise TypeError(
+                f"Program.outputs[{index}].name: must be a string; got"
+                f" {type_name(output_name)}"
+            )
+        if not output_name:
+            raise ValueError(
+                f"Program.outputs[{index}].name: invalid_literal: must be a"
+                " non-empty string"
+            )
+        if not isinstance(value, (TableExpr, ArrayExpr)):
+            raise TypeError(
+                f"Program.outputs[{index}].value: expected TableExpr |"
+                f" ArrayExpr; got {type_name(value)}"
+            )
+        if output_name in names:
+            raise ValueError(
+                f"outputs.{output_name}: duplicate_name: duplicate output"
+                f" name {output_name!r}"
+            )
+        names.add(output_name)
+        copied.append((output_name, value))
+    return tuple(copied)
+
+
 @dataclass(frozen=True, slots=True, eq=False, init=False)
 class Program:
     """An immutable program of declared inputs, outputs, and expressions."""
@@ -188,71 +254,15 @@ class Program:
             raise ValueError(
                 "Program.name: invalid_literal: must be a non-empty string"
             )
-        declared: dict[str, str] = {}
-        copied_inputs: list[TableExpr | Parameter[object]] = []
-        for index, value in enumerate(inputs):
-            if not isinstance(value, (TableExpr, Parameter)):
-                raise TypeError(
-                    f"Program.inputs[{index}]: expected TableExpr |"
-                    f" Parameter[object]; got {type_name(value)}"
-                )
-            if value._node.op.name not in ("table_input", "parameter"):
-                raise ValueError(
-                    f"Program.inputs[{index}]: invalid_literal: program inputs"
-                    " must be declared table_input or parameter values; got"
-                    f" {value._node.op.name}"
-                )
-            input_name = _node_name(value._node)
-            root = "static_inputs" if isinstance(value, Parameter) else "inputs"
-            if input_name in declared:
-                raise ValueError(
-                    f"{root}.{input_name}: duplicate_name: duplicate input name"
-                    f" {input_name!r}"
-                )
-            declared[input_name] = root
-            copied_inputs.append(value)
-        copied_outputs: list[tuple[str, TableExpr | ArrayExpr]] = []
-        output_names: set[str] = set()
-        for index, item in enumerate(outputs):
-            if not isinstance(item, tuple) or len(item) != 2:
-                raise TypeError(
-                    f"Program.outputs[{index}]: must be a (name, TableExpr |"
-                    f" ArrayExpr) pair; got {type_name(item)}"
-                )
-            output_name, value = item
-            if type(output_name) is not str:
-                raise TypeError(
-                    f"Program.outputs[{index}].name: must be a string; got"
-                    f" {type_name(output_name)}"
-                )
-            if not output_name:
-                raise ValueError(
-                    f"Program.outputs[{index}].name: invalid_literal: must be a"
-                    " non-empty string"
-                )
-            if not isinstance(value, (TableExpr, ArrayExpr)):
-                raise TypeError(
-                    f"Program.outputs[{index}].value: expected TableExpr |"
-                    f" ArrayExpr; got {type_name(value)}"
-                )
-            if output_name in output_names:
-                raise ValueError(
-                    f"outputs.{output_name}: duplicate_name: duplicate output"
-                    f" name {output_name!r}"
-                )
-            output_names.add(output_name)
-            copied_outputs.append((output_name, value))
+        copied_inputs = _validated_inputs(inputs)
+        copied_outputs = _validated_outputs(outputs)
         object.__setattr__(self, "_name", name)
-        object.__setattr__(self, "_inputs", tuple(copied_inputs))
-        object.__setattr__(self, "_outputs", tuple(copied_outputs))
+        object.__setattr__(self, "_inputs", copied_inputs)
+        object.__setattr__(self, "_outputs", copied_outputs)
         object.__setattr__(
             self,
             "_fingerprint",
-            _program_fingerprint(
-                name,
-                tuple(copied_inputs),
-                tuple(copied_outputs),
-            ),
+            _program_fingerprint(name, copied_inputs, copied_outputs),
         )
 
     @property
