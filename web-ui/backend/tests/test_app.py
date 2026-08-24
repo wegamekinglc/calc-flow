@@ -259,10 +259,16 @@ def test_capabilities_route_exposes_the_typed_runtime_session_snapshot(
 
     assert response.status_code == 200
     document = response.json()
-    assert document["schemaVersion"] == 1
+    assert document["schemaVersion"] == 2
     assert document["runtime"]["scope"]["kind"] == "runtimeSession"
     assert document["runtime"]["scope"]["revision"] == 1
     assert document["runtime"]["providers"][0]["name"] == "identity"
+    assert document["runtime"]["providers"][0]["modes"] == ["batch"]
+    assert document["runtime"]["providers"][0]["finality"] == "unproven"
+    assert document["runtime"]["providers"][0]["supportsStaticInputs"] is False
+    assert document["runtime"]["operators"][0]["kind"] == "expression"
+    assert document["runtime"]["operators"][0]["modes"] == ["batch", "stream"]
+    assert document["runtime"]["operators"][0]["finality"] == "per_row_final"
     assert document["preview"]["inputBatchKinds"] == ["table"]
     assert catalog.json() == []
     capability_operation = openapi["paths"][f"{API_PREFIX}/capabilities"]["get"]

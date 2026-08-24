@@ -131,6 +131,72 @@ const providerOptionsAt = (value: unknown, path: string): void => {
   });
 };
 
+const capabilityLifecycleAt = (
+  value: Record<string, unknown>,
+  path: string,
+  fields: {
+    modes: unknown;
+    finality: unknown;
+    stateful: unknown;
+    microbatchInvariant: unknown;
+    requiresWatermark: unknown;
+    checkpointSupport: unknown;
+    stateVersion: unknown;
+    deterministic: unknown;
+    replaySafe: unknown;
+  },
+): void => {
+  const modes = arrayAt(fields.modes, `${path}.modes`);
+  stringArrayAt(modes, ['batch', 'stream'], `${path}.modes`);
+  if (modes.length === 0) {
+    fail(`${path}.modes`, 'expected at least one execution mode');
+  }
+  literalAt(
+    fields.finality,
+    ['per_row_final', 'group_final_append_only', 'unproven'],
+    `${path}.finality`,
+  );
+  booleanAt(fields.stateful, `${path}.stateful`);
+  booleanAt(fields.microbatchInvariant, `${path}.microbatchInvariant`);
+  booleanAt(fields.requiresWatermark, `${path}.requiresWatermark`);
+  literalAt(
+    fields.checkpointSupport,
+    ['stateless', 'checkpointed_stateful', 'unproven'],
+    `${path}.checkpointSupport`,
+  );
+  if (fields.stateVersion === null) {
+    if (fields.checkpointSupport === 'checkpointed_stateful') {
+      fail(`${path}.stateVersion`, 'must be a positive integer when checkpointed_stateful');
+    }
+  } else {
+    integerAt(fields.stateVersion, `${path}.stateVersion`);
+    if (
+      typeof fields.stateVersion === 'number'
+      && fields.stateVersion < 1
+    ) {
+      fail(`${path}.stateVersion`, 'expected a positive state layout version');
+    }
+    if (fields.checkpointSupport !== 'checkpointed_stateful') {
+      fail(
+        `${path}.stateVersion`,
+        'must be null unless checkpointSupport is checkpointed_stateful',
+      );
+    }
+  }
+  if (fields.checkpointSupport === 'stateless' && fields.stateful === true) {
+    fail(`${path}.stateful`, 'stateless capability must set stateful=false');
+  }
+  booleanAt(fields.deterministic, `${path}.deterministic`);
+  booleanAt(fields.replaySafe, `${path}.replaySafe`);
+};
+
+const capabilityRuleAt = (value: unknown, path: string): void => {
+  const rule = objectAt(value, path);
+  exactKeys(rule, ['name', 'version'], path);
+  stringAt(rule.name, `${path}.name`);
+  stringAt(rule.version, `${path}.version`);
+};
+
 const runtimeCapabilitiesAt = (value: unknown, path: string): void => {
   const runtime = objectAt(value, path);
   exactKeys(runtime, [
@@ -159,13 +225,42 @@ const runtimeCapabilitiesAt = (value: unknown, path: string): void => {
     const operator = objectAt(item, itemPath);
     exactKeys(
       operator,
-      ['kind', 'inputKinds', 'outputKinds', 'requiresDatafusion'],
+      [
+        'kind',
+        'version',
+        'inputPorts',
+        'outputPorts',
+        'modes',
+        'finality',
+        'requiresDatafusion',
+        'stateful',
+        'microbatchInvariant',
+        'requiresWatermark',
+        'checkpointSupport',
+        'stateVersion',
+        'deterministic',
+        'replaySafe',
+      ],
       itemPath,
     );
     stringAt(operator.kind, `${itemPath}.kind`);
-    stringArrayAt(operator.inputKinds, ['table', 'array'], `${itemPath}.inputKinds`);
-    stringArrayAt(operator.outputKinds, ['table', 'array'], `${itemPath}.outputKinds`);
+    stringAt(operator.version, `${itemPath}.version`);
+    arrayAt(operator.inputPorts, `${itemPath}.inputPorts`)
+      .forEach((port, portIndex) => providerPortAt(port, `${itemPath}.inputPorts[${portIndex}]`));
+    arrayAt(operator.outputPorts, `${itemPath}.outputPorts`)
+      .forEach((port, portIndex) => providerPortAt(port, `${itemPath}.outputPorts[${portIndex}]`));
     booleanAt(operator.requiresDatafusion, `${itemPath}.requiresDatafusion`);
+    capabilityLifecycleAt(operator, itemPath, {
+      modes: operator.modes,
+      finality: operator.finality,
+      stateful: operator.stateful,
+      microbatchInvariant: operator.microbatchInvariant,
+      requiresWatermark: operator.requiresWatermark,
+      checkpointSupport: operator.checkpointSupport,
+      stateVersion: operator.stateVersion,
+      deterministic: operator.deterministic,
+      replaySafe: operator.replaySafe,
+    });
   });
   arrayAt(runtime.udfs, `${path}.udfs`).forEach((item, index) => {
     const itemPath = `${path}.udfs[${index}]`;
@@ -190,7 +285,26 @@ const runtimeCapabilitiesAt = (value: unknown, path: string): void => {
     const provider = objectAt(item, itemPath);
     exactKeys(
       provider,
-      ['provider', 'name', 'version', 'inputPorts', 'outputPorts', 'optionsSchema'],
+      [
+        'provider',
+        'name',
+        'version',
+        'inputPorts',
+        'outputPorts',
+        'optionsSchema',
+        'modes',
+        'finality',
+        'stateful',
+        'microbatchInvariant',
+        'requiresWatermark',
+        'checkpointSupport',
+        'stateVersion',
+        'deterministic',
+        'replaySafe',
+        'supportsStaticInputs',
+        'partitionContract',
+        'arrayRules',
+      ],
       itemPath,
     );
     stringAt(provider.provider, `${itemPath}.provider`);
@@ -201,6 +315,31 @@ const runtimeCapabilitiesAt = (value: unknown, path: string): void => {
     arrayAt(provider.outputPorts, `${itemPath}.outputPorts`)
       .forEach((port, portIndex) => providerPortAt(port, `${itemPath}.outputPorts[${portIndex}]`));
     providerOptionsAt(provider.optionsSchema, `${itemPath}.optionsSchema`);
+    capabilityLifecycleAt(provider, itemPath, {
+      modes: provider.modes,
+      finality: provider.finality,
+      stateful: provider.stateful,
+      microbatchInvariant: provider.microbatchInvariant,
+      requiresWatermark: provider.requiresWatermark,
+      checkpointSupport: provider.checkpointSupport,
+      stateVersion: provider.stateVersion,
+      deterministic: provider.deterministic,
+      replaySafe: provider.replaySafe,
+    });
+    booleanAt(provider.supportsStaticInputs, `${itemPath}.supportsStaticInputs`);
+    literalAt(
+      provider.partitionContract,
+      ['none', 'row_axis_independent'],
+      `${itemPath}.partitionContract`,
+    );
+    if (provider.arrayRules === null) return;
+    const rulesPath = `${itemPath}.arrayRules`;
+    const rules = objectAt(provider.arrayRules, rulesPath);
+    exactKeys(rules, ['supportedDtypes', 'safeDtypeRule', 'shapeRules'], rulesPath);
+    stringArrayAt(rules.supportedDtypes, null, `${rulesPath}.supportedDtypes`);
+    capabilityRuleAt(rules.safeDtypeRule, `${rulesPath}.safeDtypeRule`);
+    arrayAt(rules.shapeRules, `${rulesPath}.shapeRules`)
+      .forEach((rule, ruleIndex) => capabilityRuleAt(rule, `${rulesPath}.shapeRules[${ruleIndex}]`));
   });
   arrayAt(runtime.connectors, `${path}.connectors`).forEach((item, index) => {
     const itemPath = `${path}.connectors[${index}]`;
@@ -317,9 +456,9 @@ const previewCapabilitiesAt = (value: unknown, path: string): void => {
 
 export const decodeCapabilitiesResponse = (value: unknown): CapabilitiesResponse => {
   const root = objectAt(value, 'capabilities');
-  if (root.schemaVersion !== 1) {
+  if (root.schemaVersion !== 2) {
     throw new ApiContractError(
-      `capabilities schema version ${String(root.schemaVersion)} is unsupported; expected 1`,
+      `capabilities schema version ${String(root.schemaVersion)} is unsupported; expected 2`,
     );
   }
   exactKeys(root, ['schemaVersion', 'runtime', 'preview'], 'capabilities');

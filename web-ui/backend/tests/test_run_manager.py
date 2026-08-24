@@ -836,7 +836,7 @@ def test_capabilities_reject_a_malformed_runtime_snapshot() -> None:
 
     with pytest.raises(
         CapabilitySnapshotError,
-        match=r"runtime capability snapshot violates schema version 1 at .*batch.*",
+        match=r"runtime capability snapshot violates schema version 2 at .*batch.*",
     ):
         manager.capabilities()
 

@@ -124,9 +124,9 @@ def test_run_options_enforce_preview_limits() -> None:
             RunOptions.model_validate({field: value})
 
 
-def test_capabilities_response_is_a_closed_camel_case_v1_contract() -> None:
+def test_capabilities_response_is_a_closed_camel_case_v2_contract() -> None:
     document = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "runtime": {
             "scope": {
                 "kind": "runtimeSession",
@@ -137,9 +137,65 @@ def test_capabilities_response_is_a_closed_camel_case_v1_contract() -> None:
             "projectFormatVersions": [3],
             "batchKinds": ["array", "table"],
             "portableArrowTypes": ["int64"],
-            "operators": [],
+            "operators": [
+                {
+                    "kind": "expression",
+                    "version": "1",
+                    "inputPorts": [
+                        {"name": "input", "kind": "table", "required": True}
+                    ],
+                    "outputPorts": [
+                        {"name": "output", "kind": "table", "required": True}
+                    ],
+                    "modes": ["batch", "stream"],
+                    "finality": "per_row_final",
+                    "requiresDatafusion": True,
+                    "stateful": False,
+                    "microbatchInvariant": True,
+                    "requiresWatermark": False,
+                    "checkpointSupport": "stateless",
+                    "stateVersion": None,
+                    "deterministic": True,
+                    "replaySafe": True,
+                }
+            ],
             "udfs": [],
-            "providers": [],
+            "providers": [
+                {
+                    "provider": "numpy",
+                    "name": "table_matmul",
+                    "version": "1",
+                    "inputPorts": [
+                        {"name": "table", "kind": "table", "required": True},
+                        {"name": "weights", "kind": "array", "required": True},
+                    ],
+                    "outputPorts": [
+                        {"name": "output", "kind": "array", "required": True}
+                    ],
+                    "optionsSchema": None,
+                    "modes": ["batch"],
+                    "finality": "unproven",
+                    "stateful": False,
+                    "microbatchInvariant": False,
+                    "requiresWatermark": False,
+                    "checkpointSupport": "stateless",
+                    "stateVersion": None,
+                    "deterministic": False,
+                    "replaySafe": False,
+                    "supportsStaticInputs": False,
+                    "partitionContract": "none",
+                    "arrayRules": {
+                        "supportedDtypes": ["float32", "float64"],
+                        "safeDtypeRule": {
+                            "name": "array_api_safe_dtype",
+                            "version": "1",
+                        },
+                        "shapeRules": [
+                            {"name": "table_matmul_static_rhs", "version": "1"}
+                        ],
+                    },
+                }
+            ],
             "connectors": [],
         },
         "preview": {
@@ -183,7 +239,19 @@ def test_capabilities_response_is_a_closed_camel_case_v1_contract() -> None:
     with pytest.raises(ValidationError):
         CapabilitiesResponse.model_validate({**document, "optionalFutureField": True})
     with pytest.raises(ValidationError):
-        CapabilitiesResponse.model_validate({**document, "schemaVersion": 2})
+        CapabilitiesResponse.model_validate({**document, "schemaVersion": 1})
+    with pytest.raises(ValidationError):
+        CapabilitiesResponse.model_validate(
+            {
+                **document,
+                "runtime": {
+                    **document["runtime"],
+                    "operators": [
+                        {**document["runtime"]["operators"][0], "stateVersion": 1}
+                    ],
+                },
+            }
+        )
 
 
 def test_validation_report_discriminator_enforces_status_invariants() -> None:

@@ -113,7 +113,7 @@ class RunManagerError(RuntimeError):
 
 
 class CapabilitySnapshotError(RunManagerError):
-    """Raised when trusted runtime capability data violates schema version 1."""
+    """Raised when trusted runtime capability data violates schema version 2."""
 
 
 def _capability_snapshot_error(
@@ -131,7 +131,7 @@ def _capability_snapshot_error(
         filter(None, (prefix, *(wire_name(part) for part in first["loc"])))
     )
     return CapabilitySnapshotError(
-        "runtime capability snapshot violates schema version 1 at "
+        "runtime capability snapshot violates schema version 2 at "
         f"{location or '<root>'}: {first['msg']}"
     )
 

@@ -145,7 +145,7 @@ runtime.register_provider(
 )
 snapshot = runtime.capabilities()
 
-assert snapshot.schema_version == 1
+assert snapshot.schema_version == 2
 assert snapshot.scope.kind == "runtime_session"
 assert snapshot.scope.revision == 1
 assert snapshot.providers[0].name == "normalize"
@@ -153,7 +153,8 @@ assert snapshot.providers[0].name == "normalize"
 
 The public frozen values are `ProviderOption`, `ProviderOptionsSchema`,
 `ProviderPort`, `ProviderCapability`, `UdfCapability`, `OperatorCapability`,
-`RuntimeSessionScope`, and `RuntimeCapabilities`. Provider option schema
+`CapabilityRule`, `ProviderArrayRules`, `RuntimeSessionScope`, and
+`RuntimeCapabilities`. Provider option schema
 version 1 supports only named scalar string, integer, number, or boolean
 fields. `options_schema=None` means no declarative editor is available; it
 does not mean every option is valid. The provider callback remains

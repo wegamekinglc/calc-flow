@@ -4,9 +4,11 @@ from calc_flow import _native as _native
 from calc_flow import symbolic
 from calc_flow.array import register_jax, register_numpy
 from calc_flow.capabilities import (
+    CapabilityRule,
     ConnectorCapabilities,
     ConnectorCapability,
     OperatorCapability,
+    ProviderArrayRules,
     ProviderCapability,
     ProviderOption,
     ProviderOptionsSchema,
@@ -121,9 +123,11 @@ __all__ = [
     "PipelineBuilder",
     "ConnectorCapabilities",
     "ConnectorCapability",
+    "CapabilityRule",
     "OperatorCapability",
     "connector_capabilities",
     "compile_stream_project",
+    "ProviderArrayRules",
     "ProviderCapability",
     "ProviderOption",
     "ProviderOptionsSchema",
