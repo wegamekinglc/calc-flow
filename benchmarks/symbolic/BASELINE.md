@@ -93,9 +93,10 @@ lifecycle; checkpoint duration, checkpoint bytes, and recovery duration come
 from `perf_counter`/disk scans inside the dedicated measured lifecycle
 recorded in each benchmark's `extra_info`.
 
-The recorded `recovery_resumed_batches` (11 in both runs) counts in-flight
-source reads discarded by the recovery drain — a timing artifact, not a
-stable workload property.
+The recorded `recovery_resumed_batches` deterministically equals the pause
+point (resumed batches = pause_at): the recovery source idles at the
+restored cursor, so the value is a stable workload property, not a
+drain-timing artifact.
 
 ## Noise and confidence
 

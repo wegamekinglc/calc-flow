@@ -77,10 +77,10 @@ asynchronous and accepts only `Batch` values.
 ### Engine boundary
 
 `ExpressionOperator` and `SqlOperator` are built-in operators. Each implements
-both `BatchOperator` and `StreamOperator`; `UnionOperator` and
-`WindowAggregateOperator` are stream-only. Add them through
-`PipelineBuilder::add_node`, which accepts a `NodeOperator` conversion from a
-boxed built-in, custom batch operator, or custom stream operator.
+both `BatchOperator` and `StreamOperator`; `UnionOperator`,
+`WindowAggregateOperator`, and `StreamJoinOperator` are stream-only. Add them
+through `PipelineBuilder::add_node`, which accepts a `NodeOperator` conversion
+from a boxed built-in, custom batch operator, or custom stream operator.
 
 Every operator implements `OperatorMetadata`. Custom finite operators implement
 `BatchOperator`, whose `BatchOperatorContext` carries the run-scoped context;

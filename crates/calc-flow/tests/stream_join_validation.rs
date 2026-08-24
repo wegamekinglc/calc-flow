@@ -1,7 +1,15 @@
+use std::{sync::Arc, time::Duration};
+
 use calc_flow::{
-    ArrowFieldSpec, BatchKind, CalcFlowError, DataFusionConfig, JoinStateLimits, JoinTimeBounds,
-    NodeSpec, OperatorSpec, PortSpec, ProjectSpec, ProviderRegistry, RuntimeSpec, StateConfig,
-    StreamJoinSpec, StreamRunOptions, UdfRegistry, import_project_json, validate_project,
+    ArrowFieldSpec, Batch, BatchKind, BatchMetadata, CalcFlowError, DataFusionConfig,
+    JoinStateLimits, JoinTimeBounds, NodeSpec, OperatorSpec, PortSpec, ProjectSpec,
+    ProviderRegistry, RuntimeSpec, StateConfig, StreamJoinOperator, StreamJoinSpec,
+    StreamRunOptions, UdfRegistry, import_project_json, validate_project,
+};
+use datafusion::arrow::{
+    array::{StringArray, TimestampMicrosecondArray},
+    datatypes::{DataType, Field, Schema, TimeUnit},
+    record_batch::RecordBatch,
 };
 use serde_json::{Value, json};
 
@@ -365,8 +373,8 @@ fn typed_spec() -> StreamJoinSpec {
         "authorized_at",
         "paid_at",
         JoinTimeBounds::new(
-            std::time::Duration::from_micros(300_000_000),
-            std::time::Duration::from_micros(30_000_000),
+            Duration::from_micros(300_000_000),
+            Duration::from_micros(30_000_000),
         )
         .unwrap(),
         JoinStateLimits::new(100_000, 134_217_728, 1_000_000).unwrap(),
@@ -477,7 +485,7 @@ fn typed_missing_key_column_reports_the_stable_path_and_code() {
         ["account_id"],
         "authorized_at",
         "paid_at",
-        JoinTimeBounds::new(std::time::Duration::ZERO, std::time::Duration::ZERO).unwrap(),
+        JoinTimeBounds::new(Duration::ZERO, Duration::ZERO).unwrap(),
         JoinStateLimits::new(1, 1, 1).unwrap(),
     )
     .unwrap()
@@ -504,7 +512,7 @@ fn typed_incompatible_key_types_report_the_stable_code() {
         ["account_id"],
         "authorized_at",
         "paid_at",
-        JoinTimeBounds::new(std::time::Duration::ZERO, std::time::Duration::ZERO).unwrap(),
+        JoinTimeBounds::new(Duration::ZERO, Duration::ZERO).unwrap(),
         JoinStateLimits::new(1, 1, 1).unwrap(),
     )
     .unwrap()
@@ -530,7 +538,7 @@ fn typed_event_time_issues_report_the_stable_codes() {
         ["account_id"],
         "mauthorized_at",
         "paid_at",
-        JoinTimeBounds::new(std::time::Duration::ZERO, std::time::Duration::ZERO).unwrap(),
+        JoinTimeBounds::new(Duration::ZERO, Duration::ZERO).unwrap(),
         JoinStateLimits::new(1, 1, 1).unwrap(),
     )
     .unwrap()
@@ -554,7 +562,7 @@ fn typed_event_time_issues_report_the_stable_codes() {
         ["account_id"],
         "authorized_at",
         "paid_at",
-        JoinTimeBounds::new(std::time::Duration::ZERO, std::time::Duration::ZERO).unwrap(),
+        JoinTimeBounds::new(Duration::ZERO, Duration::ZERO).unwrap(),
         JoinStateLimits::new(1, 1, 1).unwrap(),
     )
     .unwrap()
@@ -570,4 +578,97 @@ fn typed_event_time_issues_report_the_stable_codes() {
         )],
         "{issues:?}"
     );
+}
+
+/// Feeds both Join ingresses and returns the emitted output messages.
+async fn drive_join(
+    left_keys: &[&str],
+    right_keys: &[&str],
+) -> calc_flow::Result<(usize, StreamJoinOperator)> {
+    use calc_flow::{
+        CancellationToken, EdgeCollector, JsonMap, OperatorMetadata, StreamJobContext,
+        StreamOperator, StreamOperatorContext,
+    };
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        ),
+    ]));
+    let mut operator = StreamJoinOperator::new(
+        "match",
+        Arc::clone(&schema),
+        schema,
+        StreamJoinSpec::inner(
+            ["key"],
+            ["key"],
+            "ts",
+            "ts",
+            JoinTimeBounds::new(Duration::from_secs(300), Duration::from_secs(60)).unwrap(),
+            JoinStateLimits::new(100_000, 134_217_728, 1_000_000).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let job = StreamJobContext::new(
+        1,
+        "fingerprint",
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    let batch = |keys: &[&str]| {
+        let record = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("key", DataType::Utf8, false),
+                Field::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Microsecond, None),
+                    false,
+                ),
+            ])),
+            vec![
+                Arc::new(StringArray::from(keys.to_vec())),
+                Arc::new(TimestampMicrosecondArray::from(vec![
+                    1_000_000_i64;
+                    keys.len()
+                ])),
+            ],
+        )
+        .unwrap();
+        Batch::table(vec![record], BatchMetadata::default()).unwrap()
+    };
+    operator
+        .process_data("left", batch(left_keys), &context, &mut collector)
+        .await?;
+    operator
+        .process_data("right", batch(right_keys), &context, &mut collector)
+        .await?;
+    let outputs = collector.drain("output").len();
+    Ok((outputs, operator))
+}
+
+#[tokio::test]
+async fn zero_match_batches_do_not_fail_the_join_and_emit_nothing() {
+    // AC2/AC7 steady-state path: a non-empty batch probing non-empty opposite
+    // state with zero key-equality matches must succeed with zero output.
+    let (outputs, operator) = drive_join(&["a"], &["b"]).await.unwrap();
+    assert_eq!(outputs, 0);
+    let status = operator.status();
+    assert_eq!(status.left.retained_rows, 1);
+    assert_eq!(status.right.retained_rows, 1);
+    assert_eq!(status.emitted_match_rows, 0);
+    assert_eq!(status.state_limit_failures, 0);
+    assert_eq!(status.match_limit_failures, 0);
+}
+
+#[tokio::test]
+async fn matching_keys_still_emit_after_the_zero_match_path_exists() {
+    let (outputs, _operator) = drive_join(&["a"], &["a"]).await.unwrap();
+    assert_eq!(outputs, 1);
 }

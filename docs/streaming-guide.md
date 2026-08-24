@@ -217,6 +217,22 @@ frontier. State and match admission failures surface one of the four stable
 `reason_code` values on terminal errors; callers should still retain a fallback
 for future reason strings.
 
+The Join has one required table output port named `output`, and its schema is
+derived rather than declared. Every left column is emitted as
+`left_prefix__name`, followed by every right column as `right_prefix__name`,
+each keeping its input nullability. With the prefixes above the output columns
+are `authorization__account_id`, `authorization__event_time`,
+`payment__account_id`, and `payment__event_time`; downstream operators and
+windows reference these prefixed names.
+
+Each Join node also reports a payload-free status. The
+`job.status()["stream_joins"]` mapping keys are node IDs; each value carries
+per-side retained rows and bytes, evicted, late, and null drop counters,
+`late_affected_batches`, `max_lateness_micros`, plus the node's
+`emitted_match_rows`, `state_limit_failures`, and `match_limit_failures`. Jobs
+without a Join node report an empty mapping. Studio progress events carry the
+same per-node rows as a `stream_joins` list on the run event.
+
 ## Checkpoints and recovery
 
 `ManagedCheckpointRuntime(root)` owns local manifest and state storage. Keep
@@ -285,9 +301,10 @@ route.
 ## Status and diagnostics
 
 Status includes job state, terminal cause, requested/effective delivery, task
-counts, watermark, bounded edge/source/operator/sink metrics, and checkpoint
-summary. It intentionally excludes row data, cursor payloads, pre-commit
-payloads, connector internals, secret values, and filesystem paths.
+counts, watermark, bounded edge/source/operator/sink metrics, per-node Join
+state, and checkpoint summary. It intentionally excludes row data, cursor
+payloads, pre-commit payloads, connector internals, secret values, and
+filesystem paths.
 
 Terminal outcomes are `completed`, `cancelled`, `failed`, or
 `recovery_required` and include payload-safe structured errors. Preserve these

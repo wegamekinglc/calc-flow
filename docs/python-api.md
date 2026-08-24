@@ -409,7 +409,11 @@ optional JAX paths are in
 
 `ProjectDocument` validates a strict `format_version: 3` mapping with the Rust
 schema. `project_json_schema()` returns the generated schema;
-`validate_project_json(document)` returns canonical JSON.
+`validate_project_json(document)` returns canonical JSON. Invalid documents
+raise a pydantic `ValidationError` whose entries carry the engine's stable
+issue codes as `type` and the failing project path as `loc`; malformed stream
+Join input reports codes such as `invalid_time_bound` and
+`unsupported_join_type` instead of a flattened message.
 
 Project v3 selects `runtime.mode` explicitly. Stream projects carry exact
 connector and format identities, non-secret options, named secret references,
@@ -471,10 +475,13 @@ linearized and cancellation arrives during thread cleanup, that outcome wins
 and cleanup still completes.
 
 `Cursor` payloads, capability/config mappings, pre-commit values, recovery
-values, status, and outcomes cross the boundary as defensive copies. Managed
-checkpoint recovery reopens a live replayable source with a cursor bound to the
-exact source-map key. A terminal manifest instead returns completed without
-reopening ended sources or duplicating final output. See
+values, status, and outcomes cross the boundary as defensive copies. Status
+and outcomes are typed: `job.status()` returns a `JobStatus` mapping that
+includes `stream_joins`, a per-node mapping of `StreamJoinStatus` values with
+`StreamJoinSideStatus` per side (empty when the graph has no Join node).
+Managed checkpoint recovery reopens a live replayable source with a cursor
+bound to the exact source-map key. A terminal manifest instead returns
+completed without reopening ended sources or duplicating final output. See
 [`04_continuous_runtime.py`](../examples/04_continuous_runtime.py),
 [`08_streaming_recovery.py`](../examples/08_streaming_recovery.py), and the
 [continuous streaming guide](streaming-guide.md).

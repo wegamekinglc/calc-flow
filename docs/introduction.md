@@ -145,12 +145,16 @@ model. Its `expression`, `sql`, `external`, `table_matmul`, and `connect`
 methods return new builders. `compile_batch()` and `compile_stream()` serialize
 the strict graph project and ask the Rust `Runtime` to validate and compile it.
 
-Rust stream graphs can also contain `UnionOperator` and
-`WindowAggregateOperator`. A `WindowSpec` declares fixed UTC tumbling or
-hopping geometry, event-time and grouping columns, and ordered count, sum,
-minimum, maximum, or average aggregates. Window nodes are rejected by
-`compile_batch()` and accepted by `compile_stream()` after geometry, schema,
-aggregate, overlap, and output-name validation.
+Rust stream graphs can also contain `UnionOperator`,
+`WindowAggregateOperator`, and `StreamJoinOperator`. A `WindowSpec` declares
+fixed UTC tumbling or hopping geometry, event-time and grouping columns, and
+ordered count, sum, minimum, maximum, or average aggregates. Window nodes are
+rejected by `compile_batch()` and accepted by `compile_stream()` after
+geometry, schema, aggregate, overlap, and output-name validation. A
+`StreamJoinSpec` declares a two-input bounded event-time inner equi-Join with
+explicit asymmetric time bounds, required state and match limits, and a
+derived prefixed output schema; see the
+[continuous streaming guide](streaming-guide.md).
 
 `table_matmul` creates a provider-backed `table_matmul@1` external node with
 the required mixed-kind inputs `table` (table) and `weights` (array), and the
