@@ -308,3 +308,26 @@ fn config_rejects_zero_batch_size_and_target_partitions() {
         ));
     }
 }
+
+#[tokio::test]
+async fn sql_normalizes_a_zero_row_result_to_one_empty_batch() {
+    // A zero-row INNER JOIN collects to zero RecordBatches; the runtime-level
+    // contract represents an empty table as one zero-row batch instead of an
+    // error (the same wording Batch::table's error message prescribes).
+    let tables = BTreeMap::from([("l".into(), input(vec![1])), ("r".into(), input(vec![2]))]);
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+
+    let output = runtime
+        .sql(
+            "SELECT l.a FROM l JOIN r ON l.a = r.a",
+            &tables,
+            Some("join"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(output.num_rows(), 0);
+    let payload = output.table_payload().unwrap();
+    assert_eq!(payload.batches().len(), 1);
+    assert_eq!(payload.batches()[0].num_rows(), 0);
+}

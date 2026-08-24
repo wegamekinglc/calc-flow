@@ -8,6 +8,7 @@ use std::{
 };
 
 use datafusion::{
+    arrow::record_batch::RecordBatch,
     datasource::MemTable,
     execution::context::{SessionConfig, SessionContext},
     logical_expr::ScalarUDF,
@@ -215,11 +216,20 @@ impl DataFusionRuntime {
         let planning_ns = nanos(planning_start.elapsed());
 
         let execution_start = Instant::now();
+        let result_schema = Arc::new(dataframe.schema().as_arrow().clone());
         let batches = dataframe
             .collect()
             .await
             .map_err(|error| datafusion_error(node_id, error))?;
         let execution_ns = nanos(execution_start.elapsed());
+        // A zero-row result (for example an INNER JOIN with no key-equal
+        // pairs) collects to zero RecordBatches; represent it as one
+        // zero-row batch, exactly as the Batch::table contract prescribes.
+        let batches = if batches.is_empty() {
+            vec![RecordBatch::new_empty(result_schema)]
+        } else {
+            batches
+        };
         let output = Batch::table(batches, merged_metadata(tables))?;
         let output_rows = output.num_rows();
         self.metrics.lock().push(DataFusionQueryMetric {
