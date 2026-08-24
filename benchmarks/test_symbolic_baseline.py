@@ -491,7 +491,10 @@ def _run_stream_lifecycle(
         await job.cancel_async()
         checkpoint_bytes = directory_bytes(state_root)
 
-        recovery_source = _BaselineSource(batches)
+        # Bound the recovery source at the pause point so it idles at the
+        # restored cursor instead of replaying: graceful shutdown then drains
+        # only the checkpointed window state, fixing replayed batches at zero.
+        recovery_source = _BaselineSource(batches, pause_at)
         recovery_sink = _BaselineSink()
         recovery_start = time.perf_counter()
         recovery_job = await StreamingRunner(
