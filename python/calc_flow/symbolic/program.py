@@ -23,8 +23,10 @@ from calc_flow.symbolic.nodes import (
     _text,
     _u64,
 )
+from calc_flow.symbolic.types import CompileMode
 
 if TYPE_CHECKING:
+    from calc_flow.pipeline import Runtime
     from calc_flow.symbolic.analyzer import AnalysisResult
 
 _PROGRAM_TAG = 0x21
@@ -295,14 +297,14 @@ class Program:
             outputs=(*self._outputs, (name, value)),
         )
 
-    def analyze(self, runtime: object, /, *, mode: str) -> AnalysisResult:
+    def analyze(self, runtime: Runtime, /, *, mode: CompileMode) -> AnalysisResult:
         """Analyze this program against one immutable capability snapshot."""
 
         from calc_flow.symbolic.analyzer import analyze_program
 
         return analyze_program(self, runtime, mode)
 
-    def explain(self, runtime: object, /, *, mode: str) -> str:
+    def explain(self, runtime: Runtime, /, *, mode: CompileMode) -> str:
         """Render deterministic analysis facts for this program."""
 
         from calc_flow.symbolic.analyzer import explain_program

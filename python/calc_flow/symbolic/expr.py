@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal, overload
+from typing import TYPE_CHECKING, Literal, overload
 
 from calc_flow.symbolic.domains import (
     array_operator_error,
@@ -45,6 +45,9 @@ from calc_flow.symbolic.types import (
     require_non_empty_str,
     require_non_negative_int,
 )
+
+if TYPE_CHECKING:
+    from calc_flow.symbolic.program import FeatureSet
 
 type ColumnOperand = ColumnExpr | ScalarLiteral
 type ArrayOperand = ArrayExpr | Parameter[ArrayExpr] | ScalarLiteral
@@ -371,7 +374,7 @@ class TableExpr(Expr[object]):
             )
         return ColumnExpr(build("column_ref", (self._node,), {"name": CStr(field)}))
 
-    def with_columns(self, features: object, /) -> TableExpr:
+    def with_columns(self, features: FeatureSet, /) -> TableExpr:
         from calc_flow.symbolic.program import FeatureSet
 
         if not isinstance(features, FeatureSet):

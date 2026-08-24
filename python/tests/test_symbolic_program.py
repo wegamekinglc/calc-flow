@@ -228,6 +228,7 @@ def test_program_fingerprint_ignores_construction_order_not_declaration_order() 
         )
 
     assert build(first, second).fingerprint == build(first, second).fingerprint
+    assert build(first, second).fingerprint != build(second, first).fingerprint
 
     quotes = _quotes()
     weights = _weights()

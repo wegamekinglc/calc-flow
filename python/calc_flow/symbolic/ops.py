@@ -167,6 +167,11 @@ class RowNamespace:
         )
 
     def coalesce(self, *values: object) -> ColumnExpr:
+        if not values:
+            raise ValueError(
+                "calc_flow.symbolic.row.coalesce.values: invalid_literal:"
+                " coalesce requires at least one value"
+            )
         return ColumnExpr(
             build(
                 "coalesce",

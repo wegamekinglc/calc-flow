@@ -451,3 +451,10 @@ def test_row_and_cs_defaults_materialize_identically() -> None:
         ts.count(x, window=rows(5)).digest
         == ts.count(x, window=rows(5), min_periods=1).digest
     )
+
+
+def test_coalesce_requires_at_least_one_value() -> None:
+    with pytest.raises(ValueError, match=r"row\.coalesce") as exc:
+        row.coalesce()
+
+    assert "at least one" in str(exc.value)

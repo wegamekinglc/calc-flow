@@ -18,6 +18,7 @@ from calc_flow.symbolic import (
     exact_time,
     linalg,
     parameter,
+    row,
     rows,
     table,
     table_input,
@@ -696,3 +697,346 @@ def test_explain_renders_program_facts_deterministically() -> None:
     assert "capability session" in explanation
     assert "output signals table" in explanation
     assert "field score float64 nullable=true" in explanation
+
+
+# --- review blocker regressions (B1-B6, S4) -------------------------------
+
+
+def _trades_flagged() -> TableExpr:
+    return table_input(
+        "trades",
+        schema=[
+            Field("ts", "timestamp[us, UTC]", nullable=False),
+            Field("symbol", "string", nullable=False),
+            Field("flag", "bool", nullable=False),
+            Field("y", "float64"),
+        ],
+    )
+
+
+def _feature_program(
+    quotes: TableExpr, name: str, value: object, **rest: object
+) -> Program:  # type: ignore[override]
+    extra_inputs = rest.get("extra_inputs", ())
+    return Program(
+        "p",
+        inputs=[quotes, *extra_inputs],  # type: ignore[list-item]
+        outputs=[("signals", quotes.with_columns(FeatureSet([(name, value)])))],  # type: ignore[arg-type]
+    )
+
+
+def test_successful_cast_resolves_derived_field_type() -> None:
+    quotes = _quotes_plain()
+    program = _feature_program(quotes, "half", row.cast(quotes["x"], "float32"))
+    result = program.analyze(Runtime(), mode="batch")
+
+    assert result.issues == ()
+    assert "field half float32 nullable=true" in program.explain(
+        Runtime(), mode="batch"
+    )
+
+
+def test_stream_mode_requires_ordering_for_lag_and_delta() -> None:
+    quotes = _quotes_plain()
+    program = Program(
+        "p",
+        inputs=[quotes],
+        outputs=[
+            (
+                "signals",
+                quotes.with_columns(
+                    FeatureSet(
+                        [
+                            ("prev", ts.lag(quotes["x"], periods=2)),
+                            ("change", ts.delta(quotes["x"])),
+                        ]
+                    )
+                ),
+            )
+        ],
+    )
+
+    stream_result = program.analyze(Runtime(), mode="stream")
+    paths = _issue_paths(stream_result)
+    assert "inputs.quotes.event_time" in paths
+    assert "inputs.quotes.entity_by" in paths
+    assert "inputs.quotes.sequence_by" in paths
+    assert all(issue.code == "ordering_required" for issue in stream_result.issues)
+
+    assert program.analyze(Runtime(), mode="batch").issues == ()
+
+
+def test_where_condition_and_coalesce_operands_respect_lineage() -> None:
+    quotes = _quotes_plain()
+    trades = _trades_flagged()
+
+    where_program = Program(
+        "p",
+        inputs=[quotes, trades],
+        outputs=[
+            (
+                "signals",
+                quotes.with_columns(
+                    FeatureSet(
+                        [
+                            (
+                                "score",
+                                row.where(trades["flag"], quotes["x"], quotes["y"]),
+                            )
+                        ]
+                    )
+                ),
+            )
+        ],
+    )
+    where_result = where_program.analyze(Runtime(), mode="batch")
+    assert any(
+        issue.code == "schema_mismatch" and ".lineage" in issue.path
+        for issue in where_result.issues
+    )
+
+    coalesce_program = Program(
+        "p",
+        inputs=[quotes, trades],
+        outputs=[
+            (
+                "signals",
+                quotes.with_columns(
+                    FeatureSet([("score", row.coalesce(trades["y"], quotes["x"]))])
+                ),
+            )
+        ],
+    )
+    coalesce_result = coalesce_program.analyze(Runtime(), mode="batch")
+    assert any(
+        issue.code == "schema_mismatch" and ".lineage" in issue.path
+        for issue in coalesce_result.issues
+    )
+
+
+def test_where_condition_state_propagates_to_result() -> None:
+    quotes = _quotes_ordered()
+    program = Program(
+        "p",
+        inputs=[quotes],
+        outputs=[
+            (
+                "signals",
+                quotes.with_columns(
+                    FeatureSet(
+                        [
+                            (
+                                "score",
+                                row.where(
+                                    ts.mean(quotes["x"], window=rows(3)) > 1.0,
+                                    quotes["x"],
+                                    quotes["y"],
+                                ),
+                            )
+                        ]
+                    )
+                ),
+            )
+        ],
+    )
+    explanation = program.explain(Runtime(), mode="batch")
+
+    assert "state rows(3)" in explanation
+
+
+def test_cross_section_group_columns_are_analyzed() -> None:
+    quotes = _quotes_ordered()
+    trades = _trades_flagged()
+
+    unresolved = Program(
+        "p",
+        inputs=[quotes],
+        outputs=[
+            (
+                "signals",
+                quotes.with_columns(
+                    FeatureSet(
+                        [
+                            (
+                                "score",
+                                cs.rank(
+                                    quotes["x"],
+                                    group=exact_time(quotes["no_such_field"]),
+                                ),
+                            )
+                        ]
+                    )
+                ),
+            )
+        ],
+    )
+    unresolved_result = unresolved.analyze(Runtime(), mode="batch")
+    assert "outputs.signals.score.rank.event_time" in _issue_paths(unresolved_result)
+    assert all(issue.code == "unresolved_type" for issue in unresolved_result.issues)
+
+    lineage = Program(
+        "p",
+        inputs=[quotes, trades],
+        outputs=[
+            (
+                "signals",
+                quotes.with_columns(
+                    FeatureSet(
+                        [
+                            (
+                                "score",
+                                cs.zscore(
+                                    quotes["x"],
+                                    group=exact_time(
+                                        quotes["ts"],
+                                        partition_by=[trades["flag"]],
+                                    ),
+                                ),
+                            )
+                        ]
+                    )
+                ),
+            )
+        ],
+    )
+    lineage_result = lineage.analyze(Runtime(), mode="batch")
+    assert "outputs.signals.score.zscore.partition_by[0].lineage" in _issue_paths(
+        lineage_result
+    )
+
+    value_mismatch = Program(
+        "p",
+        inputs=[quotes, trades],
+        outputs=[
+            (
+                "signals",
+                quotes.with_columns(
+                    FeatureSet(
+                        [
+                            (
+                                "score",
+                                cs.zscore(quotes["x"], group=exact_time(trades["ts"])),
+                            )
+                        ]
+                    )
+                ),
+            )
+        ],
+    )
+    value_mismatch_result = value_mismatch.analyze(Runtime(), mode="batch")
+    assert "outputs.signals.score.zscore.event_time.lineage" in _issue_paths(
+        value_mismatch_result
+    )
+
+
+def test_window_output_has_no_row_axis_lineage() -> None:
+    quotes = _quotes_ordered()
+    windows = window.tumbling(quotes, event_time="ts", size_micros=60_000_000)
+    derived = linalg.from_columns(windows, columns=["window_start"], backend="numpy")
+    program = Program(
+        "p",
+        inputs=[quotes],
+        outputs=[("signals", table.attach_columns(quotes, derived, names=("w",)))],
+    )
+    result = program.analyze(Runtime(), mode="batch")
+
+    assert "outputs.signals.attach_columns.array.lineage" in _issue_paths(result)
+
+
+def test_statistics_reject_non_numeric_inputs() -> None:
+    quotes = table_input(
+        "quotes",
+        schema=[
+            Field("ts", "timestamp[us, UTC]", nullable=False),
+            Field("symbol", "string", nullable=False),
+            Field("seq", "uint64", nullable=False),
+            Field("flag", "bool"),
+            Field("x", "float64"),
+        ],
+        entity_by=["symbol"],
+        event_time="ts",
+        sequence_by=["seq"],
+    )
+    cases = [
+        ("sum", ts.sum(quotes["symbol"], window=rows(3))),
+        ("mean", ts.mean(quotes["flag"], window=rows(3))),
+        ("variance", ts.variance(quotes["symbol"], window=rows(3))),
+        ("stddev", ts.stddev(quotes["flag"], window=rows(3))),
+        (
+            "covariance",
+            ts.covariance(quotes["x"], quotes["symbol"], window=rows(3)),
+        ),
+        (
+            "correlation",
+            ts.correlation(quotes["symbol"], quotes["x"], window=rows(3)),
+        ),
+        ("delta", ts.delta(quotes["symbol"])),
+        (
+            "zscore",
+            cs.zscore(quotes["symbol"], group=exact_time(quotes["ts"])),
+        ),
+        (
+            "demean",
+            cs.demean(quotes["flag"], group=exact_time(quotes["ts"])),
+        ),
+    ]
+
+    for name, value in cases:
+        program = _feature_program(quotes, "score", value)
+        result = program.analyze(Runtime(), mode="batch")
+        dtype_issues = [
+            issue
+            for issue in result.issues
+            if issue.code == "unsupported_type" and issue.path.endswith(".dtype")
+        ]
+        assert dtype_issues, name
+        assert all(
+            issue.path.startswith("outputs.signals.score.") for issue in dtype_issues
+        ), name
+
+    numeric_program = Program(
+        "p",
+        inputs=[quotes],
+        outputs=[
+            (
+                "signals",
+                quotes.with_columns(
+                    FeatureSet(
+                        [
+                            ("total", ts.sum(quotes["seq"], window=rows(3))),
+                            ("spread", ts.stddev(quotes["x"], window=rows(3))),
+                            ("last", ts.min(quotes["symbol"], window=rows(3))),
+                        ]
+                    )
+                ),
+            )
+        ],
+    )
+    assert numeric_program.analyze(Runtime(), mode="batch").issues == ()
+    explanation = numeric_program.explain(Runtime(), mode="batch")
+    assert "field last string nullable=true" in explanation
+
+
+def test_elementwise_shape_paths_index_from_the_left() -> None:
+    quotes = _quotes_ordered()
+    square = parameter(
+        "square",
+        kind="array",
+        backend="numpy",
+        dtype="float64",
+        shape=(3, 3),
+    )
+    left = linalg.from_columns(quotes, columns=["x", "y"], backend="numpy")
+    program = Program(
+        "p",
+        inputs=[quotes, square],
+        outputs=[("scores", left * square)],
+    )
+    result = program.analyze(Runtime(), mode="batch")
+
+    mismatch = next(issue for issue in result.issues if issue.code == "schema_mismatch")
+    assert mismatch.path == "outputs.scores.mul.right.shape[1]"
+    unresolved = next(
+        issue for issue in result.issues if issue.code == "unresolved_type"
+    )
+    assert unresolved.path == "outputs.scores.mul.right.shape[0]"

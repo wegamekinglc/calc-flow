@@ -23,6 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final
 
+from calc_flow.capabilities import RuntimeCapabilities
 from calc_flow.pipeline import Runtime
 from calc_flow.symbolic.domains import type_name
 from calc_flow.symbolic.nodes import (
@@ -45,6 +46,9 @@ _EVENT_TIME_TYPE: Final = "timestamp[us, UTC]"
 _FLOATING_TYPES: Final = ("float32", "float64")
 _SIGNED_INT_TYPES: Final = ("int8", "int16", "int32", "int64")
 _UNSIGNED_INT_TYPES: Final = ("uint8", "uint16", "uint32", "uint64")
+_NUMERIC_TYPES: Final = frozenset(
+    (*_SIGNED_INT_TYPES, *_UNSIGNED_INT_TYPES, *_FLOATING_TYPES)
+)
 _ARITHMETIC: Final = frozenset({"add", "sub", "mul", "truediv"})
 _COMPARISONS: Final = frozenset({"eq", "ne", "lt", "le", "gt", "ge"})
 _BOOLEANS: Final = frozenset({"and", "or"})
@@ -492,7 +496,7 @@ class _Analyzer:
                 fields.append(field)
         return TableFacts(
             tuple(fields),
-            child.lineage,
+            None,
             child.state | frozenset({"window"}),
             child.event_time,
             child.entity_by,
@@ -567,6 +571,31 @@ class _Analyzer:
             f"unknown field {field_name!r} in the schema of input {table.lineage!r}",
         )
         return ColumnFacts(None, True, table.lineage, table.state)
+
+    def _anchored_operands(
+        self,
+        nodes: tuple[Node, ...],
+        paths: tuple[str, ...],
+        /,
+        initial_anchor: str | None = None,
+    ) -> tuple[ColumnFacts, ...]:
+        """Analyze operands left to right against the first resolved lineage."""
+
+        operands: list[ColumnFacts] = []
+        anchor = initial_anchor
+        for child, operand_path in zip(nodes, paths, strict=True):
+            facts = self._operand(child, operand_path, anchor)
+            operands.append(facts)
+            if anchor is None and facts.lineage is not None:
+                anchor = facts.lineage
+        return tuple(operands)
+
+    @staticmethod
+    def _running_anchor(operands: tuple[ColumnFacts, ...], /) -> str | None:
+        return next(
+            (facts.lineage for facts in operands if facts.lineage is not None),
+            None,
+        )
 
     def _operand(self, node: Node, path: str, anchor: str | None, /) -> ColumnFacts:
         if node.op.name == "literal":
@@ -683,15 +712,17 @@ class _Analyzer:
 
     def _where(self, node: Node, path: str, /) -> ColumnFacts:
         role = f"{path}.where"
-        condition = self._operand(node.args[0], f"{role}.condition", None)
+        operand_paths = (f"{role}.condition", f"{role}.when_true", f"{role}.when_false")
+        operands = self._anchored_operands(node.args, operand_paths)
+        condition, left, right = operands
         if condition.data_type is not None and condition.data_type != "bool":
             self.issue(
                 f"{role}.condition.dtype",
                 "unsupported_type",
                 "a conditional requires a boolean condition",
             )
-        left = self._operand(node.args[1], f"{role}.when_true", None)
-        right = self._operand(node.args[2], f"{role}.when_false", left.lineage)
+        anchor = self._running_anchor(operands)
+        states = _column_state_union(operands)
         if (
             left.data_type is not None
             and right.data_type is not None
@@ -703,20 +734,20 @@ class _Analyzer:
                 f"no provable common type for {left.data_type!r} and"
                 f" {right.data_type!r}; use row.cast for an explicit conversion",
             )
-            return ColumnFacts(None, True, left.lineage, left.state | right.state)
+            return ColumnFacts(None, True, anchor, states)
         return ColumnFacts(
             left.data_type,
             left.nullable or right.nullable,
-            left.lineage,
-            left.state | right.state,
+            anchor,
+            states,
         )
 
     def _coalesce(self, node: Node, path: str, /) -> ColumnFacts:
         role = f"{path}.coalesce"
-        operands = [
-            self._operand(child, f"{role}.values[{index}]", None)
-            for index, child in enumerate(node.args)
-        ]
+        operands = self._anchored_operands(
+            node.args,
+            tuple(f"{role}.values[{index}]" for index in range(len(node.args))),
+        )
         first = operands[0]
         for index, facts in enumerate(operands[1:], start=1):
             if (
@@ -729,12 +760,17 @@ class _Analyzer:
                     "unsupported_type",
                     "coalesce requires operands of one provable type",
                 )
-                return ColumnFacts(None, True, first.lineage, _union(operands))
+                return ColumnFacts(
+                    None,
+                    True,
+                    self._running_anchor(operands),
+                    _column_state_union(operands),
+                )
         return ColumnFacts(
             first.data_type,
             all(facts.nullable for facts in operands),
-            first.lineage,
-            _union(operands),
+            self._running_anchor(operands),
+            _column_state_union(operands),
         )
 
     def _scalar_function(self, node: Node, path: str, /) -> ColumnFacts:
@@ -787,18 +823,36 @@ class _Analyzer:
 
     def _cast(self, node: Node, path: str, /) -> ColumnFacts:
         operand = self._operand(node.args[0], f"{path}.cast.value", None)
-        target = _cstr(node.attr("data_type"))
+        target = _ctype_str(node.attr("data_type"))
         return ColumnFacts(target, operand.nullable, operand.lineage, operand.state)
 
     def _lag_like(self, node: Node, path: str, /) -> ColumnFacts:
-        operand = self._operand(node.args[0], f"{path}.{node.op.name}.value", None)
+        role = f"{path}.{node.op.name}"
+        operand = self._operand(node.args[0], f"{role}.value", None)
+        if operand.lineage is not None:
+            self._temporal_lineages.add(operand.lineage)
         periods = _cint(node.attr("periods")) or 1
-        return ColumnFacts(
-            operand.data_type,
-            True,
-            operand.lineage,
-            operand.state | frozenset({f"rows({periods})"}),
+        states = operand.state | frozenset({f"rows({periods})"})
+        if node.op.name == "delta" and not self._numeric_or_issue(
+            operand.data_type, f"{role}.value", node.op.name
+        ):
+            return ColumnFacts(None, True, operand.lineage, states)
+        return ColumnFacts(operand.data_type, True, operand.lineage, states)
+
+    def _numeric_or_issue(
+        self, data_type: str | None, operand_path: str, primitive: str, /
+    ) -> bool:
+        """Require a provably numeric input; unknown types stay unresolved."""
+
+        if data_type is None or data_type in _NUMERIC_TYPES:
+            return True
+        self.issue(
+            f"{operand_path}.dtype",
+            "unsupported_type",
+            f"{primitive} is only defined for numeric columns; use row.cast"
+            " for an explicit conversion",
         )
+        return False
 
     def _frame_state(self, node: Node, /) -> str | None:
         frame = node.attr("frame")
@@ -823,6 +877,10 @@ class _Analyzer:
         )
         primitive = node.op.name
         input_type = operand.data_type
+        if primitive not in ("count", "min", "max") and not self._numeric_or_issue(
+            input_type, f"{path}.{primitive}.value", primitive
+        ):
+            return ColumnFacts(None, True, operand.lineage, states)
         if primitive == "count":
             output_type: str | None = "uint64"
         elif primitive == "sum":
@@ -850,6 +908,11 @@ class _Analyzer:
             | right.state
             | (frozenset({state}) if state is not None else frozenset())
         )
+        numeric = self._numeric_or_issue(
+            left.data_type, f"{role}.left", node.op.name
+        ) & self._numeric_or_issue(right.data_type, f"{role}.right", node.op.name)
+        if not numeric:
+            return ColumnFacts(None, True, left.lineage, states)
         return ColumnFacts("float64", True, left.lineage, states)
 
     def _cross_section(self, node: Node, path: str, /) -> ColumnFacts:
@@ -857,7 +920,14 @@ class _Analyzer:
         operand = self._operand(node.args[0], f"{role}.value", None)
         if operand.lineage is not None:
             self._temporal_lineages.add(operand.lineage)
-        states = operand.state | frozenset({"cross_section"})
+        group_paths = (
+            f"{role}.event_time",
+            *(f"{role}.partition_by[{index}]" for index in range(len(node.args) - 2)),
+        )
+        group = self._anchored_operands(node.args[1:], group_paths, operand.lineage)
+        states = (
+            operand.state | _column_state_union(group) | frozenset({"cross_section"})
+        )
         if node.op.name == "winsorize":
             if operand.data_type is not None and operand.data_type not in (
                 "float32",
@@ -870,6 +940,10 @@ class _Analyzer:
                 )
                 return ColumnFacts(None, True, operand.lineage, states)
             return ColumnFacts(operand.data_type, True, operand.lineage, states)
+        if node.op.name in ("zscore", "demean") and not self._numeric_or_issue(
+            operand.data_type, f"{role}.value", node.op.name
+        ):
+            return ColumnFacts(None, True, operand.lineage, states)
         return ColumnFacts("float64", True, operand.lineage, states)
 
     # -- array analysis ------------------------------------------------------
@@ -1112,7 +1186,9 @@ class _Analyzer:
         )
 
 
-def _union(operands: list[ColumnFacts], /) -> frozenset[str]:
+def _column_state_union(
+    operands: tuple[ColumnFacts, ...] | list[ColumnFacts], /
+) -> frozenset[str]:
     combined: set[str] = set()
     for facts in operands:
         combined |= facts.state
@@ -1163,7 +1239,9 @@ def _broadcast_shapes(
     for index in range(rank):
         first = left[len(left) - 1 - index] if index < len(left) else 1
         second = right[len(right) - 1 - index] if index < len(right) else 1
-        result.append(_broadcast_dimension(first, second, role, len(result), analyzer))
+        result.append(
+            _broadcast_dimension(first, second, role, rank - 1 - index, analyzer)
+        )
     result.reverse()
     return tuple(result)
 
@@ -1216,7 +1294,9 @@ def _require_mode(mode: object, /) -> CompileMode:
     return mode  # type: ignore[return-value]
 
 
-def _run(program: object, runtime: Runtime, mode: CompileMode, /) -> _Analyzer:
+def _run(
+    program: object, runtime: Runtime, mode: CompileMode, /
+) -> tuple[_Analyzer, RuntimeCapabilities]:
     from calc_flow.symbolic.expr import ArrayExpr, TableExpr
 
     capabilities = runtime.capabilities()
@@ -1247,7 +1327,7 @@ def _run(program: object, runtime: Runtime, mode: CompileMode, /) -> _Analyzer:
             name = _cstr(node.attr("name")) or ""
             if name in analyzer.temporal_lineages:
                 analyzer.check_stream_ordering(node, root, name)
-    return analyzer
+    return analyzer, capabilities
 
 
 def analyze_program(
@@ -1257,8 +1337,7 @@ def analyze_program(
 
     runtime_value = _require_runtime(runtime)
     mode_value = _require_mode(mode)
-    analyzer = _run(program, runtime_value, mode_value)
-    capabilities = runtime_value.capabilities()
+    analyzer, capabilities = _run(program, runtime_value, mode_value)
     return AnalysisResult(
         mode=mode_value,
         program_fingerprint=program.fingerprint,
@@ -1275,8 +1354,7 @@ def explain_program(program: object, runtime: object, mode: object, /) -> str:
 
     runtime_value = _require_runtime(runtime)
     mode_value = _require_mode(mode)
-    analyzer = _run(program, runtime_value, mode_value)
-    capabilities = runtime_value.capabilities()
+    analyzer, capabilities = _run(program, runtime_value, mode_value)
     lines = [
         f"program {program.name}",
         f"  mode {mode_value}",
