@@ -26,7 +26,8 @@ below.
 - **[Connectors and stream projects](connectors.md)** — exact connector
   identities, delivery limits, project fragments, windows, and recovery
 - **[Python API guide](python-api.md)** — `PipelineBuilder`, batches, UDFs,
-  async execution, NumPy/JAX, projects, and runners
+  async execution, NumPy/JAX, symbolic declarations and static analysis,
+  projects, and runners
 - **[Rust API guide](rust-api.md)** — native batches, operators, graph
   compiler, UDF/provider registries, and recovery, with paired examples
 - **[API reference](api-reference.md)** — the supported surfaces at a glance:
@@ -51,10 +52,12 @@ below.
 - **[Streaming engine research](research/2026-08-02-arroyo-risingwave-streaming-research.md)**
   — point-in-time Arroyo/RisingWave architecture research and Calc-Flow
   continuous-runtime recommendations
-- **[Symbolic computation engine proposal](superpowers/specs/2026-08-22-symbolic-computation-engine-design.md)**
+- **[Symbolic computation engine design](superpowers/specs/2026-08-22-symbolic-computation-engine-design.md)**
   — point-in-time Python symbolic IR, batch/stream lowering, and native
   operator design, paired with its
-  [phased implementation plan](superpowers/plans/2026-08-22-symbolic-computation-engine.md)
+  [phased implementation plan](superpowers/plans/2026-08-22-symbolic-computation-engine.md).
+  The immutable declaration and static-analysis layer is available today; see
+  the [Python API guide](python-api.md)
 - **[Project schema](../schemas/project-v3.schema.json)** — the canonical
   generated v3 project contract
 - **[Studio README](../web-ui/README.md)** — the local calc-flow-studio

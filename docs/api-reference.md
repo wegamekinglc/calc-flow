@@ -52,7 +52,7 @@ The `calc_flow` crate re-exports its supported public types from
 | Batch graph        | `PipelineBuilder`, `Edge`, `PortEndpoint`, `BatchExecutionPlan`                                                    |
 | Stream plan        | `StreamExecutionPlan`, `StreamRequirements`, `DeliveryGuarantee`, `StreamRuntimeConfig`                            |
 | Operator traits    | `Port`, `OperatorMetadata`, `NodeOperator`, `BatchOperator`, `StreamOperator`, `OperatorStateSnapshot`             |
-| Built-in operators | `ExpressionOperator`, `SqlOperator`, `UnionOperator`, `WindowAggregateOperator`, `StreamJoinOperator`             |
+| Built-in operators | `ExpressionOperator`, `SqlOperator`, `UnionOperator`, `WindowAggregateOperator`, `StreamJoinOperator`              |
 | Window model       | `WindowSpec`, `WindowGeometry`, `AggregateSpec`, `AggregateFunction`, `MAX_WINDOW_OVERLAP`                         |
 | Stream join model  | `StreamJoinSpec`, `StreamJoinType`, `JoinTimeBounds`, `JoinStateLimits`, `StreamJoinStatus`                        |
 | Execution          | `ExecutionOptions`, `RunResult`, `RunMetadata`, `NodeTiming`                                                       |
@@ -258,6 +258,33 @@ the owned thread; dropping the job schedules cancellation and settlement
 before reclaiming it. Observer cancellation during terminal cleanup cannot
 strand the thread. Once the native terminal outcome has linearized, it wins
 over cancellation that arrives while the thread is being reclaimed.
+
+### Symbolic declarations
+
+`calc_flow.symbolic` is the pure declaration surface: immutable expressions,
+programs, and static analysis with no data execution path. Every expression,
+feature, program, and analysis result is immutable; constructors copy
+caller-owned sequences and mappings.
+
+| Member                                                                        | Contract                                                                |
+| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `Expr` / `ColumnExpr` / `ArrayExpr` / `TableExpr` / `Parameter`               | Immutable typed declaration values with v1 digests                      |
+| `table_input(name, *, schema, entity_by=(), event_time=None, sequence_by=())` | Declare one named table input                                           |
+| `parameter(name, *, kind=...)`                                                | Declare one named static table or array input                           |
+| `Field(name, data_type, nullable=True)`                                       | One exact table field declaration                                       |
+| `rows(size)` / `duration(micros)`                                             | Row-count and exact-microsecond rolling frames                          |
+| `exact_time(...)` / `event_time_bucket(...)`                                  | Cross-section group declarations                                        |
+| `row` / `ts` / `cs` / `table` / `linalg` / `window`                           | Namespace functions over expressions                                    |
+| `FeatureSet(features=())` / `.with_feature(name, value)`                      | Ordered uniquely named column expressions                               |
+| `TableExpr.with_columns(features)`                                            | Append a feature set as derived columns                                 |
+| `Program(name, *, inputs=(), outputs=())`                                     | Declared inputs and outputs with the runtime-independent v1 fingerprint |
+| `Program.analyze(runtime, *, mode)` / `.explain(runtime, *, mode)`            | Static analysis and deterministic fact rendering                        |
+| `AnalysisIssue` / `AnalysisResult`                                            | Immutable findings with stable output/input-rooted paths                |
+
+Structural identity uses `identical()`; public comparison operators build
+symbolic expressions, and converting one to `bool` fails. See the
+[Python API guide](python-api.md) for the declaration, fingerprint, and
+analysis contract.
 
 ## Local HTTP API
 

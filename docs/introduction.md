@@ -164,6 +164,27 @@ the resulting table matrix by same-backend weights.
 Unconnected required inputs become named graph inputs. Duplicate port names are
 qualified with the node ID. Unconnected outputs become named graph outputs.
 
+## Symbolic declarations
+
+Python applications can also declare a calculation symbolically before any
+graph is built. The `calc_flow.symbolic` package holds typed immutable column,
+table, array, and parameter expressions with canonical v1 digests; an ordered
+`FeatureSet` of uniquely named features that `TableExpr.with_columns` appends
+as derived columns; and an immutable `Program` over declared inputs and
+outputs. The package is declaration and analysis only: it exposes no `eval`,
+data, or runner path, and execution remains owned by the execution plans and
+runners above.
+
+Every `Program` carries a runtime-independent v1 fingerprint over its
+declaration graph. `Program.analyze(runtime, mode=...)` verifies the program
+statically — value types, domains and lineages, symbolic dimensions,
+attachment compatibility, state requirements, and stream safety — from the
+declaration graph alone, reporting immutable issues on stable output- or
+input-rooted paths; `Program.explain(runtime, mode=...)` renders the same
+facts deterministically. Type inference proves only what the runtime
+capability snapshot proves, so cross-type arithmetic requires an explicit
+`row.cast`. The full contract is in the [Python API guide](python-api.md).
+
 ## Table execution
 
 DataFusion is the only table query/calculation engine. `ExpressionOperator`
@@ -343,6 +364,8 @@ The Python package lives under `python/calc_flow/`. The native extension is
 `calc_flow._native`; pure Python modules provide:
 
 - functional builder and runtime wrappers;
+- immutable symbolic declarations, programs, and static analysis
+  (`calc_flow.symbolic`);
 - strict Pydantic project documents;
 - async/blocking project-store adapters;
 - the source-driven continuous runner/job adapter;

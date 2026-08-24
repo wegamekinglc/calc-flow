@@ -405,6 +405,91 @@ not promise a host-free transfer path. The construction of caller input
 optional JAX paths are in
 [`examples/07_array_and_dataframe.py`](../examples/07_array_and_dataframe.py).
 
+## Symbolic declarations and static analysis
+
+`calc_flow.symbolic` is the pure declaration surface: typed immutable
+expressions, feature sets, and programs with canonical identities plus static
+analysis over the declaration graph. It has no data execution path — there is
+no `eval`, `push`, `value`, `transform`, preview evaluator, or formula parser —
+and execution stays owned by the existing execution plans and runners.
+
+```python
+from calc_flow import Runtime
+from calc_flow.symbolic import FeatureSet, Field, Program, table_input
+
+quotes = table_input(
+    "quotes",
+    schema=[
+        Field("ts", "timestamp[us, UTC]", nullable=False),
+        Field("x", "float64"),
+        Field("y", "float64"),
+    ],
+)
+signals = quotes.with_columns(FeatureSet([("score", quotes["x"] + quotes["y"])]))
+program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+
+result = program.analyze(Runtime(), mode="batch")
+assert result.issues == ()
+```
+
+`table_input` declares one named table input with an exact ordered schema — a
+sequence of `Field` values, never a mapping; `event_time`, `entity_by`, and
+`sequence_by` declare the ordering facts of a temporal input. Selecting
+`quotes["x"]` builds a `ColumnExpr`; arithmetic, comparison, and boolean
+composition build immutable expression nodes whose canonical v1 digests are
+stable across processes. Public comparisons build symbolic expressions:
+converting an expression to `bool` fails, and `identical()` is the structural
+identity check.
+
+A `FeatureSet` is an ordered immutable set of uniquely named column
+expressions; `with_feature` appends one. `TableExpr.with_columns(features)`
+returns a new table with the declared features appended as derived columns.
+The `row`, `ts`, `cs`, `table`, `linalg`, and `window` namespaces expose
+row-local functions, rolling frames (`rows`/`duration`), cross-section groups
+(`exact_time`/`event_time_bucket`), table bridges, and matrix work.
+
+A `Program` declares uniquely named inputs (`table_input` or `parameter`
+values) and outputs (tables or arrays) in declaration order. Its `fingerprint`
+is the runtime-independent `calc_flow.symbolic.declaration.v1` program
+fingerprint over every unique node reachable from a declared input or output;
+it does not depend on construction history and is stable across conforming
+implementations. Duplicate declared names fail at construction with stable
+paths such as `inputs.quotes: duplicate_name`. An input referenced by an
+output but missing from `inputs` is reported during analysis as an issue
+rooted at `inputs.<name>`.
+
+`Program.analyze(runtime, mode=...)` and `Program.explain(runtime, mode=...)`
+require an explicit `Runtime` and a `batch` or `stream` mode; both consume one
+immutable capability snapshot and record its session and revision. From the
+declaration graph alone — no data object, source, sink, or runner is accepted —
+the analysis proves:
+
+- value types, proving only what the capability snapshot proves: identical
+  operand types, the frozen rolling/cross-section output-type table, and exact
+  field resolution; cross-type arithmetic needs an explicit `row.cast`;
+- domains and row lineages, rejecting cross-input lineage mixing;
+- symbolic dimensions through `linalg.from_columns` and `linalg.matmul`,
+  retaining the row axis of a table-derived array;
+- attachment compatibility for `table.attach_columns`;
+- state requirements per output, rendered by `explain` as
+  `state cross_section, duration(60000000)`-style facts; and
+- stream safety: temporal and cross-section inputs need an event-time column
+  with entity and sequence keys, and a stream-mode array output with row-axis
+  lineage is reported as unbounded state.
+
+`analyze` returns an immutable `AnalysisResult` carrying `mode`,
+`program_fingerprint`, `capability_session_id`, `capability_revision`, and an
+`issues` tuple; each finding is an immutable `AnalysisIssue` with a stable
+`path`, `code`, and `message`. Paths start at a named program output or input —
+for example `outputs.signals.score`, `outputs.scores.matmul.right.shape[0]`,
+`inputs.quotes.sequence_by[0]`, and `static_inputs.weights`. Analysis is
+deterministic: it never mutates a declaration node, and repeated runs return
+equal results. The analysis issue codes are `capability_mismatch`,
+`duplicate_name`, `ordering_required`, `schema_mismatch`, `unbounded_state`,
+`unresolved_type`, and `unsupported_type`; construction errors raise
+`ValueError` or `TypeError` with the same path grammar. `explain` renders the
+same facts as a deterministic multi-line report.
+
 ## Projects and persistence
 
 `ProjectDocument` validates a strict `format_version: 3` mapping with the Rust
