@@ -5,6 +5,23 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-25: Extend the runtime capability snapshot to lifecycle-aware
+  schema version 2 across Python and Studio. `OperatorCapability` and
+  `ProviderCapability` report execution modes, output finality, statefulness,
+  micro-batch invariance, watermark requirement, checkpoint support with a
+  positive state version exactly when checkpointed state is declared,
+  determinism, and replay safety; providers additionally report static-input
+  support, a partition contract, and closed `CapabilityRule` /
+  `ProviderArrayRules` identities. The vocabularies and rule identities are
+  closed and validated fail-closed at construction, in the Studio `/api/v3`
+  response models, and in the browser decoder: unknown identities, forged
+  lifecycle keys on registration records, and inconsistent state claims are
+  rejected. Existing provider registrations stay source compatible and
+  report batch-only conservative values until an approved stream proof
+  exists. `GET /api/v3/capabilities` serves `schemaVersion` 2 with the
+  nested runtime version removed; clients consuming the version 1 shape must
+  regenerate their contract.
+
 - 2026-08-24: Add the public symbolic declaration surface
   `calc_flow.symbolic`. Typed immutable column, table, array, and parameter
   expressions carry canonical v1 digests; an ordered `FeatureSet` of uniquely
