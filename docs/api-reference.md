@@ -268,9 +268,9 @@ over cancellation that arrives while the thread is being reclaimed.
 ### Symbolic declarations
 
 `calc_flow.symbolic` is the pure declaration surface: immutable expressions,
-programs, and static analysis with no data execution path. Every expression,
-feature, program, and analysis result is immutable; constructors copy
-caller-owned sequences and mappings.
+programs, static analysis, and row-local compilation with no data execution
+path. Every expression, feature, program, and analysis result is immutable;
+constructors copy caller-owned sequences and mappings.
 
 | Member                                                                        | Contract                                                                |
 | ----------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
@@ -285,12 +285,13 @@ caller-owned sequences and mappings.
 | `TableExpr.with_columns(features)`                                            | Append a feature set as derived columns                                 |
 | `Program(name, *, inputs=(), outputs=())`                                     | Declared inputs and outputs with the runtime-independent v1 fingerprint |
 | `Program.analyze(runtime, *, mode)` / `.explain(runtime, *, mode)`            | Static analysis and deterministic fact rendering                        |
+| `Program.compile_batch(runtime)` / `.compile_stream(runtime, *, ...)`         | Lower a row-local program to a strict project-v3 execution plan         |
 | `AnalysisIssue` / `AnalysisResult`                                            | Immutable findings with stable output/input-rooted paths                |
 
 Structural identity uses `identical()`; public comparison operators build
 symbolic expressions, and converting one to `bool` fails. See the
-[Python API guide](python-api.md) for the declaration, fingerprint, and
-analysis contract.
+[Python API guide](python-api.md) for the declaration, fingerprint,
+analysis, and compilation contract.
 
 ## Local HTTP API
 

@@ -5,6 +5,24 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-26: Compile symbolic row-local programs into execution plans.
+  `Program.compile_batch(runtime)` and `Program.compile_stream(runtime, *,
+  allowed_lateness_micros=0, late_policy="error")` lower literal, field,
+  arithmetic, comparison, boolean, `where`, `coalesce`,
+  `log`/`exp`/`sqrt`/`abs`/`clip`/`cast`, and
+  `select`/`filter`/`with_columns` declarations into strict project-v3
+  `expression` nodes. Row-local chains fuse into one node per program
+  output, and structurally shared non-trivial subexpressions materialize
+  exactly once through deterministically named CSE tiers. Node IDs and plan
+  fingerprints are deterministic, the lowered project carries strict JSON
+  only, the Rust graph compiler keeps final validation, and no symbolic
+  Python runs while a compiled plan executes. Declarations outside the
+  row-local lowerer fail loudly at compile time. Stream compilation now
+  also rejects read-only `expression`/`sql` queries that call volatile
+  built-in functions such as `random()`, resolved against the built-in
+  default function registry, so the deterministic and replay-safe
+  capability claims of those operators stay truthful.
+
 - 2026-08-25: Extend the runtime capability snapshot to lifecycle-aware
   schema version 2 across Python and Studio. `OperatorCapability` and
   `ProviderCapability` report execution modes, output finality, statefulness,

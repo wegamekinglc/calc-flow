@@ -196,9 +196,9 @@ The `operators` tuple contains exactly `expression@1`, `sql@1`, and
 a watermark; `expression@1` is the only micro-batch-invariant operator. All
 three report `deterministic=True` and `replay_safe=True`. For `sql@1` those
 two claims hold from the engine viewpoint: exactly-once stream plans reject
-nodes that select volatile registered UDFs, while volatile built-in SQL
-functions such as `random()` inside a read-only `SELECT` are outside that
-validation.
+nodes that select volatile registered UDFs, and stream compilation rejects
+read-only queries that call volatile built-in SQL functions such as
+`random()`.
 
 Providers registered through `register_provider` keep their existing
 signature and source compatibility. The registration API accepts no lifecycle
@@ -578,20 +578,24 @@ supplied at execution must match the declared input schema exactly.
 Analysis rejections surface as `CompileError` with the first issue's
 `{path}: {code}: {message}`. Declarations the row-local lowerer does not
 implement — `ts` rolling primitives, `cs` cross-section statistics, event
-`window` nodes, `linalg` array bridges, array outputs, and `parameter` static
-inputs — fail with the eighth issue code `unknown_primitive_version` rooted at
-the output or `static_inputs.<name>`, in both batch and stream modes; a stream
-aggregate or SQL window is never silently made batch-local. Casts to
-non-portable targets fail with `unsupported_type` at
-`outputs.<name>.cast.data_type`. The lateness arguments of `compile_stream`
-are validated and accepted for forward compatibility; row-local lowering has
-no stateful late-row surface.
+`window` nodes, `linalg` array bridges, and `parameter` static inputs — fail
+with the eighth issue code `unknown_primitive_version` rooted at the output
+or `static_inputs.<name>`, in both batch and stream modes; a stream
+aggregate or SQL window is never silently made batch-local. Array outputs
+fail with `unknown_primitive_version` in batch mode; stream mode rejects
+them earlier, at the analysis phase, with `unbounded_state` rooted at
+`outputs.<name>` — the stream-safety rule for an array output with row-axis
+lineage described above. Casts to non-portable targets fail with
+`unsupported_type` at `outputs.<name>.cast.data_type`. The lateness
+arguments of `compile_stream` are validated and accepted for forward
+compatibility; row-local lowering has no stateful late-row surface.
 
 Stream plans also reject read-only queries that call volatile built-in
 functions (for example `random()`): `compile_stream` resolves every function
-in an expression or SQL node's query against the runtime function registry
-and fails volatile calls before any source opens, so the deterministic,
-replay-safe lifecycle claims of those operators remain truthful.
+in an expression or SQL node's query against the built-in default function
+registry and fails volatile calls before any source opens, so the
+deterministic, replay-safe lifecycle claims of those operators remain
+truthful.
 
 ## Projects and persistence
 
