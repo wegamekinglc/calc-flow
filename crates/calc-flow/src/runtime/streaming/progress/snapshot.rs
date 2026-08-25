@@ -216,6 +216,7 @@ mod tests {
             .iter()
             .map(|emission| match emission {
                 DriverEmission::ForwardData { .. } => "data",
+                DriverEmission::ForwardControl { .. } => "control",
                 DriverEmission::Progress(_) => "progress",
             })
             .collect()
@@ -241,6 +242,7 @@ mod tests {
             .iter()
             .map(|emission| match emission {
                 DriverEmission::ForwardData { .. } => "data",
+                DriverEmission::ForwardControl { .. } => "control",
                 DriverEmission::Progress(_) => "progress",
             })
             .collect()

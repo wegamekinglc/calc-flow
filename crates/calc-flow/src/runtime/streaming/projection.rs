@@ -1265,8 +1265,17 @@ impl StatusProjection {
         self.sources
             .iter()
             .map(|(source_id, projection)| {
-                let progress = &status.sources[source_id];
-                let metrics = &status.metrics.sources[source_id];
+                // A failed start (for example a rejected recovery) never
+                // registers task statuses, so absent entries project as
+                // default progress instead of panicking.
+                let empty_progress = super::runner::SourceStatus::default();
+                let empty_metrics = super::metrics::SourceMetrics::default();
+                let progress = status.sources.get(source_id).unwrap_or(&empty_progress);
+                let metrics = status
+                    .metrics
+                    .sources
+                    .get(source_id)
+                    .unwrap_or(&empty_metrics);
                 (
                     source_id.clone(),
                     SourceStatus {
@@ -1327,8 +1336,17 @@ impl StatusProjection {
         self.sinks
             .iter()
             .map(|(sink_id, projection)| {
-                let metrics = &status.metrics.sinks[&projection.metric_id];
-                let progress = &status.sinks[&projection.metric_id];
+                let empty_metrics = super::metrics::SinkMetrics::default();
+                let empty_progress = super::runner::SinkStatus::default();
+                let metrics = status
+                    .metrics
+                    .sinks
+                    .get(&projection.metric_id)
+                    .unwrap_or(&empty_metrics);
+                let progress = status
+                    .sinks
+                    .get(&projection.metric_id)
+                    .unwrap_or(&empty_progress);
                 (
                     sink_id.clone(),
                     SinkStatus {

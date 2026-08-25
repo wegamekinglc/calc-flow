@@ -997,7 +997,7 @@ pub(crate) struct ContinuousJob {
     _ownership: JobOwnershipToken,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct SourceStatus {
     pub(crate) replayable: bool,
     pub(crate) latest_observed_order: Option<Vec<u8>>,
@@ -15240,16 +15240,11 @@ mod tests {
         }
     }
 
-    /// Runs one AC5 `Join`->Window scenario through a real `StreamingRunner` and
-    /// returns the window's emitted pair counts (spec AC5).
-    async fn run_ac5_join_window(
+    /// Builds the AC5 `Join`->Window graph on one prefixed event-time column.
+    fn ac5_join_window_plan(
         bounds: JoinTimeBounds,
         window_column: &str,
-        left_rows: &[(&str, i64)],
-        left_watermark: i64,
-        right_rows: &[(&str, i64)],
-        right_watermark: i64,
-    ) -> Vec<i64> {
+    ) -> crate::StreamExecutionPlan {
         let schema = Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
             datafusion::arrow::datatypes::Field::new(
                 "key",
@@ -15289,7 +15284,7 @@ mod tests {
             output: "pairs".into(),
         }];
         let window = WindowAggregateOperator::new("agg", join_output, window_spec).unwrap();
-        let plan = PipelineBuilder::new("ac5")
+        PipelineBuilder::new("ac5")
             .unwrap()
             .add_node("match", Box::new(join))
             .unwrap()
@@ -15304,33 +15299,27 @@ mod tests {
                 &UdfRegistry::new().snapshot(),
                 &StreamRequirements::default(),
             )
-            .unwrap();
+            .unwrap()
+    }
+
+    /// Runs one AC5 `Join`->Window scenario through a real `StreamingRunner`
+    /// with the given source bindings and returns the window's emitted pair
+    /// counts (spec AC5).
+    async fn run_ac5_join_window_from_bindings(
+        plan: crate::StreamExecutionPlan,
+        left: SourceBinding,
+        right: SourceBinding,
+    ) -> Vec<i64> {
         let rows = Arc::new(Mutex::new(Vec::new()));
         let mut spec = ac5_job_spec(plan, &rows);
         spec.sources = vec![
             NamedSourceBinding {
                 binding_id: "left".into(),
-                binding: SourceBinding::new(
-                    Box::new(FiniteSource {
-                        events: ac5_scripted_events(left_rows, left_watermark),
-                        closed: Arc::new(AtomicUsize::new(0)),
-                    }),
-                    None,
-                    0,
-                )
-                .unwrap(),
+                binding: left,
             },
             NamedSourceBinding {
                 binding_id: "right".into(),
-                binding: SourceBinding::new(
-                    Box::new(FiniteSource {
-                        events: ac5_scripted_events(right_rows, right_watermark),
-                        closed: Arc::new(AtomicUsize::new(0)),
-                    }),
-                    None,
-                    0,
-                )
-                .unwrap(),
+                binding: right,
             },
         ];
         let runner = ContinuousRunner::new();
@@ -15340,6 +15329,36 @@ mod tests {
         assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
         drop(job);
         rows.lock().clone()
+    }
+
+    fn ac5_finite_binding(events: VecDeque<SourceEvent>) -> SourceBinding {
+        SourceBinding::new(
+            Box::new(FiniteSource {
+                events,
+                closed: Arc::new(AtomicUsize::new(0)),
+            }),
+            None,
+            0,
+        )
+        .unwrap()
+    }
+
+    /// Runs one AC5 `Join`->Window scenario through a real `StreamingRunner` and
+    /// returns the window's emitted pair counts (spec AC5).
+    async fn run_ac5_join_window(
+        bounds: JoinTimeBounds,
+        window_column: &str,
+        left_rows: &[(&str, i64)],
+        left_watermark: i64,
+        right_rows: &[(&str, i64)],
+        right_watermark: i64,
+    ) -> Vec<i64> {
+        run_ac5_join_window_from_bindings(
+            ac5_join_window_plan(bounds, window_column),
+            ac5_finite_binding(ac5_scripted_events(left_rows, left_watermark)),
+            ac5_finite_binding(ac5_scripted_events(right_rows, right_watermark)),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -15406,5 +15425,1083 @@ mod tests {
         )
         .await;
         assert_eq!(counts, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn ac5_idle_reactivation_keeps_retained_rows_matchable() {
+        // Left goes Idle after its first watermark; Idle must not evict the
+        // retained left row and must not remove left from the output-frontier
+        // calculation. Reactivated left data still matches later right rows,
+        // and both windows close exactly once (spec AC5/AC6).
+        let mut left = ac5_scripted_events(&[("a", 95)], 100);
+        left.push_back(SourceEvent::Idle);
+        let reactivation = join_ts_row("b", 105);
+        left.push_back(SourceEvent::Data {
+            batch: reactivation,
+            cursor: Cursor::unbound(2_u64.to_be_bytes().to_vec(), JsonMap::new()).unwrap(),
+        });
+        left.push_back(SourceEvent::Watermark(EventTime::from_micros(110)));
+        let mut right = ac5_scripted_events(&[("a", 100)], 100);
+        let late_right = join_ts_row("b", 106);
+        right.push_back(SourceEvent::Data {
+            batch: late_right,
+            cursor: Cursor::unbound(2_u64.to_be_bytes().to_vec(), JsonMap::new()).unwrap(),
+        });
+        right.push_back(SourceEvent::Watermark(EventTime::from_micros(120)));
+
+        let counts = run_ac5_join_window_from_bindings(
+            ac5_join_window_plan(
+                JoinTimeBounds::new(StdDuration::from_micros(0), StdDuration::from_micros(10))
+                    .unwrap(),
+                "left__ts",
+            ),
+            ac5_finite_binding(left),
+            ac5_finite_binding(right),
+        )
+        .await;
+        // [90,100) holds the pre-Idle pair and [100,110) the post-reactivation
+        // pair; both close because the final frontier min(110-0, 120-10)=110.
+        assert_eq!(counts, vec![1, 1], "idle reactivation windows");
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the restore scenario is clearest as one end-to-end test"
+    )]
+    async fn ac5_checkpoint_restore_preserves_the_join_window_result() {
+        // Durable cut after both data rows but before either watermark: the
+        // restored job resumes its source cursors, restores Join state, and
+        // still delivers every legal pair to the Window exactly once instead
+        // of re-forwarding or losing it (spec AC5/AC12).
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Arc::new(
+            LocalStateBackend::new(directory.path().join("state"))
+                .await
+                .unwrap(),
+        );
+        let manifest_root = directory.path().join("manifests");
+        let checkpoint = || {
+            CheckpointRuntimeSpec::new(
+                backend.clone(),
+                &manifest_root,
+                StreamRuntimeConfig {
+                    checkpoint_interval: StdDuration::from_secs(3_600),
+                    checkpoint_timeout: StdDuration::from_secs(10),
+                    ..StreamRuntimeConfig::default()
+                },
+            )
+            .unwrap()
+        };
+        let left_release = Arc::new(AtomicBool::new(false));
+        let right_release = Arc::new(AtomicBool::new(false));
+        let rows = Arc::new(Mutex::new(Vec::new()));
+        let spec = |left_release: Arc<AtomicBool>,
+                    right_release: Arc<AtomicBool>|
+         -> ContinuousJobSpec {
+            let mut spec = ac5_job_spec(
+                ac5_join_window_plan(
+                    JoinTimeBounds::new(StdDuration::from_micros(0), StdDuration::from_micros(10))
+                        .unwrap(),
+                    "left__ts",
+                ),
+                &rows,
+            );
+            spec.sources = vec![
+                NamedSourceBinding {
+                    binding_id: "left".into(),
+                    binding: SourceBinding::new(
+                        Box::new(PausedWatermarkSource {
+                            key: "a",
+                            ts: 95,
+                            order: 1,
+                            watermark: 110,
+                            release: left_release,
+                            data_delivered: false,
+                            watermark_delivered: false,
+                        }),
+                        None,
+                        0,
+                    )
+                    .unwrap(),
+                },
+                NamedSourceBinding {
+                    binding_id: "right".into(),
+                    binding: SourceBinding::new(
+                        Box::new(PausedWatermarkSource {
+                            key: "a",
+                            ts: 100,
+                            order: 1,
+                            watermark: 120,
+                            release: right_release,
+                            data_delivered: false,
+                            watermark_delivered: false,
+                        }),
+                        None,
+                        0,
+                    )
+                    .unwrap(),
+                },
+            ];
+            spec
+        };
+
+        let mut first_runner = ContinuousRunner::new();
+        let first_job = first_runner
+            .start_checkpointed(
+                spec(Arc::clone(&left_release), Arc::clone(&right_release)),
+                checkpoint(),
+            )
+            .await
+            .unwrap();
+        wait_for_join_emission(&first_job, 1).await;
+        let epoch = tokio::time::timeout(StdDuration::from_secs(5), first_job.trigger_checkpoint())
+            .await
+            .expect("ac5 restore checkpoint should not hang")
+            .unwrap();
+        assert_eq!(epoch, crate::Epoch::INITIAL);
+        assert_eq!(
+            first_job.cancel().await.state,
+            ContinuousJobState::Cancelled
+        );
+        drop(first_job);
+        first_runner.shutdown().await.unwrap();
+
+        left_release.store(true, Ordering::SeqCst);
+        right_release.store(true, Ordering::SeqCst);
+        let mut restart_runner = ContinuousRunner::new();
+        let restart_job = restart_runner
+            .start_checkpointed(spec(left_release, right_release), checkpoint())
+            .await
+            .unwrap();
+        let outcome = tokio::time::timeout(StdDuration::from_secs(5), restart_job.wait())
+            .await
+            .expect("ac5 restart hung");
+        assert_eq!(outcome.state, ContinuousJobState::Completed, "{outcome:?}");
+        drop(restart_job);
+        restart_runner.shutdown().await.unwrap();
+        // Exactly one window emission: restore resumed past the committed
+        // cursors, so the retained pair is neither lost nor replayed.
+        assert_eq!(*rows.lock(), vec![1]);
+    }
+
+    /// Waits until the `match` Join of one running job has emitted `pairs`
+    /// match rows, bounding the wait for the restore scenario.
+    async fn wait_for_join_emission(job: &super::ContinuousJob, pairs: u64) {
+        for _ in 0..500 {
+            let joins = job.stream_join_status();
+            if joins
+                .get("match")
+                .is_some_and(|status| status.emitted_match_rows >= pairs)
+            {
+                return;
+            }
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+        panic!("join never emitted {pairs} pairs before the restore cut");
+    }
+
+    /// A replayable scripted source that delivers one keyed event-time row,
+    /// then holds its watermark back until released, then ends. Restarts skip
+    /// the data row when the durable cursor covers it.
+    struct PausedWatermarkSource {
+        key: &'static str,
+        ts: i64,
+        order: u64,
+        watermark: i64,
+        release: Arc<AtomicBool>,
+        data_delivered: bool,
+        watermark_delivered: bool,
+    }
+
+    #[async_trait]
+    impl StreamSource for PausedWatermarkSource {
+        async fn open(&mut self, cursor: Option<Cursor>) -> Result<()> {
+            if cursor.is_some_and(|cursor| cursor.order() >= self.order.to_be_bytes().as_slice()) {
+                self.data_delivered = true;
+            }
+            Ok(())
+        }
+
+        async fn next(&mut self) -> Result<Option<SourceEvent>> {
+            if !self.data_delivered {
+                self.data_delivered = true;
+                return Ok(Some(SourceEvent::Data {
+                    batch: join_ts_row(self.key, self.ts),
+                    cursor: Cursor::unbound(self.order.to_be_bytes().to_vec(), JsonMap::new())
+                        .unwrap(),
+                }));
+            }
+            if !self.watermark_delivered {
+                while !self.release.load(Ordering::SeqCst) {
+                    tokio::time::sleep(StdDuration::from_millis(5)).await;
+                }
+                self.watermark_delivered = true;
+                return Ok(Some(SourceEvent::Watermark(EventTime::from_micros(
+                    self.watermark,
+                ))));
+            }
+            Ok(None)
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn capabilities(&self) -> SourceCapabilities {
+            SourceCapabilities {
+                replayable: true,
+                max_batch_rows: 1,
+                max_batch_bytes: 1 << 20,
+            }
+        }
+    }
+
+    /// One committed Window emission of the AC14 fault matrix: the operator
+    /// output sequence and the tumbling window's start micros.
+    #[derive(
+        Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+    )]
+    struct Ac14WindowRecord {
+        sequence: u64,
+        window_start: i64,
+        pairs: u64,
+    }
+
+    #[derive(Default)]
+    struct Ac14TransactionalState {
+        committed_epochs: BTreeSet<u64>,
+        visible: Vec<Ac14WindowRecord>,
+    }
+
+    struct Ac14TransactionalSink {
+        pending: Vec<Ac14WindowRecord>,
+        state: Arc<Mutex<Ac14TransactionalState>>,
+    }
+
+    fn ac14_records(state: &JsonMap) -> Result<Vec<Ac14WindowRecord>> {
+        serde_json::from_value(state.get("records").cloned().ok_or_else(|| {
+            CalcFlowError::CheckpointMismatch {
+                message: "AC14 pre-commit records are missing".into(),
+            }
+        })?)
+        .map_err(|error| CalcFlowError::CheckpointMismatch {
+            message: format!("AC14 pre-commit records are invalid: {error}"),
+        })
+    }
+
+    #[async_trait]
+    impl TransactionalStreamSink for Ac14TransactionalSink {
+        async fn open(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn begin_epoch(&mut self, _epoch: crate::Epoch) -> Result<()> {
+            self.pending.clear();
+            Ok(())
+        }
+
+        async fn write(&mut self, batch: &Batch) -> Result<()> {
+            for record in batch.table_payload()?.batches() {
+                let starts = record
+                    .column_by_name("window_start")
+                    .expect("the window emits its start column")
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::TimestampMicrosecondArray>()
+                    .expect("microsecond window starts");
+                let counts = record
+                    .column_by_name("pairs")
+                    .expect("the window emits the pairs aggregate")
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::UInt64Array>()
+                    .expect("the pairs aggregate is a UInt64 column");
+                self.pending
+                    .extend((0..starts.len()).map(|index| Ac14WindowRecord {
+                        sequence: batch.metadata().sequence() + u64::try_from(index).unwrap(),
+                        window_start: starts.value(index),
+                        pairs: counts.value(index),
+                    }));
+            }
+            Ok(())
+        }
+
+        async fn pre_commit(&mut self, _epoch: crate::Epoch) -> Result<JsonMap> {
+            Ok(BTreeMap::from([(
+                "records".into(),
+                serde_json::to_value(&self.pending).unwrap(),
+            )]))
+        }
+
+        async fn commit(&mut self, epoch: crate::Epoch, state: &JsonMap) -> Result<()> {
+            let records = ac14_records(state)?;
+            let mut durable = self.state.lock();
+            if durable.committed_epochs.insert(epoch.as_u64()) {
+                durable.visible.extend(records);
+            }
+            Ok(())
+        }
+
+        async fn abort(&mut self, _epoch: crate::Epoch, _state: Option<&JsonMap>) -> Result<()> {
+            self.pending.clear();
+            Ok(())
+        }
+
+        async fn recover(&mut self, manifest: &crate::CheckpointManifest) -> Result<()> {
+            let state = manifest
+                .sinks()
+                .get("window")
+                .and_then(|entry| entry.pre_commit.clone())
+                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                    message: "AC14 transactional recovery state is missing".into(),
+                })?;
+            self.commit(manifest.epoch(), &state).await
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Transactional mirror of the window output: records the committed
+    /// `(window_start, pairs)` multiset so the partial sink-commit crash can
+    /// fire between two transactional sinks on one output (spec AC14).
+    struct Ac14MirrorTransactionalSink {
+        pending: Vec<(i64, i64)>,
+        state: Arc<Mutex<Ac14TapState>>,
+    }
+
+    #[derive(Default)]
+    struct Ac14TapState {
+        committed_epochs: BTreeSet<u64>,
+        visible: Vec<(i64, i64)>,
+    }
+
+    fn ac14_pair_records(state: &JsonMap) -> Result<Vec<(i64, i64)>> {
+        serde_json::from_value(state.get("windows").cloned().ok_or_else(|| {
+            CalcFlowError::CheckpointMismatch {
+                message: "AC14 mirror pre-commit windows are missing".into(),
+            }
+        })?)
+        .map_err(|error| CalcFlowError::CheckpointMismatch {
+            message: format!("AC14 mirror pre-commit windows are invalid: {error}"),
+        })
+    }
+
+    #[async_trait]
+    impl TransactionalStreamSink for Ac14MirrorTransactionalSink {
+        async fn open(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn begin_epoch(&mut self, _epoch: crate::Epoch) -> Result<()> {
+            self.pending.clear();
+            Ok(())
+        }
+
+        async fn write(&mut self, batch: &Batch) -> Result<()> {
+            for record in batch.table_payload()?.batches() {
+                let starts = record
+                    .column_by_name("window_start")
+                    .expect("the window emits its start column")
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::TimestampMicrosecondArray>()
+                    .expect("microsecond window starts");
+                let counts = record
+                    .column_by_name("pairs")
+                    .expect("the window emits the pairs aggregate")
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::UInt64Array>()
+                    .expect("the pairs aggregate is a UInt64 column");
+                self.pending.extend((0..starts.len()).map(|index| {
+                    (
+                        starts.value(index),
+                        i64::try_from(counts.value(index)).unwrap(),
+                    )
+                }));
+            }
+            Ok(())
+        }
+
+        async fn pre_commit(&mut self, _epoch: crate::Epoch) -> Result<JsonMap> {
+            Ok(BTreeMap::from([(
+                "windows".into(),
+                serde_json::to_value(&self.pending).unwrap(),
+            )]))
+        }
+
+        async fn commit(&mut self, epoch: crate::Epoch, state: &JsonMap) -> Result<()> {
+            let windows = ac14_pair_records(state)?;
+            let mut durable = self.state.lock();
+            if durable.committed_epochs.insert(epoch.as_u64()) {
+                durable.visible.extend(windows);
+            }
+            Ok(())
+        }
+
+        async fn abort(&mut self, _epoch: crate::Epoch, _state: Option<&JsonMap>) -> Result<()> {
+            self.pending.clear();
+            Ok(())
+        }
+
+        async fn recover(&mut self, manifest: &crate::CheckpointManifest) -> Result<()> {
+            let state = manifest
+                .sinks()
+                .get("mirror")
+                .and_then(|entry| entry.pre_commit.clone())
+                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                    message: "AC14 mirror recovery state is missing".into(),
+                })?;
+            self.commit(manifest.epoch(), &state).await
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A replayable multi-row scripted source: data rows carry monotonic
+    /// cursor orders and the trailing watermark always replays; restarts skip
+    /// the data rows the durable cursor already covers. `hold_open` keeps the
+    /// source alive after its watermark so a manual checkpoint runs while the
+    /// ingresses are still active.
+    struct ScriptedSeekingSource {
+        rows: Vec<(&'static str, i64)>,
+        watermark: i64,
+        next: usize,
+        watermark_sent: bool,
+        hold_open: bool,
+    }
+
+    #[async_trait]
+    impl StreamSource for ScriptedSeekingSource {
+        async fn open(&mut self, cursor: Option<Cursor>) -> Result<()> {
+            if let Some(cursor) = cursor {
+                let bytes: [u8; 8] =
+                    cursor
+                        .order()
+                        .try_into()
+                        .map_err(|_| CalcFlowError::CheckpointMismatch {
+                            message: "AC14 cursor order is not a u64".into(),
+                        })?;
+                self.next =
+                    usize::try_from(u64::from_be_bytes(bytes)).expect("cursor order fits usize");
+            }
+            Ok(())
+        }
+
+        async fn next(&mut self) -> Result<Option<SourceEvent>> {
+            if self.next < self.rows.len() {
+                let (key, ts) = self.rows[self.next];
+                let order = u64::try_from(self.next + 1).unwrap();
+                self.next += 1;
+                return Ok(Some(SourceEvent::Data {
+                    batch: join_ts_row(key, ts),
+                    cursor: Cursor::unbound(order.to_be_bytes().to_vec(), JsonMap::new()).unwrap(),
+                }));
+            }
+            if !self.watermark_sent {
+                self.watermark_sent = true;
+                return Ok(Some(SourceEvent::Watermark(EventTime::from_micros(
+                    self.watermark,
+                ))));
+            }
+            if self.hold_open {
+                std::future::pending::<()>().await;
+            }
+            Ok(None)
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn capabilities(&self) -> SourceCapabilities {
+            SourceCapabilities {
+                replayable: true,
+                max_batch_rows: 1,
+                max_batch_bytes: 1 << 20,
+            }
+        }
+    }
+
+    /// Builds the AC14 Join->Window job spec with exactly-once delivery on
+    /// the window output (spec AC14). When `tap` is set, a second
+    /// transactional sink taps the raw Join output so the partial sink-commit
+    /// crash point can fire between the two commits.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the fault-matrix job spec is clearest as one inline fixture"
+    )]
+    fn ac14_job_spec(
+        job_id: u64,
+        transactional: Arc<Mutex<Ac14TransactionalState>>,
+        hold_open: bool,
+        tap: Option<Arc<Mutex<Ac14TapState>>>,
+    ) -> ContinuousJobSpec {
+        let schema = Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
+            datafusion::arrow::datatypes::Field::new(
+                "key",
+                datafusion::arrow::datatypes::DataType::Utf8,
+                false,
+            ),
+            datafusion::arrow::datatypes::Field::new(
+                "ts",
+                datafusion::arrow::datatypes::DataType::Timestamp(
+                    datafusion::arrow::datatypes::TimeUnit::Microsecond,
+                    None,
+                ),
+                false,
+            ),
+        ]));
+        let join = StreamJoinOperator::new(
+            "match",
+            Arc::clone(&schema),
+            schema,
+            StreamJoinSpec::inner(
+                ["key"],
+                ["key"],
+                "ts",
+                "ts",
+                JoinTimeBounds::new(StdDuration::from_micros(0), StdDuration::from_micros(10))
+                    .unwrap(),
+                JoinStateLimits::new(100_000, 134_217_728, 1_000_000).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let join_output = Arc::clone(join.output_ports()[0].schema().expect("derived schema"));
+        let mut window_spec =
+            WindowSpec::tumbling("left__ts", StdDuration::from_micros(10)).unwrap();
+        window_spec.aggregates = vec![AggregateSpec {
+            function: AggregateFunction::Count,
+            column: "left__ts".into(),
+            output: "pairs".into(),
+        }];
+        let window = WindowAggregateOperator::new("agg", join_output, window_spec).unwrap();
+        let builder = PipelineBuilder::new("ac14-join-window-fault")
+            .unwrap()
+            .add_node("match", Box::new(join))
+            .unwrap()
+            .add_node("agg", Box::new(window))
+            .unwrap()
+            .connect(Edge::new(
+                PortEndpoint::new("match", "output").unwrap(),
+                PortEndpoint::new("agg", "input").unwrap(),
+            ))
+            .unwrap();
+        let plan = builder
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements {
+                    delivery: BTreeMap::from([(
+                        "output".into(),
+                        crate::DeliveryGuarantee::ExactlyOnce,
+                    )]),
+                },
+            )
+            .unwrap();
+        ContinuousJobSpec {
+            context: StreamJobContext::new(
+                job_id,
+                plan.fingerprint(),
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            ),
+            plan,
+            sources: vec![
+                NamedSourceBinding {
+                    binding_id: "left".into(),
+                    binding: SourceBinding::new(
+                        Box::new(ScriptedSeekingSource {
+                            rows: vec![("a", 95), ("b", 40)],
+                            watermark: 110,
+                            next: 0,
+                            watermark_sent: false,
+                            hold_open,
+                        }),
+                        None,
+                        0,
+                    )
+                    .unwrap(),
+                },
+                NamedSourceBinding {
+                    binding_id: "right".into(),
+                    binding: SourceBinding::new(
+                        Box::new(ScriptedSeekingSource {
+                            rows: vec![("a", 100), ("b", 50)],
+                            watermark: 120,
+                            next: 0,
+                            watermark_sent: false,
+                            hold_open,
+                        }),
+                        None,
+                        0,
+                    )
+                    .unwrap(),
+                },
+            ],
+            sinks: vec![NamedSinkBinding {
+                output_id: "output".into(),
+                sink_id: "window".into(),
+                binding: OrdinarySinkBinding::new_transactional(Box::new(Ac14TransactionalSink {
+                    pending: Vec::new(),
+                    state: transactional,
+                })),
+            }]
+            .into_iter()
+            .chain(tap.map(|state| NamedSinkBinding {
+                output_id: "output".into(),
+                sink_id: "mirror".into(),
+                binding: OrdinarySinkBinding::new_transactional(Box::new(
+                    Ac14MirrorTransactionalSink {
+                        pending: Vec::new(),
+                        state,
+                    },
+                )),
+            }))
+            .collect(),
+            edge_budget: EdgeBudget {
+                max_rows: 1,
+                max_bytes: 1 << 20,
+            },
+            delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+        }
+    }
+
+    /// One AC14 fault-point case: crash during the terminal checkpoint,
+    /// recover with a clean runner, and prove the transactional Join->Window
+    /// output is exactly the expected pair set with non-retreating window
+    /// starts and exactly-restored output sequences (spec AC14).
+    async fn ac14_run_one_fault_point(point: super::CheckpointFaultPoint) {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Arc::new(
+            LocalStateBackend::new(directory.path().join("state"))
+                .await
+                .unwrap(),
+        );
+        let manifest_root = directory.path().join("manifests");
+        let state = Arc::new(Mutex::new(Ac14TransactionalState::default()));
+        let checkpoint = |faulted: bool| {
+            let spec = CheckpointRuntimeSpec::new(
+                backend.clone(),
+                &manifest_root,
+                StreamRuntimeConfig {
+                    checkpoint_interval: StdDuration::from_secs(3_600),
+                    checkpoint_timeout: StdDuration::from_secs(10),
+                    ..StreamRuntimeConfig::default()
+                },
+            )
+            .unwrap();
+            if faulted {
+                spec.with_fault(point, super::CheckpointFaultMode::Restart)
+            } else {
+                spec
+            }
+        };
+
+        let mut first_runner = ContinuousRunner::new();
+        let first_job = first_runner
+            .start_checkpointed(
+                ac14_job_spec(920, Arc::clone(&state), false, None),
+                checkpoint(true),
+            )
+            .await
+            .unwrap();
+        let first_outcome = tokio::time::timeout(StdDuration::from_secs(10), first_job.wait())
+            .await
+            .unwrap_or_else(|_| panic!("AC14 fault at {point:?} hung"));
+        // The injected checkpoint fault must terminate the faulted run before
+        // it can report success.
+        assert_ne!(
+            first_outcome.state,
+            ContinuousJobState::Completed,
+            "AC14 fault at {point:?} must fail the run"
+        );
+        drop(first_job);
+        first_runner.shutdown().await.unwrap();
+
+        let mut restart_runner = ContinuousRunner::new();
+        let restart_job = restart_runner
+            .start_checkpointed(
+                ac14_job_spec(921, Arc::clone(&state), false, None),
+                checkpoint(false),
+            )
+            .await
+            .unwrap();
+        let restart_outcome = tokio::time::timeout(StdDuration::from_secs(10), restart_job.wait())
+            .await
+            .unwrap_or_else(|_| panic!("AC14 recovery after {point:?} hung"));
+        assert_eq!(
+            restart_outcome.state,
+            ContinuousJobState::Completed,
+            "AC14 recovery after {point:?}: {restart_outcome:?}"
+        );
+        drop(restart_job);
+        restart_runner.shutdown().await.unwrap();
+
+        // Zero missing and zero duplicate pairs: exactly the two expected
+        // window emissions, in window-start order, with the exact restored
+        // output sequences.
+        let visible = state.lock().visible.clone();
+        assert_eq!(
+            visible,
+            vec![
+                Ac14WindowRecord {
+                    sequence: 0,
+                    window_start: 40,
+                    pairs: 1,
+                },
+                Ac14WindowRecord {
+                    sequence: 1,
+                    window_start: 90,
+                    pairs: 1,
+                },
+            ],
+            "AC14 transactional output after {point:?}"
+        );
+    }
+
+    /// Partial alignment only fires while an ingress is still active, so its
+    /// crash point runs a manual checkpoint against held-open sources: the
+    /// faulted epoch fails before the operator barrier completes, and the
+    /// recovered run still delivers the exact window set exactly once (spec
+    /// AC14).
+    #[tokio::test]
+    async fn ac14_partial_alignment_mid_flight_checkpoint_recovers_exactly_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Arc::new(
+            LocalStateBackend::new(directory.path().join("state"))
+                .await
+                .unwrap(),
+        );
+        let manifest_root = directory.path().join("manifests");
+        let state = Arc::new(Mutex::new(Ac14TransactionalState::default()));
+        let spec = |job_id: u64| ac14_job_spec(job_id, Arc::clone(&state), true, None);
+        let checkpoint = |faulted: bool| {
+            let spec = CheckpointRuntimeSpec::new(
+                backend.clone(),
+                &manifest_root,
+                StreamRuntimeConfig {
+                    checkpoint_interval: StdDuration::from_secs(3_600),
+                    checkpoint_timeout: StdDuration::from_secs(10),
+                    ..StreamRuntimeConfig::default()
+                },
+            )
+            .unwrap();
+            if faulted {
+                spec.with_fault(
+                    super::CheckpointFaultPoint::PartialAlignment,
+                    super::CheckpointFaultMode::Restart,
+                )
+            } else {
+                spec
+            }
+        };
+
+        let mut first_runner = ContinuousRunner::new();
+        let first_job = first_runner
+            .start_checkpointed(spec(924), checkpoint(true))
+            .await
+            .unwrap();
+        wait_for_join_emission(&first_job, 2).await;
+        let (manual, first_failed) = tokio::time::timeout(StdDuration::from_secs(10), async {
+            tokio::join!(first_job.trigger_checkpoint(), first_job.wait())
+        })
+        .await
+        .expect("AC14 partial-alignment fault hung");
+        assert!(manual.is_err(), "the faulted checkpoint must fail");
+        assert_ne!(
+            first_failed.state,
+            ContinuousJobState::Completed,
+            "the faulted run must not complete"
+        );
+        drop(first_job);
+        first_runner.shutdown().await.unwrap();
+
+        let mut restart_runner = ContinuousRunner::new();
+        let restart_job = restart_runner
+            .start_checkpointed(spec(925), checkpoint(false))
+            .await
+            .unwrap();
+        wait_for_join_emission(&restart_job, 2).await;
+        let epoch =
+            tokio::time::timeout(StdDuration::from_secs(10), restart_job.trigger_checkpoint())
+                .await
+                .expect("AC14 partial-alignment restart checkpoint hung");
+        assert!(epoch.is_ok(), "recovered checkpoint failed: {epoch:?}");
+        assert_eq!(
+            restart_job.cancel().await.state,
+            ContinuousJobState::Cancelled
+        );
+        drop(restart_job);
+        restart_runner.shutdown().await.unwrap();
+
+        let visible = state.lock().visible.clone();
+        assert_eq!(
+            visible,
+            vec![
+                Ac14WindowRecord {
+                    sequence: 0,
+                    window_start: 40,
+                    pairs: 1,
+                },
+                Ac14WindowRecord {
+                    sequence: 1,
+                    window_start: 90,
+                    pairs: 1,
+                },
+            ],
+            "AC14 partial-alignment transactional output"
+        );
+    }
+
+    #[tokio::test]
+    async fn ac14_join_window_fault_matrix_recovers_exactly_once() {
+        for point in super::CheckpointFaultPoint::ALL
+            .into_iter()
+            .filter(|point| {
+                !matches!(
+                    point,
+                    super::CheckpointFaultPoint::PartialAlignment
+                        | super::CheckpointFaultPoint::PartialSinkCommit
+                )
+            })
+        {
+            ac14_run_one_fault_point(point).await;
+        }
+    }
+
+    /// The partial sink-commit crash point fires between transactional
+    /// sinks, so it runs a two-sink Join graph: the window sink commits, the
+    /// tap sink crashes after it, and recovery completes both commits forward
+    /// with the exact expected multisets (spec AC14).
+    #[tokio::test]
+    async fn ac14_partial_sink_commit_between_two_transactional_sinks_recovers() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Arc::new(
+            LocalStateBackend::new(directory.path().join("state"))
+                .await
+                .unwrap(),
+        );
+        let manifest_root = directory.path().join("manifests");
+        let window_state = Arc::new(Mutex::new(Ac14TransactionalState::default()));
+        let tap_state = Arc::new(Mutex::new(Ac14TapState::default()));
+        let checkpoint = |faulted: bool| {
+            let spec = CheckpointRuntimeSpec::new(
+                backend.clone(),
+                &manifest_root,
+                StreamRuntimeConfig {
+                    checkpoint_interval: StdDuration::from_secs(3_600),
+                    checkpoint_timeout: StdDuration::from_secs(10),
+                    ..StreamRuntimeConfig::default()
+                },
+            )
+            .unwrap();
+            if faulted {
+                spec.with_fault(
+                    super::CheckpointFaultPoint::PartialSinkCommit,
+                    super::CheckpointFaultMode::Restart,
+                )
+            } else {
+                spec
+            }
+        };
+
+        let mut first_runner = ContinuousRunner::new();
+        let first_job = first_runner
+            .start_checkpointed(
+                ac14_job_spec(
+                    926,
+                    Arc::clone(&window_state),
+                    false,
+                    Some(Arc::clone(&tap_state)),
+                ),
+                checkpoint(true),
+            )
+            .await
+            .unwrap();
+        let first_outcome = tokio::time::timeout(StdDuration::from_secs(10), first_job.wait())
+            .await
+            .expect("AC14 partial sink-commit fault hung");
+        assert_ne!(
+            first_outcome.state,
+            ContinuousJobState::Completed,
+            "the faulted two-sink run must not complete: {first_outcome:?}"
+        );
+        drop(first_job);
+        first_runner.shutdown().await.unwrap();
+
+        let mut restart_runner = ContinuousRunner::new();
+        let restart_job = restart_runner
+            .start_checkpointed(
+                ac14_job_spec(
+                    927,
+                    Arc::clone(&window_state),
+                    false,
+                    Some(Arc::clone(&tap_state)),
+                ),
+                checkpoint(false),
+            )
+            .await
+            .unwrap();
+        let restart_outcome = tokio::time::timeout(StdDuration::from_secs(10), restart_job.wait())
+            .await
+            .expect("AC14 partial sink-commit recovery hung");
+        assert_eq!(
+            restart_outcome.state,
+            ContinuousJobState::Completed,
+            "AC14 partial sink-commit recovery: {restart_outcome:?}"
+        );
+        drop(restart_job);
+        restart_runner.shutdown().await.unwrap();
+
+        // The window sink committed before the crash; recovery re-installs
+        // that epoch exactly once and the tap completes forward, so both
+        // multisets are exact with no duplicates.
+        let windows = window_state.lock().visible.clone();
+        assert_eq!(
+            windows,
+            vec![
+                Ac14WindowRecord {
+                    sequence: 0,
+                    window_start: 40,
+                    pairs: 1,
+                },
+                Ac14WindowRecord {
+                    sequence: 1,
+                    window_start: 90,
+                    pairs: 1,
+                },
+            ],
+            "AC14 partial sink-commit window output"
+        );
+        let mut windows = tap_state.lock().visible.clone();
+        windows.sort_unstable();
+        assert_eq!(
+            windows,
+            vec![(40, 1), (90, 1)],
+            "AC14 partial sink-commit mirror windows"
+        );
+    }
+
+    /// The same crash point with an ordinary sink stays explicitly
+    /// at-least-once: every window still arrives at least once and no pair is
+    /// lost, while the replayed epoch may re-observe whole window batches
+    /// (spec AC14).
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the at-least-once boundary is clearest as one end-to-end test"
+    )]
+    async fn ac14_ordinary_sink_stays_at_least_once_across_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Arc::new(
+            LocalStateBackend::new(directory.path().join("state"))
+                .await
+                .unwrap(),
+        );
+        let manifest_root = directory.path().join("manifests");
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let spec = || {
+            let mut spec = ac5_job_spec(
+                ac5_join_window_plan(
+                    JoinTimeBounds::new(StdDuration::from_micros(0), StdDuration::from_micros(10))
+                        .unwrap(),
+                    "left__ts",
+                ),
+                &writes,
+            );
+            spec.sources = vec![
+                NamedSourceBinding {
+                    binding_id: "left".into(),
+                    binding: SourceBinding::new(
+                        Box::new(ScriptedSeekingSource {
+                            rows: vec![("a", 95), ("b", 40)],
+                            watermark: 110,
+                            next: 0,
+                            watermark_sent: false,
+                            hold_open: false,
+                        }),
+                        None,
+                        0,
+                    )
+                    .unwrap(),
+                },
+                NamedSourceBinding {
+                    binding_id: "right".into(),
+                    binding: SourceBinding::new(
+                        Box::new(ScriptedSeekingSource {
+                            rows: vec![("a", 100), ("b", 50)],
+                            watermark: 120,
+                            next: 0,
+                            watermark_sent: false,
+                            hold_open: false,
+                        }),
+                        None,
+                        0,
+                    )
+                    .unwrap(),
+                },
+            ];
+            spec
+        };
+        let checkpoint = |faulted: bool| {
+            let spec = CheckpointRuntimeSpec::new(
+                backend.clone(),
+                &manifest_root,
+                StreamRuntimeConfig {
+                    checkpoint_interval: StdDuration::from_secs(3_600),
+                    checkpoint_timeout: StdDuration::from_secs(10),
+                    ..StreamRuntimeConfig::default()
+                },
+            )
+            .unwrap();
+            if faulted {
+                spec.with_fault(
+                    super::CheckpointFaultPoint::ManifestWrite,
+                    super::CheckpointFaultMode::Restart,
+                )
+            } else {
+                spec
+            }
+        };
+
+        let mut first_runner = ContinuousRunner::new();
+        let first_job = first_runner
+            .start_checkpointed(spec(), checkpoint(true))
+            .await
+            .unwrap();
+        let first_outcome = tokio::time::timeout(StdDuration::from_secs(10), first_job.wait())
+            .await
+            .expect("AC14 ordinary fault run hung");
+        assert_ne!(first_outcome.state, ContinuousJobState::Completed);
+        drop(first_job);
+        first_runner.shutdown().await.unwrap();
+
+        let mut restart_runner = ContinuousRunner::new();
+        let restart_job = restart_runner
+            .start_checkpointed(spec(), checkpoint(false))
+            .await
+            .unwrap();
+        let restart_outcome = tokio::time::timeout(StdDuration::from_secs(10), restart_job.wait())
+            .await
+            .expect("AC14 ordinary restart hung");
+        assert_eq!(restart_outcome.state, ContinuousJobState::Completed);
+        drop(restart_job);
+        restart_runner.shutdown().await.unwrap();
+
+        // Zero missing: both tumbling windows arrived, each carrying exactly
+        // one pair. At-least-once replay may add whole-batch duplicates, so
+        // only the per-window pair counts and the minimum coverage are exact.
+        let observed = writes.lock().clone();
+        assert!(
+            observed.len() >= 2,
+            "ordinary sink lost window emissions: {observed:?}"
+        );
+        assert!(
+            observed.iter().all(|count| *count == 1),
+            "window pair counts changed across replay: {observed:?}"
+        );
     }
 }
