@@ -170,7 +170,7 @@ mod checkpoint_cut_tests {
             max_bytes: 1 << 20,
         };
         let (left_sender, mut left_receiver) = edge_channel("left", budget).unwrap();
-        let (right_sender, right_receiver) = edge_channel("right", budget).unwrap();
+        let (right_sender, mut right_receiver) = edge_channel("right", budget).unwrap();
         let cancellation = CancellationToken::new();
         let coordinator = LiveProgressCoordinator::new(
             &prepared,
@@ -244,6 +244,10 @@ mod checkpoint_cut_tests {
         let after_cut = left_receiver.recv().await.unwrap().unwrap();
         assert_eq!(after_cut.kind(), StreamMessageKind::Data);
         assert_eq!(after_cut.as_data().unwrap().metadata().sequence(), 8);
+        // The ended right source routes only its own end-of-input control; no
+        // aggregate fanout reaches it and the barrier skipped its route.
+        let right_end = right_receiver.recv().await.unwrap().unwrap();
+        assert_eq!(right_end.kind(), StreamMessageKind::EndOfInput);
         assert_eq!(right_receiver.metrics().queue_depth, 0);
     }
 
@@ -783,6 +787,14 @@ pub(crate) enum DriverEmission {
     ForwardData {
         binding: BindingOrdinal,
         batch: Batch,
+    },
+    /// One per-binding control attribution (FR23-FR26): a watermark, idle, or
+    /// end-of-input observation reaches only the ingress route of the source
+    /// binding that produced it. Multi-input operators such as stream Join
+    /// depend on per-ingress progress staying unpolluted by the aggregate.
+    ForwardControl {
+        binding: BindingOrdinal,
+        kind: super::aggregate::ProgressEmissionKind,
     },
     Progress(ProgressEmission),
 }
@@ -2484,6 +2496,10 @@ fn evaluate_raw(
                 selected_error(key, "runtime.progress.timers.idle", &error.to_string())
             })?;
             if advances {
+                emissions.push(DriverEmission::ForwardControl {
+                    binding: ordinal,
+                    kind: super::aggregate::ProgressEmissionKind::Watermark(*watermark),
+                });
                 append_progress(
                     emissions,
                     state
@@ -2498,6 +2514,10 @@ fn evaluate_raw(
         }
         RawIngressEvent::ConnectorIdle => {
             remove_timer(state, ordinal, TimerKind::Idle);
+            emissions.push(DriverEmission::ForwardControl {
+                binding: ordinal,
+                kind: super::aggregate::ProgressEmissionKind::Idle,
+            });
             append_progress(
                 emissions,
                 state
@@ -2512,6 +2532,10 @@ fn evaluate_raw(
         RawIngressEvent::EndOfInput => {
             remove_timer(state, ordinal, TimerKind::Watermark);
             remove_timer(state, ordinal, TimerKind::Idle);
+            emissions.push(DriverEmission::ForwardControl {
+                binding: ordinal,
+                kind: super::aggregate::ProgressEmissionKind::EndOfInput,
+            });
             append_progress(
                 emissions,
                 state
@@ -2582,6 +2606,10 @@ fn evaluate_timer(
                     selected_error(timer.key, "runtime.progress.generated", &error.to_string())
                 })?;
             if let Some(watermark) = watermark {
+                emissions.push(DriverEmission::ForwardControl {
+                    binding: ordinal,
+                    kind: super::aggregate::ProgressEmissionKind::Watermark(watermark),
+                });
                 append_progress(
                     emissions,
                     state
@@ -2612,6 +2640,10 @@ fn evaluate_timer(
         }
         TimerKind::Idle => {
             remove_timer(state, ordinal, TimerKind::Idle);
+            emissions.push(DriverEmission::ForwardControl {
+                binding: ordinal,
+                kind: super::aggregate::ProgressEmissionKind::Idle,
+            });
             append_progress(
                 emissions,
                 state
@@ -3176,8 +3208,8 @@ impl LiveProgressCoordinator {
                     )
                     .await?;
                 }
-                DriverEmission::Progress(progress) => {
-                    let message = match progress.kind {
+                DriverEmission::ForwardControl { binding, kind } => {
+                    let message = match kind {
                         super::aggregate::ProgressEmissionKind::Watermark(watermark) => {
                             super::super::StreamMessage::watermark(watermark)
                         }
@@ -3188,11 +3220,21 @@ impl LiveProgressCoordinator {
                             super::super::StreamMessage::end_of_input()
                         }
                     };
-                    for binding_outputs in outputs.values_mut() {
-                        send_progress_fanout(binding_outputs, message.clone(), cancellation)
-                            .await?;
-                    }
+                    send_progress_fanout(
+                        outputs
+                            .get_mut(&binding)
+                            .expect("driver control binding has a prepared route"),
+                        message,
+                        cancellation,
+                    )
+                    .await?;
                 }
+                // Aggregate emissions are driver-internal progress
+                // bookkeeping: operators derive their own aggregate from the
+                // per-binding controls above, and fanning the job-level
+                // watermark into every ingress would overwrite one source's
+                // progress with another's (FR23-FR26).
+                DriverEmission::Progress(_) => {}
             }
         }
         Ok(())
@@ -3957,10 +3999,16 @@ mod tests {
         end.wait_settled().await.unwrap();
         assert!(matches!(
             drain.emissions.as_slice(),
-            [DriverEmission::Progress(super::ProgressEmission {
-                kind: ProgressEmissionKind::EndOfInput,
-                ..
-            })]
+            [
+                DriverEmission::ForwardControl {
+                    kind: ProgressEmissionKind::EndOfInput,
+                    ..
+                },
+                DriverEmission::Progress(super::ProgressEmission {
+                    kind: ProgressEmissionKind::EndOfInput,
+                    ..
+                })
+            ]
         ));
         assert_eq!(driver.next_central_wake(), None);
     }

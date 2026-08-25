@@ -1265,8 +1265,17 @@ impl StatusProjection {
         self.sources
             .iter()
             .map(|(source_id, projection)| {
-                let progress = &status.sources[source_id];
-                let metrics = &status.metrics.sources[source_id];
+                // A failed start (for example a rejected recovery) never
+                // registers task statuses, so absent entries project as
+                // default progress instead of panicking.
+                let empty_progress = super::runner::SourceStatus::default();
+                let empty_metrics = super::metrics::SourceMetrics::default();
+                let progress = status.sources.get(source_id).unwrap_or(&empty_progress);
+                let metrics = status
+                    .metrics
+                    .sources
+                    .get(source_id)
+                    .unwrap_or(&empty_metrics);
                 (
                     source_id.clone(),
                     SourceStatus {
@@ -1327,8 +1336,17 @@ impl StatusProjection {
         self.sinks
             .iter()
             .map(|(sink_id, projection)| {
-                let metrics = &status.metrics.sinks[&projection.metric_id];
-                let progress = &status.sinks[&projection.metric_id];
+                let empty_metrics = super::metrics::SinkMetrics::default();
+                let empty_progress = super::runner::SinkStatus::default();
+                let metrics = status
+                    .metrics
+                    .sinks
+                    .get(&projection.metric_id)
+                    .unwrap_or(&empty_metrics);
+                let progress = status
+                    .sinks
+                    .get(&projection.metric_id)
+                    .unwrap_or(&empty_progress);
                 (
                     sink_id.clone(),
                     SinkStatus {
@@ -1830,6 +1848,82 @@ mod tests {
 
         assert_eq!(status.operators.len(), 1);
         assert!(status.operators["windows"].ended);
+    }
+
+    #[test]
+    fn projection_tolerates_unregistered_source_and_sink_entries_on_failed_start() {
+        // A failed start (for example a rejected recovery) never registers
+        // task statuses or metrics, so projecting a status that lacks the
+        // declared source/sink entries must yield defaults instead of
+        // panicking on the missing keys.
+        let projection = super::StatusProjection {
+            sources: BTreeMap::from([(
+                "left".to_string(),
+                super::SourceProjection {
+                    replay_positioning:
+                        crate::continuous::ReplayPositioning::ExactPauseReportAndSeek,
+                    delivery: crate::continuous::SourceDeliveryCapability::Lossless,
+                    max_batch_rows: 1,
+                    max_batch_bytes: 1 << 20,
+                },
+            )]),
+            sinks: BTreeMap::from([(
+                "sink-a".to_string(),
+                super::SinkProjection {
+                    metric_id: "sink/6272616e63685f61/6f7574707574".to_string(),
+                    output_id: "branch_a.output".to_string(),
+                    delivery: super::SinkDelivery::Transactional,
+                },
+            )]),
+            ..Default::default()
+        };
+        let internal = ContinuousJobStatus {
+            job_id: 17,
+            state: ContinuousJobState::Failed,
+            terminal_cause: None,
+            tasks: BTreeMap::new(),
+            edges: BTreeMap::new(),
+            sources: BTreeMap::new(),
+            nodes: BTreeMap::new(),
+            sinks: BTreeMap::new(),
+            progress: None,
+            checkpoint: None,
+            metrics: M2MetricsSnapshot::default(),
+        };
+
+        let status = projection.project(&internal);
+
+        let source = &status.sources["left"];
+        assert_eq!(
+            source.replay_positioning,
+            crate::continuous::ReplayPositioning::ExactPauseReportAndSeek
+        );
+        assert_eq!(
+            source.delivery,
+            crate::continuous::SourceDeliveryCapability::Lossless
+        );
+        assert_eq!(source.max_batch_rows, 1);
+        assert_eq!(source.max_batch_bytes, 1 << 20);
+        assert_eq!(source.next_sequence, None);
+        assert!(!source.ended);
+        assert_eq!(source.polls, 0);
+        assert_eq!(source.data_batches, 0);
+        assert_eq!(source.data_rows, 0);
+        assert_eq!(source.data_bytes, 0);
+        assert_eq!(source.fanned_out_batches, 0);
+        assert_eq!(source.fanned_out_rows, 0);
+        assert_eq!(source.fanned_out_bytes, 0);
+        assert_eq!(source.errors, 0);
+
+        let sink = &status.sinks["sink-a"];
+        assert_eq!(sink.output_id, "branch_a.output");
+        assert_eq!(sink.effective_delivery, super::SinkDelivery::Transactional);
+        assert_eq!(sink.delivered_batches, 0);
+        assert_eq!(sink.delivered_rows, 0);
+        assert_eq!(sink.delivered_bytes, 0);
+        assert_eq!(sink.write_duration, std::time::Duration::ZERO);
+        assert_eq!(sink.errors, 0);
+        assert!(!sink.ended);
     }
 
     #[test]

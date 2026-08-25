@@ -91,10 +91,30 @@ impl MultiInputProgress {
         activities: impl IntoIterator<Item = (BindingOrdinal, IngressActivity)>,
     ) -> Self {
         let ingresses = activities.into_iter().collect::<BTreeMap<_, _>>();
-        let last_emitted_watermark = ingresses
+        // The emitted frontier is the S5.2 input watermark: the minimum over
+        // primed Active ingresses. A cut can persist skewed per-ingress
+        // watermarks (one source ahead of another); seeding from the maximum
+        // would re-emit a watermark the operator never sent and let downstream
+        // windows close ahead of replayed rows. With no primed-active minimum
+        // (all idle/ended, or an unprimed active ingress) no such minimum
+        // exists: keep the conservative maximum so emissions never retreat.
+        let active_watermarks = ingresses
             .values()
-            .filter_map(|activity| activity.watermark())
-            .max();
+            .filter_map(|activity| match activity {
+                IngressActivity::Active { watermark } => Some(*watermark),
+                IngressActivity::Idle { .. } | IngressActivity::Ended { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        let last_emitted_watermark = if active_watermarks.is_empty() {
+            ingresses
+                .values()
+                .filter_map(|activity| activity.watermark())
+                .max()
+        } else if active_watermarks.iter().any(Option::is_none) {
+            None
+        } else {
+            active_watermarks.into_iter().min().expect("non-empty")
+        };
         let terminal = ingresses
             .values()
             .all(|activity| matches!(activity, IngressActivity::Ended { .. }));
@@ -385,6 +405,81 @@ mod tests {
             [ProgressEmissionKind::Watermark(wm(8))]
         );
         assert!(kinds(&mut progress, 0, AggregateInput::End).is_empty());
+    }
+
+    #[test]
+    fn restore_seeds_emitted_frontier_at_the_active_minimum() {
+        // A checkpoint cut can persist skewed per-ingress watermarks when one
+        // source runs ahead of another; restore must resume emission from the
+        // S5.2 input watermark (the primed-active minimum), never the maximum,
+        // or the first post-restore transition re-emits a watermark the
+        // operator never sent and downstream windows close ahead of replayed
+        // rows.
+        let mut restored = MultiInputProgress::restore([
+            (
+                BindingOrdinal::new(0),
+                super::IngressActivity::Active {
+                    watermark: Some(wm(640)),
+                },
+            ),
+            (
+                BindingOrdinal::new(1),
+                super::IngressActivity::Active {
+                    watermark: Some(wm(638)),
+                },
+            ),
+        ]);
+        assert_eq!(restored.last_emitted_watermark(), Some(wm(638)));
+        assert_eq!(
+            kinds(&mut restored, 1, AggregateInput::Watermark(wm(639))),
+            [ProgressEmissionKind::Watermark(wm(639))]
+        );
+    }
+
+    #[test]
+    fn restore_with_unprimed_active_ingress_has_no_emitted_frontier() {
+        // S5.2: an Active ingress that has delivered no watermark leaves the
+        // input watermark undefined, so nothing was ever emitted and restore
+        // must not invent a frontier from the other ingress.
+        let mut restored = MultiInputProgress::restore([
+            (
+                BindingOrdinal::new(0),
+                super::IngressActivity::Active {
+                    watermark: Some(wm(640)),
+                },
+            ),
+            (
+                BindingOrdinal::new(1),
+                super::IngressActivity::Active { watermark: None },
+            ),
+        ]);
+        assert_eq!(restored.last_emitted_watermark(), None);
+        assert_eq!(
+            kinds(&mut restored, 1, AggregateInput::Watermark(wm(100))),
+            [ProgressEmissionKind::Watermark(wm(100))]
+        );
+    }
+
+    #[test]
+    fn restore_without_active_ingresses_keeps_the_conservative_maximum() {
+        // With no active ingress the pre-cut emission may have advanced to any
+        // ingress watermark (idle/ended exclusion), so the frontier stays at
+        // the conservative maximum to keep emissions monotone.
+        let restored = MultiInputProgress::restore([
+            (
+                BindingOrdinal::new(0),
+                super::IngressActivity::Idle {
+                    watermark: Some(wm(640)),
+                },
+            ),
+            (
+                BindingOrdinal::new(1),
+                super::IngressActivity::Ended {
+                    final_watermark: Some(wm(638)),
+                },
+            ),
+        ]);
+        assert_eq!(restored.last_emitted_watermark(), Some(wm(640)));
     }
 
     #[test]
