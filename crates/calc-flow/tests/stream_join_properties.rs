@@ -65,8 +65,8 @@ fn chunk_sizes() -> BoxedStrategy<Vec<usize>> {
     vec(1_usize..=3, 0..12).boxed()
 }
 
-fn permutations() -> BoxedStrategy<Vec<Vec<usize>>> {
-    vec(vec(any::<usize>(), 0..3), 0..12).boxed()
+fn permutations() -> BoxedStrategy<Vec<Vec<u32>>> {
+    vec(vec(any::<u32>(), 0..3), 0..12).boxed()
 }
 
 fn picks() -> BoxedStrategy<Vec<bool>> {
@@ -79,7 +79,7 @@ fn picks() -> BoxedStrategy<Vec<bool>> {
 fn partition_side(
     rows: &[SideRow],
     chunk_sizes: &[usize],
-    within_batch_permutations: &[Vec<usize>],
+    within_batch_sort_keys: &[Vec<u32>],
 ) -> Vec<(Vec<SideRow>, i64)> {
     let mut batches = Vec::new();
     let mut index = 0;
@@ -90,15 +90,16 @@ fn partition_side(
         }
         let end = (index + size.max(1)).min(rows.len());
         let mut batch: Vec<SideRow> = rows[index..end].to_vec();
-        if let Some(permutation) = within_batch_permutations.get(ordinal) {
-            let shuffled: Vec<SideRow> = permutation
+        // Sort keys permute rows by their relative order; rows beyond the
+        // generated keys keep their input order, so every shuffle stays a
+        // valid permutation of the batch (FR18 physical-order freedom).
+        if let Some(keys) = within_batch_sort_keys.get(ordinal) {
+            let mut keyed = batch
                 .iter()
-                .filter(|position| **position < batch.len())
-                .map(|position| batch[*position])
-                .collect();
-            if shuffled.len() == batch.len() {
-                batch = shuffled;
-            }
+                .zip(keys.iter().chain(std::iter::repeat(&0)))
+                .collect::<Vec<_>>();
+            keyed.sort_by_key(|(row, key)| (**key, row.ts));
+            batch = keyed.into_iter().map(|(row, _)| *row).collect();
         }
         let watermark = batch.iter().map(|row| row.ts).max().unwrap_or(0);
         batches.push((batch, watermark));
