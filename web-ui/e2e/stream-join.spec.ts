@@ -375,6 +375,9 @@ test.describe('stream Join studio workflow', () => {
     await expect
       .poll(async () => {
         const sinkRoot = resolve(fixtureDirectory, `${fixture.id}-sink`);
+        // Test-local output directory, not request-influenced; the
+        // non-literal-fs-filename audit targets production path traversal.
+        // eslint-disable-next-line security/detect-non-literal-fs-filename
         const entries = await readdir(sinkRoot, { recursive: true });
         return entries.filter((entry) => String(entry).endsWith('.parquet')).length;
       })
