@@ -1,6 +1,6 @@
 import { SchemaEditor } from './SchemaEditor';
 import { InputAliasEditor } from './InputAliasEditor';
-import type { SqlInputAliasEdit } from './inputAliasEditor';
+import type { SqlInputAliasEdit } from './inputAliasEditorModel';
 import type {
   ArrowFieldConfig,
   NodeConfig,

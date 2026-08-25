@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-import { validateInputAlias } from './inputAliasEditor';
+import { validateInputAlias } from './inputAliasEditorModel';
 
 interface InputAliasEditorProps {
   aliases: readonly string[];

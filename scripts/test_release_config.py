@@ -205,6 +205,15 @@ class ReleaseConfigTests(unittest.TestCase):
                 self.assertIn("Apache License", license_text)
                 self.assertIn("Version 2.0, January 2004", license_text)
 
+    def test_python_projects_publish_nonempty_readmes(self) -> None:
+        for project in (ROOT, ROOT / "web-ui/backend"):
+            with self.subTest(project=project):
+                config = tomllib.loads(
+                    (project / "pyproject.toml").read_text(encoding="utf-8")
+                )
+                readme = project / config["project"]["readme"]
+                self.assertTrue(readme.read_text(encoding="utf-8").strip())
+
     def test_crate_excludes_integration_tests_and_ships_license(self) -> None:
         crate = ROOT / "crates/calc-flow"
         config = tomllib.loads((crate / "Cargo.toml").read_text(encoding="utf-8"))
@@ -253,6 +262,52 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(action_count, 3)
         self.assertEqual(workflow.count("maturin-version: v1.14.1"), action_count)
         self.assertEqual(workflow.count('rust-toolchain: "1.88.0"'), action_count)
+
+    def test_python_release_verifies_exact_artifacts_before_oidc_publish(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+        self.assertIn("  prepare-python-release:\n", workflow)
+        self.assertIn("python scripts/verify_python_release.py", workflow)
+        self.assertIn("git fetch --no-tags origin main", workflow)
+        self.assertIn('git cat-file -t "${GITHUB_REF}"', workflow)
+        self.assertIn("  verify-python-release:\n", workflow)
+        self.assertIn("name: verified-python-release", workflow)
+        self.assertEqual(workflow.count("sha256sum --check release-manifest.txt"), 2)
+        self.assertEqual(workflow.count("uses: pypa/gh-action-pypi-publish@"), 2)
+        self.assertEqual(workflow.count("id-token: write"), 2)
+        self.assertIn("name: pypi\n", workflow)
+        self.assertIn("name: pypi-studio\n", workflow)
+        self.assertIn("url: https://pypi.org/project/calc-flow/", workflow)
+        self.assertIn("url: https://pypi.org/project/calc-flow-studio/", workflow)
+        self.assertNotIn("skip-existing", workflow)
+
+    def test_python_release_guide_covers_rehearsal_and_trusted_publishers(self) -> None:
+        guide = (ROOT / "docs/python-release.md").read_text(encoding="utf-8")
+
+        for expected in (
+            "python scripts/build_python_release.py --clean",
+            "python scripts/verify_python_release.py",
+            "`pypi`",
+            "`pypi-studio`",
+            "release.yml",
+            "git tag -a v<version>",
+            "PyPI versions and files are immutable",
+        ):
+            self.assertIn(expected, guide)
+
+    def test_frontend_module_stems_do_not_collide_on_windows(self) -> None:
+        modules = sorted((ROOT / "web-ui/src").rglob("*.ts")) + sorted(
+            (ROOT / "web-ui/src").rglob("*.tsx")
+        )
+        paths_by_stem: dict[str, list[str]] = {}
+        for module in modules:
+            key = str(module.relative_to(ROOT).with_suffix("")).casefold()
+            paths_by_stem.setdefault(key, []).append(str(module.relative_to(ROOT)))
+        collisions = {
+            stem: paths for stem, paths in paths_by_stem.items() if len(paths) > 1
+        }
+
+        self.assertEqual(collisions, {})
 
     def test_workflow_actions_are_sha_pinned(self) -> None:
         for name in (
@@ -408,7 +463,8 @@ class ReleaseConfigTests(unittest.TestCase):
         command = (
             "python -m unittest scripts.test_run_rust_tests "
             "scripts.test_run_rust_coverage "
-            "scripts.test_inspect_wheel scripts.test_release_config "
+            "scripts.test_build_python_release scripts.test_inspect_wheel "
+            "scripts.test_release_config scripts.test_verify_python_release "
             "scripts.test_verify_perf_gates scripts.test_verify_security_gates"
         )
         windows_test = (

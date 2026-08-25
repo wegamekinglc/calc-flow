@@ -65,7 +65,7 @@ npm audit --omit=dev
 # Supply chain and release helpers
 cargo audit --ignore RUSTSEC-2026-0176 --ignore RUSTSEC-2026-0177 --ignore RUSTSEC-2026-0235
 cargo deny --locked check
-python -m unittest scripts.test_run_examples scripts.test_run_rust_tests scripts.test_run_rust_coverage scripts.test_inspect_wheel scripts.test_release_config
+python -m unittest scripts.test_run_examples scripts.test_run_rust_tests scripts.test_run_rust_coverage scripts.test_build_python_release scripts.test_inspect_wheel scripts.test_release_config scripts.test_verify_python_release
 ```
 
 Run informational benchmarks with:

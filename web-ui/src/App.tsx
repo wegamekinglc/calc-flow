@@ -40,8 +40,8 @@ import {
   nextDataSource,
   type DataSourceDraft,
   type DataSourceFormat,
-} from './components/dataSourceEditor';
-import { editSqlInputAliases } from './components/inputAliasEditor';
+} from './components/dataSourceEditorModel';
+import { editSqlInputAliases } from './components/inputAliasEditorModel';
 import {
   PANEL_LIMITS,
   PANEL_RESIZE_HANDLE_WIDTH,
