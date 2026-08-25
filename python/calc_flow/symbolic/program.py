@@ -26,8 +26,9 @@ from calc_flow.symbolic.nodes import (
 from calc_flow.symbolic.types import CompileMode
 
 if TYPE_CHECKING:
-    from calc_flow.pipeline import Runtime
+    from calc_flow.pipeline import BatchExecutionPlan, Runtime, StreamExecutionPlan
     from calc_flow.symbolic.analyzer import AnalysisResult
+    from calc_flow.symbolic.types import LatePolicy
 
 _PROGRAM_TAG = 0x21
 
@@ -340,3 +341,36 @@ class Program:
         from calc_flow.symbolic.analyzer import explain_program
 
         return explain_program(self, runtime, mode)
+
+    def compile_batch(self, runtime: Runtime, /) -> BatchExecutionPlan:
+        """Lower this program to a strict project-v3 batch execution plan.
+
+        Compilation is declaration processing only: it captures one immutable
+        capability snapshot, lowers one strict project-v3 document, and invokes
+        the Rust graph compiler for final validation. No data, source, sink,
+        or runner is accepted.
+        """
+
+        from calc_flow.symbolic.lower import compile_program_batch
+
+        return compile_program_batch(self, runtime)
+
+    def compile_stream(
+        self,
+        runtime: Runtime,
+        /,
+        *,
+        allowed_lateness_micros: int = 0,
+        late_policy: LatePolicy = "error",
+    ) -> StreamExecutionPlan:
+        """Lower this program to a strict project-v3 continuous plan.
+
+        The lateness arguments are validated and accepted for forward
+        compatibility; row-local lowering has no stateful late-row surface.
+        """
+
+        from calc_flow.symbolic.lower import compile_program_stream
+
+        return compile_program_stream(
+            self, runtime, allowed_lateness_micros, late_policy
+        )

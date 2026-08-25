@@ -255,7 +255,10 @@ compile time, before any source opens:
 - nodes offering only a batch operator are rejected;
 - delivery requirements naming an unknown graph output are rejected;
 - volatile DataFusion scalar UDFs are rejected when any output requests
-  exactly-once delivery.
+  exactly-once delivery;
+- read-only expression and SQL queries that call a volatile built-in
+  function, resolved against the built-in default function registry, are
+  rejected.
 
 Stream graphs compose unary expression nodes, single-input SQL nodes,
 explicit stream providers, `UnionOperator`, `WindowAggregateOperator`, and

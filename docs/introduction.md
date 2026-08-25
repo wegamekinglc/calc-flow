@@ -171,9 +171,11 @@ graph is built. The `calc_flow.symbolic` package holds typed immutable column,
 table, array, and parameter expressions with canonical v1 digests; an ordered
 `FeatureSet` of uniquely named features that `TableExpr.with_columns` appends
 as derived columns; and an immutable `Program` over declared inputs and
-outputs. The package is declaration and analysis only: it exposes no `eval`,
-data, or runner path, and execution remains owned by the execution plans and
-runners above.
+outputs. The package is declaration, analysis, and row-local compilation
+only: it exposes no `eval`, data, or runner path.
+`Program.compile_batch(runtime)` and `Program.compile_stream(runtime)` lower
+a row-local program into the same strict project-v3 execution plans, and
+execution remains owned by the execution plans and runners above.
 
 Every `Program` carries a runtime-independent v1 fingerprint over its
 declaration graph. `Program.analyze(runtime, mode=...)` verifies the program

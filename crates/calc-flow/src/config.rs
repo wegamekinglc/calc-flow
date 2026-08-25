@@ -2549,6 +2549,7 @@ fn arrow_data_type(value: &str) -> Option<DataType> {
         "time64[us]" => DataType::Time64(TimeUnit::Microsecond),
         "timestamp[ms]" => DataType::Timestamp(TimeUnit::Millisecond, None),
         "timestamp[us]" => DataType::Timestamp(TimeUnit::Microsecond, None),
+        "timestamp[us, UTC]" => DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
         "uint8" => DataType::UInt8,
         "uint16" => DataType::UInt16,
         "uint32" => DataType::UInt32,
