@@ -548,6 +548,51 @@ equal results. The analysis issue codes are `capability_mismatch`,
 `ValueError` or `TypeError` with the same path grammar. `explain` renders the
 same facts as a deterministic multi-line report.
 
+### Row-local compilation
+
+`Program.compile_batch(runtime)` and `Program.compile_stream(runtime, *,
+allowed_lateness_micros=0, late_policy="error")` lower a program to the
+existing execution plans. Compilation is declaration processing only: it
+captures one immutable capability snapshot, lowers one strict project-v3
+document, and invokes the Rust graph compiler for final port, kind, schema,
+topology, and fingerprint validation. No data object, source, sink, or runner
+is accepted, and no symbolic Python runs while a compiled plan executes.
+
+Row-local declarations — literals, fields, arithmetic, comparison, boolean
+composition, `where`, `coalesce`, `log`/`exp`/`sqrt`/`abs`/`clip`/`cast`, and
+the `table.project`/`table.filter`/`with_columns` table operations — fuse into
+one `expression` node per program output; a `where`/filter predicate becomes
+the node's `WHERE` clause. Structurally identical non-trivial subexpressions
+referenced at least twice are computed exactly once: they materialize as
+`__cf_cse_N` columns in deterministic tier nodes (`<output>__cf_cse_<k>`)
+ahead of the fused node, so a 20-output `FeatureSet` with no shared
+subexpressions compiles to a single fused node. Node IDs and the plan
+fingerprint are deterministic, and the lowered project carries strict JSON
+only.
+
+Programs with one input and one output bind the plan endpoints `input` and
+`output`, matching the `PipelineBuilder` convention; multi-branch graphs name
+endpoints `<node>.input` and `<node>.output` deterministically. Batches
+supplied at execution must match the declared input schema exactly.
+
+Analysis rejections surface as `CompileError` with the first issue's
+`{path}: {code}: {message}`. Declarations the row-local lowerer does not
+implement — `ts` rolling primitives, `cs` cross-section statistics, event
+`window` nodes, `linalg` array bridges, array outputs, and `parameter` static
+inputs — fail with the eighth issue code `unknown_primitive_version` rooted at
+the output or `static_inputs.<name>`, in both batch and stream modes; a stream
+aggregate or SQL window is never silently made batch-local. Casts to
+non-portable targets fail with `unsupported_type` at
+`outputs.<name>.cast.data_type`. The lateness arguments of `compile_stream`
+are validated and accepted for forward compatibility; row-local lowering has
+no stateful late-row surface.
+
+Stream plans also reject read-only queries that call volatile built-in
+functions (for example `random()`): `compile_stream` resolves every function
+in an expression or SQL node's query against the runtime function registry
+and fails volatile calls before any source opens, so the deterministic,
+replay-safe lifecycle claims of those operators remain truthful.
+
 ## Projects and persistence
 
 `ProjectDocument` validates a strict `format_version: 3` mapping with the Rust

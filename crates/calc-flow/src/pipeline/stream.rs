@@ -579,6 +579,11 @@ impl PipelineBuilder {
     ) -> Result<StreamExecutionPlan> {
         for (node_id, node) in &self.nodes {
             validate_stream_node(node_id, &node.operator)?;
+            validate_stream_query(
+                node_id,
+                &node.operator,
+                crate::expression::default_function_registry(),
+            )?;
         }
         let graph = compile_graph(&self, "stream", udfs)?;
         for output in requirements.delivery.keys() {
@@ -712,6 +717,25 @@ fn validate_stream_node(node_id: &str, operator: &NodeOperator) -> Result<()> {
             ),
         }),
     }
+}
+
+/// Rejects read-only stream queries that call volatile built-in functions.
+///
+/// The expression and SQL operators report deterministic, replay-safe
+/// lifecycles; that claim only holds when every function a stream query can
+/// resolve is non-volatile, so stream compilation checks each query against
+/// the default function registry before any source opens.
+pub(crate) fn validate_stream_query(
+    node_id: &str,
+    operator: &NodeOperator,
+    registry: &impl datafusion::execution::FunctionRegistry,
+) -> Result<()> {
+    let query = match operator {
+        NodeOperator::Expression(operator) => operator.query_text(),
+        NodeOperator::Sql(operator) => operator.query_text(),
+        _ => return Ok(()),
+    };
+    crate::expression::validate_no_volatile_functions(node_id, query, registry)
 }
 
 fn validate_deterministic_udfs(
@@ -1417,5 +1441,103 @@ mod runtime_projection_tests {
         let decoded = capability.decode_snapshot("window", encoded).unwrap();
         compiled.restore(&decoded).unwrap();
         compiled.restore(&OperatorStateSnapshot::default()).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod volatile_query_tests {
+    use std::sync::Arc;
+
+    use datafusion::{
+        arrow::datatypes::DataType,
+        common::ScalarValue,
+        execution::context::SessionContext,
+        logical_expr::{ColumnarValue, Volatility, create_udf},
+    };
+
+    use crate::{
+        CalcFlowError, ExpressionOperator, NodeOperator, PipelineBuilder, SqlOperator,
+        StreamRequirements, UdfRegistry, expression::default_function_registry,
+        pipeline::stream::validate_stream_query,
+    };
+
+    fn volatile_roll_context() -> SessionContext {
+        let context = SessionContext::new();
+        context.register_udf(create_udf(
+            "roll",
+            vec![],
+            DataType::Float64,
+            Volatility::Volatile,
+            Arc::new(|_| Ok(ColumnarValue::Scalar(ScalarValue::Float64(Some(0.5))))),
+        ));
+        context
+    }
+
+    #[test]
+    fn expression_and_sql_queries_reject_volatile_builtins() {
+        let context = volatile_roll_context();
+        let expression = NodeOperator::Expression(
+            ExpressionOperator::new("features", "score = roll()", Vec::new(), None, Vec::new())
+                .unwrap(),
+        );
+        let error = validate_stream_query("features", &expression, &context).unwrap_err();
+        let CalcFlowError::Compile { message } = error else {
+            panic!("expected a compile error, got {error:?}");
+        };
+        assert!(message.contains("features"), "{message}");
+        assert!(message.contains("roll"), "{message}");
+
+        let sql = NodeOperator::Sql(
+            SqlOperator::new(
+                "features",
+                "SELECT roll() AS score FROM input",
+                vec!["input".into()],
+                Vec::new(),
+            )
+            .unwrap(),
+        );
+        assert!(validate_stream_query("features", &sql, &context).is_err());
+    }
+
+    #[test]
+    fn non_query_operators_skip_the_volatility_check() {
+        let context = volatile_roll_context();
+        let union = NodeOperator::Union(
+            crate::UnionOperator::new(
+                "merge",
+                vec![
+                    crate::Port::new("left", crate::BatchKind::Table, true, None).unwrap(),
+                    crate::Port::new("right", crate::BatchKind::Table, true, None).unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        assert!(validate_stream_query("merge", &union, &context).is_ok());
+    }
+
+    #[test]
+    fn deterministic_queries_still_compile_through_the_default_registry() {
+        let plan = PipelineBuilder::new("deterministic")
+            .unwrap()
+            .add_node(
+                "features",
+                Box::new(
+                    ExpressionOperator::new(
+                        "features",
+                        "score = abs(x) + ln(x)",
+                        Vec::new(),
+                        Some("sqrt(x) > 0.0".into()),
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap()
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements::default(),
+            );
+        assert!(plan.is_ok(), "{:?}", plan.err());
+        let _ = default_function_registry();
     }
 }

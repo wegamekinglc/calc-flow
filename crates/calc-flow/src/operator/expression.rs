@@ -131,6 +131,11 @@ impl ExpressionOperator {
         Ok(self)
     }
 
+    /// The normalized read-only query executed by this operator.
+    pub(crate) fn query_text(&self) -> &str {
+        &self.query
+    }
+
     /// Attaches the plan's `DataFusion` resources for the stream path.
     pub(crate) fn set_stream_resources(
         &mut self,

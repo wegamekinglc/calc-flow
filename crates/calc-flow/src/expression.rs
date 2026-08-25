@@ -1,6 +1,16 @@
 use std::sync::OnceLock;
 
-use datafusion::sql::{parser::DFParser, sqlparser::dialect::GenericDialect};
+use datafusion::{
+    execution::{FunctionRegistry, context::SessionContext},
+    logical_expr::Volatility,
+    sql::{
+        parser::DFParser,
+        sqlparser::{
+            ast::{Expr, visit_expressions},
+            dialect::GenericDialect,
+        },
+    },
+};
 use regex::Regex;
 
 use crate::{CalcFlowError, Result};
@@ -71,6 +81,75 @@ pub(crate) fn validate_select_query(query: &str) -> Result<String> {
     Ok(query.trim().trim_end_matches(';').trim().to_owned())
 }
 
+/// Reject a read-only query that calls a volatile built-in function.
+///
+/// Stream plans replay deterministic work, so every function a stream query
+/// can resolve must be non-volatile. The check resolves every function call
+/// in the query against the supplied registry and rejects any function whose
+/// signature is [`Volatility::Volatile`]. Names the registry does not know
+/// are left to query planning, which already rejects unknown functions.
+///
+/// # Errors
+///
+/// Returns [`CalcFlowError::Compile`] naming the node and the volatile
+/// function, or [`CalcFlowError::InvalidArgument`] when the query does not
+/// parse.
+pub(crate) fn validate_no_volatile_functions(
+    node_id: &str,
+    query: &str,
+    registry: &impl FunctionRegistry,
+) -> Result<()> {
+    let statements =
+        DFParser::parse_sql_with_dialect(query, &GenericDialect {}).map_err(|error| {
+            CalcFlowError::InvalidArgument {
+                field: "query".into(),
+                message: error.to_string(),
+            }
+        })?;
+    let mut volatile = None;
+    for statement in &statements {
+        let datafusion::sql::parser::Statement::Statement(statement) = statement else {
+            continue;
+        };
+        let _ = visit_expressions(statement.as_ref(), |expr| {
+            if let Expr::Function(function) = expr {
+                let name = function
+                    .name
+                    .0
+                    .last()
+                    .and_then(|part| part.as_ident())
+                    .map(|ident| ident.value.to_lowercase())
+                    .unwrap_or_default();
+                if let Ok(udf) = registry.udf(&name)
+                    && matches!(udf.signature().volatility, Volatility::Volatile)
+                {
+                    volatile = Some(name.clone());
+                    return std::ops::ControlFlow::Break(());
+                }
+            }
+            std::ops::ControlFlow::Continue(())
+        });
+        if volatile.is_some() {
+            break;
+        }
+    }
+    if let Some(name) = volatile {
+        return Err(CalcFlowError::Compile {
+            message: format!(
+                "stream node {node_id:?} selects volatile built-in function {name:?}; deterministic replay requires deterministic SQL"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// The shared default function registry used for stream SQL determinism
+/// checks; built once because it mirrors the engine's execution sessions.
+pub(crate) fn default_function_registry() -> &'static SessionContext {
+    static REGISTRY: OnceLock<SessionContext> = OnceLock::new();
+    REGISTRY.get_or_init(SessionContext::new)
+}
+
 fn is_identifier(value: &str) -> bool {
     let mut chars = value.chars();
     chars
@@ -81,8 +160,103 @@ fn is_identifier(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{split_assignment, sql_projection, validate_select_query};
+    use std::sync::Arc;
+
+    use super::{
+        split_assignment, sql_projection, validate_no_volatile_functions, validate_select_query,
+    };
     use crate::CalcFlowError;
+    use datafusion::{
+        arrow::datatypes::DataType,
+        common::ScalarValue,
+        execution::{FunctionRegistry, context::SessionContext},
+        logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf},
+    };
+
+    fn volatile_roll() -> ScalarUDF {
+        create_udf(
+            "roll",
+            vec![],
+            DataType::Float64,
+            Volatility::Volatile,
+            Arc::new(|_| Ok(ColumnarValue::Scalar(ScalarValue::Float64(Some(0.5))))),
+        )
+    }
+
+    fn registry_with_roll() -> SessionContext {
+        let context = SessionContext::new();
+        context.register_udf(volatile_roll());
+        context
+    }
+
+    #[test]
+    fn volatile_builtin_function_is_rejected() {
+        let registry = registry_with_roll();
+        let error =
+            validate_no_volatile_functions("features", "SELECT roll() AS x FROM input", &registry)
+                .unwrap_err();
+        let CalcFlowError::Compile { message } = error else {
+            panic!("expected a compile error, got {error:?}");
+        };
+        assert!(message.contains("features"), "{message}");
+        assert!(message.contains("roll"), "{message}");
+    }
+
+    #[test]
+    fn volatile_function_is_matched_case_insensitively() {
+        let registry = registry_with_roll();
+        assert!(
+            validate_no_volatile_functions("n", "SELECT ROLL() AS x FROM input", &registry)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn volatile_function_is_found_in_where_case_and_subquery() {
+        let registry = registry_with_roll();
+        for query in [
+            "SELECT x FROM input WHERE roll() > 0.5",
+            "SELECT CASE WHEN roll() > 0.0 THEN 1.0 ELSE 0.0 END AS c FROM input",
+            "SELECT r FROM (SELECT roll() AS r FROM input) AS t",
+            "WITH rolled AS (SELECT roll() AS r FROM input) SELECT r FROM rolled",
+        ] {
+            assert!(
+                validate_no_volatile_functions("n", query, &registry).is_err(),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn deterministic_functions_pass() {
+        let registry = registry_with_roll();
+        assert!(
+            validate_no_volatile_functions(
+                "n",
+                "SELECT abs(x) AS a, CASE WHEN x > 0.0 THEN ln(x) ELSE 0.0 END AS b FROM input WHERE sqrt(x) >= 0.0",
+                &registry,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn unknown_functions_are_left_to_query_planning() {
+        let registry = registry_with_roll();
+        assert!(
+            validate_no_volatile_functions(
+                "n",
+                "SELECT definitely_not_a_builtin(x) AS a FROM input",
+                &registry,
+            )
+            .is_ok()
+        );
+        let context = SessionContext::new();
+        assert!(context.udf("roll").is_err());
+        assert!(
+            validate_no_volatile_functions("n", "SELECT roll() AS x FROM input", &context).is_ok()
+        );
+    }
 
     #[test]
     fn assignment_accepts_comparisons_in_the_right_hand_side() {

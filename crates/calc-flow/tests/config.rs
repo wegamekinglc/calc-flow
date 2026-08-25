@@ -999,6 +999,24 @@ fn supported_v1_arrow_aliases_compile_exactly() {
     }
 }
 
+#[test]
+fn utc_event_time_spelling_compiles_to_microsecond_utc() {
+    let (providers, udfs) = empty_registries();
+    let mut value = project(expression_node("node"));
+    value.graph.nodes[0].input_ports = vec![port(
+        "input",
+        BatchKind::Table,
+        true,
+        vec![ArrowFieldSpec {
+            name: "ts".into(),
+            data_type: "timestamp[us, UTC]".into(),
+            nullable: false,
+        }],
+    )];
+    assert!(validate_project(&value, &providers, &udfs).valid);
+    compile_project(&value, &providers, &udfs).expect("the UTC event-time spelling compiles");
+}
+
 fn stream_join_node(id: &str, key_type: &str) -> NodeSpec {
     NodeSpec {
         id: id.into(),
