@@ -18,14 +18,29 @@ const job = (status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled
 });
 
 const capabilities = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   runtime: {
     scope: { kind: 'runtimeSession', sessionId: 'session', revision: 0 },
     packageVersion: '4.0.0',
     projectFormatVersions: [3],
     batchKinds: ['array', 'table'],
     portableArrowTypes: ['int64'],
-    operators: [],
+    operators: [{
+      kind: 'expression',
+      version: '1',
+      inputPorts: [{ name: 'input', kind: 'table', required: true }],
+      outputPorts: [{ name: 'output', kind: 'table', required: true }],
+      modes: ['batch', 'stream'],
+      finality: 'per_row_final',
+      requiresDatafusion: true,
+      stateful: false,
+      microbatchInvariant: true,
+      requiresWatermark: false,
+      checkpointSupport: 'stateless',
+      stateVersion: null,
+      deterministic: true,
+      replaySafe: true,
+    }],
     udfs: [],
     providers: [],
     connectors: [],
@@ -51,12 +66,12 @@ describe('API client', () => {
   it('decodes the closed capabilities document at the raw HTTP boundary', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(capabilities)))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ schemaVersion: 2 })));
+      .mockResolvedValueOnce(new Response(JSON.stringify({ schemaVersion: 3 })));
     vi.stubGlobal('fetch', fetchMock);
 
     await expect(api.capabilities()).resolves.toEqual(capabilities);
     await expect(api.capabilities()).rejects.toEqual(
-      new ApiContractError('capabilities schema version 2 is unsupported; expected 1'),
+      new ApiContractError('capabilities schema version 3 is unsupported; expected 2'),
     );
   });
 

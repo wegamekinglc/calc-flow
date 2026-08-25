@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
 from calc_flow import ProjectDocument
 from pydantic import (
@@ -14,6 +14,7 @@ from pydantic import (
     StrictBool,
     StrictInt,
     field_validator,
+    model_validator,
 )
 
 type JSONValue = (
@@ -70,11 +71,51 @@ class RuntimeSessionScopeResponse(CapabilityModel):
     revision: int = Field(ge=0)
 
 
+type ExecutionModeValue = Literal["batch", "stream"]
+type OutputFinalityValue = Literal[
+    "per_row_final", "group_final_append_only", "unproven"
+]
+type CheckpointSupportValue = Literal["stateless", "checkpointed_stateful", "unproven"]
+
+
+def _validate_lifecycle_invariants(
+    checkpoint_support: CheckpointSupportValue,
+    state_version: int | None,
+    stateful: bool,
+) -> None:
+    if checkpoint_support == "checkpointed_stateful":
+        if state_version is None or state_version <= 0:
+            raise ValueError(
+                "checkpointed_stateful requires a positive stateVersion",
+            )
+    elif state_version is not None:
+        raise ValueError("stateVersion must be null unless checkpointed_stateful")
+    if checkpoint_support == "stateless" and stateful:
+        raise ValueError("stateless capability must set stateful=false")
+
+
 class OperatorCapabilityResponse(CapabilityModel):
     kind: str
-    input_kinds: tuple[Literal["table", "array"], ...]
-    output_kinds: tuple[Literal["table", "array"], ...]
+    version: str
+    input_ports: tuple[ProviderPortResponse, ...]
+    output_ports: tuple[ProviderPortResponse, ...]
+    modes: tuple[ExecutionModeValue, ...] = Field(min_length=1)
+    finality: OutputFinalityValue
     requires_datafusion: bool
+    stateful: bool
+    microbatch_invariant: bool
+    requires_watermark: bool
+    checkpoint_support: CheckpointSupportValue
+    state_version: int | None = Field(ge=1)
+    deterministic: bool
+    replay_safe: bool
+
+    @model_validator(mode="after")
+    def _lifecycle_is_self_consistent(self) -> Self:
+        _validate_lifecycle_invariants(
+            self.checkpoint_support, self.state_version, self.stateful
+        )
+        return self
 
 
 class UdfCapabilityResponse(CapabilityModel):
@@ -104,6 +145,33 @@ class ProviderOptionsSchemaResponse(CapabilityModel):
     additional_properties: Literal[False] = False
 
 
+_CLOSED_CAPABILITY_RULES = frozenset(
+    (
+        ("array_api_safe_dtype", "1"),
+        ("elementwise_broadcast", "1"),
+        ("feature_axis_reduction", "1"),
+        ("table_matmul_static_rhs", "1"),
+    )
+)
+
+
+class CapabilityRuleResponse(CapabilityModel):
+    name: str
+    version: str
+
+    @model_validator(mode="after")
+    def _identity_is_closed(self) -> Self:
+        if (self.name, self.version) not in _CLOSED_CAPABILITY_RULES:
+            raise ValueError(f"unknown capability rule {self.name}@{self.version}")
+        return self
+
+
+class ProviderArrayRulesResponse(CapabilityModel):
+    supported_dtypes: tuple[str, ...]
+    safe_dtype_rule: CapabilityRuleResponse
+    shape_rules: tuple[CapabilityRuleResponse, ...]
+
+
 class ProviderCapabilityResponse(CapabilityModel):
     provider: str
     name: str
@@ -111,6 +179,25 @@ class ProviderCapabilityResponse(CapabilityModel):
     input_ports: tuple[ProviderPortResponse, ...]
     output_ports: tuple[ProviderPortResponse, ...]
     options_schema: ProviderOptionsSchemaResponse | None
+    modes: tuple[ExecutionModeValue, ...] = Field(min_length=1)
+    finality: OutputFinalityValue
+    stateful: bool
+    microbatch_invariant: bool
+    requires_watermark: bool
+    checkpoint_support: CheckpointSupportValue
+    state_version: int | None = Field(ge=1)
+    deterministic: bool
+    replay_safe: bool
+    supports_static_inputs: bool
+    partition_contract: Literal["none", "row_axis_independent"]
+    array_rules: ProviderArrayRulesResponse | None
+
+    @model_validator(mode="after")
+    def _lifecycle_is_self_consistent(self) -> Self:
+        _validate_lifecycle_invariants(
+            self.checkpoint_support, self.state_version, self.stateful
+        )
+        return self
 
 
 class ConnectorAxesResponse(CapabilityModel):
@@ -206,7 +293,7 @@ class PreviewCapabilitiesResponse(CapabilityModel):
 
 
 class CapabilitiesResponse(CapabilityModel):
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     runtime: RuntimeCapabilitiesResponse
     preview: PreviewCapabilitiesResponse
 

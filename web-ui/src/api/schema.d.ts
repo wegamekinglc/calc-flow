@@ -305,8 +305,17 @@ export interface components {
              * Schemaversion
              * @constant
              */
-            schemaVersion: 1;
+            schemaVersion: 2;
         };
+        /** CapabilityRuleResponse */
+        CapabilityRuleResponse: {
+            /** Name */
+            name: string;
+            /** Version */
+            version: string;
+        };
+        /** @enum {string} */
+        CheckpointSupportValue: "stateless" | "checkpointed_stateful" | "unproven";
         /** CompletedJobResponse */
         CompletedJobResponse: {
             /**
@@ -392,6 +401,8 @@ export interface components {
             /** Version */
             version: string;
         };
+        /** @enum {string} */
+        ExecutionModeValue: "batch" | "stream";
         /** FailedJobResponse */
         FailedJobResponse: {
             /**
@@ -488,15 +499,35 @@ export interface components {
         };
         /** OperatorCapabilityResponse */
         OperatorCapabilityResponse: {
-            /** Inputkinds */
-            inputKinds: ("table" | "array")[];
+            checkpointSupport: components["schemas"]["CheckpointSupportValue"];
+            /** Deterministic */
+            deterministic: boolean;
+            finality: components["schemas"]["OutputFinalityValue"];
+            /** Inputports */
+            inputPorts: components["schemas"]["ProviderPortResponse"][];
             /** Kind */
             kind: string;
-            /** Outputkinds */
-            outputKinds: ("table" | "array")[];
+            /** Microbatchinvariant */
+            microbatchInvariant: boolean;
+            /** Modes */
+            modes: components["schemas"]["ExecutionModeValue"][];
+            /** Outputports */
+            outputPorts: components["schemas"]["ProviderPortResponse"][];
+            /** Replaysafe */
+            replaySafe: boolean;
             /** Requiresdatafusion */
             requiresDatafusion: boolean;
+            /** Requireswatermark */
+            requiresWatermark: boolean;
+            /** Stateversion */
+            stateVersion: number | null;
+            /** Stateful */
+            stateful: boolean;
+            /** Version */
+            version: string;
         };
+        /** @enum {string} */
+        OutputFinalityValue: "per_row_final" | "group_final_append_only" | "unproven";
         /** PendingJobResponse */
         PendingJobResponse: {
             /**
@@ -1350,17 +1381,49 @@ export interface components {
             /** Node Count */
             node_count: number;
         };
+        /** ProviderArrayRulesResponse */
+        ProviderArrayRulesResponse: {
+            safeDtypeRule: components["schemas"]["CapabilityRuleResponse"];
+            /** Shaperules */
+            shapeRules: components["schemas"]["CapabilityRuleResponse"][];
+            /** Supporteddtypes */
+            supportedDtypes: string[];
+        };
         /** ProviderCapabilityResponse */
         ProviderCapabilityResponse: {
+            arrayRules: components["schemas"]["ProviderArrayRulesResponse"] | null;
+            checkpointSupport: components["schemas"]["CheckpointSupportValue"];
+            /** Deterministic */
+            deterministic: boolean;
+            finality: components["schemas"]["OutputFinalityValue"];
             /** Inputports */
             inputPorts: components["schemas"]["ProviderPortResponse"][];
+            /** Microbatchinvariant */
+            microbatchInvariant: boolean;
+            /** Modes */
+            modes: components["schemas"]["ExecutionModeValue"][];
             /** Name */
             name: string;
             optionsSchema: components["schemas"]["ProviderOptionsSchemaResponse"] | null;
             /** Outputports */
             outputPorts: components["schemas"]["ProviderPortResponse"][];
+            /**
+             * Partitioncontract
+             * @enum {string}
+             */
+            partitionContract: "none" | "row_axis_independent";
             /** Provider */
             provider: string;
+            /** Replaysafe */
+            replaySafe: boolean;
+            /** Requireswatermark */
+            requiresWatermark: boolean;
+            /** Stateversion */
+            stateVersion: number | null;
+            /** Stateful */
+            stateful: boolean;
+            /** Supportsstaticinputs */
+            supportsStaticInputs: boolean;
             /** Version */
             version: string;
         };

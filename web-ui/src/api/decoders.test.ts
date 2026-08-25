@@ -25,22 +25,58 @@ const connectorFixture = () => ({
   optionsSchema: { path: { type: 'string' } },
 });
 
+const operatorFixture = () => ({
+  kind: 'expression',
+  version: '1',
+  inputPorts: [{ name: 'input', kind: 'table', required: true }],
+  outputPorts: [{ name: 'output', kind: 'table', required: true }],
+  modes: ['batch', 'stream'],
+  finality: 'per_row_final',
+  requiresDatafusion: true,
+  stateful: false,
+  microbatchInvariant: true,
+  requiresWatermark: false,
+  checkpointSupport: 'stateless',
+  stateVersion: null,
+  deterministic: true,
+  replaySafe: true,
+});
+
+const providerFixture = () => ({
+  provider: 'numpy',
+  name: 'table_matmul',
+  version: '1',
+  inputPorts: [
+    { name: 'table', kind: 'table', required: true },
+    { name: 'weights', kind: 'array', required: true },
+  ],
+  outputPorts: [{ name: 'output', kind: 'array', required: true }],
+  optionsSchema: null,
+  modes: ['batch'],
+  finality: 'unproven',
+  stateful: false,
+  microbatchInvariant: false,
+  requiresWatermark: false,
+  checkpointSupport: 'stateless',
+  stateVersion: null,
+  deterministic: false,
+  replaySafe: false,
+  supportsStaticInputs: false,
+  partitionContract: 'none',
+  arrayRules: null,
+});
+
 const capabilitiesFixture = () => ({
-  schemaVersion: 1,
+  schemaVersion: 2,
   runtime: {
     scope: { kind: 'runtimeSession', sessionId: 'session', revision: 0 },
     packageVersion: '4.0.0',
     projectFormatVersions: [3],
     batchKinds: ['table', 'array'],
     portableArrowTypes: ['int64'],
-    operators: [{
-      kind: 'expression',
-      inputKinds: ['table'],
-      outputKinds: ['table'],
-      requiresDatafusion: true,
-    }],
+    operators: [operatorFixture()],
     udfs: [],
-    providers: [],
+    providers: [providerFixture()],
     connectors: [connectorFixture()],
   },
   preview: {
@@ -77,6 +113,106 @@ describe('capabilities decoder', () => {
     const document = capabilitiesFixture();
 
     expect(decodeCapabilitiesResponse(document)).toEqual(document);
+  });
+
+  it('rejects the retired schema version 1 envelope', () => {
+    const document = capabilitiesFixture();
+
+    expect(() => decodeCapabilitiesResponse({
+      ...document,
+      schemaVersion: 1,
+    })).toThrowError(new ApiContractError(
+      'capabilities schema version 1 is unsupported; expected 2',
+    ));
+  });
+
+  it('rejects the legacy v1 operator shape', () => {
+    const document = capabilitiesFixture();
+
+    expect(() => decodeCapabilitiesResponse({
+      ...document,
+      runtime: {
+        ...document.runtime,
+        operators: [{
+          kind: 'expression',
+          inputKinds: ['table'],
+          outputKinds: ['table'],
+          requiresDatafusion: true,
+        }],
+      },
+    })).toThrowError(new ApiContractError(
+      'capabilities.runtime.operators[0].inputKinds: extra fields are forbidden',
+    ));
+  });
+
+  it('rejects an operator state version on a stateless checkpoint support', () => {
+    const document = capabilitiesFixture();
+
+    expect(() => decodeCapabilitiesResponse({
+      ...document,
+      runtime: {
+        ...document.runtime,
+        operators: [{ ...operatorFixture(), stateVersion: 1 }],
+      },
+    })).toThrowError(new ApiContractError(
+      'capabilities.runtime.operators[0].stateVersion: must be null unless checkpointSupport is checkpointed_stateful',
+    ));
+  });
+
+  it('rejects an unknown operator finality', () => {
+    const document = capabilitiesFixture();
+
+    expect(() => decodeCapabilitiesResponse({
+      ...document,
+      runtime: {
+        ...document.runtime,
+        operators: [{ ...operatorFixture(), finality: 'append_only' }],
+      },
+    })).toThrowError(new ApiContractError(
+      "capabilities.runtime.operators[0].finality: expected 'per_row_final' or 'group_final_append_only' or 'unproven'",
+    ));
+  });
+
+  it('rejects an unknown capability rule identity in the safe dtype rule', () => {
+    const document = capabilitiesFixture();
+
+    expect(() => decodeCapabilitiesResponse({
+      ...document,
+      runtime: {
+        ...document.runtime,
+        providers: [{
+          ...providerFixture(),
+          arrayRules: {
+            supportedDtypes: ['float64'],
+            safeDtypeRule: { name: 'unrestricted_matmul', version: '1' },
+            shapeRules: [],
+          },
+        }],
+      },
+    })).toThrowError(new ApiContractError(
+      'capabilities.runtime.providers[0].arrayRules.safeDtypeRule: unknown capability rule unrestricted_matmul@1',
+    ));
+  });
+
+  it('rejects an unknown capability rule identity inside shape rules', () => {
+    const document = capabilitiesFixture();
+
+    expect(() => decodeCapabilitiesResponse({
+      ...document,
+      runtime: {
+        ...document.runtime,
+        providers: [{
+          ...providerFixture(),
+          arrayRules: {
+            supportedDtypes: ['float64'],
+            safeDtypeRule: { name: 'array_api_safe_dtype', version: '1' },
+            shapeRules: [{ name: 'reduce_along_any_axis', version: '2' }],
+          },
+        }],
+      },
+    })).toThrowError(new ApiContractError(
+      'capabilities.runtime.providers[0].arrayRules.shapeRules[0]: unknown capability rule reduce_along_any_axis@2',
+    ));
   });
 
   it('rejects extra connector capability axes', () => {

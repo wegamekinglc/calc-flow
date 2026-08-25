@@ -145,7 +145,7 @@ runtime.register_provider(
 )
 snapshot = runtime.capabilities()
 
-assert snapshot.schema_version == 1
+assert snapshot.schema_version == 2
 assert snapshot.scope.kind == "runtime_session"
 assert snapshot.scope.revision == 1
 assert snapshot.providers[0].name == "normalize"
@@ -153,18 +153,76 @@ assert snapshot.providers[0].name == "normalize"
 
 The public frozen values are `ProviderOption`, `ProviderOptionsSchema`,
 `ProviderPort`, `ProviderCapability`, `UdfCapability`, `OperatorCapability`,
-`RuntimeSessionScope`, and `RuntimeCapabilities`. Provider option schema
+`CapabilityRule`, `ProviderArrayRules`, `RuntimeSessionScope`, and
+`RuntimeCapabilities`. Provider option schema
 version 1 supports only named scalar string, integer, number, or boolean
 fields. `options_schema=None` means no declarative editor is available; it
 does not mean every option is valid. The provider callback remains
 authoritative during compilation.
+
+Capability schema version 2 makes every operator and provider entry
+lifecycle-aware. `OperatorCapability` and `ProviderCapability` report
+`modes`, `finality`, `stateful`, `microbatch_invariant`, `requires_watermark`,
+`checkpoint_support`, `state_version`, `deterministic`, and `replay_safe`;
+providers additionally report `supports_static_inputs`, `partition_contract`,
+and optional `array_rules`. The vocabularies are closed: execution modes are
+`batch` and `stream`; output finality is `per_row_final`,
+`group_final_append_only`, or `unproven`; checkpoint support is `stateless`,
+`checkpointed_stateful`, or `unproven`; and a provider partition contract is
+`none` or `row_axis_independent`. `state_version` is a positive integer
+exactly when `checkpoint_support` is `checkpointed_stateful` and `None`
+otherwise, and a `stateless` capability must set `stateful=False`.
+Construction validates strictly and fails closed: closed-vocabulary and
+cross-field violations raise `ValueError`, while non-strict data (a `list`
+where a tuple is declared, a non-`bool` boolean field) raises `TypeError`.
+
+`CapabilityRule` identities are closed and versioned. The accepted identities
+are `array_api_safe_dtype@1`, `elementwise_broadcast@1`,
+`feature_axis_reduction@1`, and `table_matmul_static_rhs@1`; any other
+name/version pair fails construction. `ProviderArrayRules` pairs the exact
+`supported_dtypes` tuple with a `safe_dtype_rule` and `shape_rules`, and
+stores both tuples sorted by identity.
+
+The `operators` tuple contains exactly `expression@1`, `sql@1`, and
+`stream_join@1`, with truths anchored in the engine implementation:
+
+| Operator        | Modes         | Finality      | Checkpoint support     | State version |
+| --------------- | ------------- | ------------- | ---------------------- | ------------- |
+| `expression@1`  | batch, stream | per_row_final | stateless              | —             |
+| `sql@1`         | batch, stream | unproven      | stateless              | —             |
+| `stream_join@1` | stream        | unproven      | checkpointed_stateful  | 1             |
+
+`stream_join@1` is the only stateful operator and the only one that requires
+a watermark; `expression@1` is the only micro-batch-invariant operator. All
+three report `deterministic=True` and `replay_safe=True`. For `sql@1` those
+two claims hold from the engine viewpoint: exactly-once stream plans reject
+nodes that select volatile registered UDFs, while volatile built-in SQL
+functions such as `random()` inside a read-only `SELECT` are outside that
+validation.
+
+Providers registered through `register_provider` keep their existing
+signature and source compatibility. The registration API accepts no lifecycle
+metadata, so a registered provider's entry is always batch-only with
+conservative values: `modes=("batch",)`, `finality="unproven"`,
+`stateful=False`, `microbatch_invariant=False`, `requires_watermark=False`,
+`checkpoint_support="stateless"`, `state_version=None`,
+`deterministic=False`, `replay_safe=False`, `supports_static_inputs=False`,
+`partition_contract="none"`, and `array_rules=None`. A registration record
+carrying forged lifecycle keys is ignored rather than upgraded, and omission
+never opts a provider into stream execution. `finality="unproven"` means
+registration evidence establishes no output-finality contract; it is the
+truthful conservative value for a batch-only registration and does not narrow
+existing batch selectability.
 
 The session ID is stable for one runtime. A successful registry entry advances
 the revision exactly once; rejected duplicates do not. NumPy/JAX helpers add
 `expression@1` and mapped `table_matmul@1` as separate entries, so one helper
 normally advances by two and can expose a real partial success if its second
 entry already exists. Previously returned snapshots remain isolated from
-later revisions.
+later revisions. Snapshots are immutable and defensively copied: mutating a
+caller-owned sequence after registration cannot change a returned snapshot.
+Operators sort by `(kind, version)`; providers and UDFs sort by
+`(provider, name, version)`.
 
 ## Execution options and provider context
 

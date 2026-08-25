@@ -72,7 +72,7 @@
             "$ref": "#/components/schemas/RuntimeCapabilitiesResponse"
           },
           "schemaVersion": {
-            "const": 1,
+            "const": 2,
             "title": "Schemaversion",
             "type": "integer"
           }
@@ -84,6 +84,33 @@
         ],
         "title": "CapabilitiesResponse",
         "type": "object"
+      },
+      "CapabilityRuleResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version"
+        ],
+        "title": "CapabilityRuleResponse",
+        "type": "object"
+      },
+      "CheckpointSupportValue": {
+        "enum": [
+          "stateless",
+          "checkpointed_stateful",
+          "unproven"
+        ],
+        "type": "string"
       },
       "CompletedJobResponse": {
         "additionalProperties": false,
@@ -259,6 +286,13 @@
         ],
         "title": "ConnectorCapabilityResponse",
         "type": "object"
+      },
+      "ExecutionModeValue": {
+        "enum": [
+          "batch",
+          "stream"
+        ],
+        "type": "string"
       },
       "FailedJobResponse": {
         "additionalProperties": false,
@@ -529,45 +563,105 @@
       "OperatorCapabilityResponse": {
         "additionalProperties": false,
         "properties": {
-          "inputKinds": {
+          "checkpointSupport": {
+            "$ref": "#/components/schemas/CheckpointSupportValue"
+          },
+          "deterministic": {
+            "title": "Deterministic",
+            "type": "boolean"
+          },
+          "finality": {
+            "$ref": "#/components/schemas/OutputFinalityValue"
+          },
+          "inputPorts": {
             "items": {
-              "enum": [
-                "table",
-                "array"
-              ],
-              "type": "string"
+              "$ref": "#/components/schemas/ProviderPortResponse"
             },
-            "title": "Inputkinds",
+            "title": "Inputports",
             "type": "array"
           },
           "kind": {
             "title": "Kind",
             "type": "string"
           },
-          "outputKinds": {
+          "microbatchInvariant": {
+            "title": "Microbatchinvariant",
+            "type": "boolean"
+          },
+          "modes": {
             "items": {
-              "enum": [
-                "table",
-                "array"
-              ],
-              "type": "string"
+              "$ref": "#/components/schemas/ExecutionModeValue"
             },
-            "title": "Outputkinds",
+            "minItems": 1,
+            "title": "Modes",
             "type": "array"
+          },
+          "outputPorts": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderPortResponse"
+            },
+            "title": "Outputports",
+            "type": "array"
+          },
+          "replaySafe": {
+            "title": "Replaysafe",
+            "type": "boolean"
           },
           "requiresDatafusion": {
             "title": "Requiresdatafusion",
             "type": "boolean"
+          },
+          "requiresWatermark": {
+            "title": "Requireswatermark",
+            "type": "boolean"
+          },
+          "stateVersion": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stateversion"
+          },
+          "stateful": {
+            "title": "Stateful",
+            "type": "boolean"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
           }
         },
         "required": [
           "kind",
-          "inputKinds",
-          "outputKinds",
-          "requiresDatafusion"
+          "version",
+          "inputPorts",
+          "outputPorts",
+          "modes",
+          "finality",
+          "requiresDatafusion",
+          "stateful",
+          "microbatchInvariant",
+          "requiresWatermark",
+          "checkpointSupport",
+          "stateVersion",
+          "deterministic",
+          "replaySafe"
         ],
         "title": "OperatorCapabilityResponse",
         "type": "object"
+      },
+      "OutputFinalityValue": {
+        "enum": [
+          "per_row_final",
+          "group_final_append_only",
+          "unproven"
+        ],
+        "type": "string"
       },
       "PendingJobResponse": {
         "additionalProperties": false,
@@ -2987,14 +3081,75 @@
         "title": "ProjectSummary",
         "type": "object"
       },
+      "ProviderArrayRulesResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "safeDtypeRule": {
+            "$ref": "#/components/schemas/CapabilityRuleResponse"
+          },
+          "shapeRules": {
+            "items": {
+              "$ref": "#/components/schemas/CapabilityRuleResponse"
+            },
+            "title": "Shaperules",
+            "type": "array"
+          },
+          "supportedDtypes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Supporteddtypes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "supportedDtypes",
+          "safeDtypeRule",
+          "shapeRules"
+        ],
+        "title": "ProviderArrayRulesResponse",
+        "type": "object"
+      },
       "ProviderCapabilityResponse": {
         "additionalProperties": false,
         "properties": {
+          "arrayRules": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderArrayRulesResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "checkpointSupport": {
+            "$ref": "#/components/schemas/CheckpointSupportValue"
+          },
+          "deterministic": {
+            "title": "Deterministic",
+            "type": "boolean"
+          },
+          "finality": {
+            "$ref": "#/components/schemas/OutputFinalityValue"
+          },
           "inputPorts": {
             "items": {
               "$ref": "#/components/schemas/ProviderPortResponse"
             },
             "title": "Inputports",
+            "type": "array"
+          },
+          "microbatchInvariant": {
+            "title": "Microbatchinvariant",
+            "type": "boolean"
+          },
+          "modes": {
+            "items": {
+              "$ref": "#/components/schemas/ExecutionModeValue"
+            },
+            "minItems": 1,
+            "title": "Modes",
             "type": "array"
           },
           "name": {
@@ -3018,9 +3173,45 @@
             "title": "Outputports",
             "type": "array"
           },
+          "partitionContract": {
+            "enum": [
+              "none",
+              "row_axis_independent"
+            ],
+            "title": "Partitioncontract",
+            "type": "string"
+          },
           "provider": {
             "title": "Provider",
             "type": "string"
+          },
+          "replaySafe": {
+            "title": "Replaysafe",
+            "type": "boolean"
+          },
+          "requiresWatermark": {
+            "title": "Requireswatermark",
+            "type": "boolean"
+          },
+          "stateVersion": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stateversion"
+          },
+          "stateful": {
+            "title": "Stateful",
+            "type": "boolean"
+          },
+          "supportsStaticInputs": {
+            "title": "Supportsstaticinputs",
+            "type": "boolean"
           },
           "version": {
             "title": "Version",
@@ -3033,7 +3224,19 @@
           "version",
           "inputPorts",
           "outputPorts",
-          "optionsSchema"
+          "optionsSchema",
+          "modes",
+          "finality",
+          "stateful",
+          "microbatchInvariant",
+          "requiresWatermark",
+          "checkpointSupport",
+          "stateVersion",
+          "deterministic",
+          "replaySafe",
+          "supportsStaticInputs",
+          "partitionContract",
+          "arrayRules"
         ],
         "title": "ProviderCapabilityResponse",
         "type": "object"

@@ -203,14 +203,20 @@ Execution settings and deadlines are per-run values; provider-context opt-in
 belongs to the runtime registration. Neither changes project or checkpoint
 formats, fingerprints, Studio REST/OpenAPI, or capability schemas.
 
-Capability schema version 1 contains only frozen data:
+Capability schema version 2 contains only frozen data:
 `RuntimeSessionScope`, `OperatorCapability`, `UdfCapability`,
-`ProviderCapability`, `ProviderPort`, `ProviderOptionsSchema`, and
-`ProviderOption`. Its session ID is stable for one `Runtime`; its revision
-advances once for each successful registry entry. Failed duplicates do not
-advance it, while the two-entry NumPy and JAX helpers can expose a real partial
-success. Snapshots already returned to callers do not change when later
-registrations advance the revision.
+`ProviderCapability`, `ProviderPort`, `ProviderOptionsSchema`,
+`ProviderOption`, `CapabilityRule`, and `ProviderArrayRules`. Operator and
+provider entries carry the lifecycle vocabulary — modes, finality,
+statefulness, micro-batch invariance, watermark requirement, checkpoint
+support and state version, determinism, and replay safety — validated
+fail-closed against closed vocabularies; see the
+[Python API guide](python-api.md) for the full contract. Its session ID is
+stable for one `Runtime`; its revision advances once for each successful
+registry entry. Failed duplicates do not advance it, while the two-entry
+NumPy and JAX helpers can expose a real partial success. Snapshots already
+returned to callers do not change when later registrations advance the
+revision.
 
 `register_numpy(runtime)` installs `numpy:expression@1` and
 `numpy:table_matmul@1`; `register_jax(runtime)` installs `jax:expression@1`
@@ -315,16 +321,20 @@ whether a matching registration can be reconstructed as `serialized`,
 is not a promise that arbitrary project input is executable: normal compile,
 Port, option, input-format, and resource-limit checks still apply.
 
-Only NumPy/JAX `expression@1` is eligible for lazy built-in reconstruction in
-schema version 1. There is no lazy `table_matmul@1`; a parent registration may
-therefore be compile-capable while worker reconstruction is unavailable.
-Clients should disable only the unsupported job action and keep project
-editing and parent-runtime validation available.
+Only NumPy/JAX `expression@1` is eligible for lazy built-in reconstruction.
+There is no lazy `table_matmul@1`; a parent registration may therefore be
+compile-capable while worker reconstruction is unavailable. Clients should
+disable only the unsupported job action and keep project editing and
+parent-runtime validation available.
 
-Capability schema version 1 is closed. The browser decoder rejects an unknown
-version or any extra field before React receives it. Validation, job, and SSE
-responses use generated discriminated unions, so backend and frontend must be
-deployed from the same generated contract.
+The response envelope carries one schema version: `schemaVersion` is `2`, and
+the nested `runtime` object omits its own version field. The browser decoder
+rejects a response whose `schemaVersion` is not `2` or that carries any extra
+field before React receives it. Unknown capability-rule identities, unknown
+lifecycle vocabulary, and inconsistent `stateVersion`/`stateful` combinations
+are rejected by the backend response models as well as the decoder.
+Validation, job, and SSE responses use generated discriminated unions, so
+backend and frontend must be deployed from the same generated contract.
 
 Project writes that fail validation answer `422` with a structured envelope on
 `POST /projects`, `POST /projects/import`, and `PUT /projects/{id}`: the
