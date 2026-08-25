@@ -173,6 +173,48 @@ describe('capabilities decoder', () => {
     ));
   });
 
+  it('rejects an unknown capability rule identity in the safe dtype rule', () => {
+    const document = capabilitiesFixture();
+
+    expect(() => decodeCapabilitiesResponse({
+      ...document,
+      runtime: {
+        ...document.runtime,
+        providers: [{
+          ...providerFixture(),
+          arrayRules: {
+            supportedDtypes: ['float64'],
+            safeDtypeRule: { name: 'unrestricted_matmul', version: '1' },
+            shapeRules: [],
+          },
+        }],
+      },
+    })).toThrowError(new ApiContractError(
+      'capabilities.runtime.providers[0].arrayRules.safeDtypeRule: unknown capability rule unrestricted_matmul@1',
+    ));
+  });
+
+  it('rejects an unknown capability rule identity inside shape rules', () => {
+    const document = capabilitiesFixture();
+
+    expect(() => decodeCapabilitiesResponse({
+      ...document,
+      runtime: {
+        ...document.runtime,
+        providers: [{
+          ...providerFixture(),
+          arrayRules: {
+            supportedDtypes: ['float64'],
+            safeDtypeRule: { name: 'array_api_safe_dtype', version: '1' },
+            shapeRules: [{ name: 'reduce_along_any_axis', version: '2' }],
+          },
+        }],
+      },
+    })).toThrowError(new ApiContractError(
+      'capabilities.runtime.providers[0].arrayRules.shapeRules[0]: unknown capability rule reduce_along_any_axis@2',
+    ));
+  });
+
   it('rejects extra connector capability axes', () => {
     const document = capabilitiesFixture();
     const connector = connectorFixture();

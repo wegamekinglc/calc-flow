@@ -190,11 +190,21 @@ const capabilityLifecycleAt = (
   booleanAt(fields.replaySafe, `${path}.replaySafe`);
 };
 
+const CLOSED_CAPABILITY_RULES: ReadonlySet<string> = new Set([
+  'array_api_safe_dtype@1',
+  'elementwise_broadcast@1',
+  'feature_axis_reduction@1',
+  'table_matmul_static_rhs@1',
+]);
+
 const capabilityRuleAt = (value: unknown, path: string): void => {
   const rule = objectAt(value, path);
   exactKeys(rule, ['name', 'version'], path);
   stringAt(rule.name, `${path}.name`);
   stringAt(rule.version, `${path}.version`);
+  if (!CLOSED_CAPABILITY_RULES.has(`${String(rule.name)}@${String(rule.version)}`)) {
+    fail(path, `unknown capability rule ${String(rule.name)}@${String(rule.version)}`);
+  }
 };
 
 const runtimeCapabilitiesAt = (value: unknown, path: string): void => {
@@ -339,7 +349,9 @@ const runtimeCapabilitiesAt = (value: unknown, path: string): void => {
     stringArrayAt(rules.supportedDtypes, null, `${rulesPath}.supportedDtypes`);
     capabilityRuleAt(rules.safeDtypeRule, `${rulesPath}.safeDtypeRule`);
     arrayAt(rules.shapeRules, `${rulesPath}.shapeRules`)
-      .forEach((rule, ruleIndex) => capabilityRuleAt(rule, `${rulesPath}.shapeRules[${ruleIndex}]`));
+      .forEach((rule, ruleIndex) => {
+        capabilityRuleAt(rule, `${rulesPath}.shapeRules[${ruleIndex}]`);
+      });
   });
   arrayAt(runtime.connectors, `${path}.connectors`).forEach((item, index) => {
     const itemPath = `${path}.connectors[${index}]`;

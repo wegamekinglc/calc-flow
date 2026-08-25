@@ -171,6 +171,24 @@ def _require_finality(owner: str, value: object) -> OutputFinality:
     return value  # type: ignore[return-value]
 
 
+def _require_state_version(owner: str, support: str, state_version: object) -> None:
+    if support != "checkpointed_stateful":
+        if state_version is not None:
+            raise ValueError(
+                f"{owner} state_version must be None unless checkpointed_stateful"
+            )
+        return
+    if state_version is None or (type(state_version) is int and state_version <= 0):
+        raise ValueError(
+            f"{owner} checkpointed_stateful requires a positive state_version"
+        )
+    if type(state_version) is not int:
+        raise TypeError(
+            f"{owner} state_version must be an exact int when "
+            f"checkpointed_stateful; found {type(state_version).__name__}"
+        )
+
+
 def _require_checkpoint_support(
     owner: str, support: object, state_version: object, stateful: bool
 ) -> None:
@@ -184,20 +202,7 @@ def _require_checkpoint_support(
             "checkpoint support must be stateless, checkpointed_stateful, or "
             f"unproven; found {support!r}"
         )
-    if support == "checkpointed_stateful":
-        if state_version is None or (type(state_version) is int and state_version <= 0):
-            raise ValueError(
-                f"{owner} checkpointed_stateful requires a positive state_version"
-            )
-        if type(state_version) is not int:
-            raise TypeError(
-                f"{owner} state_version must be an exact int when "
-                f"checkpointed_stateful; found {type(state_version).__name__}"
-            )
-    elif state_version is not None:
-        raise ValueError(
-            f"{owner} state_version must be None unless checkpointed_stateful"
-        )
+    _require_state_version(owner, support, state_version)
     if support == "stateless" and stateful:
         raise ValueError(f"{owner} stateless capability must set stateful=False")
 

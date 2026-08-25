@@ -833,6 +833,56 @@ def test_capability_rules_accept_only_the_closed_versioned_identities() -> None:
             safe_dtype_rule=CapabilityRule("array_api_safe_dtype", "1"),
             shape_rules=(),
         )
+    with pytest.raises(
+        TypeError,
+        match="capability rule name and version must be exact strings",
+    ):
+        CapabilityRule(b"array_api_safe_dtype", "1")  # type: ignore[arg-type]
+    with pytest.raises(
+        TypeError,
+        match="capability rule name and version must be exact strings",
+    ):
+        CapabilityRule("array_api_safe_dtype", 1)  # type: ignore[arg-type]
+
+
+def test_capability_snapshot_ignores_later_mutation_of_caller_owned_sequences() -> None:
+    runtime = Runtime()
+    input_ports = [("table", "table"), ("weights", "array")]
+    output_ports = [("output", "array")]
+    input_types = ["int64", "float64"]
+
+    runtime._register_mapping_provider(
+        "numpy",
+        "table_matmul",
+        "1",
+        lambda _inputs, _options: {},
+        input_ports=input_ports,
+        output_ports=output_ports,
+    )
+    runtime.register_scalar_udf(
+        provider="python",
+        name="scaled",
+        version="1",
+        input_types=input_types,
+        return_type="float64",
+        volatility="immutable",
+        function=lambda left, right: left,
+    )
+    snapshot = runtime.capabilities()
+
+    input_ports.append(("hijacked", "table"))
+    output_ports[0] = ("hijacked", "array")
+    input_types[0] = "hijacked"
+
+    assert runtime.capabilities() == snapshot
+    assert snapshot.providers[0].input_ports == (
+        ProviderPort("table", "table", required=True),
+        ProviderPort("weights", "array", required=True),
+    )
+    assert snapshot.providers[0].output_ports == (
+        ProviderPort("output", "array", required=True),
+    )
+    assert snapshot.udfs[0].input_types == ("int64", "float64")
 
 
 def test_capability_snapshot_stays_immutable_across_later_registrations() -> None:

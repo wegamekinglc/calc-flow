@@ -252,6 +252,27 @@ def test_capabilities_response_is_a_closed_camel_case_v2_contract() -> None:
                 },
             }
         )
+    with pytest.raises(ValidationError):
+        CapabilitiesResponse.model_validate(
+            {
+                **document,
+                "runtime": {
+                    **document["runtime"],
+                    "providers": [
+                        {
+                            **document["runtime"]["providers"][0],
+                            "arrayRules": {
+                                **document["runtime"]["providers"][0]["arrayRules"],
+                                "safeDtypeRule": {
+                                    "name": "unrestricted_matmul",
+                                    "version": "1",
+                                },
+                            },
+                        }
+                    ],
+                },
+            }
+        )
 
 
 def test_validation_report_discriminator_enforces_status_invariants() -> None:

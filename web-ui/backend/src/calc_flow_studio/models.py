@@ -145,9 +145,25 @@ class ProviderOptionsSchemaResponse(CapabilityModel):
     additional_properties: Literal[False] = False
 
 
+_CLOSED_CAPABILITY_RULES = frozenset(
+    (
+        ("array_api_safe_dtype", "1"),
+        ("elementwise_broadcast", "1"),
+        ("feature_axis_reduction", "1"),
+        ("table_matmul_static_rhs", "1"),
+    )
+)
+
+
 class CapabilityRuleResponse(CapabilityModel):
     name: str
     version: str
+
+    @model_validator(mode="after")
+    def _identity_is_closed(self) -> Self:
+        if (self.name, self.version) not in _CLOSED_CAPABILITY_RULES:
+            raise ValueError(f"unknown capability rule {self.name}@{self.version}")
+        return self
 
 
 class ProviderArrayRulesResponse(CapabilityModel):
