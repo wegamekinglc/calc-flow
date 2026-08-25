@@ -10,9 +10,9 @@ has one package boundary.
 The workflow produces the following Python artifact set for every manual or
 tagged release run:
 
-| Package            | Published artifacts                             | Python compatibility |
-| ------------------ | ----------------------------------------------- | -------------------- |
-| `calc-flow`        | Five abi3 wheels and one source distribution    | CPython 3.13+        |
+| Package            | Published artifacts                              | Python compatibility |
+| ------------------ | ------------------------------------------------ | -------------------- |
+| `calc-flow`        | Five abi3 wheels and one source distribution     | CPython 3.13+        |
 | `calc-flow-studio` | One `py3-none-any` wheel with built React assets | Python 3.13+         |
 
 The five core wheels cover this matrix:

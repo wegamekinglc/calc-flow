@@ -281,6 +281,15 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("url: https://pypi.org/project/calc-flow-studio/", workflow)
         self.assertNotIn("skip-existing", workflow)
 
+        verify_job = workflow.split("  verify-python-release:\n", 1)[1].split(
+            "  publish-python-core:\n", 1
+        )[0]
+        self.assertIn(
+            "uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1",
+            verify_job,
+        )
+        self.assertIn('python-version: "3.13"', verify_job)
+
     def test_python_release_guide_covers_rehearsal_and_trusted_publishers(self) -> None:
         guide = (ROOT / "docs/python-release.md").read_text(encoding="utf-8")
 
@@ -294,6 +303,13 @@ class ReleaseConfigTests(unittest.TestCase):
             "PyPI versions and files are immutable",
         ):
             self.assertIn(expected, guide)
+
+        release_table = guide.split("tagged release run:\n\n", 1)[1].split("\n\n", 1)[0]
+        pipe_positions = {
+            tuple(index for index, character in enumerate(line) if character == "|")
+            for line in release_table.splitlines()
+        }
+        self.assertEqual(len(pipe_positions), 1)
 
     def test_frontend_module_stems_do_not_collide_on_windows(self) -> None:
         modules = sorted((ROOT / "web-ui/src").rglob("*.ts")) + sorted(
