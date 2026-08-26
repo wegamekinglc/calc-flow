@@ -42,7 +42,7 @@ defensive copies.
 
 An expression node accepts exactly one calculation expression or a non-empty
 `select` projection; `filter` may accompany either mode. Connect nodes with
-`connect(source, target, source_port="output", target_port="input")`.
+`connect(source_node, target_node, source_port="output", target_port="input")`.
 
 ## Multi-input SQL
 
@@ -153,7 +153,8 @@ assert snapshot.providers[0].name == "normalize"
 
 The public frozen values are `ProviderOption`, `ProviderOptionsSchema`,
 `ProviderPort`, `ProviderCapability`, `UdfCapability`, `OperatorCapability`,
-`CapabilityRule`, `ProviderArrayRules`, `RuntimeSessionScope`, and
+`ConnectorCapabilities`, `ConnectorCapability`, `CapabilityRule`,
+`ProviderArrayRules`, `RuntimeSessionScope`, and
 `RuntimeCapabilities`. Provider option schema
 version 1 supports only named scalar string, integer, number, or boolean
 fields. `options_schema=None` means no declarative editor is available; it
@@ -213,6 +214,13 @@ never opts a provider into stream execution. `finality="unproven"` means
 registration evidence establishes no output-finality contract; it is the
 truthful conservative value for a batch-only registration and does not narrow
 existing batch selectability.
+
+Compiled-in connector registrations surface on the snapshot's `connectors`
+tuple as `ConnectorCapability` entries. Each entry pairs its
+`(provider, name, version)` identity and `source`/`sink`/`both` kind with a
+`ConnectorCapabilities` value (`delivery`, `replay`, `watermark`,
+`transaction`, and the `snapshot`/`polling`/`cdc`/`lookup` flags), the
+declared formats, and an options schema.
 
 The session ID is stable for one runtime. A successful registry entry advances
 the revision exactly once; rejected duplicates do not. NumPy/JAX helpers add
@@ -646,6 +654,14 @@ print(job.status())  # synchronous and safe inside the event loop
 outcome = await job.wait_async()
 ```
 
+A bounded event-time Join is declared on the builder with
+`stream_join(name, *, left_schema, right_schema, left_keys, right_keys,
+left_event_time, right_event_time, bounds, limits, left_prefix="left",
+right_prefix="right")`. Input schemas are `ArrowFieldSpec` sequences and the
+`JoinTimeBounds`/`JoinStateLimits` values are required; the
+[continuous streaming guide](streaming-guide.md) carries the full
+declaration.
+
 Source `open`, `next`, and `close` and every sink lifecycle method must be
 declared with `async def`; binding construction rejects invalid method shapes
 without invoking the connector. `start_async()` consumes its runner exactly
@@ -698,6 +714,6 @@ paths, callback representations, or raw source chains.
 ## More examples
 
 Every file under [`examples/`](../examples/README.md) is executable against the
-installed 3.0 wheel. See the [cross-language inventory](examples.md) or run
+installed 4.0 wheel. See the [cross-language inventory](examples.md) or run
 all user examples with
 `JAX_PLATFORMS=cpu uv run python scripts/run_examples.py`.

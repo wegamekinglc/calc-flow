@@ -73,10 +73,10 @@ actor 调度会偏离 Calc-Flow 的嵌入式定位。
 对应实现入口：
 
 - [`pipeline.rs`](https://github.com/wegamekinglc/calc-flow/blob/cb2321e139d3905f746f7242c7cec313b93c8661/crates/calc-flow/src/pipeline.rs)
-- [`runtime/micro_batch.rs`](../../crates/calc-flow/src/runtime/micro_batch.rs)
+- [`runtime/micro_batch.rs`](https://github.com/wegamekinglc/calc-flow/blob/cb2321e139d3905f746f7242c7cec313b93c8661/crates/calc-flow/src/runtime/micro_batch.rs)
 - [`runtime/streaming.rs`](https://github.com/wegamekinglc/calc-flow/blob/cb2321e139d3905f746f7242c7cec313b93c8661/crates/calc-flow/src/runtime/streaming.rs)
-- [`checkpoint.rs`](../../crates/calc-flow/src/checkpoint.rs)
-- [`io.rs`](../../crates/calc-flow/src/io.rs)
+- [`checkpoint.rs`](https://github.com/wegamekinglc/calc-flow/blob/cb2321e139d3905f746f7242c7cec313b93c8661/crates/calc-flow/src/checkpoint.rs)
+- [`io.rs`](https://github.com/wegamekinglc/calc-flow/blob/cb2321e139d3905f746f7242c7cec313b93c8661/crates/calc-flow/src/io.rs)
 
 ### 3.2 尚未实现的流语义
 
@@ -700,8 +700,8 @@ Calc-Flow 的建设理由应来自嵌入式、Python/Arrow/array 混合工作负
 - [`docs/runtime-envelope.md`](../runtime-envelope.md)
 - [`crates/calc-flow/src/pipeline.rs`](https://github.com/wegamekinglc/calc-flow/blob/cb2321e139d3905f746f7242c7cec313b93c8661/crates/calc-flow/src/pipeline.rs)
 - [`crates/calc-flow/src/runtime/streaming.rs`](https://github.com/wegamekinglc/calc-flow/blob/cb2321e139d3905f746f7242c7cec313b93c8661/crates/calc-flow/src/runtime/streaming.rs)
-- [`crates/calc-flow/src/runtime/micro_batch.rs`](../../crates/calc-flow/src/runtime/micro_batch.rs)
+- [`crates/calc-flow/src/runtime/micro_batch.rs`](https://github.com/wegamekinglc/calc-flow/blob/cb2321e139d3905f746f7242c7cec313b93c8661/crates/calc-flow/src/runtime/micro_batch.rs)
 - [`crates/calc-flow/src/runtime/envelope.rs`](https://github.com/wegamekinglc/calc-flow/blob/cb2321e139d3905f746f7242c7cec313b93c8661/crates/calc-flow/src/runtime/envelope.rs)
 - [`crates/calc-flow/src/pipeline/control.rs`](https://github.com/wegamekinglc/calc-flow/blob/cb2321e139d3905f746f7242c7cec313b93c8661/crates/calc-flow/src/pipeline/control.rs)
-- [`crates/calc-flow/src/checkpoint.rs`](../../crates/calc-flow/src/checkpoint.rs)
-- [`crates/calc-flow/src/io.rs`](../../crates/calc-flow/src/io.rs)
+- [`crates/calc-flow/src/checkpoint.rs`](https://github.com/wegamekinglc/calc-flow/blob/cb2321e139d3905f746f7242c7cec313b93c8661/crates/calc-flow/src/checkpoint.rs)
+- [`crates/calc-flow/src/io.rs`](https://github.com/wegamekinglc/calc-flow/blob/cb2321e139d3905f746f7242c7cec313b93c8661/crates/calc-flow/src/io.rs)
