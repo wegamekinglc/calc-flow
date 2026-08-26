@@ -464,9 +464,13 @@ impl StreamOperator for RollingOperator {
         let encoded = self.encode_state(epoch)?;
         let (descriptor, segments) = match encoded {
             Some(prepared) => {
-                let descriptor = self.snapshot_segment_descriptor(epoch, &prepared)?;
+                // One shared allocation and one digest serve both the snapshot
+                // and the manifest descriptor; nothing re-encodes or re-hashes.
+                let (segment_id, bytes) = prepared;
+                let segment = crate::StateSegment::new(bytes);
+                let descriptor = self.snapshot_segment_descriptor(epoch, &segment_id, &segment)?;
                 let mut segments = BTreeMap::new();
-                segments.insert(prepared.0, prepared.1);
+                segments.insert(segment_id, segment);
                 (Some(descriptor), segments)
             }
             None => (None, BTreeMap::new()),
@@ -739,19 +743,18 @@ impl RollingOperator {
     fn snapshot_segment_descriptor(
         &self,
         epoch: Epoch,
-        prepared: &(String, Vec<u8>),
+        segment_id: &str,
+        segment: &crate::StateSegment,
     ) -> Result<SegmentDescriptor> {
         let operator_id = self.state.operator_id.as_deref().ok_or_else(|| {
             checkpoint_mismatch("rolling segment is missing its operator identity".into())
         })?;
-        let (segment_id, bytes) = prepared;
         let relative_path = format!(
             "committed/{operator_id}/{:020}-{segment_id}.arrow",
             epoch.as_u64()
         );
-        let byte_len = u64::try_from(bytes.len())
+        let byte_len = u64::try_from(segment.bytes().len())
             .map_err(|_| internal_error("rolling segment length does not fit u64"))?;
-        let sha256 = hex::encode(Sha256::digest(bytes));
         Ok(SegmentDescriptor {
             kind: SegmentKind::Base,
             state_layout_version: ROLLING_STATE_LAYOUT_VERSION,
@@ -762,7 +765,7 @@ impl RollingOperator {
                 segment_id,
                 &relative_path,
                 byte_len,
-                &sha256,
+                segment.sha256(),
             )?,
         })
     }
@@ -1218,27 +1221,30 @@ fn validate_snapshot_metadata(
 fn snapshot_segments(
     snapshot: &crate::OperatorStateSnapshot,
     inventory: &[SegmentDescriptor],
-) -> Result<Vec<Vec<u8>>> {
+) -> Result<Vec<Arc<Vec<u8>>>> {
     inventory
         .iter()
         .map(|descriptor| {
             let segment_id = descriptor.handle.segment_id();
-            let bytes = snapshot.segments.get(segment_id).cloned().ok_or_else(|| {
+            let segment = snapshot.segments.get(segment_id).ok_or_else(|| {
                 checkpoint_mismatch(format!(
                     "rolling snapshot is missing segment {segment_id:?}"
                 ))
             })?;
+            // A fresh session revalidates every referenced segment byte
+            // against the manifest handle before any state is installed.
+            let bytes = segment.bytes();
             if u64::try_from(bytes.len()).ok() != Some(descriptor.handle.byte_len()) {
                 return Err(checkpoint_mismatch(
                     "rolling snapshot segment byte length does not match its handle".into(),
                 ));
             }
-            if hex::encode(Sha256::digest(&bytes)) != descriptor.handle.sha256() {
+            if hex::encode(Sha256::digest(bytes)) != descriptor.handle.sha256() {
                 return Err(checkpoint_mismatch(
                     "rolling snapshot segment checksum does not match its handle".into(),
                 ));
             }
-            Ok(bytes)
+            Ok(segment.bytes_arc())
         })
         .collect()
 }

@@ -499,9 +499,11 @@ async fn probe_restore_rejects_corrupt_segment_and_leaves_state_untouched() {
     let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
 
     let mut corrupted = snapshot.clone();
-    for bytes in corrupted.segments.values_mut() {
+    for segment in corrupted.segments.values_mut() {
+        let mut bytes = segment.bytes().to_vec();
         let middle = bytes.len() / 2;
         bytes[middle] ^= 0xFF;
+        *segment = calc_flow::StateSegment::new(bytes);
     }
     let mut target = make_operator(probe_spec(1, 1, 0, false));
     assert!(

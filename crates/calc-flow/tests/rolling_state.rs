@@ -3,8 +3,8 @@ use std::{collections::BTreeMap, sync::Arc};
 use calc_flow::{
     Batch, BatchMetadata, CancellationToken, EdgeCollector, Epoch, EventTime, JsonMap,
     LocalStateBackend, OperatorMetadata, OperatorStateSnapshot, RollingOperator, RollingSpec,
-    StateBackend, StateHandle, StateLineageKey, StreamCollector, StreamJobContext, StreamOperator,
-    StreamOperatorContext,
+    StateBackend, StateHandle, StateLineageKey, StateSegment, StreamCollector, StreamJobContext,
+    StreamOperator, StreamOperatorContext,
 };
 use datafusion::arrow::{
     array::{
@@ -478,7 +478,10 @@ async fn invalid_restore_has_no_side_effect_and_repeated_restore_is_idempotent()
     let mut tampered = snapshot.clone();
     let first_segment = tampered.segments.keys().next().cloned();
     if let Some(segment_id) = first_segment {
-        tampered.segments.get_mut(&segment_id).unwrap().push(0xAA);
+        let segment = tampered.segments.get_mut(&segment_id).unwrap();
+        let mut bytes = segment.bytes().to_vec();
+        bytes.push(0xAA);
+        *segment = StateSegment::new(bytes);
     }
     let mut target = error_operator();
     if !tampered.segments.is_empty() {
@@ -720,7 +723,8 @@ async fn snapshot_segments_round_trip_through_the_validating_local_backend() {
     let lineage_hash =
         digest(format!("{}\0{}", key.pipeline_name(), key.pipeline_fingerprint()).as_bytes());
     let mut restored_segments = BTreeMap::new();
-    for (segment_id, bytes) in &snapshot.segments {
+    for (segment_id, segment) in &snapshot.segments {
+        let bytes = segment.bytes();
         let handle = StateHandle::new(
             "rolling",
             Epoch::new(1).unwrap(),
@@ -741,7 +745,7 @@ async fn snapshot_segments_round_trip_through_the_validating_local_backend() {
         lineage.publish_segment(&handle).await.unwrap();
         restored_segments.insert(
             segment_id.clone(),
-            lineage.load_segment(&handle).await.unwrap(),
+            StateSegment::new(lineage.load_segment(&handle).await.unwrap()),
         );
     }
 
