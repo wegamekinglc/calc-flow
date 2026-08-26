@@ -1276,7 +1276,9 @@ mod runtime_projection_tests {
             inline_metadata: [("value".into(), serde_json::json!(11))]
                 .into_iter()
                 .collect(),
-            segments: [("delta".into(), vec![1, 2, 3])].into_iter().collect(),
+            segments: [("delta".into(), crate::StateSegment::new(vec![1, 2, 3]))]
+                .into_iter()
+                .collect(),
         };
 
         let encoded = capability

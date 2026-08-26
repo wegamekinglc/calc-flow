@@ -191,9 +191,13 @@ defaults are stateless: capture returns an empty snapshot, restore rejects a
 non-empty one, and reset succeeds.
 
 `OperatorStateSnapshot` carries small bounded JSON `inline_metadata` plus
-named byte `segments`. Keyed row state never appears inline (D4.4), and no
-segment may carry secrets (I4); the runtime assigns segment paths, lengths,
-and checksums during staging (D4.1).
+named `segments` of allocation-shared `StateSegment` values (immutable bytes
+with a SHA-256 computed once at construction, so carried segments move
+between epochs without copying or re-hashing). Keyed row state never appears
+inline (D4.4), and no segment may carry secrets (I4); the runtime assigns
+segment paths, lengths, and checksums during staging (D4.1), reusing the
+already-committed handle for segment content that is unchanged since the
+current session committed it.
 
 The built-in window operator prepares immutable Arrow IPC deltas through a
 blocking worker while processing data and control events. Its synchronous

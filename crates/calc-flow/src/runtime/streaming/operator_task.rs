@@ -1561,7 +1561,10 @@ pub(super) mod tests {
             if matches!(self.behavior, Behavior::Stateful) {
                 Ok(crate::OperatorStateSnapshot {
                     inline_metadata: BTreeMap::from([("layout".into(), serde_json::json!(1))]),
-                    segments: BTreeMap::from([("delta-0001".into(), b"state".to_vec())]),
+                    segments: BTreeMap::from([(
+                        "delta-0001".into(),
+                        crate::StateSegment::new(b"state".to_vec()),
+                    )]),
                 })
             } else {
                 Ok(crate::OperatorStateSnapshot::default())

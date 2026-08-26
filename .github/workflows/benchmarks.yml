@@ -22,6 +22,8 @@ jobs:
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
       - name: Run Rust core benchmarks
         run: cargo bench --locked -p calc-flow --bench core
+      - name: Run stream join baseline benchmarks
+        run: cargo bench --locked -p calc-flow --bench stream_join_perf
       - name: Upload Rust benchmark report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

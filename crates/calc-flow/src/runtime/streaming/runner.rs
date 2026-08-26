@@ -2791,7 +2791,7 @@ fn validate_manifest_operator_capabilities(
         let segments = if entry.segments.is_empty() {
             BTreeMap::new()
         } else {
-            BTreeMap::from([("state".into(), Vec::new())])
+            BTreeMap::from([("state".into(), crate::StateSegment::new(Vec::new()))])
         };
         node.checkpoint_capability.decode_snapshot(
             operator_id,
@@ -2869,12 +2869,7 @@ async fn prepare_checkpoint_recovery(
     for (operator_id, entry) in selected.manifest.operators() {
         let snapshot = checkpoint
             .transaction
-            .load_operator_state_cancellable(
-                operator_id,
-                selected.manifest.epoch(),
-                entry,
-                cancellation,
-            )
+            .load_operator_state_cancellable(operator_id, entry, cancellation)
             .await?;
         let &(checkpoint_capability, requires_output_frontier) = checkpoint_capabilities
             .get(operator_id.as_str())
@@ -5842,7 +5837,10 @@ mod tests {
         assert_eq!(resets.load(Ordering::SeqCst), 0);
         assert_eq!(source.opened.load(Ordering::SeqCst), 0);
         assert_eq!(sink.opened.load(Ordering::SeqCst), 0);
-        assert_eq!(load_count.load(Ordering::SeqCst), 3);
+        // Recovery loads each referenced segment exactly once: the selection
+        // revalidation (AC-08) and the operator state load. The session no
+        // longer re-reads the same committed bytes again at retention.
+        assert_eq!(load_count.load(Ordering::SeqCst), 2);
     }
 
     fn assert_job_status_json_is_allowlisted(encoded: &serde_json::Value) {
@@ -7079,7 +7077,7 @@ mod tests {
         }
 
         async fn load_segment(&self, handle: &StateHandle) -> Result<Vec<u8>> {
-            if self.load_count.fetch_add(1, Ordering::SeqCst) >= 2 {
+            if self.load_count.fetch_add(1, Ordering::SeqCst) >= 1 {
                 return Err(CalcFlowError::Io {
                     path: self.failure_path.to_string(),
                     source: std::io::Error::new(

@@ -3,7 +3,7 @@ use std::{io::Cursor, sync::Arc, time::Duration};
 use calc_flow::{
     AggregateFunction, Batch, BatchMetadata, CancellationToken, EdgeCollector, Epoch, EventTime,
     JsonMap, LocalStateBackend, OperatorMetadata, OperatorStateSnapshot, StateBackend, StateHandle,
-    StateLineageKey, StreamJobContext, StreamOperator, StreamOperatorContext,
+    StateLineageKey, StateSegment, StreamJobContext, StreamOperator, StreamOperatorContext,
     WindowAggregateOperator, WindowSpec,
 };
 use datafusion::arrow::{
@@ -203,7 +203,7 @@ async fn checkpoint_is_incremental_arrow_ipc_and_restore_replaces_live_state() {
         .as_array()
         .unwrap();
     assert_eq!(inventory.len(), 1);
-    let first_bytes = first.segments.values().next().unwrap();
+    let first_bytes = first.segments.values().next().unwrap().bytes();
     let descriptor = &inventory[0];
     assert_eq!(descriptor["kind"], "delta");
     assert_eq!(descriptor["state_layout_version"], 1);
@@ -277,6 +277,7 @@ async fn prepared_large_snapshot_keeps_the_next_control_handler_responsive() {
             .values()
             .next()
             .unwrap()
+            .bytes()
             .starts_with(b"ARROW1")
     );
 
@@ -394,7 +395,9 @@ async fn invalid_restore_has_no_side_effect_and_repeated_restore_is_idempotent()
     target.restore(&snapshot).unwrap();
     let mut corrupted = snapshot.clone();
     let segment = corrupted.segments.values_mut().next().unwrap();
-    segment.truncate(segment.len() / 2);
+    let mut bytes = segment.bytes().to_vec();
+    bytes.truncate(bytes.len() / 2);
+    *segment = StateSegment::new(bytes);
     assert!(target.restore(&corrupted).is_err());
 
     let mut output = EdgeCollector::new(target.output_ports().to_vec());
@@ -616,12 +619,18 @@ async fn snapshot_segments_round_trip_through_the_validating_local_backend() {
     let backend = LocalStateBackend::new(directory.path()).await.unwrap();
     let lineage = backend.open_lineage(&key).await.unwrap();
     let mut loaded = std::collections::BTreeMap::new();
-    for (segment_id, bytes) in snapshot.segments {
-        let handle = local_handle(&key, Epoch::INITIAL, &segment_id, &bytes);
-        lineage.stage_segment(&handle, &bytes).await.unwrap();
+    for (segment_id, segment) in snapshot.segments {
+        let handle = local_handle(&key, Epoch::INITIAL, &segment_id, segment.bytes());
+        lineage
+            .stage_segment(&handle, segment.bytes())
+            .await
+            .unwrap();
         lineage.validate_segment(&handle).await.unwrap();
         lineage.publish_segment(&handle).await.unwrap();
-        loaded.insert(segment_id, lineage.load_segment(&handle).await.unwrap());
+        loaded.insert(
+            segment_id,
+            StateSegment::new(lineage.load_segment(&handle).await.unwrap()),
+        );
     }
     let persisted = OperatorStateSnapshot {
         inline_metadata: snapshot.inline_metadata,
