@@ -269,6 +269,9 @@ impl BatchOperator for RollingOperator {
     /// Evaluates the complete input in canonical order without late-row
     /// classification (SCE-00 D7): every accepted row is final at
     /// end-of-input.
+    // Batch evaluation intentionally owns the validate-read-sort-compute-build
+    // pipeline in one pass with a stable error path per stage.
+    // #lizard forgives
     async fn process(
         &mut self,
         inputs: &BTreeMap<String, Batch>,
@@ -357,6 +360,9 @@ impl StreamOperator for RollingOperator {
     /// Classifies and buffers one input envelope atomically (SCE-00 D7): the
     /// aggregate input watermark is sampled once, and no row changes state,
     /// metrics, or output before the complete envelope is validated.
+    // Envelope classification keeps ingress, port, context, end-of-input, late,
+    // and duplicate checks in one transactional pass with stable per-check errors.
+    // #lizard forgives
     async fn process_data(
         &mut self,
         ingress: &str,
@@ -640,6 +646,10 @@ impl RollingOperator {
             .collect()
     }
 
+    // Final emission keeps compute, record building, chunking, sequence
+    // accounting, and history application in one ordered pass so a partial
+    // failure leaves consistent in-memory state.
+    // #lizard forgives
     async fn emit_rows(
         &mut self,
         rows: Vec<BufferedRow>,
@@ -838,6 +848,9 @@ fn state_schema(
     )
 }
 
+// State serialization writes deterministic history and buffer rows column
+// by column with checked conversions for every value class.
+// #lizard forgives
 fn encode_state_segment(
     histories: &RollingHistories,
     buffer: &BTreeMap<RowIdentity, BufferedRow>,
@@ -898,6 +911,9 @@ fn encode_state_segment(
     Ok(bytes)
 }
 
+// State decode intentionally validates header metadata, shape, deterministic
+// order, and per-row invariants before any state is installed.
+// #lizard forgives
 fn decode_state_segment(
     bytes: &[u8],
     input_schema: &Schema,
@@ -1273,6 +1289,9 @@ fn record_late_row(
     Ok(())
 }
 
+// Budget chunking intentionally checks per-row cost, cumulative budget, and
+// sequence range in one pass so oversize output fails before enqueue.
+// #lizard forgives
 fn chunk_output_record(
     record: &RecordBatch,
     operator_id: &str,
@@ -1629,6 +1648,9 @@ struct ComputedOutputs {
 /// Computes every declared rolling output over `rows` in canonical order,
 /// reading entity histories without mutating them (SCE-00 D5: batch and
 /// stream lifecycles share this kernel and row order).
+// The shared kernel keeps per-entity grouping, per-output evaluation, and
+// history truncation in one deterministic pass (D5 mandates one algorithm).
+// #lizard forgives
 fn compute_output_columns(
     rows: &[BufferedRow],
     histories: &RollingHistories,

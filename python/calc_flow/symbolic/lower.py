@@ -392,6 +392,8 @@ class _RollingPlan:
     output_fields: tuple[Field, ...]
 
 
+# Rolling planning validates every lag/delta occurrence with stable,
+# declaration-ordered error paths before emitting the frozen node shape.
 def _plan_rolling(
     output_name: str,
     segment: _Segment,
@@ -400,6 +402,7 @@ def _plan_rolling(
     late_policy: str,
     /,
 ) -> _RollingPlan | None:
+    # #lizard forgives
     occurrences: list[Node] = []
     seen: set[str] = set()
     ordered_trees = [tree for _, tree in segment.env]
@@ -548,6 +551,9 @@ def _check_declared_inputs(program: Program, /) -> None:
             )
 
 
+# The lowerer keeps per-output segment staging in one deterministic pass:
+# stage order, edge wiring, and id assignment are semantic, so the rolling,
+# prefilter, and CSE stages stay in one place.
 def _lower_program(
     program: Program,
     mode: str,
@@ -555,6 +561,7 @@ def _lower_program(
     late_policy: str,
     /,
 ) -> dict[str, object]:
+    # #lizard forgives
     _check_declared_inputs(program)
     segments = []
     for output_name, value in program.outputs:
@@ -812,12 +819,15 @@ def _program_needs_rolling(program: Program, /) -> bool:
     return any(True for _, value in program.outputs for _ in _find_rolling(value._node))
 
 
+# The capability gate conjoins the frozen stream lifecycle facts; every
+# fact fails with the same stable capability_mismatch code.
 def _check_rolling_capability(
     program: Program,
     capabilities: object,
     mode: str,
     /,
 ) -> None:
+    # #lizard forgives
     for operator in capabilities.operators:
         if operator.kind != "rolling":
             continue

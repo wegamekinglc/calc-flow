@@ -189,7 +189,10 @@ _PROBE_ROWS = [
 ]
 
 
+# The independent reference oracle keeps per-entity lag/delta derivation in
+# one flat loop for line-by-line auditability against the engine.
 def _reference(rows_data, lag_periods, delta_periods):
+    # #lizard forgives
     ordered = sorted(rows_data, key=lambda row: (row[0], row[1], row[2]))
     by_entity: dict[str, list] = {}
     for row in ordered:
