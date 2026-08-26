@@ -316,6 +316,46 @@ def test_filter_above_rolling_applies_after_the_rolling_stage() -> None:
     assert values["prev"] == [3.0]
 
 
+def test_lower_program_document_validates_lateness_when_rolling_present() -> None:
+    quotes = _ordered()
+    program = _program([("prev", ts.lag(quotes["x"]))])
+
+    with pytest.raises(ValueError, match="non-negative"):
+        lower_program_document(program, Runtime(), "stream", allowed_lateness_micros=-1)
+    with pytest.raises(ValueError, match="unsigned"):
+        lower_program_document(
+            program, Runtime(), "stream", allowed_lateness_micros=1 << 64
+        )
+    with pytest.raises(TypeError):
+        lower_program_document(
+            program, Runtime(), "stream", allowed_lateness_micros=True
+        )
+    with pytest.raises(ValueError, match="late_policy"):
+        lower_program_document(program, Runtime(), "stream", late_policy="retry")
+    with pytest.raises(TypeError):
+        lower_program_document(program, Runtime(), "stream", late_policy=1)
+
+
+def test_row_local_program_ignores_lateness_arguments() -> None:
+    quotes = _ordered()
+    signals = quotes.with_columns(FeatureSet([("double", quotes["x"] * 2.0)]))
+    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+
+    document = lower_program_document(
+        program, Runtime(), "stream", allowed_lateness_micros=-1, late_policy="bogus"
+    )
+
+    assert document["graph"]["nodes"]
+
+
+def test_compile_stream_rejects_out_of_range_lateness() -> None:
+    quotes = _ordered()
+    program = _program([("prev", ts.lag(quotes["x"]))])
+
+    with pytest.raises(ValueError, match="unsigned"):
+        program.compile_stream(Runtime(), allowed_lateness_micros=1 << 64)
+
+
 def test_rolling_capability_is_advertised_with_frozen_lifecycle_facts() -> None:
     capabilities = Runtime().capabilities()
 

@@ -75,6 +75,8 @@ _TABLE_OUTPUT_PRIMITIVES: Final = frozenset(
 
 _ROLLING_PRIMITIVES: Final = frozenset({"lag", "delta"})
 
+_U64_MAX: Final = (1 << 64) - 1
+
 _BINARY_SQL: Final = {
     "add": "+",
     "sub": "-",
@@ -871,12 +873,17 @@ def lower_program_document(
     allowed_lateness_micros: int = 0,
     late_policy: str = "error",
 ) -> dict[str, object]:
-    """Analyze and lower one program to its strict project-v3 document."""
+    """Analyze and lower one program to its strict project-v3 document.
+
+    The lateness arguments are validated whenever the program contains
+    rolling primitives; row-local programs do not consume them.
+    """
 
     selected = _require_runtime(runtime, "lower_program_document")
     mode_value = _require_mode(mode)
     _check_expression_capability(program, selected, mode_value)
     if _program_needs_rolling(program):
+        _validate_lateness(allowed_lateness_micros, late_policy)
         _, capabilities = _run(program, selected, mode_value)
         _check_rolling_capability(program, capabilities, mode_value)
     return _lower_program(program, mode_value, allowed_lateness_micros, late_policy)
@@ -920,20 +927,22 @@ def compile_program_stream(
 def _validate_lateness(allowed_lateness_micros: object, late_policy: object, /) -> None:
     if type(allowed_lateness_micros) is not int:
         raise TypeError(
-            "compile_stream allowed_lateness_micros must be an exact int; got"
+            "allowed_lateness_micros must be an exact int; got"
             f" {type_name(allowed_lateness_micros)}"
         )
     if allowed_lateness_micros < 0:
         raise ValueError(
-            "compile_stream allowed_lateness_micros: invalid_literal: must be"
-            " non-negative"
+            "allowed_lateness_micros: invalid_literal: must be non-negative"
+        )
+    if allowed_lateness_micros > _U64_MAX:
+        raise ValueError(
+            "allowed_lateness_micros: invalid_literal: must fit the unsigned"
+            " 64-bit microsecond range"
         )
     if type(late_policy) is not str:
-        raise TypeError(
-            f"compile_stream late_policy must be a string; got {type_name(late_policy)}"
-        )
+        raise TypeError(f"late_policy must be a string; got {type_name(late_policy)}")
     if late_policy not in ("error", "drop"):
         raise ValueError(
-            "compile_stream late_policy: invalid_literal: must be 'error' or"
+            "late_policy: invalid_literal: must be 'error' or"
             f" 'drop'; got {late_policy!r}"
         )

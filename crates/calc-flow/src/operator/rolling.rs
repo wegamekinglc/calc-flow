@@ -90,6 +90,7 @@ pub enum RollingOutputSpec {
         /// Output column name.
         output: String,
         /// Positive lag distance in rows.
+        #[schemars(range(min = 1))]
         periods: u64,
     },
     /// Checked difference between the current value and the value `periods`
@@ -102,6 +103,7 @@ pub enum RollingOutputSpec {
         /// Output column name.
         output: String,
         /// Positive lag distance in rows.
+        #[schemars(range(min = 1))]
         periods: u64,
     },
 }

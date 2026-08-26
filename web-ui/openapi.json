@@ -1619,7 +1619,7 @@
                   "periods": {
                     "description": "Positive lag distance in rows.",
                     "format": "uint64",
-                    "minimum": 0.0,
+                    "minimum": 1.0,
                     "type": "integer"
                   },
                   "primitive_version": {
@@ -1657,7 +1657,7 @@
                   "periods": {
                     "description": "Positive lag distance in rows.",
                     "format": "uint64",
-                    "minimum": 0.0,
+                    "minimum": 1.0,
                     "type": "integer"
                   },
                   "primitive_version": {
@@ -2952,7 +2952,7 @@
                   "periods": {
                     "description": "Positive lag distance in rows.",
                     "format": "uint64",
-                    "minimum": 0.0,
+                    "minimum": 1.0,
                     "type": "integer"
                   },
                   "primitive_version": {
@@ -2990,7 +2990,7 @@
                   "periods": {
                     "description": "Positive lag distance in rows.",
                     "format": "uint64",
-                    "minimum": 0.0,
+                    "minimum": 1.0,
                     "type": "integer"
                   },
                   "primitive_version": {
