@@ -6,7 +6,7 @@ import {
   DATA_SOURCE_FORMATS,
   type DataSourceDraft,
   type DataSourceFormat,
-} from './dataSourceEditor';
+} from './dataSourceEditorModel';
 
 export interface DataSourceEditorProps {
   readonly sources: readonly DataSourceSpec[];

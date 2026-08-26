@@ -5,7 +5,7 @@ import {
   parseBenchmarkReport,
   type BenchmarkCompatibilityIssue,
   type BenchmarkReport,
-} from './benchmarkComparison';
+} from './benchmarkComparisonModel';
 
 const fingerprint = (digit: string): string => digit.repeat(64);
 

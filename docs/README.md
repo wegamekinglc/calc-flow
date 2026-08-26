@@ -32,6 +32,8 @@ below.
   compiler, UDF/provider registries, and recovery, with paired examples
 - **[API reference](api-reference.md)** — the supported surfaces at a glance:
   Rust exports, Python members, and the Studio HTTP API
+- **[Python release guide](python-release.md)** — local packaging rehearsal,
+  artifact matrix verification, Trusted Publishers, and the PyPI procedure
 
 ## Project orientation
 
