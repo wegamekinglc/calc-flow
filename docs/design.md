@@ -120,7 +120,7 @@ allowed-lateness updates, retractions, and early triggers remain unavailable.
 
 ## Stateful stream join
 
-`StreamJoinOperator` is the other stateful stream component. Its
+`StreamJoinOperator` is the bounded two-input stateful stream component. Its
 `StreamJoinSpec` declares a two-input inner equi-Join over inclusive asymmetric
 event-time bounds, explicit per-side state and per-batch match limits, and
 output prefixes; the output schema is derived from the prefixed input columns.
@@ -132,6 +132,21 @@ null keys, and rows strictly older than their own ingress watermark are never
 retained. The operator checkpoints its delta-based state and an independent
 output frontier, and exposes a payload-free per-node status through the job
 status surface.
+
+## Row-window rolling
+
+`RollingOperator` evaluates native lag and delta outputs over
+entity-partitioned, event-time-ordered rows and runs in both batch and stream
+graphs. Its `RollingSpec` declares ordered partition and sequence keys, a
+non-null UTC `timestamp[us]` event-time column, lag/delta outputs with
+positive row distances, allowed lateness, and an envelope-scoped `error` or
+metrics-recorded `drop` late-row policy.
+
+Stream execution buffers rows until the input watermark passes each row's
+event time plus the allowed lateness, then emits final rows in canonical
+order; batch evaluation classifies no late rows. The operator checkpoints its
+per-entity histories as an Arrow IPC segment with state version 1, and a
+restored or reset operator reproduces the same ordered output.
 
 ## Checkpoint transaction
 

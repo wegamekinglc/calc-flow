@@ -29,6 +29,32 @@ engine or Studio capabilities.
   plus a capture-independence canary pair) for future 0.80×/1.20× gate
   comparisons; the scheduled nightly workflow stays contract-frozen to the
   `core` harness.
+- 2026-08-27: Add the native row-window rolling operator for lag and delta
+  across Rust, Python, and the generated contracts. `RollingOperator`
+  evaluates ordered `lag`/`delta` outputs over entity-partitioned, event-time
+  rows in both batch and final-only stream graphs: stream evaluation buffers
+  rows until the input watermark passes each row's closing coordinate, then
+  emits final rows in canonical order, classifying late rows with an
+  envelope-scoped `error` policy or a metrics-recorded `drop` policy; its
+  per-entity histories checkpoint at the aligned epoch cut with state version
+  1, and batch and stream produce the same ordered rows across segmentation
+  and recovery. The data-only `RollingSpec` joins project format v3 with nine
+  required fields — `configuration_version`/`state_layout_version` 1, ordered
+  `partition_by`/`sequence_by` keys, a non-null UTC `timestamp[us]`
+  `event_time` column, `outputs` (kind `lag` or `delta`,
+  `primitive_version` 1, input/output names, positive `periods`),
+  `allowed_lateness_micros`, `late_policy`, and the frozen
+  `stateful_numeric_v1` value policy — with the JSON Schema, Studio OpenAPI
+  document, and TypeScript contract regenerated in the same commit.
+  `Program.compile_batch` and `Program.compile_stream` now lower
+  `ts.lag`/`ts.delta` declarations into rolling nodes, requiring declared
+  `entity_by`/`event_time`/`sequence_by` ordering keys and, in this release,
+  plain input-column arguments; `compile_stream`'s validated
+  `allowed_lateness_micros` and `late_policy` are written into every lowered
+  node. The capability snapshot reports `rolling@1` as a batch/stream,
+  per-row-final, micro-batch-invariant, checkpointed-stateful operator with
+  state version 1. Rolling aggregates, duration frames, correlation, and
+  cross-section declarations remain loudly rejected.
 
 - 2026-08-26: Compile symbolic row-local programs into execution plans.
   `Program.compile_batch(runtime)` and `Program.compile_stream(runtime, *,

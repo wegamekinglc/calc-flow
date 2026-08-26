@@ -179,9 +179,9 @@ dashes span the full column width, including cell spaces.
   schema.
 - `OperatorMetadata` owns shared graph metadata. `BatchOperator` and
   `StreamOperator` split finite processing from continuous processing and
-  checkpoint lifecycle. `ExpressionOperator` and `SqlOperator` implement both
-  lifecycles; `UnionOperator`, `WindowAggregateOperator`, and
-  `StreamJoinOperator` are stream-only.
+  checkpoint lifecycle. `ExpressionOperator`, `SqlOperator`, and
+  `RollingOperator` implement both lifecycles; `UnionOperator`,
+  `WindowAggregateOperator`, and `StreamJoinOperator` are stream-only.
   External operators resolve through lifecycle-specific factories in
   `ProviderRegistry`.
 - `PipelineBuilder` consumes immutable graph-building steps.
