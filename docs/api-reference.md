@@ -297,23 +297,23 @@ analysis, and compilation contract.
 
 The separate Studio service exposes its supported API under `/api/v3`.
 
-| Method                 | Route                     | Purpose                                             |
-| ---------------------- | ------------------------- | --------------------------------------------------- |
-| `GET`                  | `/catalog`                | UDF-only top-level array                            |
-| `GET`                  | `/capabilities`           | Runtime, connector, and worker capabilities         |
-| `GET`                  | `/schema/project`         | Rust-generated v3 project JSON Schema               |
-| `GET`, `POST`          | `/projects`               | List or create projects                             |
-| `POST`                 | `/projects/import`        | Safely import JSON or YAML                          |
-| `GET`, `PUT`, `DELETE` | `/projects/{id}`          | Read, replace, or delete a project                  |
-| `GET`                  | `/projects/{id}/export`   | Export canonical JSON or safe YAML                  |
-| `POST`                 | `/projects/{id}/validate` | Validate and compile a stored graph                 |
-| `POST`, `GET`          | `/jobs`                   | Start a continuous job or list owned jobs           |
-| `GET`                  | `/jobs/{id}`              | Read typed job status, metrics, and bounded results |
-| `GET`                  | `/jobs/{id}/events`       | Resume-safe job event SSE                           |
-| `POST`                 | `/jobs/{id}/checkpoint`   | Trigger one durable checkpoint                      |
-| `POST`                 | `/jobs/{id}/shutdown`     | Request graceful terminal checkpoint and shutdown   |
-| `POST`                 | `/jobs/{id}/cancel`       | Cancel and settle a job                             |
-| `GET`                  | `/resource-limits`        | Read enforced continuous-job resource bounds        |
+| Method                 | Route                     | Purpose                                           |
+| ---------------------- | ------------------------- | ------------------------------------------------- |
+| `GET`                  | `/catalog`                | UDF-only top-level array                          |
+| `GET`                  | `/capabilities`           | Runtime, connector, and worker capabilities       |
+| `GET`                  | `/schema/project`         | Rust-generated v3 project JSON Schema             |
+| `GET`, `POST`          | `/projects`               | List or create projects                           |
+| `POST`                 | `/projects/import`        | Safely import JSON or YAML                        |
+| `GET`, `PUT`, `DELETE` | `/projects/{id}`          | Read, replace, or delete a project                |
+| `GET`                  | `/projects/{id}/export`   | Export canonical JSON or safe YAML                |
+| `POST`                 | `/projects/{id}/validate` | Validate and compile a stored graph               |
+| `POST`, `GET`          | `/jobs`                   | Start a continuous job or list owned jobs         |
+| `GET`                  | `/jobs/{id}`              | Read typed job lifecycle status                   |
+| `GET`                  | `/jobs/{id}/events`       | Resume-safe job event SSE                         |
+| `POST`                 | `/jobs/{id}/checkpoint`   | Trigger one durable checkpoint                    |
+| `POST`                 | `/jobs/{id}/shutdown`     | Request graceful terminal checkpoint and shutdown |
+| `POST`                 | `/jobs/{id}/cancel`       | Cancel and settle a job                           |
+| `GET`                  | `/resource-limits`        | Read enforced continuous-job resource bounds      |
 
 `/capabilities` deliberately separates two scopes. `runtime` is the parent
 session snapshot used for compilation. `preview.workerRegistrations` describes
@@ -334,8 +334,11 @@ rejects a response whose `schemaVersion` is not `2` or that carries any extra
 field before React receives it. Unknown capability-rule identities, unknown
 lifecycle vocabulary, and inconsistent `stateVersion`/`stateful` combinations
 are rejected by the backend response models as well as the decoder.
-Validation, job, and SSE responses use generated discriminated unions, so
-backend and frontend must be deployed from the same generated contract.
+Validation and job responses use generated discriminated unions, so
+backend and frontend must be deployed from the same generated contract. SSE
+event payloads are not part of that generated contract: the events route
+serializes the backend event model directly, and the frontend maintains the
+corresponding event type by hand.
 
 Project writes that fail validation answer `422` with a structured envelope on
 `POST /projects`, `POST /projects/import`, and `PUT /projects/{id}`: the

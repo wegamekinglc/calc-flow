@@ -131,10 +131,10 @@ bytes as checkpoint state, and checks the committed epoch marker before replay.
 ## Rust surface
 
 - The `calc-flow-connectors` crate ships behind per-transport feature
-  gates (`file` default; `kafka`, `postgresql`, `clickhouse`,
-  `http-websocket` opt-in).
+  gates (`file` default; `kafka`, `postgresql`, `clickhouse`, `http`,
+  `websocket` opt-in).
 - The core crate owns `ConnectorRegistry`, the capability vocabulary,
-  `SecretRef`, and `FormatDecoder`/`FormatEncoder` contracts.
+  `SecretReference`, and `FormatDecoder`/`FormatEncoder` contracts.
 - `CalcFlowError::Connector(ConnectorError)` is the safe error
   projection for connector failures.
 
@@ -144,7 +144,7 @@ bytes as checkpoint state, and checks the committed epoch marker before replay.
 2. For stream projects, replace inline data sources with connector bindings;
    batch projects may retain bounded inline `data_sources` fixtures.
 3. Move credentials to environment variables and reference them as
-   `SecretRef` values.
+   `SecretReference` values.
 4. Add `runtime.mode` and mode-specific options.
 5. Add `state` config for stream projects.
 6. Update Studio API clients from `/api/v2` to `/api/v3`.
