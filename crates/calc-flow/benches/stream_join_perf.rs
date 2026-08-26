@@ -300,32 +300,63 @@ fn provenance() -> serde_json::Value {
     })
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "the frozen baseline protocol lays its scenarios out in one linear group"
-)]
+/// Pre-built canonical workload batches shared by the scenarios.
+struct ScenarioBatches {
+    left_unique: Arc<Batch>,
+    left_disjoint: Arc<Batch>,
+    right_disjoint: Arc<Batch>,
+    left_one_to_one: Arc<Batch>,
+    right_one_to_one: Arc<Batch>,
+    left_fan: Arc<Batch>,
+    right_fan: Arc<Batch>,
+}
+
+impl ScenarioBatches {
+    fn new() -> Self {
+        let keys_one_to_one = Arc::new(unique_keys("K", ROWS));
+        Self {
+            left_unique: Arc::new(make_batch(&unique_keys("L", ROWS), BASE_TS)),
+            // Truly disjoint key sets: zero equality rows, the steady-state
+            // no-match shape (the zero-row probe is well-defined since PR
+            // #189).
+            left_disjoint: Arc::new(make_batch(&unique_keys("L", ROWS), BASE_TS)),
+            right_disjoint: Arc::new(make_batch(&unique_keys("R", ROWS), BASE_TS)),
+            left_one_to_one: Arc::new(make_batch(&keys_one_to_one, BASE_TS)),
+            right_one_to_one: Arc::new(make_batch(&keys_one_to_one, BASE_TS)),
+            left_fan: Arc::new(make_batch(&fan_keys(FAN_KEYS, ROWS), BASE_TS)),
+            right_fan: Arc::new(make_batch(&fan_keys(FAN_KEYS, ROWS), BASE_TS)),
+        }
+    }
+}
+
 fn baseline(c: &mut Criterion) {
     println!("JOIN_PERF_PROVENANCE {}", provenance());
     let runtime = tokio::runtime::Runtime::new().unwrap();
+    let batches = ScenarioBatches::new();
+    run_probe(&runtime, &batches);
 
-    let left_unique = Arc::new(make_batch(&unique_keys("L", ROWS), BASE_TS));
-    // Truly disjoint key sets: zero equality rows, the steady-state no-match
-    // shape (the zero-row probe is well-defined since PR #189).
-    let left_disjoint = Arc::new(make_batch(&unique_keys("L", ROWS), BASE_TS));
-    let right_disjoint = Arc::new(make_batch(&unique_keys("R", ROWS), BASE_TS));
-    let keys_one_to_one = Arc::new(unique_keys("K", ROWS));
-    let left_one_to_one = Arc::new(make_batch(&keys_one_to_one, BASE_TS));
-    let right_one_to_one = Arc::new(make_batch(&keys_one_to_one, BASE_TS));
-    let left_fan = Arc::new(make_batch(&fan_keys(FAN_KEYS, ROWS), BASE_TS));
-    let right_fan = Arc::new(make_batch(&fan_keys(FAN_KEYS, ROWS), BASE_TS));
+    let mut group = c.benchmark_group("join");
+    group.sample_size(30);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(2));
+    handler_scenarios(&mut group, &runtime, &batches);
+    checkpoint_scenarios(&mut group, &runtime, &batches);
+    compaction_scenarios(&mut group, &runtime);
+    restore_scenarios(&mut group, &runtime);
+    let (rss, hwm) = read_rss();
+    println!("JOIN_PERF_RSS rss_kib={rss} hwm_kib={hwm}");
+    group.finish();
+}
 
-    // Warm-up probe: prints the per-scenario state/match cardinality and RSS.
+/// Warm-up probe: prints the per-scenario state/match cardinality and RSS,
+/// then runs the fail-closed harness self-checks.
+fn run_probe(runtime: &tokio::runtime::Runtime, batches: &ScenarioBatches) {
     runtime.block_on(async {
         let job = job();
         let mut probe = new_operator();
         let mut collector = EdgeCollector::new(probe.output_ports().to_vec());
-        feed(&mut probe, &job, &mut collector, "left", &left_one_to_one).await;
-        feed(&mut probe, &job, &mut collector, "right", &right_one_to_one).await;
+        feed(&mut probe, &job, &mut collector, "left", &batches.left_one_to_one).await;
+        feed(&mut probe, &job, &mut collector, "right", &batches.right_one_to_one).await;
         let status = probe.status();
         let (rss, hwm) = read_rss();
         println!(
@@ -337,8 +368,8 @@ fn baseline(c: &mut Criterion) {
         );
         let mut probe = new_operator();
         let mut collector = EdgeCollector::new(probe.output_ports().to_vec());
-        feed(&mut probe, &job, &mut collector, "left", &left_fan).await;
-        feed(&mut probe, &job, &mut collector, "right", &right_fan).await;
+        feed(&mut probe, &job, &mut collector, "left", &batches.left_fan).await;
+        feed(&mut probe, &job, &mut collector, "right", &batches.right_fan).await;
         let status = probe.status();
         println!(
             "JOIN_PERF_PROBE fanout10 matches={} left_retained={}",
@@ -385,17 +416,18 @@ fn baseline(c: &mut Criterion) {
                 .join(",")
         );
     });
+}
 
-    let mut group = c.benchmark_group("join");
-    group.sample_size(30);
-    group.warm_up_time(Duration::from_secs(1));
-    group.measurement_time(Duration::from_secs(2));
-
+fn handler_scenarios(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    runtime: &tokio::runtime::Runtime,
+    batches: &ScenarioBatches,
+) {
     // Scenario: no-match — right 10k probes 10k retained left rows, 0 pairs.
     group.bench_function("handler/right_10k_no_match", |b| {
-        b.to_async(&runtime).iter_custom(|iters| {
-            let left = Arc::clone(&left_disjoint);
-            let right = Arc::clone(&right_disjoint);
+        b.to_async(runtime).iter_custom(|iters| {
+            let left = Arc::clone(&batches.left_disjoint);
+            let right = Arc::clone(&batches.right_disjoint);
             async move {
                 let job = job();
                 let mut total = Duration::ZERO;
@@ -417,9 +449,9 @@ fn baseline(c: &mut Criterion) {
 
     // Scenario: 1:1 — 10k pairs emitted against 10k retained left rows.
     group.bench_function("handler/right_10k_one_to_one", |b| {
-        b.to_async(&runtime).iter_custom(|iters| {
-            let left = Arc::clone(&left_one_to_one);
-            let right = Arc::clone(&right_one_to_one);
+        b.to_async(runtime).iter_custom(|iters| {
+            let left = Arc::clone(&batches.left_one_to_one);
+            let right = Arc::clone(&batches.right_one_to_one);
             async move {
                 let job = job();
                 let mut total = Duration::ZERO;
@@ -442,9 +474,9 @@ fn baseline(c: &mut Criterion) {
 
     // Scenario: high fan-out — 1,000 keys × 10 rows per side → 100k pairs.
     group.bench_function("handler/right_10k_fanout10", |b| {
-        b.to_async(&runtime).iter_custom(|iters| {
-            let left = Arc::clone(&left_fan);
-            let right = Arc::clone(&right_fan);
+        b.to_async(runtime).iter_custom(|iters| {
+            let left = Arc::clone(&batches.left_fan);
+            let right = Arc::clone(&batches.right_fan);
             async move {
                 let job = job();
                 let mut total = Duration::ZERO;
@@ -467,8 +499,8 @@ fn baseline(c: &mut Criterion) {
 
     // Scenario: watermark eviction — one progress call evicts 10k left rows.
     group.bench_function("handler/watermark_evict_10k", |b| {
-        b.to_async(&runtime).iter_custom(|iters| {
-            let left = Arc::clone(&left_unique);
+        b.to_async(runtime).iter_custom(|iters| {
+            let left = Arc::clone(&batches.left_unique);
             async move {
                 let job = job();
                 let mut total = Duration::ZERO;
@@ -487,12 +519,18 @@ fn baseline(c: &mut Criterion) {
             }
         });
     });
+}
 
+fn checkpoint_scenarios(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    runtime: &tokio::runtime::Runtime,
+    batches: &ScenarioBatches,
+) {
     // Scenario: dirty checkpoint capture — 20k dirty rows, no base carried.
     group.bench_function("checkpoint/capture_dirty_20k", |b| {
-        b.to_async(&runtime).iter_custom(|iters| {
-            let left = Arc::clone(&left_one_to_one);
-            let right = Arc::clone(&right_one_to_one);
+        b.to_async(runtime).iter_custom(|iters| {
+            let left = Arc::clone(&batches.left_one_to_one);
+            let right = Arc::clone(&batches.right_one_to_one);
             async move {
                 let job = job();
                 let mut total = Duration::ZERO;
@@ -516,7 +554,7 @@ fn baseline(c: &mut Criterion) {
     for total_rows in [17_500_usize, 62_500] {
         let name = format!("checkpoint/capture_dirty_1250_base_{total_rows}");
         group.bench_function(name, |b| {
-            b.to_async(&runtime).iter_custom(|iters| {
+            b.to_async(runtime).iter_custom(|iters| {
                 Box::pin(async move {
                     let mut total = Duration::ZERO;
                     for _ in 0..iters {
@@ -532,11 +570,16 @@ fn baseline(c: &mut Criterion) {
             });
         });
     }
+}
 
-    // Inline compaction — a 500-row data handler that compacts a 60k-row base
-    // inline vs the same handler on an already-compacted base.
+/// Inline compaction — a 500-row data handler that compacts a 60k-row base
+/// inline vs the same handler on an already-compacted base.
+fn compaction_scenarios(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    runtime: &tokio::runtime::Runtime,
+) {
     group.bench_function("handler/left_500_inline_compact_60k", |b| {
-        b.to_async(&runtime).iter_custom(|iters| {
+        b.to_async(runtime).iter_custom(|iters| {
             Box::pin(async move {
                 let job = job();
                 let mut total = Duration::ZERO;
@@ -557,7 +600,7 @@ fn baseline(c: &mut Criterion) {
     });
 
     group.bench_function("handler/left_500_steady_60k_base", |b| {
-        b.to_async(&runtime).iter_custom(|iters| {
+        b.to_async(runtime).iter_custom(|iters| {
             Box::pin(async move {
                 let job = job();
                 let mut total = Duration::ZERO;
@@ -576,12 +619,17 @@ fn baseline(c: &mut Criterion) {
             })
         });
     });
+}
 
-    // Scenario: full restore — base-plus-delta snapshot at scale.
+/// Scenario: full restore — base-plus-delta snapshot at scale.
+fn restore_scenarios(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    runtime: &tokio::runtime::Runtime,
+) {
     for total_rows in [20_000_usize, 60_000] {
         let name = format!("restore/full_{total_rows}");
         group.bench_function(name, |b| {
-            b.to_async(&runtime).iter_custom(|iters| {
+            b.to_async(runtime).iter_custom(|iters| {
                 Box::pin(async move {
                     let snapshot = full_snapshot(total_rows).await;
                     let mut total = Duration::ZERO;
@@ -596,10 +644,6 @@ fn baseline(c: &mut Criterion) {
             });
         });
     }
-
-    let (rss, hwm) = read_rss();
-    println!("JOIN_PERF_RSS rss_kib={rss} hwm_kib={hwm}");
-    group.finish();
 }
 
 criterion_group!(benches, baseline);
