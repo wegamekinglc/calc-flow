@@ -78,19 +78,6 @@ def test_batch_rolling_aggregate_is_rejected() -> None:
         program.compile_batch(Runtime())
 
 
-def test_lag_and_delta_are_rejected() -> None:
-    quotes = _ordered()
-    signals = quotes.with_columns(
-        FeatureSet([("prev", ts.lag(quotes["x"])), ("change", ts.delta(quotes["x"]))])
-    )
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
-
-    with pytest.raises(CompileError) as excinfo:
-        program.compile_batch(Runtime())
-
-    assert "'lag'" in _reject_message(excinfo)
-
-
 def test_cross_section_is_rejected() -> None:
     quotes = _ordered()
     signals = quotes.with_columns(

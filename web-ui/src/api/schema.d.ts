@@ -685,6 +685,23 @@ export interface components {
                     /** Format: uint64 */
                     before_micros: number;
                 };
+                /** @description Transaction scope of the `error` late-row policy (API note section 3.2). */
+                LateErrorScope: "envelope";
+                /** @description Late-row handling for one rolling operator (SCE-00 D7). */
+                LatePolicySpec: {
+                    /** @constant */
+                    kind: "error";
+                    /** @description The only supported transaction scope. */
+                    scope: components["schemas"]["ProjectCreateRequest"]["$defs"]["LateErrorScope"];
+                } | {
+                    /** @constant */
+                    kind: "drop";
+                    /**
+                     * Format: uint32
+                     * @description Metric transaction version; must equal `1`.
+                     */
+                    metrics_version: number;
+                };
                 NodeSpec: {
                     id: string;
                     /** @default [] */
@@ -718,6 +735,10 @@ export interface components {
                     /** @constant */
                     kind: "window";
                     spec: components["schemas"]["ProjectCreateRequest"]["$defs"]["WindowSpec"];
+                } | {
+                    /** @constant */
+                    kind: "rolling";
+                    spec: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingSpec"];
                 } | {
                     /** @constant */
                     kind: "stream_join";
@@ -836,6 +857,76 @@ export interface components {
                     /** @constant */
                     policy: "disabled";
                 };
+                /** @description One declared rolling output and its output column name. */
+                RollingOutputSpec: {
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "lag";
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint64
+                     * @description Positive lag distance in rows.
+                     */
+                    periods: number;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "delta";
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint64
+                     * @description Positive lag distance in rows.
+                     */
+                    periods: number;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                };
+                /** @description Data-only declaration of one native row-window rolling operation. */
+                RollingSpec: {
+                    /**
+                     * Format: uint64
+                     * @description Allowed lateness in exact microseconds (SCE-00 D7).
+                     */
+                    allowed_lateness_micros: number;
+                    /**
+                     * Format: uint32
+                     * @description Semantic configuration version; must equal
+                     *     [`ROLLING_CONFIGURATION_VERSION`].
+                     */
+                    configuration_version: number;
+                    /** @description Non-null UTC `timestamp[us]` event-time column. */
+                    event_time: string;
+                    /** @description Late-row policy. */
+                    late_policy: components["schemas"]["ProjectCreateRequest"]["$defs"]["LatePolicySpec"];
+                    /** @description Rolling outputs in semantic declaration order. */
+                    outputs: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingOutputSpec"][];
+                    /** @description Ordered non-empty entity partition key. */
+                    partition_by: string[];
+                    /** @description Ordered non-empty sequence key; floating columns are forbidden. */
+                    sequence_by: string[];
+                    /**
+                     * Format: uint32
+                     * @description Durable state-layout version; must equal
+                     *     [`ROLLING_STATE_LAYOUT_VERSION`].
+                     */
+                    state_layout_version: number;
+                    /** @description Frozen null/NaN value policy. */
+                    value_policy: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingValuePolicy"];
+                };
+                /** @description Frozen null/NaN policy for rolling values (SCE-00 D3.2). */
+                RollingValuePolicy: "stateful_numeric_v1";
                 RunOptions: {
                     /**
                      * Format: uint
@@ -1072,6 +1163,23 @@ export interface components {
                     /** Format: uint64 */
                     before_micros: number;
                 };
+                /** @description Transaction scope of the `error` late-row policy (API note section 3.2). */
+                LateErrorScope: "envelope";
+                /** @description Late-row handling for one rolling operator (SCE-00 D7). */
+                LatePolicySpec: {
+                    /** @constant */
+                    kind: "error";
+                    /** @description The only supported transaction scope. */
+                    scope: components["schemas"]["ProjectDocument"]["$defs"]["LateErrorScope"];
+                } | {
+                    /** @constant */
+                    kind: "drop";
+                    /**
+                     * Format: uint32
+                     * @description Metric transaction version; must equal `1`.
+                     */
+                    metrics_version: number;
+                };
                 NodeSpec: {
                     id: string;
                     /** @default [] */
@@ -1105,6 +1213,10 @@ export interface components {
                     /** @constant */
                     kind: "window";
                     spec: components["schemas"]["ProjectDocument"]["$defs"]["WindowSpec"];
+                } | {
+                    /** @constant */
+                    kind: "rolling";
+                    spec: components["schemas"]["ProjectDocument"]["$defs"]["RollingSpec"];
                 } | {
                     /** @constant */
                     kind: "stream_join";
@@ -1223,6 +1335,76 @@ export interface components {
                     /** @constant */
                     policy: "disabled";
                 };
+                /** @description One declared rolling output and its output column name. */
+                RollingOutputSpec: {
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "lag";
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint64
+                     * @description Positive lag distance in rows.
+                     */
+                    periods: number;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "delta";
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint64
+                     * @description Positive lag distance in rows.
+                     */
+                    periods: number;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                };
+                /** @description Data-only declaration of one native row-window rolling operation. */
+                RollingSpec: {
+                    /**
+                     * Format: uint64
+                     * @description Allowed lateness in exact microseconds (SCE-00 D7).
+                     */
+                    allowed_lateness_micros: number;
+                    /**
+                     * Format: uint32
+                     * @description Semantic configuration version; must equal
+                     *     [`ROLLING_CONFIGURATION_VERSION`].
+                     */
+                    configuration_version: number;
+                    /** @description Non-null UTC `timestamp[us]` event-time column. */
+                    event_time: string;
+                    /** @description Late-row policy. */
+                    late_policy: components["schemas"]["ProjectDocument"]["$defs"]["LatePolicySpec"];
+                    /** @description Rolling outputs in semantic declaration order. */
+                    outputs: components["schemas"]["ProjectDocument"]["$defs"]["RollingOutputSpec"][];
+                    /** @description Ordered non-empty entity partition key. */
+                    partition_by: string[];
+                    /** @description Ordered non-empty sequence key; floating columns are forbidden. */
+                    sequence_by: string[];
+                    /**
+                     * Format: uint32
+                     * @description Durable state-layout version; must equal
+                     *     [`ROLLING_STATE_LAYOUT_VERSION`].
+                     */
+                    state_layout_version: number;
+                    /** @description Frozen null/NaN value policy. */
+                    value_policy: components["schemas"]["ProjectDocument"]["$defs"]["RollingValuePolicy"];
+                };
+                /** @description Frozen null/NaN policy for rolling values (SCE-00 D3.2). */
+                RollingValuePolicy: "stateful_numeric_v1";
                 RunOptions: {
                     /**
                      * Format: uint

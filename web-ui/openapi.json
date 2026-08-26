@@ -1074,6 +1074,61 @@
             ],
             "type": "object"
           },
+          "LateErrorScope": {
+            "description": "Transaction scope of the `error` late-row policy (API note section 3.2).",
+            "oneOf": [
+              {
+                "const": "envelope",
+                "description": "The complete input envelope is rejected atomically.",
+                "type": "string"
+              }
+            ]
+          },
+          "LatePolicySpec": {
+            "description": "Late-row handling for one rolling operator (SCE-00 D7).",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Reject the complete input envelope without state, metric, or output\nchanges.",
+                "properties": {
+                  "kind": {
+                    "const": "error",
+                    "type": "string"
+                  },
+                  "scope": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/LateErrorScope",
+                    "description": "The only supported transaction scope."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "scope"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Drop each late row and record the three D7 metrics.",
+                "properties": {
+                  "kind": {
+                    "const": "drop",
+                    "type": "string"
+                  },
+                  "metrics_version": {
+                    "description": "Metric transaction version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "metrics_version"
+                ],
+                "type": "object"
+              }
+            ]
+          },
           "NodeSpec": {
             "additionalProperties": false,
             "properties": {
@@ -1208,6 +1263,24 @@
                   },
                   "spec": {
                     "$ref": "#/components/schemas/ProjectCreateRequest/$defs/WindowSpec"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "spec"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Native row-window lag/delta over partitioned event-time rows.",
+                "properties": {
+                  "kind": {
+                    "const": "rolling",
+                    "type": "string"
+                  },
+                  "spec": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingSpec"
                   }
                 },
                 "required": [
@@ -1521,6 +1594,166 @@
                   "policy"
                 ],
                 "type": "object"
+              }
+            ]
+          },
+          "RollingOutputSpec": {
+            "description": "One declared rolling output and its output column name.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Value of the same column `periods` earlier in the entity total order.",
+                "properties": {
+                  "input": {
+                    "description": "Input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "lag",
+                    "type": "string"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "periods": {
+                    "description": "Positive lag distance in rows.",
+                    "format": "uint64",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Checked difference between the current value and the value `periods`\nearlier in the entity total order.",
+                "properties": {
+                  "input": {
+                    "description": "Input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "delta",
+                    "type": "string"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "periods": {
+                    "description": "Positive lag distance in rows.",
+                    "format": "uint64",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "periods"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "RollingSpec": {
+            "additionalProperties": false,
+            "description": "Data-only declaration of one native row-window rolling operation.",
+            "properties": {
+              "allowed_lateness_micros": {
+                "description": "Allowed lateness in exact microseconds (SCE-00 D7).",
+                "format": "uint64",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "configuration_version": {
+                "description": "Semantic configuration version; must equal\n[`ROLLING_CONFIGURATION_VERSION`].",
+                "format": "uint32",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "event_time": {
+                "description": "Non-null UTC `timestamp[us]` event-time column.",
+                "type": "string"
+              },
+              "late_policy": {
+                "$ref": "#/components/schemas/ProjectCreateRequest/$defs/LatePolicySpec",
+                "description": "Late-row policy."
+              },
+              "outputs": {
+                "description": "Rolling outputs in semantic declaration order.",
+                "items": {
+                  "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingOutputSpec"
+                },
+                "type": "array"
+              },
+              "partition_by": {
+                "description": "Ordered non-empty entity partition key.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "sequence_by": {
+                "description": "Ordered non-empty sequence key; floating columns are forbidden.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "state_layout_version": {
+                "description": "Durable state-layout version; must equal\n[`ROLLING_STATE_LAYOUT_VERSION`].",
+                "format": "uint32",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "value_policy": {
+                "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingValuePolicy",
+                "description": "Frozen null/NaN value policy."
+              }
+            },
+            "required": [
+              "configuration_version",
+              "state_layout_version",
+              "partition_by",
+              "event_time",
+              "sequence_by",
+              "outputs",
+              "allowed_lateness_micros",
+              "late_policy",
+              "value_policy"
+            ],
+            "type": "object"
+          },
+          "RollingValuePolicy": {
+            "description": "Frozen null/NaN policy for rolling values (SCE-00 D3.2).",
+            "oneOf": [
+              {
+                "const": "stateful_numeric_v1",
+                "description": "Lag/delta preserve a null or NaN current or referenced operand.",
+                "type": "string"
               }
             ]
           },
@@ -2174,6 +2407,61 @@
             ],
             "type": "object"
           },
+          "LateErrorScope": {
+            "description": "Transaction scope of the `error` late-row policy (API note section 3.2).",
+            "oneOf": [
+              {
+                "const": "envelope",
+                "description": "The complete input envelope is rejected atomically.",
+                "type": "string"
+              }
+            ]
+          },
+          "LatePolicySpec": {
+            "description": "Late-row handling for one rolling operator (SCE-00 D7).",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Reject the complete input envelope without state, metric, or output\nchanges.",
+                "properties": {
+                  "kind": {
+                    "const": "error",
+                    "type": "string"
+                  },
+                  "scope": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/LateErrorScope",
+                    "description": "The only supported transaction scope."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "scope"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Drop each late row and record the three D7 metrics.",
+                "properties": {
+                  "kind": {
+                    "const": "drop",
+                    "type": "string"
+                  },
+                  "metrics_version": {
+                    "description": "Metric transaction version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "metrics_version"
+                ],
+                "type": "object"
+              }
+            ]
+          },
           "NodeSpec": {
             "additionalProperties": false,
             "properties": {
@@ -2308,6 +2596,24 @@
                   },
                   "spec": {
                     "$ref": "#/components/schemas/ProjectDocument/$defs/WindowSpec"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "spec"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Native row-window lag/delta over partitioned event-time rows.",
+                "properties": {
+                  "kind": {
+                    "const": "rolling",
+                    "type": "string"
+                  },
+                  "spec": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/RollingSpec"
                   }
                 },
                 "required": [
@@ -2621,6 +2927,166 @@
                   "policy"
                 ],
                 "type": "object"
+              }
+            ]
+          },
+          "RollingOutputSpec": {
+            "description": "One declared rolling output and its output column name.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Value of the same column `periods` earlier in the entity total order.",
+                "properties": {
+                  "input": {
+                    "description": "Input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "lag",
+                    "type": "string"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "periods": {
+                    "description": "Positive lag distance in rows.",
+                    "format": "uint64",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Checked difference between the current value and the value `periods`\nearlier in the entity total order.",
+                "properties": {
+                  "input": {
+                    "description": "Input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "delta",
+                    "type": "string"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "periods": {
+                    "description": "Positive lag distance in rows.",
+                    "format": "uint64",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "periods"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "RollingSpec": {
+            "additionalProperties": false,
+            "description": "Data-only declaration of one native row-window rolling operation.",
+            "properties": {
+              "allowed_lateness_micros": {
+                "description": "Allowed lateness in exact microseconds (SCE-00 D7).",
+                "format": "uint64",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "configuration_version": {
+                "description": "Semantic configuration version; must equal\n[`ROLLING_CONFIGURATION_VERSION`].",
+                "format": "uint32",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "event_time": {
+                "description": "Non-null UTC `timestamp[us]` event-time column.",
+                "type": "string"
+              },
+              "late_policy": {
+                "$ref": "#/components/schemas/ProjectDocument/$defs/LatePolicySpec",
+                "description": "Late-row policy."
+              },
+              "outputs": {
+                "description": "Rolling outputs in semantic declaration order.",
+                "items": {
+                  "$ref": "#/components/schemas/ProjectDocument/$defs/RollingOutputSpec"
+                },
+                "type": "array"
+              },
+              "partition_by": {
+                "description": "Ordered non-empty entity partition key.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "sequence_by": {
+                "description": "Ordered non-empty sequence key; floating columns are forbidden.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "state_layout_version": {
+                "description": "Durable state-layout version; must equal\n[`ROLLING_STATE_LAYOUT_VERSION`].",
+                "format": "uint32",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "value_policy": {
+                "$ref": "#/components/schemas/ProjectDocument/$defs/RollingValuePolicy",
+                "description": "Frozen null/NaN value policy."
+              }
+            },
+            "required": [
+              "configuration_version",
+              "state_layout_version",
+              "partition_by",
+              "event_time",
+              "sequence_by",
+              "outputs",
+              "allowed_lateness_micros",
+              "late_policy",
+              "value_policy"
+            ],
+            "type": "object"
+          },
+          "RollingValuePolicy": {
+            "description": "Frozen null/NaN policy for rolling values (SCE-00 D3.2).",
+            "oneOf": [
+              {
+                "const": "stateful_numeric_v1",
+                "description": "Lag/delta preserve a null or NaN current or referenced operand.",
+                "type": "string"
               }
             ]
           },

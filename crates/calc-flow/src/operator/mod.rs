@@ -3,6 +3,7 @@
 mod batch;
 mod expression;
 mod join;
+mod rolling;
 mod sql;
 mod stream;
 mod union;
@@ -15,6 +16,10 @@ pub use join::{
     JoinStateLimits, JoinTimeBounds, STREAM_JOIN_MAX_SAFE_JSON_INTEGER,
     STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1, StreamJoinOperator, StreamJoinSideStatus,
     StreamJoinSpec, StreamJoinStatus, StreamJoinType,
+};
+pub use rolling::{
+    LateErrorScope, LatePolicySpec, ROLLING_CONFIGURATION_VERSION, ROLLING_STATE_LAYOUT_VERSION,
+    RollingOperator, RollingOutputSpec, RollingSpec, RollingValuePolicy,
 };
 pub use sql::SqlOperator;
 pub use stream::{
@@ -235,6 +240,7 @@ pub enum NodeOperator {
     Sql(SqlOperator),
     Union(UnionOperator),
     Window(WindowAggregateOperator),
+    Rolling(RollingOperator),
     StreamJoin(Box<StreamJoinOperator>),
     Batch(Box<dyn BatchOperator>),
     Stream(Box<dyn StreamOperator>),
@@ -247,6 +253,7 @@ impl NodeOperator {
             Self::Sql(operator) => operator,
             Self::Union(operator) => operator,
             Self::Window(operator) => operator,
+            Self::Rolling(operator) => operator,
             Self::StreamJoin(operator) => operator.as_ref(),
             Self::Batch(operator) => operator.as_ref(),
             Self::Stream(operator) => operator.as_ref(),
@@ -304,6 +311,18 @@ impl From<WindowAggregateOperator> for NodeOperator {
 impl From<Box<WindowAggregateOperator>> for NodeOperator {
     fn from(value: Box<WindowAggregateOperator>) -> Self {
         Self::Window(*value)
+    }
+}
+
+impl From<RollingOperator> for NodeOperator {
+    fn from(value: RollingOperator) -> Self {
+        Self::Rolling(value)
+    }
+}
+
+impl From<Box<RollingOperator>> for NodeOperator {
+    fn from(value: Box<RollingOperator>) -> Self {
+        Self::Rolling(*value)
     }
 }
 
