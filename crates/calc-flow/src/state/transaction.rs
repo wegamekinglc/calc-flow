@@ -344,14 +344,13 @@ impl ManifestTransaction {
             .await?;
         self.publish_prepared_segments(&prepared.staged_segments, cancellation)
             .await?;
-        let session_verified = self.session_segments.lock().verified.clone();
         owner_settled(
             cancellation,
             "manifest-publish-segment-read",
             validate_manifest_segments(
                 self.lineage.as_ref(),
                 &prepared.manifest,
-                &session_verified,
+                Some(&self.session_segments),
             ),
         )
         .await?;
@@ -768,14 +767,14 @@ impl ManifestTransaction {
         let candidates = manifest_candidates(root, "manifest-select-list", cancellation).await?;
         let mut latest = None;
         for candidate in candidates {
-            // Recovery always revalidates every referenced segment byte; the
-            // session set is empty here, so nothing skips the full read.
+            // Recovery always revalidates every referenced segment byte: the
+            // `None` session skips nothing on this path.
             let manifest = self
                 .load_candidate_manifest(
                     &candidate,
                     identity,
                     "manifest-select",
-                    &BTreeSet::new(),
+                    None,
                     cancellation,
                 )
                 .await?;
@@ -865,14 +864,13 @@ impl ManifestTransaction {
         cancellation: &CancellationToken,
     ) -> Result<Vec<(ManifestCandidate, CheckpointManifest)>> {
         let mut manifests = Vec::with_capacity(candidates.len());
-        let session_verified = self.session_segments.lock().verified.clone();
         for candidate in candidates {
             let manifest = self
                 .load_candidate_manifest(
                     &candidate,
                     identity,
                     "manifest-retain",
-                    &session_verified,
+                    Some(&self.session_segments),
                     cancellation,
                 )
                 .await?;
@@ -886,7 +884,7 @@ impl ManifestTransaction {
         candidate: &ManifestCandidate,
         identity: &PreparedManifestIdentity,
         operation: &str,
-        session_verified: &BTreeSet<StateHandle>,
+        session_segments: Option<&parking_lot::Mutex<SessionSegments>>,
         cancellation: &CancellationToken,
     ) -> Result<CheckpointManifest> {
         let bytes = owner_settled(cancellation, &format!("{operation}-read"), async {
@@ -906,7 +904,7 @@ impl ManifestTransaction {
         owner_settled(
             cancellation,
             &format!("{operation}-segments"),
-            validate_manifest_segments(self.lineage.as_ref(), &manifest, session_verified),
+            validate_manifest_segments(self.lineage.as_ref(), &manifest, session_segments),
         )
         .await?;
         Ok(manifest)
@@ -1032,14 +1030,19 @@ struct ManifestCandidate {
 async fn validate_manifest_segments(
     lineage: &dyn StateLineageBackend,
     manifest: &CheckpointManifest,
-    session_verified: &BTreeSet<StateHandle>,
+    session_segments: Option<&parking_lot::Mutex<SessionSegments>>,
 ) -> Result<()> {
     // Handles this session committed or fully verified skip the redundant
-    // re-read; recovery-time selection on a fresh session passes an empty set
-    // and therefore revalidates every referenced segment byte (AC-08).
+    // re-read; recovery-time selection passes `None` and therefore revalidates
+    // every referenced segment byte (AC-08). Membership is checked per handle
+    // under a short lock — never across an `.await` — so the check stays O(1)
+    // per segment instead of cloning the session set every epoch.
+    let session_verified = |handle: &StateHandle| {
+        session_segments.is_some_and(|session| session.lock().verified.contains(handle))
+    };
     for operator in manifest.operators().values() {
         for handle in &operator.segments {
-            if session_verified.contains(handle) {
+            if session_verified(handle) {
                 continue;
             }
             lineage.load_segment(handle).await?;
@@ -1047,7 +1050,7 @@ async fn validate_manifest_segments(
     }
     for sink in manifest.sinks().values() {
         for handle in &sink.segments {
-            if session_verified.contains(handle) {
+            if session_verified(handle) {
                 continue;
             }
             lineage.load_segment(handle).await?;
