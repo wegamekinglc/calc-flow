@@ -1041,7 +1041,7 @@ async fn pre_commit_all(
                 .stage_sink_segments_cancellable(
                     sink.sink_id.as_str(),
                     epoch,
-                    &segment_bytes,
+                    segment_bytes,
                     &cancellation,
                 )
                 .await
@@ -1231,7 +1231,6 @@ async fn recover_transactional_sinks_inner(
             transaction
                 .load_sink_segments_cancellable(
                     sink.sink_id.as_str(),
-                    manifest.epoch(),
                     &entry.segments,
                     cancellation,
                 )

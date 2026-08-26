@@ -675,6 +675,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn checkpoint_encodes_dirty_upserts_from_carried_records_not_live_state() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("left", left_batch(vec![0, 1, 2]), &context, &mut collector)
+            .await
+            .unwrap();
+        // The dirty log must encode from the records it carries at admission:
+        // the checkpoint path may not scan live state per dirty row, or capture
+        // cost grows with the total retained state instead of the dirty set.
+        operator.state.left.clear();
+        let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
+
+        let mut restored =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        restored.restore(&snapshot).unwrap();
+        assert_eq!(restored.status().left.retained_rows, 3);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_shares_carried_segment_allocations_across_epochs() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("left", left_batch(vec![0]), &context, &mut collector)
+            .await
+            .unwrap();
+        let first = operator.checkpoint(Epoch::INITIAL).unwrap();
+        operator
+            .process_data("left", left_batch(vec![1]), &context, &mut collector)
+            .await
+            .unwrap();
+        let second = operator.checkpoint(Epoch::INITIAL.next().unwrap()).unwrap();
+
+        // Capture cost must stay proportional to the dirty set (spec FR47): a
+        // segment the operator already encoded is carried into the next
+        // snapshot by sharing its allocation, never by copying its bytes.
+        let mut shared = 0_usize;
+        for (segment_id, carried) in &second.segments {
+            if let Some(original) = first.segments.get(segment_id) {
+                assert!(
+                    Arc::ptr_eq(&original.bytes_arc(), &carried.bytes_arc()),
+                    "carried segment {segment_id:?} must share its allocation"
+                );
+                shared += 1;
+            }
+        }
+        assert_eq!(shared, 1, "epoch 1 delta carries into epoch 2");
+        assert!(
+            second.segments.contains_key("left-delta-2"),
+            "epoch 2 dirty ops encode a fresh segment"
+        );
+    }
+
+    #[tokio::test]
     async fn restore_rejects_tampered_checkpoints() {
         let mut operator =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
@@ -696,7 +757,7 @@ mod tests {
         let mut bad_magic = snapshot.clone();
         bad_magic
             .segments
-            .insert("left-delta-1".into(), vec![0_u8; 8]);
+            .insert("left-delta-1".into(), StateSegment::new(vec![0_u8; 8]));
         assert!(fresh(&bad_magic).is_err(), "invalid magic must be rejected");
 
         let mut short_inventory = snapshot.clone();
@@ -707,8 +768,10 @@ mod tests {
         );
 
         let mut truncated = snapshot.clone();
-        let bytes = truncated.segments.get_mut("left-delta-1").unwrap();
+        let segment = truncated.segments.get_mut("left-delta-1").unwrap();
+        let mut bytes = segment.bytes().to_vec();
         bytes.truncate(bytes.len() - 1);
+        *segment = StateSegment::new(bytes);
         assert!(
             fresh(&truncated).is_err(),
             "truncated segment must be rejected"
@@ -1087,8 +1150,8 @@ use serde_json::Value;
 
 use crate::{
     Batch, BatchKind, BatchMetadata, CalcFlowError, DataFusionConfig, DataFusionRuntime, Epoch,
-    EventTime, IngressProgress, JsonMap, OperatorStateSnapshot, Port, Result, StreamCollector,
-    StreamOperator, StreamOperatorContext, UdfRegistrySnapshot,
+    EventTime, IngressProgress, JsonMap, OperatorStateSnapshot, Port, Result, StateSegment,
+    StreamCollector, StreamOperator, StreamOperatorContext, UdfRegistrySnapshot,
 };
 
 use super::{OperatorMetadata, StreamRuntimeState, is_portable_identifier, validate_operator_name};
@@ -1578,6 +1641,8 @@ enum PendingOp {
         row_id: u64,
         event_time: EventTime,
         encoded_key: Arc<Vec<u8>>,
+        record: RecordBatch,
+        charge: u64,
     },
     Tombstone {
         side: JoinSide,
@@ -1600,11 +1665,12 @@ impl PendingOp {
 /// Prepared checkpoint segments and the dirty log (spec FR45/FR47).
 ///
 /// Bulk encoding and compaction are prepared during data/progress handlers;
-/// `checkpoint` only moves prepared buffers and encodes the dirty ops.
+/// `checkpoint` only shares the prepared segment allocations and encodes the
+/// dirty ops.
 #[derive(Default)]
 struct DeltaTracking {
-    base: BTreeMap<&'static str, Arc<Vec<u8>>>,
-    segments: BTreeMap<(u64, &'static str), Arc<Vec<u8>>>,
+    base: BTreeMap<&'static str, StateSegment>,
+    segments: BTreeMap<(u64, &'static str), StateSegment>,
     pending: Vec<PendingOp>,
     segments_since_base: u32,
     needs_compaction: bool,
@@ -2058,6 +2124,8 @@ impl StreamJoinOperator {
                 row_id: row.row_id,
                 event_time: row.event_time,
                 encoded_key: Arc::clone(&row.encoded_key),
+                record: row.record.clone(),
+                charge: row.charge,
             });
         }
         if side == JoinSide::Left {
@@ -2310,22 +2378,26 @@ impl StreamOperator for StreamJoinOperator {
             unreachable!("stream Join checkpoint metadata is an object")
         };
         // O(dirty/segment metadata) capture (spec FR47): prepared base and
-        // carried delta buffers move without re-encoding, and only the dirty
-        // ops since the last epoch encode here.
+        // carried delta segments share their allocations without copying, and
+        // only the dirty ops since the last epoch encode here.
         let mut segments = BTreeMap::new();
-        for (side, bytes) in &self.state.deltas.base {
-            segments.insert(format!("{side}-base"), (**bytes).clone());
+        for (side, segment) in &self.state.deltas.base {
+            segments.insert(format!("{side}-base"), segment.clone());
         }
-        for ((segment_epoch, side), bytes) in &self.state.deltas.segments {
-            segments.insert(format!("{side}-delta-{segment_epoch}"), (**bytes).clone());
+        for ((segment_epoch, side), segment) in &self.state.deltas.segments {
+            segments.insert(format!("{side}-delta-{segment_epoch}"), segment.clone());
         }
         if !self.state.deltas.pending.is_empty() {
             for (side, bytes) in encode_pending_delta(&self.state, epoch, &self.name)? {
+                let segment = StateSegment::new(bytes);
                 self.state
                     .deltas
                     .segments
-                    .insert((epoch.as_u64(), side.as_str()), Arc::new(bytes.clone()));
-                segments.insert(format!("{}-delta-{}", side.as_str(), epoch.as_u64()), bytes);
+                    .insert((epoch.as_u64(), side.as_str()), segment.clone());
+                segments.insert(
+                    format!("{}-delta-{}", side.as_str(), epoch.as_u64()),
+                    segment,
+                );
             }
             self.state.deltas.pending.clear();
             self.state.deltas.segments_since_base += 1;
@@ -3131,7 +3203,10 @@ const JOIN_STATE_MAGIC: &[u8; 8] = b"CFJOIN1\0";
 fn compact_base(state: &mut StreamJoinState, operator_id: &str) -> Result<()> {
     let left = encode_side(&state.left, operator_id, "left")?;
     let right = encode_side(&state.right, operator_id, "right")?;
-    state.deltas.base = BTreeMap::from([("left", Arc::new(left)), ("right", Arc::new(right))]);
+    state.deltas.base = BTreeMap::from([
+        ("left", StateSegment::new(left)),
+        ("right", StateSegment::new(right)),
+    ]);
     state.deltas.segments.clear();
     state.deltas.pending.clear();
     state.deltas.segments_since_base = 0;
@@ -3149,8 +3224,8 @@ const JOIN_DELTA_TOMBSTONE_TAG: u8 = 2;
 
 /// Encodes the dirty ops of one epoch into per-side delta segments.
 ///
-/// Upserts pull their records from live state, so the encode cost is
-/// proportional to the dirty set, never to the full state.
+/// Upserts encode the records they carry from admission, so the encode cost is
+/// proportional to the dirty set, never to the full state (spec FR47).
 fn encode_pending_delta(
     state: &StreamJoinState,
     epoch: Epoch,
@@ -3197,18 +3272,9 @@ fn encode_pending_delta(
                     .to_le_bytes(),
             );
             segment.extend_from_slice(encoded_key);
-            if let PendingOp::Upsert { .. } = op {
-                let rows = side_rows(state, side);
-                let row = rows
-                    .iter()
-                    .find(|row| row.row_id == row_id)
-                    .ok_or_else(|| CalcFlowError::Internal {
-                        message: format!(
-                "stream Join {operator_id:?} dirty upsert {row_id} is missing from live state"
-            ),
-                    })?;
-                segment.extend_from_slice(&row.charge.to_le_bytes());
-                let ipc = encode_row_ipc(&row.record, operator_id, side.as_str())?;
+            if let PendingOp::Upsert { record, charge, .. } = op {
+                segment.extend_from_slice(&charge.to_le_bytes());
+                let ipc = encode_row_ipc(record, operator_id, side.as_str())?;
                 segment.extend_from_slice(
                     &u64::try_from(ipc.len())
                         .map_err(|_| counter_overflow(operator_id, "IPC length"))?
@@ -3228,13 +3294,6 @@ impl PendingOp {
         match self {
             PendingOp::Upsert { side, .. } | PendingOp::Tombstone { side, .. } => *side,
         }
-    }
-}
-
-const fn side_rows(state: &StreamJoinState, side: JoinSide) -> &Vec<StoredRow> {
-    match side {
-        JoinSide::Left => &state.left,
-        JoinSide::Right => &state.right,
     }
 }
 
@@ -3318,16 +3377,16 @@ fn identity_order(left: &StoredRow, right: &StoredRow) -> std::cmp::Ordering {
 
 /// Rebuilds the carried delta-segment map from a restored snapshot so the
 /// next checkpoint carries them forward without re-encoding.
-type CarriedDeltaSegments = BTreeMap<(u64, &'static str), Arc<Vec<u8>>>;
+type CarriedDeltaSegments = BTreeMap<(u64, &'static str), StateSegment>;
 
-fn carried_base_segments(snapshot: &OperatorStateSnapshot) -> BTreeMap<&'static str, Arc<Vec<u8>>> {
+fn carried_base_segments(snapshot: &OperatorStateSnapshot) -> BTreeMap<&'static str, StateSegment> {
     let mut base = BTreeMap::new();
-    for (segment_id, bytes) in &snapshot.segments {
+    for (segment_id, segment) in &snapshot.segments {
         if let Some(side) = ["left", "right"]
             .into_iter()
             .find(|side| segment_id == &format!("{side}-base"))
         {
-            base.insert(side, Arc::new(bytes.clone()));
+            base.insert(side, segment.clone());
         }
     }
     base
@@ -3338,7 +3397,7 @@ fn carried_delta_segments(
     operator_id: &str,
 ) -> Result<CarriedDeltaSegments> {
     let mut carried = BTreeMap::new();
-    for (segment_id, bytes) in &snapshot.segments {
+    for (segment_id, segment) in &snapshot.segments {
         let side = ["left", "right"]
             .into_iter()
             .find(|side| segment_id.starts_with(side) && segment_id.contains("-delta-"));
@@ -3352,7 +3411,7 @@ fn carried_delta_segments(
             .ok_or_else(|| CalcFlowError::CheckpointMismatch {
                 message: format!("stream Join {operator_id:?} segment id is invalid"),
             })?;
-        carried.insert((epoch, side), Arc::new(bytes.clone()));
+        carried.insert((epoch, side), segment.clone());
     }
     Ok(carried)
 }
@@ -3383,7 +3442,7 @@ fn parse_segment_kind(segment_id: &str, operator_id: &str) -> Result<SegmentKind
 
 /// Folds one side's base and deltas into durable-identity order.
 fn fold_side(
-    segments: &BTreeMap<String, Vec<u8>>,
+    segments: &BTreeMap<String, StateSegment>,
     inventory: &[(&str, SegmentKind)],
     side: JoinSide,
     schema: &SchemaRef,
@@ -3392,7 +3451,7 @@ fn fold_side(
 ) -> Result<Vec<StoredRow>> {
     let mut folded: BTreeMap<(Vec<u8>, i64, u64), StoredRow> = BTreeMap::new();
     let side_str = side.as_str();
-    let mut ordered: Vec<(&str, &SegmentKind, &Vec<u8>)> = inventory
+    let mut ordered: Vec<(&str, &SegmentKind, &StateSegment)> = inventory
         .iter()
         .filter(|(segment_id, _)| segment_id.starts_with(side_str))
         .map(|(segment_id, kind)| (*segment_id, kind, &segments[*segment_id]))
@@ -3402,7 +3461,8 @@ fn fold_side(
         SegmentKind::Base => (u64::MIN, (*segment_id).to_owned()),
         SegmentKind::Delta(epoch) => (*epoch, (*segment_id).to_owned()),
     });
-    for (_segment_id, kind, bytes) in ordered {
+    for (_segment_id, kind, segment) in ordered {
+        let bytes = segment.bytes();
         match kind {
             SegmentKind::Base => {
                 for row in decode_side(bytes, schema, key_indices, operator_id, side_str)? {
@@ -3857,10 +3917,20 @@ fn record_tombstones(
     side: JoinSide,
     evicted: Vec<(u64, EventTime, Arc<Vec<u8>>)>,
 ) {
+    // Pending identities are unique per side, so one indexed pass keeps the
+    // coalescing cost proportional to the dirty log, never quadratic.
+    let pending_identities: BTreeSet<(JoinSide, u64)> =
+        pending.iter().map(PendingOp::identity).collect();
+    let coalesced: BTreeSet<(JoinSide, u64)> = evicted
+        .iter()
+        .map(|(row_id, _, _)| (side, *row_id))
+        .filter(|identity| pending_identities.contains(identity))
+        .collect();
+    if !coalesced.is_empty() {
+        pending.retain(|op| !coalesced.contains(&op.identity()));
+    }
     for (row_id, event_time, encoded_key) in evicted {
-        let identity = (side, row_id);
-        if let Some(position) = pending.iter().position(|op| op.identity() == identity) {
-            pending.swap_remove(position);
+        if coalesced.contains(&(side, row_id)) {
             continue;
         }
         pending.push(PendingOp::Tombstone {

@@ -19,7 +19,7 @@ pub use join::{
 pub use sql::SqlOperator;
 pub use stream::{
     EdgeCollector, IngressProgress, IngressProgressSnapshot, IngressState, OperatorStateSnapshot,
-    StreamCollector, StreamOperator, StreamOperatorContext,
+    StateSegment, StreamCollector, StreamOperator, StreamOperatorContext,
 };
 pub use union::UnionOperator;
 pub use window::{

@@ -77,9 +77,9 @@ pub use operator::{
     IngressProgressSnapshot, IngressState, JoinStateLimits, JoinTimeBounds, MAX_WINDOW_OVERLAP,
     NodeOperator, OperatorMetadata, OperatorStateSnapshot, Port, ProviderRegistry,
     STREAM_JOIN_MAX_SAFE_JSON_INTEGER, STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1, SqlOperator,
-    StreamCollector, StreamJoinOperator, StreamJoinSideStatus, StreamJoinSpec, StreamJoinStatus,
-    StreamJoinType, StreamOperator, StreamOperatorContext, StreamOperatorFactory, UnionOperator,
-    WindowAggregateOperator, WindowGeometry, WindowSpec,
+    StateSegment, StreamCollector, StreamJoinOperator, StreamJoinSideStatus, StreamJoinSpec,
+    StreamJoinStatus, StreamJoinType, StreamOperator, StreamOperatorContext, StreamOperatorFactory,
+    UnionOperator, WindowAggregateOperator, WindowGeometry, WindowSpec,
 };
 pub use pipeline::{
     BatchExecutionPlan, DeliveryGuarantee, Edge, EdgeBudget, ExecutionOptions, NodeTiming,

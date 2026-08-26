@@ -5,6 +5,31 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-26: Make epoch checkpoint capture cost proportional to the dirty
+  set, not the retained state (DAL-160). `OperatorStateSnapshot.segments`
+  now maps segment IDs to the new public `StateSegment` type — an
+  allocation-shared (`Arc`) byte buffer with a SHA-256 computed once at
+  construction — replacing `BTreeMap<String, Vec<u8>>` in a breaking Rust
+  API change; custom `StreamOperator` checkpoint implementations and
+  snapshot consumers must wrap segment bytes in `StateSegment::new`. The
+  stream Join encodes dirty upserts from the records its dirty log carries
+  at admission instead of scanning live state per dirty row, eliminating a
+  quadratic capture path that reached 45–78.5 s per epoch at ~1.04M
+  retained rows, and carries prepared base/delta segments across epochs by
+  sharing allocations rather than copying bytes. The manifest transaction
+  reuses the already-committed handle for a segment whose content is
+  unchanged since the current session committed it, skipping the per-epoch
+  re-hash, re-write, and re-validation of carried state; recovery-time
+  manifest selection still revalidates every referenced segment byte on
+  every fresh session (AC-08), while same-session publish and retention
+  skip that redundant re-read. Manifests may now reference handles
+  committed at earlier epochs, and recovery loads validate handle ownership
+  without requiring one shared epoch. A resident `stream_join_perf`
+  Criterion suite preserves the frozen AC19 join baseline (nine scenarios
+  plus a capture-independence canary pair) for future 0.80×/1.20× gate
+  comparisons; the scheduled nightly workflow stays contract-frozen to the
+  `core` harness.
+
 - 2026-08-26: Compile symbolic row-local programs into execution plans.
   `Program.compile_batch(runtime)` and `Program.compile_stream(runtime, *,
   allowed_lateness_micros=0, late_policy="error")` lower literal, field,

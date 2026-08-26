@@ -341,8 +341,8 @@ impl SoakWindowOperator {
         let segment_bytes = snapshot
             .segments
             .values()
-            .try_fold(0_u64, |total, bytes| {
-                total.checked_add(u64::try_from(bytes.len()).ok()?)
+            .try_fold(0_u64, |total, segment| {
+                total.checked_add(u64::try_from(segment.bytes().len()).ok()?)
             })
             .expect("the bounded soak cannot overflow segment byte accounting");
         let mut probe = self.probe.lock();

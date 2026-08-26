@@ -48,5 +48,9 @@ harness = false
 name = "m4_state_window"
 harness = false
 
+[[bench]]
+name = "stream_join_perf"
+harness = false
+
 [lints]
 workspace = true
