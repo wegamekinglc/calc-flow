@@ -27,7 +27,8 @@ engine or Studio capabilities.
   without requiring one shared epoch. A resident `stream_join_perf`
   Criterion suite preserves the frozen AC19 join baseline (nine scenarios
   plus a capture-independence canary pair) for future 0.80×/1.20× gate
-  comparisons, wired into the nightly informational benchmark workflow.
+  comparisons; the scheduled nightly workflow stays contract-frozen to the
+  `core` harness.
 
 - 2026-08-26: Compile symbolic row-local programs into execution plans.
   `Program.compile_batch(runtime)` and `Program.compile_stream(runtime, *,

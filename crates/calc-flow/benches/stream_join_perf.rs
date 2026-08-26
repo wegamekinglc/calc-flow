@@ -3,8 +3,8 @@
 //! Adopted from the frozen DAL-130 AC19 evidence harness (first baseline:
 //! `main@f74f32a`, WSL2 i9-13900HX, workload SHA-256 `555546a7…`). The frozen
 //! acceptance gates for future candidates are throughput floors at 0.80 × the
-//! frozen 95% lower bound (no_match ≥ 1.12M rows/s, one_to_one ≥ 491k,
-//! fanout10 ≥ 75.0k, evict ≥ 135k) and recovery ceilings at 1.20 × the frozen
+//! frozen 95% lower bound (`no_match` ≥ 1.12M rows/s, `one_to_one` ≥ 491k,
+//! `fanout10` ≥ 75.0k, `evict` ≥ 135k) and recovery ceilings at 1.20 × the frozen
 //! 95% upper bound (20k restore ≤ 59.3 ms, 60k restore ≤ 175.5 ms). Absolute
 //! values are platform-keyed; slope and ratio conclusions must hold across
 //! runs. The zero-match honey-key workaround from the scratch harness is gone:
@@ -44,10 +44,6 @@ const BEFORE: Duration = Duration::from_secs(300);
 const AFTER: Duration = Duration::from_secs(60);
 /// Segment count that arms inline compaction on the next data handler.
 const COMPACTION_THRESHOLD: u64 = 4;
-
-fn sha256(bytes: impl AsRef<[u8]>) -> String {
-    hex::encode(Sha256::digest(bytes.as_ref()))
-}
 
 fn schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
@@ -151,7 +147,6 @@ fn read_rss() -> (u64, u64) {
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
             rss = rest
-                .trim()
                 .split_whitespace()
                 .next()
                 .unwrap_or("0")
@@ -159,7 +154,6 @@ fn read_rss() -> (u64, u64) {
                 .unwrap_or(0);
         } else if let Some(rest) = line.strip_prefix("VmHWM:") {
             hwm = rest
-                .trim()
                 .split_whitespace()
                 .next()
                 .unwrap_or("0")
@@ -418,7 +412,7 @@ fn baseline(c: &mut Criterion) {
                 }
                 total
             }
-        })
+        });
     });
 
     // Scenario: 1:1 — 10k pairs emitted against 10k retained left rows.
@@ -443,7 +437,7 @@ fn baseline(c: &mut Criterion) {
                 }
                 total
             }
-        })
+        });
     });
 
     // Scenario: high fan-out — 1,000 keys × 10 rows per side → 100k pairs.
@@ -468,7 +462,7 @@ fn baseline(c: &mut Criterion) {
                 }
                 total
             }
-        })
+        });
     });
 
     // Scenario: watermark eviction — one progress call evicts 10k left rows.
@@ -491,7 +485,7 @@ fn baseline(c: &mut Criterion) {
                 }
                 total
             }
-        })
+        });
     });
 
     // Scenario: dirty checkpoint capture — 20k dirty rows, no base carried.
@@ -513,7 +507,7 @@ fn baseline(c: &mut Criterion) {
                 }
                 total
             }
-        })
+        });
     });
 
     // Capture independence canary (DAL-160): equal dirty cardinality (1,250
@@ -535,7 +529,7 @@ fn baseline(c: &mut Criterion) {
                     }
                     total
                 })
-            })
+            });
         });
     }
 
@@ -559,7 +553,7 @@ fn baseline(c: &mut Criterion) {
                 }
                 total
             })
-        })
+        });
     });
 
     group.bench_function("handler/left_500_steady_60k_base", |b| {
@@ -580,7 +574,7 @@ fn baseline(c: &mut Criterion) {
                 }
                 total
             })
-        })
+        });
     });
 
     // Scenario: full restore — base-plus-delta snapshot at scale.
@@ -599,7 +593,7 @@ fn baseline(c: &mut Criterion) {
                     }
                     total
                 })
-            })
+            });
         });
     }
 
