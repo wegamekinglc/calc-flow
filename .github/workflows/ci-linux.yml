@@ -315,7 +315,7 @@ jobs:
           enable-cache: true
       - name: Build wheel and source distribution
         run: |
-          python -m unittest scripts.test_run_rust_tests scripts.test_run_rust_coverage scripts.test_inspect_wheel scripts.test_release_config scripts.test_verify_perf_gates scripts.test_verify_security_gates
+          python -m unittest scripts.test_run_rust_tests scripts.test_run_rust_coverage scripts.test_build_python_release scripts.test_inspect_wheel scripts.test_release_config scripts.test_verify_python_release scripts.test_verify_perf_gates scripts.test_verify_security_gates
           uv build
           python scripts/inspect_wheel.py core-wheel dist/calc_flow-*.whl
           python scripts/inspect_wheel.py sdist dist/calc_flow-*.tar.gz

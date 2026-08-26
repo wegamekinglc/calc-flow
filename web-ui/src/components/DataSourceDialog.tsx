@@ -7,7 +7,7 @@ import {
   type MouseEvent,
 } from 'react';
 
-import type { DataSourceFormat } from './dataSourceEditor';
+import type { DataSourceFormat } from './dataSourceEditorModel';
 
 export interface DataSourceDialogProps {
   readonly format: DataSourceFormat;

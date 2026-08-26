@@ -315,6 +315,8 @@ repository commands and constraints.
 - **[Python API](docs/python-api.md)** — Python surface and examples
 - **[Rust API](docs/rust-api.md)** — native surface and examples
 - **[API reference](docs/api-reference.md)** — supported surfaces at a glance
+- **[Python release guide](docs/python-release.md)** — packaging, verification,
+  Trusted Publishers, and the PyPI procedure
 - **[Benchmark harness](benchmarks/README.md)** — informational benchmarks
 - **[v2 release and migration](docs/v2-release.md)** — v1-to-v2 boundary (history)
 

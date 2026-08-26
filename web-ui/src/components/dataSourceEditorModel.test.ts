@@ -5,7 +5,7 @@ import {
   createDataSourceDrafts,
   materializeDataSources,
   nextDataSource,
-} from './dataSourceEditor';
+} from './dataSourceEditorModel';
 
 const sources: DataSourceSpec[] = [
   { id: 'left', input: 'left_source', format: 'inline_json', data: [{ value: 1 }] },

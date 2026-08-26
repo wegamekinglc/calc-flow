@@ -23,6 +23,14 @@ engine or Studio capabilities.
   default function registry, so the deterministic and replay-safe
   capability claims of those operators stay truthful.
 
+- 2026-08-26: Add the complete Python publication boundary: a cross-platform
+  local package builder, five-platform abi3 matrix and metadata verification,
+  SHA-256 release manifests, annotated-tag and PyPI immutability checks, and
+  separate OIDC Trusted Publisher jobs for `calc-flow` and
+  `calc-flow-studio`. Studio now publishes a nonempty package README, and its
+  frontend helper modules use case-distinct filenames so release builds also
+  work on Windows.
+
 - 2026-08-25: Extend the runtime capability snapshot to lifecycle-aware
   schema version 2 across Python and Studio. `OperatorCapability` and
   `ProviderCapability` report execution modes, output finality, statefulness,

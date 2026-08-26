@@ -4,7 +4,7 @@ import {
   compareBenchmarkReports,
   parseBenchmarkReport,
   type BenchmarkReport,
-} from './benchmarkComparison';
+} from './benchmarkComparisonModel';
 
 const duration = (seconds: number): string => {
   if (seconds >= 1) return `${seconds.toFixed(3)} s`;

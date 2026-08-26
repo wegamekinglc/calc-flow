@@ -278,9 +278,9 @@ Cancelling a task that is only awaiting `wait_async()` does not cancel the
 job. Call `cancel_async()` explicitly. A runner can start once, and a job is the
 sole lifecycle owner; create a fresh plan, bindings, and runner for a restart.
 
-Blocking `start`, `checkpoint`, `shutdown`, `cancel`, and `wait` variants exist
-for Python callers outside an event loop. They reject an active event loop;
-async applications should always use the async forms.
+Blocking `start`, `trigger_checkpoint`, `shutdown`, `cancel`, and `wait`
+variants exist for Python callers outside an event loop. They reject an
+active event loop; async applications should always use the async forms.
 
 ## Runtime tuning and backpressure
 

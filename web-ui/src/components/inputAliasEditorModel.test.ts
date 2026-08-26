@@ -5,7 +5,7 @@ import {
   editSqlInputAliases,
   nextInputAlias,
   validateInputAlias,
-} from './inputAliasEditor';
+} from './inputAliasEditorModel';
 
 const sqlProject = () => {
   const project = blankProject();
