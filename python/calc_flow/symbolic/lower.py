@@ -363,15 +363,6 @@ def _field_json(field: Field, /) -> dict[str, object]:
     }
 
 
-def _segment_has_rolling(segment: _Segment, /) -> bool:
-    return any(True for _, tree in segment.env for _ in _find_rolling(tree)) or any(
-        True
-        for tree in (segment.predicate, segment.post_predicate)
-        if tree is not None
-        for _ in _find_rolling(tree)
-    )
-
-
 def _cint(value: CValue | None, /) -> int | None:
     return value.value if isinstance(value, CInt) else None
 

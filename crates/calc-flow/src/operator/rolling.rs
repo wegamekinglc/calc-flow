@@ -904,7 +904,7 @@ fn decode_state_segment(
     compiled: &CompiledRollingSpec,
     metadata: &RollingSnapshotMetadata,
 ) -> Result<DecodedRollingState> {
-    let mut reader = FileReader::try_new(Cursor::new(bytes), None)
+    let reader = FileReader::try_new(Cursor::new(bytes), None)
         .map_err(|error| state_format(format!("rolling state IPC open failed: {error}")))?;
     validate_segment_schema_metadata(reader.schema().metadata(), metadata, compiled)?;
     let batches = reader
@@ -1455,7 +1455,6 @@ struct CompiledRollingSpec {
 #[derive(Clone)]
 struct CompiledKeyColumn {
     index: usize,
-    data_type: DataType,
 }
 
 #[derive(Clone)]
@@ -1616,14 +1615,6 @@ impl RollingHistories {
         for (entity, history) in touched {
             self.by_entity.insert(entity, history);
         }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.by_entity.is_empty()
-    }
-
-    fn values(&self) -> impl Iterator<Item = &VecDeque<Vec<ScalarValue>>> {
-        self.by_entity.values()
     }
 }
 
@@ -1928,7 +1919,7 @@ fn compile_key_column(
             }
         }
     }
-    Ok(CompiledKeyColumn { index, data_type })
+    Ok(CompiledKeyColumn { index })
 }
 
 fn compile_output(
@@ -2901,22 +2892,22 @@ mod tests {
     fn history_is_truncated_to_the_maximum_declared_periods() {
         let spec = kernel_spec(json!([lag_price(2), lag_price(1)]));
         let mut histories = RollingHistories::default();
-        for batch in 0..3_u64 {
-            let rows = (0..4_u64)
+        for batch in 0..3_u32 {
+            let rows = (0..4_u32)
                 .map(|index| {
                     let sequence = batch * 4 + index + 1;
                     full_row(
-                        sequence as i64,
+                        i64::from(sequence),
                         "a",
-                        sequence,
-                        vec![ScalarValue::Float64(Some(sequence as f64))],
+                        u64::from(sequence),
+                        vec![ScalarValue::Float64(Some(f64::from(sequence)))],
                     )
                 })
                 .collect::<Vec<_>>();
             let outputs = compute(&spec, &histories, &rows).unwrap();
             histories.apply(outputs.touched);
         }
-        for history in histories.values() {
+        for history in histories.by_entity.values() {
             assert!(history.len() <= 2);
         }
     }
@@ -2943,7 +2934,7 @@ mod tests {
             ),
         ];
         assert!(compute(&spec, &histories, &rows).is_err());
-        assert!(histories.is_empty());
+        assert!(histories.by_entity.is_empty());
     }
 
     // ------------------------------------------------------------------
