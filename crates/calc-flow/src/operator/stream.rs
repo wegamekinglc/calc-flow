@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use crate::{
     Batch, CalcFlowError, EdgeBudget, Epoch, EventTime, JsonMap, Port, Result, StreamJobContext,
@@ -10,6 +11,58 @@ use crate::{
 };
 
 use super::OperatorMetadata;
+
+/// One immutable checkpoint state segment with its content digest.
+///
+/// Segments are shared by allocation: an operator that carries an unchanged
+/// segment across epochs clones the cheap `Arc` instead of copying bytes, and
+/// the SHA-256 is computed once at construction so re-staging a carried
+/// segment never re-hashes the retained state (spec FR47 capture cost stays
+/// proportional to the dirty set).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StateSegment {
+    bytes: Arc<Vec<u8>>,
+    sha256: String,
+}
+
+impl StateSegment {
+    /// Wraps segment bytes, computing their SHA-256 exactly once.
+    #[must_use]
+    pub fn new(bytes: Vec<u8>) -> Self {
+        let sha256 = hex::encode(Sha256::digest(&bytes));
+        Self {
+            bytes: Arc::new(bytes),
+            sha256,
+        }
+    }
+
+    /// Wraps bytes whose digest was already validated against a committed
+    /// handle, so recovery never re-hashes what it just verified.
+    pub(crate) fn from_validated(bytes: Vec<u8>, sha256: String) -> Self {
+        Self {
+            bytes: Arc::new(bytes),
+            sha256,
+        }
+    }
+
+    /// Returns the immutable segment bytes.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Shares the segment allocation with another snapshot or carried buffer.
+    #[must_use]
+    pub fn bytes_arc(&self) -> Arc<Vec<u8>> {
+        Arc::clone(&self.bytes)
+    }
+
+    /// Returns the lowercase hexadecimal SHA-256 of the segment bytes.
+    #[must_use]
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+}
 
 /// Operator-private state captured at one epoch (API note A2.3).
 ///
@@ -20,9 +73,9 @@ use super::OperatorMetadata;
 pub struct OperatorStateSnapshot {
     /// Small bounded JSON placed inline in the manifest.
     pub inline_metadata: JsonMap,
-    /// `segment_id -> bytes`; the runtime assigns paths, lengths, and
+    /// `segment_id -> shared segment`; the runtime assigns paths, lengths, and
     /// checksums during staging (D4.1).
-    pub segments: BTreeMap<String, Vec<u8>>,
+    pub segments: BTreeMap<String, StateSegment>,
 }
 
 /// One named ingress's current runtime-owned progress state.

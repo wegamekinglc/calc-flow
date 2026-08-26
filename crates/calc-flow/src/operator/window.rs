@@ -367,7 +367,7 @@ struct PreparedStateSegment {
 
 struct PreparedSnapshotSegments {
     descriptors: Vec<SegmentDescriptor>,
-    bytes: BTreeMap<String, Vec<u8>>,
+    bytes: BTreeMap<String, crate::StateSegment>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1098,9 +1098,17 @@ impl WindowAggregateOperator {
                 SegmentKind::Delta => "delta",
             };
             let segment_id = format!("{kind}-{:020}-{ordinal:08}", epoch.as_u64());
-            let descriptor = self.snapshot_segment_descriptor(epoch, &segment_id, segment)?;
+            // One shared allocation and one digest serve both the snapshot and
+            // the manifest descriptor; nothing re-encodes or re-hashes here.
+            let snapshot_segment = crate::StateSegment::new(segment.bytes.clone());
+            let descriptor = self.snapshot_segment_descriptor(
+                epoch,
+                &segment_id,
+                segment.kind,
+                &snapshot_segment,
+            )?;
             descriptors.push(descriptor);
-            segments.insert(segment_id, segment.bytes.clone());
+            segments.insert(segment_id, snapshot_segment);
         }
         Ok(PreparedSnapshotSegments {
             descriptors,
@@ -1112,7 +1120,8 @@ impl WindowAggregateOperator {
         &self,
         epoch: crate::Epoch,
         segment_id: &str,
-        segment: &PreparedStateSegment,
+        kind: SegmentKind,
+        segment: &crate::StateSegment,
     ) -> Result<SegmentDescriptor> {
         let operator_id = self.state.operator_id.as_deref().ok_or_else(|| {
             checkpoint_mismatch("window segment is missing its operator identity".into())
@@ -1121,11 +1130,10 @@ impl WindowAggregateOperator {
             "committed/{operator_id}/{:020}-{segment_id}.arrow",
             epoch.as_u64()
         );
-        let byte_len = u64::try_from(segment.bytes.len())
+        let byte_len = u64::try_from(segment.bytes().len())
             .map_err(|_| internal_error("window segment length does not fit u64"))?;
-        let sha256 = hex::encode(Sha256::digest(&segment.bytes));
         Ok(SegmentDescriptor {
-            kind: segment.kind,
+            kind,
             state_layout_version: WINDOW_STATE_LAYOUT_VERSION,
             schema_fingerprint: self.compiled.state_schema_fingerprint.clone(),
             handle: StateHandle::new(
@@ -1134,7 +1142,7 @@ impl WindowAggregateOperator {
                 segment_id,
                 &relative_path,
                 byte_len,
-                &sha256,
+                segment.sha256(),
             )?,
         })
     }
@@ -1212,7 +1220,7 @@ impl WindowAggregateOperator {
         let operator_id = metadata.operator_id.clone();
         std::thread::spawn(move || {
             decode_state_segments(
-                segments,
+                &segments,
                 &spec,
                 &compiled,
                 pipeline_fingerprint.as_deref(),
@@ -1256,16 +1264,16 @@ fn parse_snapshot_metadata(
 fn snapshot_segments(
     snapshot: &crate::OperatorStateSnapshot,
     inventory: &[SegmentDescriptor],
-) -> Result<Vec<Vec<u8>>> {
+) -> Result<Vec<Arc<Vec<u8>>>> {
     inventory
         .iter()
         .map(|descriptor| {
             let segment_id = descriptor.handle.segment_id();
-            let bytes = snapshot.segments.get(segment_id).cloned().ok_or_else(|| {
+            let segment = snapshot.segments.get(segment_id).ok_or_else(|| {
                 checkpoint_mismatch(format!("window snapshot is missing segment {segment_id:?}"))
             })?;
-            validate_snapshot_segment_bytes(descriptor, &bytes)?;
-            Ok(bytes)
+            validate_snapshot_segment_bytes(descriptor, segment.bytes())?;
+            Ok(segment.bytes_arc())
         })
         .collect()
 }
@@ -2948,7 +2956,7 @@ fn validate_snapshot_inventory(
 }
 
 fn decode_state_segments(
-    segments: Vec<Vec<u8>>,
+    segments: &[Arc<Vec<u8>>],
     spec: &WindowSpec,
     compiled: &CompiledWindowSpec,
     pipeline_fingerprint: Option<&str>,
@@ -2964,7 +2972,7 @@ fn decode_state_segments(
         .ok_or_else(|| checkpoint_mismatch("window state is missing its operator ID".into()))?;
     let expected_schema = state_schema(spec, compiled, pipeline_fingerprint, operator_id);
     let decoded = segments
-        .into_iter()
+        .iter()
         .map(|bytes| {
             decode_state_segment(bytes, spec, compiled, &expected_schema, operator_id).map(
                 |operations| {
@@ -2988,7 +2996,7 @@ fn decode_state_segments(
     reason = "durable state validation remains a single fail-before-install decoding transaction"
 )]
 fn decode_state_segment(
-    bytes: Vec<u8>,
+    bytes: &[u8],
     spec: &WindowSpec,
     compiled: &CompiledWindowSpec,
     expected_schema: &Schema,
@@ -3714,7 +3722,11 @@ mod tests {
             .unwrap();
 
         let snapshot = source.checkpoint(crate::Epoch::INITIAL).unwrap();
-        let segment_bytes = snapshot.segments.values().map(Vec::len).sum::<usize>();
+        let segment_bytes = snapshot
+            .segments
+            .values()
+            .map(|segment| segment.bytes().len())
+            .sum::<usize>();
         assert!(
             segment_bytes > LEGACY_PROJECT_JSON_LIMIT,
             "high-cardinality state encoded only {segment_bytes} bytes"

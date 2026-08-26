@@ -91,6 +91,31 @@ impl StateHandle {
     /// non-canonical, or [`CalcFlowError::CheckpointMismatch`] before any
     /// segment load when either ownership coordinate differs.
     pub fn validate_for(&self, expected_owner: &str, expected_epoch: Epoch) -> Result<()> {
+        self.validate_owner(expected_owner)?;
+        if self.epoch != expected_epoch {
+            return Err(CalcFlowError::CheckpointMismatch {
+                message: format!(
+                    "state handle epoch {} does not match expected epoch {}",
+                    self.epoch.as_u64(),
+                    expected_epoch.as_u64()
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validates that this handle belongs to one expected state owner.
+    ///
+    /// Recovery loads validate ownership with this method rather than by
+    /// epoch: a carried segment keeps the epoch that created it, so one
+    /// manifest legitimately references handles committed at different epochs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] when the handle itself is
+    /// non-canonical, or [`CalcFlowError::CheckpointMismatch`] before any
+    /// segment load when the owner differs.
+    pub(crate) fn validate_owner(&self, expected_owner: &str) -> Result<()> {
         validate_portable_identifier("operator_id", &self.operator_id)?;
         validate_portable_identifier("segment_id", &self.segment_id)?;
         validate_committed_relative_path(&self.relative_path)?;
@@ -100,15 +125,6 @@ impl StateHandle {
                 message: format!(
                     "state handle owner {:?} does not match expected owner {expected_owner:?}",
                     self.operator_id
-                ),
-            });
-        }
-        if self.epoch != expected_epoch {
-            return Err(CalcFlowError::CheckpointMismatch {
-                message: format!(
-                    "state handle epoch {} does not match expected epoch {}",
-                    self.epoch.as_u64(),
-                    expected_epoch.as_u64()
                 ),
             });
         }

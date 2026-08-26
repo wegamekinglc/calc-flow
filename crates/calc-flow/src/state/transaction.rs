@@ -25,7 +25,7 @@ use super::{
 };
 use crate::{
     CalcFlowError, CancellationToken, Epoch, JsonMap, OperatorManifestEntry, OperatorStateSnapshot,
-    Result,
+    Result, StateSegment,
 };
 
 const MAX_MANIFEST_ENTRIES: usize = 4_096;
@@ -138,6 +138,7 @@ pub(crate) struct ManifestTransaction {
     manifest_root: PathBuf,
     retained_epochs: usize,
     operation: Mutex<()>,
+    session_segments: parking_lot::Mutex<SessionSegments>,
     #[cfg(test)]
     fault_hook: Option<ManifestTransactionFaultHook>,
     #[cfg(test)]
@@ -146,6 +147,22 @@ pub(crate) struct ManifestTransaction {
     real_parent_sync_failure: bool,
     #[cfg(all(test, unix))]
     real_parent_sync_failure_probe: Option<ManifestParentSyncOsFailureProbe>,
+}
+
+/// Session-scoped knowledge about committed segments.
+///
+/// A segment this session staged and published — or fully re-validated during
+/// recovery selection — never needs the per-epoch re-hash, re-write, or
+/// re-read the frozen capture-independence NFR forbids (FR47). Live operator
+/// state stays authoritative between epochs; on-disk corruption is still
+/// caught fail-closed by the recovery-time full validation on every fresh
+/// session (AC-08).
+#[derive(Default)]
+struct SessionSegments {
+    /// `(owner_id, segment_id) -> latest committed handle`, for carried reuse.
+    carried: BTreeMap<(String, String), StateHandle>,
+    /// Handles whose committed bytes this session wrote or fully verified.
+    verified: BTreeSet<StateHandle>,
 }
 
 impl ManifestTransaction {
@@ -238,6 +255,7 @@ impl ManifestTransaction {
             manifest_root,
             retained_epochs,
             operation: Mutex::new(()),
+            session_segments: parking_lot::Mutex::new(SessionSegments::default()),
             #[cfg(test)]
             fault_hook: None,
             #[cfg(test)]
@@ -329,7 +347,11 @@ impl ManifestTransaction {
         owner_settled(
             cancellation,
             "manifest-publish-segment-read",
-            validate_manifest_segments(self.lineage.as_ref(), &prepared.manifest),
+            validate_manifest_segments(
+                self.lineage.as_ref(),
+                &prepared.manifest,
+                Some(&self.session_segments),
+            ),
         )
         .await?;
         let epoch = prepared.manifest.epoch();
@@ -475,15 +497,19 @@ impl ManifestTransaction {
         &self,
         sink_id: &str,
         epoch: Epoch,
-        segments: &BTreeMap<String, Vec<u8>>,
+        segments: BTreeMap<String, Vec<u8>>,
         cancellation: &CancellationToken,
     ) -> Result<Vec<StateHandle>> {
+        let segments = segments
+            .into_iter()
+            .map(|(segment_id, bytes)| (segment_id, StateSegment::new(bytes)))
+            .collect();
         let _guard = owner_settled(cancellation, "sink-state-stage-lock", async {
             Ok(self.operation.lock().await)
         })
         .await?;
         let (staged, unpublished) = self
-            .collect_staged_state_segments(sink_id, epoch, segments, cancellation)
+            .collect_staged_state_segments(sink_id, epoch, &segments, cancellation)
             .await?;
         self.validate_staged_segments(&unpublished, cancellation)
             .await?;
@@ -500,20 +526,20 @@ impl ManifestTransaction {
         &self,
         owner_id: &str,
         epoch: Epoch,
-        segments: &BTreeMap<String, Vec<u8>>,
+        segments: &BTreeMap<String, StateSegment>,
         cancellation: &CancellationToken,
     ) -> Result<(Vec<StateHandle>, Vec<StateHandle>)> {
         let owner_hash = digest(owner_id);
         let mut staged = Vec::with_capacity(segments.len());
         let mut unpublished = Vec::with_capacity(segments.len());
-        for (segment_id, bytes) in segments {
+        for (segment_id, segment) in segments {
             let (handle, needs_publication) = self
                 .stage_state_segment(
                     owner_id,
                     epoch,
                     &owner_hash,
                     segment_id,
-                    bytes,
+                    segment,
                     cancellation,
                 )
                 .await?;
@@ -531,9 +557,30 @@ impl ManifestTransaction {
         epoch: Epoch,
         owner_hash: &str,
         segment_id: &str,
-        bytes: &[u8],
+        segment: &StateSegment,
         cancellation: &CancellationToken,
     ) -> Result<(StateHandle, bool)> {
+        let byte_len =
+            u64::try_from(segment.bytes().len()).map_err(|_| CalcFlowError::InvalidArgument {
+                field: format!("state.{owner_id}.segments.{segment_id}"),
+                message: "segment byte length does not fit u64".into(),
+            })?;
+        let carry_key = (owner_id.to_string(), segment_id.to_string());
+        // A carried segment whose content is unchanged since this session
+        // committed it reuses its handle as-is: no re-hash, re-write, or
+        // re-validation of the retained payload (spec FR47).
+        if let Some(carried) = self
+            .session_segments
+            .lock()
+            .carried
+            .get(&carry_key)
+            .filter(|carried| {
+                carried.sha256() == segment.sha256() && carried.byte_len() == byte_len
+            })
+            .cloned()
+        {
+            return Ok((carried, false));
+        }
         let segment_hash = digest(segment_id);
         let relative_path = format!(
             "committed/{}/{owner_hash}/{}-{segment_hash}.segment",
@@ -545,20 +592,17 @@ impl ManifestTransaction {
             epoch,
             segment_id,
             &relative_path,
-            u64::try_from(bytes.len()).map_err(|_| CalcFlowError::InvalidArgument {
-                field: format!("state.{owner_id}.segments.{segment_id}"),
-                message: "segment byte length does not fit u64".into(),
-            })?,
-            &digest(bytes),
+            byte_len,
+            segment.sha256(),
         )?;
-        match owner_settled(
+        let outcome = match owner_settled(
             cancellation,
             "state-stage-existing-read",
             self.lineage.load_segment(&handle),
         )
         .await
         {
-            Ok(committed) if committed == bytes => Ok((handle, false)),
+            Ok(committed) if committed == segment.bytes() => Ok((handle, false)),
             Ok(_) => Err(CalcFlowError::CheckpointMismatch {
                 message: format!(
                     "state owner {owner_id:?} committed segment {segment_id:?} changed bytes"
@@ -568,13 +612,19 @@ impl ManifestTransaction {
                 owner_settled(
                     cancellation,
                     "state-stage-write",
-                    self.lineage.stage_segment(&handle, bytes),
+                    self.lineage.stage_segment(&handle, segment.bytes()),
                 )
                 .await?;
                 Ok((handle, true))
             }
             Err(error) => Err(error),
+        };
+        if let Ok((handle, _)) = &outcome {
+            let mut session = self.session_segments.lock();
+            session.carried.insert(carry_key, handle.clone());
+            session.verified.insert(handle.clone());
         }
+        outcome
     }
 
     async fn validate_staged_segments(
@@ -612,17 +662,15 @@ impl ManifestTransaction {
     pub(crate) async fn load_operator_state(
         &self,
         operator_id: &str,
-        epoch: Epoch,
         entry: &OperatorManifestEntry,
     ) -> Result<OperatorStateSnapshot> {
-        self.load_operator_state_cancellable(operator_id, epoch, entry, &CancellationToken::new())
+        self.load_operator_state_cancellable(operator_id, entry, &CancellationToken::new())
             .await
     }
 
     pub(crate) async fn load_operator_state_cancellable(
         &self,
         operator_id: &str,
-        epoch: Epoch,
         entry: &OperatorManifestEntry,
         cancellation: &CancellationToken,
     ) -> Result<OperatorStateSnapshot> {
@@ -635,7 +683,7 @@ impl ManifestTransaction {
             .await?;
         let mut segment_ids = BTreeSet::new();
         for handle in &entry.segments {
-            handle.validate_for(operator_id, epoch)?;
+            handle.validate_owner(operator_id)?;
             if !segment_ids.insert(handle.segment_id()) {
                 return Err(CalcFlowError::CheckpointMismatch {
                     message: format!(
@@ -653,7 +701,10 @@ impl ManifestTransaction {
                 self.lineage.load_segment(handle),
             )
             .await?;
-            segments.insert(handle.segment_id().into(), bytes);
+            segments.insert(
+                handle.segment_id().into(),
+                StateSegment::from_validated(bytes, handle.sha256().into()),
+            );
         }
         Ok(OperatorStateSnapshot {
             inline_metadata: entry.inline_metadata.clone(),
@@ -664,7 +715,6 @@ impl ManifestTransaction {
     pub(crate) async fn load_sink_segments_cancellable(
         &self,
         sink_id: &str,
-        epoch: Epoch,
         handles: &[StateHandle],
         cancellation: &CancellationToken,
     ) -> Result<BTreeMap<String, Vec<u8>>> {
@@ -674,7 +724,7 @@ impl ManifestTransaction {
         .await?;
         let mut segments = BTreeMap::new();
         for handle in handles {
-            handle.validate_for(sink_id, epoch)?;
+            handle.validate_owner(sink_id)?;
             let bytes = owner_settled(
                 cancellation,
                 "sink-state-load-segment",
@@ -717,10 +767,21 @@ impl ManifestTransaction {
         let candidates = manifest_candidates(root, "manifest-select-list", cancellation).await?;
         let mut latest = None;
         for candidate in candidates {
+            // Recovery always revalidates every referenced segment byte: the
+            // `None` session skips nothing on this path.
             let manifest = self
-                .load_candidate_manifest(&candidate, identity, "manifest-select", cancellation)
+                .load_candidate_manifest(
+                    &candidate,
+                    identity,
+                    "manifest-select",
+                    None,
+                    cancellation,
+                )
                 .await?;
             let expectation = identity.expectation(candidate.epoch);
+            let mut handles = BTreeSet::new();
+            collect_manifest_handles(&manifest, &mut handles);
+            self.session_segments.lock().verified.extend(handles);
             latest = Some(SelectedManifest {
                 validation: ManifestValidation {
                     runtime_config_changed: manifest.runtime_config_changed(&expectation),
@@ -805,7 +866,13 @@ impl ManifestTransaction {
         let mut manifests = Vec::with_capacity(candidates.len());
         for candidate in candidates {
             let manifest = self
-                .load_candidate_manifest(&candidate, identity, "manifest-retain", cancellation)
+                .load_candidate_manifest(
+                    &candidate,
+                    identity,
+                    "manifest-retain",
+                    Some(&self.session_segments),
+                    cancellation,
+                )
                 .await?;
             manifests.push((candidate, manifest));
         }
@@ -817,6 +884,7 @@ impl ManifestTransaction {
         candidate: &ManifestCandidate,
         identity: &PreparedManifestIdentity,
         operation: &str,
+        session_segments: Option<&parking_lot::Mutex<SessionSegments>>,
         cancellation: &CancellationToken,
     ) -> Result<CheckpointManifest> {
         let bytes = owner_settled(cancellation, &format!("{operation}-read"), async {
@@ -836,7 +904,7 @@ impl ManifestTransaction {
         owner_settled(
             cancellation,
             &format!("{operation}-segments"),
-            validate_manifest_segments(self.lineage.as_ref(), &manifest),
+            validate_manifest_segments(self.lineage.as_ref(), &manifest, session_segments),
         )
         .await?;
         Ok(manifest)
@@ -962,14 +1030,29 @@ struct ManifestCandidate {
 async fn validate_manifest_segments(
     lineage: &dyn StateLineageBackend,
     manifest: &CheckpointManifest,
+    session_segments: Option<&parking_lot::Mutex<SessionSegments>>,
 ) -> Result<()> {
+    // Handles this session committed or fully verified skip the redundant
+    // re-read; recovery-time selection passes `None` and therefore revalidates
+    // every referenced segment byte (AC-08). Membership is checked per handle
+    // under a short lock — never across an `.await` — so the check stays O(1)
+    // per segment instead of cloning the session set every epoch.
+    let session_verified = |handle: &StateHandle| {
+        session_segments.is_some_and(|session| session.lock().verified.contains(handle))
+    };
     for operator in manifest.operators().values() {
         for handle in &operator.segments {
+            if session_verified(handle) {
+                continue;
+            }
             lineage.load_segment(handle).await?;
         }
     }
     for sink in manifest.sinks().values() {
         for handle in &sink.segments {
+            if session_verified(handle) {
+                continue;
+            }
             lineage.load_segment(handle).await?;
         }
     }
@@ -1499,6 +1582,7 @@ fn io_error(path: &Path, source: std::io::Error) -> CalcFlowError {
 mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet},
+        path::Path,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -1515,7 +1599,7 @@ mod tests {
     use crate::{
         CalcFlowError, CheckpointManifest, CheckpointManifestFields, Epoch, LocalStateBackend,
         OperatorManifestEntry, OperatorStateSnapshot, RecoveryStatus, StateBackend, StateHandle,
-        StateLineageBackend, StateLineageKey,
+        StateLineageBackend, StateLineageKey, StateSegment,
     };
 
     const PIPELINE_FINGERPRINT: &str =
@@ -1643,6 +1727,244 @@ mod tests {
             "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".into();
         let selected = transaction.select_latest(&changed).await.unwrap().unwrap();
         assert!(selected.validation.runtime_config_changed);
+    }
+
+    fn snapshot_with_segments(segments: &[(&str, &[u8])]) -> OperatorStateSnapshot {
+        OperatorStateSnapshot {
+            inline_metadata: BTreeMap::new(),
+            segments: segments
+                .iter()
+                .map(|(segment_id, bytes)| {
+                    ((*segment_id).into(), StateSegment::new(bytes.to_vec()))
+                })
+                .collect(),
+        }
+    }
+
+    fn committed_file_count(root: &Path) -> usize {
+        let mut count = 0;
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(directory) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    #[tokio::test]
+    async fn carried_segments_reuse_committed_handles_without_restaging() {
+        let directory = TempDir::new().unwrap();
+        let state_root = directory.path().join("state");
+        let backend = LocalStateBackend::new(&state_root).await.unwrap();
+        let key = StateLineageKey::new("orders", PIPELINE_FINGERPRINT).unwrap();
+        let lineage: Arc<dyn StateLineageBackend> =
+            Arc::from(backend.open_lineage(&key).await.unwrap());
+        let transaction = ManifestTransaction::open(
+            Arc::clone(&lineage),
+            &key,
+            directory.path().join("manifests"),
+            2,
+        )
+        .await
+        .unwrap();
+
+        let first = transaction
+            .stage_operator_state(
+                "window",
+                Epoch::INITIAL,
+                snapshot_with_segments(&[("left-base", b"state-v1")]),
+            )
+            .await
+            .unwrap();
+        let second_epoch = Epoch::INITIAL.next().unwrap();
+        let second = transaction
+            .stage_operator_state(
+                "window",
+                second_epoch,
+                snapshot_with_segments(&[("left-base", b"state-v1")]),
+            )
+            .await
+            .unwrap();
+
+        // Capture cost must stay independent of the retained payload (FR47):
+        // unchanged carried content reuses its already-committed handle and is
+        // never re-encoded, re-hashed, or rewritten at the new epoch.
+        assert_eq!(first.segments, second.segments);
+        assert_eq!(second.segments[0].epoch(), Epoch::INITIAL);
+        assert_eq!(
+            committed_file_count(&state_root.join("committed")),
+            1,
+            "carried content must not be rewritten"
+        );
+
+        let third_epoch = second_epoch.next().unwrap();
+        let third = transaction
+            .stage_operator_state(
+                "window",
+                third_epoch,
+                snapshot_with_segments(&[("left-base", b"state-v2")]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(third.segments[0].epoch(), third_epoch);
+        assert_ne!(third.segments, second.segments);
+        assert_eq!(committed_file_count(&state_root.join("committed")), 2);
+    }
+
+    #[tokio::test]
+    async fn load_accepts_segments_committed_at_earlier_epochs() {
+        let directory = TempDir::new().unwrap();
+        let backend = LocalStateBackend::new(directory.path().join("state"))
+            .await
+            .unwrap();
+        let key = StateLineageKey::new("orders", PIPELINE_FINGERPRINT).unwrap();
+        let lineage: Arc<dyn StateLineageBackend> =
+            Arc::from(backend.open_lineage(&key).await.unwrap());
+        let transaction = ManifestTransaction::open(
+            Arc::clone(&lineage),
+            &key,
+            directory.path().join("manifests"),
+            2,
+        )
+        .await
+        .unwrap();
+
+        let base = transaction
+            .stage_operator_state(
+                "window",
+                Epoch::INITIAL,
+                snapshot_with_segments(&[("left-base", b"first")]),
+            )
+            .await
+            .unwrap()
+            .segments
+            .remove(0);
+        let second_epoch = Epoch::INITIAL.next().unwrap();
+        let delta = transaction
+            .stage_operator_state(
+                "window",
+                second_epoch,
+                snapshot_with_segments(&[("left-delta-2", b"second")]),
+            )
+            .await
+            .unwrap()
+            .segments
+            .remove(0);
+
+        // A manifest at epoch 2 legitimately references the carried base from
+        // epoch 1 next to the fresh epoch-2 delta; recovery must load both.
+        let entry = OperatorManifestEntry {
+            progress: BTreeMap::new(),
+            inline_metadata: BTreeMap::new(),
+            segments: vec![base, delta],
+        };
+        let restored = transaction
+            .load_operator_state("window", &entry)
+            .await
+            .unwrap();
+        let restored_bytes: BTreeMap<String, Vec<u8>> = restored
+            .segments
+            .iter()
+            .map(|(segment_id, segment)| (segment_id.clone(), segment.bytes().to_vec()))
+            .collect();
+        assert_eq!(
+            restored_bytes,
+            BTreeMap::from([
+                ("left-base".to_string(), b"first".to_vec()),
+                ("left-delta-2".to_string(), b"second".to_vec()),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_and_retain_skip_session_committed_revalidation_but_select_rechecks() {
+        let directory = TempDir::new().unwrap();
+        let state_root = directory.path().join("state");
+        let backend = LocalStateBackend::new(&state_root).await.unwrap();
+        let key = StateLineageKey::new("orders", PIPELINE_FINGERPRINT).unwrap();
+        let lineage: Arc<dyn StateLineageBackend> =
+            Arc::from(backend.open_lineage(&key).await.unwrap());
+        let transaction = ManifestTransaction::open(
+            Arc::clone(&lineage),
+            &key,
+            directory.path().join("manifests"),
+            2,
+        )
+        .await
+        .unwrap();
+
+        let handle = transaction
+            .stage_operator_state(
+                "window",
+                Epoch::INITIAL,
+                snapshot_with_segments(&[("left-base", b"state-v1")]),
+            )
+            .await
+            .unwrap()
+            .segments
+            .remove(0);
+        transaction
+            .publish(PreparedEpochManifest {
+                manifest: manifest_with_operator_segments(Epoch::INITIAL, vec![handle.clone()]),
+                staged_segments: BTreeMap::new(),
+            })
+            .await
+            .unwrap();
+
+        // External tampering after publication: same length, wrong digest.
+        std::fs::write(state_root.join(handle.relative_path()), b"tampered").unwrap();
+
+        // This session wrote and validated the segment itself; per-epoch
+        // publish/retention must not re-read the whole retained payload, so
+        // the tamper is not what these paths re-verify. Live operator state
+        // stays authoritative and the corruption is caught at recovery below.
+        transaction
+            .retain(&identity_with_window(), None)
+            .await
+            .unwrap();
+        transaction
+            .publish(PreparedEpochManifest {
+                manifest: manifest_with_operator_segments(
+                    Epoch::INITIAL.next().unwrap(),
+                    vec![handle.clone()],
+                ),
+                staged_segments: BTreeMap::new(),
+            })
+            .await
+            .unwrap();
+
+        drop(transaction);
+        drop(lineage);
+
+        // Recovery always revalidates every referenced segment byte (AC-08):
+        // a fresh session catches the tampered segment fail-closed.
+        let recovered_backend = LocalStateBackend::new(&state_root).await.unwrap();
+        let recovered_lineage: Arc<dyn StateLineageBackend> =
+            Arc::from(recovered_backend.open_lineage(&key).await.unwrap());
+        let recovered = ManifestTransaction::open(
+            recovered_lineage,
+            &key,
+            directory.path().join("manifests"),
+            2,
+        )
+        .await
+        .unwrap();
+        let Err(error) = recovered.select_latest(&identity_with_window()).await else {
+            panic!("recovery must reject a tampered committed segment");
+        };
+        assert!(
+            matches!(error, CalcFlowError::CheckpointMismatch { .. }),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -1896,7 +2218,7 @@ mod tests {
         let bytes = b"operator-delta".to_vec();
         let snapshot = OperatorStateSnapshot {
             inline_metadata: BTreeMap::from([("layout".into(), serde_json::json!(1))]),
-            segments: BTreeMap::from([("delta-0001".into(), bytes.clone())]),
+            segments: BTreeMap::from([("delta-0001".into(), StateSegment::new(bytes.clone()))]),
         };
 
         let staged = transaction
@@ -1944,7 +2266,10 @@ mod tests {
                 Epoch::INITIAL,
                 OperatorStateSnapshot {
                     inline_metadata: BTreeMap::new(),
-                    segments: BTreeMap::from([("delta".into(), b"state".to_vec())]),
+                    segments: BTreeMap::from([(
+                        "delta".into(),
+                        StateSegment::new(b"state".to_vec()),
+                    )]),
                 },
             )
             .await
@@ -2001,7 +2326,10 @@ mod tests {
                 Epoch::INITIAL,
                 OperatorStateSnapshot {
                     inline_metadata: BTreeMap::new(),
-                    segments: BTreeMap::from([("delta".into(), b"state".to_vec())]),
+                    segments: BTreeMap::from([(
+                        "delta".into(),
+                        StateSegment::new(b"state".to_vec()),
+                    )]),
                 },
             )
             .await
@@ -2348,7 +2676,6 @@ mod tests {
             ManifestOperationPoint::Load => transaction
                 .load_operator_state_cancellable(
                     "window",
-                    Epoch::INITIAL,
                     &OperatorManifestEntry {
                         progress: BTreeMap::new(),
                         inline_metadata: BTreeMap::new(),
@@ -2525,8 +2852,8 @@ mod tests {
                 OperatorStateSnapshot {
                     inline_metadata: BTreeMap::from([("layout".into(), serde_json::json!(1))]),
                     segments: BTreeMap::from([
-                        ("base".into(), b"base-state".to_vec()),
-                        ("delta".into(), b"delta-state".to_vec()),
+                        ("base".into(), StateSegment::new(b"base-state".to_vec())),
+                        ("delta".into(), StateSegment::new(b"delta-state".to_vec())),
                     ]),
                 },
             )
@@ -2539,7 +2866,7 @@ mod tests {
         };
 
         let restored = transaction
-            .load_operator_state("window", epoch, &entry)
+            .load_operator_state("window", &entry)
             .await
             .unwrap();
 
@@ -2547,8 +2874,8 @@ mod tests {
         assert_eq!(
             restored.segments,
             BTreeMap::from([
-                ("base".into(), b"base-state".to_vec()),
-                ("delta".into(), b"delta-state".to_vec()),
+                ("base".into(), StateSegment::new(b"base-state".to_vec())),
+                ("delta".into(), StateSegment::new(b"delta-state".to_vec())),
             ])
         );
     }
@@ -2611,7 +2938,10 @@ mod tests {
                 Epoch::INITIAL,
                 OperatorStateSnapshot {
                     inline_metadata: BTreeMap::new(),
-                    segments: BTreeMap::from([("base".into(), b"first".to_vec())]),
+                    segments: BTreeMap::from([(
+                        "base".into(),
+                        StateSegment::new(b"first".to_vec()),
+                    )]),
                 },
             )
             .await
@@ -2632,7 +2962,10 @@ mod tests {
                 second_epoch,
                 OperatorStateSnapshot {
                     inline_metadata: BTreeMap::new(),
-                    segments: BTreeMap::from([("delta".into(), b"second".to_vec())]),
+                    segments: BTreeMap::from([(
+                        "delta".into(),
+                        StateSegment::new(b"second".to_vec()),
+                    )]),
                 },
             )
             .await
@@ -2688,7 +3021,10 @@ mod tests {
                 Epoch::INITIAL,
                 OperatorStateSnapshot {
                     inline_metadata: BTreeMap::new(),
-                    segments: BTreeMap::from([("base".into(), b"first".to_vec())]),
+                    segments: BTreeMap::from([(
+                        "base".into(),
+                        StateSegment::new(b"first".to_vec()),
+                    )]),
                 },
             )
             .await
