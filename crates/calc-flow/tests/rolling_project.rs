@@ -62,7 +62,7 @@ fn rolling_node_json() -> serde_json::Value {
     })
 }
 
-fn project_json(runtime: serde_json::Value, node: serde_json::Value) -> serde_json::Value {
+fn project_json(runtime: &serde_json::Value, node: &serde_json::Value) -> serde_json::Value {
     let mut project = json!({
         "format_version": 3,
         "id": "rolling_project",
@@ -120,8 +120,8 @@ fn input_batch() -> calc_flow::Batch {
 #[test]
 fn rolling_project_document_validates_and_compiles_in_batch_mode() {
     let project: ProjectSpec = serde_json::from_value(project_json(
-        json!({"mode": "batch", "options": {}}),
-        rolling_node_json(),
+        &json!({"mode": "batch", "options": {}}),
+        &rolling_node_json(),
     ))
     .unwrap();
     let (providers, udfs) = registries();
@@ -156,8 +156,8 @@ fn rolling_project_document_validates_and_compiles_in_batch_mode() {
 #[test]
 fn rolling_project_document_compiles_in_stream_mode() {
     let project: ProjectSpec = serde_json::from_value(project_json(
-        json!({"mode": "stream", "options": {}}),
-        rolling_node_json(),
+        &json!({"mode": "stream", "options": {}}),
+        &rolling_node_json(),
     ))
     .unwrap();
     let (providers, udfs) = registries();
@@ -171,13 +171,13 @@ fn rolling_project_document_compiles_in_stream_mode() {
 fn rolling_project_canonicalizes_to_a_stable_fingerprint() {
     let (providers, udfs) = registries();
     let canonical: ProjectSpec = serde_json::from_value(project_json(
-        json!({"mode": "batch", "options": {}}),
-        rolling_node_json(),
+        &json!({"mode": "batch", "options": {}}),
+        &rolling_node_json(),
     ))
     .unwrap();
     let reordered_text = serde_json::to_string(&project_json(
-        json!({"mode": "batch", "options": {}}),
-        rolling_node_json(),
+        &json!({"mode": "batch", "options": {}}),
+        &rolling_node_json(),
     ))
     .unwrap();
     let mut reordered: serde_json::Map<String, serde_json::Value> =
@@ -199,8 +199,8 @@ fn rolling_project_rejects_unknown_and_missing_spec_fields() {
     node["operator"]["spec"]["unexpected"] = json!(true);
     assert!(
         serde_json::from_value::<ProjectSpec>(project_json(
-            json!({"mode": "batch", "options": {}}),
-            node
+            &json!({"mode": "batch", "options": {}}),
+            &node
         ))
         .is_err()
     );
@@ -212,8 +212,8 @@ fn rolling_project_rejects_unknown_and_missing_spec_fields() {
         .remove("late_policy");
     assert!(
         serde_json::from_value::<ProjectSpec>(project_json(
-            json!({"mode": "batch", "options": {}}),
-            node
+            &json!({"mode": "batch", "options": {}}),
+            &node
         ))
         .is_err()
     );
@@ -232,8 +232,8 @@ fn rolling_project_rejects_aggregate_output_kinds() {
     });
     assert!(
         serde_json::from_value::<ProjectSpec>(project_json(
-            json!({"mode": "batch", "options": {}}),
-            node
+            &json!({"mode": "batch", "options": {}}),
+            &node
         ))
         .is_err()
     );
@@ -243,18 +243,22 @@ fn rolling_project_rejects_aggregate_output_kinds() {
 fn rolling_project_requires_the_exact_input_port_contract() {
     let mut node = rolling_node_json();
     node["input_ports"][0]["name"] = json!("upstream");
-    let project: ProjectSpec =
-        serde_json::from_value(project_json(json!({"mode": "batch", "options": {}}), node))
-            .unwrap();
+    let project: ProjectSpec = serde_json::from_value(project_json(
+        &json!({"mode": "batch", "options": {}}),
+        &node,
+    ))
+    .unwrap();
     let (providers, udfs) = registries();
     let report = validate_project(&project, &providers, &udfs);
     assert!(!report.valid);
 
     let mut node = rolling_node_json();
     node["input_ports"][0]["schema"] = json!([]);
-    let project: ProjectSpec =
-        serde_json::from_value(project_json(json!({"mode": "batch", "options": {}}), node))
-            .unwrap();
+    let project: ProjectSpec = serde_json::from_value(project_json(
+        &json!({"mode": "batch", "options": {}}),
+        &node,
+    ))
+    .unwrap();
     let report = validate_project(&project, &providers, &udfs);
     assert!(!report.valid);
 }
@@ -262,8 +266,8 @@ fn rolling_project_requires_the_exact_input_port_contract() {
 #[test]
 fn rolling_project_derives_output_ports_when_omitted() {
     let project: ProjectSpec = serde_json::from_value(project_json(
-        json!({"mode": "batch", "options": {}}),
-        rolling_node_json(),
+        &json!({"mode": "batch", "options": {}}),
+        &rolling_node_json(),
     ))
     .unwrap();
     let (providers, udfs) = registries();

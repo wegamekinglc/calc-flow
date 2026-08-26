@@ -36,7 +36,9 @@ fn input_schema() -> Arc<Schema> {
     ]))
 }
 
-fn input_batch(rows: &[(i64, &str, u64, Option<f64>, Option<i64>)]) -> Batch {
+type InputRow = (i64, &'static str, u64, Option<f64>, Option<i64>);
+
+fn input_batch(rows: &[InputRow]) -> Batch {
     let record = RecordBatch::try_new(
         input_schema(),
         vec![
@@ -110,7 +112,7 @@ fn job() -> StreamJobContext {
     )
 }
 
-fn context<'a>(job: &'a StreamJobContext, watermark: Option<i64>) -> StreamOperatorContext<'a> {
+fn context(job: &StreamJobContext, watermark: Option<i64>) -> StreamOperatorContext<'_> {
     StreamOperatorContext::new(job, "probe_rolling", watermark.map(EventTime::from_micros))
 }
 
@@ -172,7 +174,7 @@ fn drain_rows(collector: &mut EdgeCollector, rows: &mut Vec<ProbeRow>) {
 
 /// Independent fixture: interleaved entities, duplicate timestamps within and
 /// across entities, a null price, a null volume, and a NaN price.
-fn probe_rows() -> Vec<(i64, &'static str, u64, Option<f64>, Option<i64>)> {
+fn probe_rows() -> Vec<InputRow> {
     vec![
         (12, "a", 3, Some(3.0), Some(120)),
         (10, "a", 1, Some(1.0), Some(100)),
@@ -209,7 +211,7 @@ fn expected_rows() -> Vec<ProbeRow> {
     ]
 }
 
-async fn batch_reference(rows: &[(i64, &str, u64, Option<f64>, Option<i64>)]) -> Vec<ProbeRow> {
+async fn batch_reference(rows: &[InputRow]) -> Vec<ProbeRow> {
     let plan = calc_flow::PipelineBuilder::new("cf tester probe equivalence")
         .unwrap()
         .add_node("probe_rolling", make_operator(probe_spec(3, 2, 0, false)))
@@ -233,10 +235,7 @@ async fn batch_reference(rows: &[(i64, &str, u64, Option<f64>, Option<i64>)]) ->
     observed
 }
 
-async fn stream_run(
-    segments: &[&[(i64, &str, u64, Option<f64>, Option<i64>)]],
-    checkpoint_after: Option<usize>,
-) -> Vec<ProbeRow> {
+async fn stream_run(segments: &[&[InputRow]], checkpoint_after: Option<usize>) -> Vec<ProbeRow> {
     let job = job();
     let mut observed = Vec::new();
     let mut head = make_operator(probe_spec(3, 2, 0, false));

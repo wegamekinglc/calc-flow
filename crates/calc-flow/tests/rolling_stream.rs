@@ -29,7 +29,9 @@ fn input_schema() -> Arc<Schema> {
     ]))
 }
 
-fn input_batch(rows: &[(i64, &str, u64, Option<f64>, Option<i64>)]) -> Batch {
+type InputRow = (i64, &'static str, u64, Option<f64>, Option<i64>);
+
+fn input_batch(rows: &[InputRow]) -> Batch {
     let record = RecordBatch::try_new(
         input_schema(),
         vec![
@@ -55,7 +57,7 @@ fn input_batch(rows: &[(i64, &str, u64, Option<f64>, Option<i64>)]) -> Batch {
     Batch::table(vec![record], BatchMetadata::default()).unwrap()
 }
 
-fn spec(late_policy: serde_json::Value, allowed_lateness_micros: u64) -> RollingSpec {
+fn spec(late_policy: &serde_json::Value, allowed_lateness_micros: u64) -> RollingSpec {
     serde_json::from_value(serde_json::json!({
         "configuration_version": 1,
         "state_layout_version": 1,
@@ -89,7 +91,10 @@ fn error_operator() -> RollingOperator {
     RollingOperator::new(
         "rolling",
         input_schema(),
-        spec(serde_json::json!({"kind": "error", "scope": "envelope"}), 0),
+        spec(
+            &serde_json::json!({"kind": "error", "scope": "envelope"}),
+            0,
+        ),
     )
     .unwrap()
 }
@@ -99,7 +104,7 @@ fn drop_operator(lateness: u64) -> RollingOperator {
         "rolling",
         input_schema(),
         spec(
-            serde_json::json!({"kind": "drop", "metrics_version": 1}),
+            &serde_json::json!({"kind": "drop", "metrics_version": 1}),
             lateness,
         ),
     )
@@ -116,7 +121,7 @@ fn job() -> StreamJobContext {
     )
 }
 
-fn context<'a>(job: &'a StreamJobContext, watermark: Option<i64>) -> StreamOperatorContext<'a> {
+fn context(job: &StreamJobContext, watermark: Option<i64>) -> StreamOperatorContext<'_> {
     StreamOperatorContext::new(job, "rolling", watermark.map(EventTime::from_micros))
 }
 

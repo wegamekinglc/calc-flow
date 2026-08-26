@@ -32,7 +32,9 @@ fn input_schema() -> Arc<Schema> {
     ]))
 }
 
-fn input_batch(rows: &[(i64, &str, u64, Option<f64>, Option<i64>)]) -> Batch {
+type InputRow = (i64, &'static str, u64, Option<f64>, Option<i64>);
+
+fn input_batch(rows: &[InputRow]) -> Batch {
     let record = RecordBatch::try_new(
         input_schema(),
         vec![
@@ -58,7 +60,7 @@ fn input_batch(rows: &[(i64, &str, u64, Option<f64>, Option<i64>)]) -> Batch {
     Batch::table(vec![record], BatchMetadata::default()).unwrap()
 }
 
-fn spec(late_policy: serde_json::Value, allowed_lateness_micros: u64) -> RollingSpec {
+fn spec(late_policy: &serde_json::Value, allowed_lateness_micros: u64) -> RollingSpec {
     serde_json::from_value(serde_json::json!({
         "configuration_version": 1,
         "state_layout_version": 1,
@@ -92,7 +94,10 @@ fn error_operator() -> RollingOperator {
     RollingOperator::new(
         "rolling",
         input_schema(),
-        spec(serde_json::json!({"kind": "error", "scope": "envelope"}), 0),
+        spec(
+            &serde_json::json!({"kind": "error", "scope": "envelope"}),
+            0,
+        ),
     )
     .unwrap()
 }
@@ -102,7 +107,7 @@ fn drop_operator(lateness: u64) -> RollingOperator {
         "rolling",
         input_schema(),
         spec(
-            serde_json::json!({"kind": "drop", "metrics_version": 1}),
+            &serde_json::json!({"kind": "drop", "metrics_version": 1}),
             lateness,
         ),
     )
@@ -119,7 +124,7 @@ fn job() -> StreamJobContext {
     )
 }
 
-fn context<'a>(job: &'a StreamJobContext, watermark: Option<i64>) -> StreamOperatorContext<'a> {
+fn context(job: &StreamJobContext, watermark: Option<i64>) -> StreamOperatorContext<'_> {
     StreamOperatorContext::new(job, "rolling", watermark.map(EventTime::from_micros))
 }
 
@@ -127,9 +132,11 @@ fn new_collector() -> EdgeCollector {
     EdgeCollector::new(error_operator().output_ports().to_vec())
 }
 
+type ObservedRow = (i64, String, u64, Option<f64>, Option<i64>);
+
 #[derive(Clone, Default, PartialEq, Debug)]
 struct Observed {
-    rows: Vec<(i64, String, u64, Option<f64>, Option<i64>)>,
+    rows: Vec<ObservedRow>,
     batch_sequences: Vec<u64>,
 }
 
@@ -181,7 +188,7 @@ fn drain(collector: &mut EdgeCollector, observed: &mut Observed) {
     }
 }
 
-fn fixture_rows() -> Vec<(i64, &'static str, u64, Option<f64>, Option<i64>)> {
+fn fixture_rows() -> Vec<InputRow> {
     vec![
         (10, "a", 1, Some(1.0), Some(10)),
         (10, "b", 1, Some(5.0), Some(50)),
@@ -195,7 +202,7 @@ fn fixture_rows() -> Vec<(i64, &'static str, u64, Option<f64>, Option<i64>)> {
 
 async fn drive_segmented(
     operator: &mut RollingOperator,
-    chunks: &[&[(i64, &str, u64, Option<f64>, Option<i64>)]],
+    chunks: &[&[InputRow]],
     job: &StreamJobContext,
     collector: &mut EdgeCollector,
 ) {
@@ -249,7 +256,7 @@ async fn checkpoint_restore_continues_without_duplicate_or_missing_rows() {
     let mut restarted = error_operator();
     let mut recovered = error_operator();
     let mut restarted_collector = new_collector();
-    let mut restarted_observed = Observed::default();
+    let restarted_observed = Observed::default();
     drive_segmented(&mut restarted, &chunks[..2], &job, &mut restarted_collector).await;
     let snapshot = restarted.checkpoint(Epoch::new(1).unwrap()).unwrap();
     recovered.restore(&snapshot).unwrap();
@@ -527,7 +534,10 @@ async fn restore_rejects_layout_configuration_and_segment_mismatches() {
         assert!(error_operator().restore(&missing_segment).is_err());
     }
 
-    let different_spec = spec(serde_json::json!({"kind": "drop", "metrics_version": 1}), 5);
+    let different_spec = spec(
+        &serde_json::json!({"kind": "drop", "metrics_version": 1}),
+        5,
+    );
     let mut different_operator =
         RollingOperator::new("rolling", input_schema(), different_spec).unwrap();
     assert!(different_operator.restore(&snapshot).is_err());
