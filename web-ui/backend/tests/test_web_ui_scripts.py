@@ -47,7 +47,13 @@ def test_web_ui_shell_wrapper_is_executable_and_valid(name: str) -> None:
     wrapper = WEB_UI / "scripts" / name
 
     assert os.access(wrapper, os.X_OK)
-    subprocess.run(["bash", "-n", wrapper], check=True)
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is not available")
+    # Resolve the executable explicitly (a bare "bash" can hit the WSL
+    # launcher in System32 on Windows) and pass a POSIX-style path
+    # (git-bash treats backslashes in Windows paths as escape characters).
+    subprocess.run(["bash", "-n", wrapper.as_posix()], executable=bash, check=True)
 
 
 @pytest.mark.parametrize(
