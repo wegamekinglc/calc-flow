@@ -84,3 +84,27 @@ jobs:
         run: uv sync --extra dev
       - name: Run Python tests
         run: uv run pytest -q -n auto --dist load -p no:benchmark
+  # Clippy otherwise runs only on Linux CI, so cfg-gated code compiled out on
+  # Linux (unix fsync stubs, Linux /proc soak evidence) regressed on Windows
+  # unnoticed (DAL-167). Keep the gate scoped to the lint surface that carries
+  # platform cfg code; kafka stays out because rdkafka-sys needs a native
+  # cmake build that no cfg lint justifies paying for here.
+  clippy:
+    name: Clippy (Windows cfg parity)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+        with:
+          components: clippy
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      - name: Run Windows clippy (calc-flow)
+        run: cargo clippy -p calc-flow --all-targets --all-features -- -D warnings
+      - name: Run Windows clippy (connectors, non-kafka)
+        run: >-
+          cargo clippy -p calc-flow-connectors --all-targets
+          --no-default-features --features file,clickhouse,http,websocket,postgresql
+          -- -D warnings
