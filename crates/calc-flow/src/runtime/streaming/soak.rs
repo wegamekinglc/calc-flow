@@ -134,6 +134,13 @@ const _: () = assert!(MAX_CHECKPOINT_RSS_NORMALIZED_GROWTH_SPREAD_KIB < MAX_MEDI
 const CHECKPOINT_SOAK_REPORT_LIMIT: u64 = 1 << 20;
 const CHECKPOINT_SOAK_CADENCE_TOLERANCE: Duration = Duration::from_secs(3);
 const MAX_CHECKPOINT_SOAK_RESTART_GAP: Duration = Duration::from_secs(60);
+// Smoke wait bounds are harness budgets, not behavioral assertions: debug-profile
+// operator cost, fsync latency, and deep-retention per-epoch checkpoint cost
+// (DAL-164) all scale with machine speed and load, so the bounds must stay far
+// above the 50 ms smoke interval to avoid load-sensitive flakes.
+const CHECKPOINT_SOAK_SMOKE_CHECKPOINT_WAIT: Duration = Duration::from_secs(180);
+const CHECKPOINT_SOAK_SMOKE_GENERATION_TIMEOUT: Duration = Duration::from_secs(300);
+const CHECKPOINT_SOAK_SETTLE_TIMEOUT: Duration = Duration::from_secs(60);
 const CHECKPOINT_BENCHMARK_COMMAND: &str = "CARGO_TARGET_DIR=<fresh-candidate-target> CARGO_INCREMENTAL=0 CALC_FLOW_M5_CHECKPOINT_BENCHMARK=1 CALC_FLOW_M5_CHECKPOINT_BENCHMARK_RUN_ID=<unique-run-id> CALC_FLOW_M5_PRIVATE_SOURCE_COMMIT=<candidate-commit> CALC_FLOW_M5_PRIVATE_SOURCE_TREE=<candidate-tree> cargo test --release --locked -p calc-flow --lib runtime::streaming::soak::private_m5_epoch_checkpoint_absolute_benchmark -- --ignored --exact --nocapture";
 const M5_PRIVATE_BENCHMARK_CASES: [&str; 12] = [
     "m5/private_path/barrier_cut_single_source",
@@ -4978,7 +4985,7 @@ async fn wait_for_completed_checkpoints(job: &PublicStreamingJob, expected: u64)
     let target = baseline
         .checked_add(expected)
         .expect("checkpoint soak smoke target epoch overflowed");
-    let completed = tokio::time::timeout(Duration::from_secs(20), async {
+    let completed = tokio::time::timeout(CHECKPOINT_SOAK_SMOKE_CHECKPOINT_WAIT, async {
         loop {
             let status = job.status();
             assert_eq!(
@@ -5155,7 +5162,7 @@ async fn settle_checkpoint_soak_process(
 ) -> Result<CheckpointSoakTerminalEvidence> {
     let outcome = if final_generation {
         stop.store(1, Ordering::SeqCst);
-        tokio::time::timeout(Duration::from_secs(20), job.wait())
+        tokio::time::timeout(CHECKPOINT_SOAK_SETTLE_TIMEOUT, job.wait())
             .await
             .map_err(|_| checkpoint_soak_process_error("terminal checkpoint timed out"))?
     } else {
@@ -5744,7 +5751,7 @@ async fn spawn_checkpoint_soak_process(
     let stdout_path = log_root.join(format!("generation-{}.stdout", plan.generation));
     let stderr_path = log_root.join(format!("generation-{}.stderr", plan.generation));
     let timeout = match plan.mode {
-        CheckpointSoakProcessMode::Smoke => Duration::from_secs(60),
+        CheckpointSoakProcessMode::Smoke => CHECKPOINT_SOAK_SMOKE_GENERATION_TIMEOUT,
         CheckpointSoakProcessMode::Standard => {
             let samples = u64::try_from(plan.sample_end - plan.sample_start).unwrap();
             CHECKPOINT_SOAK_CADENCE * u32::try_from(samples).unwrap() + Duration::from_secs(60)
