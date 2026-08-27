@@ -1838,7 +1838,7 @@
                   "ddof": {
                     "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
                     "format": "uint8",
-                    "maximum": 255.0,
+                    "maximum": 1.0,
                     "minimum": 0.0,
                     "type": "integer"
                   },
@@ -1889,7 +1889,7 @@
                   "ddof": {
                     "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
                     "format": "uint8",
-                    "maximum": 255.0,
+                    "maximum": 1.0,
                     "minimum": 0.0,
                     "type": "integer"
                   },
@@ -3428,7 +3428,7 @@
                   "ddof": {
                     "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
                     "format": "uint8",
-                    "maximum": 255.0,
+                    "maximum": 1.0,
                     "minimum": 0.0,
                     "type": "integer"
                   },
@@ -3479,7 +3479,7 @@
                   "ddof": {
                     "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
                     "format": "uint8",
-                    "maximum": 255.0,
+                    "maximum": 1.0,
                     "minimum": 0.0,
                     "type": "integer"
                   },

@@ -186,6 +186,7 @@ pub enum RollingOutputSpec {
         #[schemars(range(min = 1))]
         min_periods: u64,
         /// Degrees-of-freedom adjustment; must be `0` or `1`.
+        #[schemars(range(min = 0, max = 1))]
         ddof: u8,
     },
     /// Float64 standard deviation over the frame (SCE-00 D5 divisor rules).
@@ -202,6 +203,7 @@ pub enum RollingOutputSpec {
         #[schemars(range(min = 1))]
         min_periods: u64,
         /// Degrees-of-freedom adjustment; must be `0` or `1`.
+        #[schemars(range(min = 0, max = 1))]
         ddof: u8,
     },
 }

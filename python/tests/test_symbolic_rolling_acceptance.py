@@ -313,12 +313,54 @@ def test_batch_execution_matches_independent_reference_and_preserves_input() -> 
     assert _table_bytes(table) == before, "caller-owned input table was mutated"
 
 
+def _window_samples(window: list) -> list:
+    return [
+        item[3] for item in window if item[3] is not None and not math.isnan(item[3])
+    ]
+
+
+def _reference_count(valid: list):
+    return len(valid) if len(valid) >= 2 else None
+
+
+def _reference_sum(valid: list):
+    return sum(valid) if valid else None
+
+
+def _reference_mean(valid: list):
+    # Frozen ±inf readout (SCE-07 defect 1 ruling): both signs is the
+    # undefined inf − inf (NaN), one sign is that infinity, none is the
+    # finite average.
+    pos_inf = sum(1 for value in valid if value == math.inf)
+    neg_inf = sum(1 for value in valid if value == -math.inf)
+    if not valid:
+        return None
+    if pos_inf and neg_inf:
+        return math.nan
+    if pos_inf:
+        return math.inf
+    if neg_inf:
+        return -math.inf
+    return sum(valid) / len(valid)
+
+
+def _reference_spread(valid: list):
+    # Variance/stddev after the null gates; any inf window pins to NaN.
+    count = len(valid)
+    if count < 2:
+        return None, None
+    if any(math.isinf(value) for value in valid):
+        return math.nan, math.nan
+    mean = sum(valid) / count
+    squared = sum((value - mean) ** 2 for value in valid)
+    return squared / (count - 1), math.sqrt(squared / count)
+
+
 def _aggregate_reference(rows_data, size):
     # Independent oracle with the frozen ±inf readout semantics (SCE-07
     # defect 1 ruling): sum is the naive IEEE fold, mean classifies from the
-    # ±inf counts (both signs → NaN, one sign → that infinity, none → the
-    # finite average), and variance/stddev over any inf window is NaN after
-    # the null gates. # #lizard forgives
+    # ±inf counts, and variance/stddev over any inf window is NaN after the
+    # null gates.
     ordered = sorted(rows_data, key=lambda row: (row[0], row[1], row[2]))
     by_entity: dict[str, list] = {}
     for row in ordered:
@@ -330,38 +372,12 @@ def _aggregate_reference(rows_data, size):
             window.append(row)
             if len(window) > size:
                 window.pop(0)
-            valid = [
-                item[3]
-                for item in window
-                if item[3] is not None and not math.isnan(item[3])
-            ]
-            valid_count = len(valid)
-            pos_inf = sum(1 for value in valid if value == math.inf)
-            neg_inf = sum(1 for value in valid if value == -math.inf)
-            total = sum(valid) if valid else None
-            if not valid:
-                mean = None
-            elif pos_inf and neg_inf:
-                mean = math.nan
-            elif pos_inf:
-                mean = math.inf
-            elif neg_inf:
-                mean = -math.inf
-            else:
-                mean = total / valid_count
-            if valid_count < 2 or pos_inf or neg_inf:
-                variance = (
-                    math.nan if valid_count >= 2 and (pos_inf or neg_inf) else None
-                )
-                stddev = variance
-            else:
-                squared = sum((value - mean) ** 2 for value in valid)
-                variance = squared / (valid_count - 1)
-                stddev = math.sqrt(squared / valid_count)
+            valid = _window_samples(window)
+            variance, stddev = _reference_spread(valid)
             results[id(row)] = (
-                valid_count if valid_count >= 2 else None,
-                total,
-                mean,
+                _reference_count(valid),
+                _reference_sum(valid),
+                _reference_mean(valid),
                 variance,
                 stddev,
             )
@@ -399,21 +415,26 @@ def _aggregate_columns(output: pa.Table) -> list[tuple]:
     )
 
 
+def _assert_classified_value(got, wanted, rtol: float) -> None:
+    # D13 semantics: null matches null exactly, NaN only NaN, infinities by
+    # sign, and everything else within the per-column tolerance.
+    if wanted is None:
+        assert got is None
+    elif isinstance(wanted, float) and math.isnan(wanted):
+        assert isinstance(got, float) and math.isnan(got)
+    elif isinstance(wanted, float) and math.isinf(wanted):
+        assert got == wanted
+    else:
+        assert got == pytest.approx(wanted, rel=rtol, abs=1e-12)
+
+
 def _assert_aggregates_match(actual, expected) -> None:
     assert len(actual) == len(expected)
     for got, want in zip(actual, expected, strict=True):
         assert got[:3] == want[:3]
         assert got[3] == want[3]
         for column, rtol in ((4, 1e-12), (5, 1e-12), (6, 1e-10), (7, 1e-10)):
-            wanted = want[column]
-            if wanted is None:
-                assert got[column] is None
-            elif isinstance(wanted, float) and math.isnan(wanted):
-                assert isinstance(got[column], float) and math.isnan(got[column])
-            elif isinstance(wanted, float) and math.isinf(wanted):
-                assert got[column] == wanted
-            else:
-                assert got[column] == pytest.approx(wanted, rel=rtol, abs=1e-12)
+            _assert_classified_value(got[column], want[column], rtol)
 
 
 def test_aggregate_batch_execution_matches_independent_reference() -> None:

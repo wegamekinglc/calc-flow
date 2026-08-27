@@ -1015,7 +1015,7 @@
             "ddof": {
               "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
               "format": "uint8",
-              "maximum": 255,
+              "maximum": 1,
               "minimum": 0,
               "type": "integer"
             },
@@ -1066,7 +1066,7 @@
             "ddof": {
               "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
               "format": "uint8",
-              "maximum": 255,
+              "maximum": 1,
               "minimum": 0,
               "type": "integer"
             },
