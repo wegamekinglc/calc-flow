@@ -841,3 +841,139 @@ async fn aggregate_micro_batch_segmentation_matches_one_envelope_output() {
 
     assert_eq!(actual, expected);
 }
+
+// ---------------------------------------------------------------------
+// SCE-07 defect 1 (B1): inf classifications are segmentation invariant
+// ---------------------------------------------------------------------
+
+fn inf_rows() -> Vec<InputRow> {
+    vec![
+        (10, "a", 1, Some(f64::INFINITY), Some(10)),
+        (10, "b", 1, Some(1.0), Some(50)),
+        (11, "a", 2, Some(2.0), Some(20)),
+        (12, "b", 2, Some(f64::INFINITY), Some(60)),
+        (12, "a", 3, Some(3.0), Some(30)),
+        (13, "b", 3, Some(5.0), Some(70)),
+    ]
+}
+
+fn assert_inf_classification(observed: &AggregateObserved) {
+    // Canonical order: (10,a), (10,b), (11,a), (12,a), (12,b), (13,b).
+    assert_eq!(observed.symbols, vec!["a", "b", "a", "a", "b", "b"]);
+    let inf = f64::INFINITY;
+    assert_eq!(observed.means[0], Some(inf));
+    assert_eq!(observed.means[1], Some(1.0));
+    assert_eq!(observed.means[2], Some(inf));
+    assert_eq!(observed.means[3], Some(2.5));
+    assert_eq!(observed.means[4], Some(inf));
+    assert_eq!(observed.means[5], Some(inf));
+    assert_eq!(observed.stddevs[0], None);
+    assert_eq!(observed.stddevs[1], None);
+    for index in [2_usize, 4, 5] {
+        assert!(
+            observed.stddevs[index].unwrap().is_nan(),
+            "stddev over an inf window at row {index} must be NaN"
+        );
+    }
+    assert_eq!(observed.stddevs[3], Some(0.5_f64.sqrt()));
+    assert_eq!(
+        observed.counts,
+        vec![Some(1), Some(1), Some(2), Some(2), Some(2), Some(2)]
+    );
+}
+
+fn assert_float_column_matches(actual: &[Option<f64>], expected: &[Option<f64>], what: &str) {
+    assert_eq!(actual.len(), expected.len(), "{what} length");
+    for (index, (left, right)) in actual.iter().zip(expected).enumerate() {
+        let matches = match (left, right) {
+            (None, None) => true,
+            (Some(left), Some(right)) => {
+                if left.is_nan() {
+                    right.is_nan()
+                } else {
+                    left == right
+                }
+            }
+            _ => false,
+        };
+        assert!(matches, "{what} at row {index}: {left:?} vs {right:?}");
+    }
+}
+
+fn assert_inf_observed_matches(actual: &AggregateObserved, expected: &AggregateObserved) {
+    assert_eq!(actual.event_times, expected.event_times);
+    assert_eq!(actual.symbols, expected.symbols);
+    assert_eq!(actual.counts, expected.counts);
+    assert_eq!(actual.volume_sums, expected.volume_sums);
+    assert_float_column_matches(&actual.sums, &expected.sums, "sums");
+    assert_float_column_matches(&actual.means, &expected.means, "means");
+    assert_float_column_matches(&actual.stddevs, &expected.stddevs, "stddevs");
+}
+
+#[tokio::test]
+async fn aggregate_inf_classification_is_independent_of_segmentation() {
+    let rows = inf_rows();
+    let job = job();
+    let mut one_shot = aggregate_operator();
+    let mut one_shot_collector = EdgeCollector::new(one_shot.output_ports().to_vec());
+    let mut expected = AggregateObserved::default();
+    one_shot
+        .process_data(
+            "input",
+            input_batch(&rows),
+            &context(&job, None),
+            &mut one_shot_collector,
+        )
+        .await
+        .unwrap();
+    one_shot
+        .on_watermark(
+            EventTime::from_micros(100),
+            &context(&job, Some(100)),
+            &mut one_shot_collector,
+        )
+        .await
+        .unwrap();
+    drain_aggregates(&mut one_shot_collector, &mut expected);
+    assert_inf_classification(&expected);
+
+    let mut segmented = aggregate_operator();
+    let mut segmented_collector = EdgeCollector::new(segmented.output_ports().to_vec());
+    let mut actual = AggregateObserved::default();
+    let mut watermark = 0;
+    for chunk in rows.chunks(3) {
+        segmented
+            .process_data(
+                "input",
+                input_batch(chunk),
+                &context(&job, None),
+                &mut segmented_collector,
+            )
+            .await
+            .unwrap();
+        watermark = chunk.iter().map(|row| row.0).max().unwrap_or(watermark);
+        segmented
+            .on_watermark(
+                EventTime::from_micros(watermark),
+                &context(&job, Some(watermark)),
+                &mut segmented_collector,
+            )
+            .await
+            .unwrap();
+    }
+    segmented
+        .on_watermark(
+            EventTime::from_micros(100),
+            &context(&job, Some(100)),
+            &mut segmented_collector,
+        )
+        .await
+        .unwrap();
+    segmented
+        .on_end(&context(&job, Some(100)), &mut segmented_collector)
+        .await
+        .unwrap();
+    drain_aggregates(&mut segmented_collector, &mut actual);
+
+    assert_inf_observed_matches(&actual, &expected);
+}

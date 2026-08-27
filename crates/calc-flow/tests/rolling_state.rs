@@ -1481,3 +1481,130 @@ async fn cancelled_emission_preserves_buffered_state_until_retry() {
     assert_eq!(observed[0].3, Some(1));
     assert_eq!(observed[0].4, Some(1.0));
 }
+
+// ---------------------------------------------------------------------
+// SCE-07 defect 1 (B2): inf classifications survive checkpoint/restore
+// ---------------------------------------------------------------------
+
+fn inf_fixture_rows() -> Vec<InputRow> {
+    vec![
+        (10, "a", 1, Some(f64::INFINITY), Some(10)),
+        (10, "b", 1, Some(1.0), Some(50)),
+        (11, "a", 2, Some(2.0), Some(20)),
+        (12, "b", 2, Some(f64::INFINITY), Some(60)),
+        (12, "a", 3, Some(3.0), Some(30)),
+        (13, "b", 3, Some(5.0), Some(70)),
+    ]
+}
+
+/// D13 comparison semantics for observed aggregate rows: null positions and
+/// row identities compare exactly, NaN compares equal only to NaN, and
+/// infinities require equal sign.
+fn assert_aggregate_rows_match(actual: &[ObservedAggregateRow], expected: &[ObservedAggregateRow]) {
+    assert_eq!(actual.len(), expected.len());
+    for (index, (got, want)) in actual.iter().zip(expected).enumerate() {
+        assert_eq!(got.0, want.0, "event time at row {index}");
+        assert_eq!(got.1, want.1, "symbol at row {index}");
+        assert_eq!(got.2, want.2, "sequence at row {index}");
+        assert_eq!(got.3, want.3, "count at row {index}");
+        assert_eq!(got.7, want.7, "volume sum at row {index}");
+        for (column, (left, right)) in [
+            (4, (got.4, want.4)),
+            (5, (got.5, want.5)),
+            (6, (got.6, want.6)),
+        ] {
+            match (left, right) {
+                (None, None) => {}
+                (Some(left), Some(right)) => {
+                    let matches = if left.is_nan() {
+                        right.is_nan()
+                    } else {
+                        left == right
+                    };
+                    assert!(
+                        matches,
+                        "row {index} column {column}: {left:?} vs {right:?}"
+                    );
+                }
+                (left, right) => {
+                    panic!("row {index} column {column} nullness diverged: {left:?} vs {right:?}")
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn aggregate_inf_classification_continues_across_checkpoint_and_restore() {
+    let job = job();
+    let rows = inf_fixture_rows();
+    let chunks: Vec<&[_]> = rows.chunks(2).collect();
+
+    let mut reference = aggregate_operator();
+    let mut reference_collector = EdgeCollector::new(reference.output_ports().to_vec());
+    let mut reference_rows = Vec::new();
+    drive_aggregates(
+        &mut reference,
+        &chunks,
+        &job,
+        &mut reference_collector,
+        &mut reference_rows,
+    )
+    .await;
+
+    let mut restarted = aggregate_operator();
+    let mut restarted_collector = EdgeCollector::new(restarted.output_ports().to_vec());
+    let mut restarted_rows = Vec::new();
+    drive_aggregates(
+        &mut restarted,
+        &chunks[..2],
+        &job,
+        &mut restarted_collector,
+        &mut restarted_rows,
+    )
+    .await;
+    // The checkpoint lands while both entities still hold their infinity
+    // sample inside the retained window.
+    let snapshot = restarted.checkpoint(Epoch::new(1).unwrap()).unwrap();
+
+    let mut recovered = aggregate_operator();
+    recovered.restore(&snapshot).unwrap();
+    let mut recovered_collector = EdgeCollector::new(recovered.output_ports().to_vec());
+    drive_aggregates(
+        &mut recovered,
+        &chunks[2..],
+        &job,
+        &mut recovered_collector,
+        &mut restarted_rows,
+    )
+    .await;
+
+    assert_aggregate_rows_match(&reference_rows, &restarted_rows);
+    let inf = f64::INFINITY;
+    // Emission order under per-chunk watermarks: the (12,a) row arrives only
+    // in the third envelope, so it finalizes one watermark after (12,b).
+    let symbols: Vec<&str> = reference_rows.iter().map(|row| row.1.as_str()).collect();
+    assert_eq!(symbols, vec!["a", "b", "a", "b", "a", "b"]);
+    let means: Vec<Option<f64>> = reference_rows.iter().map(|row| row.5).collect();
+    assert_eq!(
+        means,
+        vec![
+            Some(inf),
+            Some(1.0),
+            Some(inf),
+            Some(inf),
+            Some(2.5),
+            Some(inf)
+        ]
+    );
+    let variances: Vec<Option<f64>> = reference_rows.iter().map(|row| row.6).collect();
+    assert_eq!(variances[0], None);
+    assert_eq!(variances[1], None);
+    for index in [2_usize, 3, 5] {
+        assert!(
+            variances[index].unwrap().is_nan(),
+            "variance over an inf window at row {index} must be NaN after restore"
+        );
+    }
+    assert_eq!(variances[4], Some(0.5));
+}

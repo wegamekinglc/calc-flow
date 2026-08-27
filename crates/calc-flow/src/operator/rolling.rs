@@ -1930,19 +1930,28 @@ impl RollingHistories {
 /// Reversible sliding-window accumulator (SCE-00 D5): exact checked integer
 /// sums, `f64` sums, and West-style add/remove mean and M2 variance state.
 /// The ordered add/remove sequence is the one frozen algorithm shared by the
-/// batch and stream lifecycles.
+/// batch and stream lifecycles. ±inf sample counts make the mean and
+/// variance classifications pure multiset functions of the window (SCE-07
+/// defect 1 ruling): a window's IEEE classification must not depend on where
+/// the infinity sat in arrival order.
 #[derive(Clone, Copy, Debug)]
 struct WindowAccumulator {
     valid_count: u64,
     sum: Option<SumState>,
     mean: f64,
     m2: f64,
+    pos_inf: u64,
+    neg_inf: u64,
 }
 
+/// Integer sums accumulate in the wide transient class so the
+/// add-before-remove slide never reports a false overflow for a window whose
+/// true sum is representable; the readout converts back with a checked
+/// narrowing that keeps genuine overflow loud (SCE-07 defect 2 fix).
 #[derive(Clone, Copy, Debug)]
 enum SumState {
-    Signed(i64),
-    Unsigned(u64),
+    Signed(i128),
+    Unsigned(u128),
     Float(f64),
 }
 
@@ -1959,6 +1968,8 @@ impl WindowAccumulator {
             sum,
             mean: 0.0,
             m2: 0.0,
+            pos_inf: 0,
+            neg_inf: 0,
         }
     }
 
@@ -1976,17 +1987,24 @@ impl WindowAccumulator {
             match sum {
                 SumState::Signed(total) => {
                     *total = total
-                        .checked_add(signed_sample(value))
+                        .checked_add(i128::from(signed_sample(value)))
                         .ok_or_else(|| operator_error(node_id, "rolling integer sum overflowed"))?;
                 }
                 SumState::Unsigned(total) => {
                     *total = total
-                        .checked_add(unsigned_sample(value))
+                        .checked_add(u128::from(unsigned_sample(value)))
                         .ok_or_else(|| operator_error(node_id, "rolling integer sum overflowed"))?;
                 }
                 SumState::Float(total) => *total += float_sample(value),
             }
             let sample = float_sample(value);
+            if sample.is_infinite() {
+                if sample > 0.0 {
+                    self.pos_inf = self.pos_inf.saturating_add(1);
+                } else {
+                    self.neg_inf = self.neg_inf.saturating_add(1);
+                }
+            }
             let count = self.valid_count as f64;
             let delta = sample - self.mean;
             self.mean += delta / count;
@@ -2008,22 +2026,33 @@ impl WindowAccumulator {
         if let Some(sum) = &mut self.sum {
             match sum {
                 SumState::Signed(total) => {
-                    *total = total.checked_sub(signed_sample(value)).ok_or_else(|| {
-                        internal_error("rolling sum removal diverged from the adds")
-                    })?;
+                    *total = total
+                        .checked_sub(i128::from(signed_sample(value)))
+                        .ok_or_else(|| {
+                            internal_error("rolling sum removal diverged from the adds")
+                        })?;
                 }
                 SumState::Unsigned(total) => {
-                    *total = total.checked_sub(unsigned_sample(value)).ok_or_else(|| {
-                        internal_error("rolling sum removal diverged from the adds")
-                    })?;
+                    *total = total
+                        .checked_sub(u128::from(unsigned_sample(value)))
+                        .ok_or_else(|| {
+                            internal_error("rolling sum removal diverged from the adds")
+                        })?;
                 }
                 SumState::Float(total) => *total -= float_sample(value),
+            }
+            let sample = float_sample(value);
+            if sample.is_infinite() {
+                if sample > 0.0 {
+                    self.pos_inf = self.pos_inf.saturating_sub(1);
+                } else {
+                    self.neg_inf = self.neg_inf.saturating_sub(1);
+                }
             }
             if self.valid_count == 0 {
                 self.mean = 0.0;
                 self.m2 = 0.0;
             } else {
-                let sample = float_sample(value);
                 let count = self.valid_count as f64;
                 let delta = sample - self.mean;
                 self.mean -= delta / count;
@@ -2342,7 +2371,11 @@ fn compute_output_value(
 /// Reads one aggregate output from its shared window accumulator: the
 /// minimum-period gate uses the valid sample count (SCE-00 D3.2), and the
 /// variance divisor is `valid_count - ddof` with a non-positive divisor
-/// producing null (SCE-00 D5).
+/// producing null (SCE-00 D5). Windows holding ±inf samples classify from
+/// the reversible infinity counts — both signs is the undefined ∞ − ∞ (NaN),
+/// one sign is that infinity, and no infinity keeps the frozen finite-path
+/// West readout (SCE-07 defect 1 ruling); variance/stddev over a window with
+/// any infinity is NaN because every deviation involves ∞ − ∞.
 #[allow(
     clippy::cast_precision_loss,
     reason = "the frozen aggregate output type is Float64"
@@ -2360,19 +2393,33 @@ fn evaluate_aggregate(
     match aggregate.statistic {
         Statistic::Count => Ok(ScalarValue::UInt64(Some(accumulator.valid_count))),
         Statistic::Sum => match accumulator.sum {
-            Some(SumState::Signed(total)) => Ok(ScalarValue::Int64(Some(total))),
-            Some(SumState::Unsigned(total)) => Ok(ScalarValue::UInt64(Some(total))),
+            Some(SumState::Signed(total)) => i64::try_from(total)
+                .map(|narrowed| ScalarValue::Int64(Some(narrowed)))
+                .map_err(|_| operator_error(node_id, "rolling integer sum overflowed")),
+            Some(SumState::Unsigned(total)) => u64::try_from(total)
+                .map(|narrowed| ScalarValue::UInt64(Some(narrowed)))
+                .map_err(|_| operator_error(node_id, "rolling integer sum overflowed")),
             Some(SumState::Float(total)) => Ok(ScalarValue::Float64(Some(total))),
             None => Err(operator_error(
                 node_id,
                 "rolling sum requires a numeric window group",
             )),
         },
-        Statistic::Mean => Ok(ScalarValue::Float64(Some(accumulator.mean))),
+        Statistic::Mean => Ok(ScalarValue::Float64(Some(
+            match (accumulator.pos_inf > 0, accumulator.neg_inf > 0) {
+                (true, true) => f64::NAN,
+                (true, false) => f64::INFINITY,
+                (false, true) => f64::NEG_INFINITY,
+                (false, false) => accumulator.mean,
+            },
+        ))),
         Statistic::Variance | Statistic::Stddev => {
             let divisor = accumulator.valid_count - u64::from(aggregate.ddof);
             if divisor == 0 {
                 return Ok(ScalarValue::Float64(None));
+            }
+            if accumulator.pos_inf > 0 || accumulator.neg_inf > 0 {
+                return Ok(ScalarValue::Float64(Some(f64::NAN)));
             }
             // Negative M2 is floating-point removal drift, never a real
             // negative variance; NaN propagates as the frozen undefined value.
@@ -4117,6 +4164,82 @@ mod tests {
         );
     }
 
+    #[test]
+    fn integer_slide_transient_overflow_returns_representable_sums() {
+        // Window sums [MAX], [MAX,-1], [-1,5] are all representable, but the
+        // add-before-remove slide transient MAX-1+5 overflows narrow i64.
+        let spec = kernel_spec(json!([aggregate_output("sum", "volume", "volume_sum", 2)]));
+        let rows = [i64::MAX, -1, 5]
+            .into_iter()
+            .enumerate()
+            .map(|(index, volume)| {
+                full_row(
+                    i64::try_from(index + 1).unwrap(),
+                    "a",
+                    u64::try_from(index + 1).unwrap(),
+                    vec![ScalarValue::Float64(None), ScalarValue::Int64(Some(volume))],
+                )
+            })
+            .collect::<Vec<_>>();
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        assert_eq!(
+            signed_column(&outputs, 0),
+            vec![Some(i64::MAX), Some(i64::MAX - 1), Some(4)]
+        );
+    }
+
+    #[test]
+    fn unsigned_slide_transient_overflow_returns_representable_sums() {
+        let schema = numeric_schema(DataType::UInt64);
+        let spec = numeric_spec(json!([aggregate_output("sum", "value", "value_sum", 2)]));
+        let compiled = compile_spec(&spec, &schema).unwrap();
+        let rows = [u64::MAX, 0, 5]
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                numeric_row(
+                    i64::try_from(index + 1).unwrap(),
+                    u64::try_from(index + 1).unwrap(),
+                    ScalarValue::UInt64(Some(value)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let outputs =
+            compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling")
+                .unwrap();
+        assert_eq!(
+            unsigned_column(&outputs, 0),
+            vec![Some(u64::MAX), Some(u64::MAX), Some(5)]
+        );
+    }
+
+    #[test]
+    fn integer_transient_slide_matches_the_rebuild_fold() {
+        let spec = kernel_spec(json!([aggregate_output("sum", "volume", "volume_sum", 2)]));
+        let rows = [i64::MAX, -1, 5, 2]
+            .into_iter()
+            .enumerate()
+            .map(|(index, volume)| {
+                full_row(
+                    i64::try_from(index + 1).unwrap(),
+                    "a",
+                    u64::try_from(index + 1).unwrap(),
+                    vec![ScalarValue::Float64(None), ScalarValue::Int64(Some(volume))],
+                )
+            })
+            .collect::<Vec<_>>();
+        let one_shot = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        let mut histories = RollingHistories::default();
+        let mut segmented: Vec<Option<i64>> = Vec::new();
+        for chunk in rows.chunks(3) {
+            let outputs = compute(&spec, &histories, chunk).unwrap();
+            let values = signed_column(&outputs, 0);
+            histories.apply(outputs.touched);
+            segmented.extend(values);
+        }
+        assert_eq!(segmented, signed_column(&one_shot, 0));
+    }
+
     fn numeric_schema(data_type: DataType) -> Schema {
         Schema::new(vec![
             Field::new(
@@ -4244,6 +4367,188 @@ mod tests {
         assert!(variances[1].unwrap().is_nan());
         assert!(variances[2].unwrap().is_nan());
         assert_eq!(variances[3], Some(0.5));
+    }
+
+    // ------------------------------------------------------------------
+    // Frozen ±inf readout semantics (SCE-07 defect 1 ruling, A1-A6)
+    // ------------------------------------------------------------------
+
+    /// Rows for one entity with explicit per-row price values.
+    fn entity_prices(symbol: &str, prices: &[Option<f64>]) -> Vec<BufferedRow> {
+        prices
+            .iter()
+            .enumerate()
+            .map(|(index, price)| {
+                let sequence = u64::try_from(index + 1).unwrap();
+                full_row(
+                    i64::try_from(index + 1).unwrap(),
+                    symbol,
+                    sequence,
+                    vec![ScalarValue::Float64(*price)],
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a1_mean_classification_is_independent_of_infinity_position() {
+        let spec = kernel_spec(json!([aggregate_output("mean", "price", "price_mean", 3)]));
+        let mut rows = Vec::new();
+        for (symbol, prices) in [
+            ("a", [f64::INFINITY, 1.0, 2.0]),
+            ("b", [1.0, f64::INFINITY, 2.0]),
+            ("c", [1.0, 2.0, f64::INFINITY]),
+            ("d", [f64::NEG_INFINITY, 1.0, 2.0]),
+            ("e", [1.0, f64::NEG_INFINITY, 2.0]),
+            ("f", [1.0, 2.0, f64::NEG_INFINITY]),
+        ] {
+            rows.extend(entity_prices(symbol, &prices.map(Some)));
+        }
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        let means = float_column(&outputs, 0);
+        for index in [2_usize, 5, 8] {
+            assert_eq!(
+                means[index],
+                Some(f64::INFINITY),
+                "positive infinity multiset at row {index}"
+            );
+        }
+        for index in [11_usize, 14, 17] {
+            assert_eq!(
+                means[index],
+                Some(f64::NEG_INFINITY),
+                "negative infinity multiset at row {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn a2_mixed_sign_infinities_yield_nan_in_any_order() {
+        let spec = kernel_spec(json!([aggregate_output("mean", "price", "price_mean", 3)]));
+        let mut rows = Vec::new();
+        rows.extend(entity_prices(
+            "a",
+            &[Some(f64::INFINITY), Some(f64::NEG_INFINITY)],
+        ));
+        rows.extend(entity_prices(
+            "b",
+            &[Some(f64::NEG_INFINITY), Some(f64::INFINITY)],
+        ));
+        rows.extend(entity_prices(
+            "c",
+            &[
+                Some(f64::INFINITY),
+                Some(f64::INFINITY),
+                Some(f64::NEG_INFINITY),
+            ],
+        ));
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        let means = float_column(&outputs, 0);
+        for index in [1_usize, 3, 6] {
+            assert!(
+                means[index].is_some_and(f64::is_nan),
+                "mixed-sign window at row {index} must be NaN"
+            );
+        }
+    }
+
+    #[test]
+    fn a3_departed_infinities_leave_no_residue_across_slide_and_refold() {
+        let spec = kernel_spec(json!([aggregate_output("mean", "price", "price_mean", 2)]));
+        let rows = entity_prices(
+            "a",
+            &[
+                Some(1.0),
+                Some(f64::INFINITY),
+                Some(3.0),
+                Some(4.0),
+                Some(5.0),
+            ],
+        );
+        let one_shot = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        assert_eq!(
+            float_column(&one_shot, 0),
+            vec![
+                Some(1.0),
+                Some(f64::INFINITY),
+                Some(f64::INFINITY),
+                Some(3.5),
+                Some(4.5)
+            ]
+        );
+
+        let mut histories = RollingHistories::default();
+        let mut segmented: Vec<Option<f64>> = Vec::new();
+        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+        for chunk in rows.chunks(3) {
+            let outputs = compute(&spec, &histories, chunk).unwrap();
+            let values = float_column(&outputs, 0);
+            histories.apply(outputs.touched);
+            // Mirror a checkpoint restore: rebuild every window from the
+            // retained rows instead of carrying the live accumulators.
+            rebuild_windows(&mut histories, &compiled, "rolling").unwrap();
+            segmented.extend(values);
+        }
+        assert_eq!(segmented, float_column(&one_shot, 0));
+    }
+
+    #[test]
+    fn a4_near_overflow_finite_window_keeps_the_west_mean() {
+        let spec = kernel_spec(json!([aggregate_output("mean", "price", "price_mean", 2)]));
+        let rows = entity_prices("a", &[Some(1e308), Some(1e308)]);
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        let means = float_column(&outputs, 0);
+        let value = means[1].expect("finite window mean must be non-null");
+        assert!(
+            value.is_finite(),
+            "naive sum/count readout would overflow to infinity"
+        );
+        assert!((value - 1e308).abs() <= 1e308 * 1e-15);
+    }
+
+    #[test]
+    fn a5_variance_and_stddev_with_inf_are_nan_after_the_null_gates() {
+        let spec = kernel_spec(json!([
+            ddof_output("variance", "price", "price_var_1", 2, 1),
+            ddof_output("stddev", "price", "price_std_0", 2, 0),
+        ]));
+        let rows = entity_prices("a", &[Some(f64::INFINITY), Some(2.0), Some(5.0), Some(6.0)]);
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        let variances = float_column(&outputs, 0);
+        // ddof=1 with one valid sample: divisor zero wins over the NaN class.
+        assert_eq!(variances[0], None);
+        // Two valid samples with an inf present: NaN, not null and not inf.
+        assert!(variances[1].unwrap().is_nan());
+        // The inf has left the window: back to finite values (the removal
+        // step carries West drift well inside the frozen D13 tolerance).
+        assert!((variances[2].unwrap() - 4.5).abs() <= 4.5 * 1e-10);
+        assert!((variances[3].unwrap() - 0.5).abs() <= 1e-12);
+        let stddevs = float_column(&outputs, 1);
+        // ddof=0 passes the divisor gate with one sample: NaN classification.
+        assert!(stddevs[0].unwrap().is_nan());
+        assert!(stddevs[1].unwrap().is_nan());
+        assert!((stddevs[2].unwrap() - 1.5_f64).abs() <= 1e-12);
+        assert!((stddevs[3].unwrap() - 0.5_f64).abs() <= 1e-12);
+    }
+
+    #[test]
+    fn a6_infinities_count_toward_valid_samples_and_min_periods() {
+        let spec = kernel_spec(json!([
+            aggregate_output("count", "price", "price_count", 3),
+            aggregate_output("mean", "price", "price_mean", 3),
+        ]));
+        let rows = entity_prices("a", &[Some(f64::INFINITY), Some(f64::NAN), None]);
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        // NaN and null are excluded, so the valid count stays at one; the
+        // infinity alone still satisfies min_periods=1.
+        assert_eq!(
+            unsigned_column(&outputs, 0),
+            vec![Some(1), Some(1), Some(1)]
+        );
+        let means = float_column(&outputs, 1);
+        assert_eq!(means[0], Some(f64::INFINITY));
+        assert_eq!(means[1], Some(f64::INFINITY));
+        assert_eq!(means[2], Some(f64::INFINITY));
     }
 
     #[test]

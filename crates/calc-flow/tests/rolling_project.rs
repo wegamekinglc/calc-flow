@@ -219,10 +219,8 @@ fn rolling_project_rejects_unknown_and_missing_spec_fields() {
     );
 }
 
-#[test]
-fn rolling_project_accepts_aggregate_output_kinds() {
-    let mut node = rolling_node_json();
-    node["operator"]["spec"]["outputs"] = json!([
+fn aggregate_outputs_json() -> serde_json::Value {
+    json!([
         {
             "kind": "count",
             "primitive_version": 1,
@@ -273,28 +271,10 @@ fn rolling_project_accepts_aggregate_output_kinds() {
             "frame": {"kind": "rows", "size": 2},
             "min_periods": 1
         }
-    ]);
-    let project: ProjectSpec = serde_json::from_value(project_json(
-        &json!({"mode": "batch", "options": {}}),
-        &node,
-    ))
-    .unwrap();
-    let (providers, udfs) = registries();
-    let report = validate_project(&project, &providers, &udfs);
-    assert!(report.valid, "validation issues: {:?}", report.issues);
+    ])
+}
 
-    let plan = compile_project(&project, &providers, &udfs).unwrap();
-    let outputs = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(plan.execute(
-            BTreeMap::from([("input".into(), input_batch())]),
-            ExecutionOptions::default(),
-        ))
-        .unwrap();
-    let output = outputs.outputs["output"].clone();
-    let record = output.table_payload().unwrap().batches()[0].clone();
+fn assert_aggregate_record(record: &RecordBatch) {
     let floats = |name: &str| -> Vec<Option<f64>> {
         record
             .column_by_name(name)
@@ -333,6 +313,34 @@ fn rolling_project_accepts_aggregate_output_kinds() {
         .iter()
         .collect::<Vec<_>>();
     assert_eq!(volume_sums, vec![Some(10), Some(40), Some(50)]);
+}
+
+#[test]
+fn rolling_project_accepts_aggregate_output_kinds() {
+    let mut node = rolling_node_json();
+    node["operator"]["spec"]["outputs"] = aggregate_outputs_json();
+    let project: ProjectSpec = serde_json::from_value(project_json(
+        &json!({"mode": "batch", "options": {}}),
+        &node,
+    ))
+    .unwrap();
+    let (providers, udfs) = registries();
+    let report = validate_project(&project, &providers, &udfs);
+    assert!(report.valid, "validation issues: {:?}", report.issues);
+
+    let plan = compile_project(&project, &providers, &udfs).unwrap();
+    let outputs = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(plan.execute(
+            BTreeMap::from([("input".into(), input_batch())]),
+            ExecutionOptions::default(),
+        ))
+        .unwrap();
+    let output = outputs.outputs["output"].clone();
+    let record = output.table_payload().unwrap().batches()[0].clone();
+    assert_aggregate_record(&record);
 }
 
 #[test]

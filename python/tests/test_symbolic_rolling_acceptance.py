@@ -233,7 +233,7 @@ def _reference(rows_data, lag_periods, delta_periods):
     ]
 
 
-def _probe_table() -> pa.Table:
+def _table_from_rows(rows_data) -> pa.Table:
     schema = pa.schema(
         [
             pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
@@ -246,15 +246,19 @@ def _probe_table() -> pa.Table:
     return pa.table(
         {
             "ts": pa.array(
-                [row[0] for row in _PROBE_ROWS], type=pa.timestamp("us", tz="UTC")
+                [row[0] for row in rows_data], type=pa.timestamp("us", tz="UTC")
             ),
-            "symbol": [row[1] for row in _PROBE_ROWS],
-            "seq": pa.array([row[2] for row in _PROBE_ROWS], type=pa.uint64()),
-            "x": pa.array([row[3] for row in _PROBE_ROWS], type=pa.float64()),
-            "v": pa.array([row[4] for row in _PROBE_ROWS], type=pa.int64()),
+            "symbol": [row[1] for row in rows_data],
+            "seq": pa.array([row[2] for row in rows_data], type=pa.uint64()),
+            "x": pa.array([row[3] for row in rows_data], type=pa.float64()),
+            "v": pa.array([row[4] for row in rows_data], type=pa.int64()),
         },
         schema=schema,
     )
+
+
+def _probe_table() -> pa.Table:
+    return _table_from_rows(_PROBE_ROWS)
 
 
 def _table_bytes(table: pa.Table) -> bytes:
@@ -310,6 +314,11 @@ def test_batch_execution_matches_independent_reference_and_preserves_input() -> 
 
 
 def _aggregate_reference(rows_data, size):
+    # Independent oracle with the frozen ±inf readout semantics (SCE-07
+    # defect 1 ruling): sum is the naive IEEE fold, mean classifies from the
+    # ±inf counts (both signs → NaN, one sign → that infinity, none → the
+    # finite average), and variance/stddev over any inf window is NaN after
+    # the null gates. # #lizard forgives
     ordered = sorted(rows_data, key=lambda row: (row[0], row[1], row[2]))
     by_entity: dict[str, list] = {}
     for row in ordered:
@@ -327,19 +336,34 @@ def _aggregate_reference(rows_data, size):
                 if item[3] is not None and not math.isnan(item[3])
             ]
             valid_count = len(valid)
+            pos_inf = sum(1 for value in valid if value == math.inf)
+            neg_inf = sum(1 for value in valid if value == -math.inf)
             total = sum(valid) if valid else None
-            mean = (total / valid_count) if total is not None else None
-            squared = (
-                sum((value - mean) ** 2 for value in valid)
-                if valid_count >= 2
-                else None
-            )
+            if not valid:
+                mean = None
+            elif pos_inf and neg_inf:
+                mean = math.nan
+            elif pos_inf:
+                mean = math.inf
+            elif neg_inf:
+                mean = -math.inf
+            else:
+                mean = total / valid_count
+            if valid_count < 2 or pos_inf or neg_inf:
+                variance = (
+                    math.nan if valid_count >= 2 and (pos_inf or neg_inf) else None
+                )
+                stddev = variance
+            else:
+                squared = sum((value - mean) ** 2 for value in valid)
+                variance = squared / (valid_count - 1)
+                stddev = math.sqrt(squared / valid_count)
             results[id(row)] = (
                 valid_count if valid_count >= 2 else None,
                 total,
                 mean,
-                (squared / (valid_count - 1)) if squared is not None else None,
-                (math.sqrt(squared / valid_count)) if squared is not None else None,
+                variance,
+                stddev,
             )
     return [(row[0], row[1], row[2], *results[id(row)]) for row in ordered]
 
@@ -381,10 +405,15 @@ def _assert_aggregates_match(actual, expected) -> None:
         assert got[:3] == want[:3]
         assert got[3] == want[3]
         for column, rtol in ((4, 1e-12), (5, 1e-12), (6, 1e-10), (7, 1e-10)):
-            if want[column] is None:
+            wanted = want[column]
+            if wanted is None:
                 assert got[column] is None
+            elif isinstance(wanted, float) and math.isnan(wanted):
+                assert isinstance(got[column], float) and math.isnan(got[column])
+            elif isinstance(wanted, float) and math.isinf(wanted):
+                assert got[column] == wanted
             else:
-                assert got[column] == pytest.approx(want[column], rel=rtol, abs=1e-12)
+                assert got[column] == pytest.approx(wanted, rel=rtol, abs=1e-12)
 
 
 def test_aggregate_batch_execution_matches_independent_reference() -> None:
@@ -489,6 +518,78 @@ def test_aggregate_stream_matches_batch_across_segmentation(
         _aggregate_program()
         .compile_batch(Runtime())
         .execute({"input": Batch.from_pyarrow(_probe_table())})
+    )
+    batch_output = batch_result.outputs["output"].to_pyarrow()
+    _assert_aggregates_match(
+        _aggregate_columns(stream_output), _aggregate_columns(batch_output)
+    )
+
+
+# Infinities placed at differing positions inside identical multisets, plus
+# mixed-sign, NaN, and null windows (SCE-07 defect 1 ruling, B3).
+_INF_PROBE_ROWS = [
+    (10, "a", 1, math.inf, 100),
+    (11, "a", 2, 1.0, 110),
+    (12, "a", 3, 2.0, 120),
+    (10, "b", 1, 1.0, 200),
+    (11, "b", 2, 2.0, 210),
+    (12, "b", 3, math.inf, 220),
+    (10, "c", 1, 1.0, 300),
+    (11, "c", 2, math.inf, 310),
+    (12, "c", 3, 2.0, 320),
+    (10, "d", 1, math.inf, 400),
+    (11, "d", 2, -math.inf, 410),
+    (12, "d", 3, 5.0, 420),
+    (10, "e", 1, math.inf, 500),
+    (11, "e", 2, float("nan"), 510),
+    (12, "e", 3, None, 520),
+]
+
+
+def test_aggregate_inf_windows_match_the_frozen_reference() -> None:
+    table = _table_from_rows(_INF_PROBE_ROWS)
+    before = _table_bytes(table)
+
+    plan = _aggregate_program().compile_batch(Runtime())
+    result = plan.execute({"input": Batch.from_pyarrow(table)})
+
+    output = result.outputs["output"].to_pyarrow()
+    _assert_aggregates_match(
+        _aggregate_columns(output), _aggregate_reference(_INF_PROBE_ROWS, 3)
+    )
+    assert _table_bytes(table) == before, "caller-owned input table was mutated"
+
+
+@pytest.mark.parametrize("segmentation", (1, 2, 1000))
+def test_aggregate_inf_stream_matches_batch_across_segmentation(
+    tmp_path: Path, segmentation: int
+) -> None:
+    table = _table_from_rows(_INF_PROBE_ROWS)
+    plan = _aggregate_program().compile_stream(Runtime())
+    sink = _CollectSink()
+
+    async def exercise() -> None:
+        job = await StreamingRunner(
+            plan,
+            {
+                "input": SourceBinding(
+                    _SegmentedSource(table, segmentation),
+                    watermark_policy=DisabledWatermarks(),
+                )
+            },
+            {"output": [SinkBinding.ordinary("archive", sink)]},
+            ManagedCheckpointRuntime(tmp_path),
+        ).start_async()
+        outcome = await job.wait_async()
+        assert outcome.state == "completed"
+
+    asyncio.run(exercise())
+
+    stream_output = pa.concat_tables(sink.tables)
+    batch_result = (
+        _aggregate_program()
+        .compile_batch(Runtime())
+        .execute({"input": Batch.from_pyarrow(table)})
     )
     batch_output = batch_result.outputs["output"].to_pyarrow()
     _assert_aggregates_match(
