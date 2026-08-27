@@ -81,17 +81,27 @@ pub(crate) fn validate_select_query(query: &str) -> Result<String> {
     Ok(query.trim().trim_end_matches(';').trim().to_owned())
 }
 
-/// Reject a read-only query that calls a volatile built-in function.
+/// `DataFusion` datetime built-ins that read the wall clock while declaring
+/// [`Volatility::Stable`], so the volatility check alone lets them through
+/// and checkpoint replays produce different output.
+const WALL_CLOCK_BUILTINS: [&str; 3] = ["now", "current_date", "current_time"];
+
+/// Reject a read-only query that calls a volatile or wall-clock built-in
+/// function.
 ///
 /// Stream plans replay deterministic work, so every function a stream query
 /// can resolve must be non-volatile. The check resolves every function call
 /// in the query against the supplied registry and rejects any function whose
-/// signature is [`Volatility::Volatile`]. Names the registry does not know
-/// are left to query planning, which already rejects unknown functions.
+/// signature is [`Volatility::Volatile`], plus the wall-clock built-ins in
+/// [`WALL_CLOCK_BUILTINS`] that `DataFusion` marks stable even though they read
+/// the wall clock and break deterministic replay. Matching happens on the
+/// resolved function name, so aliases such as `current_timestamp` (of `now`)
+/// are covered. Names the registry does not know are left to query planning,
+/// which already rejects unknown functions.
 ///
 /// # Errors
 ///
-/// Returns [`CalcFlowError::Compile`] naming the node and the volatile
+/// Returns [`CalcFlowError::Compile`] naming the node and the rejected
 /// function, or [`CalcFlowError::InvalidArgument`] when the query does not
 /// parse.
 pub(crate) fn validate_no_volatile_functions(
@@ -106,7 +116,7 @@ pub(crate) fn validate_no_volatile_functions(
                 message: error.to_string(),
             }
         })?;
-    let mut volatile = None;
+    let mut rejected = None;
     for statement in &statements {
         let datafusion::sql::parser::Statement::Statement(statement) = statement else {
             continue;
@@ -120,23 +130,28 @@ pub(crate) fn validate_no_volatile_functions(
                     .and_then(|part| part.as_ident())
                     .map(|ident| ident.value.to_lowercase())
                     .unwrap_or_default();
-                if let Ok(udf) = registry.udf(&name)
-                    && matches!(udf.signature().volatility, Volatility::Volatile)
-                {
-                    volatile = Some(name.clone());
+                if let Ok(udf) = registry.udf(&name) {
+                    let kind = if matches!(udf.signature().volatility, Volatility::Volatile) {
+                        "volatile"
+                    } else if WALL_CLOCK_BUILTINS.contains(&udf.name()) {
+                        "wall-clock"
+                    } else {
+                        return std::ops::ControlFlow::Continue(());
+                    };
+                    rejected = Some((name.clone(), kind));
                     return std::ops::ControlFlow::Break(());
                 }
             }
             std::ops::ControlFlow::Continue(())
         });
-        if volatile.is_some() {
+        if rejected.is_some() {
             break;
         }
     }
-    if let Some(name) = volatile {
+    if let Some((name, kind)) = rejected {
         return Err(CalcFlowError::Compile {
             message: format!(
-                "stream node {node_id:?} selects volatile built-in function {name:?}; deterministic replay requires deterministic SQL"
+                "stream node {node_id:?} selects {kind} built-in function {name:?}; deterministic replay requires deterministic SQL"
             ),
         });
     }
@@ -225,6 +240,56 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn wall_clock_builtins_are_rejected() {
+        let registry = SessionContext::new();
+        for query in [
+            "SELECT now() AS ts FROM input",
+            "SELECT NOW() AS ts FROM input",
+            "SELECT current_date() AS d FROM input",
+            "SELECT current_date AS d FROM input",
+            "SELECT current_time() AS t FROM input",
+            "SELECT current_timestamp() AS ts FROM input",
+            "SELECT current_timestamp AS ts FROM input",
+            "SELECT today() AS d FROM input",
+        ] {
+            let error = validate_no_volatile_functions("features", query, &registry).unwrap_err();
+            let CalcFlowError::Compile { message } = error else {
+                panic!("expected a compile error for {query}, got {error:?}");
+            };
+            assert!(message.contains("features"), "{message} for {query}");
+            assert!(message.contains("wall-clock"), "{message} for {query}");
+        }
+    }
+
+    #[test]
+    fn wall_clock_builtins_are_rejected_in_nested_positions() {
+        let registry = SessionContext::new();
+        for query in [
+            "SELECT x FROM input WHERE now() > to_timestamp(0)",
+            "SELECT CASE WHEN current_date() > to_timestamp(0) THEN 1.0 ELSE 0.0 END AS c FROM input",
+            "WITH stamped AS (SELECT now() AS ts FROM input) SELECT ts FROM stamped",
+        ] {
+            assert!(
+                validate_no_volatile_functions("n", query, &registry).is_err(),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn deterministic_datetime_functions_pass() {
+        let registry = SessionContext::new();
+        assert!(
+            validate_no_volatile_functions(
+                "n",
+                "SELECT date_part('year', ts) AS y, to_timestamp(x) AS t FROM input WHERE date_bin(INTERVAL '1 minute', ts, to_timestamp(0)) IS NOT NULL",
+                &registry,
+            )
+            .is_ok()
+        );
     }
 
     #[test]

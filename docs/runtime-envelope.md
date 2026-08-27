@@ -261,8 +261,13 @@ compile time, before any source opens:
 - volatile DataFusion scalar UDFs are rejected when any output requests
   exactly-once delivery;
 - read-only expression and SQL queries that call a volatile built-in
-  function, resolved against the built-in default function registry, are
-  rejected.
+  function or a wall-clock built-in function (`now`, `current_date`, or
+  `current_time`) are rejected. Every call is resolved against the
+  built-in default function registry and matched by its canonical name
+  after parsing, so the `current_timestamp` and `today` aliases and the
+  no-parenthesis keyword spellings are covered too, with the same error
+  shape as the volatile rejection. Wall-clock reads would otherwise make
+  a checkpoint replay of the same input produce different output.
 
 Stream graphs compose unary expression nodes, single-input SQL nodes,
 explicit stream providers, `RollingOperator`, `UnionOperator`,

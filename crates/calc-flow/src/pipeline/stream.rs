@@ -730,7 +730,8 @@ fn validate_stream_node(node_id: &str, operator: &NodeOperator) -> Result<()> {
     }
 }
 
-/// Rejects read-only stream queries that call volatile built-in functions.
+/// Rejects read-only stream queries that call volatile or wall-clock
+/// built-in functions.
 ///
 /// The expression and SQL operators report deterministic, replay-safe
 /// lifecycles; that claim only holds when every function a stream query can
@@ -1513,6 +1514,85 @@ mod volatile_query_tests {
     }
 
     #[test]
+    fn wall_clock_queries_are_rejected_by_stream_compilation() {
+        for expression in [
+            "ts = now()",
+            "ts = NOW()",
+            "ts = current_date()",
+            "ts = current_time()",
+            "ts = current_timestamp()",
+            "ts = current_timestamp",
+        ] {
+            let plan = PipelineBuilder::new("wall-clock")
+                .unwrap()
+                .add_node(
+                    "features",
+                    Box::new(
+                        ExpressionOperator::new(
+                            "features",
+                            expression,
+                            Vec::new(),
+                            None,
+                            Vec::new(),
+                        )
+                        .unwrap(),
+                    ),
+                )
+                .unwrap()
+                .compile_stream(
+                    &UdfRegistry::new().snapshot(),
+                    &StreamRequirements::default(),
+                );
+            let error = plan.unwrap_err();
+            let CalcFlowError::Compile { message } = error else {
+                panic!("expected a compile error for {expression}, got {error:?}");
+            };
+            assert!(message.contains("features"), "{message} for {expression}");
+            assert!(message.contains("wall-clock"), "{message} for {expression}");
+        }
+
+        let sql = NodeOperator::Sql(
+            SqlOperator::new(
+                "features",
+                "SELECT now() AS ts FROM input",
+                vec!["input".into()],
+                Vec::new(),
+            )
+            .unwrap(),
+        );
+        assert!(validate_stream_query("features", &sql, &SessionContext::new()).is_err());
+    }
+
+    #[test]
+    fn random_builtin_is_still_rejected_by_stream_compilation() {
+        let plan = PipelineBuilder::new("random")
+            .unwrap()
+            .add_node(
+                "features",
+                Box::new(
+                    ExpressionOperator::new(
+                        "features",
+                        "score = random()",
+                        Vec::new(),
+                        None,
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap()
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements::default(),
+            );
+        let error = plan.unwrap_err();
+        let CalcFlowError::Compile { message } = error else {
+            panic!("expected a compile error, got {error:?}");
+        };
+        assert!(message.contains("random"), "{message}");
+    }
+
+    #[test]
     fn non_query_operators_skip_the_volatility_check() {
         let context = volatile_roll_context();
         let union = NodeOperator::Union(
@@ -1552,5 +1632,30 @@ mod volatile_query_tests {
             );
         assert!(plan.is_ok(), "{:?}", plan.err());
         let _ = default_function_registry();
+    }
+
+    #[test]
+    fn deterministic_datetime_queries_still_compile_through_the_default_registry() {
+        let plan = PipelineBuilder::new("deterministic-datetime")
+            .unwrap()
+            .add_node(
+                "features",
+                Box::new(
+                    ExpressionOperator::new(
+                        "features",
+                        "year = date_part('year', ts)",
+                        Vec::new(),
+                        Some("to_timestamp(x) > to_timestamp(0)".into()),
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap()
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements::default(),
+            );
+        assert!(plan.is_ok(), "{:?}", plan.err());
     }
 }
