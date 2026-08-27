@@ -327,14 +327,18 @@ def _reference_sum(valid: list):
     return sum(valid) if valid else None
 
 
+def _count_exact(values: list, target: float) -> int:
+    return sum(1 for value in values if value == target)
+
+
 def _reference_mean(valid: list):
     # Frozen ±inf readout (SCE-07 defect 1 ruling): both signs is the
     # undefined inf − inf (NaN), one sign is that infinity, none is the
     # finite average.
-    pos_inf = sum(1 for value in valid if value == math.inf)
-    neg_inf = sum(1 for value in valid if value == -math.inf)
     if not valid:
         return None
+    pos_inf = _count_exact(valid, math.inf)
+    neg_inf = _count_exact(valid, -math.inf)
     if pos_inf and neg_inf:
         return math.nan
     if pos_inf:
