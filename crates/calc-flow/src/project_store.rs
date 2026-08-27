@@ -899,6 +899,13 @@ fn sync_directory(directory: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[cfg_attr(
+    not(unix),
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "non-unix stub keeps the unix fallible signature so call sites stay platform-agnostic"
+    )
+)]
 fn sync_directory(_directory: &Path) -> Result<()> {
     Ok(())
 }

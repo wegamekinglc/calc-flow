@@ -2981,6 +2981,13 @@ fn sync_directory(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[cfg_attr(
+    not(unix),
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "non-unix stub keeps the unix fallible signature so call sites stay platform-agnostic"
+    )
+)]
 fn sync_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
@@ -4421,7 +4428,10 @@ struct CheckpointRestartSoakReport {
     compacted_window_epochs: usize,
     maximum_manifest_count: usize,
     maximum_state_bytes: u64,
+    // Populated on every platform; only the Linux /proc soak evidence bundle reads them.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     source_records: usize,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     output_records: usize,
     duplicate_records: usize,
     missing_records: usize,
@@ -4527,10 +4537,16 @@ struct CheckpointSoakParentTiming {
 
 struct CheckpointSoakProcessEvidence {
     report: CheckpointRestartSoakReport,
+    // Populated on every platform; only the Linux /proc soak evidence bundle reads them.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     plans: Vec<CheckpointSoakProcessPlan>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     processes: Vec<CheckpointSoakProcessReport>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     parent_timings: Vec<CheckpointSoakParentTiming>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     rss_samples: Vec<RssSample>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     rss_process_samples: Vec<CheckpointRssProcessSamples>,
 }
 
@@ -4814,6 +4830,13 @@ fn sync_checkpoint_soak_directory(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[cfg_attr(
+    not(unix),
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "non-unix stub keeps the unix fallible signature so call sites stay platform-agnostic"
+    )
+)]
 fn sync_checkpoint_soak_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
@@ -5030,6 +5053,13 @@ async fn checkpoint_soak_process_rss_kib() -> Result<u64> {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        clippy::unused_async,
+        reason = "non-Linux stub keeps the Linux async signature so await sites stay platform-agnostic"
+    )
+)]
 async fn checkpoint_soak_process_rss_kib() -> Result<u64> {
     Err(checkpoint_soak_process_error(
         "standard checkpoint soak RSS evidence requires Linux",
@@ -6299,6 +6329,13 @@ async fn run_checkpoint_restart_linux_soak() {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        clippy::unused_async,
+        reason = "non-Linux stub keeps the Linux async signature so await sites stay platform-agnostic"
+    )
+)]
 async fn run_checkpoint_restart_linux_soak() {
     panic!("checkpoint restart soak evidence requires Linux /proc")
 }
@@ -8419,12 +8456,8 @@ fn private_m5_epoch_checkpoint_absolute_benchmark() {
     println!("{metadata}");
 }
 
-#[cfg_attr(
-    not(target_os = "linux"),
-    ignore = "checkpoint restart soak evidence requires Linux /proc"
-)]
 #[tokio::test]
-#[ignore = "twenty-minute opt-in M5 checkpoint restart soak; set CALC_FLOW_M5_CHECKPOINT_SOAK=1"]
+#[ignore = "twenty-minute opt-in M5 checkpoint restart soak; requires Linux /proc and CALC_FLOW_M5_CHECKPOINT_SOAK=1"]
 async fn twenty_minute_epoch_checkpoint_restart() {
     assert_eq!(
         std::env::var("CALC_FLOW_M5_CHECKPOINT_SOAK").as_deref(),
