@@ -274,3 +274,67 @@ fn rolling_project_derives_output_ports_when_omitted() {
     let report = validate_project(&project, &providers, &udfs);
     assert!(report.valid, "validation issues: {:?}", report.issues);
 }
+
+#[test]
+fn rolling_project_rejects_multiple_input_ports_at_compile() {
+    let mut node = rolling_node_json();
+    node["input_ports"] = json!([
+        node["input_ports"][0].clone(),
+        {"name": "side", "kind": "table", "required": true, "schema": []}
+    ]);
+    let project: ProjectSpec = serde_json::from_value(project_json(
+        &json!({"mode": "batch", "options": {}}),
+        &node,
+    ))
+    .unwrap();
+    let (providers, udfs) = registries();
+    assert!(compile_project(&project, &providers, &udfs).is_err());
+}
+
+#[test]
+fn rolling_project_rejects_wrong_input_port_name_at_compile() {
+    let mut node = rolling_node_json();
+    node["input_ports"][0]["name"] = json!("upstream");
+    let project: ProjectSpec = serde_json::from_value(project_json(
+        &json!({"mode": "batch", "options": {}}),
+        &node,
+    ))
+    .unwrap();
+    let (providers, udfs) = registries();
+    assert!(compile_project(&project, &providers, &udfs).is_err());
+}
+
+#[test]
+fn rolling_project_rejects_a_missing_exact_schema_at_compile() {
+    let mut node = rolling_node_json();
+    node["input_ports"][0]["schema"] = json!([]);
+    let project: ProjectSpec = serde_json::from_value(project_json(
+        &json!({"mode": "batch", "options": {}}),
+        &node,
+    ))
+    .unwrap();
+    let (providers, udfs) = registries();
+    assert!(compile_project(&project, &providers, &udfs).is_err());
+}
+
+#[test]
+fn rolling_project_reports_operator_construction_failure_as_a_validation_issue() {
+    let mut node = rolling_node_json();
+    node["operator"]["spec"]["outputs"][0]["periods"] = json!(0);
+    let project: ProjectSpec = serde_json::from_value(project_json(
+        &json!({"mode": "batch", "options": {}}),
+        &node,
+    ))
+    .unwrap();
+    let (providers, udfs) = registries();
+    let report = validate_project(&project, &providers, &udfs);
+    assert!(!report.valid);
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "invalid_operator" && issue.path.contains("operator")),
+        "expected an invalid_operator issue: {:?}",
+        report.issues
+    );
+}

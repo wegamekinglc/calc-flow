@@ -3000,4 +3000,113 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn spec_getter_returns_the_validated_declaration_and_debug_stays_non_exhaustive() {
+        let spec = valid_spec();
+        let operator =
+            RollingOperator::new("rolling_features", Arc::new(input_schema()), spec.clone())
+                .unwrap();
+        assert_eq!(operator.spec(), &spec);
+        let rendered = format!("{operator:?}");
+        assert!(rendered.contains("RollingOperator"));
+        assert!(rendered.contains("rolling_features"));
+    }
+
+    #[tokio::test]
+    async fn emission_chunks_by_edge_budget_and_oversize_rows_fail() {
+        use crate::{CancellationToken, EdgeBudget, IngressProgressSnapshot, StreamJobContext};
+
+        struct NoopLateMetrics;
+        impl crate::operator::LateMetricSink for NoopLateMetrics {
+            fn record(&self, _delta: LateMetricDelta) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        fn matrix_record(times: Vec<i64>, prices: Vec<Option<f64>>) -> RecordBatch {
+            let len = times.len();
+            RecordBatch::try_new(
+                Arc::new(input_schema()),
+                vec![
+                    Arc::new(
+                        datafusion::arrow::array::TimestampMicrosecondArray::from(times)
+                            .with_timezone("UTC"),
+                    ) as ArrayRef,
+                    Arc::new(datafusion::arrow::array::StringArray::from(vec!["a"; len]))
+                        as ArrayRef,
+                    Arc::new(UInt64Array::from((1..=len as u64).collect::<Vec<_>>())),
+                    Arc::new(datafusion::arrow::array::Float64Array::from(prices)),
+                    Arc::new(datafusion::arrow::array::Int64Array::from(
+                        (1..=len as u64)
+                            .map(|v| Some(i64::try_from(v).unwrap() * 10))
+                            .collect::<Vec<_>>(),
+                    )),
+                    Arc::new(datafusion::arrow::array::StringArray::from(vec!["x"; len])),
+                ],
+            )
+            .unwrap()
+        }
+
+        let job = StreamJobContext::new(
+            7,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let budget = EdgeBudget::new(2, usize::MAX).unwrap();
+        let context = StreamOperatorContext::for_task(
+            &job,
+            "rolling",
+            None,
+            IngressProgressSnapshot::default(),
+            budget,
+            Arc::new(NoopLateMetrics),
+        );
+        let mut operator =
+            RollingOperator::new("rolling", Arc::new(input_schema()), valid_spec()).unwrap();
+        let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        let record = matrix_record(vec![10, 11, 12], vec![Some(1.0), Some(2.0), Some(3.0)]);
+        let batch = Batch::table(vec![record], BatchMetadata::default()).unwrap();
+        operator
+            .process_data("input", batch, &context, &mut collector)
+            .await
+            .unwrap();
+        operator
+            .on_watermark(EventTime::from_micros(20), &context, &mut collector)
+            .await
+            .unwrap();
+        let emitted = collector.drain("output");
+        assert_eq!(emitted.len(), 2);
+        assert_eq!(emitted[0].as_data().unwrap().metadata().sequence(), 0);
+        assert_eq!(emitted[1].as_data().unwrap().metadata().sequence(), 1);
+
+        let tiny = EdgeBudget::new(10, 1).unwrap();
+        let context = StreamOperatorContext::for_task(
+            &job,
+            "rolling",
+            None,
+            IngressProgressSnapshot::default(),
+            tiny,
+            Arc::new(NoopLateMetrics),
+        );
+        let mut operator =
+            RollingOperator::new("rolling", Arc::new(input_schema()), valid_spec()).unwrap();
+        let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        let record = matrix_record(vec![10], vec![Some(1.0)]);
+        let batch = Batch::table(vec![record], BatchMetadata::default()).unwrap();
+        operator
+            .process_data("input", batch, &context, &mut collector)
+            .await
+            .unwrap();
+        let error = operator
+            .on_watermark(EventTime::from_micros(20), &context, &mut collector)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+                error,
+                CalcFlowError::InvalidArgument { ref field, .. } if field == "message.bytes"
+        ));
+    }
 }

@@ -9,7 +9,7 @@ use calc_flow::{
 use datafusion::arrow::{
     array::{
         Array, ArrayRef, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray,
-        UInt64Array,
+        UInt8Array, UInt64Array,
     },
     datatypes::{DataType, Field, Schema, TimeUnit},
     record_batch::RecordBatch,
@@ -772,4 +772,434 @@ async fn snapshot_segments_round_trip_through_the_validating_local_backend() {
             (11, "a".into(), 2, Some(1.0), Some(10)),
         ]
     );
+}
+
+// ---------------------------------------------------------------------------
+// P1: identity, frontier, extreme-value, and corruption-matrix coverage.
+// ---------------------------------------------------------------------------
+
+fn different_job() -> StreamJobContext {
+    StreamJobContext::new(
+        2,
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    )
+}
+
+#[tokio::test]
+async fn context_identity_mismatch_is_rejected() {
+    let job = job();
+    let mut operator = error_operator();
+    let mut collector = new_collector();
+    operator
+        .process_data(
+            "input",
+            input_batch(&fixture_rows()[..1]),
+            &context(&job, None),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+
+    let other = different_job();
+    let error = operator
+        .on_watermark(
+            EventTime::from_micros(100),
+            &context(&other, Some(100)),
+            &mut collector,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, calc_flow::CalcFlowError::Operator { .. }),
+        "unexpected error: {error}"
+    );
+
+    let wrong_operator_context = StreamOperatorContext::new(&job, "other_rolling", None);
+    let error = operator
+        .process_data(
+            "input",
+            input_batch(&fixture_rows()[..1]),
+            &wrong_operator_context,
+            &mut collector,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, calc_flow::CalcFlowError::Operator { .. }),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn zero_row_checkpoint_after_watermark_restores_empty_state() {
+    let job = job();
+    let mut operator = error_operator();
+    let mut collector = new_collector();
+    operator
+        .on_watermark(
+            EventTime::from_micros(50),
+            &context(&job, Some(50)),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert!(snapshot.segments.is_empty());
+
+    let mut recovered = error_operator();
+    recovered.restore(&snapshot).unwrap();
+    let error = recovered
+        .on_watermark(
+            EventTime::from_micros(50),
+            &context(&job, Some(50)),
+            &mut collector,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, calc_flow::CalcFlowError::Operator { .. }),
+        "the restored watermark frontier must reject a non-advancing watermark: {error}"
+    );
+    recovered
+        .on_watermark(
+            EventTime::from_micros(51),
+            &context(&job, Some(51)),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+}
+
+fn periods_two_spec() -> RollingSpec {
+    serde_json::from_value(serde_json::json!({
+        "configuration_version": 1,
+        "state_layout_version": 1,
+        "partition_by": ["symbol"],
+        "event_time": "ts",
+        "sequence_by": ["sequence"],
+        "outputs": [
+            {
+                "kind": "lag",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "price_lag_1",
+                "periods": 2
+            },
+            {
+                "kind": "delta",
+                "primitive_version": 1,
+                "input": "volume",
+                "output": "volume_delta_1",
+                "periods": 2
+            }
+        ],
+        "allowed_lateness_micros": 0,
+        "late_policy": {"kind": "error", "scope": "envelope"},
+        "value_policy": "stateful_numeric_v1"
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn periods_two_history_survives_emission_checkpoint_and_restore() {
+    let job = job();
+    let spec = periods_two_spec();
+    let mut operator = RollingOperator::new("rolling", input_schema(), spec.clone()).unwrap();
+    let mut collector = new_collector();
+    let mut observed = Observed::default();
+    operator
+        .process_data(
+            "input",
+            input_batch(&fixture_rows()[..4]),
+            &context(&job, None),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    operator
+        .on_watermark(
+            EventTime::from_micros(12),
+            &context(&job, Some(12)),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    drain(&mut collector, &mut observed);
+    let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+
+    let mut recovered = RollingOperator::new("rolling", input_schema(), spec).unwrap();
+    recovered.restore(&snapshot).unwrap();
+    let mut recovered_collector = new_collector();
+    recovered
+        .process_data(
+            "input",
+            input_batch(&fixture_rows()[4..6]),
+            &context(&job, None),
+            &mut recovered_collector,
+        )
+        .await
+        .unwrap();
+    finish(
+        &mut recovered,
+        &job,
+        &mut recovered_collector,
+        &mut observed,
+    )
+    .await;
+    assert_eq!(
+        observed.rows,
+        vec![
+            (10, "a".into(), 1, None, None),
+            (10, "b".into(), 1, None, None),
+            (11, "a".into(), 2, None, None),
+            (12, "b".into(), 2, None, None),
+            (12, "a".into(), 3, Some(1.0), Some(20)),
+            (13, "b".into(), 3, Some(5.0), Some(20)),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn extreme_lateness_values_are_checked_not_wrapped() {
+    let job = job();
+    let mut maximal = drop_operator(u64::MAX);
+    let mut collector = new_collector();
+    let error = maximal
+        .process_data(
+            "input",
+            input_batch(&fixture_rows()[..1]),
+            &context(&job, Some(100)),
+            &mut collector,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, calc_flow::CalcFlowError::Operator { .. }),
+        "u64::MAX lateness must be checked: {error}"
+    );
+
+    let mut operator = drop_operator(1);
+    let error = operator
+        .process_data(
+            "input",
+            input_batch(&[(i64::MAX, "a", 1, Some(1.0), Some(10))]),
+            &context(&job, Some(i64::MAX)),
+            &mut collector,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, calc_flow::CalcFlowError::Operator { .. }),
+        "finality overflow must be checked: {error}"
+    );
+
+    let mut operator = drop_operator(1);
+    operator
+        .process_data(
+            "input",
+            input_batch(&[(i64::MAX, "a", 1, Some(1.0), Some(10))]),
+            &context(&job, None),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    let error = operator
+        .on_watermark(
+            EventTime::from_micros(i64::MAX - 1),
+            &context(&job, Some(i64::MAX - 1)),
+            &mut collector,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, calc_flow::CalcFlowError::Operator { .. }),
+        "closing-coordinate overflow at emission must be checked: {error}"
+    );
+}
+
+#[tokio::test]
+async fn malformed_inline_metadata_is_rejected_without_side_effects() {
+    let job = job();
+    let mut operator = error_operator();
+    let mut collector = new_collector();
+    operator
+        .process_data(
+            "input",
+            input_batch(&fixture_rows()[..1]),
+            &context(&job, None),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+
+    let mut malformed = snapshot.clone();
+    malformed
+        .inline_metadata
+        .insert("epoch".into(), serde_json::json!("not-a-number"));
+    let mut target = error_operator();
+    assert!(target.restore(&malformed).is_err());
+
+    target.restore(&snapshot).unwrap();
+    let mut recovered_collector = new_collector();
+    let mut observed = Observed::default();
+    finish(&mut target, &job, &mut recovered_collector, &mut observed).await;
+    assert_eq!(observed.rows, vec![(10, "a".into(), 1, None, None)]);
+}
+
+fn reencode_segment(
+    snapshot: &OperatorStateSnapshot,
+    mutate: impl FnOnce(&Schema, RecordBatch) -> (Schema, RecordBatch),
+) -> OperatorStateSnapshot {
+    use datafusion::arrow::ipc::{reader::FileReader, writer::FileWriter};
+
+    let (segment_id, segment) = snapshot.segments.iter().next().unwrap();
+    let mut reader = FileReader::try_new(std::io::Cursor::new(segment.bytes()), None).unwrap();
+    let schema = reader.schema().as_ref().clone();
+    let record = reader.next().unwrap().unwrap();
+    let (new_schema, new_record) = mutate(&schema, record);
+    let mut bytes = Vec::new();
+    {
+        let mut writer = FileWriter::try_new(&mut bytes, &new_schema).unwrap();
+        writer.write(&new_record).unwrap();
+        writer.finish().unwrap();
+    }
+    OperatorStateSnapshot {
+        inline_metadata: snapshot.inline_metadata.clone(),
+        segments: BTreeMap::from([(segment_id.clone(), StateSegment::new(bytes))]),
+    }
+}
+
+async fn snapshot_with_history_and_buffer() -> OperatorStateSnapshot {
+    let job = job();
+    let mut operator = error_operator();
+    let mut collector = new_collector();
+    operator
+        .process_data(
+            "input",
+            input_batch(&fixture_rows()[..2]),
+            &context(&job, None),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    operator
+        .on_watermark(
+            EventTime::from_micros(10),
+            &context(&job, Some(10)),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    operator
+        .process_data(
+            "input",
+            input_batch(&fixture_rows()[2..4]),
+            &context(&job, None),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    operator.checkpoint(Epoch::new(1).unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn segment_with_wrong_column_count_is_rejected() {
+    let snapshot = snapshot_with_history_and_buffer().await;
+    let corrupted = reencode_segment(&snapshot, |schema, record| {
+        let fields: Vec<_> = schema.fields().iter().cloned().collect();
+        let new_schema = Schema::new_with_metadata(
+            fields[..fields.len() - 1].to_vec(),
+            schema.metadata().clone(),
+        );
+        let columns: Vec<_> = record
+            .columns()
+            .iter()
+            .take(record.num_columns() - 1)
+            .cloned()
+            .collect();
+        let new_record = RecordBatch::try_new(Arc::new(new_schema.clone()), columns).unwrap();
+        (new_schema, new_record)
+    });
+    assert!(error_operator().restore(&corrupted).is_err());
+}
+
+#[tokio::test]
+async fn segment_with_out_of_order_rows_is_rejected() {
+    let snapshot = snapshot_with_history_and_buffer().await;
+    let corrupted = reencode_segment(&snapshot, |schema, record| {
+        use datafusion::arrow::compute::concat_batches;
+        let head = record.slice(0, 1);
+        let tail = record.slice(1, record.num_rows() - 1);
+        let reversed = concat_batches(&record.schema(), [&tail, &head]).unwrap();
+        (schema.clone(), reversed)
+    });
+    assert!(error_operator().restore(&corrupted).is_err());
+}
+
+#[tokio::test]
+async fn segment_with_non_contiguous_history_positions_is_rejected() {
+    let snapshot = snapshot_with_history_and_buffer().await;
+    let corrupted = reencode_segment(&snapshot, |schema, record| {
+        let mut columns = record.columns().to_vec();
+        let positions: Vec<Option<u64>> = (0..record.num_rows())
+            .map(|index| if index == 0 { Some(5) } else { None })
+            .collect();
+        columns[1] = Arc::new(UInt64Array::from(positions));
+        let new_record = RecordBatch::try_new(record.schema(), columns).unwrap();
+        (schema.clone(), new_record)
+    });
+    assert!(error_operator().restore(&corrupted).is_err());
+}
+
+#[tokio::test]
+async fn segment_with_an_unknown_row_kind_is_rejected() {
+    let snapshot = snapshot_with_history_and_buffer().await;
+    let corrupted = reencode_segment(&snapshot, |schema, record| {
+        let mut columns = record.columns().to_vec();
+        columns[0] = Arc::new(UInt8Array::from(vec![7_u8; record.num_rows()]));
+        let new_record = RecordBatch::try_new(record.schema(), columns).unwrap();
+        (schema.clone(), new_record)
+    });
+    assert!(error_operator().restore(&corrupted).is_err());
+}
+
+#[tokio::test]
+async fn inventory_with_a_future_epoch_is_rejected() {
+    let snapshot = snapshot_with_history_and_buffer().await;
+    let mut corrupted = snapshot.clone();
+    let inventory = &snapshot.inline_metadata["segment_inventory"][0];
+    corrupted.inline_metadata.insert(
+        "segment_inventory".into(),
+        serde_json::json!([{
+            "kind": "base",
+            "state_layout_version": 1,
+            "schema_fingerprint": inventory["schema_fingerprint"].clone(),
+            "handle": {
+                "operator_id": "rolling",
+                "epoch": 99,
+                "segment_id": inventory["handle"]["segment_id"].clone(),
+                "relative_path": inventory["handle"]["relative_path"].clone(),
+                "byte_len": inventory["handle"]["byte_len"].clone(),
+                "sha256": inventory["handle"]["sha256"].clone(),
+            }
+        }]),
+    );
+    assert!(error_operator().restore(&corrupted).is_err());
+}
+
+#[tokio::test]
+async fn segments_without_identity_metadata_are_rejected() {
+    let snapshot = snapshot_with_history_and_buffer().await;
+    let mut corrupted = snapshot.clone();
+    corrupted
+        .inline_metadata
+        .insert("pipeline_fingerprint".into(), serde_json::Value::Null);
+    corrupted
+        .inline_metadata
+        .insert("operator_id".into(), serde_json::Value::Null);
+    assert!(error_operator().restore(&corrupted).is_err());
 }
