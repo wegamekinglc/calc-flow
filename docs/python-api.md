@@ -200,7 +200,8 @@ invariant. All four report `deterministic=True` and `replay_safe=True`. For
 `sql@1` those two claims hold from the engine viewpoint: exactly-once stream
 plans reject nodes that select volatile registered UDFs, and stream
 compilation rejects read-only queries that call volatile built-in SQL
-functions such as `random()`.
+functions such as `random()` or wall-clock built-ins such as `now()`,
+`current_date()`, and `current_time()` (aliases included).
 
 Providers registered through `register_provider` keep their existing
 signature and source compatibility. The registration API accepts no lifecycle
@@ -625,11 +626,13 @@ above. Casts to non-portable targets fail with `unsupported_type` at
 `outputs.<name>.cast.data_type`.
 
 Stream plans also reject read-only queries that call volatile built-in
-functions (for example `random()`): `compile_stream` resolves every function
-in an expression or SQL node's query against the built-in default function
-registry and fails volatile calls before any source opens, so the
-deterministic, replay-safe lifecycle claims of those operators remain
-truthful.
+functions (for example `random()`) or the wall-clock built-ins `now`,
+`current_date`, and `current_time` (aliases such as `current_timestamp`
+and `today` included): `compile_stream` resolves every function in an
+expression or SQL node's query against the built-in default function
+registry, matching the resolved canonical name, and fails volatile and
+wall-clock calls before any source opens, so the deterministic,
+replay-safe lifecycle claims of those operators remain truthful.
 
 ## Projects and persistence
 

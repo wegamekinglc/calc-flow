@@ -5,6 +5,20 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-28: Reject wall-clock built-in functions in stream query
+  compilation (DAL-166). `compile_stream` now rejects read-only expression
+  and SQL queries that call `now`, `current_date`, or `current_time`:
+  DataFusion declares these built-ins `Volatility::Stable`, so the
+  volatile-function guard let them compile while checkpoint replays of the
+  same input produced different output, breaking the replay-safety the
+  guard exists to protect. The check resolves each call against the
+  built-in default function registry and matches the canonical name, so
+  the `current_timestamp` and `today` aliases and the no-parenthesis
+  keyword spellings are rejected too, with the same error shape as the
+  volatile rejection. This is a user-visible tightening: existing stream
+  queries that call these functions now fail at compile time. Batch query
+  compilation is unchanged.
+
 - 2026-08-26: Make epoch checkpoint capture cost proportional to the dirty
   set, not the retained state (DAL-160). `OperatorStateSnapshot.segments`
   now maps segment IDs to the new public `StateSegment` type — an
