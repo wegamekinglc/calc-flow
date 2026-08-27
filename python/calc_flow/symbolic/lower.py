@@ -20,13 +20,20 @@ from calc_flow.pipeline import (
     _data_sources,
 )
 from calc_flow.symbolic import errors
-from calc_flow.symbolic.analyzer import _require_mode, _run, _schema_fields
+from calc_flow.symbolic.analyzer import (
+    _require_mode,
+    _rolling_output_type,
+    _run,
+    _schema_fields,
+)
 from calc_flow.symbolic.domains import type_name
 from calc_flow.symbolic.nodes import (
     CBool,
     CDType,
+    CEnum,
     CFloat,
     CInt,
+    CMap,
     CNull,
     CStr,
     CValue,
@@ -73,7 +80,11 @@ _TABLE_OUTPUT_PRIMITIVES: Final = frozenset(
     {"table_input", "project", "filter", "with_columns"}
 )
 
-_ROLLING_PRIMITIVES: Final = frozenset({"lag", "delta"})
+_ROLLING_PRIMITIVES: Final = frozenset(
+    {"lag", "delta", "count", "sum", "mean", "variance", "stddev"}
+)
+
+_ROLLING_DDOF_PRIMITIVES: Final = frozenset({"variance", "stddev"})
 
 _U64_MAX: Final = (1 << 64) - 1
 
@@ -235,7 +246,7 @@ def _inline(node: Node, env: dict[str, Node], path: str, /) -> Node:
 
 
 def _find_rolling(node: Node, /):
-    """Yield every lag/delta subtree in first-appearance order."""
+    """Yield every rolling temporal subtree in first-appearance order."""
     if node.op.name in _ROLLING_PRIMITIVES:
         yield node
     for argument in node.args:
@@ -394,8 +405,28 @@ class _RollingPlan:
     output_fields: tuple[Field, ...]
 
 
-# Rolling planning validates every lag/delta occurrence with stable,
-# declaration-ordered error paths before emitting the frozen node shape.
+def _rolling_frame(subtree: Node, path: str, kind: str, /) -> dict[str, object]:
+    """Render the frozen row-frame JSON; duration frames arrive with SCE-08."""
+
+    frame = subtree.attr("frame")
+    variant = None
+    if isinstance(frame, CMap):
+        tag = frame.get("frame")
+        if isinstance(tag, CEnum):
+            variant = tag.variant
+    if variant != "rows":
+        errors.raise_compile(
+            path,
+            errors.UNSUPPORTED_TYPE,
+            f"rolling {kind} duration frames are not supported in this release",
+        )
+    size = _cint(frame.get("size"))
+    return {"kind": "rows", "size": 1 if size is None else size}
+
+
+# Rolling planning validates every lag/delta/aggregate occurrence with
+# stable, declaration-ordered error paths before emitting the frozen node
+# shape.
 def _plan_rolling(
     output_name: str,
     segment: _Segment,
@@ -428,8 +459,8 @@ def _plan_rolling(
         errors.raise_compile(
             path,
             errors.ORDERING_REQUIRED,
-            "rolling lag/delta requires declared entity_by, event_time, and"
-            " sequence_by ordering keys on the input table",
+            "rolling temporal primitives require declared entity_by,"
+            " event_time, and sequence_by ordering keys on the input table",
         )
 
     whole_feature = {
@@ -471,17 +502,39 @@ def _plan_rolling(
                 f"rolling {kind} argument column {input_name!r} is not in the"
                 " input schema",
             )
-        periods = _cint(subtree.attr("periods")) or 1
-        declarations.append(
-            {
-                "kind": kind,
-                "primitive_version": 1,
-                "input": input_name,
-                "output": name,
-                "periods": periods,
-            }
+        periods = _cint(subtree.attr("periods"))
+        if periods is not None:
+            declarations.append(
+                {
+                    "kind": kind,
+                    "primitive_version": 1,
+                    "input": input_name,
+                    "output": name,
+                    "periods": periods,
+                }
+            )
+            derived_fields.append(Field(name, field.data_type, nullable=True))
+            continue
+        frame = _rolling_frame(subtree, f"{path}.{name}", kind)
+        declaration: dict[str, object] = {
+            "kind": kind,
+            "primitive_version": 1,
+            "input": input_name,
+            "output": name,
+            "frame": frame,
+            "min_periods": _cint(subtree.attr("min_periods")) or 1,
+        }
+        if kind in _ROLLING_DDOF_PRIMITIVES:
+            ddof = _cint(subtree.attr("ddof"))
+            declaration["ddof"] = 1 if ddof is None else ddof
+        declarations.append(declaration)
+        derived_fields.append(
+            Field(
+                name,
+                _rolling_output_type(kind, field.data_type) or "float64",
+                nullable=True,
+            )
         )
-        derived_fields.append(Field(name, field.data_type, nullable=True))
 
     node_id = f"{output_name}__cf_rolling"
     node: dict[str, object] = {

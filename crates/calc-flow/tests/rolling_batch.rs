@@ -592,3 +592,136 @@ async fn batch_plan_rejects_a_non_null_rolling_state_restore() {
         "unexpected error: {error}"
     );
 }
+
+// ---------------------------------------------------------------------
+// SCE-07: rolling aggregates through the batch pipeline
+// ---------------------------------------------------------------------
+
+fn aggregate_spec() -> RollingSpec {
+    serde_json::from_value(serde_json::json!({
+        "configuration_version": 1,
+        "state_layout_version": 1,
+        "partition_by": ["symbol"],
+        "event_time": "ts",
+        "sequence_by": ["sequence"],
+        "outputs": [
+            {
+                "kind": "count",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "price_count_3",
+                "frame": {"kind": "rows", "size": 3},
+                "min_periods": 2
+            },
+            {
+                "kind": "sum",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "price_sum_3",
+                "frame": {"kind": "rows", "size": 3},
+                "min_periods": 1
+            },
+            {
+                "kind": "mean",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "price_mean_3",
+                "frame": {"kind": "rows", "size": 3},
+                "min_periods": 1
+            },
+            {
+                "kind": "variance",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "price_var_3",
+                "frame": {"kind": "rows", "size": 3},
+                "min_periods": 2,
+                "ddof": 1
+            },
+            {
+                "kind": "stddev",
+                "primitive_version": 1,
+                "input": "volume",
+                "output": "volume_std_2",
+                "frame": {"kind": "rows", "size": 2},
+                "min_periods": 2,
+                "ddof": 0
+            }
+        ],
+        "allowed_lateness_micros": 0,
+        "late_policy": {"kind": "error", "scope": "envelope"},
+        "value_policy": "stateful_numeric_v1"
+    }))
+    .unwrap()
+}
+
+async fn execute_aggregates(input: Batch) -> calc_flow::Result<Batch> {
+    let plan = PipelineBuilder::new("rolling aggregates batch")
+        .unwrap()
+        .add_node(
+            "rolling",
+            RollingOperator::new("rolling", input_schema(), aggregate_spec()).unwrap(),
+        )
+        .unwrap()
+        .compile_batch(&UdfRegistry::new().snapshot())
+        .unwrap();
+    let outputs = plan
+        .execute(
+            BTreeMap::from([("input".into(), input)]),
+            ExecutionOptions::default(),
+        )
+        .await?;
+    Ok(outputs.outputs["output"].clone())
+}
+
+#[tokio::test]
+async fn batch_emits_aggregate_columns_with_frozen_null_nan_min_period_rules() {
+    let output = execute_aggregates(input_batch(
+        vec![10, 10, 11, 12, 13],
+        vec!["a", "b", "a", "a", "a"],
+        vec![1, 1, 2, 3, 4],
+        vec![Some(1.0), Some(10.0), None, Some(3.0), Some(f64::NAN)],
+        vec![Some(8), Some(80), Some(16), Some(24), Some(32)],
+    ))
+    .await
+    .unwrap();
+    let record = output.table_payload().unwrap().batches()[0].clone();
+    assert_eq!(record.num_rows(), 5);
+    let floats = |name: &str| -> Vec<Option<f64>> {
+        record
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .iter()
+            .collect()
+    };
+    let counts = record
+        .column_by_name("price_count_3")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap()
+        .iter()
+        .collect::<Vec<_>>();
+    // Entity a prices in canonical row order: 1.0, null, 3.0, NaN; b: 10.0.
+    // Count/variance require two valid samples; sum/mean require one.
+    assert_eq!(counts, vec![None, None, None, Some(2), None]);
+    assert_eq!(
+        floats("price_sum_3"),
+        vec![Some(1.0), Some(10.0), Some(1.0), Some(4.0), Some(3.0)]
+    );
+    assert_eq!(
+        floats("price_mean_3"),
+        vec![Some(1.0), Some(10.0), Some(1.0), Some(2.0), Some(3.0)]
+    );
+    assert_eq!(
+        floats("price_var_3"),
+        vec![None, None, None, Some(2.0), None]
+    );
+    assert_eq!(
+        floats("volume_std_2"),
+        vec![None, None, Some(4.0), Some(4.0), Some(4.0)]
+    );
+}

@@ -8,12 +8,28 @@ fixtures and an independently derived reference model.
 
 from __future__ import annotations
 
+import asyncio
 import math
+from pathlib import Path
 
 import pyarrow as pa
 import pytest
 
-from calc_flow import Batch, Runtime
+from calc_flow import (
+    Batch,
+    Cursor,
+    Data,
+    DisabledWatermarks,
+    ManagedCheckpointRuntime,
+    NativeWatermarkCapability,
+    ReplayPositioning,
+    Runtime,
+    SinkBinding,
+    SourceBinding,
+    SourceCapabilities,
+    SourceDeliveryCapability,
+    StreamingRunner,
+)
 from calc_flow.errors import CompileError
 from calc_flow.symbolic import (
     FeatureSet,
@@ -61,16 +77,15 @@ def _rejected(features: list[tuple[str, object]], mode: str = "batch") -> str:
     return str(excinfo.value)
 
 
-def test_aggregate_catalog_kinds_stay_rejected() -> None:
+def test_min_max_and_pair_kinds_stay_rejected() -> None:
     quotes = _ordered()
-    aggregates = [
-        ts.count(quotes["x"], window=rows(5)),
-        ts.sum(quotes["x"], window=rows(5)),
-        ts.mean(quotes["x"], window=rows(5)),
-        ts.variance(quotes["x"], window=rows(5)),
-        ts.stddev(quotes["x"], window=rows(5)),
+    unsupported = [
+        ts.min(quotes["x"], window=rows(5)),
+        ts.max(quotes["x"], window=rows(5)),
+        ts.covariance(quotes["x"], quotes["v"], window=rows(5)),
+        ts.correlation(quotes["x"], quotes["v"], window=rows(5)),
     ]
-    for aggregate in aggregates:
+    for aggregate in unsupported:
         message = _rejected([("feature", aggregate)])
         assert "unknown_primitive_version" in message
 
@@ -78,7 +93,8 @@ def test_aggregate_catalog_kinds_stay_rejected() -> None:
 def test_duration_frame_and_correlation_stay_rejected() -> None:
     quotes = _ordered()
     message = _rejected([("m", ts.mean(quotes["x"], window=duration(1_000)))])
-    assert "unknown_primitive_version" in message
+    assert "unsupported_type" in message
+    assert "duration" in message
     message = _rejected(
         [("c", ts.correlation(quotes["x"], quotes["v"], window=rows(5)))],
         mode="stream",
@@ -291,3 +307,190 @@ def test_batch_execution_matches_independent_reference_and_preserves_input() -> 
     )
     _assert_values_match(actual, _reference(_PROBE_ROWS, 3, 2))
     assert _table_bytes(table) == before, "caller-owned input table was mutated"
+
+
+def _aggregate_reference(rows_data, size):
+    ordered = sorted(rows_data, key=lambda row: (row[0], row[1], row[2]))
+    by_entity: dict[str, list] = {}
+    for row in ordered:
+        by_entity.setdefault(row[1], []).append(row)
+    results: dict[int, tuple] = {}
+    for entity_rows in by_entity.values():
+        window: list = []
+        for row in entity_rows:
+            window.append(row)
+            if len(window) > size:
+                window.pop(0)
+            valid = [
+                item[3]
+                for item in window
+                if item[3] is not None and not math.isnan(item[3])
+            ]
+            valid_count = len(valid)
+            total = sum(valid) if valid else None
+            mean = (total / valid_count) if total is not None else None
+            squared = (
+                sum((value - mean) ** 2 for value in valid)
+                if valid_count >= 2
+                else None
+            )
+            results[id(row)] = (
+                valid_count if valid_count >= 2 else None,
+                total,
+                mean,
+                (squared / (valid_count - 1)) if squared is not None else None,
+                (math.sqrt(squared / valid_count)) if squared is not None else None,
+            )
+    return [(row[0], row[1], row[2], *results[id(row)]) for row in ordered]
+
+
+def _aggregate_program() -> Program:
+    quotes = _ordered()
+    return _program(
+        [
+            ("n3", ts.count(quotes["x"], window=rows(3), min_periods=2)),
+            ("total3", ts.sum(quotes["x"], window=rows(3))),
+            ("avg3", ts.mean(quotes["x"], window=rows(3))),
+            ("var3", ts.variance(quotes["x"], window=rows(3), min_periods=2, ddof=1)),
+            ("std3", ts.stddev(quotes["x"], window=rows(3), min_periods=2, ddof=0)),
+        ]
+    )
+
+
+def _aggregate_columns(output: pa.Table) -> list[tuple]:
+    ts_micros = output.column("ts").cast(pa.int64()).to_pylist()
+    columns = output.drop_columns(["ts"]).to_pydict()
+    return list(
+        zip(
+            ts_micros,
+            columns["symbol"],
+            columns["seq"],
+            columns["n3"],
+            columns["total3"],
+            columns["avg3"],
+            columns["var3"],
+            columns["std3"],
+            strict=True,
+        )
+    )
+
+
+def _assert_aggregates_match(actual, expected) -> None:
+    assert len(actual) == len(expected)
+    for got, want in zip(actual, expected, strict=True):
+        assert got[:3] == want[:3]
+        assert got[3] == want[3]
+        for column, rtol in ((4, 1e-12), (5, 1e-12), (6, 1e-10), (7, 1e-10)):
+            if want[column] is None:
+                assert got[column] is None
+            else:
+                assert got[column] == pytest.approx(want[column], rel=rtol, abs=1e-12)
+
+
+def test_aggregate_batch_execution_matches_independent_reference() -> None:
+    table = _probe_table()
+    before = _table_bytes(table)
+
+    plan = _aggregate_program().compile_batch(Runtime())
+    result = plan.execute({"input": Batch.from_pyarrow(table)})
+
+    output = result.outputs["output"].to_pyarrow()
+    assert output.schema.names == [
+        "ts",
+        "symbol",
+        "seq",
+        "x",
+        "v",
+        "n3",
+        "total3",
+        "avg3",
+        "var3",
+        "std3",
+    ]
+    _assert_aggregates_match(
+        _aggregate_columns(output), _aggregate_reference(_PROBE_ROWS, 3)
+    )
+    assert _table_bytes(table) == before, "caller-owned input table was mutated"
+
+
+class _SegmentedSource:
+    def __init__(self, table: pa.Table, segment: int) -> None:
+        self._table = table
+        self._segment = segment
+        self._offset = 0
+
+    def capabilities(self) -> SourceCapabilities:
+        return SourceCapabilities(
+            ReplayPositioning.UNSUPPORTED,
+            SourceDeliveryCapability.LOSSY,
+            max_batch_rows=10_000,
+            max_batch_bytes=16 * 1024 * 1024,
+            native_watermarks=NativeWatermarkCapability.NEVER_EMITS,
+        )
+
+    async def open(self, cursor: Cursor | None) -> None:
+        self._offset = 0
+
+    async def next(self) -> Data | None:
+        if self._offset >= self._table.num_rows:
+            return None
+        end = min(self._offset + self._segment, self._table.num_rows)
+        chunk = self._table.slice(self._offset, end - self._offset)
+        self._offset = end
+        order = end.to_bytes(8, "big")
+        return Data(Batch.from_pyarrow(chunk), Cursor(order, {"offset": end}))
+
+    async def close(self) -> None:
+        return None
+
+
+class _CollectSink:
+    def __init__(self) -> None:
+        self.tables: list[pa.Table] = []
+
+    async def open(self) -> None:
+        return None
+
+    async def write(self, batch: Batch) -> None:
+        table = batch.to_pyarrow()
+        if table.num_rows:
+            self.tables.append(table)
+
+    async def close(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize("segmentation", (1, 3, 1000))
+def test_aggregate_stream_matches_batch_across_segmentation(
+    tmp_path: Path, segmentation: int
+) -> None:
+    plan = _aggregate_program().compile_stream(Runtime())
+    sink = _CollectSink()
+
+    async def exercise() -> None:
+        job = await StreamingRunner(
+            plan,
+            {
+                "input": SourceBinding(
+                    _SegmentedSource(_probe_table(), segmentation),
+                    watermark_policy=DisabledWatermarks(),
+                )
+            },
+            {"output": [SinkBinding.ordinary("archive", sink)]},
+            ManagedCheckpointRuntime(tmp_path),
+        ).start_async()
+        outcome = await job.wait_async()
+        assert outcome.state == "completed"
+
+    asyncio.run(exercise())
+
+    stream_output = pa.concat_tables(sink.tables)
+    batch_result = (
+        _aggregate_program()
+        .compile_batch(Runtime())
+        .execute({"input": Batch.from_pyarrow(_probe_table())})
+    )
+    batch_output = batch_result.outputs["output"].to_pyarrow()
+    _assert_aggregates_match(
+        _aggregate_columns(stream_output), _aggregate_columns(batch_output)
+    )

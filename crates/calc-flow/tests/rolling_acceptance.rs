@@ -640,7 +640,7 @@ fn probe_non_goal_output_kinds_and_frames_are_rejected() {
         "late_policy": {"kind": "error", "scope": "envelope"},
         "value_policy": "stateful_numeric_v1"
     });
-    for kind in ["count", "sum", "mean", "variance", "std", "stddev"] {
+    for kind in ["min", "max", "covariance", "correlation", "std"] {
         let mut document = base.clone();
         document["outputs"] = serde_json::json!([{
             "kind": kind,
@@ -652,7 +652,7 @@ fn probe_non_goal_output_kinds_and_frames_are_rejected() {
         }]);
         assert!(
             serde_json::from_value::<RollingSpec>(document).is_err(),
-            "aggregate catalog kind {kind} must stay rejected"
+            "non-goal catalog kind {kind} must stay rejected"
         );
     }
     let mut duration = base.clone();

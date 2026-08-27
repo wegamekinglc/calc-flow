@@ -577,3 +577,267 @@ async fn empty_envelope_is_a_noop() {
     drain(&mut collector, &mut observed);
     assert!(observed.event_times.is_empty());
 }
+
+// ---------------------------------------------------------------------
+// SCE-07: aggregate outputs in the stream lifecycle
+// ---------------------------------------------------------------------
+
+fn aggregate_operator() -> RollingOperator {
+    RollingOperator::new(
+        "rolling",
+        input_schema(),
+        serde_json::from_value(serde_json::json!({
+            "configuration_version": 1,
+            "state_layout_version": 1,
+            "partition_by": ["symbol"],
+            "event_time": "ts",
+            "sequence_by": ["sequence"],
+            "outputs": [
+                {
+                    "kind": "count",
+                    "primitive_version": 1,
+                    "input": "price",
+                    "output": "price_count_2",
+                    "frame": {"kind": "rows", "size": 2},
+                    "min_periods": 1
+                },
+                {
+                    "kind": "sum",
+                    "primitive_version": 1,
+                    "input": "price",
+                    "output": "price_sum_2",
+                    "frame": {"kind": "rows", "size": 2},
+                    "min_periods": 1
+                },
+                {
+                    "kind": "mean",
+                    "primitive_version": 1,
+                    "input": "price",
+                    "output": "price_mean_2",
+                    "frame": {"kind": "rows", "size": 2},
+                    "min_periods": 1
+                },
+                {
+                    "kind": "stddev",
+                    "primitive_version": 1,
+                    "input": "price",
+                    "output": "price_std_2",
+                    "frame": {"kind": "rows", "size": 2},
+                    "min_periods": 1,
+                    "ddof": 1
+                },
+                {
+                    "kind": "sum",
+                    "primitive_version": 1,
+                    "input": "volume",
+                    "output": "volume_sum_2",
+                    "frame": {"kind": "rows", "size": 2},
+                    "min_periods": 1
+                }
+            ],
+            "allowed_lateness_micros": 0,
+            "late_policy": {"kind": "error", "scope": "envelope"},
+            "value_policy": "stateful_numeric_v1"
+        }))
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+#[derive(Default, PartialEq, Debug)]
+struct AggregateObserved {
+    event_times: Vec<i64>,
+    symbols: Vec<String>,
+    counts: Vec<Option<u64>>,
+    sums: Vec<Option<f64>>,
+    means: Vec<Option<f64>>,
+    stddevs: Vec<Option<f64>>,
+    volume_sums: Vec<Option<i64>>,
+}
+
+fn drain_aggregates(collector: &mut EdgeCollector, observed: &mut AggregateObserved) {
+    for message in collector.drain("output") {
+        let batch = message.as_data().unwrap();
+        for record in batch.table_payload().unwrap().batches() {
+            let event_times = record
+                .column_by_name("ts")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
+            let symbols = record
+                .column_by_name("symbol")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let counts = record
+                .column_by_name("price_count_2")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            let sums = record
+                .column_by_name("price_sum_2")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let means = record
+                .column_by_name("price_mean_2")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let stddevs = record
+                .column_by_name("price_std_2")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let volume_sums = record
+                .column_by_name("volume_sum_2")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            for index in 0..record.num_rows() {
+                observed.event_times.push(event_times.value(index));
+                observed.symbols.push(symbols.value(index).to_owned());
+                observed.counts.push(counts.iter().nth(index).unwrap());
+                observed.sums.push(sums.iter().nth(index).unwrap());
+                observed.means.push(means.iter().nth(index).unwrap());
+                observed.stddevs.push(stddevs.iter().nth(index).unwrap());
+                observed
+                    .volume_sums
+                    .push(volume_sums.iter().nth(index).unwrap());
+            }
+        }
+    }
+}
+
+fn aggregate_rows() -> Vec<InputRow> {
+    vec![
+        (10, "a", 1, Some(1.0), Some(10)),
+        (10, "b", 1, Some(5.0), Some(50)),
+        (11, "a", 2, Some(2.0), Some(20)),
+        (12, "b", 2, Some(6.0), Some(60)),
+        (12, "a", 3, Some(3.0), Some(30)),
+        (13, "b", 3, Some(7.0), Some(70)),
+    ]
+}
+
+#[tokio::test]
+async fn aggregate_outputs_emit_in_canonical_order_at_the_closing_watermark() {
+    let job = job();
+    let mut operator = aggregate_operator();
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    let mut observed = AggregateObserved::default();
+
+    operator
+        .process_data(
+            "input",
+            input_batch(&aggregate_rows()),
+            &context(&job, None),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    drain_aggregates(&mut collector, &mut observed);
+    assert!(observed.event_times.is_empty());
+
+    operator
+        .on_watermark(
+            EventTime::from_micros(11),
+            &context(&job, Some(11)),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    drain_aggregates(&mut collector, &mut observed);
+    assert_eq!(observed.event_times, vec![10, 10, 11]);
+    assert_eq!(observed.symbols, vec!["a", "b", "a"]);
+    assert_eq!(observed.counts, vec![Some(1), Some(1), Some(2)]);
+    assert_eq!(observed.sums, vec![Some(1.0), Some(5.0), Some(3.0)]);
+    assert_eq!(observed.means, vec![Some(1.0), Some(5.0), Some(1.5)]);
+    assert_eq!(observed.stddevs[0], None);
+    assert_eq!(observed.stddevs[1], None);
+    assert_eq!(observed.stddevs[2], Some(0.5_f64.sqrt()));
+    assert_eq!(observed.volume_sums, vec![Some(10), Some(50), Some(30)]);
+
+    operator
+        .on_end(&context(&job, Some(11)), &mut collector)
+        .await
+        .unwrap();
+    drain_aggregates(&mut collector, &mut observed);
+    assert_eq!(observed.event_times, vec![10, 10, 11, 12, 12, 13]);
+    assert_eq!(observed.sums[3..], [Some(5.0), Some(11.0), Some(13.0)]);
+    assert_eq!(observed.volume_sums[3..], [Some(50), Some(110), Some(130)]);
+}
+
+#[tokio::test]
+async fn aggregate_micro_batch_segmentation_matches_one_envelope_output() {
+    let rows = aggregate_rows();
+    let job = job();
+    let mut one_shot = aggregate_operator();
+    let mut one_shot_collector = EdgeCollector::new(one_shot.output_ports().to_vec());
+    let mut expected = AggregateObserved::default();
+    one_shot
+        .process_data(
+            "input",
+            input_batch(&rows),
+            &context(&job, None),
+            &mut one_shot_collector,
+        )
+        .await
+        .unwrap();
+    one_shot
+        .on_watermark(
+            EventTime::from_micros(100),
+            &context(&job, Some(100)),
+            &mut one_shot_collector,
+        )
+        .await
+        .unwrap();
+    drain_aggregates(&mut one_shot_collector, &mut expected);
+
+    let mut segmented = aggregate_operator();
+    let mut segmented_collector = EdgeCollector::new(segmented.output_ports().to_vec());
+    let mut actual = AggregateObserved::default();
+    let mut watermark = 0;
+    for chunk in rows.chunks(3) {
+        segmented
+            .process_data(
+                "input",
+                input_batch(chunk),
+                &context(&job, None),
+                &mut segmented_collector,
+            )
+            .await
+            .unwrap();
+        watermark = chunk.iter().map(|row| row.0).max().unwrap_or(watermark);
+        segmented
+            .on_watermark(
+                EventTime::from_micros(watermark),
+                &context(&job, Some(watermark)),
+                &mut segmented_collector,
+            )
+            .await
+            .unwrap();
+    }
+    segmented
+        .on_watermark(
+            EventTime::from_micros(100),
+            &context(&job, Some(100)),
+            &mut segmented_collector,
+        )
+        .await
+        .unwrap();
+    segmented
+        .on_end(&context(&job, Some(100)), &mut segmented_collector)
+        .await
+        .unwrap();
+    drain_aggregates(&mut segmented_collector, &mut actual);
+
+    assert_eq!(actual, expected);
+}

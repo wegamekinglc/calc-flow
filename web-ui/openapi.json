@@ -1597,6 +1597,32 @@
               }
             ]
           },
+          "RollingFrameSpec": {
+            "description": "Rolling frame declaration (SCE-00 D5). Only row-count frames are\nsupported in this release; duration frames arrive with SCE-08.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Row-count frame `rows [i - size + 1, i]` including the current row.",
+                "properties": {
+                  "kind": {
+                    "const": "rows",
+                    "type": "string"
+                  },
+                  "size": {
+                    "description": "Positive retained row count.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "size"
+                ],
+                "type": "object"
+              }
+            ]
+          },
           "RollingOutputSpec": {
             "description": "One declared rolling output and its output column name.",
             "oneOf": [
@@ -1673,6 +1699,237 @@
                   "input",
                   "output",
                   "periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Valid (non-null, non-NaN) sample count over the frame (SCE-00 D3.2).",
+                "properties": {
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingFrameSpec",
+                    "description": "Row-count frame."
+                  },
+                  "input": {
+                    "description": "Input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "count",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Checked sum over the frame; integer results stay exact (SCE-00 D3.2).",
+                "properties": {
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingFrameSpec",
+                    "description": "Row-count frame."
+                  },
+                  "input": {
+                    "description": "Input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "sum",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Float64 mean over the frame.",
+                "properties": {
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingFrameSpec",
+                    "description": "Row-count frame."
+                  },
+                  "input": {
+                    "description": "Input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "mean",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Float64 variance over the frame (SCE-00 D5 divisor rules).",
+                "properties": {
+                  "ddof": {
+                    "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
+                    "format": "uint8",
+                    "maximum": 255.0,
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingFrameSpec",
+                    "description": "Row-count frame."
+                  },
+                  "input": {
+                    "description": "Input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "variance",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods",
+                  "ddof"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Float64 standard deviation over the frame (SCE-00 D5 divisor rules).",
+                "properties": {
+                  "ddof": {
+                    "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
+                    "format": "uint8",
+                    "maximum": 255.0,
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingFrameSpec",
+                    "description": "Row-count frame."
+                  },
+                  "input": {
+                    "description": "Input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "stddev",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods",
+                  "ddof"
                 ],
                 "type": "object"
               }
@@ -2930,6 +3187,32 @@
               }
             ]
           },
+          "RollingFrameSpec": {
+            "description": "Rolling frame declaration (SCE-00 D5). Only row-count frames are\nsupported in this release; duration frames arrive with SCE-08.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Row-count frame `rows [i - size + 1, i]` including the current row.",
+                "properties": {
+                  "kind": {
+                    "const": "rows",
+                    "type": "string"
+                  },
+                  "size": {
+                    "description": "Positive retained row count.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "size"
+                ],
+                "type": "object"
+              }
+            ]
+          },
           "RollingOutputSpec": {
             "description": "One declared rolling output and its output column name.",
             "oneOf": [
@@ -3006,6 +3289,237 @@
                   "input",
                   "output",
                   "periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Valid (non-null, non-NaN) sample count over the frame (SCE-00 D3.2).",
+                "properties": {
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/RollingFrameSpec",
+                    "description": "Row-count frame."
+                  },
+                  "input": {
+                    "description": "Input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "count",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Checked sum over the frame; integer results stay exact (SCE-00 D3.2).",
+                "properties": {
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/RollingFrameSpec",
+                    "description": "Row-count frame."
+                  },
+                  "input": {
+                    "description": "Input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "sum",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Float64 mean over the frame.",
+                "properties": {
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/RollingFrameSpec",
+                    "description": "Row-count frame."
+                  },
+                  "input": {
+                    "description": "Input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "mean",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Float64 variance over the frame (SCE-00 D5 divisor rules).",
+                "properties": {
+                  "ddof": {
+                    "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
+                    "format": "uint8",
+                    "maximum": 255.0,
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/RollingFrameSpec",
+                    "description": "Row-count frame."
+                  },
+                  "input": {
+                    "description": "Input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "variance",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods",
+                  "ddof"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Float64 standard deviation over the frame (SCE-00 D5 divisor rules).",
+                "properties": {
+                  "ddof": {
+                    "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
+                    "format": "uint8",
+                    "maximum": 255.0,
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/RollingFrameSpec",
+                    "description": "Row-count frame."
+                  },
+                  "input": {
+                    "description": "Input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "stddev",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods",
+                  "ddof"
                 ],
                 "type": "object"
               }
