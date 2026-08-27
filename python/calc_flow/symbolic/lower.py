@@ -73,6 +73,10 @@ _TABLE_OUTPUT_PRIMITIVES: Final = frozenset(
     {"table_input", "project", "filter", "with_columns"}
 )
 
+_ROLLING_PRIMITIVES: Final = frozenset({"lag", "delta"})
+
+_U64_MAX: Final = (1 << 64) - 1
+
 _BINARY_SQL: Final = {
     "add": "+",
     "sub": "-",
@@ -107,12 +111,19 @@ _CAST_TYPES: Final = {
 
 @dataclass(frozen=True, slots=True)
 class _Segment:
-    """One fused row-local table resolution over one table input lineage."""
+    """One fused row-local table resolution over one table input lineage.
+
+    ``predicate`` filters declared *below* every rolling feature (they feed
+    the rolling stage); ``post_predicate`` filters declared *above* them
+    (they apply after). Without rolling primitives both fuse at the final
+    stage, preserving the historical behavior.
+    """
 
     input_node: Node
     fields: tuple[str, ...]
     env: tuple[tuple[str, Node], ...]
     predicate: Node | None
+    post_predicate: Node | None = None
 
 
 def _cstr(value: CValue | None, /) -> str:
@@ -158,16 +169,28 @@ def _resolve_table(node: Node, path: str, /) -> _Segment:
             columns,
             tuple((field, env[field]) for field in columns),
             child.predicate,
+            child.post_predicate,
         )
     if name == "filter":
         child = _resolve_table(node.args[0], f"{path}.filter.value")
         predicate = _inline(node.args[1], dict(child.env), f"{path}.filter.predicate")
+        if _segment_has_rolling(child) or any(True for _ in _find_rolling(predicate)):
+            combined = (
+                predicate
+                if child.post_predicate is None
+                else build("and", (child.post_predicate, predicate), {})
+            )
+            return _Segment(
+                child.input_node, child.fields, child.env, child.predicate, combined
+            )
         combined = (
             predicate
             if child.predicate is None
             else build("and", (child.predicate, predicate), {})
         )
-        return _Segment(child.input_node, child.fields, child.env, combined)
+        return _Segment(
+            child.input_node, child.fields, child.env, combined, child.post_predicate
+        )
     if name == "with_columns":
         child = _resolve_table(node.args[0], f"{path}.with_columns.value")
         env = dict(child.env)
@@ -179,8 +202,18 @@ def _resolve_table(node: Node, path: str, /) -> _Segment:
             (*child.fields, *names),
             tuple(env.items()),
             child.predicate,
+            child.post_predicate,
         )
     _reject_primitive(path, node)
+
+
+def _segment_has_rolling(segment: _Segment, /) -> bool:
+    return any(True for _, tree in segment.env for _ in _find_rolling(tree)) or any(
+        True
+        for tree in (segment.predicate, segment.post_predicate)
+        if tree is not None
+        for _ in _find_rolling(tree)
+    )
 
 
 def _inline(node: Node, env: dict[str, Node], path: str, /) -> Node:
@@ -189,7 +222,7 @@ def _inline(node: Node, env: dict[str, Node], path: str, /) -> Node:
         return env[_cstr(node.attr("name"))]
     if name == "literal":
         return node
-    if name not in _COLUMN_PRIMITIVES:
+    if name not in _COLUMN_PRIMITIVES and name not in _ROLLING_PRIMITIVES:
         _reject_primitive(path, node)
     if name == "cast":
         _cast_target(node, path)
@@ -199,6 +232,14 @@ def _inline(node: Node, env: dict[str, Node], path: str, /) -> Node:
         dict(node.attrs.entries),
         version=node.op.version,
     )
+
+
+def _find_rolling(node: Node, /):
+    """Yield every lag/delta subtree in first-appearance order."""
+    if node.op.name in _ROLLING_PRIMITIVES:
+        yield node
+    for argument in node.args:
+        yield from _find_rolling(argument)
 
 
 def _cast_target(node: Node, path: str, /) -> str:
@@ -282,6 +323,7 @@ def _expression_node(
     select: list[str],
     filter_sql: str | None,
     input_schema: tuple[Field, ...] | None,
+    output_schema: tuple[Field, ...] | None = None,
     /,
 ) -> dict[str, object]:
     node: dict[str, object] = {
@@ -303,6 +345,15 @@ def _expression_node(
                 "schema": [_field_json(field) for field in input_schema],
             }
         ]
+    if output_schema is not None:
+        node["output_ports"] = [
+            {
+                "name": "output",
+                "kind": "table",
+                "required": True,
+                "schema": [_field_json(field) for field in output_schema],
+            }
+        ]
     return node
 
 
@@ -312,6 +363,183 @@ def _field_json(field: Field, /) -> dict[str, object]:
         "data_type": field.data_type,
         "nullable": field.nullable,
     }
+
+
+def _cint(value: CValue | None, /) -> int | None:
+    return value.value if isinstance(value, CInt) else None
+
+
+def _replace_rolling(node: Node, replacements: dict[str, str], /) -> Node:
+    replacement = replacements.get(node.digest)
+    if replacement is not None:
+        return _base_ref(replacement)
+    return build(
+        node.op.name,
+        tuple(_replace_rolling(argument, replacements) for argument in node.args),
+        dict(node.attrs.entries),
+        version=node.op.version,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _RollingPlan:
+    """One lowered rolling stage: the project node plus the rewritten
+    row-local environment that references its output columns."""
+
+    node_id: str
+    node: dict[str, object]
+    env: tuple[tuple[str, Node], ...]
+    post_predicate: Node | None
+    input_field_names: tuple[str, ...]
+    output_fields: tuple[Field, ...]
+
+
+# Rolling planning validates every lag/delta occurrence with stable,
+# declaration-ordered error paths before emitting the frozen node shape.
+def _plan_rolling(
+    output_name: str,
+    segment: _Segment,
+    path: str,
+    allowed_lateness_micros: int,
+    late_policy: str,
+    /,
+) -> _RollingPlan | None:
+    # #lizard forgives
+    occurrences: list[Node] = []
+    seen: set[str] = set()
+    ordered_trees = [tree for _, tree in segment.env]
+    ordered_trees += [
+        tree for tree in (segment.predicate, segment.post_predicate) if tree is not None
+    ]
+    for tree in ordered_trees:
+        for subtree in _find_rolling(tree):
+            if subtree.digest not in seen:
+                seen.add(subtree.digest)
+                occurrences.append(subtree)
+    if not occurrences:
+        return None
+
+    input_fields = _schema_fields(segment.input_node.attr("schema"))
+    input_types = {field.name: field for field in input_fields}
+    entity_by = _cstr_seq(segment.input_node.attr("entity_by"))
+    sequence_by = _cstr_seq(segment.input_node.attr("sequence_by"))
+    event_time = _cstr(segment.input_node.attr("event_time"))
+    if not entity_by or not sequence_by or not event_time:
+        errors.raise_compile(
+            path,
+            errors.ORDERING_REQUIRED,
+            "rolling lag/delta requires declared entity_by, event_time, and"
+            " sequence_by ordering keys on the input table",
+        )
+
+    whole_feature = {
+        tree.digest: name
+        for name, tree in segment.env
+        if tree.op.name in _ROLLING_PRIMITIVES
+    }
+    used_names = set(input_types) | {name for name, _ in segment.env}
+    replacements: dict[str, str] = {}
+    declarations: list[dict[str, object]] = []
+    derived_fields: list[Field] = []
+    for index, subtree in enumerate(occurrences):
+        kind = subtree.op.name
+        name = whole_feature.get(subtree.digest)
+        if name is None:
+            name = f"{output_name}__cf_roll_{index}"
+            if name in used_names:
+                errors.raise_compile(
+                    f"{path}.{name}",
+                    errors.DUPLICATE_NAME,
+                    f"materialized rolling column {name!r} collides with a"
+                    " declared field",
+                )
+            used_names.add(name)
+        replacements[subtree.digest] = name
+        argument = subtree.args[0]
+        if argument.op.name != "column_ref":
+            errors.raise_compile(
+                f"{path}.{name}",
+                errors.UNSUPPORTED_TYPE,
+                f"rolling {kind} argument must be an input column in this release",
+            )
+        input_name = _cstr(argument.attr("name"))
+        field = input_types.get(input_name)
+        if field is None:
+            errors.raise_compile(
+                f"{path}.{name}",
+                errors.SCHEMA_MISMATCH,
+                f"rolling {kind} argument column {input_name!r} is not in the"
+                " input schema",
+            )
+        periods = _cint(subtree.attr("periods")) or 1
+        declarations.append(
+            {
+                "kind": kind,
+                "primitive_version": 1,
+                "input": input_name,
+                "output": name,
+                "periods": periods,
+            }
+        )
+        derived_fields.append(Field(name, field.data_type, nullable=True))
+
+    node_id = f"{output_name}__cf_rolling"
+    node: dict[str, object] = {
+        "id": node_id,
+        "operator": {
+            "kind": "rolling",
+            "spec": {
+                "configuration_version": 1,
+                "state_layout_version": 1,
+                "partition_by": list(entity_by),
+                "event_time": event_time,
+                "sequence_by": list(sequence_by),
+                "outputs": declarations,
+                "allowed_lateness_micros": allowed_lateness_micros,
+                "late_policy": (
+                    {"kind": "error", "scope": "envelope"}
+                    if late_policy == "error"
+                    else {"kind": "drop", "metrics_version": 1}
+                ),
+                "value_policy": "stateful_numeric_v1",
+            },
+        },
+        "input_ports": [
+            {
+                "name": "input",
+                "kind": "table",
+                "required": True,
+                "schema": [_field_json(field) for field in input_fields],
+            }
+        ],
+        "output_ports": [
+            {
+                "name": "output",
+                "kind": "table",
+                "required": True,
+                "schema": [
+                    *(_field_json(field) for field in input_fields),
+                    *(_field_json(field) for field in derived_fields),
+                ],
+            }
+        ],
+    }
+    env = tuple(
+        (name, _replace_rolling(tree, replacements)) for name, tree in segment.env
+    )
+    post_predicate = (
+        None
+        if segment.post_predicate is None
+        else _replace_rolling(segment.post_predicate, replacements)
+    )
+    return _RollingPlan(
+        node_id,
+        node,
+        env,
+        post_predicate,
+        (*input_types, *(field.name for field in derived_fields)),
+        (*input_fields, *derived_fields),
+    )
 
 
 def _check_declared_inputs(program: Program, /) -> None:
@@ -325,7 +553,17 @@ def _check_declared_inputs(program: Program, /) -> None:
             )
 
 
-def _lower_program(program: Program, mode: str, /) -> dict[str, object]:
+# The lowerer keeps per-output segment staging in one deterministic pass:
+# stage order, edge wiring, and id assignment are semantic, so the rolling,
+# prefilter, and CSE stages stay in one place.
+def _lower_program(
+    program: Program,
+    mode: str,
+    allowed_lateness_micros: int,
+    late_policy: str,
+    /,
+) -> dict[str, object]:
+    # #lizard forgives
     _check_declared_inputs(program)
     segments = []
     for output_name, value in program.outputs:
@@ -341,6 +579,21 @@ def _lower_program(program: Program, mode: str, /) -> dict[str, object]:
         if sum(1 for _, segment in segments if segment.input_node.digest == digest) > 1
     }
     fanout = len(program.inputs) > 1 or bool(multi_output_lineages)
+    plans = {
+        output_name: _plan_rolling(
+            output_name,
+            segment,
+            f"outputs.{output_name}",
+            allowed_lateness_micros,
+            late_policy,
+        )
+        for output_name, segment in segments
+    }
+    rolling_digests = {
+        segment.input_node.digest
+        for (output_name, segment), plan in zip(segments, plans.values(), strict=True)
+        if plan is not None
+    }
     nodes: list[dict[str, object]] = []
     edges: list[dict[str, object]] = []
     fanout_ids: dict[str, str] = {}
@@ -357,20 +610,76 @@ def _lower_program(program: Program, mode: str, /) -> dict[str, object]:
                     [_quote_identifier(field.name) for field in schema],
                     None,
                     schema,
+                    schema if input_node.digest in rolling_digests else None,
                 )
             )
             fanout_ids[input_node.digest] = input_name
     for output_name, segment in segments:
+        rolling = plans[output_name]
         env = dict(segment.env)
-        reserved = frozenset(env)
-        fused = extract_common(
-            tuple((field, env[field]) for field in segment.fields),
-            segment.predicate,
-            reserved,
-        )
         input_field_names = [
             field.name for field in _schema_fields(segment.input_node.attr("schema"))
         ]
+        upstream_id: str | None = None
+        final_predicate = segment.predicate
+        if rolling is not None:
+            if segment.predicate is not None:
+                prefilter_id = f"{output_name}__cf_prefilter"
+                input_fields = _schema_fields(segment.input_node.attr("schema"))
+                nodes.append(
+                    _expression_node(
+                        prefilter_id,
+                        [_quote_identifier(name) for name in input_field_names],
+                        _sql(segment.predicate),
+                        input_fields,
+                        input_fields,
+                    )
+                )
+                if fanout:
+                    edges.append(
+                        {
+                            "source_node": fanout_ids[segment.input_node.digest],
+                            "source_port": "output",
+                            "target_node": prefilter_id,
+                            "target_port": "input",
+                        }
+                    )
+                upstream_id = prefilter_id
+            nodes.append(rolling.node)
+            if upstream_id is not None:
+                edges.append(
+                    {
+                        "source_node": upstream_id,
+                        "source_port": "output",
+                        "target_node": rolling.node_id,
+                        "target_port": "input",
+                    }
+                )
+            elif fanout:
+                edges.append(
+                    {
+                        "source_node": fanout_ids[segment.input_node.digest],
+                        "source_port": "output",
+                        "target_node": rolling.node_id,
+                        "target_port": "input",
+                    }
+                )
+            upstream_id = rolling.node_id
+            env = dict(rolling.env)
+            input_field_names = list(rolling.input_field_names)
+            final_predicate = rolling.post_predicate
+        elif segment.post_predicate is not None:
+            final_predicate = (
+                segment.post_predicate
+                if segment.predicate is None
+                else build("and", (segment.predicate, segment.post_predicate), {})
+            )
+        reserved = frozenset(env)
+        fused = extract_common(
+            tuple((field, env[field]) for field in segment.fields),
+            final_predicate,
+            reserved,
+        )
         cse_order = [name for tier in fused.tiers for name, _ in tier]
         needed: set[str] = set()
         for _, tree in fused.selects:
@@ -412,7 +721,19 @@ def _lower_program(program: Program, mode: str, /) -> dict[str, object]:
             if position == len(stage_ids) - 1 and fused.predicate is not None:
                 filter_sql = _sql(fused.predicate)
             if position == 0:
-                if fanout:
+                if upstream_id is not None:
+                    edges.append(
+                        {
+                            "source_node": upstream_id,
+                            "source_port": "output",
+                            "target_node": node_id,
+                            "target_port": "input",
+                        }
+                    )
+                    input_schema = (
+                        rolling.output_fields if rolling is not None else None
+                    )
+                elif fanout:
                     edges.append(
                         {
                             "source_node": fanout_ids[segment.input_node.digest],
@@ -496,18 +817,76 @@ def _check_expression_capability(
     )
 
 
+def _program_needs_rolling(program: Program, /) -> bool:
+    return any(True for _, value in program.outputs for _ in _find_rolling(value._node))
+
+
+# The capability gate conjoins the frozen stream lifecycle facts; every
+# fact fails with the same stable capability_mismatch code.
+def _check_rolling_capability(
+    program: Program,
+    capabilities: object,
+    mode: str,
+    /,
+) -> None:
+    # #lizard forgives
+    for operator in capabilities.operators:
+        if operator.kind != "rolling":
+            continue
+        if mode not in operator.modes:
+            errors.raise_compile(
+                program.name,
+                errors.CAPABILITY_MISMATCH,
+                f"the rolling operator does not support {mode} mode in the"
+                " selected capability snapshot",
+            )
+        if mode == "stream" and (
+            operator.finality == "unproven"
+            or not operator.stateful
+            or not operator.microbatch_invariant
+            or operator.checkpoint_support != "checkpointed_stateful"
+            or not isinstance(operator.state_version, int)
+            or operator.state_version <= 0
+            or not operator.deterministic
+            or not operator.replay_safe
+        ):
+            errors.raise_compile(
+                program.name,
+                errors.CAPABILITY_MISMATCH,
+                "the rolling operator does not prove stream lifecycle facts"
+                " in the selected capability snapshot",
+            )
+        return
+    errors.raise_compile(
+        program.name,
+        errors.CAPABILITY_MISMATCH,
+        "the capability snapshot does not offer the rolling operator",
+    )
+
+
 def lower_program_document(
     program: Program,
     runtime: Runtime,
     mode: str,
     /,
+    *,
+    allowed_lateness_micros: int = 0,
+    late_policy: str = "error",
 ) -> dict[str, object]:
-    """Analyze and lower one program to its strict project-v3 document."""
+    """Analyze and lower one program to its strict project-v3 document.
+
+    The lateness arguments are validated whenever the program contains
+    rolling primitives; row-local programs do not consume them.
+    """
 
     selected = _require_runtime(runtime, "lower_program_document")
     mode_value = _require_mode(mode)
     _check_expression_capability(program, selected, mode_value)
-    return _lower_program(program, mode_value)
+    if _program_needs_rolling(program):
+        _validate_lateness(allowed_lateness_micros, late_policy)
+        _, capabilities = _run(program, selected, mode_value)
+        _check_rolling_capability(program, capabilities, mode_value)
+    return _lower_program(program, mode_value, allowed_lateness_micros, late_policy)
 
 
 def compile_program_batch(program: Program, runtime: object, /) -> BatchExecutionPlan:
@@ -527,14 +906,19 @@ def compile_program_stream(
 ) -> StreamExecutionPlan:
     """Lower one program to a strict project-v3 continuous plan.
 
-    Row-local lowering has no stateful late-row surface; the lateness
-    arguments are validated and accepted for forward compatibility with the
-    stateful stages that consume them.
+    The validated lateness arguments are written into every lowered rolling
+    node; row-local programs are unaffected by them.
     """
 
     selected = _require_runtime(runtime, "compile_stream")
     _validate_lateness(allowed_lateness_micros, late_policy)
-    document = lower_program_document(program, selected, "stream")
+    document = lower_program_document(
+        program,
+        selected,
+        "stream",
+        allowed_lateness_micros=allowed_lateness_micros,
+        late_policy=late_policy,
+    )
     return selected._compile_stream_graph_project(
         _canonical(document), requirements=StreamRequirements()
     )
@@ -543,20 +927,22 @@ def compile_program_stream(
 def _validate_lateness(allowed_lateness_micros: object, late_policy: object, /) -> None:
     if type(allowed_lateness_micros) is not int:
         raise TypeError(
-            "compile_stream allowed_lateness_micros must be an exact int; got"
+            "allowed_lateness_micros must be an exact int; got"
             f" {type_name(allowed_lateness_micros)}"
         )
     if allowed_lateness_micros < 0:
         raise ValueError(
-            "compile_stream allowed_lateness_micros: invalid_literal: must be"
-            " non-negative"
+            "allowed_lateness_micros: invalid_literal: must be non-negative"
+        )
+    if allowed_lateness_micros > _U64_MAX:
+        raise ValueError(
+            "allowed_lateness_micros: invalid_literal: must fit the unsigned"
+            " 64-bit microsecond range"
         )
     if type(late_policy) is not str:
-        raise TypeError(
-            f"compile_stream late_policy must be a string; got {type_name(late_policy)}"
-        )
+        raise TypeError(f"late_policy must be a string; got {type_name(late_policy)}")
     if late_policy not in ("error", "drop"):
         raise ValueError(
-            "compile_stream late_policy: invalid_literal: must be 'error' or"
+            "late_policy: invalid_literal: must be 'error' or"
             f" 'drop'; got {late_policy!r}"
         )

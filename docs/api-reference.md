@@ -46,26 +46,27 @@ Run all user examples with
 The `calc_flow` crate re-exports its supported public types from
 [`lib.rs`](../crates/calc-flow/src/lib.rs).
 
-| Area               | Primary APIs                                                                                                       |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| Data               | `Batch`, `BatchKind`, `BatchMetadata`, `TableBatch`                                                                |
-| Batch graph        | `PipelineBuilder`, `Edge`, `PortEndpoint`, `BatchExecutionPlan`                                                    |
-| Stream plan        | `StreamExecutionPlan`, `StreamRequirements`, `DeliveryGuarantee`, `StreamRuntimeConfig`                            |
-| Operator traits    | `Port`, `OperatorMetadata`, `NodeOperator`, `BatchOperator`, `StreamOperator`, `OperatorStateSnapshot`             |
-| Built-in operators | `ExpressionOperator`, `SqlOperator`, `UnionOperator`, `WindowAggregateOperator`, `StreamJoinOperator`              |
-| Window model       | `WindowSpec`, `WindowGeometry`, `AggregateSpec`, `AggregateFunction`, `MAX_WINDOW_OVERLAP`                         |
-| Stream join model  | `StreamJoinSpec`, `StreamJoinType`, `JoinTimeBounds`, `JoinStateLimits`, `StreamJoinStatus`                        |
-| Execution          | `ExecutionOptions`, `RunResult`, `RunMetadata`, `NodeTiming`                                                       |
-| Stream model       | `StreamMessage`, `StreamMessageKind`, `StreamJobContext`, `EventTime`, `Epoch`                                     |
-| Stream channel     | `EdgeBudget`, `EnvelopeCost`, `ChannelMetrics`, `EdgeSender`, `EdgeReceiver`, `edge_channel`                       |
-| State backend      | `StateBackend`, `StateLineageBackend`, `StateLineageKey`, `StateHandle`, `LocalStateBackend`                       |
-| State manifest     | `CheckpointManifest`, `CheckpointManifestFields`, `ManifestExpectation`, `OperatorManifestEntry`, `RecoveryStatus` |
-| UDF/providers      | `UdfRegistry`, `UdfReference`, `ProviderRegistry`, `BatchOperatorFactory`, `StreamOperatorFactory`                 |
-| Sources and sinks  | `StreamSource`, `StreamSink`, `TransactionalStreamSink`, `SourceBinding`, `SinkBinding`                            |
-| Continuous runtime | `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`, `Cursor`, `SourceEvent`, `JobStatus`, `JobOutcome`  |
-| Projects           | `ProjectSpec`, `compile_project`, `validate_project`                                                               |
-| Persistence        | `FileProjectStore`, `LocalStateBackend`, `CheckpointManifest`                                                      |
-| Errors             | `CalcFlowError`, `Result<T>`                                                                                       |
+| Area               | Primary APIs                                                                                                             |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| Data               | `Batch`, `BatchKind`, `BatchMetadata`, `TableBatch`                                                                      |
+| Batch graph        | `PipelineBuilder`, `Edge`, `PortEndpoint`, `BatchExecutionPlan`                                                          |
+| Stream plan        | `StreamExecutionPlan`, `StreamRequirements`, `DeliveryGuarantee`, `StreamRuntimeConfig`                                  |
+| Operator traits    | `Port`, `OperatorMetadata`, `NodeOperator`, `BatchOperator`, `StreamOperator`, `OperatorStateSnapshot`                   |
+| Built-in operators | `ExpressionOperator`, `SqlOperator`, `RollingOperator`, `UnionOperator`, `WindowAggregateOperator`, `StreamJoinOperator` |
+| Window model       | `WindowSpec`, `WindowGeometry`, `AggregateSpec`, `AggregateFunction`, `MAX_WINDOW_OVERLAP`                               |
+| Rolling model      | `RollingSpec`, `RollingOutputSpec`, `LatePolicySpec`, `LateErrorScope`, `RollingValuePolicy`                             |
+| Stream join model  | `StreamJoinSpec`, `StreamJoinType`, `JoinTimeBounds`, `JoinStateLimits`, `StreamJoinStatus`                              |
+| Execution          | `ExecutionOptions`, `RunResult`, `RunMetadata`, `NodeTiming`                                                             |
+| Stream model       | `StreamMessage`, `StreamMessageKind`, `StreamJobContext`, `EventTime`, `Epoch`                                           |
+| Stream channel     | `EdgeBudget`, `EnvelopeCost`, `ChannelMetrics`, `EdgeSender`, `EdgeReceiver`, `edge_channel`                             |
+| State backend      | `StateBackend`, `StateLineageBackend`, `StateLineageKey`, `StateHandle`, `LocalStateBackend`                             |
+| State manifest     | `CheckpointManifest`, `CheckpointManifestFields`, `ManifestExpectation`, `OperatorManifestEntry`, `RecoveryStatus`       |
+| UDF/providers      | `UdfRegistry`, `UdfReference`, `ProviderRegistry`, `BatchOperatorFactory`, `StreamOperatorFactory`                       |
+| Sources and sinks  | `StreamSource`, `StreamSink`, `TransactionalStreamSink`, `SourceBinding`, `SinkBinding`                                  |
+| Continuous runtime | `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`, `Cursor`, `SourceEvent`, `JobStatus`, `JobOutcome`        |
+| Projects           | `ProjectSpec`, `compile_project`, `validate_project`                                                                     |
+| Persistence        | `FileProjectStore`, `LocalStateBackend`, `CheckpointManifest`                                                            |
+| Errors             | `CalcFlowError`, `Result<T>`                                                                                             |
 
 `compile_project` produces a `BatchExecutionPlan`. `compile_batch` and
 `compile_stream` are the Rust graph-compilation entry points. A
@@ -272,21 +273,21 @@ programs, static analysis, and row-local compilation with no data execution
 path. Every expression, feature, program, and analysis result is immutable;
 constructors copy caller-owned sequences and mappings.
 
-| Member                                                                        | Contract                                                                |
-| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `Expr` / `ColumnExpr` / `ArrayExpr` / `TableExpr` / `Parameter`               | Immutable typed declaration values with v1 digests                      |
-| `table_input(name, *, schema, entity_by=(), event_time=None, sequence_by=())` | Declare one named table input                                           |
-| `parameter(name, *, kind=...)`                                                | Declare one named static table or array input                           |
-| `Field(name, data_type, nullable=True)`                                       | One exact table field declaration                                       |
-| `rows(size)` / `duration(micros)`                                             | Row-count and exact-microsecond rolling frames                          |
-| `exact_time(...)` / `event_time_bucket(...)`                                  | Cross-section group declarations                                        |
-| `row` / `ts` / `cs` / `table` / `linalg` / `window`                           | Namespace functions over expressions                                    |
-| `FeatureSet(features=())` / `.with_feature(name, value)`                      | Ordered uniquely named column expressions                               |
-| `TableExpr.with_columns(features)`                                            | Append a feature set as derived columns                                 |
-| `Program(name, *, inputs=(), outputs=())`                                     | Declared inputs and outputs with the runtime-independent v1 fingerprint |
-| `Program.analyze(runtime, *, mode)` / `.explain(runtime, *, mode)`            | Static analysis and deterministic fact rendering                        |
-| `Program.compile_batch(runtime)` / `.compile_stream(runtime, *, ...)`         | Lower a row-local program to a strict project-v3 execution plan         |
-| `AnalysisIssue` / `AnalysisResult`                                            | Immutable findings with stable output/input-rooted paths                |
+| Member                                                                        | Contract                                                                                 |
+| ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `Expr` / `ColumnExpr` / `ArrayExpr` / `TableExpr` / `Parameter`               | Immutable typed declaration values with v1 digests                                       |
+| `table_input(name, *, schema, entity_by=(), event_time=None, sequence_by=())` | Declare one named table input                                                            |
+| `parameter(name, *, kind=...)`                                                | Declare one named static table or array input                                            |
+| `Field(name, data_type, nullable=True)`                                       | One exact table field declaration                                                        |
+| `rows(size)` / `duration(micros)`                                             | Row-count and exact-microsecond rolling frames                                           |
+| `exact_time(...)` / `event_time_bucket(...)`                                  | Cross-section group declarations                                                         |
+| `row` / `ts` / `cs` / `table` / `linalg` / `window`                           | Namespace functions over expressions                                                     |
+| `FeatureSet(features=())` / `.with_feature(name, value)`                      | Ordered uniquely named column expressions                                                |
+| `TableExpr.with_columns(features)`                                            | Append a feature set as derived columns                                                  |
+| `Program(name, *, inputs=(), outputs=())`                                     | Declared inputs and outputs with the runtime-independent v1 fingerprint                  |
+| `Program.analyze(runtime, *, mode)` / `.explain(runtime, *, mode)`            | Static analysis and deterministic fact rendering                                         |
+| `Program.compile_batch(runtime)` / `.compile_stream(runtime, *, ...)`         | Lower row-local and lag/delta rolling declarations to a strict project-v3 execution plan |
+| `AnalysisIssue` / `AnalysisResult`                                            | Immutable findings with stable output/input-rooted paths                                 |
 
 Structural identity uses `identical()`; public comparison operators build
 symbolic expressions, and converting one to `bool` fails. See the

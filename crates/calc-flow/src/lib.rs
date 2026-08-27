@@ -74,8 +74,10 @@ pub use json::{JsonMap, MAX_JSON_DEPTH, canonical_json};
 pub use operator::{
     AggregateFunction, AggregateSpec, BatchOperator, BatchOperatorContext, BatchOperatorFactory,
     EdgeCollector, ExpressionOperator, ExternalOperatorSpec, IngressProgress,
-    IngressProgressSnapshot, IngressState, JoinStateLimits, JoinTimeBounds, MAX_WINDOW_OVERLAP,
-    NodeOperator, OperatorMetadata, OperatorStateSnapshot, Port, ProviderRegistry,
+    IngressProgressSnapshot, IngressState, JoinStateLimits, JoinTimeBounds, LateErrorScope,
+    LatePolicySpec, MAX_WINDOW_OVERLAP, NodeOperator, OperatorMetadata, OperatorStateSnapshot,
+    Port, ProviderRegistry, ROLLING_CONFIGURATION_VERSION, ROLLING_STATE_LAYOUT_VERSION,
+    RollingOperator, RollingOutputSpec, RollingSpec, RollingValuePolicy,
     STREAM_JOIN_MAX_SAFE_JSON_INTEGER, STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1, SqlOperator,
     StateSegment, StreamCollector, StreamJoinOperator, StreamJoinSideStatus, StreamJoinSpec,
     StreamJoinStatus, StreamJoinType, StreamOperator, StreamOperatorContext, StreamOperatorFactory,

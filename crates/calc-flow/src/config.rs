@@ -16,12 +16,13 @@ use crate::{
     ConnectorRegistrySnapshot, ConnectorSinkFactory, ConnectorSourceFactory, Cursor,
     DataFusionConfig, DeliveryGuarantee, DeliveryParticipant, Edge, Epoch, ExpressionOperator,
     ExternalOperatorSpec, FormatIdentity, JsonMap, NodeOperator, ParticipantRole, PipelineBuilder,
-    Port, PortEndpoint, ProviderRegistry, Result, RetentionClass, SecretHandle, SecretReference,
-    SecretResolver, SecretResolverKind, SinkBinding as RuntimeSinkBinding, SinkRecovery,
-    SourceBinding as RuntimeSourceBinding, SourceCapabilities, SourceEvent, SourceSchema,
-    SqlOperator, StreamExecutionPlan, StreamJoinOperator, StreamJoinSpec, StreamRequirements,
-    StreamSink, StreamSource, TransactionSupport, TransactionalStreamSink, UdfKind, UdfReference,
-    UdfRegistrySnapshot, UnionOperator, WatermarkPolicy, WindowAggregateOperator, WindowSpec,
+    Port, PortEndpoint, ProviderRegistry, Result, RetentionClass, RollingOperator, RollingSpec,
+    SecretHandle, SecretReference, SecretResolver, SecretResolverKind,
+    SinkBinding as RuntimeSinkBinding, SinkRecovery, SourceBinding as RuntimeSourceBinding,
+    SourceCapabilities, SourceEvent, SourceSchema, SqlOperator, StreamExecutionPlan,
+    StreamJoinOperator, StreamJoinSpec, StreamRequirements, StreamSink, StreamSource,
+    TransactionSupport, TransactionalStreamSink, UdfKind, UdfReference, UdfRegistrySnapshot,
+    UnionOperator, WatermarkPolicy, WindowAggregateOperator, WindowSpec,
     validate_delivery_guarantee, validate_selected_udfs,
 };
 
@@ -145,6 +146,8 @@ pub enum OperatorSpec {
     Union,
     /// Stateful event-time aggregation for stream graphs.
     Window { spec: WindowSpec },
+    /// Native row-window lag/delta over partitioned event-time rows.
+    Rolling { spec: RollingSpec },
     /// Bounded two-input event-time inner Join for stream graphs.
     StreamJoin { spec: StreamJoinSpec },
     External {
@@ -1288,6 +1291,7 @@ fn project_node_operator(
         } => sql_node(node, inputs, outputs, query, aliases, references),
         OperatorSpec::Union => union_node(node, inputs, &outputs, mode),
         OperatorSpec::Window { spec } => window_node(node, &inputs, &outputs, spec, mode),
+        OperatorSpec::Rolling { spec } => rolling_node(node, &inputs, &outputs, spec),
         OperatorSpec::StreamJoin { spec } => stream_join_node(node, &inputs, &outputs, spec, mode),
         OperatorSpec::External {
             provider,
@@ -1358,6 +1362,39 @@ fn window_node(
     let operator = WindowAggregateOperator::new(&node.id, schema, spec.clone())?;
     validate_derived_outputs(outputs, crate::OperatorMetadata::output_ports(&operator))?;
     Ok(NodeOperator::Window(operator))
+}
+
+// Rolling construction validates the complete dual-mode operator contract
+// before exposing the node to the compiled plan.
+// #lizard forgives
+fn rolling_node(
+    node: &NodeSpec,
+    inputs: &[Port],
+    outputs: &[Port],
+    spec: &RollingSpec,
+) -> Result<NodeOperator> {
+    let [input] = inputs else {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "node.input_ports".into(),
+            message: "rolling operators require one explicit input port".into(),
+        });
+    };
+    if input.name() != "input" || input.kind() != BatchKind::Table || !input.required() {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "node.input_ports".into(),
+            message: "rolling operators require one required table input named `input`".into(),
+        });
+    }
+    let schema = input
+        .schema()
+        .cloned()
+        .ok_or_else(|| CalcFlowError::InvalidArgument {
+            field: "node.input_ports[0].schema".into(),
+            message: "rolling operators require an exact input schema".into(),
+        })?;
+    let operator = RollingOperator::new(&node.id, schema, spec.clone())?;
+    validate_derived_outputs(outputs, crate::OperatorMetadata::output_ports(&operator))?;
+    Ok(NodeOperator::Rolling(operator))
 }
 
 fn stream_join_node(
@@ -1812,6 +1849,10 @@ fn validate_operator(
             validate_window_operator(node, index, spec, mode, &base, issues);
             (Some(vec!["input"]), Some(vec!["output"]))
         }
+        OperatorSpec::Rolling { spec } => {
+            validate_rolling_operator(node, index, spec, &base, issues);
+            (Some(vec!["input"]), Some(vec!["output"]))
+        }
         OperatorSpec::StreamJoin { spec } => {
             validate_stream_join_operator(node, index, spec, mode, &base, issues);
             (Some(vec!["left", "right"]), Some(vec!["output"]))
@@ -1908,6 +1949,38 @@ fn validate_window_operator(
     } else if let Ok(input) = port_from_spec(&node.input_ports[0])
         && let Some(schema) = input.schema().cloned()
         && let Err(error) = WindowAggregateOperator::new(&node.id, schema, spec.clone())
+    {
+        issues.push(issue(base, "invalid_operator", error.to_string()));
+    }
+}
+
+// Rolling validation mirrors window construction while accumulating stable
+// field-level diagnostics; the operator is available in both runtime modes.
+// #lizard forgives
+fn validate_rolling_operator(
+    node: &NodeSpec,
+    index: usize,
+    spec: &RollingSpec,
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let valid_input = matches!(
+        node.input_ports.as_slice(),
+        [input]
+            if input.name == "input"
+                && input.kind == BatchKind::Table
+                && input.required
+                && !input.schema.is_empty()
+    );
+    if !valid_input {
+        issues.push(issue(
+            format!("graph.nodes[{index}].input_ports"),
+            "invalid_ports",
+            "rolling requires one required table input named `input` with an exact schema",
+        ));
+    } else if let Ok(input) = port_from_spec(&node.input_ports[0])
+        && let Some(schema) = input.schema().cloned()
+        && let Err(error) = RollingOperator::new(&node.id, schema, spec.clone())
     {
         issues.push(issue(base, "invalid_operator", error.to_string()));
     }
@@ -2563,6 +2636,7 @@ fn operator_udfs(operator: &OperatorSpec) -> &[UdfReference] {
         OperatorSpec::Expression { udfs, .. } | OperatorSpec::Sql { udfs, .. } => udfs,
         OperatorSpec::Union
         | OperatorSpec::Window { .. }
+        | OperatorSpec::Rolling { .. }
         | OperatorSpec::StreamJoin { .. }
         | OperatorSpec::External { .. } => &[],
     }

@@ -156,6 +156,13 @@ explicit asymmetric time bounds, required state and match limits, and a
 derived prefixed output schema; see the
 [continuous streaming guide](streaming-guide.md).
 
+A `RollingSpec` declares native row-window lag and delta outputs over
+entity-partitioned, event-time-ordered rows: ordered partition and sequence
+keys, a non-null UTC `timestamp[us]` event-time column, allowed lateness, and
+a late-row policy. `RollingOperator` compiles into both batch and stream
+graphs, emits the input fields followed by the declared rolling outputs, and
+checkpoints its stream state at the aligned epoch cut.
+
 `table_matmul` creates a provider-backed `table_matmul@1` external node with
 the required mixed-kind inputs `table` (table) and `weights` (array), and the
 array output `output`. It selects ordered numeric table columns and multiplies
@@ -171,11 +178,12 @@ graph is built. The `calc_flow.symbolic` package holds typed immutable column,
 table, array, and parameter expressions with canonical v1 digests; an ordered
 `FeatureSet` of uniquely named features that `TableExpr.with_columns` appends
 as derived columns; and an immutable `Program` over declared inputs and
-outputs. The package is declaration, analysis, and row-local compilation
+outputs. The package is declaration, analysis, and compilation
 only: it exposes no `eval`, data, or runner path.
 `Program.compile_batch(runtime)` and `Program.compile_stream(runtime)` lower
-a row-local program into the same strict project-v3 execution plans, and
-execution remains owned by the execution plans and runners above.
+row-local expressions and `ts.lag`/`ts.delta` rolling declarations into the
+same strict project-v3 execution plans, and execution remains owned by the
+execution plans and runners above.
 
 Every `Program` carries a runtime-independent v1 fingerprint over its
 declaration graph. `Program.analyze(runtime, mode=...)` verifies the program

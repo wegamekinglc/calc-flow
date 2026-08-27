@@ -76,11 +76,12 @@ asynchronous and accepts only `Batch` values.
 
 ### Engine boundary
 
-`ExpressionOperator` and `SqlOperator` are built-in operators. Each implements
-both `BatchOperator` and `StreamOperator`; `UnionOperator`,
-`WindowAggregateOperator`, and `StreamJoinOperator` are stream-only. Add them
-through `PipelineBuilder::add_node`, which accepts a `NodeOperator` conversion
-from a boxed built-in, custom batch operator, or custom stream operator.
+`ExpressionOperator`, `SqlOperator`, and `RollingOperator` are built-in
+operators that implement both `BatchOperator` and `StreamOperator`;
+`UnionOperator`, `WindowAggregateOperator`, and `StreamJoinOperator` are
+stream-only. Add them through `PipelineBuilder::add_node`, which accepts a
+`NodeOperator` conversion from a boxed built-in, custom batch operator, or
+custom stream operator.
 
 Every operator implements `OperatorMetadata`. Custom finite operators implement
 `BatchOperator`, whose `BatchOperatorContext` carries the run-scoped context;
@@ -169,6 +170,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+## Row-window rolling
+
+`RollingOperator` evaluates native row-window lag and delta outputs over
+entity-partitioned, event-time-ordered rows. Its data-only `RollingSpec`
+declares ordered `partition_by` and `sequence_by` keys, a non-null UTC
+`timestamp[us]` `event_time` column, and one `RollingOutputSpec` per rolling
+column: kind `lag` or `delta`, `primitive_version` 1, input and output column
+names, and a positive `periods` distance. `configuration_version` and
+`state_layout_version` must equal `ROLLING_CONFIGURATION_VERSION` and
+`ROLLING_STATE_LAYOUT_VERSION` (both 1 in this release),
+`allowed_lateness_micros` and a `LatePolicySpec` of `Error` (envelope scope)
+or `Drop` (metrics version 1) classify late rows against the input watermark,
+and `RollingValuePolicy` is the frozen `stateful_numeric_v1`, which preserves
+a null or NaN current or referenced value. Validation rejects unknown fields,
+empty or duplicate keys, duplicate or input-colliding output names, nullable
+or floating sequence columns, non-numeric delta inputs, and ambiguous column
+references. The output schema is the input schema followed by the declared
+outputs in declaration order, each nullable.
+
+The same kernel serves both lifecycles. Batch evaluation orders the complete
+input canonically and classifies no late rows: every row is final at
+end-of-input. Stream evaluation buffers rows until the input watermark passes
+each row's closing coordinate — its event time plus the allowed lateness —
+then emits the ordered final rows, rejecting the whole envelope under the
+`error` policy or dropping each late row and recording the late metrics under
+`drop`. Duplicate row identities are rejected. Rolling stream state
+checkpoints at the aligned epoch cut as an Arrow IPC segment with state
+version 1, and restore or reset reproduces the same ordered output rows.
 
 ## Stream compilation and continuous runtime
 

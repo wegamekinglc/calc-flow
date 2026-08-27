@@ -23,6 +23,7 @@ pub(crate) enum CompiledBatchOperator {
     External(Box<dyn BatchOperator>),
     Expression(ExpressionOperator),
     Sql(SqlOperator),
+    Rolling(crate::RollingOperator),
 }
 
 impl CompiledBatchOperator {
@@ -30,6 +31,7 @@ impl CompiledBatchOperator {
         match definition.operator {
             NodeOperator::Expression(operator) => Ok(Self::Expression(operator)),
             NodeOperator::Sql(operator) => Ok(Self::Sql(operator)),
+            NodeOperator::Rolling(operator) => Ok(Self::Rolling(operator)),
             NodeOperator::Batch(operator) => Ok(Self::External(operator)),
             NodeOperator::Union(_)
             | NodeOperator::Window(_)
@@ -46,15 +48,15 @@ impl CompiledBatchOperator {
     pub(crate) fn snapshot(&self) -> Result<Value> {
         match self {
             Self::External(operator) => operator.snapshot(),
-            Self::Expression(_) | Self::Sql(_) => Ok(Value::Null),
+            Self::Expression(_) | Self::Sql(_) | Self::Rolling(_) => Ok(Value::Null),
         }
     }
 
     pub(crate) fn restore(&mut self, state: &Value) -> Result<()> {
         match self {
             Self::External(operator) => operator.restore(state),
-            Self::Expression(_) | Self::Sql(_) if state.is_null() => Ok(()),
-            Self::Expression(_) | Self::Sql(_) => Err(CalcFlowError::Format {
+            Self::Expression(_) | Self::Sql(_) | Self::Rolling(_) if state.is_null() => Ok(()),
+            Self::Expression(_) | Self::Sql(_) | Self::Rolling(_) => Err(CalcFlowError::Format {
                 message: "stateless operator state must be null".into(),
             }),
         }
@@ -63,7 +65,7 @@ impl CompiledBatchOperator {
     pub(crate) fn reset(&mut self) -> Result<()> {
         match self {
             Self::External(operator) => operator.reset(),
-            Self::Expression(_) | Self::Sql(_) => Ok(()),
+            Self::Expression(_) | Self::Sql(_) | Self::Rolling(_) => Ok(()),
         }
     }
 
@@ -75,6 +77,11 @@ impl CompiledBatchOperator {
     ) -> Result<BTreeMap<String, Batch>> {
         match self {
             Self::External(operator) => {
+                operator
+                    .process(inputs, &BatchOperatorContext { run })
+                    .await
+            }
+            Self::Rolling(operator) => {
                 operator
                     .process(inputs, &BatchOperatorContext { run })
                     .await

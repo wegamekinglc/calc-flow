@@ -184,22 +184,23 @@ name/version pair fails construction. `ProviderArrayRules` pairs the exact
 `supported_dtypes` tuple with a `safe_dtype_rule` and `shape_rules`, and
 stores both tuples sorted by identity.
 
-The `operators` tuple contains exactly `expression@1`, `sql@1`, and
-`stream_join@1`, with truths anchored in the engine implementation:
+The `operators` tuple contains exactly `expression@1`, `rolling@1`, `sql@1`,
+and `stream_join@1`, with truths anchored in the engine implementation:
 
 | Operator        | Modes         | Finality      | Checkpoint support     | State version |
 | --------------- | ------------- | ------------- | ---------------------- | ------------- |
 | `expression@1`  | batch, stream | per_row_final | stateless              | —             |
+| `rolling@1`     | batch, stream | per_row_final | checkpointed_stateful  | 1             |
 | `sql@1`         | batch, stream | unproven      | stateless              | —             |
 | `stream_join@1` | stream        | unproven      | checkpointed_stateful  | 1             |
 
-`stream_join@1` is the only stateful operator and the only one that requires
-a watermark; `expression@1` is the only micro-batch-invariant operator. All
-three report `deterministic=True` and `replay_safe=True`. For `sql@1` those
-two claims hold from the engine viewpoint: exactly-once stream plans reject
-nodes that select volatile registered UDFs, and stream compilation rejects
-read-only queries that call volatile built-in SQL functions such as
-`random()`.
+`rolling@1` and `stream_join@1` are the stateful operators and the only ones
+that require a watermark; `expression@1` and `rolling@1` are micro-batch
+invariant. All four report `deterministic=True` and `replay_safe=True`. For
+`sql@1` those two claims hold from the engine viewpoint: exactly-once stream
+plans reject nodes that select volatile registered UDFs, and stream
+compilation rejects read-only queries that call volatile built-in SQL
+functions such as `random()`.
 
 Providers registered through `register_provider` keep their existing
 signature and source compatibility. The registration API accepts no lifecycle
@@ -583,20 +584,45 @@ Programs with one input and one output bind the plan endpoints `input` and
 endpoints `<node>.input` and `<node>.output` deterministically. Batches
 supplied at execution must match the declared input schema exactly.
 
+`ts.lag` and `ts.delta` declarations lower to one native `rolling` node per
+program output, placed ahead of the fused row-local stages. Rolling requires
+the input table to declare its `entity_by`, `event_time`, and `sequence_by`
+ordering keys; a program missing them fails with `ordering_required`. In this
+release each lag or delta argument must be a plain input column: a computed
+operand such as `ts.lag(quotes["x"] + 1.0)`, or a lag over a derived column,
+fails with `unsupported_type` rooted at the output feature. `periods` is a
+positive integer defaulting to `1`. Every lag/delta occurrence in one output
+shares that output's rolling node: a whole-feature occurrence keeps its
+feature name as the output column, while an occurrence nested inside a larger
+expression materializes as a deterministically named
+`<output>__cf_roll_<index>` column that the fused stages then reference. A
+filter declared below every rolling feature becomes a deterministic
+`<output>__cf_prefilter` expression node feeding the rolling node; a filter
+declared above them applies after it. The lowered node's frozen spec carries
+`configuration_version` and `state_layout_version` 1, the declared ordering
+keys, one entry per lag/delta output (`kind`, `primitive_version` 1,
+`input`, `output`, `periods`), the `allowed_lateness_micros` and
+`late_policy` values validated by `compile_stream` — `error` lowers to an
+envelope-scoped rejection and `drop` to a metrics-recorded drop — and the
+`stateful_numeric_v1` value policy, which preserves a null or NaN current or
+referenced value. Batch lowering writes the default lateness values, batch
+evaluation classifies no late rows, and a program without rolling
+declarations is unaffected by the lateness arguments.
+
 Analysis rejections surface as `CompileError` with the first issue's
-`{path}: {code}: {message}`. Declarations the row-local lowerer does not
-implement — `ts` rolling primitives, `cs` cross-section statistics, event
-`window` nodes, `linalg` array bridges, and `parameter` static inputs — fail
-with the eighth issue code `unknown_primitive_version` rooted at the output
-or `static_inputs.<name>`, in both batch and stream modes; a stream
-aggregate or SQL window is never silently made batch-local. Array outputs
-fail with `unknown_primitive_version` in batch mode; stream mode rejects
-them earlier, at the analysis phase, with `unbounded_state` rooted at
-`outputs.<name>` — the stream-safety rule for an array output with row-axis
-lineage described above. Casts to non-portable targets fail with
-`unsupported_type` at `outputs.<name>.cast.data_type`. The lateness
-arguments of `compile_stream` are validated and accepted for forward
-compatibility; row-local lowering has no stateful late-row surface.
+`{path}: {code}: {message}`. Declarations the lowerer does not implement —
+the `ts` rolling aggregates (`count`, `sum`, `mean`, `min`, `max`,
+`variance`, `stddev`), `ts.correlation`, duration-based rolling frames, `cs`
+cross-section statistics, event `window` nodes, `linalg` array bridges, and
+`parameter` static inputs — fail with the eighth issue code
+`unknown_primitive_version` rooted at the output or `static_inputs.<name>`,
+in both batch and stream modes; a stream aggregate or SQL window is never
+silently made batch-local. Array outputs fail with
+`unknown_primitive_version` in batch mode; stream mode rejects them earlier,
+at the analysis phase, with `unbounded_state` rooted at `outputs.<name>` —
+the stream-safety rule for an array output with row-axis lineage described
+above. Casts to non-portable targets fail with `unsupported_type` at
+`outputs.<name>.cast.data_type`.
 
 Stream plans also reject read-only queries that call volatile built-in
 functions (for example `random()`): `compile_stream` resolves every function
