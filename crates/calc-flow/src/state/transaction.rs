@@ -6,13 +6,16 @@
 use std::{
     any::Any,
     collections::{BTreeMap, BTreeSet},
-    fs::File,
     future::Future,
     io::Write as _,
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+// `File` only backs the unix directory-sync and unix fault-injection paths.
+#[cfg(unix)]
+use std::fs::File;
 
 #[cfg(all(test, unix))]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -143,7 +146,7 @@ pub(crate) struct ManifestTransaction {
     fault_hook: Option<ManifestTransactionFaultHook>,
     #[cfg(test)]
     operation_hook: Option<ManifestOperationHook>,
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     real_parent_sync_failure: bool,
     #[cfg(all(test, unix))]
     real_parent_sync_failure_probe: Option<ManifestParentSyncOsFailureProbe>,
@@ -260,7 +263,7 @@ impl ManifestTransaction {
             fault_hook: None,
             #[cfg(test)]
             operation_hook: None,
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             real_parent_sync_failure: false,
             #[cfg(all(test, unix))]
             real_parent_sync_failure_probe: None,
@@ -365,7 +368,7 @@ impl ManifestTransaction {
         let root = self.manifest_root.clone();
         #[cfg(test)]
         let fault_hook = self.fault_hook.clone();
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         let real_parent_sync_failure = self.real_parent_sync_failure;
         #[cfg(all(test, unix))]
         let real_parent_sync_failure_probe = self.real_parent_sync_failure_probe.clone();
@@ -378,7 +381,7 @@ impl ManifestTransaction {
                     &bytes,
                     #[cfg(test)]
                     fault_hook.as_ref(),
-                    #[cfg(test)]
+                    #[cfg(all(test, unix))]
                     real_parent_sync_failure,
                     #[cfg(all(test, unix))]
                     real_parent_sync_failure_probe.as_ref(),
@@ -1151,7 +1154,7 @@ fn publish_manifest(
     epoch: Epoch,
     bytes: &[u8],
     #[cfg(test)] fault_hook: Option<&ManifestTransactionFaultHook>,
-    #[cfg(test)] real_parent_sync_failure: bool,
+    #[cfg(all(test, unix))] real_parent_sync_failure: bool,
     #[cfg(all(test, unix))] real_parent_sync_failure_probe: Option<
         &ManifestParentSyncOsFailureProbe,
     >,
@@ -1170,7 +1173,7 @@ fn publish_manifest(
             &mut parent_synced,
             #[cfg(test)]
             fault_hook,
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             real_parent_sync_failure,
             #[cfg(all(test, unix))]
             real_parent_sync_failure_probe,
@@ -1224,7 +1227,7 @@ fn install_manifest(
     bytes: &[u8],
     parent_synced: &mut bool,
     #[cfg(test)] fault_hook: Option<&ManifestTransactionFaultHook>,
-    #[cfg(test)] real_parent_sync_failure: bool,
+    #[cfg(all(test, unix))] real_parent_sync_failure: bool,
     #[cfg(all(test, unix))] real_parent_sync_failure_probe: Option<
         &ManifestParentSyncOsFailureProbe,
     >,
@@ -1246,7 +1249,7 @@ fn install_manifest(
         parent_synced,
         #[cfg(test)]
         fault_hook,
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         real_parent_sync_failure,
         #[cfg(all(test, unix))]
         real_parent_sync_failure_probe,
@@ -1296,7 +1299,7 @@ fn sync_manifest_root(
     root: &Path,
     parent_synced: &mut bool,
     #[cfg(test)] fault_hook: Option<&ManifestTransactionFaultHook>,
-    #[cfg(test)] real_parent_sync_failure: bool,
+    #[cfg(all(test, unix))] real_parent_sync_failure: bool,
     #[cfg(all(test, unix))] real_parent_sync_failure_probe: Option<
         &ManifestParentSyncOsFailureProbe,
     >,
@@ -1510,6 +1513,13 @@ fn sync_directory(directory: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[cfg_attr(
+    not(unix),
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "non-unix stub keeps the unix fallible signature so call sites stay platform-agnostic"
+    )
+)]
 fn sync_directory(_directory: &Path) -> Result<()> {
     Ok(())
 }

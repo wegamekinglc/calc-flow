@@ -200,6 +200,13 @@ fn sync_file(path: &Path) -> std::result::Result<(), calc_flow::CalcFlowError> {
     Ok(())
 }
 
+#[cfg_attr(
+    not(unix),
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "the fallible signature only pays off on unix, where directory fsync can fail"
+    )
+)]
 fn sync_directory(directory: &Path) -> std::result::Result<(), calc_flow::CalcFlowError> {
     // Windows cannot fsync a directory through a file handle; durability
     // there rests on the per-file syncs.
