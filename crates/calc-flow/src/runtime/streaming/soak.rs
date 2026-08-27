@@ -122,6 +122,8 @@ const CHECKPOINT_SOAK_PROCESS_SCHEMA: &str = "calc-flow.m5-checkpoint-soak-proce
 const CHECKPOINT_SOAK_PLAN_SCHEMA: &str = "calc-flow.m5-checkpoint-soak-plan.v1";
 const CHECKPOINT_SOAK_SCHEMA: &str = "calc-flow.m5-checkpoint-soak.v2";
 const CHECKPOINT_SOAK_GENERATIONS: usize = 3;
+const CHECKPOINT_SOAK_RETAINED_EPOCHS: usize = 2;
+const CHECKPOINT_SOAK_MAX_RETAINED_EPOCHS: usize = 64;
 const _: () = assert!(CHECKPOINT_SOAK_SAMPLE_COUNT % CHECKPOINT_SOAK_GENERATIONS == 0);
 const _: () = assert!(CHECKPOINT_RSS_STABLE_WINDOW_SAMPLES % 2 == 0);
 const _: () = assert!(
@@ -4708,6 +4710,22 @@ fn checkpoint_soak_process_plans(
     executable_sha256: &str,
     mode: CheckpointSoakProcessMode,
 ) -> Vec<CheckpointSoakProcessPlan> {
+    checkpoint_soak_process_plans_with_retention(
+        run_root,
+        commit,
+        executable_sha256,
+        mode,
+        CHECKPOINT_SOAK_RETAINED_EPOCHS,
+    )
+}
+
+fn checkpoint_soak_process_plans_with_retention(
+    run_root: &Path,
+    commit: &str,
+    executable_sha256: &str,
+    mode: CheckpointSoakProcessMode,
+    retained_epochs: usize,
+) -> Vec<CheckpointSoakProcessPlan> {
     let ranges = match mode {
         CheckpointSoakProcessMode::Smoke => [0..0, 0..0, 0..0],
         CheckpointSoakProcessMode::Standard => [0..40, 40..80, 80..120],
@@ -4739,7 +4757,7 @@ fn checkpoint_soak_process_plans(
                     CheckpointSoakProcessMode::Smoke => 0,
                     CheckpointSoakProcessMode::Standard => 20,
                 },
-                retained_epochs: 2,
+                retained_epochs,
                 final_generation: generation + 1 == CHECKPOINT_SOAK_GENERATIONS,
                 mode,
                 config_hash: String::new(),
@@ -4887,7 +4905,8 @@ fn validate_checkpoint_soak_plan(plan: &CheckpointSoakProcessPlan) -> Result<()>
         || plan.parent_pid == std::process::id()
         || plan.sample_start != expected.start
         || plan.sample_end != expected.end
-        || plan.retained_epochs != 2
+        || plan.retained_epochs == 0
+        || plan.retained_epochs > CHECKPOINT_SOAK_MAX_RETAINED_EPOCHS
         || plan.final_generation != (plan.generation + 1 == CHECKPOINT_SOAK_GENERATIONS)
         || plan.config_hash != checkpoint_soak_plan_hash(plan)
     {
@@ -5546,7 +5565,7 @@ fn validate_checkpoint_soak_report(
         || report.source_close_events != 2
         || report.sink_close_events != 2
         || report.failed_checkpoints != 0
-        || report.maximum_manifest_count > 3
+        || report.maximum_manifest_count > plan.retained_epochs + 1
         || report.maximum_state_bytes > MAX_CHECKPOINT_SOAK_STATE_BYTES
         || report.terminal_tasks != 0
         || report.terminal_charged_edges != 0
@@ -5944,9 +5963,10 @@ fn aggregate_checkpoint_soak_processes(
     }
 }
 
-async fn run_checkpoint_soak_processes(
+async fn run_checkpoint_soak_processes_with_retention(
     run_root: &Path,
     mode: CheckpointSoakProcessMode,
+    retained_epochs: usize,
 ) -> Result<CheckpointSoakProcessEvidence> {
     let run_root = run_root
         .canonicalize()
@@ -5957,7 +5977,13 @@ async fn run_checkpoint_soak_processes(
     let executable = checkpoint_soak_test_executable()?;
     let executable_sha256 = checkpoint_soak_file_sha256(&executable)?;
     let commit = strict_command_output("git", &["rev-parse", "HEAD"])?;
-    let mut plans = checkpoint_soak_process_plans(&run_root, &commit, &executable_sha256, mode);
+    let mut plans = checkpoint_soak_process_plans_with_retention(
+        &run_root,
+        &commit,
+        &executable_sha256,
+        mode,
+        retained_epochs,
+    );
     let mut reports = Vec::with_capacity(plans.len());
     let mut exit_codes = Vec::with_capacity(plans.len());
     let mut parent_timings = Vec::with_capacity(plans.len());
@@ -6050,11 +6076,21 @@ fn checkpoint_soak_expected_records(manifest: &crate::CheckpointManifest) -> BTr
 }
 
 async fn run_checkpoint_restart_soak_smoke() -> CheckpointRestartSoakReport {
+    run_checkpoint_restart_soak_smoke_with_retention(CHECKPOINT_SOAK_RETAINED_EPOCHS).await
+}
+
+async fn run_checkpoint_restart_soak_smoke_with_retention(
+    retained_epochs: usize,
+) -> CheckpointRestartSoakReport {
     let directory = tempfile::tempdir().unwrap();
-    run_checkpoint_soak_processes(directory.path(), CheckpointSoakProcessMode::Smoke)
-        .await
-        .unwrap()
-        .report
+    run_checkpoint_soak_processes_with_retention(
+        directory.path(),
+        CheckpointSoakProcessMode::Smoke,
+        retained_epochs,
+    )
+    .await
+    .unwrap()
+    .report
 }
 
 #[cfg(target_os = "linux")]
@@ -6248,19 +6284,22 @@ async fn run_checkpoint_restart_linux_soak() {
         &libc,
     );
     println!("{metadata}");
-    let evidence =
-        match run_checkpoint_soak_processes(directory.path(), CheckpointSoakProcessMode::Standard)
-            .await
-        {
-            Ok(evidence) => evidence,
-            Err(error) => {
-                let retained = directory.keep();
-                panic!(
-                    "checkpoint soak evidence retained at {}: {error}",
-                    retained.display()
-                );
-            }
-        };
+    let evidence = match run_checkpoint_soak_processes_with_retention(
+        directory.path(),
+        CheckpointSoakProcessMode::Standard,
+        CHECKPOINT_SOAK_RETAINED_EPOCHS,
+    )
+    .await
+    {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            let retained = directory.keep();
+            panic!(
+                "checkpoint soak evidence retained at {}: {error}",
+                retained.display()
+            );
+        }
+    };
     let evidence_root = directory.keep();
     let report = &evidence.report;
     assert_eq!(report.restarts, 2);
@@ -7623,6 +7662,32 @@ async fn checkpoint_restart_soak_smoke_exercises_retention_and_compaction() {
     assert!(report.completed_epochs >= 12);
     assert!(report.compacted_window_epochs > 0);
     assert!(report.maximum_manifest_count <= 3);
+    assert!(report.maximum_state_bytes > 0);
+    assert_eq!(report.duplicate_records, 0);
+    assert_eq!(report.missing_records, 0);
+    assert_eq!(report.terminal_tasks, 0);
+    assert_eq!(report.terminal_charged_edges, 0);
+    assert_eq!(report.terminal_registries, (0, 0));
+    assert_eq!(report.temporary_artifacts, 0);
+}
+
+// DAL-164 regression: deep retention must not stretch per-epoch checkpoint
+// cost beyond the smoke budget after process restarts.
+#[tokio::test]
+async fn checkpoint_restart_soak_smoke_retains_max_epochs_without_stall() {
+    let report =
+        run_checkpoint_restart_soak_smoke_with_retention(CHECKPOINT_SOAK_MAX_RETAINED_EPOCHS).await;
+
+    assert_eq!(report.restarts, 2);
+    assert_eq!(report.generation_process_ids.len(), 3);
+    assert_eq!(report.generation_exit_codes, [0, 0, 0]);
+    assert!(report.completed_epochs >= 12);
+    assert!(report.compacted_window_epochs > 0);
+    assert!(
+        report.maximum_manifest_count > 3,
+        "deep retention must accumulate manifests beyond the default bound"
+    );
+    assert!(report.maximum_manifest_count <= CHECKPOINT_SOAK_MAX_RETAINED_EPOCHS + 1);
     assert!(report.maximum_state_bytes > 0);
     assert_eq!(report.duplicate_records, 0);
     assert_eq!(report.missing_records, 0);
