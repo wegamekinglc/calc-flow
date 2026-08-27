@@ -77,7 +77,7 @@ pub use operator::{
     IngressProgressSnapshot, IngressState, JoinStateLimits, JoinTimeBounds, LateErrorScope,
     LatePolicySpec, MAX_WINDOW_OVERLAP, NodeOperator, OperatorMetadata, OperatorStateSnapshot,
     Port, ProviderRegistry, ROLLING_CONFIGURATION_VERSION, ROLLING_STATE_LAYOUT_VERSION,
-    RollingOperator, RollingOutputSpec, RollingSpec, RollingValuePolicy,
+    RollingFrameSpec, RollingOperator, RollingOutputSpec, RollingSpec, RollingValuePolicy,
     STREAM_JOIN_MAX_SAFE_JSON_INTEGER, STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1, SqlOperator,
     StateSegment, StreamCollector, StreamJoinOperator, StreamJoinSideStatus, StreamJoinSpec,
     StreamJoinStatus, StreamJoinType, StreamOperator, StreamOperatorContext, StreamOperatorFactory,

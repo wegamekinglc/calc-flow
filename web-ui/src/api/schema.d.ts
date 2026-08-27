@@ -857,6 +857,19 @@ export interface components {
                     /** @constant */
                     policy: "disabled";
                 };
+                /**
+                 * @description Rolling frame declaration (SCE-00 D5). Only row-count frames are
+                 *     supported in this release; duration frames arrive with SCE-08.
+                 */
+                RollingFrameSpec: {
+                    /** @constant */
+                    kind: "rows";
+                    /**
+                     * Format: uint64
+                     * @description Positive retained row count.
+                     */
+                    size: number;
+                };
                 /** @description One declared rolling output and its output column name. */
                 RollingOutputSpec: {
                     /** @description Input column name. */
@@ -887,6 +900,111 @@ export interface components {
                      * @description Positive lag distance in rows.
                      */
                     periods: number;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Row-count frame. */
+                    frame: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingFrameSpec"];
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "count";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Row-count frame. */
+                    frame: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingFrameSpec"];
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "sum";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Row-count frame. */
+                    frame: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingFrameSpec"];
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "mean";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /**
+                     * Format: uint8
+                     * @description Degrees-of-freedom adjustment; must be `0` or `1`.
+                     */
+                    ddof: number;
+                    /** @description Row-count frame. */
+                    frame: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingFrameSpec"];
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "variance";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /**
+                     * Format: uint8
+                     * @description Degrees-of-freedom adjustment; must be `0` or `1`.
+                     */
+                    ddof: number;
+                    /** @description Row-count frame. */
+                    frame: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingFrameSpec"];
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "stddev";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
                     /**
                      * Format: uint32
                      * @description Primitive version; must equal `1`.
@@ -1335,6 +1453,19 @@ export interface components {
                     /** @constant */
                     policy: "disabled";
                 };
+                /**
+                 * @description Rolling frame declaration (SCE-00 D5). Only row-count frames are
+                 *     supported in this release; duration frames arrive with SCE-08.
+                 */
+                RollingFrameSpec: {
+                    /** @constant */
+                    kind: "rows";
+                    /**
+                     * Format: uint64
+                     * @description Positive retained row count.
+                     */
+                    size: number;
+                };
                 /** @description One declared rolling output and its output column name. */
                 RollingOutputSpec: {
                     /** @description Input column name. */
@@ -1365,6 +1496,111 @@ export interface components {
                      * @description Positive lag distance in rows.
                      */
                     periods: number;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Row-count frame. */
+                    frame: components["schemas"]["ProjectDocument"]["$defs"]["RollingFrameSpec"];
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "count";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Row-count frame. */
+                    frame: components["schemas"]["ProjectDocument"]["$defs"]["RollingFrameSpec"];
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "sum";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Row-count frame. */
+                    frame: components["schemas"]["ProjectDocument"]["$defs"]["RollingFrameSpec"];
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "mean";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /**
+                     * Format: uint8
+                     * @description Degrees-of-freedom adjustment; must be `0` or `1`.
+                     */
+                    ddof: number;
+                    /** @description Row-count frame. */
+                    frame: components["schemas"]["ProjectDocument"]["$defs"]["RollingFrameSpec"];
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "variance";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /**
+                     * Format: uint8
+                     * @description Degrees-of-freedom adjustment; must be `0` or `1`.
+                     */
+                    ddof: number;
+                    /** @description Row-count frame. */
+                    frame: components["schemas"]["ProjectDocument"]["$defs"]["RollingFrameSpec"];
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "stddev";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
                     /**
                      * Format: uint32
                      * @description Primitive version; must equal `1`.

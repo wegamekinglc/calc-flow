@@ -135,18 +135,31 @@ status surface.
 
 ## Row-window rolling
 
-`RollingOperator` evaluates native lag and delta outputs over
-entity-partitioned, event-time-ordered rows and runs in both batch and stream
-graphs. Its `RollingSpec` declares ordered partition and sequence keys, a
-non-null UTC `timestamp[us]` event-time column, lag/delta outputs with
-positive row distances, allowed lateness, and an envelope-scoped `error` or
-metrics-recorded `drop` late-row policy.
+`RollingOperator` evaluates native lag, delta, and aggregate outputs over
+entity-partitioned, event-time-ordered rows and runs in both batch and
+stream graphs. Its `RollingSpec` declares ordered partition and sequence
+keys, a non-null UTC `timestamp[us]` event-time column, lag/delta outputs
+with positive row distances or count/sum/mean/variance/stddev outputs over
+row frames with minimum-period gates, allowed lateness, and an
+envelope-scoped `error` or metrics-recorded `drop` late-row policy.
+
+Aggregates count valid samples — non-null, non-NaN values, with infinities
+counting as numeric samples — and outputs over the same input column and
+frame share one reversible accumulator group per entity. Floating sums
+follow IEEE arithmetic, integer sums stay exact and checked through a wide
+transient slide, and the statistical outputs read a West accumulator with
+explicit infinity classification: a mean over one sign of infinity is that
+infinity, over both signs it is NaN, and variance and standard deviation
+over any infinity window are NaN behind the minimum-period and divisor null
+gates.
 
 Stream execution buffers rows until the input watermark passes each row's
 event time plus the allowed lateness, then emits final rows in canonical
-order; batch evaluation classifies no late rows. The operator checkpoints its
-per-entity histories as an Arrow IPC segment with state version 1, and a
-restored or reset operator reproduces the same ordered output.
+order; batch evaluation classifies no late rows. The operator checkpoints
+its per-entity histories as an Arrow IPC segment with state version 1 — the
+segment stores only history and buffered rows, and restore rebuilds every
+accumulator by the same ordered fold — so a restored or reset operator
+reproduces the same ordered output.
 
 ## Checkpoint transaction
 

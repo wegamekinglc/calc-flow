@@ -51,10 +51,10 @@ def _reject_message(error: pytest.ExceptionInfo[CompileError]) -> str:
     return str(error.value)
 
 
-def test_stream_rolling_aggregate_is_rejected_not_made_batch_local() -> None:
+def test_stream_rolling_min_max_are_rejected_not_made_batch_local() -> None:
     quotes = _ordered()
     signals = quotes.with_columns(
-        FeatureSet([("momentum", ts.mean(quotes["x"], window=rows(20)))])
+        FeatureSet([("peak", ts.max(quotes["x"], window=rows(20)))])
     )
     program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
 
@@ -62,15 +62,15 @@ def test_stream_rolling_aggregate_is_rejected_not_made_batch_local() -> None:
         program.compile_stream(Runtime())
 
     message = _reject_message(excinfo)
-    assert "outputs.signals.momentum" in message
+    assert "outputs.signals.peak" in message
     assert "unknown_primitive_version" in message
-    assert "'mean'" in message
+    assert "'max'" in message
 
 
-def test_batch_rolling_aggregate_is_rejected() -> None:
+def test_batch_rolling_min_max_are_rejected() -> None:
     quotes = _ordered()
     signals = quotes.with_columns(
-        FeatureSet([("momentum", ts.mean(quotes["x"], window=rows(20)))])
+        FeatureSet([("floor", ts.min(quotes["x"], window=rows(20)))])
     )
     program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
 

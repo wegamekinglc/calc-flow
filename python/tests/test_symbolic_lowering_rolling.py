@@ -11,6 +11,8 @@ from calc_flow.symbolic import (
     Field,
     Program,
     TableExpr,
+    duration,
+    rows,
     table,
     table_input,
     ts,
@@ -374,3 +376,155 @@ def test_rolling_capability_is_advertised_with_frozen_lifecycle_facts() -> None:
     assert operator.state_version == 1
     assert operator.deterministic is True
     assert operator.replay_safe is True
+
+
+def test_aggregates_lower_to_one_rolling_node_with_the_frozen_shape() -> None:
+    quotes = _ordered()
+    program = _program(
+        [
+            ("n", ts.count(quotes["x"], window=rows(2))),
+            ("total", ts.sum(quotes["v"], window=rows(2), min_periods=2)),
+            ("avg", ts.mean(quotes["x"], window=rows(2))),
+            ("var", ts.variance(quotes["x"], window=rows(2), ddof=1)),
+            ("std", ts.stddev(quotes["x"], window=rows(2), ddof=0)),
+        ]
+    )
+
+    document = lower_program_document(program, Runtime(), "batch")
+
+    rolling = _rolling_nodes(document)
+    assert len(rolling) == 1
+    spec = rolling[0]["operator"]["spec"]  # type: ignore[index]
+    assert spec["outputs"] == [
+        {
+            "kind": "count",
+            "primitive_version": 1,
+            "input": "x",
+            "output": "n",
+            "frame": {"kind": "rows", "size": 2},
+            "min_periods": 1,
+        },
+        {
+            "kind": "sum",
+            "primitive_version": 1,
+            "input": "v",
+            "output": "total",
+            "frame": {"kind": "rows", "size": 2},
+            "min_periods": 2,
+        },
+        {
+            "kind": "mean",
+            "primitive_version": 1,
+            "input": "x",
+            "output": "avg",
+            "frame": {"kind": "rows", "size": 2},
+            "min_periods": 1,
+        },
+        {
+            "kind": "variance",
+            "primitive_version": 1,
+            "input": "x",
+            "output": "var",
+            "frame": {"kind": "rows", "size": 2},
+            "min_periods": 1,
+            "ddof": 1,
+        },
+        {
+            "kind": "stddev",
+            "primitive_version": 1,
+            "input": "x",
+            "output": "std",
+            "frame": {"kind": "rows", "size": 2},
+            "min_periods": 1,
+            "ddof": 0,
+        },
+    ]
+    output_schema = rolling[0]["output_ports"][0]["schema"]  # type: ignore[index]
+    derived = output_schema[len(input_schema_fields()) :]
+    assert derived == [
+        {"name": "n", "data_type": "uint64", "nullable": True},
+        {"name": "total", "data_type": "int64", "nullable": True},
+        {"name": "avg", "data_type": "float64", "nullable": True},
+        {"name": "var", "data_type": "float64", "nullable": True},
+        {"name": "std", "data_type": "float64", "nullable": True},
+    ]
+
+
+def input_schema_fields() -> list[dict[str, object]]:
+    return [
+        {"name": "ts", "data_type": "timestamp[us, UTC]", "nullable": False},
+        {"name": "symbol", "data_type": "string", "nullable": False},
+        {"name": "seq", "data_type": "uint64", "nullable": False},
+        {"name": "x", "data_type": "float64", "nullable": False},
+        {"name": "v", "data_type": "int64", "nullable": True},
+    ]
+
+
+def test_duration_frames_are_rejected_loudly_in_this_release() -> None:
+    quotes = _ordered()
+    program = Program(
+        "p",
+        inputs=[quotes],
+        outputs=[
+            (
+                "signals",
+                quotes.with_columns(
+                    FeatureSet(
+                        [("m", ts.mean(quotes["x"], window=duration(60_000_000)))]
+                    )
+                ),
+            )
+        ],
+    )
+
+    with pytest.raises(CompileError) as excinfo:
+        lower_program_document(program, Runtime(), "batch")
+
+    message = str(excinfo.value)
+    assert "unsupported_type" in message
+    assert "duration" in message
+
+
+def test_batch_execution_produces_aggregate_rows() -> None:
+    quotes = _ordered()
+    program = _program(
+        [
+            ("n", ts.count(quotes["x"], window=rows(2))),
+            ("avg", ts.mean(quotes["x"], window=rows(2))),
+            ("var", ts.variance(quotes["x"], window=rows(2), ddof=1)),
+            ("total", ts.sum(quotes["v"], window=rows(2))),
+        ]
+    )
+
+    plan = program.compile_batch(Runtime())
+    result = plan.execute({"input": Batch.from_pyarrow(_quotes_batch())})
+    output = result.outputs["output"].to_pyarrow()
+    assert output.schema.names == [
+        "ts",
+        "symbol",
+        "seq",
+        "x",
+        "v",
+        "n",
+        "avg",
+        "var",
+        "total",
+    ]
+    values = output.drop_columns(["ts"]).to_pydict()
+    assert values["symbol"] == ["a", "b", "a", "a"]
+    assert values["seq"] == [1, 1, 3, 2]
+    assert values["n"] == [1, 1, 2, 2]
+    assert values["avg"] == [1.0, 5.0, 2.0, 2.5]
+    assert values["var"] == [None, None, 2.0, 0.5]
+    assert values["total"] == [10, 50, 40, 50]
+
+
+def test_stream_compile_lowers_an_aggregate_program() -> None:
+    quotes = _ordered()
+    program = _program([("avg", ts.mean(quotes["x"], window=rows(3)))])
+
+    plan = program.compile_stream(
+        Runtime(), allowed_lateness_micros=5, late_policy="drop"
+    )
+
+    assert isinstance(plan, StreamExecutionPlan)

@@ -173,12 +173,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Row-window rolling
 
-`RollingOperator` evaluates native row-window lag and delta outputs over
-entity-partitioned, event-time-ordered rows. Its data-only `RollingSpec`
-declares ordered `partition_by` and `sequence_by` keys, a non-null UTC
-`timestamp[us]` `event_time` column, and one `RollingOutputSpec` per rolling
-column: kind `lag` or `delta`, `primitive_version` 1, input and output column
-names, and a positive `periods` distance. `configuration_version` and
+`RollingOperator` evaluates native row-window lag, delta, and aggregate
+outputs over entity-partitioned, event-time-ordered rows. Its data-only
+`RollingSpec` declares ordered `partition_by` and `sequence_by` keys, a
+non-null UTC `timestamp[us]` `event_time` column, and one `RollingOutputSpec`
+per rolling column: kind `lag` or `delta` — `primitive_version` 1, input and
+output column names, and a positive `periods` distance — or kind `count`,
+`sum`, `mean`, `variance`, or `stddev` — `primitive_version` 1, input and
+output column names, a positive `rows` frame, and `min_periods`, with
+`variance` and `stddev` adding `ddof`. `configuration_version` and
 `state_layout_version` must equal `ROLLING_CONFIGURATION_VERSION` and
 `ROLLING_STATE_LAYOUT_VERSION` (both 1 in this release),
 `allowed_lateness_micros` and a `LatePolicySpec` of `Error` (envelope scope)
@@ -186,19 +189,64 @@ or `Drop` (metrics version 1) classify late rows against the input watermark,
 and `RollingValuePolicy` is the frozen `stateful_numeric_v1`, which preserves
 a null or NaN current or referenced value. Validation rejects unknown fields,
 empty or duplicate keys, duplicate or input-colliding output names, nullable
-or floating sequence columns, non-numeric delta inputs, and ambiguous column
-references. The output schema is the input schema followed by the declared
-outputs in declaration order, each nullable.
+or floating sequence columns, non-numeric `delta`, `sum`, `mean`, `variance`,
+and `stddev` inputs, a `min_periods` below one or above the frame size, a
+`ddof` outside 0 or 1, and ambiguous column references; `count` accepts any
+input column. The output schema is the input schema followed by the declared
+outputs in declaration order, each nullable. Lag and delta keep the input
+type; the aggregates follow the frozen output-type table:
 
-The same kernel serves both lifecycles. Batch evaluation orders the complete
-input canonically and classifies no late rows: every row is final at
-end-of-input. Stream evaluation buffers rows until the input watermark passes
-each row's closing coordinate — its event time plus the allowed lateness —
-then emits the ordered final rows, rejecting the whole envelope under the
-`error` policy or dropping each late row and recording the late metrics under
-`drop`. Duplicate row identities are rejected. Rolling stream state
-checkpoints at the aligned epoch cut as an Arrow IPC segment with state
-version 1, and restore or reset reproduces the same ordered output rows.
+| Kind                           | Input            | Output type       |
+| ------------------------------ | ---------------- | ----------------- |
+| `count`                        | any column       | `uint64`          |
+| `sum`                          | signed integer   | `int64`, checked  |
+| `sum`                          | unsigned integer | `uint64`, checked |
+| `sum`                          | floating         | `float64`         |
+| `mean` / `variance` / `stddev` | numeric          | `float64`         |
+
+Aggregates count valid samples — values that are neither null nor NaN;
+infinities are numeric samples and count toward `min_periods`. A window with
+fewer than `min_periods` valid samples reads null, and a computed NaN stays
+observably distinct from that gate. Floating sums follow IEEE arithmetic: a
+window holding both signs of infinity sums to NaN, and a window holding one
+sign sums to that infinity. Integer sums stay exact and checked: the slide
+runs through a wide transient accumulator and narrows with a checked
+conversion at readout, so a window whose true sum is representable never
+reports a false overflow, while a genuine `int64` or `uint64` overflow fails
+the run loudly. Mean, variance, and standard deviation read a reversible
+West accumulator that also counts the window's positive and negative
+infinities: a mean over both signs is NaN (the undefined ∞ − ∞), a mean over
+one sign is that infinity, and a finite window keeps the incremental West
+value. Variance and standard deviation over any window holding an infinity
+are NaN — a pinned contract — and their divisor is `valid_count − ddof`: a
+non-positive divisor reads null after the `min_periods` gate and before the
+NaN classification. Negative `M2` drift from reversible removal clamps to
+zero at readout.
+
+Outputs over the same input column and frame size share one accumulator
+group — `min_periods` and `ddof` are readout parameters, not extra state —
+and each entity retains the largest `periods` distance or frame size across
+every output. The same kernel serves both lifecycles. Batch evaluation
+orders the complete input canonically and classifies no late rows: every row
+is final at end-of-input. Stream evaluation buffers rows until the input
+watermark passes each row's closing coordinate — its event time plus the
+allowed lateness — then emits the ordered final rows, rejecting the whole
+envelope under the `error` policy or dropping each late row and recording
+the late metrics under `drop`. Duplicate row identities are rejected. Rolling
+stream state checkpoints at the aligned epoch cut as an Arrow IPC segment
+with state version 1, and restore or reset reproduces the same ordered
+output rows: the segment stores only the retained history and buffered rows,
+and every accumulator — the sums, the West state, and the infinity counts —
+is rebuilt by the same ordered fold over those rows, so live, refolded, and
+restored states read identically. Sliding arithmetic that becomes non-finite
+re-folds the current window, keeping the classification exact at an
+O(frame) cost per row for those windows.
+
+Two finite-extreme corners are settled properties of this algorithm family,
+identical on every path: the incremental mean can overflow opposite-sign
+extremes ({−1e308, +1e308} reads +inf though the true mean is 0), and a
+floating sum can overflow its finite partial sum before reaching an infinity
+({−1e308, −1e308, +inf} sums to NaN while the mean reads +inf).
 
 ## Stream compilation and continuous runtime
 

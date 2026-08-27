@@ -1203,3 +1203,409 @@ async fn segments_without_identity_metadata_are_rejected() {
         .insert("operator_id".into(), serde_json::Value::Null);
     assert!(error_operator().restore(&corrupted).is_err());
 }
+
+// ---------------------------------------------------------------------
+// SCE-07: aggregate state, cancellation, and checkpoint coverage
+// ---------------------------------------------------------------------
+
+fn aggregate_operator() -> RollingOperator {
+    RollingOperator::new(
+        "rolling",
+        input_schema(),
+        serde_json::from_value(serde_json::json!({
+            "configuration_version": 1,
+            "state_layout_version": 1,
+            "partition_by": ["symbol"],
+            "event_time": "ts",
+            "sequence_by": ["sequence"],
+            "outputs": [
+                {
+                    "kind": "count",
+                    "primitive_version": 1,
+                    "input": "price",
+                    "output": "price_count_2",
+                    "frame": {"kind": "rows", "size": 2},
+                    "min_periods": 1
+                },
+                {
+                    "kind": "sum",
+                    "primitive_version": 1,
+                    "input": "price",
+                    "output": "price_sum_2",
+                    "frame": {"kind": "rows", "size": 2},
+                    "min_periods": 1
+                },
+                {
+                    "kind": "mean",
+                    "primitive_version": 1,
+                    "input": "price",
+                    "output": "price_mean_2",
+                    "frame": {"kind": "rows", "size": 2},
+                    "min_periods": 1
+                },
+                {
+                    "kind": "variance",
+                    "primitive_version": 1,
+                    "input": "price",
+                    "output": "price_var_2",
+                    "frame": {"kind": "rows", "size": 2},
+                    "min_periods": 1,
+                    "ddof": 1
+                },
+                {
+                    "kind": "sum",
+                    "primitive_version": 1,
+                    "input": "volume",
+                    "output": "volume_sum_2",
+                    "frame": {"kind": "rows", "size": 2},
+                    "min_periods": 1
+                }
+            ],
+            "allowed_lateness_micros": 0,
+            "late_policy": {"kind": "error", "scope": "envelope"},
+            "value_policy": "stateful_numeric_v1"
+        }))
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+type ObservedAggregateRow = (
+    i64,
+    String,
+    u64,
+    Option<u64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<i64>,
+);
+
+fn drain_aggregates(collector: &mut EdgeCollector, rows: &mut Vec<ObservedAggregateRow>) {
+    for message in collector.drain("output") {
+        let batch = message.as_data().unwrap();
+        for record in batch.table_payload().unwrap().batches() {
+            let event_times = record
+                .column_by_name("ts")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
+            let symbols = record
+                .column_by_name("symbol")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let sequences = record
+                .column_by_name("sequence")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            let counts = record
+                .column_by_name("price_count_2")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            let sums = record
+                .column_by_name("price_sum_2")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let means = record
+                .column_by_name("price_mean_2")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let variances = record
+                .column_by_name("price_var_2")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let volume_sums = record
+                .column_by_name("volume_sum_2")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            for index in 0..record.num_rows() {
+                rows.push((
+                    event_times.value(index),
+                    symbols.value(index).to_owned(),
+                    sequences.value(index),
+                    counts.iter().nth(index).unwrap(),
+                    sums.iter().nth(index).unwrap(),
+                    means.iter().nth(index).unwrap(),
+                    variances.iter().nth(index).unwrap(),
+                    volume_sums.iter().nth(index).unwrap(),
+                ));
+            }
+        }
+    }
+}
+
+async fn drive_aggregates(
+    operator: &mut RollingOperator,
+    chunks: &[&[InputRow]],
+    job: &StreamJobContext,
+    collector: &mut EdgeCollector,
+    rows: &mut Vec<ObservedAggregateRow>,
+) {
+    for chunk in chunks {
+        operator
+            .process_data("input", input_batch(chunk), &context(job, None), collector)
+            .await
+            .unwrap();
+        let closing = chunk.iter().map(|row| row.0).max().unwrap_or(0);
+        operator
+            .on_watermark(
+                EventTime::from_micros(closing),
+                &context(job, Some(closing)),
+                collector,
+            )
+            .await
+            .unwrap();
+        drain_aggregates(collector, rows);
+    }
+}
+
+#[tokio::test]
+async fn aggregate_windows_continue_across_checkpoint_and_restore() {
+    let job = job();
+    let rows = fixture_rows();
+    let chunks: Vec<&[_]> = rows.chunks(3).collect();
+
+    let mut reference = aggregate_operator();
+    let mut reference_collector = EdgeCollector::new(reference.output_ports().to_vec());
+    let mut reference_rows = Vec::new();
+    drive_aggregates(
+        &mut reference,
+        &chunks,
+        &job,
+        &mut reference_collector,
+        &mut reference_rows,
+    )
+    .await;
+
+    let mut restarted = aggregate_operator();
+    let mut restarted_collector = EdgeCollector::new(restarted.output_ports().to_vec());
+    let mut restarted_rows = Vec::new();
+    drive_aggregates(
+        &mut restarted,
+        &chunks[..2],
+        &job,
+        &mut restarted_collector,
+        &mut restarted_rows,
+    )
+    .await;
+    let snapshot = restarted.checkpoint(Epoch::new(1).unwrap()).unwrap();
+
+    let mut recovered = aggregate_operator();
+    recovered.restore(&snapshot).unwrap();
+    let mut recovered_collector = EdgeCollector::new(recovered.output_ports().to_vec());
+    drive_aggregates(
+        &mut recovered,
+        &chunks[2..],
+        &job,
+        &mut recovered_collector,
+        &mut restarted_rows,
+    )
+    .await;
+
+    assert_eq!(reference_rows, restarted_rows);
+    assert_eq!(reference_rows.len(), rows.len());
+    let last = reference_rows.last().unwrap();
+    assert_eq!(last.0, 14);
+    assert_eq!(last.3, Some(2));
+    assert_eq!(last.4, Some(7.0));
+    assert_eq!(last.5, Some(3.5));
+    assert_eq!(last.6, Some(0.5));
+    assert_eq!(last.7, Some(70));
+}
+
+#[tokio::test]
+async fn cancelled_emission_preserves_buffered_state_until_retry() {
+    let token = CancellationToken::new();
+    let job = StreamJobContext::new(1, FINGERPRINT, JsonMap::new(), None, token.clone());
+    let mut operator = aggregate_operator();
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data(
+            "input",
+            input_batch(&fixture_rows()[..2]),
+            &context(&job, None),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+
+    token.cancel();
+    let error = operator
+        .on_watermark(
+            EventTime::from_micros(20),
+            &context(&job, Some(20)),
+            &mut collector,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, calc_flow::CalcFlowError::Cancelled { .. }),
+        "unexpected error: {error}"
+    );
+    let mut observed = Vec::new();
+    drain_aggregates(&mut collector, &mut observed);
+    assert!(observed.is_empty());
+
+    let retry_job = StreamJobContext::new(
+        1,
+        FINGERPRINT,
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    operator
+        .on_watermark(
+            EventTime::from_micros(20),
+            &context(&retry_job, Some(20)),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    drain_aggregates(&mut collector, &mut observed);
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[0].3, Some(1));
+    assert_eq!(observed[0].4, Some(1.0));
+}
+
+// ---------------------------------------------------------------------
+// SCE-07 defect 1 (B2): inf classifications survive checkpoint/restore
+// ---------------------------------------------------------------------
+
+fn inf_fixture_rows() -> Vec<InputRow> {
+    vec![
+        (10, "a", 1, Some(f64::INFINITY), Some(10)),
+        (10, "b", 1, Some(1.0), Some(50)),
+        (11, "a", 2, Some(2.0), Some(20)),
+        (12, "b", 2, Some(f64::INFINITY), Some(60)),
+        (12, "a", 3, Some(3.0), Some(30)),
+        (13, "b", 3, Some(5.0), Some(70)),
+    ]
+}
+
+/// D13 comparison semantics for observed aggregate rows: null positions and
+/// row identities compare exactly, NaN compares equal only to NaN, and
+/// infinities require equal sign.
+#[allow(clippy::float_cmp, reason = "D13 exact classification comparison")]
+fn assert_aggregate_rows_match(actual: &[ObservedAggregateRow], expected: &[ObservedAggregateRow]) {
+    assert_eq!(actual.len(), expected.len());
+    for (index, (got, want)) in actual.iter().zip(expected).enumerate() {
+        assert_eq!(got.0, want.0, "event time at row {index}");
+        assert_eq!(got.1, want.1, "symbol at row {index}");
+        assert_eq!(got.2, want.2, "sequence at row {index}");
+        assert_eq!(got.3, want.3, "count at row {index}");
+        assert_eq!(got.7, want.7, "volume sum at row {index}");
+        for (column, (left, right)) in [
+            (4, (got.4, want.4)),
+            (5, (got.5, want.5)),
+            (6, (got.6, want.6)),
+        ] {
+            match (left, right) {
+                (None, None) => {}
+                (Some(left), Some(right)) => {
+                    let matches = if left.is_nan() {
+                        right.is_nan()
+                    } else {
+                        left == right
+                    };
+                    assert!(
+                        matches,
+                        "row {index} column {column}: {left:?} vs {right:?}"
+                    );
+                }
+                (left, right) => {
+                    panic!("row {index} column {column} nullness diverged: {left:?} vs {right:?}")
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn aggregate_inf_classification_continues_across_checkpoint_and_restore() {
+    let job = job();
+    let rows = inf_fixture_rows();
+    let chunks: Vec<&[_]> = rows.chunks(2).collect();
+
+    let mut reference = aggregate_operator();
+    let mut reference_collector = EdgeCollector::new(reference.output_ports().to_vec());
+    let mut reference_rows = Vec::new();
+    drive_aggregates(
+        &mut reference,
+        &chunks,
+        &job,
+        &mut reference_collector,
+        &mut reference_rows,
+    )
+    .await;
+
+    let mut restarted = aggregate_operator();
+    let mut restarted_collector = EdgeCollector::new(restarted.output_ports().to_vec());
+    let mut restarted_rows = Vec::new();
+    drive_aggregates(
+        &mut restarted,
+        &chunks[..2],
+        &job,
+        &mut restarted_collector,
+        &mut restarted_rows,
+    )
+    .await;
+    // The checkpoint lands while both entities still hold their infinity
+    // sample inside the retained window.
+    let snapshot = restarted.checkpoint(Epoch::new(1).unwrap()).unwrap();
+
+    let mut recovered = aggregate_operator();
+    recovered.restore(&snapshot).unwrap();
+    let mut recovered_collector = EdgeCollector::new(recovered.output_ports().to_vec());
+    drive_aggregates(
+        &mut recovered,
+        &chunks[2..],
+        &job,
+        &mut recovered_collector,
+        &mut restarted_rows,
+    )
+    .await;
+
+    assert_aggregate_rows_match(&reference_rows, &restarted_rows);
+    let inf = f64::INFINITY;
+    // Emission order under per-chunk watermarks: the (12,a) row arrives only
+    // in the third envelope, so it finalizes one watermark after (12,b).
+    let symbols: Vec<&str> = reference_rows.iter().map(|row| row.1.as_str()).collect();
+    assert_eq!(symbols, vec!["a", "b", "a", "b", "a", "b"]);
+    let means: Vec<Option<f64>> = reference_rows.iter().map(|row| row.5).collect();
+    assert_eq!(
+        means,
+        vec![
+            Some(inf),
+            Some(1.0),
+            Some(inf),
+            Some(inf),
+            Some(2.5),
+            Some(inf)
+        ]
+    );
+    let variances: Vec<Option<f64>> = reference_rows.iter().map(|row| row.6).collect();
+    assert_eq!(variances[0], None);
+    assert_eq!(variances[1], None);
+    for index in [2_usize, 3, 5] {
+        assert!(
+            variances[index].unwrap().is_nan(),
+            "variance over an inf window at row {index} must be NaN after restore"
+        );
+    }
+    assert_eq!(variances[4], Some(0.5));
+}

@@ -1,7 +1,10 @@
-//! Native row-window rolling operator: lag and delta over entity-partitioned,
-//! event-time ordered rows (SCE-00 D5, API note `symbolic-computation-engine`
-//! section 3.2). The same calculation kernel serves batch and final-only
-//! stream lifecycles; stream state is checkpointed at the aligned epoch cut.
+//! Native row-window rolling operator: lag, delta, and the count/sum/mean/
+//! variance/standard-deviation aggregates over entity-partitioned, event-time
+//! ordered rows (SCE-00 D5, API note `symbolic-computation-engine` section
+//! 3.2). The same calculation kernel serves batch and final-only stream
+//! lifecycles; stream state is checkpointed at the aligned epoch cut, and
+//! aggregate window state is rebuilt from the retained history rows on
+//! restore.
 
 use std::{
     cmp::Ordering,
@@ -77,6 +80,27 @@ pub enum RollingValuePolicy {
     StatefulNumericV1,
 }
 
+/// Rolling frame declaration (SCE-00 D5). Only row-count frames are
+/// supported in this release; duration frames arrive with SCE-08.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RollingFrameSpec {
+    /// Row-count frame `rows [i - size + 1, i]` including the current row.
+    Rows {
+        /// Positive retained row count.
+        #[schemars(range(min = 1))]
+        size: u64,
+    },
+}
+
+impl RollingFrameSpec {
+    const fn size(self) -> u64 {
+        match self {
+            Self::Rows { size } => size,
+        }
+    }
+}
+
 /// One declared rolling output and its output column name.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -106,6 +130,82 @@ pub enum RollingOutputSpec {
         #[schemars(range(min = 1))]
         periods: u64,
     },
+    /// Valid (non-null, non-NaN) sample count over the frame (SCE-00 D3.2).
+    Count {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Input column name.
+        input: String,
+        /// Output column name.
+        output: String,
+        /// Row-count frame.
+        frame: RollingFrameSpec,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+    },
+    /// Checked sum over the frame; integer results stay exact (SCE-00 D3.2).
+    Sum {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Input column name.
+        input: String,
+        /// Output column name.
+        output: String,
+        /// Row-count frame.
+        frame: RollingFrameSpec,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+    },
+    /// Float64 mean over the frame.
+    Mean {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Input column name.
+        input: String,
+        /// Output column name.
+        output: String,
+        /// Row-count frame.
+        frame: RollingFrameSpec,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+    },
+    /// Float64 variance over the frame (SCE-00 D5 divisor rules).
+    Variance {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Input column name.
+        input: String,
+        /// Output column name.
+        output: String,
+        /// Row-count frame.
+        frame: RollingFrameSpec,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+        /// Degrees-of-freedom adjustment; must be `0` or `1`.
+        #[schemars(range(min = 0, max = 1))]
+        ddof: u8,
+    },
+    /// Float64 standard deviation over the frame (SCE-00 D5 divisor rules).
+    Stddev {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Input column name.
+        input: String,
+        /// Output column name.
+        output: String,
+        /// Row-count frame.
+        frame: RollingFrameSpec,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+        /// Degrees-of-freedom adjustment; must be `0` or `1`.
+        #[schemars(range(min = 0, max = 1))]
+        ddof: u8,
+    },
 }
 
 impl RollingOutputSpec {
@@ -116,30 +216,89 @@ impl RollingOutputSpec {
             }
             | Self::Delta {
                 primitive_version, ..
+            }
+            | Self::Count {
+                primitive_version, ..
+            }
+            | Self::Sum {
+                primitive_version, ..
+            }
+            | Self::Mean {
+                primitive_version, ..
+            }
+            | Self::Variance {
+                primitive_version, ..
+            }
+            | Self::Stddev {
+                primitive_version, ..
             } => *primitive_version,
         }
     }
 
     fn input(&self) -> &str {
         match self {
-            Self::Lag { input, .. } | Self::Delta { input, .. } => input,
+            Self::Lag { input, .. }
+            | Self::Delta { input, .. }
+            | Self::Count { input, .. }
+            | Self::Sum { input, .. }
+            | Self::Mean { input, .. }
+            | Self::Variance { input, .. }
+            | Self::Stddev { input, .. } => input,
         }
     }
 
     fn output(&self) -> &str {
         match self {
-            Self::Lag { output, .. } | Self::Delta { output, .. } => output,
+            Self::Lag { output, .. }
+            | Self::Delta { output, .. }
+            | Self::Count { output, .. }
+            | Self::Sum { output, .. }
+            | Self::Mean { output, .. }
+            | Self::Variance { output, .. }
+            | Self::Stddev { output, .. } => output,
         }
     }
 
-    fn periods(&self) -> u64 {
+    /// Rows one output needs retained per entity: the lag/delta distance or
+    /// the row-frame size.
+    const fn retained_rows(&self) -> u64 {
         match self {
             Self::Lag { periods, .. } | Self::Delta { periods, .. } => *periods,
+            Self::Count { frame, .. }
+            | Self::Sum { frame, .. }
+            | Self::Mean { frame, .. }
+            | Self::Variance { frame, .. }
+            | Self::Stddev { frame, .. } => frame.size(),
         }
     }
 
-    const fn is_delta(&self) -> bool {
-        matches!(self, Self::Delta { .. })
+    const fn frame(&self) -> Option<RollingFrameSpec> {
+        match self {
+            Self::Lag { .. } | Self::Delta { .. } => None,
+            Self::Count { frame, .. }
+            | Self::Sum { frame, .. }
+            | Self::Mean { frame, .. }
+            | Self::Variance { frame, .. }
+            | Self::Stddev { frame, .. } => Some(*frame),
+        }
+    }
+
+    const fn min_periods(&self) -> Option<u64> {
+        match self {
+            Self::Lag { .. } | Self::Delta { .. } => None,
+            Self::Count { min_periods, .. }
+            | Self::Sum { min_periods, .. }
+            | Self::Mean { min_periods, .. }
+            | Self::Variance { min_periods, .. }
+            | Self::Stddev { min_periods, .. } => Some(*min_periods),
+        }
+    }
+
+    const fn ddof(&self) -> Option<u8> {
+        match self {
+            Self::Variance { ddof, .. } | Self::Stddev { ddof, .. } => Some(*ddof),
+            _ => None,
+        }
     }
 }
 
@@ -411,6 +570,9 @@ impl StreamOperator for RollingOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        // Cancellation is checked before any state mutation so a cancelled
+        // emission leaves the buffered rows available for a retry.
+        context.check_cancelled()?;
         self.observe_context(context)?;
         if self
             .state
@@ -437,6 +599,7 @@ impl StreamOperator for RollingOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        context.check_cancelled()?;
         self.observe_context(context)?;
         if self.state.ended {
             return Ok(());
@@ -711,7 +874,7 @@ impl RollingOperator {
             .histories
             .by_entity
             .values()
-            .map(VecDeque::len)
+            .map(|state| state.rows.len())
             .sum::<usize>()
             + self.state.buffer.len();
         if row_count == 0 {
@@ -875,8 +1038,8 @@ fn encode_state_segment(
             column.push(values.get(index).cloned());
         }
     };
-    for history in histories.by_entity.values() {
-        for (position, values) in history.iter().enumerate() {
+    for state in histories.by_entity.values() {
+        for (position, values) in state.rows.iter().enumerate() {
             let position = u64::try_from(position)
                 .map_err(|_| internal_error("rolling history position does not fit u64"))?;
             push_row(0, Some(position), values);
@@ -973,6 +1136,7 @@ fn decode_state_segment(
         )?;
     }
     validate_decoded_state(&decoded, compiled)?;
+    rebuild_windows(&mut decoded.histories, compiled, "rolling")?;
     Ok(decoded)
 }
 
@@ -1037,18 +1201,18 @@ fn decode_state_row(
     }
     match kind {
         0 => {
-            let history = decoded
+            let state = decoded
                 .histories
                 .by_entity
                 .entry(row.identity.entity.clone())
                 .or_default();
-            let expected = u64::try_from(history.len()).unwrap_or(u64::MAX);
+            let expected = u64::try_from(state.rows.len()).unwrap_or(u64::MAX);
             if position != Some(expected) {
                 return Err(state_format(
                     "rolling state segment history positions are not contiguous".to_owned(),
                 ));
             }
-            history.push_back(row.values);
+            state.rows.push_back(row.values);
         }
         1 => {
             if decoded.buffer.insert(row.identity.clone(), row).is_some() {
@@ -1114,14 +1278,40 @@ fn validate_decoded_state(
     decoded: &DecodedRollingState,
     compiled: &CompiledRollingSpec,
 ) -> Result<()> {
-    let max_periods = usize::try_from(compiled.max_periods)
-        .map_err(|_| internal_error("rolling max periods does not fit usize"))?;
-    for history in decoded.histories.by_entity.values() {
-        if history.len() > max_periods {
+    let max_retained = usize::try_from(compiled.max_retained_rows)
+        .map_err(|_| internal_error("rolling max retained rows does not fit usize"))?;
+    for state in decoded.histories.by_entity.values() {
+        if state.rows.len() > max_retained {
             return Err(state_format(
                 "rolling state segment retains more history than the declared frames".to_owned(),
             ));
         }
+    }
+    Ok(())
+}
+
+/// Rebuilds every window accumulator as the ordered fold over the retained
+/// history tail; the segment stores rows only, and the accumulator is the
+/// deterministic function of those rows frozen in D5/D11.
+fn rebuild_windows(
+    histories: &mut RollingHistories,
+    compiled: &CompiledRollingSpec,
+    node_id: &str,
+) -> Result<()> {
+    for state in histories.by_entity.values_mut() {
+        let mut windows = fresh_windows(compiled);
+        for (group_index, group) in compiled.window_groups.iter().enumerate() {
+            let frame = usize::try_from(group.frame_rows)
+                .map_err(|_| internal_error("rolling frame rows do not fit usize"))?;
+            let start = state.rows.len().saturating_sub(frame);
+            for values in state.rows.iter().skip(start) {
+                let value = &values[group.input_index];
+                if is_valid_sample(value) {
+                    windows[group_index].add(value, node_id)?;
+                }
+            }
+        }
+        state.windows = windows;
     }
     Ok(())
 }
@@ -1474,7 +1664,8 @@ struct CompiledRollingSpec {
     partition_columns: Vec<CompiledKeyColumn>,
     sequence_columns: Vec<CompiledKeyColumn>,
     outputs: Vec<CompiledRollingOutput>,
-    max_periods: u64,
+    window_groups: Vec<CompiledWindowGroup>,
+    max_retained_rows: u64,
     configuration_hash: String,
     state_schema_fingerprint: String,
 }
@@ -1490,8 +1681,76 @@ struct CompiledRollingOutput {
     name: String,
     input_type: DataType,
     output_type: DataType,
-    is_delta: bool,
-    periods: u64,
+    evaluation: CompiledEvaluation,
+}
+
+#[derive(Clone)]
+enum CompiledEvaluation {
+    Lag { periods: u64 },
+    Delta { periods: u64 },
+    Aggregate(CompiledAggregate),
+}
+
+#[derive(Clone)]
+struct CompiledAggregate {
+    group: usize,
+    statistic: Statistic,
+    min_periods: u64,
+    ddof: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Statistic {
+    Count,
+    Sum,
+    Mean,
+    Variance,
+    Stddev,
+}
+
+impl Statistic {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Count => "count",
+            Self::Sum => "sum",
+            Self::Mean => "mean",
+            Self::Variance => "variance",
+            Self::Stddev => "stddev",
+        }
+    }
+}
+
+/// One shared per-entity sliding window: every output on the same
+/// `(input column, row-frame)` pair reads this one accumulator set instead
+/// of maintaining duplicate windows (SCE-07 state sharing).
+#[derive(Clone)]
+struct CompiledWindowGroup {
+    input_index: usize,
+    frame_rows: u64,
+    sum_class: SumClass,
+}
+
+/// Integer sums stay exact in their frozen 64-bit class; floating sums and
+/// every mean/variance accumulate in `f64` (SCE-00 D3.2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SumClass {
+    Signed,
+    Unsigned,
+    Float,
+    CountOnly,
+}
+
+impl SumClass {
+    fn from_input(data_type: &DataType) -> Self {
+        match data_type {
+            DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => Self::Signed,
+            DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+                Self::Unsigned
+            }
+            DataType::Float32 | DataType::Float64 => Self::Float,
+            _ => Self::CountOnly,
+        }
+    }
 }
 
 /// One entity or sequence key component in the Arrow total order (null
@@ -1628,20 +1887,251 @@ impl BufferedRow {
     }
 }
 
-/// Per-entity retained tails of the last `max_periods` referenced values.
+/// Per-entity retained tail plus the shared sliding-window accumulators.
 #[derive(Clone, Debug, Default)]
-struct RollingHistories {
-    by_entity: BTreeMap<Vec<Option<KeyValue>>, VecDeque<Vec<ScalarValue>>>,
+struct EntityRollingState {
+    rows: VecDeque<Vec<ScalarValue>>,
+    windows: Vec<WindowAccumulator>,
 }
 
-/// Kernel-produced per-entity history replacements (entity key, new tail).
-type HistoryUpdates = Vec<(Vec<Option<KeyValue>>, VecDeque<Vec<ScalarValue>>)>;
+impl EntityRollingState {
+    fn fresh(compiled: &CompiledRollingSpec) -> Self {
+        Self {
+            rows: VecDeque::new(),
+            windows: fresh_windows(compiled),
+        }
+    }
+}
+
+fn fresh_windows(compiled: &CompiledRollingSpec) -> Vec<WindowAccumulator> {
+    compiled
+        .window_groups
+        .iter()
+        .map(|group| WindowAccumulator::new(group.sum_class))
+        .collect()
+}
+
+/// Per-entity rolling state: retained tails of the last `max_retained_rows`
+/// rows plus one accumulator set per compiled window group.
+#[derive(Clone, Debug, Default)]
+struct RollingHistories {
+    by_entity: BTreeMap<Vec<Option<KeyValue>>, EntityRollingState>,
+}
+
+/// Kernel-produced per-entity state replacements (entity key, new state).
+type HistoryUpdates = Vec<(Vec<Option<KeyValue>>, EntityRollingState)>;
 
 impl RollingHistories {
     fn apply(&mut self, touched: HistoryUpdates) {
-        for (entity, history) in touched {
-            self.by_entity.insert(entity, history);
+        for (entity, state) in touched {
+            self.by_entity.insert(entity, state);
         }
+    }
+}
+
+/// Reversible sliding-window accumulator (SCE-00 D5): exact checked integer
+/// sums, `f64` sums, and West-style add/remove mean and M2 variance state.
+/// The ordered add/remove sequence is the one frozen algorithm shared by the
+/// batch and stream lifecycles. ±inf sample counts make the mean and
+/// variance classifications pure multiset functions of the window (SCE-07
+/// defect 1 ruling): a window's IEEE classification must not depend on where
+/// the infinity sat in arrival order.
+#[derive(Clone, Copy, Debug)]
+struct WindowAccumulator {
+    valid_count: u64,
+    sum: Option<SumState>,
+    mean: f64,
+    m2: f64,
+    pos_inf: u64,
+    neg_inf: u64,
+}
+
+/// Integer sums accumulate in the wide transient class so the
+/// add-before-remove slide never reports a false overflow for a window whose
+/// true sum is representable; the readout converts back with a checked
+/// narrowing that keeps genuine overflow loud (SCE-07 defect 2 fix).
+#[derive(Clone, Copy, Debug)]
+enum SumState {
+    Signed(i128),
+    Unsigned(u128),
+    Float(f64),
+}
+
+impl WindowAccumulator {
+    fn new(sum_class: SumClass) -> Self {
+        let sum = match sum_class {
+            SumClass::Signed => Some(SumState::Signed(0)),
+            SumClass::Unsigned => Some(SumState::Unsigned(0)),
+            SumClass::Float => Some(SumState::Float(0.0)),
+            SumClass::CountOnly => None,
+        };
+        Self {
+            valid_count: 0,
+            sum,
+            mean: 0.0,
+            m2: 0.0,
+            pos_inf: 0,
+            neg_inf: 0,
+        }
+    }
+
+    /// Adds one valid sample. Null and NaN values never reach this method.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "the frozen mean/variance output type is Float64"
+    )]
+    fn add(&mut self, value: &ScalarValue, node_id: &str) -> Result<()> {
+        self.valid_count = self
+            .valid_count
+            .checked_add(1)
+            .ok_or_else(|| operator_error(node_id, "rolling valid sample count overflowed"))?;
+        if let Some(sum) = &mut self.sum {
+            match sum {
+                SumState::Signed(total) => {
+                    *total = total
+                        .checked_add(i128::from(signed_sample(value)))
+                        .ok_or_else(|| operator_error(node_id, "rolling integer sum overflowed"))?;
+                }
+                SumState::Unsigned(total) => {
+                    *total = total
+                        .checked_add(u128::from(unsigned_sample(value)))
+                        .ok_or_else(|| operator_error(node_id, "rolling integer sum overflowed"))?;
+                }
+                SumState::Float(total) => *total += float_sample(value),
+            }
+            let sample = float_sample(value);
+            if sample.is_infinite() {
+                if sample > 0.0 {
+                    self.pos_inf = self.pos_inf.saturating_add(1);
+                } else {
+                    self.neg_inf = self.neg_inf.saturating_add(1);
+                }
+            }
+            let count = self.valid_count as f64;
+            let delta = sample - self.mean;
+            self.mean += delta / count;
+            self.m2 += delta * (sample - self.mean);
+        }
+        Ok(())
+    }
+
+    /// Removes one previously added valid sample (West 1979 removal step).
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "the frozen mean/variance output type is Float64"
+    )]
+    fn remove(&mut self, value: &ScalarValue) -> Result<()> {
+        self.valid_count = self
+            .valid_count
+            .checked_sub(1)
+            .ok_or_else(|| internal_error("rolling removal without a matching add"))?;
+        if let Some(sum) = &mut self.sum {
+            match sum {
+                SumState::Signed(total) => {
+                    *total = total
+                        .checked_sub(i128::from(signed_sample(value)))
+                        .ok_or_else(|| {
+                            internal_error("rolling sum removal diverged from the adds")
+                        })?;
+                }
+                SumState::Unsigned(total) => {
+                    *total = total
+                        .checked_sub(u128::from(unsigned_sample(value)))
+                        .ok_or_else(|| {
+                            internal_error("rolling sum removal diverged from the adds")
+                        })?;
+                }
+                SumState::Float(total) => *total -= float_sample(value),
+            }
+            let sample = float_sample(value);
+            if sample.is_infinite() {
+                if sample > 0.0 {
+                    self.pos_inf = self.pos_inf.saturating_sub(1);
+                } else {
+                    self.neg_inf = self.neg_inf.saturating_sub(1);
+                }
+            }
+            if self.valid_count == 0 {
+                self.mean = 0.0;
+                self.m2 = 0.0;
+            } else {
+                let count = self.valid_count as f64;
+                let delta = sample - self.mean;
+                self.mean -= delta / count;
+                self.m2 -= delta * (sample - self.mean);
+            }
+        }
+        Ok(())
+    }
+
+    /// True when sliding arithmetic produced a non-finite component; the
+    /// caller then re-folds the current window so the live state always
+    /// matches the checkpoint rebuild for non-finite classifications.
+    fn is_non_finite(&self) -> bool {
+        let sum_non_finite = match &self.sum {
+            Some(SumState::Float(total)) => !total.is_finite(),
+            _ => false,
+        };
+        sum_non_finite || !self.mean.is_finite() || !self.m2.is_finite()
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new(match &self.sum {
+            Some(SumState::Signed(_)) => SumClass::Signed,
+            Some(SumState::Unsigned(_)) => SumClass::Unsigned,
+            Some(SumState::Float(_)) => SumClass::Float,
+            None => SumClass::CountOnly,
+        });
+    }
+}
+
+/// A rolling sample is valid when it is neither null nor NaN (SCE-00 D3.2);
+/// infinities stay numeric.
+fn is_valid_sample(value: &ScalarValue) -> bool {
+    if value.is_null() {
+        return false;
+    }
+    !matches!(value, ScalarValue::Float32(Some(sample)) if sample.is_nan())
+        && !matches!(value, ScalarValue::Float64(Some(sample)) if sample.is_nan())
+}
+
+fn signed_sample(value: &ScalarValue) -> i64 {
+    match value {
+        ScalarValue::Int8(Some(sample)) => i64::from(*sample),
+        ScalarValue::Int16(Some(sample)) => i64::from(*sample),
+        ScalarValue::Int32(Some(sample)) => i64::from(*sample),
+        ScalarValue::Int64(Some(sample)) => *sample,
+        other => unreachable!("signed rolling sample has type {}", other.data_type()),
+    }
+}
+
+fn unsigned_sample(value: &ScalarValue) -> u64 {
+    match value {
+        ScalarValue::UInt8(Some(sample)) => u64::from(*sample),
+        ScalarValue::UInt16(Some(sample)) => u64::from(*sample),
+        ScalarValue::UInt32(Some(sample)) => u64::from(*sample),
+        ScalarValue::UInt64(Some(sample)) => *sample,
+        other => unreachable!("unsigned rolling sample has type {}", other.data_type()),
+    }
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the frozen mean/variance output type is Float64"
+)]
+fn float_sample(value: &ScalarValue) -> f64 {
+    match value {
+        ScalarValue::Float32(Some(sample)) => f64::from(*sample),
+        ScalarValue::Float64(Some(sample)) => *sample,
+        ScalarValue::Int8(_)
+        | ScalarValue::Int16(_)
+        | ScalarValue::Int32(_)
+        | ScalarValue::Int64(_) => signed_sample(value) as f64,
+        ScalarValue::UInt8(_)
+        | ScalarValue::UInt16(_)
+        | ScalarValue::UInt32(_)
+        | ScalarValue::UInt64(_) => unsigned_sample(value) as f64,
+        other => unreachable!("floating rolling sample has type {}", other.data_type()),
     }
 }
 
@@ -1656,9 +2146,6 @@ struct ComputedOutputs {
 /// Computes every declared rolling output over `rows` in canonical order,
 /// reading entity histories without mutating them (SCE-00 D5: batch and
 /// stream lifecycles share this kernel and row order).
-// The shared kernel keeps per-entity grouping, per-output evaluation, and
-// history truncation in one deterministic pass (D5 mandates one algorithm).
-// #lizard forgives
 fn compute_output_columns(
     rows: &[BufferedRow],
     histories: &RollingHistories,
@@ -1675,6 +2162,61 @@ fn compute_output_columns(
             touched: Vec::new(),
         });
     }
+    let mut derived: Vec<Vec<Option<ScalarValue>>> = compiled
+        .outputs
+        .iter()
+        .map(|_| vec![None; rows.len()])
+        .collect();
+    let entities = group_rows_by_entity(rows);
+    let mut touched = Vec::with_capacity(entities.len());
+    for (entity, indices) in entities {
+        let mut entity_state = histories
+            .by_entity
+            .get(entity)
+            .cloned()
+            .unwrap_or_else(|| EntityRollingState::fresh(compiled));
+        {
+            let view = EntityRowView {
+                rows,
+                indices: &indices,
+                history: &entity_state.rows,
+            };
+            for (position, &row_index) in indices.iter().enumerate() {
+                slide_windows(
+                    &view,
+                    position,
+                    row_index,
+                    compiled,
+                    &mut entity_state.windows,
+                    node_id,
+                )?;
+                for (ordinal, output) in compiled.outputs.iter().enumerate() {
+                    derived[ordinal][row_index] = Some(compute_output_value(
+                        &view,
+                        position,
+                        row_index,
+                        output,
+                        &entity_state.windows,
+                        node_id,
+                    )?);
+                }
+            }
+        }
+        for &row_index in &indices {
+            entity_state.rows.push_back(rows[row_index].values.clone());
+        }
+        while entity_state.rows.len()
+            > usize::try_from(compiled.max_retained_rows).unwrap_or(usize::MAX)
+        {
+            entity_state.rows.pop_front();
+        }
+        touched.push((entity.clone(), entity_state));
+    }
+    let columns = encode_derived_columns(derived, compiled, node_id)?;
+    Ok(ComputedOutputs { columns, touched })
+}
+
+fn group_rows_by_entity(rows: &[BufferedRow]) -> BTreeMap<&Vec<Option<KeyValue>>, Vec<usize>> {
     let mut entities: BTreeMap<&Vec<Option<KeyValue>>, Vec<usize>> = BTreeMap::new();
     for (index, row) in rows.iter().enumerate() {
         entities
@@ -1682,31 +2224,15 @@ fn compute_output_columns(
             .or_default()
             .push(index);
     }
-    let mut derived: Vec<Vec<Option<ScalarValue>>> = compiled
-        .outputs
-        .iter()
-        .map(|_| vec![None; rows.len()])
-        .collect();
-    let mut touched = Vec::with_capacity(entities.len());
-    for (entity, indices) in entities {
-        let history = histories.by_entity.get(entity).cloned().unwrap_or_default();
-        let mut next_history = history.clone();
-        for (position, &row_index) in indices.iter().enumerate() {
-            for (ordinal, output) in compiled.outputs.iter().enumerate() {
-                derived[ordinal][row_index] = Some(compute_output_value(
-                    rows, &indices, &history, position, row_index, output, node_id,
-                )?);
-            }
-        }
-        for &row_index in &indices {
-            next_history.push_back(rows[row_index].values.clone());
-        }
-        while next_history.len() > usize::try_from(compiled.max_periods).unwrap_or(usize::MAX) {
-            next_history.pop_front();
-        }
-        touched.push((entity.clone(), next_history));
-    }
-    let columns = derived
+    entities
+}
+
+fn encode_derived_columns(
+    derived: Vec<Vec<Option<ScalarValue>>>,
+    compiled: &CompiledRollingSpec,
+    node_id: &str,
+) -> Result<Vec<ArrayRef>> {
+    derived
         .into_iter()
         .zip(&compiled.outputs)
         .map(|(column, output)| {
@@ -1722,32 +2248,114 @@ fn compute_output_columns(
                 )
             })
         })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(ComputedOutputs { columns, touched })
+        .collect()
+}
+
+/// Read-only view over one entity's retained history tail and its current
+/// emission batch rows in canonical order; combined positions index the
+/// history first and the batch rows second.
+struct EntityRowView<'a> {
+    rows: &'a [BufferedRow],
+    indices: &'a [usize],
+    history: &'a VecDeque<Vec<ScalarValue>>,
+}
+
+impl EntityRowView<'_> {
+    fn value(&self, combined: usize, input_index: usize) -> &ScalarValue {
+        if combined < self.history.len() {
+            &self.history[combined][input_index]
+        } else {
+            &self.rows[self.indices[combined - self.history.len()]].values[input_index]
+        }
+    }
+}
+
+/// Slides every shared window group to the current row: add the current
+/// valid sample, remove the sample that left the frame, then repair any
+/// non-finite accumulator by re-folding the window so live state and the
+/// checkpoint rebuild agree on non-finite classifications (SCE-00 D3.2).
+// Add precedes removal so the frozen order matches the rebuild fold exactly.
+fn slide_windows(
+    view: &EntityRowView<'_>,
+    position: usize,
+    row_index: usize,
+    compiled: &CompiledRollingSpec,
+    windows: &mut [WindowAccumulator],
+    node_id: &str,
+) -> Result<()> {
+    for (group_index, group) in compiled.window_groups.iter().enumerate() {
+        let frame = usize::try_from(group.frame_rows)
+            .map_err(|_| operator_error(node_id, "rolling frame rows do not fit usize"))?;
+        let combined = view.history.len() + position;
+        let current = &view.rows[row_index].values[group.input_index];
+        if is_valid_sample(current) {
+            windows[group_index].add(current, node_id)?;
+        }
+        if combined >= frame {
+            let expiring = view.value(combined - frame, group.input_index);
+            if is_valid_sample(expiring) {
+                windows[group_index].remove(expiring)?;
+            }
+        }
+        if windows[group_index].is_non_finite() {
+            refold_window(view, position, group, &mut windows[group_index], node_id)?;
+        }
+    }
+    Ok(())
+}
+
+/// Rebuilds one accumulator as the ordered fold over the current window;
+/// this is the same construction the checkpoint restore applies to retained
+/// history (SCE-00 D11/D13).
+fn refold_window(
+    view: &EntityRowView<'_>,
+    position: usize,
+    group: &CompiledWindowGroup,
+    accumulator: &mut WindowAccumulator,
+    node_id: &str,
+) -> Result<()> {
+    let frame = usize::try_from(group.frame_rows)
+        .map_err(|_| operator_error(node_id, "rolling frame rows do not fit usize"))?;
+    let combined = view.history.len() + position;
+    let start = (combined + 1).saturating_sub(frame);
+    accumulator.reset();
+    for index in start..=combined {
+        let value = view.value(index, group.input_index);
+        if is_valid_sample(value) {
+            accumulator.add(value, node_id)?;
+        }
+    }
+    Ok(())
 }
 
 fn compute_output_value(
-    rows: &[BufferedRow],
-    indices: &[usize],
-    history: &VecDeque<Vec<ScalarValue>>,
+    view: &EntityRowView<'_>,
     position: usize,
     row_index: usize,
     output: &CompiledRollingOutput,
+    windows: &[WindowAccumulator],
     node_id: &str,
 ) -> Result<ScalarValue> {
-    let periods = usize::try_from(output.periods)
-        .map_err(|_| operator_error(node_id, "rolling periods does not fit usize"))?;
-    let referenced = if position + history.len() < periods {
+    let periods = match &output.evaluation {
+        CompiledEvaluation::Lag { periods } | CompiledEvaluation::Delta { periods } => {
+            usize::try_from(*periods)
+                .map_err(|_| operator_error(node_id, "rolling periods does not fit usize"))?
+        }
+        CompiledEvaluation::Aggregate(aggregate) => {
+            return evaluate_aggregate(aggregate, windows, output, node_id);
+        }
+    };
+    let referenced = if position + view.history.len() < periods {
         None
     } else if position >= periods {
-        Some(rows[indices[position - periods]].values[output.input_index].clone())
+        Some(view.rows[view.indices[position - periods]].values[output.input_index].clone())
     } else {
-        Some(history[history.len() + position - periods][output.input_index].clone())
+        Some(view.history[view.history.len() + position - periods][output.input_index].clone())
     };
-    if !output.is_delta {
+    if matches!(output.evaluation, CompiledEvaluation::Lag { .. }) {
         return Ok(referenced.unwrap_or_else(|| typed_null(&output.input_type)));
     }
-    let current = &rows[row_index].values[output.input_index];
+    let current = &view.rows[row_index].values[output.input_index];
     if current.is_null() {
         return Ok(typed_null(&output.input_type));
     }
@@ -1760,6 +2368,75 @@ fn compute_output_value(
             &format!("rolling delta failed with checked arithmetic: {error}"),
         )
     })
+}
+
+/// Reads one aggregate output from its shared window accumulator: the
+/// minimum-period gate uses the valid sample count (SCE-00 D3.2), and the
+/// variance divisor is `valid_count - ddof` with a non-positive divisor
+/// producing null (SCE-00 D5). Windows holding ±inf samples classify from
+/// the reversible infinity counts — both signs is the undefined ∞ − ∞ (NaN),
+/// one sign is that infinity, and no infinity keeps the frozen finite-path
+/// West readout (SCE-07 defect 1 ruling); variance/stddev over a window with
+/// any infinity is NaN because every deviation involves ∞ − ∞.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the frozen aggregate output type is Float64"
+)]
+fn evaluate_aggregate(
+    aggregate: &CompiledAggregate,
+    windows: &[WindowAccumulator],
+    output: &CompiledRollingOutput,
+    node_id: &str,
+) -> Result<ScalarValue> {
+    let accumulator = &windows[aggregate.group];
+    if accumulator.valid_count < aggregate.min_periods {
+        return Ok(typed_null(&output.output_type));
+    }
+    match aggregate.statistic {
+        Statistic::Count => Ok(ScalarValue::UInt64(Some(accumulator.valid_count))),
+        Statistic::Sum => match accumulator.sum {
+            Some(SumState::Signed(total)) => i64::try_from(total)
+                .map(|narrowed| ScalarValue::Int64(Some(narrowed)))
+                .map_err(|_| operator_error(node_id, "rolling integer sum overflowed")),
+            Some(SumState::Unsigned(total)) => u64::try_from(total)
+                .map(|narrowed| ScalarValue::UInt64(Some(narrowed)))
+                .map_err(|_| operator_error(node_id, "rolling integer sum overflowed")),
+            Some(SumState::Float(total)) => Ok(ScalarValue::Float64(Some(total))),
+            None => Err(operator_error(
+                node_id,
+                "rolling sum requires a numeric window group",
+            )),
+        },
+        Statistic::Mean => Ok(ScalarValue::Float64(Some(
+            match (accumulator.pos_inf > 0, accumulator.neg_inf > 0) {
+                (true, true) => f64::NAN,
+                (true, false) => f64::INFINITY,
+                (false, true) => f64::NEG_INFINITY,
+                (false, false) => accumulator.mean,
+            },
+        ))),
+        Statistic::Variance | Statistic::Stddev => {
+            let divisor = accumulator.valid_count - u64::from(aggregate.ddof);
+            if divisor == 0 {
+                return Ok(ScalarValue::Float64(None));
+            }
+            if accumulator.pos_inf > 0 || accumulator.neg_inf > 0 {
+                return Ok(ScalarValue::Float64(Some(f64::NAN)));
+            }
+            // Negative M2 is floating-point removal drift, never a real
+            // negative variance; NaN propagates as the frozen undefined value.
+            let m2 = if accumulator.m2 < 0.0 {
+                0.0
+            } else {
+                accumulator.m2
+            };
+            let variance = m2 / divisor as f64;
+            Ok(ScalarValue::Float64(Some(match aggregate.statistic {
+                Statistic::Variance => variance,
+                _ => variance.sqrt(),
+            })))
+        }
+    }
 }
 
 fn typed_null(data_type: &DataType) -> ScalarValue {
@@ -1824,11 +2501,31 @@ fn validate_outputs(outputs: &[RollingOutputSpec]) -> Result<()> {
                 "unsupported rolling primitive version",
             ));
         }
-        if output.periods() == 0 {
-            return Err(invalid_argument(
-                &format!("{base}.periods"),
-                "must be greater than zero",
-            ));
+        if output.retained_rows() == 0 {
+            let field = match output.frame() {
+                Some(_) => format!("{base}.frame.size"),
+                None => format!("{base}.periods"),
+            };
+            return Err(invalid_argument(&field, "must be greater than zero"));
+        }
+        if let Some(min_periods) = output.min_periods() {
+            if min_periods == 0 {
+                return Err(invalid_argument(
+                    &format!("{base}.min_periods"),
+                    "must be greater than zero",
+                ));
+            }
+            if min_periods > output.retained_rows() {
+                return Err(invalid_argument(
+                    &format!("{base}.min_periods"),
+                    "must not exceed the row-frame size",
+                ));
+            }
+        }
+        if let Some(ddof) = output.ddof()
+            && ddof > 1
+        {
+            return Err(invalid_argument(&format!("{base}.ddof"), "must be 0 or 1"));
         }
         if output.input().is_empty() {
             return Err(invalid_argument(
@@ -1886,16 +2583,17 @@ fn compile_spec_against_schema(
         .iter()
         .map(|column| compile_key_column(input_schema, column, KeyRole::Sequence))
         .collect::<Result<Vec<_>>>()?;
+    let mut window_groups = Vec::new();
     let outputs = spec
         .outputs
         .iter()
         .enumerate()
-        .map(|(ordinal, output)| compile_output(input_schema, output, ordinal))
+        .map(|(ordinal, output)| compile_output(input_schema, output, ordinal, &mut window_groups))
         .collect::<Result<Vec<_>>>()?;
-    let max_periods = spec
+    let max_retained_rows = spec
         .outputs
         .iter()
-        .map(RollingOutputSpec::periods)
+        .map(RollingOutputSpec::retained_rows)
         .max()
         .unwrap_or(1);
     Ok(CompiledRollingSpec {
@@ -1903,7 +2601,8 @@ fn compile_spec_against_schema(
         partition_columns,
         sequence_columns,
         outputs,
-        max_periods,
+        window_groups,
+        max_retained_rows,
         configuration_hash,
         state_schema_fingerprint: state_schema_fingerprint(input_schema),
     })
@@ -1956,6 +2655,7 @@ fn compile_output(
     input_schema: &Schema,
     output: &RollingOutputSpec,
     ordinal: usize,
+    window_groups: &mut Vec<CompiledWindowGroup>,
 ) -> Result<CompiledRollingOutput> {
     if input_schema
         .fields()
@@ -1969,19 +2669,116 @@ fn compile_output(
     }
     let input_index = exact_field_index(input_schema, output.input())?;
     let input_type = input_schema.field(input_index).data_type().clone();
-    if output.is_delta() && !is_numeric(&input_type) {
-        return Err(compile_error(format!(
-            "rolling delta does not support column {:?} with type {input_type}",
-            output.input()
-        )));
-    }
+    let evaluation = match output {
+        RollingOutputSpec::Lag { periods, .. } => CompiledEvaluation::Lag { periods: *periods },
+        RollingOutputSpec::Delta { periods, .. } => {
+            require_numeric(output.input(), &input_type, "delta")?;
+            CompiledEvaluation::Delta { periods: *periods }
+        }
+        aggregate => compile_aggregate_output(aggregate, input_index, &input_type, window_groups)?,
+    };
+    let output_type = match &evaluation {
+        CompiledEvaluation::Lag { .. } | CompiledEvaluation::Delta { .. } => input_type.clone(),
+        CompiledEvaluation::Aggregate(aggregate) => match aggregate.statistic {
+            Statistic::Count => DataType::UInt64,
+            Statistic::Sum => match SumClass::from_input(&input_type) {
+                SumClass::Signed => DataType::Int64,
+                SumClass::Unsigned => DataType::UInt64,
+                _ => DataType::Float64,
+            },
+            Statistic::Mean | Statistic::Variance | Statistic::Stddev => DataType::Float64,
+        },
+    };
     Ok(CompiledRollingOutput {
         input_index,
         name: output.output().to_owned(),
-        output_type: input_type.clone(),
+        output_type,
         input_type,
-        is_delta: output.is_delta(),
-        periods: output.periods(),
+        evaluation,
+    })
+}
+
+fn compile_aggregate_output(
+    output: &RollingOutputSpec,
+    input_index: usize,
+    input_type: &DataType,
+    window_groups: &mut Vec<CompiledWindowGroup>,
+) -> Result<CompiledEvaluation> {
+    let (frame, min_periods, ddof, statistic) = match output {
+        RollingOutputSpec::Count {
+            frame, min_periods, ..
+        } => (*frame, *min_periods, 0, Statistic::Count),
+        RollingOutputSpec::Sum {
+            frame, min_periods, ..
+        } => (*frame, *min_periods, 0, Statistic::Sum),
+        RollingOutputSpec::Mean {
+            frame, min_periods, ..
+        } => (*frame, *min_periods, 0, Statistic::Mean),
+        RollingOutputSpec::Variance {
+            frame,
+            min_periods,
+            ddof,
+            ..
+        } => (*frame, *min_periods, *ddof, Statistic::Variance),
+        RollingOutputSpec::Stddev {
+            frame,
+            min_periods,
+            ddof,
+            ..
+        } => (*frame, *min_periods, *ddof, Statistic::Stddev),
+        RollingOutputSpec::Lag { .. } | RollingOutputSpec::Delta { .. } => {
+            unreachable!("lag and delta compile before aggregates")
+        }
+    };
+    if !matches!(statistic, Statistic::Count) {
+        require_numeric(output.input(), input_type, statistic.name())?;
+    }
+    Ok(compile_aggregate(
+        input_index,
+        input_type,
+        frame,
+        min_periods,
+        ddof,
+        statistic,
+        window_groups,
+    ))
+}
+
+fn require_numeric(column: &str, input_type: &DataType, primitive: &str) -> Result<()> {
+    if !is_numeric(input_type) {
+        return Err(compile_error(format!(
+            "rolling {primitive} does not support column {column:?} with type {input_type}"
+        )));
+    }
+    Ok(())
+}
+
+fn compile_aggregate(
+    input_index: usize,
+    input_type: &DataType,
+    frame: RollingFrameSpec,
+    min_periods: u64,
+    ddof: u8,
+    statistic: Statistic,
+    window_groups: &mut Vec<CompiledWindowGroup>,
+) -> CompiledEvaluation {
+    let frame_rows = frame.size();
+    let group = window_groups
+        .iter()
+        .position(|group| group.input_index == input_index && group.frame_rows == frame_rows)
+        .unwrap_or_else(|| {
+            window_groups.push(CompiledWindowGroup {
+                input_index,
+                frame_rows,
+                sum_class: SumClass::from_input(input_type),
+            });
+            window_groups.len() - 1
+        });
+    CompiledEvaluation::Aggregate(CompiledAggregate {
+        group,
+        statistic,
+        min_periods,
+        ddof,
     })
 }
 
@@ -2226,17 +3023,22 @@ mod tests {
     }
 
     #[test]
-    fn unknown_output_kind_is_rejected() {
-        let mut document = valid_spec_json();
-        document["outputs"][0] = json!({
-            "kind": "mean",
-            "primitive_version": 1,
-            "input": "price",
-            "output": "price_mean_20",
-            "frame": {"kind": "rows", "size": 20},
-            "min_periods": 1
-        });
-        assert!(serde_json::from_value::<RollingSpec>(document).is_err());
+    fn unsupported_output_kind_is_rejected() {
+        for kind in ["min", "max", "covariance", "correlation"] {
+            let mut document = valid_spec_json();
+            document["outputs"][0] = json!({
+                "kind": kind,
+                "primitive_version": 1,
+                "input": "price",
+                "output": "price_unsupported",
+                "frame": {"kind": "rows", "size": 20},
+                "min_periods": 1
+            });
+            assert!(
+                serde_json::from_value::<RollingSpec>(document).is_err(),
+                "unsupported kind {kind} was accepted"
+            );
+        }
     }
 
     #[test]
@@ -2607,6 +3409,214 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // Aggregate declarations (SCE-07, SCE-00 D3.2/D5)
+    // ------------------------------------------------------------------
+
+    fn aggregate_spec_json(outputs: Value) -> Value {
+        let mut document = valid_spec_json();
+        document["outputs"] = outputs;
+        document
+    }
+
+    fn aggregate_output(kind: &str, input: &str, output: &str, size: u64) -> Value {
+        json!({
+            "kind": kind,
+            "primitive_version": 1,
+            "input": input,
+            "output": output,
+            "frame": {"kind": "rows", "size": size},
+            "min_periods": 1
+        })
+    }
+
+    fn ddof_output(kind: &str, input: &str, output: &str, size: u64, ddof: u64) -> Value {
+        let mut declaration = aggregate_output(kind, input, output, size);
+        declaration["ddof"] = json!(ddof);
+        declaration
+    }
+
+    fn aggregate_spec(outputs: Value) -> RollingSpec {
+        serde_json::from_value(aggregate_spec_json(outputs)).unwrap()
+    }
+
+    #[test]
+    fn aggregate_outputs_round_trip_the_frozen_json() {
+        let document = aggregate_spec_json(json!([
+            aggregate_output("count", "price", "price_count_20", 20),
+            aggregate_output("sum", "volume", "volume_sum_20", 20),
+            aggregate_output("mean", "price", "price_mean_20", 20),
+            ddof_output("variance", "price", "price_var_20", 20, 1),
+            ddof_output("stddev", "price", "price_std_20", 20, 0),
+        ]));
+        let spec: RollingSpec = serde_json::from_value(document.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&spec).unwrap(), document);
+    }
+
+    #[test]
+    fn duration_frames_are_rejected_in_this_release() {
+        let mut declaration = aggregate_output("mean", "price", "price_mean", 20);
+        declaration["frame"] = json!({"kind": "duration", "micros": 60_000_000});
+        let document = aggregate_spec_json(json!([declaration]));
+        assert!(serde_json::from_value::<RollingSpec>(document).is_err());
+    }
+
+    #[test]
+    fn aggregate_outputs_reject_lag_only_fields() {
+        let mut declaration = aggregate_output("mean", "price", "price_mean", 20);
+        declaration["periods"] = json!(1);
+        let document = aggregate_spec_json(json!([declaration]));
+        assert!(serde_json::from_value::<RollingSpec>(document).is_err());
+    }
+
+    #[test]
+    fn statistical_outputs_reject_missing_ddof() {
+        for kind in ["variance", "stddev"] {
+            let declaration = aggregate_output(kind, "price", "price_stat", 20);
+            let document = aggregate_spec_json(json!([declaration]));
+            assert!(
+                serde_json::from_value::<RollingSpec>(document).is_err(),
+                "{kind} without ddof was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn non_statistical_aggregates_reject_ddof() {
+        for kind in ["count", "sum", "mean"] {
+            let declaration = ddof_output(kind, "price", "price_agg", 20, 1);
+            let document = aggregate_spec_json(json!([declaration]));
+            assert!(
+                serde_json::from_value::<RollingSpec>(document).is_err(),
+                "{kind} with ddof was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_output_schema_uses_the_frozen_type_table() {
+        let spec = aggregate_spec(json!([
+            aggregate_output("count", "price", "price_count", 20),
+            aggregate_output("count", "label", "label_count", 20),
+            aggregate_output("sum", "volume", "volume_sum", 20),
+            aggregate_output("sum", "price", "price_sum", 20),
+            aggregate_output("mean", "volume", "volume_mean", 20),
+            ddof_output("variance", "price", "price_var", 20, 1),
+            ddof_output("stddev", "volume", "volume_std", 20, 0),
+        ]));
+        let output_schema = spec.validate(&input_schema()).unwrap();
+        let derived = &output_schema.fields()[input_schema().fields().len()..];
+        let expected = [
+            ("price_count", DataType::UInt64),
+            ("label_count", DataType::UInt64),
+            ("volume_sum", DataType::Int64),
+            ("price_sum", DataType::Float64),
+            ("volume_mean", DataType::Float64),
+            ("price_var", DataType::Float64),
+            ("volume_std", DataType::Float64),
+        ];
+        assert_eq!(derived.len(), expected.len());
+        for (field, (name, data_type)) in derived.iter().zip(expected) {
+            assert_eq!(field.name(), name);
+            assert_eq!(field.data_type(), &data_type);
+            assert!(field.is_nullable());
+        }
+    }
+
+    #[test]
+    fn zero_frame_size_is_rejected() {
+        let mut spec = aggregate_spec(json!([aggregate_output("mean", "price", "m", 20)]));
+        let RollingOutputSpec::Mean { frame, .. } = &mut spec.outputs[0] else {
+            panic!("expected a mean output");
+        };
+        let RollingFrameSpec::Rows { size } = frame;
+        *size = 0;
+        let error = spec.validate(&input_schema()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                CalcFlowError::InvalidArgument { ref field, .. }
+                    if field == "rolling.outputs[0].frame.size"
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn zero_min_periods_is_rejected() {
+        let mut spec = aggregate_spec(json!([aggregate_output("mean", "price", "m", 20)]));
+        let RollingOutputSpec::Mean { min_periods, .. } = &mut spec.outputs[0] else {
+            panic!("expected a mean output");
+        };
+        *min_periods = 0;
+        let error = spec.validate(&input_schema()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                CalcFlowError::InvalidArgument { ref field, .. }
+                    if field == "rolling.outputs[0].min_periods"
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn min_periods_above_the_frame_size_is_rejected() {
+        let mut declaration = aggregate_output("mean", "price", "m", 3);
+        declaration["min_periods"] = json!(4);
+        let spec = aggregate_spec(json!([declaration]));
+        let error = spec.validate(&input_schema()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                CalcFlowError::InvalidArgument { ref field, .. }
+                    if field == "rolling.outputs[0].min_periods"
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn ddof_above_one_is_rejected() {
+        let mut spec = aggregate_spec(json!([ddof_output("variance", "price", "v", 20, 1)]));
+        let RollingOutputSpec::Variance { ddof, .. } = &mut spec.outputs[0] else {
+            panic!("expected a variance output");
+        };
+        *ddof = 2;
+        let error = spec.validate(&input_schema()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                CalcFlowError::InvalidArgument { ref field, .. }
+                    if field == "rolling.outputs[0].ddof"
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn sum_mean_variance_and_stddev_reject_non_numeric_inputs() {
+        for declaration in [
+            aggregate_output("sum", "label", "label_sum", 20),
+            aggregate_output("mean", "label", "label_mean", 20),
+            ddof_output("variance", "label", "label_var", 20, 1),
+            ddof_output("stddev", "label", "label_std", 20, 1),
+        ] {
+            let spec = aggregate_spec(json!([declaration]));
+            let error = spec.validate(&input_schema()).unwrap_err();
+            assert!(
+                matches!(error, CalcFlowError::Compile { .. }),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn count_accepts_non_numeric_inputs() {
+        let spec = aggregate_spec(json!([aggregate_output("count", "label", "n", 20)]));
+        assert!(spec.validate(&input_schema()).is_ok());
+    }
+
+    // ------------------------------------------------------------------
     // Shared lag/delta kernel
     // ------------------------------------------------------------------
 
@@ -2937,8 +3947,8 @@ mod tests {
             let outputs = compute(&spec, &histories, &rows).unwrap();
             histories.apply(outputs.touched);
         }
-        for history in histories.by_entity.values() {
-            assert!(history.len() <= 2);
+        for state in histories.by_entity.values() {
+            assert!(state.rows.len() <= 2);
         }
     }
 
@@ -2961,6 +3971,698 @@ mod tests {
                     ScalarValue::Float64(None),
                     ScalarValue::Int64(Some(i64::MAX)),
                 ],
+            ),
+        ];
+        assert!(compute(&spec, &histories, &rows).is_err());
+        assert!(histories.by_entity.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Shared aggregate kernel (SCE-07)
+    // ------------------------------------------------------------------
+
+    fn price_rows(prices: &[Option<f64>]) -> Vec<BufferedRow> {
+        prices
+            .iter()
+            .enumerate()
+            .map(|(index, price)| {
+                let sequence = u64::try_from(index + 1).unwrap();
+                full_row(
+                    i64::try_from(index + 1).unwrap(),
+                    "a",
+                    sequence,
+                    vec![ScalarValue::Float64(*price)],
+                )
+            })
+            .collect()
+    }
+
+    fn unsigned_column(outputs: &ComputedOutputs, index: usize) -> Vec<Option<u64>> {
+        outputs.columns[index]
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .iter()
+            .collect()
+    }
+
+    #[test]
+    fn count_sum_and_mean_slide_over_each_entity_window() {
+        let spec = kernel_spec(json!([
+            aggregate_output("count", "price", "price_count", 2),
+            aggregate_output("sum", "price", "price_sum", 2),
+            aggregate_output("mean", "price", "price_mean", 2),
+        ]));
+        let rows = vec![
+            full_row(1, "a", 1, vec![ScalarValue::Float64(Some(1.0))]),
+            full_row(1, "b", 1, vec![ScalarValue::Float64(Some(10.0))]),
+            full_row(2, "a", 2, vec![ScalarValue::Float64(Some(2.0))]),
+            full_row(2, "b", 2, vec![ScalarValue::Float64(Some(20.0))]),
+            full_row(3, "a", 3, vec![ScalarValue::Float64(Some(3.0))]),
+            full_row(4, "a", 4, vec![ScalarValue::Float64(Some(4.0))]),
+        ];
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        assert_eq!(
+            unsigned_column(&outputs, 0),
+            vec![Some(1), Some(1), Some(2), Some(2), Some(2), Some(2)]
+        );
+        assert_eq!(
+            float_column(&outputs, 1),
+            vec![
+                Some(1.0),
+                Some(10.0),
+                Some(3.0),
+                Some(30.0),
+                Some(5.0),
+                Some(7.0)
+            ]
+        );
+        assert_eq!(
+            float_column(&outputs, 2),
+            vec![
+                Some(1.0),
+                Some(10.0),
+                Some(1.5),
+                Some(15.0),
+                Some(2.5),
+                Some(3.5)
+            ]
+        );
+    }
+
+    #[test]
+    fn null_and_nan_samples_are_excluded_but_rows_still_emit() {
+        let spec = kernel_spec(json!([
+            aggregate_output("count", "price", "price_count", 2),
+            aggregate_output("sum", "price", "price_sum", 2),
+            aggregate_output("mean", "price", "price_mean", 2),
+        ]));
+        let rows = price_rows(&[Some(1.0), None, Some(f64::NAN), Some(4.0)]);
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        assert_eq!(
+            unsigned_column(&outputs, 0),
+            vec![Some(1), Some(1), None, Some(1)]
+        );
+        assert_eq!(
+            float_column(&outputs, 1),
+            vec![Some(1.0), Some(1.0), None, Some(4.0)]
+        );
+        let means = float_column(&outputs, 2);
+        assert_eq!(means[0], Some(1.0));
+        assert_eq!(means[1], Some(1.0));
+        assert_eq!(means[2], None);
+        assert_eq!(means[3], Some(4.0));
+    }
+
+    #[test]
+    fn min_periods_counts_valid_samples_not_rows() {
+        let mut declaration = aggregate_output("mean", "price", "price_mean", 3);
+        declaration["min_periods"] = json!(2);
+        let spec = kernel_spec(json!([declaration]));
+        let rows = price_rows(&[Some(1.0), None, Some(3.0), Some(4.0)]);
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        assert_eq!(
+            float_column(&outputs, 0),
+            vec![None, None, Some(2.0), Some(3.5)]
+        );
+    }
+
+    #[test]
+    fn variance_and_stddev_follow_the_ddof_divisor() {
+        let spec = kernel_spec(json!([
+            ddof_output("variance", "price", "price_var_1", 2, 1),
+            ddof_output("variance", "price", "price_var_0", 2, 0),
+            ddof_output("stddev", "price", "price_std_1", 2, 1),
+            ddof_output("stddev", "price", "price_std_0", 2, 0),
+        ]));
+        let rows = price_rows(&[Some(1.0), Some(2.0), Some(3.0), Some(4.0)]);
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        let sample = float_column(&outputs, 0);
+        assert_eq!(sample[0], None);
+        assert_eq!(sample[1..], [Some(0.5), Some(0.5), Some(0.5)]);
+        assert_eq!(
+            float_column(&outputs, 1),
+            vec![Some(0.0), Some(0.25), Some(0.25), Some(0.25)]
+        );
+        let std_sample = float_column(&outputs, 2);
+        assert_eq!(std_sample[0], None);
+        for value in &std_sample[1..] {
+            assert!((value.unwrap() - 0.5_f64.sqrt()).abs() < 1e-15);
+        }
+        let std_population = float_column(&outputs, 3);
+        assert_eq!(std_population[0], Some(0.0));
+        for value in &std_population[1..] {
+            assert!((value.unwrap() - 0.5).abs() < 1e-15);
+        }
+    }
+
+    #[test]
+    fn integer_sum_is_exact_and_checked() {
+        let spec = kernel_spec(json!([aggregate_output("sum", "volume", "volume_sum", 2)]));
+        let rows = [10_i64, 20, 30]
+            .into_iter()
+            .enumerate()
+            .map(|(index, volume)| {
+                let sequence = u64::try_from(index + 1).unwrap();
+                full_row(
+                    i64::try_from(index + 1).unwrap(),
+                    "a",
+                    sequence,
+                    vec![ScalarValue::Float64(None), ScalarValue::Int64(Some(volume))],
+                )
+            })
+            .collect::<Vec<_>>();
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        assert_eq!(
+            signed_column(&outputs, 0),
+            vec![Some(10), Some(30), Some(50)]
+        );
+    }
+
+    #[test]
+    fn integer_sum_overflow_is_a_data_error() {
+        let spec = kernel_spec(json!([aggregate_output("sum", "volume", "volume_sum", 2)]));
+        let rows = vec![
+            full_row(
+                1,
+                "a",
+                1,
+                vec![
+                    ScalarValue::Float64(None),
+                    ScalarValue::Int64(Some(i64::MAX - 1)),
+                ],
+            ),
+            full_row(
+                2,
+                "a",
+                2,
+                vec![ScalarValue::Float64(None), ScalarValue::Int64(Some(2))],
+            ),
+        ];
+        let error = compute(&spec, &RollingHistories::default(), &rows).unwrap_err();
+        assert!(
+            matches!(error, CalcFlowError::Operator { ref message, .. } if message.contains("sum")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn integer_slide_transient_overflow_returns_representable_sums() {
+        // Window sums [MAX], [MAX,-1], [-1,5] are all representable, but the
+        // add-before-remove slide transient MAX-1+5 overflows narrow i64.
+        let spec = kernel_spec(json!([aggregate_output("sum", "volume", "volume_sum", 2)]));
+        let rows = [i64::MAX, -1, 5]
+            .into_iter()
+            .enumerate()
+            .map(|(index, volume)| {
+                full_row(
+                    i64::try_from(index + 1).unwrap(),
+                    "a",
+                    u64::try_from(index + 1).unwrap(),
+                    vec![ScalarValue::Float64(None), ScalarValue::Int64(Some(volume))],
+                )
+            })
+            .collect::<Vec<_>>();
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        assert_eq!(
+            signed_column(&outputs, 0),
+            vec![Some(i64::MAX), Some(i64::MAX - 1), Some(4)]
+        );
+    }
+
+    #[test]
+    fn unsigned_slide_transient_overflow_returns_representable_sums() {
+        let schema = numeric_schema(DataType::UInt64);
+        let spec = numeric_spec(json!([aggregate_output("sum", "value", "value_sum", 2)]));
+        let compiled = compile_spec(&spec, &schema).unwrap();
+        let rows = [u64::MAX, 0, 5]
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                numeric_row(
+                    i64::try_from(index + 1).unwrap(),
+                    u64::try_from(index + 1).unwrap(),
+                    ScalarValue::UInt64(Some(value)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let outputs =
+            compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling")
+                .unwrap();
+        assert_eq!(
+            unsigned_column(&outputs, 0),
+            vec![Some(u64::MAX), Some(u64::MAX), Some(5)]
+        );
+    }
+
+    #[test]
+    fn integer_transient_slide_matches_the_rebuild_fold() {
+        let spec = kernel_spec(json!([aggregate_output("sum", "volume", "volume_sum", 2)]));
+        let rows = [i64::MAX, -1, 5, 2]
+            .into_iter()
+            .enumerate()
+            .map(|(index, volume)| {
+                full_row(
+                    i64::try_from(index + 1).unwrap(),
+                    "a",
+                    u64::try_from(index + 1).unwrap(),
+                    vec![ScalarValue::Float64(None), ScalarValue::Int64(Some(volume))],
+                )
+            })
+            .collect::<Vec<_>>();
+        let one_shot = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        let mut histories = RollingHistories::default();
+        let mut segmented: Vec<Option<i64>> = Vec::new();
+        for chunk in rows.chunks(3) {
+            let outputs = compute(&spec, &histories, chunk).unwrap();
+            let values = signed_column(&outputs, 0);
+            histories.apply(outputs.touched);
+            segmented.extend(values);
+        }
+        assert_eq!(segmented, signed_column(&one_shot, 0));
+    }
+
+    fn numeric_schema(data_type: DataType) -> Schema {
+        Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC"))),
+                false,
+            ),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("sequence", DataType::UInt64, false),
+            Field::new("value", data_type, true),
+        ])
+    }
+
+    fn numeric_row(event_time: i64, sequence: u64, value: ScalarValue) -> BufferedRow {
+        BufferedRow::new(
+            vec![Some(KeyValue::String("a".into()))],
+            vec![KeyValue::Unsigned(sequence)],
+            event_time,
+            vec![
+                ts_scalar(event_time),
+                ScalarValue::Utf8(Some("a".into())),
+                ScalarValue::UInt64(Some(sequence)),
+                value,
+            ],
+        )
+    }
+
+    fn numeric_spec(outputs: Value) -> RollingSpec {
+        let mut document = aggregate_spec_json(outputs);
+        document["partition_by"] = json!(["symbol"]);
+        document["event_time"] = json!("ts");
+        document["sequence_by"] = json!(["sequence"]);
+        serde_json::from_value(document).unwrap()
+    }
+
+    #[test]
+    fn unsigned_sum_stays_exact_and_checked() {
+        let schema = numeric_schema(DataType::UInt64);
+        let spec = numeric_spec(json!([aggregate_output("sum", "value", "value_sum", 2)]));
+        let compiled = compile_spec(&spec, &schema).unwrap();
+        let rows = [5_u64, 7, 9]
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let sequence = u64::try_from(index + 1).unwrap();
+                numeric_row(
+                    i64::try_from(index + 1).unwrap(),
+                    sequence,
+                    ScalarValue::UInt64(Some(value)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let outputs =
+            compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling")
+                .unwrap();
+        assert_eq!(
+            unsigned_column(&outputs, 0),
+            vec![Some(5), Some(12), Some(16)]
+        );
+        let overflow = vec![
+            numeric_row(1, 1, ScalarValue::UInt64(Some(u64::MAX))),
+            numeric_row(2, 2, ScalarValue::UInt64(Some(1))),
+        ];
+        let error = compute_output_columns(
+            &overflow,
+            &RollingHistories::default(),
+            &compiled,
+            "rolling",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, CalcFlowError::Operator { ref message, .. } if message.contains("sum")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn float32_samples_widen_to_float64_outputs() {
+        let schema = numeric_schema(DataType::Float32);
+        let spec = numeric_spec(json!([
+            aggregate_output("sum", "value", "value_sum", 2),
+            aggregate_output("mean", "value", "value_mean", 2),
+        ]));
+        let compiled = compile_spec(&spec, &schema).unwrap();
+        let rows = [1.5_f32, 2.5, 4.0]
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let sequence = u64::try_from(index + 1).unwrap();
+                numeric_row(
+                    i64::try_from(index + 1).unwrap(),
+                    sequence,
+                    ScalarValue::Float32(Some(value)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let outputs =
+            compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling")
+                .unwrap();
+        assert_eq!(
+            float_column(&outputs, 0),
+            vec![Some(1.5), Some(4.0), Some(6.5)]
+        );
+        assert_eq!(
+            float_column(&outputs, 1),
+            vec![Some(1.5), Some(2.0), Some(3.25)]
+        );
+    }
+
+    #[test]
+    fn infinities_follow_ieee_and_undefined_results_are_nan_not_null() {
+        let spec = kernel_spec(json!([
+            aggregate_output("sum", "price", "price_sum", 2),
+            ddof_output("variance", "price", "price_var", 2, 1),
+        ]));
+        let rows = price_rows(&[Some(1.0), Some(f64::INFINITY), Some(3.0), Some(4.0)]);
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        let sums = float_column(&outputs, 0);
+        assert_eq!(sums[0], Some(1.0));
+        assert_eq!(sums[1], Some(f64::INFINITY));
+        assert_eq!(sums[2], Some(f64::INFINITY));
+        assert_eq!(sums[3], Some(7.0));
+        let variances = float_column(&outputs, 1);
+        assert_eq!(variances[0], None);
+        assert!(variances[1].unwrap().is_nan());
+        assert!(variances[2].unwrap().is_nan());
+        assert_eq!(variances[3], Some(0.5));
+    }
+
+    // ------------------------------------------------------------------
+    // Frozen ±inf readout semantics (SCE-07 defect 1 ruling, A1-A6)
+    // ------------------------------------------------------------------
+
+    /// Rows for one entity with explicit per-row price values.
+    fn entity_prices(symbol: &str, prices: &[Option<f64>]) -> Vec<BufferedRow> {
+        prices
+            .iter()
+            .enumerate()
+            .map(|(index, price)| {
+                let sequence = u64::try_from(index + 1).unwrap();
+                full_row(
+                    i64::try_from(index + 1).unwrap(),
+                    symbol,
+                    sequence,
+                    vec![ScalarValue::Float64(*price)],
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a1_mean_classification_is_independent_of_infinity_position() {
+        let spec = kernel_spec(json!([aggregate_output("mean", "price", "price_mean", 3)]));
+        let mut rows = Vec::new();
+        for (symbol, prices) in [
+            ("a", [f64::INFINITY, 1.0, 2.0]),
+            ("b", [1.0, f64::INFINITY, 2.0]),
+            ("c", [1.0, 2.0, f64::INFINITY]),
+            ("d", [f64::NEG_INFINITY, 1.0, 2.0]),
+            ("e", [1.0, f64::NEG_INFINITY, 2.0]),
+            ("f", [1.0, 2.0, f64::NEG_INFINITY]),
+        ] {
+            rows.extend(entity_prices(symbol, &prices.map(Some)));
+        }
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        let means = float_column(&outputs, 0);
+        for index in [2_usize, 5, 8] {
+            assert_eq!(
+                means[index],
+                Some(f64::INFINITY),
+                "positive infinity multiset at row {index}"
+            );
+        }
+        for index in [11_usize, 14, 17] {
+            assert_eq!(
+                means[index],
+                Some(f64::NEG_INFINITY),
+                "negative infinity multiset at row {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn a2_mixed_sign_infinities_yield_nan_in_any_order() {
+        let spec = kernel_spec(json!([aggregate_output("mean", "price", "price_mean", 3)]));
+        let mut rows = Vec::new();
+        rows.extend(entity_prices(
+            "a",
+            &[Some(f64::INFINITY), Some(f64::NEG_INFINITY)],
+        ));
+        rows.extend(entity_prices(
+            "b",
+            &[Some(f64::NEG_INFINITY), Some(f64::INFINITY)],
+        ));
+        rows.extend(entity_prices(
+            "c",
+            &[
+                Some(f64::INFINITY),
+                Some(f64::INFINITY),
+                Some(f64::NEG_INFINITY),
+            ],
+        ));
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        let means = float_column(&outputs, 0);
+        for index in [1_usize, 3, 6] {
+            assert!(
+                means[index].is_some_and(f64::is_nan),
+                "mixed-sign window at row {index} must be NaN"
+            );
+        }
+    }
+
+    #[test]
+    fn a3_departed_infinities_leave_no_residue_across_slide_and_refold() {
+        let spec = kernel_spec(json!([aggregate_output("mean", "price", "price_mean", 2)]));
+        let rows = entity_prices(
+            "a",
+            &[
+                Some(1.0),
+                Some(f64::INFINITY),
+                Some(3.0),
+                Some(4.0),
+                Some(5.0),
+            ],
+        );
+        let one_shot = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        assert_eq!(
+            float_column(&one_shot, 0),
+            vec![
+                Some(1.0),
+                Some(f64::INFINITY),
+                Some(f64::INFINITY),
+                Some(3.5),
+                Some(4.5)
+            ]
+        );
+
+        let mut histories = RollingHistories::default();
+        let mut segmented: Vec<Option<f64>> = Vec::new();
+        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+        for chunk in rows.chunks(3) {
+            let outputs = compute(&spec, &histories, chunk).unwrap();
+            let values = float_column(&outputs, 0);
+            histories.apply(outputs.touched);
+            // Mirror a checkpoint restore: rebuild every window from the
+            // retained rows instead of carrying the live accumulators.
+            rebuild_windows(&mut histories, &compiled, "rolling").unwrap();
+            segmented.extend(values);
+        }
+        assert_eq!(segmented, float_column(&one_shot, 0));
+    }
+
+    #[test]
+    fn a4_near_overflow_finite_window_keeps_the_west_mean() {
+        let spec = kernel_spec(json!([aggregate_output("mean", "price", "price_mean", 2)]));
+        let rows = entity_prices("a", &[Some(1e308), Some(1e308)]);
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        let means = float_column(&outputs, 0);
+        let value = means[1].expect("finite window mean must be non-null");
+        assert!(
+            value.is_finite(),
+            "naive sum/count readout would overflow to infinity"
+        );
+        assert!((value - 1e308).abs() <= 1e308 * 1e-15);
+    }
+
+    #[test]
+    fn a5_variance_and_stddev_with_inf_are_nan_after_the_null_gates() {
+        let spec = kernel_spec(json!([
+            ddof_output("variance", "price", "price_var_1", 2, 1),
+            ddof_output("stddev", "price", "price_std_0", 2, 0),
+        ]));
+        let rows = entity_prices("a", &[Some(f64::INFINITY), Some(2.0), Some(5.0), Some(6.0)]);
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        let variances = float_column(&outputs, 0);
+        // ddof=1 with one valid sample: divisor zero wins over the NaN class.
+        assert_eq!(variances[0], None);
+        // Two valid samples with an inf present: NaN, not null and not inf.
+        assert!(variances[1].unwrap().is_nan());
+        // The inf has left the window: back to finite values (the removal
+        // step carries West drift well inside the frozen D13 tolerance).
+        assert!((variances[2].unwrap() - 4.5).abs() <= 4.5 * 1e-10);
+        assert!((variances[3].unwrap() - 0.5).abs() <= 1e-12);
+        let stddevs = float_column(&outputs, 1);
+        // ddof=0 passes the divisor gate with one sample: NaN classification.
+        assert!(stddevs[0].unwrap().is_nan());
+        assert!(stddevs[1].unwrap().is_nan());
+        assert!((stddevs[2].unwrap() - 1.5_f64).abs() <= 1e-12);
+        assert!((stddevs[3].unwrap() - 0.5_f64).abs() <= 1e-12);
+    }
+
+    #[test]
+    fn a6_infinities_count_toward_valid_samples_and_min_periods() {
+        let spec = kernel_spec(json!([
+            aggregate_output("count", "price", "price_count", 3),
+            aggregate_output("mean", "price", "price_mean", 3),
+        ]));
+        let rows = entity_prices("a", &[Some(f64::INFINITY), Some(f64::NAN), None]);
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        // NaN and null are excluded, so the valid count stays at one; the
+        // infinity alone still satisfies min_periods=1.
+        assert_eq!(
+            unsigned_column(&outputs, 0),
+            vec![Some(1), Some(1), Some(1)]
+        );
+        let means = float_column(&outputs, 1);
+        assert_eq!(means[0], Some(f64::INFINITY));
+        assert_eq!(means[1], Some(f64::INFINITY));
+        assert_eq!(means[2], Some(f64::INFINITY));
+    }
+
+    #[test]
+    fn compatible_outputs_share_one_window_state() {
+        let spec = kernel_spec(json!([
+            aggregate_output("count", "price", "price_count", 2),
+            aggregate_output("sum", "price", "price_sum", 2),
+            aggregate_output("mean", "price", "price_mean", 2),
+            ddof_output("variance", "price", "price_var", 2, 1),
+            ddof_output("stddev", "price", "price_std", 2, 1),
+            aggregate_output("mean", "price", "price_mean_3", 3),
+        ]));
+        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+        assert_eq!(compiled.window_groups.len(), 2);
+        let rows = price_rows(&[Some(1.0), Some(2.0), Some(3.0), Some(4.0)]);
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        let variances = float_column(&outputs, 3);
+        let stddevs = float_column(&outputs, 4);
+        let means_3 = float_column(&outputs, 5);
+        for (variance, stddev) in variances.iter().zip(&stddevs) {
+            match (variance, stddev) {
+                (Some(variance), Some(stddev)) => {
+                    assert!((stddev * stddev - variance).abs() < 1e-12);
+                }
+                (None, None) => {}
+                other => panic!("variance/stddev nullness diverged: {other:?}"),
+            }
+        }
+        assert_eq!(means_3, vec![Some(1.0), Some(1.5), Some(2.0), Some(3.0)]);
+    }
+
+    #[test]
+    fn frame_size_extends_history_retention_beyond_lag_periods() {
+        let spec = kernel_spec(json!([
+            lag_price(1),
+            aggregate_output("mean", "price", "price_mean", 3),
+        ]));
+        let mut histories = RollingHistories::default();
+        for batch in 0..3_u32 {
+            let rows = (0..4_u32)
+                .map(|index| {
+                    let sequence = batch * 4 + index + 1;
+                    full_row(
+                        i64::from(sequence),
+                        "a",
+                        u64::from(sequence),
+                        vec![ScalarValue::Float64(Some(f64::from(sequence)))],
+                    )
+                })
+                .collect::<Vec<_>>();
+            let outputs = compute(&spec, &histories, &rows).unwrap();
+            histories.apply(outputs.touched);
+        }
+        for state in histories.by_entity.values() {
+            assert!(state.rows.len() <= 3);
+            assert_eq!(state.rows.len(), 3);
+        }
+    }
+
+    #[test]
+    fn aggregate_windows_survive_segmentation() {
+        let spec = kernel_spec(json!([
+            aggregate_output("sum", "price", "price_sum", 2),
+            ddof_output("variance", "price", "price_var", 2, 1),
+        ]));
+        let all_rows = price_rows(&[Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0)]);
+        let one_shot = compute(&spec, &RollingHistories::default(), &all_rows).unwrap();
+        let mut histories = RollingHistories::default();
+        let mut segmented: Vec<Vec<Option<f64>>> = vec![Vec::new(); 2];
+        for chunk in all_rows.chunks(2) {
+            let outputs = compute(&spec, &histories, chunk).unwrap();
+            histories.apply(outputs.touched);
+            for (index, column) in outputs.columns.iter().enumerate() {
+                let values = column
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::Float64Array>()
+                    .unwrap()
+                    .iter()
+                    .collect::<Vec<_>>();
+                segmented[index].extend(values);
+            }
+        }
+        for (index, column) in one_shot.columns.iter().enumerate() {
+            let expected = column
+                .as_any()
+                .downcast_ref::<datafusion::arrow::array::Float64Array>()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>();
+            assert_eq!(segmented[index], expected);
+        }
+    }
+
+    #[test]
+    fn failed_aggregate_leaves_histories_untouched() {
+        let spec = kernel_spec(json!([aggregate_output("sum", "volume", "volume_sum", 2)]));
+        let histories = RollingHistories::default();
+        let rows = vec![
+            full_row(
+                1,
+                "a",
+                1,
+                vec![
+                    ScalarValue::Float64(None),
+                    ScalarValue::Int64(Some(i64::MAX)),
+                ],
+            ),
+            full_row(
+                2,
+                "a",
+                2,
+                vec![ScalarValue::Float64(None), ScalarValue::Int64(Some(1))],
             ),
         ];
         assert!(compute(&spec, &histories, &rows).is_err());
