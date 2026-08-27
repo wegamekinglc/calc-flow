@@ -882,6 +882,7 @@ fn assert_inf_classification(observed: &AggregateObserved) {
     );
 }
 
+#[allow(clippy::float_cmp, reason = "D13 exact classification comparison")]
 fn assert_float_column_matches(actual: &[Option<f64>], expected: &[Option<f64>], what: &str) {
     assert_eq!(actual.len(), expected.len(), "{what} length");
     for (index, (left, right)) in actual.iter().zip(expected).enumerate() {

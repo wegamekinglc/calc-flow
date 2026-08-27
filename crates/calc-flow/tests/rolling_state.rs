@@ -1500,6 +1500,7 @@ fn inf_fixture_rows() -> Vec<InputRow> {
 /// D13 comparison semantics for observed aggregate rows: null positions and
 /// row identities compare exactly, NaN compares equal only to NaN, and
 /// infinities require equal sign.
+#[allow(clippy::float_cmp, reason = "D13 exact classification comparison")]
 fn assert_aggregate_rows_match(actual: &[ObservedAggregateRow], expected: &[ObservedAggregateRow]) {
     assert_eq!(actual.len(), expected.len());
     for (index, (got, want)) in actual.iter().zip(expected).enumerate() {
