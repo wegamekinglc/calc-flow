@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$uv = Get-Command uv -CommandType Application -ErrorAction SilentlyContinue
+$uv = Get-Command uv -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($null -eq $uv) {
     Write-Error "'uv' is required; install it and ensure it is on PATH"
     exit 1
