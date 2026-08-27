@@ -141,6 +141,21 @@ const MAX_CHECKPOINT_SOAK_RESTART_GAP: Duration = Duration::from_secs(60);
 const CHECKPOINT_SOAK_SMOKE_CHECKPOINT_WAIT: Duration = Duration::from_secs(180);
 const CHECKPOINT_SOAK_SMOKE_GENERATION_TIMEOUT: Duration = Duration::from_secs(300);
 const CHECKPOINT_SOAK_SETTLE_TIMEOUT: Duration = Duration::from_secs(60);
+const CHECKPOINT_SOAK_CHECKPOINT_TIMEOUT_MILLIS: u64 = 10_000;
+const CHECKPOINT_SOAK_SMOKE_TARGET_CHECKPOINTS: u64 = 12;
+// Why: the engine legitimately allows one checkpoint to occupy up to the plan
+// timeout, so the smoke wait must dominate target x timeout (DAL-151).
+const _: () = assert!(
+    CHECKPOINT_SOAK_SMOKE_CHECKPOINT_WAIT.as_millis() as u64
+        >= CHECKPOINT_SOAK_SMOKE_TARGET_CHECKPOINTS * CHECKPOINT_SOAK_CHECKPOINT_TIMEOUT_MILLIS,
+);
+// Why: the parent generation cap must enclose the child's own wait and settle
+// budgets, or the watchdog kills a generation that is still inside contract.
+const _: () = assert!(
+    CHECKPOINT_SOAK_SMOKE_GENERATION_TIMEOUT.as_secs()
+        > CHECKPOINT_SOAK_SMOKE_CHECKPOINT_WAIT.as_secs()
+            + CHECKPOINT_SOAK_SETTLE_TIMEOUT.as_secs(),
+);
 const CHECKPOINT_BENCHMARK_COMMAND: &str = "CARGO_TARGET_DIR=<fresh-candidate-target> CARGO_INCREMENTAL=0 CALC_FLOW_M5_CHECKPOINT_BENCHMARK=1 CALC_FLOW_M5_CHECKPOINT_BENCHMARK_RUN_ID=<unique-run-id> CALC_FLOW_M5_PRIVATE_SOURCE_COMMIT=<candidate-commit> CALC_FLOW_M5_PRIVATE_SOURCE_TREE=<candidate-tree> cargo test --release --locked -p calc-flow --lib runtime::streaming::soak::private_m5_epoch_checkpoint_absolute_benchmark -- --ignored --exact --nocapture";
 const M5_PRIVATE_BENCHMARK_CASES: [&str; 12] = [
     "m5/private_path/barrier_cut_single_source",
@@ -4771,9 +4786,9 @@ fn checkpoint_soak_process_plans_with_retention(
                     CheckpointSoakProcessMode::Smoke => 50,
                     CheckpointSoakProcessMode::Standard => 5_000,
                 },
-                checkpoint_timeout_millis: 10_000,
+                checkpoint_timeout_millis: CHECKPOINT_SOAK_CHECKPOINT_TIMEOUT_MILLIS,
                 target_checkpoints: match mode {
-                    CheckpointSoakProcessMode::Smoke => 12,
+                    CheckpointSoakProcessMode::Smoke => CHECKPOINT_SOAK_SMOKE_TARGET_CHECKPOINTS,
                     CheckpointSoakProcessMode::Standard => 0,
                 },
                 sink_write_delay_millis: match mode {
