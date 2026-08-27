@@ -138,7 +138,9 @@ const MAX_CHECKPOINT_SOAK_RESTART_GAP: Duration = Duration::from_secs(60);
 // operator cost, fsync latency, and deep-retention per-epoch checkpoint cost
 // (DAL-164) all scale with machine speed and load, so the bounds must stay far
 // above the 50 ms smoke interval to avoid load-sensitive flakes.
-const CHECKPOINT_SOAK_SMOKE_CHECKPOINT_WAIT: Duration = Duration::from_secs(180);
+const CHECKPOINT_SOAK_SMOKE_WAIT_MILLIS: u64 = 180_000;
+const CHECKPOINT_SOAK_SMOKE_CHECKPOINT_WAIT: Duration =
+    Duration::from_millis(CHECKPOINT_SOAK_SMOKE_WAIT_MILLIS);
 const CHECKPOINT_SOAK_SMOKE_GENERATION_TIMEOUT: Duration = Duration::from_secs(300);
 const CHECKPOINT_SOAK_SETTLE_TIMEOUT: Duration = Duration::from_secs(60);
 const CHECKPOINT_SOAK_CHECKPOINT_TIMEOUT_MILLIS: u64 = 10_000;
@@ -146,7 +148,7 @@ const CHECKPOINT_SOAK_SMOKE_TARGET_CHECKPOINTS: u64 = 12;
 // Why: the engine legitimately allows one checkpoint to occupy up to the plan
 // timeout, so the smoke wait must dominate target x timeout (DAL-151).
 const _: () = assert!(
-    CHECKPOINT_SOAK_SMOKE_CHECKPOINT_WAIT.as_millis() as u64
+    CHECKPOINT_SOAK_SMOKE_WAIT_MILLIS
         >= CHECKPOINT_SOAK_SMOKE_TARGET_CHECKPOINTS * CHECKPOINT_SOAK_CHECKPOINT_TIMEOUT_MILLIS,
 );
 // Why: the parent generation cap must enclose the child's own wait and settle
