@@ -55,6 +55,30 @@ engine or Studio capabilities.
   per-row-final, micro-batch-invariant, checkpointed-stateful operator with
   state version 1. Rolling aggregates, duration frames, correlation, and
   cross-section declarations remain loudly rejected.
+- 2026-08-28: Add the native rolling aggregates `count`, `sum`, `mean`,
+  `variance`, and `stddev` to `RollingOperator` across Rust, Python, and the
+  regenerated contracts. Each aggregate output declares a `rows` frame and
+  `min_periods`, with `ddof` 0 or 1 on the two statistical kinds; valid
+  samples are non-null, non-NaN values, infinities count as numeric samples,
+  and the minimum-period gate reads null so a computed NaN stays distinct.
+  Output types follow the frozen table: `uint64` count, checked `int64` /
+  `uint64` integer sums, and `float64` for floating sums and every
+  statistical output. Floating sums follow IEEE arithmetic; integer sums
+  slide through a wide transient accumulator with a checked narrowing at
+  readout, so a window whose true sum is representable never reports a false
+  overflow while genuine integer overflow fails the run loudly. Mean,
+  variance, and standard deviation read a reversible West accumulator that
+  also counts the window's infinities: a mean over one infinity sign is
+  that infinity, over both signs it is NaN, and variance and standard
+  deviation over any infinity window are NaN behind the minimum-period and
+  divisor null gates — the ±inf readout semantics were adjudicated in
+  `.codex/artifacts/critiques/sce-07-rolling-inf-mean.md`. Outputs over the
+  same input column and frame share one accumulator group, and the
+  checkpoint segment still stores only history and buffered rows, with
+  every accumulator rebuilt by the same ordered fold on restore. The Python
+  constructors `ts.count`, `ts.sum`, `ts.mean`, `ts.variance`, and
+  `ts.stddev` lower into rolling nodes; `ts.min`, `ts.max`, correlation,
+  and duration frames remain rejected.
 
 - 2026-08-26: Compile symbolic row-local programs into execution plans.
   `Program.compile_batch(runtime)` and `Program.compile_stream(runtime, *,

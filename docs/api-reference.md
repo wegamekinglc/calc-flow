@@ -273,21 +273,21 @@ programs, static analysis, and row-local compilation with no data execution
 path. Every expression, feature, program, and analysis result is immutable;
 constructors copy caller-owned sequences and mappings.
 
-| Member                                                                        | Contract                                                                                 |
-| ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `Expr` / `ColumnExpr` / `ArrayExpr` / `TableExpr` / `Parameter`               | Immutable typed declaration values with v1 digests                                       |
-| `table_input(name, *, schema, entity_by=(), event_time=None, sequence_by=())` | Declare one named table input                                                            |
-| `parameter(name, *, kind=...)`                                                | Declare one named static table or array input                                            |
-| `Field(name, data_type, nullable=True)`                                       | One exact table field declaration                                                        |
-| `rows(size)` / `duration(micros)`                                             | Row-count and exact-microsecond rolling frames                                           |
-| `exact_time(...)` / `event_time_bucket(...)`                                  | Cross-section group declarations                                                         |
-| `row` / `ts` / `cs` / `table` / `linalg` / `window`                           | Namespace functions over expressions                                                     |
-| `FeatureSet(features=())` / `.with_feature(name, value)`                      | Ordered uniquely named column expressions                                                |
-| `TableExpr.with_columns(features)`                                            | Append a feature set as derived columns                                                  |
-| `Program(name, *, inputs=(), outputs=())`                                     | Declared inputs and outputs with the runtime-independent v1 fingerprint                  |
-| `Program.analyze(runtime, *, mode)` / `.explain(runtime, *, mode)`            | Static analysis and deterministic fact rendering                                         |
-| `Program.compile_batch(runtime)` / `.compile_stream(runtime, *, ...)`         | Lower row-local and lag/delta rolling declarations to a strict project-v3 execution plan |
-| `AnalysisIssue` / `AnalysisResult`                                            | Immutable findings with stable output/input-rooted paths                                 |
+| Member                                                                        | Contract                                                                                             |
+| ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `Expr` / `ColumnExpr` / `ArrayExpr` / `TableExpr` / `Parameter`               | Immutable typed declaration values with v1 digests                                                   |
+| `table_input(name, *, schema, entity_by=(), event_time=None, sequence_by=())` | Declare one named table input                                                                        |
+| `parameter(name, *, kind=...)`                                                | Declare one named static table or array input                                                        |
+| `Field(name, data_type, nullable=True)`                                       | One exact table field declaration                                                                    |
+| `rows(size)` / `duration(micros)`                                             | Row-count and exact-microsecond rolling frames                                                       |
+| `exact_time(...)` / `event_time_bucket(...)`                                  | Cross-section group declarations                                                                     |
+| `row` / `ts` / `cs` / `table` / `linalg` / `window`                           | Namespace functions over expressions                                                                 |
+| `FeatureSet(features=())` / `.with_feature(name, value)`                      | Ordered uniquely named column expressions                                                            |
+| `TableExpr.with_columns(features)`                                            | Append a feature set as derived columns                                                              |
+| `Program(name, *, inputs=(), outputs=())`                                     | Declared inputs and outputs with the runtime-independent v1 fingerprint                              |
+| `Program.analyze(runtime, *, mode)` / `.explain(runtime, *, mode)`            | Static analysis and deterministic fact rendering                                                     |
+| `Program.compile_batch(runtime)` / `.compile_stream(runtime, *, ...)`         | Lower row-local and rolling (lag/delta/aggregate) declarations to a strict project-v3 execution plan |
+| `AnalysisIssue` / `AnalysisResult`                                            | Immutable findings with stable output/input-rooted paths                                             |
 
 Structural identity uses `identical()`; public comparison operators build
 symbolic expressions, and converting one to `bool` fails. See the
