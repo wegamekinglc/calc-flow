@@ -51,10 +51,17 @@ def _reject_message(error: pytest.ExceptionInfo[CompileError]) -> str:
     return str(error.value)
 
 
-def test_stream_rolling_min_max_are_rejected_not_made_batch_local() -> None:
+def test_stream_rolling_pair_arguments_must_be_input_columns() -> None:
     quotes = _ordered()
     signals = quotes.with_columns(
-        FeatureSet([("peak", ts.max(quotes["x"], window=rows(20)))])
+        FeatureSet(
+            [
+                (
+                    "corr",
+                    ts.correlation(quotes["x"] + 1.0, quotes["y"], window=rows(20)),
+                )
+            ]
+        )
     )
     program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
 
@@ -62,19 +69,25 @@ def test_stream_rolling_min_max_are_rejected_not_made_batch_local() -> None:
         program.compile_stream(Runtime())
 
     message = _reject_message(excinfo)
-    assert "outputs.signals.peak" in message
-    assert "unknown_primitive_version" in message
-    assert "'max'" in message
+    assert "outputs.signals.corr" in message
+    assert "must be an input column" in message
 
 
-def test_batch_rolling_min_max_are_rejected() -> None:
+def test_batch_rolling_pair_arguments_must_be_input_columns() -> None:
     quotes = _ordered()
     signals = quotes.with_columns(
-        FeatureSet([("floor", ts.min(quotes["x"], window=rows(20)))])
+        FeatureSet(
+            [
+                (
+                    "cov",
+                    ts.covariance(quotes["x"], quotes["y"] * 2.0, window=rows(20)),
+                )
+            ]
+        )
     )
     program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
 
-    with pytest.raises(CompileError, match="unknown_primitive_version"):
+    with pytest.raises(CompileError, match="must be an input column"):
         program.compile_batch(Runtime())
 
 

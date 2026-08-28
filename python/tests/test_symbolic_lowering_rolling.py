@@ -460,29 +460,56 @@ def input_schema_fields() -> list[dict[str, object]]:
     ]
 
 
-def test_duration_frames_are_rejected_loudly_in_this_release() -> None:
+def test_duration_and_pair_lower_to_the_frozen_rolling_shape() -> None:
     quotes = _ordered()
-    program = Program(
-        "p",
-        inputs=[quotes],
-        outputs=[
-            (
-                "signals",
-                quotes.with_columns(
-                    FeatureSet(
-                        [("m", ts.mean(quotes["x"], window=duration(60_000_000)))]
-                    )
-                ),
-            )
-        ],
+    program = _program(
+        [
+            ("m", ts.mean(quotes["x"], window=duration(60_000_000))),
+            ("peak", ts.max(quotes["x"], window=duration(60_000_000))),
+            ("corr", ts.correlation(quotes["x"], quotes["v"], window=rows(4))),
+        ]
     )
 
-    with pytest.raises(CompileError) as excinfo:
-        lower_program_document(program, Runtime(), "batch")
+    document = lower_program_document(program, Runtime(), "batch")
 
-    message = str(excinfo.value)
-    assert "unsupported_type" in message
-    assert "duration" in message
+    rolling = _rolling_nodes(document)
+    assert len(rolling) == 1
+    spec = rolling[0]["operator"]["spec"]  # type: ignore[index]
+    assert spec["outputs"] == [
+        {
+            "kind": "mean",
+            "primitive_version": 1,
+            "input": "x",
+            "output": "m",
+            "frame": {"kind": "duration", "micros": 60_000_000},
+            "min_periods": 1,
+        },
+        {
+            "kind": "max",
+            "primitive_version": 1,
+            "input": "x",
+            "output": "peak",
+            "frame": {"kind": "duration", "micros": 60_000_000},
+            "min_periods": 1,
+        },
+        {
+            "kind": "correlation",
+            "primitive_version": 1,
+            "left": "x",
+            "right": "v",
+            "output": "corr",
+            "frame": {"kind": "rows", "size": 4},
+            "min_periods": 1,
+            "ddof": 1,
+        },
+    ]
+    output_schema = rolling[0]["output_ports"][0]["schema"]  # type: ignore[index]
+    derived = output_schema[len(input_schema_fields()) :]
+    assert derived == [
+        {"name": "m", "data_type": "float64", "nullable": True},
+        {"name": "peak", "data_type": "float64", "nullable": True},
+        {"name": "corr", "data_type": "float64", "nullable": True},
+    ]
 
 
 def test_batch_execution_produces_aggregate_rows() -> None:

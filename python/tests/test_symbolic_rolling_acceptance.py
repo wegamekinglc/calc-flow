@@ -77,29 +77,86 @@ def _rejected(features: list[tuple[str, object]], mode: str = "batch") -> str:
     return str(excinfo.value)
 
 
-def test_min_max_and_pair_kinds_stay_rejected() -> None:
+def test_min_max_covariance_and_correlation_execute_with_reference_values() -> None:
     quotes = _ordered()
-    unsupported = [
-        ts.min(quotes["x"], window=rows(5)),
-        ts.max(quotes["x"], window=rows(5)),
-        ts.covariance(quotes["x"], quotes["v"], window=rows(5)),
-        ts.correlation(quotes["x"], quotes["v"], window=rows(5)),
-    ]
-    for aggregate in unsupported:
-        message = _rejected([("feature", aggregate)])
-        assert "unknown_primitive_version" in message
-
-
-def test_duration_frame_and_correlation_stay_rejected() -> None:
-    quotes = _ordered()
-    message = _rejected([("m", ts.mean(quotes["x"], window=duration(1_000)))])
-    assert "unsupported_type" in message
-    assert "duration" in message
-    message = _rejected(
-        [("c", ts.correlation(quotes["x"], quotes["v"], window=rows(5)))],
-        mode="stream",
+    program = _program(
+        [
+            ("floor", ts.min(quotes["x"], window=rows(3))),
+            ("peak", ts.max(quotes["x"], window=rows(3))),
+            ("cov", ts.covariance(quotes["x"], quotes["v"], window=rows(3), ddof=1)),
+            ("corr", ts.correlation(quotes["x"], quotes["v"], window=rows(3))),
+        ]
     )
-    assert "unknown_primitive_version" in message
+    plan = program.compile_batch(Runtime())
+    result = plan.execute({"input": Batch.from_pyarrow(_probe_table())})
+    table = result.outputs["output"].to_pyarrow()
+    # Canonical order is (event_time, entity, sequence): a10, b10, a11,
+    # b11, a12s3, a12s4, b13, a14, b15, a16. Null and NaN samples are
+    # excluded; covariance counts pairwise-valid positions only.
+    assert table.column("floor").to_pylist() == [
+        1.0,
+        10.0,
+        1.0,
+        10.0,
+        1.0,
+        3.0,
+        10.0,
+        3.0,
+        11.0,
+        3.5,
+    ]
+    assert table.column("peak").to_pylist() == [
+        1.0,
+        10.0,
+        1.0,
+        11.0,
+        3.0,
+        3.5,
+        13.0,
+        3.5,
+        14.0,
+        6.0,
+    ]
+    covariances = table.column("cov").to_pylist()
+    expected_cov = [None, None, None, -50.0, 20.0, 2.5, -50.0, 2.5, -150.0, 25.0]
+    for actual, expected in zip(covariances, expected_cov, strict=True):
+        if expected is None:
+            assert actual is None
+        else:
+            assert actual == pytest.approx(expected, rel=1e-12, abs=1e-12)
+    correlations = table.column("corr").to_pylist()
+    expected_corr = [None, None, None, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0, 1.0]
+    for actual, expected in zip(correlations, expected_corr, strict=True):
+        if expected is None:
+            assert actual is None
+        else:
+            assert actual == pytest.approx(expected, rel=1e-10, abs=1e-12)
+
+
+def test_duration_frames_execute_and_correlation_compiles_stream() -> None:
+    quotes = _ordered()
+    program = _program([("m", ts.mean(quotes["x"], window=duration(10_000)))])
+    plan = program.compile_batch(Runtime())
+    result = plan.execute({"input": Batch.from_pyarrow(_probe_table())})
+    table = result.outputs["output"].to_pyarrow()
+    # Windows (t - 10ms, t] in canonical (time, entity, sequence) order:
+    # a10, b10, a11, b11, a12s3, a12s4, b13, a14, b15, a16.
+    means = table.column("m").to_pylist()
+    expected = [1.0, 10.0, 1.0, 10.5, 2.0, 2.5, 34.0 / 3.0, 2.5, 12.0, 3.375]
+    for actual, reference in zip(means, expected, strict=True):
+        assert actual == pytest.approx(reference, rel=1e-12, abs=1e-12)
+
+    pair_program = _program(
+        [
+            (
+                "c",
+                ts.correlation(
+                    quotes["x"], quotes["v"], window=duration(10_000), ddof=0
+                ),
+            )
+        ]
+    )
+    pair_program.compile_stream(Runtime())
 
 
 def test_cross_section_stays_rejected() -> None:
