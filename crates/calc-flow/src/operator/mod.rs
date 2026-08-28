@@ -1,6 +1,7 @@
 //! Operator metadata, the batch/stream trait split, and provider factories.
 
 mod batch;
+mod cross_section;
 mod expression;
 mod join;
 mod rolling;
@@ -10,6 +11,11 @@ mod union;
 mod window;
 
 pub use batch::{BatchOperator, BatchOperatorContext};
+pub use cross_section::{
+    CROSS_SECTION_CONFIGURATION_VERSION, CROSS_SECTION_STATE_LAYOUT_VERSION,
+    CrossSectionGroupingSpec, CrossSectionOperator, CrossSectionOutputSpec, CrossSectionSpec,
+    CrossSectionValuePolicy, NullPlacement, RankTieMethod, SortDirection,
+};
 pub use expression::ExpressionOperator;
 pub(crate) use join::supported_key_type;
 pub use join::{
@@ -241,6 +247,7 @@ pub enum NodeOperator {
     Union(UnionOperator),
     Window(WindowAggregateOperator),
     Rolling(RollingOperator),
+    CrossSection(CrossSectionOperator),
     StreamJoin(Box<StreamJoinOperator>),
     Batch(Box<dyn BatchOperator>),
     Stream(Box<dyn StreamOperator>),
@@ -254,6 +261,7 @@ impl NodeOperator {
             Self::Union(operator) => operator,
             Self::Window(operator) => operator,
             Self::Rolling(operator) => operator,
+            Self::CrossSection(operator) => operator,
             Self::StreamJoin(operator) => operator.as_ref(),
             Self::Batch(operator) => operator.as_ref(),
             Self::Stream(operator) => operator.as_ref(),
@@ -323,6 +331,18 @@ impl From<RollingOperator> for NodeOperator {
 impl From<Box<RollingOperator>> for NodeOperator {
     fn from(value: Box<RollingOperator>) -> Self {
         Self::Rolling(*value)
+    }
+}
+
+impl From<CrossSectionOperator> for NodeOperator {
+    fn from(value: CrossSectionOperator) -> Self {
+        Self::CrossSection(value)
+    }
+}
+
+impl From<Box<CrossSectionOperator>> for NodeOperator {
+    fn from(value: Box<CrossSectionOperator>) -> Self {
+        Self::CrossSection(*value)
     }
 }
 

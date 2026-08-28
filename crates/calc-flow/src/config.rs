@@ -13,16 +13,16 @@ use serde_json::{Value, json};
 use crate::operator::{expression_query, supported_key_type};
 use crate::{
     Batch, BatchExecutionPlan, BatchKind, CalcFlowError, ConnectorIdentity,
-    ConnectorRegistrySnapshot, ConnectorSinkFactory, ConnectorSourceFactory, Cursor,
-    DataFusionConfig, DeliveryGuarantee, DeliveryParticipant, Edge, Epoch, ExpressionOperator,
-    ExternalOperatorSpec, FormatIdentity, JsonMap, NodeOperator, ParticipantRole, PipelineBuilder,
-    Port, PortEndpoint, ProviderRegistry, Result, RetentionClass, RollingOperator, RollingSpec,
-    SecretHandle, SecretReference, SecretResolver, SecretResolverKind,
-    SinkBinding as RuntimeSinkBinding, SinkRecovery, SourceBinding as RuntimeSourceBinding,
-    SourceCapabilities, SourceEvent, SourceSchema, SqlOperator, StreamExecutionPlan,
-    StreamJoinOperator, StreamJoinSpec, StreamRequirements, StreamSink, StreamSource,
-    TransactionSupport, TransactionalStreamSink, UdfKind, UdfReference, UdfRegistrySnapshot,
-    UnionOperator, WatermarkPolicy, WindowAggregateOperator, WindowSpec,
+    ConnectorRegistrySnapshot, ConnectorSinkFactory, ConnectorSourceFactory, CrossSectionOperator,
+    CrossSectionSpec, Cursor, DataFusionConfig, DeliveryGuarantee, DeliveryParticipant, Edge,
+    Epoch, ExpressionOperator, ExternalOperatorSpec, FormatIdentity, JsonMap, NodeOperator,
+    ParticipantRole, PipelineBuilder, Port, PortEndpoint, ProviderRegistry, Result, RetentionClass,
+    RollingOperator, RollingSpec, SecretHandle, SecretReference, SecretResolver,
+    SecretResolverKind, SinkBinding as RuntimeSinkBinding, SinkRecovery,
+    SourceBinding as RuntimeSourceBinding, SourceCapabilities, SourceEvent, SourceSchema,
+    SqlOperator, StreamExecutionPlan, StreamJoinOperator, StreamJoinSpec, StreamRequirements,
+    StreamSink, StreamSource, TransactionSupport, TransactionalStreamSink, UdfKind, UdfReference,
+    UdfRegistrySnapshot, UnionOperator, WatermarkPolicy, WindowAggregateOperator, WindowSpec,
     validate_delivery_guarantee, validate_selected_udfs,
 };
 
@@ -148,6 +148,8 @@ pub enum OperatorSpec {
     Window { spec: WindowSpec },
     /// Native row-window lag/delta over partitioned event-time rows.
     Rolling { spec: RollingSpec },
+    /// Native complete-group cross-section statistics over event-time groups.
+    CrossSection { spec: CrossSectionSpec },
     /// Bounded two-input event-time inner Join for stream graphs.
     StreamJoin { spec: StreamJoinSpec },
     External {
@@ -1292,6 +1294,7 @@ fn project_node_operator(
         OperatorSpec::Union => union_node(node, inputs, &outputs, mode),
         OperatorSpec::Window { spec } => window_node(node, &inputs, &outputs, spec, mode),
         OperatorSpec::Rolling { spec } => rolling_node(node, &inputs, &outputs, spec),
+        OperatorSpec::CrossSection { spec } => cross_section_node(node, &inputs, &outputs, spec),
         OperatorSpec::StreamJoin { spec } => stream_join_node(node, &inputs, &outputs, spec, mode),
         OperatorSpec::External {
             provider,
@@ -1395,6 +1398,39 @@ fn rolling_node(
     let operator = RollingOperator::new(&node.id, schema, spec.clone())?;
     validate_derived_outputs(outputs, crate::OperatorMetadata::output_ports(&operator))?;
     Ok(NodeOperator::Rolling(operator))
+}
+
+// Cross-section construction validates the complete dual-mode operator
+// contract before exposing the node to the compiled plan.
+fn cross_section_node(
+    node: &NodeSpec,
+    inputs: &[Port],
+    outputs: &[Port],
+    spec: &CrossSectionSpec,
+) -> Result<NodeOperator> {
+    let [input] = inputs else {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "node.input_ports".into(),
+            message: "cross-section operators require one explicit input port".into(),
+        });
+    };
+    if input.name() != "input" || input.kind() != BatchKind::Table || !input.required() {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "node.input_ports".into(),
+            message: "cross-section operators require one required table input named `input`"
+                .into(),
+        });
+    }
+    let schema = input
+        .schema()
+        .cloned()
+        .ok_or_else(|| CalcFlowError::InvalidArgument {
+            field: "node.input_ports[0].schema".into(),
+            message: "cross-section operators require an exact input schema".into(),
+        })?;
+    let operator = CrossSectionOperator::new(&node.id, schema, spec.clone())?;
+    validate_derived_outputs(outputs, crate::OperatorMetadata::output_ports(&operator))?;
+    Ok(NodeOperator::CrossSection(operator))
 }
 
 fn stream_join_node(
@@ -1725,6 +1761,48 @@ fn project_requires_datafusion(project: &ProjectSpec) -> bool {
     })
 }
 
+// SQL validation accumulates the same stable issue paths as the expression
+// arm while deriving its input ports from the aliases.
+fn validate_sql_operator<'a>(
+    query: &str,
+    aliases: &'a [String],
+    references: &[UdfReference],
+    base: &str,
+    udfs: &UdfRegistrySnapshot,
+    issues: &mut Vec<ValidationIssue>,
+) -> (Option<Vec<&'a str>>, Option<Vec<&'static str>>) {
+    if query.trim().is_empty() || aliases.is_empty() {
+        issues.push(issue(
+            base,
+            "invalid_operator",
+            "SQL requires a query and at least one alias",
+        ));
+    } else if let Err(error) = crate::expression::validate_select_query(query) {
+        issues.push(issue(base, "invalid_operator", error.to_string()));
+    }
+    let unique = aliases.iter().collect::<BTreeSet<_>>();
+    if unique.len() != aliases.len() {
+        issues.push(issue(
+            format!("{base}.aliases"),
+            "duplicate_alias",
+            "SQL aliases must be unique",
+        ));
+    }
+    validate_udfs(references, base, udfs, issues);
+    (
+        Some(aliases.iter().map(String::as_str).collect()),
+        Some(vec!["output"]),
+    )
+}
+
+fn single_table_io() -> (Option<Vec<&'static str>>, Option<Vec<&'static str>>) {
+    (Some(vec!["input"]), Some(vec!["output"]))
+}
+
+fn join_table_io() -> (Option<Vec<&'static str>>, Option<Vec<&'static str>>) {
+    (Some(vec!["left", "right"]), Some(vec!["output"]))
+}
+
 fn validate_nodes(
     project: &ProjectSpec,
     providers: &ProviderRegistry,
@@ -1817,45 +1895,26 @@ fn validate_operator(
             query,
             aliases,
             udfs: references,
-        } => {
-            if query.trim().is_empty() || aliases.is_empty() {
-                issues.push(issue(
-                    &base,
-                    "invalid_operator",
-                    "SQL requires a query and at least one alias",
-                ));
-            } else if let Err(error) = crate::expression::validate_select_query(query) {
-                issues.push(issue(&base, "invalid_operator", error.to_string()));
-            }
-            let unique = aliases.iter().collect::<BTreeSet<_>>();
-            if unique.len() != aliases.len() {
-                issues.push(issue(
-                    format!("{base}.aliases"),
-                    "duplicate_alias",
-                    "SQL aliases must be unique",
-                ));
-            }
-            validate_udfs(references, &base, udfs, issues);
-            (
-                Some(aliases.iter().map(String::as_str).collect()),
-                Some(vec!["output"]),
-            )
-        }
+        } => validate_sql_operator(query, aliases, references, &base, udfs, issues),
         OperatorSpec::Union => {
             validate_union_operator(node, index, mode, &base, issues);
             (None, Some(vec!["output"]))
         }
         OperatorSpec::Window { spec } => {
             validate_window_operator(node, index, spec, mode, &base, issues);
-            (Some(vec!["input"]), Some(vec!["output"]))
+            single_table_io()
         }
         OperatorSpec::Rolling { spec } => {
             validate_rolling_operator(node, index, spec, &base, issues);
-            (Some(vec!["input"]), Some(vec!["output"]))
+            single_table_io()
+        }
+        OperatorSpec::CrossSection { spec } => {
+            validate_cross_section_operator(node, index, spec, &base, issues);
+            single_table_io()
         }
         OperatorSpec::StreamJoin { spec } => {
             validate_stream_join_operator(node, index, spec, mode, &base, issues);
-            (Some(vec!["left", "right"]), Some(vec!["output"]))
+            join_table_io()
         }
         OperatorSpec::External {
             provider,
@@ -1981,6 +2040,37 @@ fn validate_rolling_operator(
     } else if let Ok(input) = port_from_spec(&node.input_ports[0])
         && let Some(schema) = input.schema().cloned()
         && let Err(error) = RollingOperator::new(&node.id, schema, spec.clone())
+    {
+        issues.push(issue(base, "invalid_operator", error.to_string()));
+    }
+}
+
+// Cross-section validation mirrors rolling construction while accumulating
+// stable issue paths.
+fn validate_cross_section_operator(
+    node: &NodeSpec,
+    index: usize,
+    spec: &CrossSectionSpec,
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let valid_input = matches!(
+        node.input_ports.as_slice(),
+        [input]
+            if input.name == "input"
+                && input.kind == BatchKind::Table
+                && input.required
+                && !input.schema.is_empty()
+    );
+    if !valid_input {
+        issues.push(issue(
+            format!("graph.nodes[{index}].input_ports"),
+            "invalid_ports",
+            "cross-section requires one required table input named `input` with an exact schema",
+        ));
+    } else if let Ok(input) = port_from_spec(&node.input_ports[0])
+        && let Some(schema) = input.schema().cloned()
+        && let Err(error) = CrossSectionOperator::new(&node.id, schema, spec.clone())
     {
         issues.push(issue(base, "invalid_operator", error.to_string()));
     }
@@ -2637,6 +2727,7 @@ fn operator_udfs(operator: &OperatorSpec) -> &[UdfReference] {
         OperatorSpec::Union
         | OperatorSpec::Window { .. }
         | OperatorSpec::Rolling { .. }
+        | OperatorSpec::CrossSection { .. }
         | OperatorSpec::StreamJoin { .. }
         | OperatorSpec::External { .. } => &[],
     }

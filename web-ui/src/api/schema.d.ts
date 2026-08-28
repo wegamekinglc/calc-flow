@@ -633,6 +633,152 @@ export interface components {
                     provider: string;
                     version: string;
                 };
+                /** @description Group membership rule of one cross-section operator (SCE-00 D6). */
+                CrossSectionGroupingSpec: {
+                    /** @constant */
+                    kind: "exact_time";
+                } | {
+                    /** @constant */
+                    kind: "fixed_bucket";
+                    /**
+                     * Format: uint64
+                     * @description Positive bucket width in exact microseconds.
+                     */
+                    width_micros: number;
+                };
+                /**
+                 * @description One declared cross-section output and its output column name. Ordering
+                 *     fields are valid only on the order-statistic primitives; the strict
+                 *     variant shapes reject them everywhere else (SCE-00 D6).
+                 */
+                CrossSectionOutputSpec: {
+                    /** @description Sort direction of the measured value. */
+                    direction: components["schemas"]["ProjectCreateRequest"]["$defs"]["SortDirection"];
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "rank";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_samples: number;
+                    /** @description Null placement. */
+                    null_placement: components["schemas"]["ProjectCreateRequest"]["$defs"]["NullPlacement"];
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                    /** @description Rank tie method. */
+                    tie_method: components["schemas"]["ProjectCreateRequest"]["$defs"]["RankTieMethod"];
+                } | {
+                    /** @description Sort direction of the measured value. */
+                    direction: components["schemas"]["ProjectCreateRequest"]["$defs"]["SortDirection"];
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "percentile";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_samples: number;
+                    /** @description Null placement. */
+                    null_placement: components["schemas"]["ProjectCreateRequest"]["$defs"]["NullPlacement"];
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                    /** @description Rank tie method. */
+                    tie_method: components["schemas"]["ProjectCreateRequest"]["$defs"]["RankTieMethod"];
+                } | {
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "demean";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_samples: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /**
+                     * Format: uint8
+                     * @description Degrees-of-freedom adjustment; must be `0` or `1`.
+                     */
+                    ddof: number;
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "zscore";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_samples: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                };
+                /** @description Data-only declaration of one native cross-section operation. */
+                CrossSectionSpec: {
+                    /**
+                     * Format: uint64
+                     * @description Allowed lateness in exact microseconds (SCE-00 D7).
+                     */
+                    allowed_lateness_micros: number;
+                    /**
+                     * Format: uint32
+                     * @description Semantic configuration version; must equal
+                     *     [`CROSS_SECTION_CONFIGURATION_VERSION`].
+                     */
+                    configuration_version: number;
+                    /** @description Ordered non-empty entity key used for row identity. */
+                    entity_by: string[];
+                    /** @description Non-null UTC `timestamp[us]` event-time column. */
+                    event_time: string;
+                    /** @description Exact-time or fixed-bucket grouping. */
+                    grouping: components["schemas"]["ProjectCreateRequest"]["$defs"]["CrossSectionGroupingSpec"];
+                    /** @description Late-row policy. */
+                    late_policy: components["schemas"]["ProjectCreateRequest"]["$defs"]["LatePolicySpec"];
+                    /** @description Cross-section outputs in semantic declaration order. */
+                    outputs: components["schemas"]["ProjectCreateRequest"]["$defs"]["CrossSectionOutputSpec"][];
+                    /**
+                     * @description Ordered group partition key; empty means one global group per
+                     *     grouping coordinate.
+                     * @default []
+                     */
+                    partition_by: string[];
+                    /** @description Ordered non-empty sequence key; floating columns are forbidden. */
+                    sequence_by: string[];
+                    /**
+                     * Format: uint32
+                     * @description Durable state-layout version; must equal
+                     *     [`CROSS_SECTION_STATE_LAYOUT_VERSION`].
+                     */
+                    state_layout_version: number;
+                    /** @description Frozen null/NaN value policy. */
+                    value_policy: components["schemas"]["ProjectCreateRequest"]["$defs"]["CrossSectionValuePolicy"];
+                };
+                /** @description Frozen null/NaN policy for cross-section values (SCE-00 D3.2/D6). */
+                CrossSectionValuePolicy: "nan_exclude_preserve_v1";
                 DataFusionConfig: {
                     /**
                      * Format: uint
@@ -711,6 +857,12 @@ export interface components {
                     output_ports: components["schemas"]["ProjectCreateRequest"]["$defs"]["PortSpec"][];
                     position?: components["schemas"]["ProjectCreateRequest"]["$defs"]["PositionSpec"] | null;
                 };
+                /**
+                 * @description Null placement of an order-statistic output (SCE-00 D6). Excluded nulls
+                 *     produce null; included nulls form one tied class at the requested end of
+                 *     the final sort order.
+                 */
+                NullPlacement: "exclude" | "first" | "last";
                 OperatorSpec: {
                     /** @default  */
                     expression: string;
@@ -739,6 +891,10 @@ export interface components {
                     /** @constant */
                     kind: "rolling";
                     spec: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingSpec"];
+                } | {
+                    /** @constant */
+                    kind: "cross_section";
+                    spec: components["schemas"]["ProjectCreateRequest"]["$defs"]["CrossSectionSpec"];
                 } | {
                     /** @constant */
                     kind: "stream_join";
@@ -857,6 +1013,8 @@ export interface components {
                     /** @constant */
                     policy: "disabled";
                 };
+                /** @description Rank tie method of an order-statistic output (SCE-00 D6). */
+                RankTieMethod: "average" | "min" | "max";
                 /**
                  * @description Rolling frame declaration (SCE-00 D5). Only row-count frames are
                  *     supported in this release; duration frames arrive with SCE-08.
@@ -1094,6 +1252,8 @@ export interface components {
                 };
                 /** @description Where a secret reference is resolved from. */
                 SecretResolverKind: "environment" | "file" | "registered";
+                /** @description Sort direction of an order-statistic output (SCE-00 D6). */
+                SortDirection: "ascending" | "descending";
                 /** @description Managed state location and checkpoint retention for stream projects. */
                 StateConfig: {
                     /**
@@ -1229,6 +1389,152 @@ export interface components {
                     provider: string;
                     version: string;
                 };
+                /** @description Group membership rule of one cross-section operator (SCE-00 D6). */
+                CrossSectionGroupingSpec: {
+                    /** @constant */
+                    kind: "exact_time";
+                } | {
+                    /** @constant */
+                    kind: "fixed_bucket";
+                    /**
+                     * Format: uint64
+                     * @description Positive bucket width in exact microseconds.
+                     */
+                    width_micros: number;
+                };
+                /**
+                 * @description One declared cross-section output and its output column name. Ordering
+                 *     fields are valid only on the order-statistic primitives; the strict
+                 *     variant shapes reject them everywhere else (SCE-00 D6).
+                 */
+                CrossSectionOutputSpec: {
+                    /** @description Sort direction of the measured value. */
+                    direction: components["schemas"]["ProjectDocument"]["$defs"]["SortDirection"];
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "rank";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_samples: number;
+                    /** @description Null placement. */
+                    null_placement: components["schemas"]["ProjectDocument"]["$defs"]["NullPlacement"];
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                    /** @description Rank tie method. */
+                    tie_method: components["schemas"]["ProjectDocument"]["$defs"]["RankTieMethod"];
+                } | {
+                    /** @description Sort direction of the measured value. */
+                    direction: components["schemas"]["ProjectDocument"]["$defs"]["SortDirection"];
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "percentile";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_samples: number;
+                    /** @description Null placement. */
+                    null_placement: components["schemas"]["ProjectDocument"]["$defs"]["NullPlacement"];
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                    /** @description Rank tie method. */
+                    tie_method: components["schemas"]["ProjectDocument"]["$defs"]["RankTieMethod"];
+                } | {
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "demean";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_samples: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /**
+                     * Format: uint8
+                     * @description Degrees-of-freedom adjustment; must be `0` or `1`.
+                     */
+                    ddof: number;
+                    /** @description Input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "zscore";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_samples: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                };
+                /** @description Data-only declaration of one native cross-section operation. */
+                CrossSectionSpec: {
+                    /**
+                     * Format: uint64
+                     * @description Allowed lateness in exact microseconds (SCE-00 D7).
+                     */
+                    allowed_lateness_micros: number;
+                    /**
+                     * Format: uint32
+                     * @description Semantic configuration version; must equal
+                     *     [`CROSS_SECTION_CONFIGURATION_VERSION`].
+                     */
+                    configuration_version: number;
+                    /** @description Ordered non-empty entity key used for row identity. */
+                    entity_by: string[];
+                    /** @description Non-null UTC `timestamp[us]` event-time column. */
+                    event_time: string;
+                    /** @description Exact-time or fixed-bucket grouping. */
+                    grouping: components["schemas"]["ProjectDocument"]["$defs"]["CrossSectionGroupingSpec"];
+                    /** @description Late-row policy. */
+                    late_policy: components["schemas"]["ProjectDocument"]["$defs"]["LatePolicySpec"];
+                    /** @description Cross-section outputs in semantic declaration order. */
+                    outputs: components["schemas"]["ProjectDocument"]["$defs"]["CrossSectionOutputSpec"][];
+                    /**
+                     * @description Ordered group partition key; empty means one global group per
+                     *     grouping coordinate.
+                     * @default []
+                     */
+                    partition_by: string[];
+                    /** @description Ordered non-empty sequence key; floating columns are forbidden. */
+                    sequence_by: string[];
+                    /**
+                     * Format: uint32
+                     * @description Durable state-layout version; must equal
+                     *     [`CROSS_SECTION_STATE_LAYOUT_VERSION`].
+                     */
+                    state_layout_version: number;
+                    /** @description Frozen null/NaN value policy. */
+                    value_policy: components["schemas"]["ProjectDocument"]["$defs"]["CrossSectionValuePolicy"];
+                };
+                /** @description Frozen null/NaN policy for cross-section values (SCE-00 D3.2/D6). */
+                CrossSectionValuePolicy: "nan_exclude_preserve_v1";
                 DataFusionConfig: {
                     /**
                      * Format: uint
@@ -1307,6 +1613,12 @@ export interface components {
                     output_ports: components["schemas"]["ProjectDocument"]["$defs"]["PortSpec"][];
                     position?: components["schemas"]["ProjectDocument"]["$defs"]["PositionSpec"] | null;
                 };
+                /**
+                 * @description Null placement of an order-statistic output (SCE-00 D6). Excluded nulls
+                 *     produce null; included nulls form one tied class at the requested end of
+                 *     the final sort order.
+                 */
+                NullPlacement: "exclude" | "first" | "last";
                 OperatorSpec: {
                     /** @default  */
                     expression: string;
@@ -1335,6 +1647,10 @@ export interface components {
                     /** @constant */
                     kind: "rolling";
                     spec: components["schemas"]["ProjectDocument"]["$defs"]["RollingSpec"];
+                } | {
+                    /** @constant */
+                    kind: "cross_section";
+                    spec: components["schemas"]["ProjectDocument"]["$defs"]["CrossSectionSpec"];
                 } | {
                     /** @constant */
                     kind: "stream_join";
@@ -1453,6 +1769,8 @@ export interface components {
                     /** @constant */
                     policy: "disabled";
                 };
+                /** @description Rank tie method of an order-statistic output (SCE-00 D6). */
+                RankTieMethod: "average" | "min" | "max";
                 /**
                  * @description Rolling frame declaration (SCE-00 D5). Only row-count frames are
                  *     supported in this release; duration frames arrive with SCE-08.
@@ -1690,6 +2008,8 @@ export interface components {
                 };
                 /** @description Where a secret reference is resolved from. */
                 SecretResolverKind: "environment" | "file" | "registered";
+                /** @description Sort direction of an order-statistic output (SCE-00 D6). */
+                SortDirection: "ascending" | "descending";
                 /** @description Managed state location and checkpoint retention for stream projects. */
                 StateConfig: {
                     /**

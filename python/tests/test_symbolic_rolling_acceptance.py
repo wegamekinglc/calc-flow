@@ -102,17 +102,37 @@ def test_duration_frame_and_correlation_stay_rejected() -> None:
     assert "unknown_primitive_version" in message
 
 
-def test_cross_section_stays_rejected() -> None:
+def test_cross_section_winsorize_stays_rejected() -> None:
+    # SCE-09 lowers rank/percentile/z-score/demean; winsorization waits for
+    # its own stage (SCE-10) and still fails closed.
     quotes = _ordered()
     message = _rejected(
-        [("alpha", cs.zscore(quotes["x"], group=exact_time(quotes["ts"])))]
+        [
+            (
+                "w",
+                cs.winsorize(
+                    quotes["x"], group=exact_time(quotes["ts"]), lower=0.1, upper=0.9
+                ),
+            )
+        ]
     )
-    assert "unknown_primitive_version" in message
-    message = _rejected(
-        [("r", cs.rank(quotes["x"], group=exact_time(quotes["ts"])))],
-        mode="stream",
-    )
-    assert "unknown_primitive_version" in message
+    assert "not supported in this release" in message
+
+
+def test_cross_section_primitives_lower_in_both_modes() -> None:
+    quotes = _ordered()
+    for primitive in (
+        cs.rank(quotes["x"], group=exact_time(quotes["ts"])),
+        cs.percentile(quotes["x"], group=exact_time(quotes["ts"])),
+        cs.zscore(quotes["x"], group=exact_time(quotes["ts"])),
+        cs.demean(quotes["x"], group=exact_time(quotes["ts"])),
+    ):
+        for mode in ("batch", "stream"):
+            document = lower_program_document(
+                _program([("feature", primitive)]), Runtime(), mode
+            )
+            kinds = [node["operator"]["kind"] for node in document["graph"]["nodes"]]
+            assert "cross_section" in kinds, (mode, kinds)
 
 
 def test_composite_lag_delta_arguments_stay_rejected() -> None:

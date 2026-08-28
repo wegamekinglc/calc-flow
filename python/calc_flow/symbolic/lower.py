@@ -86,6 +86,14 @@ _ROLLING_PRIMITIVES: Final = frozenset(
 
 _ROLLING_DDOF_PRIMITIVES: Final = frozenset({"variance", "stddev"})
 
+_CROSS_SECTION_PRIMITIVES: Final = frozenset(
+    {"rank", "percentile", "demean", "zscore", "winsorize"}
+)
+
+_CROSS_SECTION_ORDERING: Final = ("rank", "percentile")
+
+_CROSS_SECTION_DDOF: Final = "zscore"
+
 _U64_MAX: Final = (1 << 64) - 1
 
 _BINARY_SQL: Final = {
@@ -185,7 +193,12 @@ def _resolve_table(node: Node, path: str, /) -> _Segment:
     if name == "filter":
         child = _resolve_table(node.args[0], f"{path}.filter.value")
         predicate = _inline(node.args[1], dict(child.env), f"{path}.filter.predicate")
-        if _segment_has_rolling(child) or any(True for _ in _find_rolling(predicate)):
+        if (
+            _segment_has_rolling(child)
+            or any(True for _ in _find_rolling(predicate))
+            or _segment_has_cross_section(child)
+            or any(True for _ in _find_cross_section(predicate))
+        ):
             combined = (
                 predicate
                 if child.post_predicate is None
@@ -227,13 +240,28 @@ def _segment_has_rolling(segment: _Segment, /) -> bool:
     )
 
 
+def _segment_has_cross_section(segment: _Segment, /) -> bool:
+    return any(
+        True for _, tree in segment.env for _ in _find_cross_section(tree)
+    ) or any(
+        True
+        for tree in (segment.predicate, segment.post_predicate)
+        if tree is not None
+        for _ in _find_cross_section(tree)
+    )
+
+
 def _inline(node: Node, env: dict[str, Node], path: str, /) -> Node:
     name = node.op.name
     if name == "column_ref":
         return env[_cstr(node.attr("name"))]
     if name == "literal":
         return node
-    if name not in _COLUMN_PRIMITIVES and name not in _ROLLING_PRIMITIVES:
+    if (
+        name not in _COLUMN_PRIMITIVES
+        and name not in _ROLLING_PRIMITIVES
+        and name not in _CROSS_SECTION_PRIMITIVES
+    ):
         _reject_primitive(path, node)
     if name == "cast":
         _cast_target(node, path)
@@ -251,6 +279,14 @@ def _find_rolling(node: Node, /):
         yield node
     for argument in node.args:
         yield from _find_rolling(argument)
+
+
+def _find_cross_section(node: Node, /):
+    """Yield every cross-section subtree in first-appearance order."""
+    if node.op.name in _CROSS_SECTION_PRIMITIVES:
+        yield node
+    for argument in node.args:
+        yield from _find_cross_section(argument)
 
 
 def _cast_target(node: Node, path: str, /) -> str:
@@ -595,6 +631,256 @@ def _plan_rolling(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _CrossSectionPlan:
+    """One lowered cross-section stage: the project node plus the rewritten
+    row-local environment that references its output columns."""
+
+    node_id: str
+    node: dict[str, object]
+    env: tuple[tuple[str, Node], ...]
+    post_predicate: Node | None
+    input_field_names: tuple[str, ...]
+    output_fields: tuple[Field, ...]
+
+
+def _cross_section_grouping(subtree: Node, path: str, /) -> dict[str, object]:
+    """Render the frozen exact-time or fixed-bucket grouping JSON."""
+
+    grouping = subtree.attr("grouping")
+    if isinstance(grouping, CEnum) and grouping.variant == "exact_time":
+        return {"kind": "exact_time"}
+    if isinstance(grouping, CMap):
+        tag = grouping.get("grouping")
+        width = _cint(grouping.get("width_micros"))
+        if isinstance(tag, CEnum) and tag.variant == "fixed_bucket" and width:
+            return {"kind": "fixed_bucket", "width_micros": width}
+    errors.raise_compile(
+        path,
+        errors.UNSUPPORTED_TYPE,
+        "cross-section grouping is neither exact_time nor a fixed bucket",
+    )
+    raise AssertionError("unreachable")
+
+
+def _enum_attr(subtree: Node, name: str, /) -> str:
+    value = subtree.attr(name)
+    return value.variant if isinstance(value, CEnum) else ""
+
+
+# Cross-section planning validates every occurrence with stable,
+# declaration-ordered error paths before emitting the frozen node shape.
+# #lizard forgives
+def _plan_cross_section(
+    output_name: str,
+    segment: _Segment,
+    path: str,
+    allowed_lateness_micros: int,
+    late_policy: str,
+    input_fields_override: tuple[Field, ...] | None,
+    /,
+) -> _CrossSectionPlan | None:
+    # #lizard forgives
+    occurrences: list[Node] = []
+    seen: set[str] = set()
+    ordered_trees = [tree for _, tree in segment.env]
+    ordered_trees += [
+        tree for tree in (segment.predicate, segment.post_predicate) if tree is not None
+    ]
+    for tree in ordered_trees:
+        for subtree in _find_cross_section(tree):
+            if subtree.digest not in seen:
+                seen.add(subtree.digest)
+                occurrences.append(subtree)
+    if not occurrences:
+        return None
+
+    input_fields = (
+        _schema_fields(segment.input_node.attr("schema"))
+        if input_fields_override is None
+        else input_fields_override
+    )
+    input_types = {field.name: field for field in input_fields}
+    entity_by = _cstr_seq(segment.input_node.attr("entity_by"))
+    sequence_by = _cstr_seq(segment.input_node.attr("sequence_by"))
+    event_time = _cstr(segment.input_node.attr("event_time"))
+    if not entity_by or not sequence_by or not event_time:
+        errors.raise_compile(
+            path,
+            errors.ORDERING_REQUIRED,
+            "cross-section primitives require declared entity_by,"
+            " event_time, and sequence_by ordering keys on the input table",
+        )
+
+    whole_feature = {
+        tree.digest: name
+        for name, tree in segment.env
+        if tree.op.name in _CROSS_SECTION_PRIMITIVES
+    }
+    used_names = set(input_types) | {name for name, _ in segment.env}
+    replacements: dict[str, str] = {}
+    declarations: list[dict[str, object]] = []
+    partition_columns: list[str] = []
+    derived_fields: list[Field] = []
+    for index, subtree in enumerate(occurrences):
+        kind = subtree.op.name
+        name = whole_feature.get(subtree.digest)
+        if name is None:
+            name = f"{output_name}__cf_cs_{index}"
+            if name in used_names:
+                errors.raise_compile(
+                    f"{path}.{name}",
+                    errors.DUPLICATE_NAME,
+                    f"materialized cross-section column {name!r} collides with a"
+                    " declared field",
+                )
+            used_names.add(name)
+        replacements[subtree.digest] = name
+        if kind == "winsorize":
+            errors.raise_compile(
+                f"{path}.{name}",
+                errors.UNSUPPORTED_TYPE,
+                "cross-section winsorize is not supported in this release",
+            )
+        argument = subtree.args[0]
+        if argument.op.name != "column_ref":
+            errors.raise_compile(
+                f"{path}.{name}",
+                errors.UNSUPPORTED_TYPE,
+                f"cross-section {kind} argument must be an input column in this"
+                " release",
+            )
+        input_name = _cstr(argument.attr("name"))
+        if input_name not in input_types:
+            errors.raise_compile(
+                f"{path}.{name}",
+                errors.SCHEMA_MISMATCH,
+                f"cross-section {kind} argument column {input_name!r} is not in"
+                " the input schema",
+            )
+        event_time_argument = subtree.args[1]
+        if event_time_argument.op.name != "column_ref":
+            errors.raise_compile(
+                f"{path}.{name}",
+                errors.UNSUPPORTED_TYPE,
+                "cross-section grouping event time must be an input column in"
+                " this release",
+            )
+        event_time_name = _cstr(event_time_argument.attr("name"))
+        if event_time_name != event_time:
+            errors.raise_compile(
+                f"{path}.{name}",
+                errors.SCHEMA_MISMATCH,
+                f"cross-section grouping event time {event_time_name!r} does not"
+                " match the declared input event time",
+            )
+        group_partitions: list[str] = []
+        for group_argument in subtree.args[2:]:
+            if group_argument.op.name != "column_ref":
+                errors.raise_compile(
+                    f"{path}.{name}",
+                    errors.UNSUPPORTED_TYPE,
+                    "cross-section group columns must be input columns in this release",
+                )
+            group_name = _cstr(group_argument.attr("name"))
+            if group_name not in input_types:
+                errors.raise_compile(
+                    f"{path}.{name}",
+                    errors.SCHEMA_MISMATCH,
+                    f"cross-section group column {group_name!r} is not in the"
+                    " input schema",
+                )
+            group_partitions.append(group_name)
+        if index == 0:
+            partition_columns = group_partitions
+        elif partition_columns != group_partitions:
+            errors.raise_compile(
+                path,
+                errors.SCHEMA_MISMATCH,
+                "cross-section primitives in one output must share one"
+                " grouping declaration",
+            )
+        declaration: dict[str, object] = {
+            "kind": kind,
+            "primitive_version": 1,
+            "input": input_name,
+            "output": name,
+        }
+        if kind in _CROSS_SECTION_ORDERING:
+            declaration["direction"] = _enum_attr(subtree, "direction") or "ascending"
+            declaration["tie_method"] = _enum_attr(subtree, "tie_method") or "average"
+            declaration["null_placement"] = (
+                _enum_attr(subtree, "null_placement") or "exclude"
+            )
+        declaration["min_samples"] = _cint(subtree.attr("min_samples")) or 1
+        if kind == _CROSS_SECTION_DDOF:
+            declaration["ddof"] = _cint(subtree.attr("ddof")) or 0
+        declarations.append(declaration)
+        derived_fields.append(Field(name, "float64", nullable=True))
+
+    node_id = f"{output_name}__cf_cross_section"
+    node: dict[str, object] = {
+        "id": node_id,
+        "operator": {
+            "kind": "cross_section",
+            "spec": {
+                "configuration_version": 1,
+                "state_layout_version": 1,
+                "event_time": event_time,
+                "entity_by": list(entity_by),
+                "partition_by": list(partition_columns),
+                "sequence_by": list(sequence_by),
+                "grouping": _cross_section_grouping(
+                    occurrences[0], f"{path}.{output_name}"
+                ),
+                "outputs": declarations,
+                "allowed_lateness_micros": allowed_lateness_micros,
+                "late_policy": (
+                    {"kind": "error", "scope": "envelope"}
+                    if late_policy == "error"
+                    else {"kind": "drop", "metrics_version": 1}
+                ),
+                "value_policy": "nan_exclude_preserve_v1",
+            },
+        },
+        "input_ports": [
+            {
+                "name": "input",
+                "kind": "table",
+                "required": True,
+                "schema": [_field_json(field) for field in input_fields],
+            }
+        ],
+        "output_ports": [
+            {
+                "name": "output",
+                "kind": "table",
+                "required": True,
+                "schema": [
+                    *(_field_json(field) for field in input_fields),
+                    *(_field_json(field) for field in derived_fields),
+                ],
+            }
+        ],
+    }
+    env = tuple(
+        (name, _replace_rolling(tree, replacements)) for name, tree in segment.env
+    )
+    post_predicate = (
+        None
+        if segment.post_predicate is None
+        else _replace_rolling(segment.post_predicate, replacements)
+    )
+    return _CrossSectionPlan(
+        node_id,
+        node,
+        env,
+        post_predicate,
+        (*input_types, *(field.name for field in derived_fields)),
+        (*input_fields, *derived_fields),
+    )
+
+
 def _check_declared_inputs(program: Program, /) -> None:
     for value in program.inputs:
         node = value._node
@@ -647,6 +933,43 @@ def _lower_program(
         for (output_name, segment), plan in zip(segments, plans.values(), strict=True)
         if plan is not None
     }
+    cross_plans: dict[str, _CrossSectionPlan | None] = {}
+    for (output_name, segment), rolling in zip(segments, plans.values(), strict=True):
+        if rolling is not None:
+            # Cross-section planning runs over the rolling-rewritten
+            # environment so a measured value may be a materialized rolling
+            # output column.
+            after_rolling = _Segment(
+                segment.input_node,
+                segment.fields,
+                rolling.env,
+                None,
+                rolling.post_predicate,
+            )
+            cross_plans[output_name] = _plan_cross_section(
+                output_name,
+                after_rolling,
+                f"outputs.{output_name}",
+                allowed_lateness_micros,
+                late_policy,
+                rolling.output_fields,
+            )
+        else:
+            cross_plans[output_name] = _plan_cross_section(
+                output_name,
+                segment,
+                f"outputs.{output_name}",
+                allowed_lateness_micros,
+                late_policy,
+                None,
+            )
+    direct_cross_section_digests = {
+        segment.input_node.digest
+        for (output_name, segment), rolling, cross in zip(
+            segments, plans.values(), cross_plans.values(), strict=True
+        )
+        if rolling is None and cross is not None
+    }
     nodes: list[dict[str, object]] = []
     edges: list[dict[str, object]] = []
     fanout_ids: dict[str, str] = {}
@@ -657,47 +980,52 @@ def _lower_program(
                 continue
             input_name = _cstr(input_node.attr("name"))
             schema = _schema_fields(input_node.attr("schema"))
+            pinned = (
+                input_node.digest in rolling_digests
+                or input_node.digest in direct_cross_section_digests
+            )
             nodes.append(
                 _expression_node(
                     input_name,
                     [_quote_identifier(field.name) for field in schema],
                     None,
                     schema,
-                    schema if input_node.digest in rolling_digests else None,
+                    schema if pinned else None,
                 )
             )
             fanout_ids[input_node.digest] = input_name
     for output_name, segment in segments:
         rolling = plans[output_name]
+        cross = cross_plans[output_name]
         env = dict(segment.env)
         input_field_names = [
             field.name for field in _schema_fields(segment.input_node.attr("schema"))
         ]
         upstream_id: str | None = None
         final_predicate = segment.predicate
-        if rolling is not None:
-            if segment.predicate is not None:
-                prefilter_id = f"{output_name}__cf_prefilter"
-                input_fields = _schema_fields(segment.input_node.attr("schema"))
-                nodes.append(
-                    _expression_node(
-                        prefilter_id,
-                        [_quote_identifier(name) for name in input_field_names],
-                        _sql(segment.predicate),
-                        input_fields,
-                        input_fields,
-                    )
+        if (rolling is not None or cross is not None) and segment.predicate is not None:
+            prefilter_id = f"{output_name}__cf_prefilter"
+            input_fields = _schema_fields(segment.input_node.attr("schema"))
+            nodes.append(
+                _expression_node(
+                    prefilter_id,
+                    [_quote_identifier(name) for name in input_field_names],
+                    _sql(segment.predicate),
+                    input_fields,
+                    input_fields,
                 )
-                if fanout:
-                    edges.append(
-                        {
-                            "source_node": fanout_ids[segment.input_node.digest],
-                            "source_port": "output",
-                            "target_node": prefilter_id,
-                            "target_port": "input",
-                        }
-                    )
-                upstream_id = prefilter_id
+            )
+            if fanout:
+                edges.append(
+                    {
+                        "source_node": fanout_ids[segment.input_node.digest],
+                        "source_port": "output",
+                        "target_node": prefilter_id,
+                        "target_port": "input",
+                    }
+                )
+            upstream_id = prefilter_id
+        if rolling is not None:
             nodes.append(rolling.node)
             if upstream_id is not None:
                 edges.append(
@@ -721,7 +1049,31 @@ def _lower_program(
             env = dict(rolling.env)
             input_field_names = list(rolling.input_field_names)
             final_predicate = rolling.post_predicate
-        elif segment.post_predicate is not None:
+        if cross is not None:
+            nodes.append(cross.node)
+            if upstream_id is not None:
+                edges.append(
+                    {
+                        "source_node": upstream_id,
+                        "source_port": "output",
+                        "target_node": cross.node_id,
+                        "target_port": "input",
+                    }
+                )
+            elif fanout:
+                edges.append(
+                    {
+                        "source_node": fanout_ids[segment.input_node.digest],
+                        "source_port": "output",
+                        "target_node": cross.node_id,
+                        "target_port": "input",
+                    }
+                )
+            upstream_id = cross.node_id
+            env = dict(cross.env)
+            input_field_names = list(cross.input_field_names)
+            final_predicate = cross.post_predicate
+        elif rolling is None and segment.post_predicate is not None:
             final_predicate = (
                 segment.post_predicate
                 if segment.predicate is None
@@ -784,7 +1136,11 @@ def _lower_program(
                         }
                     )
                     input_schema = (
-                        rolling.output_fields if rolling is not None else None
+                        cross.output_fields
+                        if cross is not None
+                        else rolling.output_fields
+                        if rolling is not None
+                        else None
                     )
                 elif fanout:
                     edges.append(
@@ -874,6 +1230,54 @@ def _program_needs_rolling(program: Program, /) -> bool:
     return any(True for _, value in program.outputs for _ in _find_rolling(value._node))
 
 
+def _program_needs_cross_section(program: Program, /) -> bool:
+    return any(
+        True for _, value in program.outputs for _ in _find_cross_section(value._node)
+    )
+
+
+# The cross-section gate mirrors the rolling gate over the frozen
+# group-final stream lifecycle facts.
+def _check_cross_section_capability(
+    program: Program,
+    capabilities: object,
+    mode: str,
+    /,
+) -> None:
+    for operator in capabilities.operators:
+        if operator.kind != "cross_section":
+            continue
+        if mode not in operator.modes:
+            errors.raise_compile(
+                program.name,
+                errors.CAPABILITY_MISMATCH,
+                f"the cross-section operator does not support {mode} mode in"
+                " the selected capability snapshot",
+            )
+        if mode == "stream" and (
+            operator.finality == "unproven"
+            or not operator.stateful
+            or not operator.microbatch_invariant
+            or operator.checkpoint_support != "checkpointed_stateful"
+            or not isinstance(operator.state_version, int)
+            or operator.state_version <= 0
+            or not operator.deterministic
+            or not operator.replay_safe
+        ):
+            errors.raise_compile(
+                program.name,
+                errors.CAPABILITY_MISMATCH,
+                "the cross-section operator does not prove stream lifecycle"
+                " facts in the selected capability snapshot",
+            )
+        return
+    errors.raise_compile(
+        program.name,
+        errors.CAPABILITY_MISMATCH,
+        "the capability snapshot does not offer the cross-section operator",
+    )
+
+
 # The capability gate conjoins the frozen stream lifecycle facts; every
 # fact fails with the same stable capability_mismatch code.
 def _check_rolling_capability(
@@ -935,10 +1339,13 @@ def lower_program_document(
     selected = _require_runtime(runtime, "lower_program_document")
     mode_value = _require_mode(mode)
     _check_expression_capability(program, selected, mode_value)
-    if _program_needs_rolling(program):
+    if _program_needs_rolling(program) or _program_needs_cross_section(program):
         _validate_lateness(allowed_lateness_micros, late_policy)
         _, capabilities = _run(program, selected, mode_value)
-        _check_rolling_capability(program, capabilities, mode_value)
+        if _program_needs_rolling(program):
+            _check_rolling_capability(program, capabilities, mode_value)
+        if _program_needs_cross_section(program):
+            _check_cross_section_capability(program, capabilities, mode_value)
     return _lower_program(program, mode_value, allowed_lateness_micros, late_policy)
 
 

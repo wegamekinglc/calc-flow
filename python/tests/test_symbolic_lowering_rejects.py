@@ -78,10 +78,24 @@ def test_batch_rolling_min_max_are_rejected() -> None:
         program.compile_batch(Runtime())
 
 
-def test_cross_section_is_rejected() -> None:
+def test_cross_section_winsorize_is_rejected() -> None:
+    # SCE-09 lowers the first four cross-section primitives; winsorization
+    # stays rejected until SCE-10 lands.
     quotes = _ordered()
     signals = quotes.with_columns(
-        FeatureSet([("alpha", cs.zscore(quotes["x"], group=exact_time(quotes["ts"])))])
+        FeatureSet(
+            [
+                (
+                    "clipped",
+                    cs.winsorize(
+                        quotes["x"],
+                        group=exact_time(quotes["ts"]),
+                        lower=0.1,
+                        upper=0.9,
+                    ),
+                )
+            ]
+        )
     )
     program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
 
@@ -89,9 +103,8 @@ def test_cross_section_is_rejected() -> None:
         program.compile_stream(Runtime())
 
     message = _reject_message(excinfo)
-    assert "outputs.signals.alpha" in message
-    assert "unknown_primitive_version" in message
-    assert "'zscore'" in message
+    assert "outputs.signals.clipped" in message
+    assert "not supported in this release" in message
 
 
 def test_sql_window_is_rejected_in_stream_mode() -> None:
