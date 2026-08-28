@@ -103,7 +103,10 @@ def _plan(declaration: dict[str, object]) -> object:
 
 
 def _weights_table() -> Batch:
-    return Batch.from_pyarrow(pyarrow.table({"factor": [1.0, 2.0, 3.0]}))
+    schema = pyarrow.schema(
+        [pyarrow.field("factor", pyarrow.float64(), nullable=False)]
+    )
+    return Batch.from_pyarrow(pyarrow.table({"factor": [1.0, 2.0, 3.0]}, schema=schema))
 
 
 def _runner(
@@ -148,11 +151,19 @@ def test_static_inputs_are_exempt_from_the_project_plan_rejection(
 
 
 def test_static_input_mapping_is_defensively_copied(tmp_path: Path) -> None:
+    import asyncio
+
     plan = _plan(_table_declaration())
     supplied = {"w": _weights_table()}
-    _runner(plan, tmp_path, supplied)
+    runner = _runner(plan, tmp_path, supplied)
     supplied.clear()
-    assert supplied == {}
+
+    async def exercise() -> None:
+        job = await runner.start_async()
+        outcome = await job.shutdown_async()
+        assert outcome is not None
+
+    asyncio.run(exercise())
 
 
 def test_latched_array_values_survive_caller_mutation(tmp_path: Path) -> None:

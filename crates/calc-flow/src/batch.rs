@@ -335,14 +335,11 @@ fn latched_family(dtype: &str) -> Option<LatchedValuesFamily> {
     })
 }
 
-fn validate_latched_shape(
+fn validate_latched_descriptor(
     backend: &str,
     dtype: &str,
     family: LatchedValuesFamily,
-    shape: &[u64],
-    nulls: Option<&[bool]>,
-    value_count: usize,
-) -> Result<usize> {
+) -> Result<()> {
     if backend.is_empty() {
         return Err(CalcFlowError::InvalidArgument {
             field: "static_inputs.backend".into(),
@@ -355,28 +352,35 @@ fn validate_latched_shape(
             message: format!("dtype {dtype:?} does not match the supplied value family"),
         });
     }
-    let mut element_count = 1_usize;
-    for dimension in shape {
+    Ok(())
+}
+
+fn latched_element_count(shape: &[u64]) -> Result<usize> {
+    shape.iter().try_fold(1_usize, |element_count, dimension| {
         let dimension =
             usize::try_from(*dimension).map_err(|_| CalcFlowError::InvalidArgument {
                 field: "static_inputs.shape".into(),
                 message: "dimension exceeds the platform address range".into(),
             })?;
-        element_count =
-            element_count
-                .checked_mul(dimension)
-                .ok_or_else(|| CalcFlowError::InvalidArgument {
-                    field: "static_inputs.shape".into(),
-                    message: "element count overflowed usize".into(),
-                })?;
-    }
-    if let Some(nulls) = nulls {
-        if nulls.len() != element_count {
-            return Err(CalcFlowError::InvalidArgument {
+        element_count
+            .checked_mul(dimension)
+            .ok_or_else(|| CalcFlowError::InvalidArgument {
                 field: "static_inputs.shape".into(),
-                message: "null mask length must equal the element count".into(),
-            });
-        }
+                message: "element count overflowed usize".into(),
+            })
+    })
+}
+
+fn validate_latched_counts(
+    nulls: Option<&[bool]>,
+    value_count: usize,
+    element_count: usize,
+) -> Result<()> {
+    if nulls.is_some_and(|nulls| nulls.len() != element_count) {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "static_inputs.shape".into(),
+            message: "null mask length must equal the element count".into(),
+        });
     }
     let null_count = nulls.map_or(0, |nulls| nulls.iter().filter(|null| **null).count());
     if value_count != element_count - null_count {
@@ -385,6 +389,20 @@ fn validate_latched_shape(
             message: "value count must equal the non-null element count".into(),
         });
     }
+    Ok(())
+}
+
+fn validate_latched_shape(
+    backend: &str,
+    dtype: &str,
+    family: LatchedValuesFamily,
+    shape: &[u64],
+    nulls: Option<&[bool]>,
+    value_count: usize,
+) -> Result<usize> {
+    validate_latched_descriptor(backend, dtype, family)?;
+    let element_count = latched_element_count(shape)?;
+    validate_latched_counts(nulls, value_count, element_count)?;
     Ok(element_count)
 }
 
@@ -691,6 +709,13 @@ impl Batch {
 mod tests {
     use super::*;
 
+    fn invalid_argument_field(result: Result<Batch>) -> String {
+        match result.unwrap_err() {
+            CalcFlowError::InvalidArgument { field, .. } => field,
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
     #[test]
     fn checked_accumulate_sums_within_usize() {
         assert_eq!(checked_accumulate(2, 3, "batch").unwrap(), 5);
@@ -703,5 +728,68 @@ mod tests {
             checked_accumulate(usize::MAX, 1, "batch"),
             Err(CalcFlowError::InvalidArgument { ref field, .. }) if field == "batch"
         ));
+    }
+
+    #[test]
+    fn latched_arrays_reject_invalid_descriptors_shapes_and_counts() {
+        assert_eq!(
+            invalid_argument_field(Batch::static_array_float(
+                "",
+                "float64",
+                vec![1],
+                None,
+                vec![1.0],
+            )),
+            "static_inputs.backend"
+        );
+        assert_eq!(
+            invalid_argument_field(Batch::static_array_int(
+                "numpy",
+                "float64",
+                vec![1],
+                None,
+                vec![1],
+            )),
+            "static_inputs.dtype"
+        );
+        assert_eq!(
+            invalid_argument_field(Batch::static_array_bool(
+                "numpy",
+                vec![u64::MAX, 2],
+                None,
+                vec![],
+            )),
+            "static_inputs.shape"
+        );
+        assert_eq!(
+            invalid_argument_field(Batch::static_array_uint(
+                "numpy",
+                "uint8",
+                vec![2],
+                Some(vec![false]),
+                vec![1, 2],
+            )),
+            "static_inputs.shape"
+        );
+        assert_eq!(
+            invalid_argument_field(Batch::static_array_uint(
+                "numpy",
+                "uint8",
+                vec![2],
+                Some(vec![false, true]),
+                vec![1, 2],
+            )),
+            "static_inputs.shape"
+        );
+        assert_eq!(
+            invalid_argument_field(Batch::static_array_uint(
+                "numpy",
+                "uint8",
+                vec![1],
+                None,
+                vec![u64::from(u8::MAX) + 1],
+            )),
+            "static_inputs.dtype"
+        );
     }
 }

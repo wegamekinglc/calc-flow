@@ -827,20 +827,20 @@ impl StreamExecutionPlan {
         specs: Vec<crate::StaticInputSpec>,
     ) -> Result<Self> {
         for spec in specs {
-            let name = spec.name();
-            if !self.external_inputs.contains_key(name) {
+            let name = spec.name().to_owned();
+            if !self.external_inputs.contains_key(&name) {
                 return Err(CalcFlowError::Compile {
                     message: format!(
                         "static input {name:?} does not name a graph external input binding"
                     ),
                 });
             }
-            if self.static_inputs.contains_key(name) {
+            if self.static_inputs.contains_key(&name) {
                 return Err(CalcFlowError::Compile {
                     message: format!("static input name {name:?} is declared twice"),
                 });
             }
-            self.static_inputs.insert(name.to_owned(), spec.clone());
+            self.static_inputs.insert(name, spec);
         }
         Ok(self)
     }

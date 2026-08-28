@@ -372,17 +372,9 @@ fn write_cell(writer: &mut DigestWriter, array: &dyn Array, row: usize) -> Resul
     write_flat_cell(writer, array, row)
 }
 
-/// Builds the canonical digest-v1 byte string for one table payload.
-///
-/// Cells are encoded in logical row-major order across every chunk; schema
-/// metadata other than field name, logical type, and nullability is excluded.
-pub(crate) fn table_digest(name: &str, table: &TableBatch) -> Result<StaticInputDigest> {
+fn write_table_schema(writer: &mut DigestWriter, table: &TableBatch) -> Result<usize> {
     let schema = table.schema();
     let fields = schema.fields();
-    let mut writer = DigestWriter::new();
-    writer.tag(0x01);
-    writer.text(name.as_bytes())?;
-    writer.tag(0x10);
     writer.checked_len(fields.len())?;
     let first_chunk_columns = table
         .batches()
@@ -396,9 +388,13 @@ pub(crate) fn table_digest(name: &str, table: &TableBatch) -> Result<StaticInput
                 .get(index)
                 .and_then(|column| dictionary_ordered_flag(column.as_ref()))
         });
-        write_table_type_ordered(&mut writer, field.data_type(), ordered)?;
+        write_table_type_ordered(writer, field.data_type(), ordered)?;
         writer.tag(u8::from(field.is_nullable()));
     }
+    Ok(fields.len())
+}
+
+fn table_row_offsets(table: &TableBatch) -> Result<(Vec<usize>, usize)> {
     let mut offsets = Vec::with_capacity(table.batches().len() + 1);
     let mut total = 0_usize;
     for chunk in table.batches() {
@@ -412,44 +408,66 @@ pub(crate) fn table_digest(name: &str, table: &TableBatch) -> Result<StaticInput
                 })?;
     }
     offsets.push(total);
-    writer.checked_len(total)?;
+    Ok((offsets, total))
+}
+
+fn write_table_rows(
+    writer: &mut DigestWriter,
+    table: &TableBatch,
+    offsets: &[usize],
+    total: usize,
+    column_count: usize,
+) -> Result<()> {
     let mut chunk_index = 0_usize;
     for row in 0..total {
         while row >= offsets[chunk_index + 1] {
             chunk_index += 1;
         }
         let local = row - offsets[chunk_index];
-        for column in 0..fields.len() {
-            write_cell(
-                &mut writer,
-                table.batches()[chunk_index].column(column),
-                local,
-            )?;
+        for column in 0..column_count {
+            write_cell(writer, table.batches()[chunk_index].column(column), local)?;
         }
     }
+    Ok(())
+}
+
+/// Builds the canonical digest-v1 byte string for one table payload.
+///
+/// Cells are encoded in logical row-major order across every chunk; schema
+/// metadata other than field name, logical type, and nullability is excluded.
+pub(crate) fn table_digest(name: &str, table: &TableBatch) -> Result<StaticInputDigest> {
+    let mut writer = DigestWriter::new();
+    writer.tag(0x01);
+    writer.text(name.as_bytes())?;
+    writer.tag(0x10);
+    let column_count = write_table_schema(&mut writer, table)?;
+    let (offsets, total) = table_row_offsets(table)?;
+    writer.checked_len(total)?;
+    write_table_rows(&mut writer, table, &offsets, total, column_count)?;
     Ok(writer.finish())
 }
 
-/// Builds the canonical digest-v1 byte string for one latched array payload.
-pub(crate) fn array_digest(name: &str, payload: &LatchedArrayPayload) -> Result<StaticInputDigest> {
-    let tag = array_dtype_tag(payload.dtype()).ok_or_else(|| CalcFlowError::InvalidArgument {
+fn array_digest_tag(payload: &LatchedArrayPayload) -> Result<u8> {
+    array_dtype_tag(payload.dtype()).ok_or_else(|| CalcFlowError::InvalidArgument {
         field: "static_inputs.dtype".into(),
         message: format!(
             "array dtype {:?} is outside the digest-v1 set",
             payload.dtype()
         ),
-    })?;
-    let mut writer = DigestWriter::new();
-    writer.tag(0x01);
-    writer.text(name.as_bytes())?;
-    writer.tag(0x11);
+    })
+}
+
+fn write_array_descriptor(writer: &mut DigestWriter, payload: &LatchedArrayPayload) -> Result<()> {
     writer.text(payload.backend().as_bytes())?;
-    writer.tag(tag);
+    writer.tag(array_digest_tag(payload)?);
     writer.checked_len(payload.shape().len())?;
     for dimension in payload.shape() {
         writer.u64(*dimension);
     }
-    writer.checked_len(payload.element_count())?;
+    writer.checked_len(payload.element_count())
+}
+
+fn write_array_cells(writer: &mut DigestWriter, payload: &LatchedArrayPayload) -> Result<()> {
     let mut next_value = 0_usize;
     for position in 0..payload.element_count() {
         if payload.is_null(position) {
@@ -464,6 +482,17 @@ pub(crate) fn array_digest(name: &str, payload: &LatchedArrayPayload) -> Result<
         writer.scalar(&cell);
         next_value += 1;
     }
+    Ok(())
+}
+
+/// Builds the canonical digest-v1 byte string for one latched array payload.
+pub(crate) fn array_digest(name: &str, payload: &LatchedArrayPayload) -> Result<StaticInputDigest> {
+    let mut writer = DigestWriter::new();
+    writer.tag(0x01);
+    writer.text(name.as_bytes())?;
+    writer.tag(0x11);
+    write_array_descriptor(&mut writer, payload)?;
+    write_array_cells(&mut writer, payload)?;
     Ok(writer.finish())
 }
 
@@ -538,6 +567,80 @@ fn static_error(path: String, message: String) -> CalcFlowError {
     }
 }
 
+fn qualify_static_input_error(name: &str, error: CalcFlowError) -> CalcFlowError {
+    let CalcFlowError::InvalidArgument { field, message } = error else {
+        return error;
+    };
+    let input_root = format!("static_inputs.{name}");
+    let path = if field == input_root || field.starts_with(&format!("{input_root}.")) {
+        field
+    } else if let Some(suffix) = field.strip_prefix("static_inputs.") {
+        format!("{input_root}.{suffix}")
+    } else {
+        format!("{input_root}.{field}")
+    };
+    static_error(path, message)
+}
+
+fn validate_array_descriptor(
+    name: &str,
+    backend: &str,
+    dtype: &str,
+    shape: &[u64],
+    payload: &LatchedArrayPayload,
+) -> Result<()> {
+    if payload.backend() != backend {
+        return Err(static_error(
+            format!("static_inputs.{name}.backend"),
+            format!(
+                "declared {backend:?} but the value has {:?}",
+                payload.backend()
+            ),
+        ));
+    }
+    if payload.dtype() != dtype {
+        return Err(static_error(
+            format!("static_inputs.{name}.dtype"),
+            format!("declared {dtype:?} but the value has {:?}", payload.dtype()),
+        ));
+    }
+    if !is_supported_array_dtype(dtype) {
+        return Err(static_error(
+            format!("static_inputs.{name}.dtype"),
+            format!("array dtype {dtype:?} is outside the digest-v1 set"),
+        ));
+    }
+    if payload.shape() != shape {
+        return Err(static_error(
+            format!("static_inputs.{name}.shape"),
+            format!("declared {shape:?} but the value has {:?}", payload.shape()),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_array_against_spec(
+    name: &str,
+    backend: &str,
+    dtype: &str,
+    shape: &[u64],
+    batch: &Batch,
+) -> Result<()> {
+    if batch.table_payload().is_ok() {
+        return Err(static_error(
+            format!("static_inputs.{name}.kind"),
+            "declared an array static input but the value is a table batch".into(),
+        ));
+    }
+    let payload = batch.latched_array_payload().ok_or_else(|| {
+        static_error(
+            format!("static_inputs.{name}.backend"),
+            "array static inputs must be latched engine-owned values".into(),
+        )
+    })?;
+    validate_array_descriptor(name, backend, dtype, shape, payload)
+}
+
 /// Validates one supplied batch against its declaration and latches it.
 fn validate_against_spec(name: &str, spec: &StaticInputSpec, batch: &Batch) -> Result<()> {
     match spec {
@@ -547,49 +650,55 @@ fn validate_against_spec(name: &str, spec: &StaticInputSpec, batch: &Batch) -> R
             dtype,
             shape,
             ..
-        } => {
-            if batch.table_payload().is_ok() {
-                return Err(static_error(
-                    format!("static_inputs.{name}.kind"),
-                    "declared an array static input but the value is a table batch".into(),
-                ));
-            }
-            let payload = batch.latched_array_payload().ok_or_else(|| {
-                static_error(
-                    format!("static_inputs.{name}.backend"),
-                    "array static inputs must be latched engine-owned values".into(),
-                )
-            })?;
-            if payload.backend() != backend {
-                return Err(static_error(
-                    format!("static_inputs.{name}.backend"),
-                    format!(
-                        "declared {backend:?} but the value has {:?}",
-                        payload.backend()
-                    ),
-                ));
-            }
-            if payload.dtype() != dtype {
-                return Err(static_error(
-                    format!("static_inputs.{name}.dtype"),
-                    format!("declared {dtype:?} but the value has {:?}", payload.dtype()),
-                ));
-            }
-            if !is_supported_array_dtype(dtype) {
-                return Err(static_error(
-                    format!("static_inputs.{name}.dtype"),
-                    format!("array dtype {dtype:?} is outside the digest-v1 set"),
-                ));
-            }
-            if payload.shape() != shape.as_slice() {
-                return Err(static_error(
-                    format!("static_inputs.{name}.shape"),
-                    format!("declared {shape:?} but the value has {:?}", payload.shape()),
-                ));
-            }
-            Ok(())
-        }
+        } => validate_array_against_spec(name, backend, dtype, shape, batch),
     }
+}
+
+fn validate_table_field(
+    name: &str,
+    index: usize,
+    declared: &ArrowFieldSpec,
+    field: &datafusion::arrow::datatypes::Field,
+) -> Result<()> {
+    if field.name() != declared.name.as_str() {
+        return Err(static_error(
+            format!("static_inputs.{name}.schema[{index}].name"),
+            format!(
+                "declared field {:?} but the value has {:?}",
+                declared.name,
+                field.name()
+            ),
+        ));
+    }
+    let canonical = canonical_type_string(field.data_type()).ok_or_else(|| {
+        static_error(
+            format!("static_inputs.{name}.schema[{index}].data_type"),
+            format!(
+                "Arrow type {} has no strict schema spelling",
+                field.data_type()
+            ),
+        )
+    })?;
+    if canonical != declared.data_type {
+        return Err(static_error(
+            format!("static_inputs.{name}.schema[{index}].data_type"),
+            format!(
+                "declared {:?} but the value has {canonical:?}",
+                declared.data_type
+            ),
+        ));
+    }
+    if field.is_nullable() != declared.nullable {
+        return Err(static_error(
+            format!("static_inputs.{name}.schema[{index}].nullable"),
+            format!(
+                "declared {} but the value has {}",
+                declared.nullable,
+                field.is_nullable()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Validates an Arrow table value against its exact declared schema.
@@ -616,49 +725,39 @@ fn validate_table_against_schema(
         ));
     }
     for (index, declared) in schema.iter().enumerate() {
-        let Some(field) = fields.get(index).map(std::sync::Arc::as_ref) else {
-            continue;
-        };
-        if field.name() != declared.name.as_str() {
-            return Err(static_error(
-                format!("static_inputs.{name}.schema[{index}].name"),
-                format!(
-                    "declared field {:?} but the value has {:?}",
-                    declared.name,
-                    field.name()
-                ),
-            ));
-        }
-        let canonical = canonical_type_string(field.data_type()).ok_or_else(|| {
-            static_error(
-                format!("static_inputs.{name}.schema[{index}].data_type"),
-                format!(
-                    "Arrow type {} has no strict schema spelling",
-                    field.data_type()
-                ),
-            )
-        })?;
-        if canonical != declared.data_type {
-            return Err(static_error(
-                format!("static_inputs.{name}.schema[{index}].data_type"),
-                format!(
-                    "declared {:?} but the value has {canonical:?}",
-                    declared.data_type
-                ),
-            ));
-        }
-        if field.is_nullable() != declared.nullable {
-            return Err(static_error(
-                format!("static_inputs.{name}.schema[{index}].nullable"),
-                format!(
-                    "declared {} but the value has {}",
-                    declared.nullable,
-                    field.is_nullable()
-                ),
-            ));
-        }
+        validate_table_field(name, index, declared, fields[index].as_ref())?;
     }
     Ok(())
+}
+
+fn validate_static_input_names(
+    declared: &BTreeMap<String, StaticInputSpec>,
+    supplied: &BTreeMap<String, Batch>,
+) -> Result<()> {
+    if let Some(name) = declared.keys().find(|name| !supplied.contains_key(*name)) {
+        return Err(static_error(
+            format!("static_inputs.{name}"),
+            "required static input is missing".into(),
+        ));
+    }
+    if let Some(name) = supplied.keys().find(|name| !declared.contains_key(*name)) {
+        return Err(static_error(
+            format!("static_inputs.{name}"),
+            "unexpected static input is not declared by the plan".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn prepare_static_input(
+    name: &str,
+    spec: &StaticInputSpec,
+    batch: &Batch,
+) -> Result<(Batch, StaticInputDigest)> {
+    validate_against_spec(name, spec, batch)?;
+    let digest =
+        digest_for_name(name, batch).map_err(|error| qualify_static_input_error(name, error))?;
+    Ok((batch.clone(), digest))
 }
 
 /// Validates the exact static input mapping, latches engine-owned handles,
@@ -672,45 +771,29 @@ pub(crate) fn prepare_static_inputs(
     declared: &BTreeMap<String, StaticInputSpec>,
     supplied: &BTreeMap<String, Batch>,
 ) -> Result<PreparedStaticInputs> {
-    for name in declared.keys() {
-        if !supplied.contains_key(name) {
-            return Err(static_error(
-                format!("static_inputs.{name}"),
-                "required static input is missing".into(),
-            ));
-        }
-    }
-    for name in supplied.keys() {
-        if !declared.contains_key(name) {
-            return Err(static_error(
-                format!("static_inputs.{name}"),
-                "unexpected static input is not declared by the plan".into(),
-            ));
-        }
-    }
+    validate_static_input_names(declared, supplied)?;
     let mut prepared = PreparedStaticInputs::default();
     for (name, spec) in declared {
-        let batch = &supplied[name];
-        validate_against_spec(name, spec, batch)?;
-        let digest = digest_for_name(name, batch).map_err(|error| match error {
-            CalcFlowError::InvalidArgument { field, message } => {
-                static_error(format!("static_inputs.{name}.{field}"), message)
-            }
-            other => other,
-        })?;
+        let (batch, digest) = prepare_static_input(name, spec, &supplied[name])?;
         prepared.digests.insert(name.clone(), digest);
-        prepared.latched.insert(name.clone(), batch.clone());
+        prepared.latched.insert(name.clone(), batch);
     }
     Ok(prepared)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use datafusion::arrow::{
-        array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray},
+        array::{
+            ArrayRef, BooleanArray, Date32Array, Date64Array, DictionaryArray, Float32Array,
+            Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, LargeStringArray,
+            StringArray, Time32SecondArray, Time64MicrosecondArray, TimestampMicrosecondArray,
+            TimestampMillisecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+        },
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     };
@@ -828,8 +911,8 @@ mod tests {
     #[test]
     fn table_digest_resolves_dictionary_cells_to_logical_values() {
         let values = StringArray::from(vec!["a", "b"]);
-        let indices = datafusion::arrow::array::Int32Array::from(vec![0, 1, 0]);
-        let dictionary = datafusion::arrow::array::DictionaryArray::new(indices, Arc::new(values));
+        let indices = Int32Array::from(vec![0, 1, 0]);
+        let dictionary = DictionaryArray::new(indices, Arc::new(values));
         let batch = table_batch(
             Schema::new(vec![Field::new(
                 "sym",
@@ -920,6 +1003,82 @@ mod tests {
         expected.push(0x31);
         expected.extend_from_slice(&2.0f64.to_bits().to_be_bytes());
         assert_eq!(digest.sha256, sha256_hex(&expected));
+    }
+
+    #[test]
+    fn table_digest_accepts_every_frozen_primitive_type() {
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(BooleanArray::from(vec![true])),
+            Arc::new(Int8Array::from(vec![1_i8])),
+            Arc::new(Int16Array::from(vec![2_i16])),
+            Arc::new(Int32Array::from(vec![3_i32])),
+            Arc::new(Int64Array::from(vec![4_i64])),
+            Arc::new(UInt8Array::from(vec![5_u8])),
+            Arc::new(UInt16Array::from(vec![6_u16])),
+            Arc::new(UInt32Array::from(vec![7_u32])),
+            Arc::new(UInt64Array::from(vec![8_u64])),
+            Arc::new(Float32Array::from(vec![9.0_f32])),
+            Arc::new(Float64Array::from(vec![10.0_f64])),
+            Arc::new(StringArray::from(vec!["text"])),
+            Arc::new(LargeStringArray::from(vec!["large"])),
+            Arc::new(Date32Array::from(vec![11_i32])),
+            Arc::new(Date64Array::from(vec![12_i64])),
+            Arc::new(Time32SecondArray::from(vec![13_i32])),
+            Arc::new(Time64MicrosecondArray::from(vec![14_i64])),
+            Arc::new(TimestampMillisecondArray::from(vec![15_i64]).with_timezone("UTC")),
+            Arc::new(TimestampMicrosecondArray::from(vec![16_i64])),
+            Arc::new(TimestampMicrosecondArray::from(vec![17_i64]).with_timezone("UTC")),
+        ];
+        let fields = columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| {
+                Field::new(format!("value_{index}"), column.data_type().clone(), false)
+            })
+            .collect::<Vec<_>>();
+        let batch = table_batch(Schema::new(fields), columns);
+
+        let digest = digest_for_name("all_types", &batch).unwrap();
+
+        assert_eq!(digest.digest_version, STATIC_INPUT_DIGEST_VERSION);
+        assert_eq!(digest.sha256.len(), 64);
+    }
+
+    #[test]
+    fn table_digest_resolves_every_frozen_dictionary_key_type() {
+        let values: ArrayRef = Arc::new(StringArray::from(vec!["value"]));
+        macro_rules! dictionary_column {
+            ($array:ident, $value:expr) => {
+                Arc::new(DictionaryArray::new(
+                    $array::from(vec![$value]),
+                    Arc::clone(&values),
+                )) as ArrayRef
+            };
+        }
+        let columns = vec![
+            dictionary_column!(Int8Array, 0_i8),
+            dictionary_column!(Int16Array, 0_i16),
+            dictionary_column!(Int32Array, 0_i32),
+            dictionary_column!(Int64Array, 0_i64),
+            dictionary_column!(UInt8Array, 0_u8),
+            dictionary_column!(UInt16Array, 0_u16),
+            dictionary_column!(UInt32Array, 0_u32),
+            dictionary_column!(UInt64Array, 0_u64),
+        ];
+        let fields = columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| {
+                Field::new(
+                    format!("dictionary_{index}"),
+                    column.data_type().clone(),
+                    false,
+                )
+            })
+            .collect::<Vec<_>>();
+        let batch = table_batch(Schema::new(fields), columns);
+
+        assert_eq!(digest_for_name("keys", &batch).unwrap().sha256.len(), 64);
     }
 
     #[test]
@@ -1075,6 +1234,47 @@ mod tests {
     #[test]
     fn preflight_validates_table_schemas_at_the_precise_path() {
         let declared = BTreeMap::from([("weights".to_string(), declared_table())]);
+        let wrong_count = table_batch(
+            Schema::new(vec![
+                Field::new("factor", DataType::Float64, false),
+                Field::new("extra", DataType::Float64, false),
+            ]),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0])),
+                Arc::new(Float64Array::from(vec![2.0])),
+            ],
+        );
+        let error = super::prepare_static_inputs(
+            &declared,
+            &BTreeMap::from([("weights".to_string(), wrong_count)]),
+        )
+        .unwrap_err();
+        assert!(error_text(error).starts_with("static_inputs.weights.schema"));
+
+        let wrong_name = table_batch(
+            Schema::new(vec![Field::new("coefficient", DataType::Float64, false)]),
+            vec![Arc::new(Float64Array::from(vec![1.0]))],
+        );
+        let error = super::prepare_static_inputs(
+            &declared,
+            &BTreeMap::from([("weights".to_string(), wrong_name)]),
+        )
+        .unwrap_err();
+        assert!(error_text(error).starts_with("static_inputs.weights.schema[0].name"));
+
+        let unsupported_type = table_batch(
+            Schema::new(vec![Field::new("factor", DataType::Binary, false)]),
+            vec![Arc::new(datafusion::arrow::array::BinaryArray::from(vec![
+                b"x".as_slice(),
+            ]))],
+        );
+        let error = super::prepare_static_inputs(
+            &declared,
+            &BTreeMap::from([("weights".to_string(), unsupported_type)]),
+        )
+        .unwrap_err();
+        assert!(error_text(error).starts_with("static_inputs.weights.schema[0].data_type"));
+
         let wrong_type = table_batch(
             Schema::new(vec![Field::new("factor", DataType::Int64, false)]),
             vec![Arc::new(Int64Array::from(vec![1]))],
@@ -1105,6 +1305,51 @@ mod tests {
         )
         .unwrap_err();
         assert!(error_text(error).starts_with("static_inputs.weights.kind"));
+    }
+
+    #[test]
+    fn digest_error_qualification_keeps_one_static_input_root() {
+        let mut writer = super::DigestWriter::new();
+        let error = super::write_table_type(&mut writer, &DataType::Binary).unwrap_err();
+
+        let qualified = super::qualify_static_input_error("weights", error);
+        let rendered = error_text(qualified);
+
+        assert!(rendered.starts_with("static_inputs.weights.schema:"));
+        assert_eq!(rendered.matches("static_inputs").count(), 1);
+    }
+
+    #[derive(Debug)]
+    struct UnlatchedArray;
+
+    impl crate::ExternalPayload for UnlatchedArray {
+        fn backend(&self) -> &str {
+            "numpy"
+        }
+
+        fn len(&self) -> usize {
+            1
+        }
+
+        fn estimated_bytes(&self) -> usize {
+            8
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[test]
+    fn digest_rejects_an_unlatched_external_array_at_the_named_backend_path() {
+        let batch = Batch::external(Arc::new(UnlatchedArray), BatchMetadata::default()).unwrap();
+
+        let error = digest_for_name("weights", &batch).unwrap_err();
+
+        assert_eq!(
+            error_text(error),
+            "static_inputs.weights.backend: array static inputs must be latched engine-owned values"
+        );
     }
 
     #[test]

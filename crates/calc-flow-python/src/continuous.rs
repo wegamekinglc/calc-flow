@@ -866,13 +866,76 @@ fn edge_budget_config(config: &Bound<'_, PyDict>) -> PyResult<calc_flow::EdgeBud
     .map_err(crate::error::to_py_err)
 }
 
-/// Latches one Python host array batch into engine-owned storage (SCE-11).
-///
-/// This is the trusted provider boundary of API note section 7.3: the
-/// declared backend, dtype, and shape are extracted from the host array and
-/// the logical C-order values are copied out of caller-mutable memory, so
-/// the returned batch can never alias it.
-fn latch_static_array(name: &str, batch: &calc_flow::Batch) -> PyResult<calc_flow::Batch> {
+fn checked_static_array_shape(name: &str, shape: &[usize]) -> PyResult<Vec<u64>> {
+    shape
+        .iter()
+        .map(|dimension| {
+            u64::try_from(*dimension).map_err(|_| {
+                PyValueError::new_err(format!(
+                    "static_inputs.{name}.shape: dimension exceeds the u64 range"
+                ))
+            })
+        })
+        .collect()
+}
+
+fn latch_static_array_values(
+    name: &str,
+    backend: &str,
+    dtype: &str,
+    shape: Vec<u64>,
+    values: &[Bound<'_, PyAny>],
+) -> PyResult<calc_flow::Batch> {
+    let latched = match dtype {
+        "bool" => calc_flow::Batch::static_array_bool(
+            backend,
+            shape,
+            None,
+            values
+                .iter()
+                .map(PyAnyMethods::extract::<bool>)
+                .collect::<PyResult<Vec<_>>>()?,
+        ),
+        "int8" | "int16" | "int32" | "int64" => calc_flow::Batch::static_array_int(
+            backend,
+            dtype,
+            shape,
+            None,
+            values
+                .iter()
+                .map(PyAnyMethods::extract::<i64>)
+                .collect::<PyResult<Vec<_>>>()?,
+        ),
+        "uint8" | "uint16" | "uint32" | "uint64" => calc_flow::Batch::static_array_uint(
+            backend,
+            dtype,
+            shape,
+            None,
+            values
+                .iter()
+                .map(PyAnyMethods::extract::<u64>)
+                .collect::<PyResult<Vec<_>>>()?,
+        ),
+        "float32" | "float64" => calc_flow::Batch::static_array_float(
+            backend,
+            dtype,
+            shape,
+            None,
+            values
+                .iter()
+                .map(PyAnyMethods::extract::<f64>)
+                .collect::<PyResult<Vec<_>>>()?,
+        ),
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "static_inputs.{name}.dtype: array dtype {other:?} is outside the digest-v1 set"
+            )));
+        }
+    };
+    latched.map_err(|error| PyValueError::new_err(format!("static_inputs.{name}: {error}")))
+}
+
+fn static_array_object(name: &str, batch: &calc_flow::Batch) -> PyResult<(String, Py<PyAny>)> {
     let payload = batch.external_payload().map_err(|_| {
         PyTypeError::new_err(format!(
             "static_inputs.{name}: table batches do not carry an array payload"
@@ -888,47 +951,46 @@ fn latch_static_array(name: &str, batch: &calc_flow::Batch) -> PyResult<calc_flo
                 "static_inputs.{name}.backend: array static inputs must be latched engine-owned values"
             ))
         })?;
-    Python::attach(|py| {
-        let array = object.bind(py);
-        let dtype: String = array.getattr(intern!(py, "dtype"))?.str()?.extract()?;
-        let shape: Vec<usize> = array.getattr(intern!(py, "shape"))?.extract()?;
-        let shape: Vec<u64> = shape
-            .into_iter()
-            .map(|dimension| dimension as u64)
-            .collect();
-        let values = array
-            .call_method0(intern!(py, "ravel"))?
-            .call_method0(intern!(py, "tolist"))?
-            .extract::<Vec<Bound<'_, PyAny>>>()?;
-        macro_rules! latched {
-            ($constructor:ident, $cast:ty) => {{
-                let mut extracted = Vec::with_capacity(values.len());
-                for value in &values {
-                    extracted.push(value.extract::<$cast>()?);
-                }
-                calc_flow::Batch::$constructor(&backend, &dtype, shape.clone(), None, extracted)
-            }};
-        }
-        let latched = match dtype.as_str() {
-            "bool" => {
-                let mut extracted = Vec::with_capacity(values.len());
-                for value in &values {
-                    extracted.push(value.extract::<bool>()?);
-                }
-                calc_flow::Batch::static_array_bool(&backend, shape, None, extracted)
-            }
-            "int8" | "int16" | "int32" | "int64" => latched!(static_array_int, i64),
-            "uint8" | "uint16" | "uint32" | "uint64" => latched!(static_array_uint, u64),
-            "float32" | "float64" => latched!(static_array_float, f64),
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "static_inputs.{name}.dtype: array dtype {other:?} is outside the digest-v1 set"
-                )));
-            }
-        }
-        .map_err(|error| PyValueError::new_err(format!("static_inputs.{name}: {error}")))?;
-        Ok(latched)
-    })
+    Ok((backend, object))
+}
+
+fn static_array_descriptor(name: &str, array: &Bound<'_, PyAny>) -> PyResult<(String, Vec<u64>)> {
+    let dtype = array
+        .getattr(intern!(array.py(), "dtype"))?
+        .str()?
+        .extract()?;
+    let shape: Vec<usize> = array.getattr(intern!(array.py(), "shape"))?.extract()?;
+    Ok((dtype, checked_static_array_shape(name, &shape)?))
+}
+
+fn flattened_static_array_values<'py>(
+    array: &Bound<'py, PyAny>,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    array
+        .call_method0(intern!(array.py(), "ravel"))?
+        .call_method0(intern!(array.py(), "tolist"))?
+        .extract()
+}
+
+fn latch_attached_static_array(
+    name: &str,
+    backend: &str,
+    array: &Bound<'_, PyAny>,
+) -> PyResult<calc_flow::Batch> {
+    let (dtype, shape) = static_array_descriptor(name, array)?;
+    let values = flattened_static_array_values(array)?;
+    latch_static_array_values(name, backend, &dtype, shape, &values)
+}
+
+/// Latches one Python host array batch into engine-owned storage (SCE-11).
+///
+/// This is the trusted provider boundary of API note section 7.3: the
+/// declared backend, dtype, and shape are extracted from the host array and
+/// the logical C-order values are copied out of caller-mutable memory, so
+/// the returned batch can never alias it.
+fn latch_static_array(name: &str, batch: &calc_flow::Batch) -> PyResult<calc_flow::Batch> {
+    let (backend, object) = static_array_object(name, batch)?;
+    Python::attach(|py| latch_attached_static_array(name, &backend, object.bind(py)))
 }
 
 /// Converts the adapter-supplied static input mapping into engine-owned
@@ -1942,11 +2004,21 @@ mod tests {
         types::{PyAnyMethods, PyDict, PyDictMethods},
     };
 
-    use super::{PyContinuousStreamingRunner, PyManagedCheckpointRuntime};
+    use super::{
+        PyContinuousStreamingRunner, PyManagedCheckpointRuntime, checked_static_array_shape,
+    };
     use crate::{batch::PyBatch, pipeline::PyStreamExecutionPlan};
 
     struct PendingSource {
         closed: Arc<AtomicBool>,
+    }
+
+    #[test]
+    fn checked_static_array_shape_preserves_dimensions() {
+        assert_eq!(
+            checked_static_array_shape("weights", &[2, 3]).unwrap(),
+            vec![2_u64, 3_u64]
+        );
     }
 
     struct FailingOpenSource;
