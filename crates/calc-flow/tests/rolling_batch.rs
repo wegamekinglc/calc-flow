@@ -242,7 +242,8 @@ async fn batch_output_carries_the_operator_metadata_identity() {
 // ---------------------------------------------------------------------------
 
 use datafusion::arrow::array::{
-    BooleanArray, Date32Array, Date64Array, Float32Array, Int16Array, Int32Array, UInt8Array,
+    BooleanArray, Date32Array, Date64Array, Float32Array, Int8Array, Int16Array, Int32Array,
+    UInt8Array, UInt16Array, UInt32Array,
 };
 
 fn matrix_spec(partition: &str, sequence: &str) -> RollingSpec {
@@ -1188,4 +1189,326 @@ async fn batch_mixed_lag_and_duration_outputs_share_one_operator() {
         mean,
         vec![Some(1.0), Some(1.5), Some(2.5), Some(3.5), Some(4.5)]
     );
+}
+
+async fn execute_with(schema: Arc<Schema>, spec: RollingSpec, columns: Vec<ArrayRef>) -> Batch {
+    let operator = RollingOperator::new("rolling", schema.clone(), spec).unwrap();
+    let record = RecordBatch::try_new(schema, columns).unwrap();
+    let plan = PipelineBuilder::new("rolling coverage")
+        .unwrap()
+        .add_node("rolling", operator)
+        .unwrap()
+        .compile_batch(&UdfRegistry::new().snapshot())
+        .unwrap();
+    let outputs = plan
+        .execute(
+            BTreeMap::from([(
+                "input".into(),
+                Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+            )]),
+            ExecutionOptions::default(),
+        )
+        .await
+        .unwrap();
+    outputs.outputs["output"].clone()
+}
+
+#[tokio::test]
+async fn batch_pair_statistics_classify_y_side_infinities_and_recover_after_slide_out() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC"))),
+            false,
+        ),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("sequence", DataType::UInt64, false),
+        Field::new("price", DataType::Float64, true),
+        Field::new("rate", DataType::Float64, true),
+    ]));
+    let spec = serde_json::from_value(serde_json::json!({
+        "configuration_version": 1,
+        "state_layout_version": 1,
+        "partition_by": ["symbol"],
+        "event_time": "ts",
+        "sequence_by": ["sequence"],
+        "outputs": [
+            {
+                "kind": "covariance",
+                "primitive_version": 1,
+                "left": "price",
+                "right": "rate",
+                "output": "cov",
+                "frame": {"kind": "rows", "size": 3},
+                "min_periods": 1,
+                "ddof": 1
+            },
+            {
+                "kind": "correlation",
+                "primitive_version": 1,
+                "left": "price",
+                "right": "rate",
+                "output": "corr",
+                "frame": {"kind": "rows", "size": 3},
+                "min_periods": 1,
+                "ddof": 1
+            }
+        ],
+        "allowed_lateness_micros": 0,
+        "late_policy": {"kind": "error", "scope": "envelope"},
+        "value_policy": "stateful_numeric_v1"
+    }))
+    .unwrap();
+    // The right operand carries +inf and then -inf; both must classify the
+    // pair statistics as NaN while inside the window and vanish cleanly once
+    // the frame slides past them.
+    let output = execute_with(
+        schema,
+        spec,
+        vec![
+            Arc::new(
+                TimestampMicrosecondArray::from(vec![10, 11, 12, 13, 14, 15, 16, 17, 18])
+                    .with_timezone("UTC"),
+            ),
+            Arc::new(StringArray::from(vec!["a"; 9])),
+            Arc::new(UInt64Array::from(vec![1, 2, 3, 4, 5, 6, 7, 8, 9])),
+            Arc::new(Float64Array::from(vec![
+                Some(1.0),
+                Some(2.0),
+                Some(3.0),
+                Some(4.0),
+                Some(5.0),
+                Some(6.0),
+                Some(7.0),
+                Some(8.0),
+                Some(9.0),
+            ])),
+            Arc::new(Float64Array::from(vec![
+                Some(1.0),
+                Some(f64::INFINITY),
+                Some(5.0),
+                Some(6.0),
+                Some(7.0),
+                Some(f64::NEG_INFINITY),
+                Some(9.0),
+                Some(10.0),
+                Some(11.0),
+            ])),
+        ],
+    )
+    .await;
+    let cov: Vec<Option<f64>> = output_column::<Float64Array>(&output, "cov")
+        .iter()
+        .collect();
+    let corr: Vec<Option<f64>> = output_column::<Float64Array>(&output, "corr")
+        .iter()
+        .collect();
+    // Row 0 has one pairwise sample: the ddof=1 divisor is zero, so both
+    // statistics stay null.
+    assert_eq!(cov[0], None);
+    assert_eq!(corr[0], None);
+    // Rows 1-3 keep +inf inside the three-row frame; rows 5-7 keep -inf.
+    for index in [1, 2, 3, 5, 6, 7] {
+        assert!(cov[index].unwrap().is_nan(), "cov row {index}: {cov:?}");
+        assert!(corr[index].unwrap().is_nan(), "corr row {index}: {corr:?}");
+    }
+    // Rows 4 and 8 slid past each infinity and read finite again — (3, 4, 5)
+    // and (7, 8, 9) against equally spaced right operands are perfect lines,
+    // so the window recovers with no NaN stickiness.
+    for index in [4, 8] {
+        assert_eq!(cov[index], Some(1.0), "cov row {index}: {cov:?}");
+        assert!(
+            (corr[index].unwrap() - 1.0).abs() < 1e-10,
+            "corr row {index}: {corr:?}"
+        );
+    }
+}
+
+fn extrema_matrix() -> (Arc<Schema>, Vec<ArrayRef>) {
+    (
+        Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC"))),
+                false,
+            ),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("sequence", DataType::UInt64, false),
+            Field::new("flag", DataType::Boolean, true),
+            Field::new("tiny", DataType::Int8, true),
+            Field::new("small", DataType::Int16, true),
+            Field::new("medium", DataType::Int32, true),
+            Field::new("big", DataType::Int64, true),
+            Field::new("u08", DataType::UInt8, true),
+            Field::new("u16", DataType::UInt16, true),
+            Field::new("u32", DataType::UInt32, true),
+            Field::new("u64", DataType::UInt64, true),
+            Field::new("f32x", DataType::Float32, true),
+            Field::new("word", DataType::Utf8, true),
+            Field::new("day", DataType::Date32, true),
+            Field::new("instant", DataType::Date64, true),
+        ])),
+        vec![
+            Arc::new(TimestampMicrosecondArray::from(vec![10, 11, 12]).with_timezone("UTC")),
+            Arc::new(StringArray::from(vec!["a"; 3])),
+            Arc::new(UInt64Array::from(vec![1, 2, 3])),
+            Arc::new(BooleanArray::from(vec![
+                Some(true),
+                Some(false),
+                Some(true),
+            ])),
+            Arc::new(Int8Array::from(vec![Some(3), Some(-7), Some(5)])),
+            Arc::new(Int16Array::from(vec![Some(300), Some(-700), Some(500)])),
+            Arc::new(Int32Array::from(vec![Some(70_000), Some(-70_000), Some(5)])),
+            Arc::new(Int64Array::from(vec![
+                Some(7_000_000_000),
+                Some(-7_000_000_000),
+                Some(5),
+            ])),
+            Arc::new(UInt8Array::from(vec![Some(3), Some(200), Some(5)])),
+            Arc::new(UInt16Array::from(vec![Some(300), Some(60_000), Some(5)])),
+            Arc::new(UInt32Array::from(vec![
+                Some(3_000_000_000),
+                Some(200),
+                Some(5),
+            ])),
+            Arc::new(UInt64Array::from(vec![
+                Some(7_000_000_000),
+                Some(200),
+                Some(5),
+            ])),
+            Arc::new(Float32Array::from(vec![Some(1.5), Some(-2.5), Some(0.5)])),
+            Arc::new(StringArray::from(vec![
+                Some("pear"),
+                Some("apple"),
+                Some("fig"),
+            ])),
+            Arc::new(Date32Array::from(vec![Some(10), Some(5), Some(7)])),
+            Arc::new(Date64Array::from(vec![
+                Some(60_000),
+                Some(1_000),
+                Some(7_000),
+            ])),
+        ],
+    )
+}
+
+fn extrema_matrix_spec() -> RollingSpec {
+    let inputs = [
+        "flag", "tiny", "small", "medium", "big", "u08", "u16", "u32", "u64", "f32x", "word",
+        "day", "instant",
+    ];
+    let declarations: Vec<_> = inputs
+        .iter()
+        .map(|input| {
+            serde_json::json!({
+                "kind": "min",
+                "primitive_version": 1,
+                "input": input,
+                "output": format!("{input}_min"),
+                "frame": {"kind": "rows", "size": 3},
+                "min_periods": 1
+            })
+        })
+        .chain([serde_json::json!({
+            "kind": "max",
+            "primitive_version": 1,
+            "input": "flag",
+            "output": "flag_max",
+            "frame": {"kind": "rows", "size": 3},
+            "min_periods": 1
+        })])
+        .collect();
+    serde_json::from_value(serde_json::json!({
+        "configuration_version": 1,
+        "state_layout_version": 1,
+        "partition_by": ["symbol"],
+        "event_time": "ts",
+        "sequence_by": ["sequence"],
+        "outputs": declarations,
+        "allowed_lateness_micros": 0,
+        "late_policy": {"kind": "error", "scope": "envelope"},
+        "value_policy": "stateful_numeric_v1"
+    }))
+    .unwrap()
+}
+
+async fn extrema_matrix_output() -> Batch {
+    let (schema, columns) = extrema_matrix();
+    execute_with(schema, extrema_matrix_spec(), columns).await
+}
+
+#[tokio::test]
+async fn batch_extrema_order_integer_and_unsigned_families() {
+    let output = extrema_matrix_output().await;
+    // The growing rows(3) frame sees one, two, then all three samples, so
+    // every family's minimum is the smallest value among the rows it has
+    // observed under the frozen total order.
+    let minima: Vec<Option<i8>> = output_column::<Int8Array>(&output, "tiny_min")
+        .iter()
+        .collect();
+    assert_eq!(minima, vec![Some(3), Some(-7), Some(-7)]);
+    let minima: Vec<Option<i16>> = output_column::<Int16Array>(&output, "small_min")
+        .iter()
+        .collect();
+    assert_eq!(minima, vec![Some(300), Some(-700), Some(-700)]);
+    let minima: Vec<Option<i32>> = output_column::<Int32Array>(&output, "medium_min")
+        .iter()
+        .collect();
+    assert_eq!(minima, vec![Some(70_000), Some(-70_000), Some(-70_000)]);
+    let minima: Vec<Option<i64>> = output_column::<Int64Array>(&output, "big_min")
+        .iter()
+        .collect();
+    assert_eq!(
+        minima,
+        vec![
+            Some(7_000_000_000),
+            Some(-7_000_000_000),
+            Some(-7_000_000_000)
+        ]
+    );
+    let minima: Vec<Option<u8>> = output_column::<UInt8Array>(&output, "u08_min")
+        .iter()
+        .collect();
+    assert_eq!(minima, vec![Some(3), Some(3), Some(3)]);
+    let minima: Vec<Option<u16>> = output_column::<UInt16Array>(&output, "u16_min")
+        .iter()
+        .collect();
+    assert_eq!(minima, vec![Some(300), Some(300), Some(5)]);
+    let minima: Vec<Option<u32>> = output_column::<UInt32Array>(&output, "u32_min")
+        .iter()
+        .collect();
+    assert_eq!(minima, vec![Some(3_000_000_000), Some(200), Some(5)]);
+    let minima: Vec<Option<u64>> = output_column::<UInt64Array>(&output, "u64_min")
+        .iter()
+        .collect();
+    assert_eq!(minima, vec![Some(7_000_000_000), Some(200), Some(5)]);
+    let minima: Vec<Option<i32>> = output_column::<Date32Array>(&output, "day_min")
+        .iter()
+        .collect();
+    assert_eq!(minima, vec![Some(10), Some(5), Some(5)]);
+    let minima: Vec<Option<i64>> = output_column::<Date64Array>(&output, "instant_min")
+        .iter()
+        .collect();
+    assert_eq!(minima, vec![Some(60_000), Some(1_000), Some(1_000)]);
+}
+
+#[tokio::test]
+async fn batch_extrema_order_boolean_float_and_string_families() {
+    let output = extrema_matrix_output().await;
+    let minima: Vec<Option<bool>> = output_column::<BooleanArray>(&output, "flag_min")
+        .iter()
+        .collect();
+    assert_eq!(minima, vec![Some(true), Some(false), Some(false)]);
+    let maxima: Vec<Option<bool>> = output_column::<BooleanArray>(&output, "flag_max")
+        .iter()
+        .collect();
+    assert_eq!(maxima, vec![Some(true), Some(true), Some(true)]);
+    let minima: Vec<Option<f32>> = output_column::<Float32Array>(&output, "f32x_min")
+        .iter()
+        .collect();
+    assert_eq!(minima, vec![Some(1.5), Some(-2.5), Some(-2.5)]);
+    let words = output_column::<StringArray>(&output, "word_min");
+    let minima: Vec<Option<&str>> = words.iter().collect();
+    assert_eq!(minima, vec![Some("pear"), Some("apple"), Some("apple")]);
 }

@@ -4908,6 +4908,55 @@ mod tests {
     }
 
     #[test]
+    fn pair_outputs_reject_an_empty_right_column() {
+        let spec = aggregate_spec(json!([pair_output(
+            "covariance",
+            "price",
+            "",
+            "price_volume_cov",
+            json!({"kind": "rows", "size": 20}),
+            1,
+        )]));
+        let error = spec.validate(&input_schema()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                CalcFlowError::InvalidArgument { ref field, .. }
+                    if field == "rolling.outputs[0].right"
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn min_over_a_column_without_total_order_is_rejected() {
+        let schema = with_field(
+            &input_schema(),
+            5,
+            &Field::new(
+                "label",
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                true,
+            ),
+        );
+        let spec = aggregate_spec(json!([aggregate_output(
+            "min",
+            "label",
+            "label_min_20",
+            20
+        )]));
+        let error = spec.validate(&schema).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                CalcFlowError::Compile { ref message }
+                    if message.contains("rolling min does not support column")
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn pair_output_ddof_above_one_is_rejected() {
         let spec = aggregate_spec(json!([pair_output(
             "correlation",

@@ -1883,3 +1883,248 @@ async fn checkpoint_keeps_unfinalized_reorder_state_for_duration_windows() {
     drain_duration_state(&mut reference_collector, &mut reference_rows);
     assert_eq!(rows, reference_rows);
 }
+
+fn extrema_pair_operator() -> RollingOperator {
+    RollingOperator::new(
+        "rolling",
+        input_schema(),
+        serde_json::from_value(serde_json::json!({
+            "configuration_version": 1,
+            "state_layout_version": 1,
+            "partition_by": ["symbol"],
+            "event_time": "ts",
+            "sequence_by": ["sequence"],
+            "outputs": [
+                {
+                    "kind": "min",
+                    "primitive_version": 1,
+                    "input": "price",
+                    "output": "price_min_rows",
+                    "frame": {"kind": "rows", "size": 2},
+                    "min_periods": 1
+                },
+                {
+                    "kind": "max",
+                    "primitive_version": 1,
+                    "input": "price",
+                    "output": "price_max_rows",
+                    "frame": {"kind": "rows", "size": 2},
+                    "min_periods": 1
+                },
+                {
+                    "kind": "min",
+                    "primitive_version": 1,
+                    "input": "price",
+                    "output": "price_min_dur",
+                    "frame": {"kind": "duration", "micros": 3},
+                    "min_periods": 1
+                },
+                {
+                    "kind": "max",
+                    "primitive_version": 1,
+                    "input": "price",
+                    "output": "price_max_dur",
+                    "frame": {"kind": "duration", "micros": 3},
+                    "min_periods": 1
+                },
+                {
+                    "kind": "covariance",
+                    "primitive_version": 1,
+                    "left": "price",
+                    "right": "volume",
+                    "output": "cov_rows",
+                    "frame": {"kind": "rows", "size": 2},
+                    "min_periods": 1,
+                    "ddof": 1
+                },
+                {
+                    "kind": "correlation",
+                    "primitive_version": 1,
+                    "left": "price",
+                    "right": "volume",
+                    "output": "corr_dur",
+                    "frame": {"kind": "duration", "micros": 3},
+                    "min_periods": 1,
+                    "ddof": 1
+                }
+            ],
+            "allowed_lateness_micros": 0,
+            "late_policy": {"kind": "error", "scope": "envelope"},
+            "value_policy": "stateful_numeric_v1"
+        }))
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+type ObservedExtremaRow = (
+    i64,
+    String,
+    u64,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+);
+
+fn drain_extrema(collector: &mut EdgeCollector, rows: &mut Vec<ObservedExtremaRow>) {
+    for message in collector.drain("output") {
+        let batch = message.as_data().unwrap();
+        for record in batch.table_payload().unwrap().batches() {
+            let event_times = record
+                .column_by_name("ts")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
+            let symbols = record
+                .column_by_name("symbol")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let sequences = record
+                .column_by_name("sequence")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            let min_rows = record
+                .column_by_name("price_min_rows")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let max_rows = record
+                .column_by_name("price_max_rows")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let min_dur = record
+                .column_by_name("price_min_dur")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let max_dur = record
+                .column_by_name("price_max_dur")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let cov_rows = record
+                .column_by_name("cov_rows")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let corr_dur = record
+                .column_by_name("corr_dur")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            for index in 0..record.num_rows() {
+                rows.push((
+                    event_times.value(index),
+                    symbols.value(index).to_owned(),
+                    sequences.value(index),
+                    min_rows.iter().nth(index).unwrap(),
+                    max_rows.iter().nth(index).unwrap(),
+                    min_dur.iter().nth(index).unwrap(),
+                    max_dur.iter().nth(index).unwrap(),
+                    cov_rows.iter().nth(index).unwrap(),
+                    corr_dur.iter().nth(index).unwrap(),
+                ));
+            }
+        }
+    }
+}
+
+async fn drive_extrema(
+    operator: &mut RollingOperator,
+    chunks: &[&[InputRow]],
+    job: &StreamJobContext,
+    collector: &mut EdgeCollector,
+    rows: &mut Vec<ObservedExtremaRow>,
+) {
+    for chunk in chunks {
+        operator
+            .process_data("input", input_batch(chunk), &context(job, None), collector)
+            .await
+            .unwrap();
+        let closing = chunk.iter().map(|row| row.0).max().unwrap_or(0);
+        operator
+            .on_watermark(
+                EventTime::from_micros(closing),
+                &context(job, Some(closing)),
+                collector,
+            )
+            .await
+            .unwrap();
+        drain_extrema(collector, rows);
+    }
+}
+
+#[tokio::test]
+async fn restored_extrema_and_pair_windows_match_uninterrupted_execution() {
+    let job = job();
+    let rows = fixture_rows();
+    let chunks: Vec<&[_]> = rows.chunks(3).collect();
+
+    let mut reference = extrema_pair_operator();
+    let mut reference_collector = EdgeCollector::new(reference.output_ports().to_vec());
+    let mut reference_rows = Vec::new();
+    drive_extrema(
+        &mut reference,
+        &chunks,
+        &job,
+        &mut reference_collector,
+        &mut reference_rows,
+    )
+    .await;
+
+    let mut restarted = extrema_pair_operator();
+    let mut restarted_collector = EdgeCollector::new(restarted.output_ports().to_vec());
+    let mut restarted_rows = Vec::new();
+    drive_extrema(
+        &mut restarted,
+        &chunks[..2],
+        &job,
+        &mut restarted_collector,
+        &mut restarted_rows,
+    )
+    .await;
+    let snapshot = restarted.checkpoint(Epoch::new(1).unwrap()).unwrap();
+
+    let mut recovered = extrema_pair_operator();
+    recovered.restore(&snapshot).unwrap();
+    let mut recovered_collector = EdgeCollector::new(recovered.output_ports().to_vec());
+    drive_extrema(
+        &mut recovered,
+        &chunks[2..],
+        &job,
+        &mut recovered_collector,
+        &mut restarted_rows,
+    )
+    .await;
+
+    assert_eq!(reference_rows, restarted_rows);
+    assert_eq!(reference_rows.len(), rows.len());
+    // The final entity-"a" row (t=14, price 4, volume 40) pins every rebuilt
+    // accumulator: the two-row frame reads prices (3, 4), the three-microsecond
+    // frame reads event times (12, 14], and the perfectly linear price/volume
+    // pairs give covariance 5.0 and correlation 1.0 under ddof=1.
+    let last = reference_rows.last().unwrap();
+    assert_eq!(last.0, 14);
+    assert_eq!(last.1, "a");
+    assert_eq!(last.3, Some(3.0));
+    assert_eq!(last.4, Some(4.0));
+    assert_eq!(last.5, Some(3.0));
+    assert_eq!(last.6, Some(4.0));
+    assert_eq!(last.7, Some(5.0));
+    assert!((last.8.unwrap() - 1.0).abs() < 1e-10, "corr: {:?}", last.8);
+}
