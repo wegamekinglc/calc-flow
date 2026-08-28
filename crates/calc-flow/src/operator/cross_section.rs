@@ -2840,11 +2840,9 @@ mod tests {
         assert!(!is_numeric(&DataType::Utf8));
     }
 
-    fn assert_key(scalar: ScalarValue, expected: KeyValue) {
-        assert_eq!(
-            KeyValue::from_required_scalar(&scalar, "cross_section").unwrap(),
-            expected
-        );
+    fn assert_key(scalar: &ScalarValue, expected: &KeyValue) {
+        let actual = KeyValue::from_required_scalar(scalar, "cross_section").unwrap();
+        assert_eq!(&actual, expected);
     }
 
     #[test]
@@ -2853,30 +2851,30 @@ mod tests {
             KeyValue::from_nullable_scalar(&ScalarValue::Utf8(None), "cross_section").unwrap(),
             None
         );
-        assert_key(ScalarValue::Boolean(Some(true)), KeyValue::Boolean(true));
-        assert_key(ScalarValue::Int8(Some(1)), KeyValue::Signed(1));
-        assert_key(ScalarValue::Int16(Some(2)), KeyValue::Signed(2));
-        assert_key(ScalarValue::Int32(Some(3)), KeyValue::Signed(3));
-        assert_key(ScalarValue::Int64(Some(4)), KeyValue::Signed(4));
-        assert_key(ScalarValue::UInt8(Some(5)), KeyValue::Unsigned(5));
-        assert_key(ScalarValue::UInt16(Some(6)), KeyValue::Unsigned(6));
-        assert_key(ScalarValue::UInt32(Some(7)), KeyValue::Unsigned(7));
-        assert_key(ScalarValue::UInt64(Some(8)), KeyValue::Unsigned(8));
-        assert_key(ScalarValue::Float32(Some(1.5)), KeyValue::Float32(1.5));
-        assert_key(ScalarValue::Float64(Some(2.5)), KeyValue::Float64(2.5));
+        assert_key(&ScalarValue::Boolean(Some(true)), &KeyValue::Boolean(true));
+        assert_key(&ScalarValue::Int8(Some(1)), &KeyValue::Signed(1));
+        assert_key(&ScalarValue::Int16(Some(2)), &KeyValue::Signed(2));
+        assert_key(&ScalarValue::Int32(Some(3)), &KeyValue::Signed(3));
+        assert_key(&ScalarValue::Int64(Some(4)), &KeyValue::Signed(4));
+        assert_key(&ScalarValue::UInt8(Some(5)), &KeyValue::Unsigned(5));
+        assert_key(&ScalarValue::UInt16(Some(6)), &KeyValue::Unsigned(6));
+        assert_key(&ScalarValue::UInt32(Some(7)), &KeyValue::Unsigned(7));
+        assert_key(&ScalarValue::UInt64(Some(8)), &KeyValue::Unsigned(8));
+        assert_key(&ScalarValue::Float32(Some(1.5)), &KeyValue::Float32(1.5));
+        assert_key(&ScalarValue::Float64(Some(2.5)), &KeyValue::Float64(2.5));
         assert_key(
-            ScalarValue::Utf8(Some("a".into())),
-            KeyValue::String("a".into()),
+            &ScalarValue::Utf8(Some("a".into())),
+            &KeyValue::String("a".into()),
         );
         assert_key(
-            ScalarValue::LargeUtf8(Some("b".into())),
-            KeyValue::String("b".into()),
+            &ScalarValue::LargeUtf8(Some("b".into())),
+            &KeyValue::String("b".into()),
         );
-        assert_key(ScalarValue::Date32(Some(9)), KeyValue::Date32(9));
-        assert_key(ScalarValue::Date64(Some(10)), KeyValue::Date64(10));
+        assert_key(&ScalarValue::Date32(Some(9)), &KeyValue::Date32(9));
+        assert_key(&ScalarValue::Date64(Some(10)), &KeyValue::Date64(10));
         assert_key(
-            ScalarValue::TimestampMicrosecond(Some(11), Some(Arc::from("UTC"))),
-            KeyValue::Timestamp(11),
+            &ScalarValue::TimestampMicrosecond(Some(11), Some(Arc::from("UTC"))),
+            &KeyValue::Timestamp(11),
         );
         assert!(
             KeyValue::from_required_scalar(&ScalarValue::Binary(Some(vec![1])), "cross_section")

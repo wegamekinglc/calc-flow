@@ -266,6 +266,18 @@ def test_non_input_column_argument_is_rejected() -> None:
     assert "input column" in str(error.value)
 
 
+def test_non_input_group_expression_is_rejected() -> None:
+    quotes = _ordered()
+    group = exact_time(quotes["ts"], partition_by=[quotes["x"] + 1.0])
+    signals = quotes.with_columns(
+        FeatureSet([("rank", cs.rank(quotes["x"], group=group))])
+    )
+    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+
+    with pytest.raises(CompileError, match="group columns must be input columns"):
+        lower_program_document(program, Runtime(), "batch")
+
+
 def test_mixed_grouping_declarations_are_rejected() -> None:
     quotes = _ordered()
     bucketed = event_time_bucket(quotes["ts"], width_micros=1000)
