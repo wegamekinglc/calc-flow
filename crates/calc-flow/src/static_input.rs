@@ -1323,7 +1323,7 @@ mod tests {
     struct UnlatchedArray;
 
     impl crate::ExternalPayload for UnlatchedArray {
-        fn backend(&self) -> &str {
+        fn backend(&self) -> &'static str {
             "numpy"
         }
 
