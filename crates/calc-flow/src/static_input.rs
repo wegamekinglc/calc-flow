@@ -1006,6 +1006,27 @@ mod tests {
     }
 
     #[test]
+    fn table_digest_canonicalizes_distinct_float32_nan_payloads() {
+        let positive = table_batch(
+            Schema::new(vec![Field::new("value", DataType::Float32, false)]),
+            vec![Arc::new(Float32Array::from(vec![f32::from_bits(
+                0x7fc0_0001,
+            )]))],
+        );
+        let negative = table_batch(
+            Schema::new(vec![Field::new("value", DataType::Float32, false)]),
+            vec![Arc::new(Float32Array::from(vec![f32::from_bits(
+                0xffc0_0002,
+            )]))],
+        );
+
+        assert_eq!(
+            digest_for_name("nan", &positive).unwrap(),
+            digest_for_name("nan", &negative).unwrap()
+        );
+    }
+
+    #[test]
     fn table_digest_accepts_every_frozen_primitive_type() {
         let columns: Vec<ArrayRef> = vec![
             Arc::new(BooleanArray::from(vec![true])),
@@ -1045,6 +1066,111 @@ mod tests {
     }
 
     #[test]
+    fn preflight_accepts_every_frozen_primitive_schema_spelling() {
+        let cases: Vec<(&str, &str, ArrayRef)> = vec![
+            ("boolean", "bool", Arc::new(BooleanArray::from(vec![true]))),
+            ("int8", "int8", Arc::new(Int8Array::from(vec![1_i8]))),
+            ("int16", "int16", Arc::new(Int16Array::from(vec![2_i16]))),
+            ("int32", "int32", Arc::new(Int32Array::from(vec![3_i32]))),
+            ("int64", "int64", Arc::new(Int64Array::from(vec![4_i64]))),
+            ("uint8", "uint8", Arc::new(UInt8Array::from(vec![5_u8]))),
+            ("uint16", "uint16", Arc::new(UInt16Array::from(vec![6_u16]))),
+            ("uint32", "uint32", Arc::new(UInt32Array::from(vec![7_u32]))),
+            ("uint64", "uint64", Arc::new(UInt64Array::from(vec![8_u64]))),
+            (
+                "float32",
+                "float32",
+                Arc::new(Float32Array::from(vec![9.0_f32])),
+            ),
+            (
+                "float64",
+                "float64",
+                Arc::new(Float64Array::from(vec![10.0_f64])),
+            ),
+            (
+                "string",
+                "string",
+                Arc::new(StringArray::from(vec!["text"])),
+            ),
+            (
+                "large_string",
+                "large_string",
+                Arc::new(LargeStringArray::from(vec!["large"])),
+            ),
+            (
+                "date32",
+                "date32",
+                Arc::new(Date32Array::from(vec![11_i32])),
+            ),
+            (
+                "date64",
+                "date64",
+                Arc::new(Date64Array::from(vec![12_i64])),
+            ),
+            (
+                "time32",
+                "time32[s]",
+                Arc::new(Time32SecondArray::from(vec![13_i32])),
+            ),
+            (
+                "time64",
+                "time64[us]",
+                Arc::new(Time64MicrosecondArray::from(vec![14_i64])),
+            ),
+            (
+                "timestamp_ms",
+                "timestamp[ms]",
+                Arc::new(TimestampMillisecondArray::from(vec![15_i64]).with_timezone("UTC")),
+            ),
+            (
+                "timestamp_us",
+                "timestamp[us]",
+                Arc::new(TimestampMicrosecondArray::from(vec![16_i64])),
+            ),
+            (
+                "timestamp_us_utc",
+                "timestamp[us, UTC]",
+                Arc::new(TimestampMicrosecondArray::from(vec![17_i64]).with_timezone("UTC")),
+            ),
+        ];
+        let schema = Schema::new(
+            cases
+                .iter()
+                .map(|(name, _, column)| Field::new(*name, column.data_type().clone(), false))
+                .collect::<Vec<_>>(),
+        );
+        let declared_schema = cases
+            .iter()
+            .map(|(name, data_type, _)| crate::ArrowFieldSpec {
+                name: (*name).into(),
+                data_type: (*data_type).into(),
+                nullable: false,
+            })
+            .collect();
+        let batch = table_batch(
+            schema,
+            cases.into_iter().map(|(_, _, column)| column).collect(),
+        );
+        let declared = BTreeMap::from([(
+            "all_types".to_string(),
+            super::StaticInputSpec::Table {
+                name: "all_types".into(),
+                mutability: super::StaticMutability::Static,
+                schema: declared_schema,
+            },
+        )]);
+
+        let prepared = super::prepare_static_inputs(
+            &declared,
+            &BTreeMap::from([("all_types".to_string(), batch)]),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.latched["all_types"].num_rows(), 1);
+        assert_eq!(prepared.digests["all_types"].sha256.len(), 64);
+    }
+
+    #[test]
     fn table_digest_resolves_every_frozen_dictionary_key_type() {
         let values: ArrayRef = Arc::new(StringArray::from(vec!["value"]));
         macro_rules! dictionary_column {
@@ -1079,6 +1205,36 @@ mod tests {
         let batch = table_batch(Schema::new(fields), columns);
 
         assert_eq!(digest_for_name("keys", &batch).unwrap().sha256.len(), 64);
+    }
+
+    #[test]
+    fn table_digest_rejects_non_integer_and_nested_dictionary_descriptors() {
+        let cases = [
+            (
+                DataType::Dictionary(Box::new(DataType::Boolean), Box::new(DataType::Utf8)),
+                "dictionary index types are restricted to integer types in digest v1",
+            ),
+            (
+                DataType::Dictionary(
+                    Box::new(DataType::Int32),
+                    Box::new(DataType::Dictionary(
+                        Box::new(DataType::Int8),
+                        Box::new(DataType::Utf8),
+                    )),
+                ),
+                "dictionary values must use a non-dictionary digest-v1 type",
+            ),
+        ];
+
+        for (data_type, expected_message) in cases {
+            let mut writer = super::DigestWriter::new();
+            let error = super::write_table_type(&mut writer, &data_type).unwrap_err();
+
+            assert_eq!(
+                error_text(error),
+                format!("static_inputs.schema: {expected_message}")
+            );
+        }
     }
 
     #[test]
@@ -1349,6 +1505,23 @@ mod tests {
         assert_eq!(
             error_text(error),
             "static_inputs.weights.backend: array static inputs must be latched engine-owned values"
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_an_unlatched_external_array_before_digesting() {
+        let batch = Batch::external(Arc::new(UnlatchedArray), BatchMetadata::default()).unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.estimated_bytes().unwrap(), 8);
+        let declared = BTreeMap::from([("w".to_string(), declared_array())]);
+
+        let error =
+            super::prepare_static_inputs(&declared, &BTreeMap::from([("w".to_string(), batch)]))
+                .unwrap_err();
+
+        assert_eq!(
+            error_text(error),
+            "static_inputs.w.backend: array static inputs must be latched engine-owned values"
         );
     }
 

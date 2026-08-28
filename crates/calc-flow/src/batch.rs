@@ -792,4 +792,115 @@ mod tests {
             "static_inputs.dtype"
         );
     }
+
+    #[test]
+    fn latched_signed_array_cells_preserve_each_declared_width() {
+        let cases = [
+            ("int8", i64::from(i8::MIN), i8::MIN.to_be_bytes().to_vec()),
+            (
+                "int16",
+                i64::from(i16::MIN),
+                i16::MIN.to_be_bytes().to_vec(),
+            ),
+            (
+                "int32",
+                i64::from(i32::MIN),
+                i32::MIN.to_be_bytes().to_vec(),
+            ),
+            ("int64", i64::MIN, i64::MIN.to_be_bytes().to_vec()),
+        ];
+
+        for (dtype, value, expected) in cases {
+            let batch =
+                Batch::static_array_int("numpy", dtype, vec![1], None, vec![value]).unwrap();
+            let payload = batch.latched_array_payload().unwrap();
+
+            assert_eq!(payload.dtype(), dtype);
+            assert_eq!(payload.cell(0).as_deref(), Some(expected.as_slice()));
+            assert_eq!(payload.cell(1), None);
+        }
+    }
+
+    #[test]
+    fn latched_unsigned_array_cells_preserve_each_declared_width() {
+        let cases = [
+            ("uint8", u64::from(u8::MAX), u8::MAX.to_be_bytes().to_vec()),
+            (
+                "uint16",
+                u64::from(u16::MAX),
+                u16::MAX.to_be_bytes().to_vec(),
+            ),
+            (
+                "uint32",
+                u64::from(u32::MAX),
+                u32::MAX.to_be_bytes().to_vec(),
+            ),
+            ("uint64", u64::MAX, u64::MAX.to_be_bytes().to_vec()),
+        ];
+
+        for (dtype, value, expected) in cases {
+            let batch =
+                Batch::static_array_uint("numpy", dtype, vec![1], None, vec![value]).unwrap();
+            let payload = batch.latched_array_payload().unwrap();
+
+            assert_eq!(payload.dtype(), dtype);
+            assert_eq!(payload.cell(0).as_deref(), Some(expected.as_slice()));
+            assert_eq!(payload.cell(1), None);
+        }
+    }
+
+    #[test]
+    fn latched_bool_and_float64_cells_preserve_canonical_values_and_nulls() {
+        let boolean =
+            Batch::static_array_bool("numpy", vec![2], Some(vec![false, true]), vec![true])
+                .unwrap();
+        let boolean_payload = boolean.latched_array_payload().unwrap();
+        assert_eq!(boolean_payload.element_count(), 2);
+        assert!(!boolean_payload.is_null(0));
+        assert!(boolean_payload.is_null(1));
+        assert_eq!(boolean_payload.cell(0), Some(vec![1]));
+
+        let nan = f64::from_bits(0xfff8_0000_0000_0001);
+        let float =
+            Batch::static_array_float("numpy", "float64", vec![1], None, vec![nan]).unwrap();
+        assert_eq!(
+            float.latched_array_payload().unwrap().cell(0),
+            Some(0x7ff8_0000_0000_0000u64.to_be_bytes().to_vec())
+        );
+    }
+
+    #[test]
+    fn latched_arrays_report_owned_lengths_backends_and_byte_estimates() {
+        let cases = [
+            (
+                Batch::static_array_bool("numpy", vec![1], None, vec![true]).unwrap(),
+                size_of::<bool>() + 5 + 4 + size_of::<u64>(),
+            ),
+            (
+                Batch::static_array_int("numpy", "int8", vec![1], None, vec![1]).unwrap(),
+                size_of::<i64>() + 5 + 4 + size_of::<u64>(),
+            ),
+            (
+                Batch::static_array_uint("numpy", "uint8", vec![1], None, vec![1]).unwrap(),
+                size_of::<u64>() + 5 + 5 + size_of::<u64>(),
+            ),
+            (
+                Batch::static_array_float(
+                    "numpy",
+                    "float64",
+                    vec![1],
+                    Some(vec![false]),
+                    vec![1.0],
+                )
+                .unwrap(),
+                size_of::<f64>() + 5 + 7 + size_of::<u64>() + size_of::<bool>(),
+            ),
+        ];
+
+        for (batch, expected_bytes) in cases {
+            assert_eq!(batch.num_rows(), 1);
+            assert_eq!(batch.external_payload().unwrap().backend(), "numpy");
+            assert_eq!(batch.estimated_bytes().unwrap(), expected_bytes);
+        }
+    }
 }
