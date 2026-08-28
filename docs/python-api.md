@@ -586,33 +586,37 @@ endpoints `<node>.input` and `<node>.output` deterministically. Batches
 supplied at execution must match the declared input schema exactly.
 
 `ts.lag`, `ts.delta`, and the rolling aggregates `ts.count`, `ts.sum`,
-`ts.mean`, `ts.variance`, and `ts.stddev` lower to one native `rolling` node
+`ts.mean`, `ts.min`, `ts.max`, `ts.variance`, `ts.stddev`,
+`ts.covariance`, and `ts.correlation` lower to one native `rolling` node
 per program output, placed ahead of the fused row-local stages. Rolling
 requires the input table to declare its `entity_by`, `event_time`, and
 `sequence_by` ordering keys; a program missing them fails with
 `ordering_required`. In this release every rolling argument must be a plain
-input column: a computed operand such as `ts.lag(quotes["x"] + 1.0)`, or a
-rolling aggregate over a derived column, fails with `unsupported_type`
-rooted at the output feature. `periods` is a positive integer defaulting to
-`1`; an aggregate declares `rows(size)` as its window with `min_periods`
-(default `1`, between one and the frame size) and — for `variance` and
-`stddev` — `ddof` of `0` or `1` (default `1`), and construction rejects
-other values with `ValueError`. Every rolling occurrence in one output
-shares that output's rolling node: a whole-feature occurrence keeps its
-feature name as the output column, while an occurrence nested inside a
-larger expression materializes as a deterministically named
+input column: a computed operand such as `ts.lag(quotes["x"] + 1.0)`, either
+operand of a pair aggregate, or a rolling aggregate over a derived column,
+fails with `unsupported_type` rooted at the output feature. `periods` is a
+positive integer defaulting to `1`; an aggregate declares `rows(size)` or
+`duration(micros)` as its window with `min_periods` (default `1`, capped at
+the frame size for `rows` windows only) and — for `variance`, `stddev`,
+`covariance`, and `correlation` — `ddof` of `0` or `1` (default `1`), and
+construction rejects other values with `ValueError`. Every rolling
+occurrence in one output shares that output's rolling node: a whole-feature
+occurrence keeps its feature name as the output column, while an occurrence
+nested inside a larger expression materializes as a deterministically named
 `<output>__cf_roll_<index>` column that the fused stages then reference. A
-lag or delta column keeps the input column's type; an aggregate column
-takes the frozen output type — `uint64` for `count`, `int64` or `uint64`
-for an integer `sum`, `float64` otherwise — and the engine evaluates the
-frozen window semantics described in the [Rust API guide](rust-api.md). A
+lag, delta, `min`, or `max` column keeps the input column's type; the
+remaining aggregate columns take the frozen output type — `uint64` for
+`count`, `int64` or `uint64` for an integer `sum`, `float64` otherwise —
+and the engine evaluates the frozen window semantics described in the
+[Rust API guide](rust-api.md). A
 filter declared below every rolling feature becomes a deterministic
 `<output>__cf_prefilter` expression node feeding the rolling node; a filter
 declared above them applies after it. The lowered node's frozen spec carries
 `configuration_version` and `state_layout_version` 1, the declared ordering
 keys, one entry per rolling output (`kind`, `primitive_version` 1, `input`,
 `output`, and `periods`, or `frame`, `min_periods`, and — for the
-statistical kinds — `ddof`), the `allowed_lateness_micros` and `late_policy`
+statistical kinds — `ddof`; the pair kinds carry `left` and `right` in place
+of `input`), the `allowed_lateness_micros` and `late_policy`
 values validated by `compile_stream` — `error` lowers to an envelope-scoped
 rejection and `drop` to a metrics-recorded drop — and the
 `stateful_numeric_v1` value policy, which preserves a null or NaN current or
@@ -622,13 +626,11 @@ declarations is unaffected by the lateness arguments.
 
 Analysis rejections surface as `CompileError` with the first issue's
 `{path}: {code}: {message}`. Declarations the lowerer does not implement —
-the remaining `ts` rolling aggregates `min` and `max`, `ts.correlation`,
 `cs` cross-section statistics, event `window` nodes, `linalg` array bridges,
 and `parameter` static inputs — fail with the eighth issue code
 `unknown_primitive_version` rooted at the output or `static_inputs.<name>`,
 in both batch and stream modes; a stream aggregate or SQL window is never
-silently made batch-local. A rolling declaration over a `duration` frame
-fails with `unsupported_type` rooted at the output feature. Array outputs
+silently made batch-local. Array outputs
 fail with `unknown_primitive_version` in batch mode; stream mode rejects
 them earlier, at the analysis phase, with `unbounded_state` rooted at
 `outputs.<name>` — the stream-safety rule for an array output with row-axis

@@ -5,6 +5,32 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-28: Add event-time duration frames and the rolling aggregates
+  `min`, `max`, `covariance`, and `correlation` to `RollingOperator` across
+  Rust, Python, and the regenerated contracts. Aggregate outputs now declare
+  either a `rows` frame or a `duration` frame — the exact-width event-time
+  interval `(t − micros, t]`, open at the lower bound — with `min_periods`
+  capped at the frame size for `rows` frames only; per-entity retention
+  keeps the largest row demand and the widest duration bound together, so
+  mixed row/duration outputs retain by both bounds. `min`/`max` read a
+  monotonic extrema queue over the total-order column types (booleans,
+  integers, floats, strings, dates, `timestamp[us]` with no timezone or
+  UTC), preserve the input type, and order floating samples by the IEEE
+  total order, so −0.0 and +0.0 are distinguishable — a self-consistent
+  deterministic choice, not SQL `MIN`/`MAX` semantics.
+  `covariance`/`correlation` declare left/right
+  input columns and read a reversible West co-moment accumulator over
+  pairwise-valid positions; their classification order is frozen — the
+  `min_periods` and divisor null gates first, any ±inf on either side reads
+  NaN, and only a finite zero-variance window reads null for correlation —
+  so an infinity window never reads null. Checkpoint segments still store
+  only retained history and buffered rows, with the extrema queues and pair
+  state rebuilt by the same ordered fold on restore. The Python constructors
+  `ts.min`, `ts.max`, `ts.covariance`, and `ts.correlation` and
+  duration-frame windows lower into rolling nodes; the JSON Schema, Studio
+  OpenAPI document, and TypeScript contract are regenerated in the same
+  commit.
+
 - 2026-08-28: Reject wall-clock built-in functions in stream query
   compilation (DAL-166). `compile_stream` now rejects read-only expression
   and SQL queries that call `now`, `current_date`, or `current_time`:
