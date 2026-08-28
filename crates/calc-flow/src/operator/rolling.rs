@@ -4929,7 +4929,7 @@ mod tests {
     }
 
     #[test]
-    fn min_over_a_column_without_total_order_is_rejected() {
+    fn extrema_over_a_column_without_total_order_are_rejected() {
         let schema = with_field(
             &input_schema(),
             5,
@@ -4939,21 +4939,23 @@ mod tests {
                 true,
             ),
         );
-        let spec = aggregate_spec(json!([aggregate_output(
-            "min",
-            "label",
-            "label_min_20",
-            20
-        )]));
-        let error = spec.validate(&schema).unwrap_err();
-        assert!(
-            matches!(
-                error,
-                CalcFlowError::Compile { ref message }
-                    if message.contains("rolling min does not support column")
-            ),
-            "unexpected error: {error}"
-        );
+        for kind in ["min", "max"] {
+            let spec = aggregate_spec(json!([aggregate_output(
+                kind,
+                "label",
+                "label_extrema_20",
+                20
+            )]));
+            let error = spec.validate(&schema).unwrap_err();
+            let expected = format!("rolling {kind} does not support column");
+            assert!(
+                matches!(
+                    error,
+                    CalcFlowError::Compile { ref message } if message.contains(&expected)
+                ),
+                "unexpected error for {kind}: {error}"
+            );
+        }
     }
 
     #[test]
