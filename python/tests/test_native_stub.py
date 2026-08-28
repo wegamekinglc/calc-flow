@@ -55,7 +55,7 @@ def test_continuous_native_stub_matches_registered_runtime_surface() -> None:
         assert hasattr(_native, name)
     assert str(inspect.signature(_native._ManagedCheckpointRuntime)) == "(directory, /)"
     assert str(inspect.signature(_native._StreamingRunner)) == (
-        "(plan, sources, sinks, checkpoints, config)"
+        "(plan, sources, sinks, checkpoints, config, static_inputs)"
     )
     with pytest.raises(TypeError, match="positional-only"):
         _native._ManagedCheckpointRuntime(directory="checkpoint")
