@@ -81,10 +81,26 @@ _TABLE_OUTPUT_PRIMITIVES: Final = frozenset(
 )
 
 _ROLLING_PRIMITIVES: Final = frozenset(
-    {"lag", "delta", "count", "sum", "mean", "variance", "stddev"}
+    {
+        "lag",
+        "delta",
+        "count",
+        "sum",
+        "mean",
+        "min",
+        "max",
+        "variance",
+        "stddev",
+        "covariance",
+        "correlation",
+    }
 )
 
-_ROLLING_DDOF_PRIMITIVES: Final = frozenset({"variance", "stddev"})
+_ROLLING_DDOF_PRIMITIVES: Final = frozenset(
+    {"variance", "stddev", "covariance", "correlation"}
+)
+
+_ROLLING_PAIR_PRIMITIVES: Final = frozenset({"covariance", "correlation"})
 
 _U64_MAX: Final = (1 << 64) - 1
 
@@ -406,7 +422,7 @@ class _RollingPlan:
 
 
 def _rolling_frame(subtree: Node, path: str, kind: str, /) -> dict[str, object]:
-    """Render the frozen row-frame JSON; duration frames arrive with SCE-08."""
+    """Render the frozen frame JSON: row-count or duration (SCE-08)."""
 
     frame = subtree.attr("frame")
     variant = None
@@ -414,11 +430,14 @@ def _rolling_frame(subtree: Node, path: str, kind: str, /) -> dict[str, object]:
         tag = frame.get("frame")
         if isinstance(tag, CEnum):
             variant = tag.variant
+    if variant == "duration":
+        micros = _cint(frame.get("micros")) if isinstance(frame, CMap) else None
+        return {"kind": "duration", "micros": 1 if micros is None else micros}
     if variant != "rows":
         errors.raise_compile(
             path,
             errors.UNSUPPORTED_TYPE,
-            f"rolling {kind} duration frames are not supported in this release",
+            f"rolling {kind} requires a rows or duration frame",
         )
     size = _cint(frame.get("size"))
     return {"kind": "rows", "size": 1 if size is None else size}
@@ -486,29 +505,33 @@ def _plan_rolling(
                 )
             used_names.add(name)
         replacements[subtree.digest] = name
-        argument = subtree.args[0]
-        if argument.op.name != "column_ref":
-            errors.raise_compile(
-                f"{path}.{name}",
-                errors.UNSUPPORTED_TYPE,
-                f"rolling {kind} argument must be an input column in this release",
-            )
-        input_name = _cstr(argument.attr("name"))
-        field = input_types.get(input_name)
-        if field is None:
-            errors.raise_compile(
-                f"{path}.{name}",
-                errors.SCHEMA_MISMATCH,
-                f"rolling {kind} argument column {input_name!r} is not in the"
-                " input schema",
-            )
+        operands: list[tuple[str, str]] = []
+        for role, argument in zip(
+            ("input", "left", "right"), subtree.args, strict=False
+        ):
+            if argument.op.name != "column_ref":
+                errors.raise_compile(
+                    f"{path}.{name}",
+                    errors.UNSUPPORTED_TYPE,
+                    f"rolling {kind} argument must be an input column in this release",
+                )
+            input_name = _cstr(argument.attr("name"))
+            field = input_types.get(input_name)
+            if field is None:
+                errors.raise_compile(
+                    f"{path}.{name}",
+                    errors.SCHEMA_MISMATCH,
+                    f"rolling {kind} argument column {input_name!r} is not in the"
+                    " input schema",
+                )
+            operands.append((role, input_name))
         periods = _cint(subtree.attr("periods"))
         if periods is not None:
             declarations.append(
                 {
                     "kind": kind,
                     "primitive_version": 1,
-                    "input": input_name,
+                    "input": operands[0][1],
                     "output": name,
                     "periods": periods,
                 }
@@ -519,11 +542,15 @@ def _plan_rolling(
         declaration: dict[str, object] = {
             "kind": kind,
             "primitive_version": 1,
-            "input": input_name,
             "output": name,
             "frame": frame,
             "min_periods": _cint(subtree.attr("min_periods")) or 1,
         }
+        if kind in _ROLLING_PAIR_PRIMITIVES:
+            declaration["left"] = operands[0][1]
+            declaration["right"] = operands[1][1]
+        else:
+            declaration["input"] = operands[0][1]
         if kind in _ROLLING_DDOF_PRIMITIVES:
             ddof = _cint(subtree.attr("ddof"))
             declaration["ddof"] = 1 if ddof is None else ddof

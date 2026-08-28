@@ -171,30 +171,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Row-window rolling
+## Rolling windows
 
-`RollingOperator` evaluates native row-window lag, delta, and aggregate
-outputs over entity-partitioned, event-time-ordered rows. Its data-only
-`RollingSpec` declares ordered `partition_by` and `sequence_by` keys, a
-non-null UTC `timestamp[us]` `event_time` column, and one `RollingOutputSpec`
-per rolling column: kind `lag` or `delta` — `primitive_version` 1, input and
-output column names, and a positive `periods` distance — or kind `count`,
-`sum`, `mean`, `variance`, or `stddev` — `primitive_version` 1, input and
-output column names, a positive `rows` frame, and `min_periods`, with
-`variance` and `stddev` adding `ddof`. `configuration_version` and
-`state_layout_version` must equal `ROLLING_CONFIGURATION_VERSION` and
-`ROLLING_STATE_LAYOUT_VERSION` (both 1 in this release),
-`allowed_lateness_micros` and a `LatePolicySpec` of `Error` (envelope scope)
-or `Drop` (metrics version 1) classify late rows against the input watermark,
-and `RollingValuePolicy` is the frozen `stateful_numeric_v1`, which preserves
-a null or NaN current or referenced value. Validation rejects unknown fields,
-empty or duplicate keys, duplicate or input-colliding output names, nullable
-or floating sequence columns, non-numeric `delta`, `sum`, `mean`, `variance`,
-and `stddev` inputs, a `min_periods` below one or above the frame size, a
-`ddof` outside 0 or 1, and ambiguous column references; `count` accepts any
+`RollingOperator` evaluates native lag, delta, and aggregate outputs over
+entity-partitioned, event-time-ordered rows. Its data-only `RollingSpec`
+declares ordered `partition_by` and `sequence_by` keys, a non-null UTC
+`timestamp[us]` `event_time` column, and one `RollingOutputSpec` per rolling
+column: kind `lag` or `delta` — `primitive_version` 1, input and output
+column names, and a positive `periods` distance; kind `count`, `sum`, `mean`,
+`min`, `max`, `variance`, or `stddev` — `primitive_version` 1, input and
+output column names, a positive frame, and `min_periods`, with `variance` and
+`stddev` adding `ddof`; or the pair kinds `covariance` and `correlation` —
+`primitive_version` 1, left and right input column names, an output column
+name, a positive frame, `min_periods`, and `ddof`. A frame is `rows(size)` —
+the `size` rows through the current row of the entity total order — or
+`duration(micros)`: the exact-width event-time interval `(t − micros, t]`,
+open at the lower bound and closed at the upper bound, with equal-time rows
+ordered by `sequence_by`. `configuration_version` and `state_layout_version`
+must equal `ROLLING_CONFIGURATION_VERSION` and `ROLLING_STATE_LAYOUT_VERSION`
+(both 1 in this release), `allowed_lateness_micros` and a `LatePolicySpec` of
+`Error` (envelope scope) or `Drop` (metrics version 1) classify late rows
+against the input watermark, and `RollingValuePolicy` is the frozen
+`stateful_numeric_v1`, which preserves a null or NaN current or referenced
+value. Validation rejects unknown fields, empty or duplicate keys, duplicate
+or input-colliding output names, nullable or floating sequence columns,
+non-numeric `delta`, `sum`, `mean`, `variance`, `stddev`, `covariance`, and
+`correlation` inputs, `min` and `max` inputs outside the total-order types
+(booleans, integers, floats, strings, dates, and `timestamp[us]` with no
+timezone or UTC), a
+`min_periods` below one or — for `rows` frames only — above the frame size,
+a `ddof` outside 0 or 1, and ambiguous column references; `count` accepts any
 input column. The output schema is the input schema followed by the declared
-outputs in declaration order, each nullable. Lag and delta keep the input
-type; the aggregates follow the frozen output-type table:
+outputs in declaration order, each nullable. Lag, delta, `min`, and `max`
+keep the input type; the other aggregates follow the frozen output-type
+table:
 
 | Kind                           | Input            | Output type       |
 | ------------------------------ | ---------------- | ----------------- |
@@ -203,30 +213,45 @@ type; the aggregates follow the frozen output-type table:
 | `sum`                          | unsigned integer | `uint64`, checked |
 | `sum`                          | floating         | `float64`         |
 | `mean` / `variance` / `stddev` | numeric          | `float64`         |
+| `min` / `max`                  | total order      | input type        |
+| `covariance` / `correlation`   | numeric pair     | `float64`         |
 
 Aggregates count valid samples — values that are neither null nor NaN;
 infinities are numeric samples and count toward `min_periods`. A window with
 fewer than `min_periods` valid samples reads null, and a computed NaN stays
-observably distinct from that gate. Floating sums follow IEEE arithmetic: a
-window holding both signs of infinity sums to NaN, and a window holding one
-sign sums to that infinity. Integer sums stay exact and checked: the slide
-runs through a wide transient accumulator and narrows with a checked
-conversion at readout, so a window whose true sum is representable never
-reports a false overflow, while a genuine `int64` or `uint64` overflow fails
-the run loudly. Mean, variance, and standard deviation read a reversible
-West accumulator that also counts the window's positive and negative
-infinities: a mean over both signs is NaN (the undefined ∞ − ∞), a mean over
-one sign is that infinity, and a finite window keeps the incremental West
-value. Variance and standard deviation over any window holding an infinity
-are NaN — a pinned contract — and their divisor is `valid_count − ddof`: a
-non-positive divisor reads null after the `min_periods` gate and before the
-NaN classification. Negative `M2` drift from reversible removal clamps to
-zero at readout.
+observably distinct from that gate. `min` and `max` read a monotonic queue of
+valid samples and preserve the input type. Floating sums follow IEEE
+arithmetic: a window holding both signs of infinity sums to NaN, and a window
+holding one sign sums to that infinity. Integer sums stay exact and checked:
+the slide runs through a wide transient accumulator and narrows with a
+checked conversion at readout, so a window whose true sum is representable
+never reports a false overflow, while a genuine `int64` or `uint64` overflow
+fails the run loudly. Mean, variance, and standard deviation read a
+reversible West accumulator that also counts the window's positive and
+negative infinities: a mean over both signs is NaN (the undefined ∞ − ∞), a
+mean over one sign is that infinity, and a finite window keeps the
+incremental West value. Variance and standard deviation over any window
+holding an infinity are NaN — a pinned contract — and their divisor is
+`valid_count − ddof`: a non-positive divisor reads null after the
+`min_periods` gate and before the NaN classification. Negative `M2` drift
+from reversible removal clamps to zero at readout.
 
-Outputs over the same input column and frame size share one accumulator
-group — `min_periods` and `ddof` are readout parameters, not extra state —
-and each entity retains the largest `periods` distance or frame size across
-every output. The same kernel serves both lifecycles. Batch evaluation
+`covariance` and `correlation` read a reversible West co-moment accumulator
+over the pairwise-valid positions — rows where both operands are non-null
+and non-NaN — so `min_periods` counts pairwise samples and their divisor is
+that count minus `ddof`. Their classification order is frozen: the
+`min_periods` and divisor null gates come first, then a window holding ±inf
+on either side reads NaN, and only a finite window with a zero-variance side
+reads null for `correlation` — an infinity window therefore never reads null.
+
+Outputs over the same input column and frame share one accumulator group —
+numeric, or one monotonic extrema group per direction for `min` and `max` —
+and pair outputs over the same operand pair and frame share one pair group;
+`min_periods` and `ddof` are readout parameters, not extra state. Each entity
+retains the largest `periods` distance or row-frame size across every output
+and, when duration frames are declared, every row inside the widest duration
+bound, so mixed row and duration outputs retain by both bounds together. The
+same kernel serves both lifecycles. Batch evaluation
 orders the complete input canonically and classifies no late rows: every row
 is final at end-of-input. Stream evaluation buffers rows until the input
 watermark passes each row's closing coordinate — its event time plus the
@@ -236,17 +261,21 @@ the late metrics under `drop`. Duplicate row identities are rejected. Rolling
 stream state checkpoints at the aligned epoch cut as an Arrow IPC segment
 with state version 1, and restore or reset reproduces the same ordered
 output rows: the segment stores only the retained history and buffered rows,
-and every accumulator — the sums, the West state, and the infinity counts —
-is rebuilt by the same ordered fold over those rows, so live, refolded, and
-restored states read identically. Sliding arithmetic that becomes non-finite
-re-folds the current window, keeping the classification exact at an
-O(frame) cost per row for those windows.
+and every accumulator — the sums, the West state, the infinity counts, the
+extrema queues, and the pair state — is rebuilt by the same ordered fold
+over those rows, so live, refolded, and restored states read identically.
+Sliding arithmetic that becomes non-finite re-folds the current window,
+keeping the classification exact at an O(frame) cost per row for those
+windows.
 
-Two finite-extreme corners are settled properties of this algorithm family,
-identical on every path: the incremental mean can overflow opposite-sign
-extremes ({−1e308, +1e308} reads +inf though the true mean is 0), and a
-floating sum can overflow its finite partial sum before reaching an infinity
-({−1e308, −1e308, +inf} sums to NaN while the mean reads +inf).
+Three settled corner properties of this algorithm family are identical on
+every path: the incremental mean can overflow opposite-sign extremes
+({−1e308, +1e308} reads +inf though the true mean is 0); a floating sum can
+overflow its finite partial sum before reaching an infinity ({−1e308,
+−1e308, +inf} sums to NaN while the mean reads +inf); and `min`/`max` order
+floating samples by the IEEE total order, so −0.0 and +0.0 are
+distinguishable extrema — a self-consistent deterministic choice, not SQL
+`MIN`/`MAX` semantics, which compare them equal.
 
 ## Stream compilation and continuous runtime
 
