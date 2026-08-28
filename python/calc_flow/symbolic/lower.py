@@ -1351,7 +1351,8 @@ def lower_program_document(
     """Analyze and lower one program to its strict project-v3 document.
 
     The lateness arguments are validated whenever the program contains
-    rolling primitives; row-local programs do not consume them.
+    rolling or cross-section primitives; row-local programs do not consume
+    them.
     """
 
     selected = _require_runtime(runtime, "lower_program_document")
