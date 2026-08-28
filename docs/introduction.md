@@ -165,6 +165,17 @@ null gate and IEEE infinity semantics. `RollingOperator` compiles into both
 batch and stream graphs, emits the input fields followed by the declared
 rolling outputs, and checkpoints its stream state at the aligned epoch cut.
 
+A `CrossSectionSpec` declares native complete-group rank, percentile,
+z-score, and demean outputs over exact-time or fixed-bucket groups: a
+non-null UTC `timestamp[us]` event-time column, ordered entity and sequence
+keys, an optional partition key, the grouping, per-output ordering choices
+and minimum samples, allowed lateness, and a late-row policy. One micro-batch
+is never evidence of completeness — `CrossSectionOperator` accumulates groups
+across envelopes, closes each group when the input watermark reaches its
+finality coordinate (or at end of input), and emits it once in canonical
+order before releasing its state. It compiles into both batch and stream
+graphs and checkpoints its open groups at the aligned epoch cut.
+
 `table_matmul` creates a provider-backed `table_matmul@1` external node with
 the required mixed-kind inputs `table` (table) and `weights` (array), and the
 array output `output`. It selects ordered numeric table columns and multiplies
@@ -183,10 +194,11 @@ as derived columns; and an immutable `Program` over declared inputs and
 outputs. The package is declaration, analysis, and compilation
 only: it exposes no `eval`, data, or runner path.
 `Program.compile_batch(runtime)` and `Program.compile_stream(runtime)` lower
-row-local expressions and the `ts` rolling declarations — lag, delta, and the
-count/sum/mean/variance/stddev aggregates — into the same strict project-v3
-execution plans, and execution remains owned by the execution plans and
-runners above.
+row-local expressions, the `ts` rolling declarations — lag, delta, and the
+count/sum/mean/variance/stddev aggregates — and the `cs` cross-section
+declarations — rank, percentile, demean, and z-score — into the same strict
+project-v3 execution plans, and execution remains owned by the execution
+plans and runners above.
 
 Every `Program` carries a runtime-independent v1 fingerprint over its
 declaration graph. `Program.analyze(runtime, mode=...)` verifies the program

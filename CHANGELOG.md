@@ -5,6 +5,46 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-28: Add the native cross-section operator for complete-group
+  rank, percentile, z-score, and demean across Rust, Python, and the
+  regenerated contracts. `CrossSectionOperator` evaluates exact-time or
+  fixed-bucket groups — one group per exact event time and partition key,
+  or per UTC `[start, start + width)` bucket — under the rule that one
+  micro-batch is never evidence of completeness: groups accumulate across
+  envelopes and close only when the input watermark reaches the group's
+  finality coordinate (the exact event time or bucket end plus the allowed
+  lateness, with equality closing) or at end of input, then emit once in
+  canonical order — groups by finality coordinate then key, rows by event
+  time, entity, and sequence — and release their state and identity index.
+  The data-only `CrossSectionSpec` joins project format v3 with the frozen
+  fields: configuration and state-layout versions 1, a non-null UTC
+  `timestamp[us]` event-time column, ordered `entity_by` and `sequence_by`
+  keys, an optional `partition_by` key whose empty value selects one global
+  group per grouping coordinate, the `exact_time`/`fixed_bucket` grouping,
+  `outputs` (kind `rank`, `percentile`, `demean`, or `zscore` with
+  `primitive_version` 1, input/output names, and `min_samples`; the order
+  statistics add `direction`, `tie_method`, and `null_placement`; `zscore`
+  adds `ddof` 0 or 1), `allowed_lateness_micros`, `late_policy`, and the
+  frozen `nan_exclude_preserve_v1` value policy. The JSON Schema, Studio
+  OpenAPI document, and TypeScript contract regenerate in the same commits.
+  Late rows follow the policy — `error` rejects the whole envelope
+  transactionally before any state changes, and `drop` discards the row and
+  records metrics — duplicate row identities are rejected across partition
+  groups within one envelope and across open envelopes, and open groups
+  checkpoint at the aligned epoch cut as versioned Arrow IPC state that
+  restores the watermark frontier, output sequence, and metrics, so batch
+  and stream produce the same rows across segmentation and recovery.
+  `Program.compile_batch` and `Program.compile_stream` lower
+  `cs.rank`/`cs.percentile`/`cs.demean`/`cs.zscore` declarations into
+  cross-section nodes: the input must declare its ordering keys, every
+  occurrence in one output must share one grouping declaration — the same
+  partition columns and the same exact-time-or-bucket-width shape — and
+  `cs.winsorize` remains rejected in this release. The capability snapshot
+  reports `cross_section@1` as a batch/stream,
+  group-final-append-only, watermark-requiring, micro-batch-invariant,
+  checkpointed-stateful operator with state version 1 — the first operator
+  reporting `group_final_append_only`.
+
 - 2026-08-28: Reject wall-clock built-in functions in stream query
   compilation (DAL-166). `compile_stream` now rejects read-only expression
   and SQL queries that call `now`, `current_date`, or `current_time`:

@@ -161,6 +161,29 @@ segment stores only history and buffered rows, and restore rebuilds every
 accumulator by the same ordered fold — so a restored or reset operator
 reproduces the same ordered output.
 
+## Cross-section groups
+
+`CrossSectionOperator` evaluates complete-group rank, percentile, z-score,
+and demean outputs over exact-time or fixed-bucket groups and runs in both
+batch and stream graphs. Its `CrossSectionSpec` declares the event-time
+column, ordered entity and sequence keys, an optional partition key, the
+grouping, per-output ordering choices with minimum samples, allowed
+lateness, and a late-row policy; row identity is the event time, entity key,
+and sequence key, and duplicates are rejected transactionally.
+
+One micro-batch is never evidence of completeness: groups accumulate across
+envelopes and close only when the input watermark reaches the group's
+finality coordinate — the exact event time or the bucket end plus the
+allowed lateness, with equality closing — or at end of input. A closed group
+emits once in canonical order — groups by finality coordinate then key,
+rows by event time, entity, and sequence — and releases its state and
+identity index. Late rows follow the policy, with `error` rejecting the
+whole envelope and `drop` discarding the row while recording metrics. Open
+groups checkpoint at the aligned epoch cut as versioned Arrow IPC state —
+per-segment configuration-hash and schema-fingerprint metadata with bounded
+inline manifest fields — and restore reproduces the same ordered output,
+watermark frontier, and metrics.
+
 ## Checkpoint transaction
 
 One checkpoint creates a consistent epoch across the job:
