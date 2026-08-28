@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use calc_flow::{
     Batch, BatchMetadata, BatchOperator, CancellationToken, EdgeCollector, EventTime, JsonMap,
-    OperatorMetadata, RollingOperator, RollingSpec, StreamCollector, StreamJobContext,
-    StreamOperator, StreamOperatorContext,
+    OperatorMetadata, RollingOperator, RollingSpec, StreamJobContext, StreamOperator,
+    StreamOperatorContext,
 };
 use datafusion::arrow::{
     array::{
@@ -472,7 +472,7 @@ proptest! {
             .min(arrival_bits.len())
             .min(chunk_bits.len());
         proptest::prop_assume!(row_count <= bits_len);
-        let mut rows: Vec<InputRow> = (0..row_count)
+        let rows: Vec<InputRow> = (0..row_count)
             .map(|index| {
                 let time = i64::from(time_bits[index] % 20);
                 let symbol = match entity_bits[index] % 3 {
