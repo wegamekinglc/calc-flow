@@ -668,6 +668,20 @@ def _enum_attr(subtree: Node, name: str, /) -> str:
     return value.variant if isinstance(value, CEnum) else ""
 
 
+def _grouping_shape(subtree: Node, /) -> tuple[str, int] | None:
+    """Comparable grouping identity: the kind and, for buckets, the width."""
+
+    grouping = subtree.attr("grouping")
+    if isinstance(grouping, CEnum) and grouping.variant == "exact_time":
+        return ("exact_time", 0)
+    if isinstance(grouping, CMap):
+        tag = grouping.get("grouping")
+        width = _cint(grouping.get("width_micros"))
+        if isinstance(tag, CEnum) and tag.variant == "fixed_bucket" and width:
+            return ("fixed_bucket", width)
+    return None
+
+
 # Cross-section planning validates every occurrence with stable,
 # declaration-ordered error paths before emitting the frozen node shape.
 # #lizard forgives
@@ -791,9 +805,13 @@ def _plan_cross_section(
                     " input schema",
                 )
             group_partitions.append(group_name)
+        grouping_shape = _grouping_shape(subtree)
         if index == 0:
             partition_columns = group_partitions
-        elif partition_columns != group_partitions:
+            declared_grouping = grouping_shape
+        elif (
+            partition_columns != group_partitions or declared_grouping != grouping_shape
+        ):
             errors.raise_compile(
                 path,
                 errors.SCHEMA_MISMATCH,

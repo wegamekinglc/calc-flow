@@ -263,6 +263,52 @@ def test_mixed_grouping_declarations_are_rejected() -> None:
     assert "one grouping declaration" in str(error.value)
 
 
+def test_mixed_grouping_kinds_with_equal_partitions_are_rejected() -> None:
+    # The grouping kind is part of the one grouping declaration an output may
+    # carry: silently reusing the first occurrence's kind would replace the
+    # user-declared grouping of the later primitives.
+    quotes = _ordered()
+    bucketed = event_time_bucket(
+        quotes["ts"], width_micros=1000, partition_by=[quotes["industry"]]
+    )
+    signals = quotes.with_columns(
+        FeatureSet(
+            [
+                ("rank", cs.rank(quotes["x"], group=_group(quotes))),
+                ("other", cs.zscore(quotes["x"], group=bucketed)),
+            ]
+        )
+    )
+    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+
+    with pytest.raises(CompileError) as error:
+        lower_program_document(program, Runtime(), "batch")
+    assert "one grouping declaration" in str(error.value)
+
+
+def test_mixed_bucket_widths_with_equal_partitions_are_rejected() -> None:
+    quotes = _ordered()
+    narrow = event_time_bucket(
+        quotes["ts"], width_micros=1000, partition_by=[quotes["industry"]]
+    )
+    wide = event_time_bucket(
+        quotes["ts"], width_micros=60_000_000, partition_by=[quotes["industry"]]
+    )
+    signals = quotes.with_columns(
+        FeatureSet(
+            [
+                ("rank", cs.rank(quotes["x"], group=narrow)),
+                ("other", cs.zscore(quotes["x"], group=wide)),
+            ]
+        )
+    )
+    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+
+    with pytest.raises(CompileError) as error:
+        lower_program_document(program, Runtime(), "batch")
+    assert "one grouping declaration" in str(error.value)
+
+
 def test_cross_section_lowering_compiles_and_executes_in_batch_mode() -> None:
     quotes = _ordered()
     signals = quotes.with_columns(
