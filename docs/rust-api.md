@@ -256,6 +256,27 @@ slots, stream requirements, and the semantic fingerprint. Pass it to the
 crate-root `StreamingRunner` with `SourceBinding`, `SinkBinding`, and
 `ManagedCheckpointRuntime` values.
 
+A plan compiled from a project that declares static side inputs exposes them
+through `StreamExecutionPlan::static_input_ids()` and `static_inputs()`;
+`source_binding_ids()` excludes the static names. Supply the immutable
+`Batch` values with the additive builder, leaving `StreamingRunner::new`
+source-compatible:
+
+```rust
+let runner = StreamingRunner::new(plan, sources, sinks, checkpoints)?
+    .with_static_inputs(BTreeMap::from([("weights".to_owned(), weights)]))?;
+```
+
+`with_static_inputs` copies the mapping and is `#[must_use]`; validation,
+latching, and digest computation are deferred to `start`, where they happen
+exactly once before any source or operator lifecycle runs. The static-input
+crate-root exports are `StaticInputSpec`, `StaticInputDigest`,
+`StaticMutability`, and `STATIC_INPUT_DIGEST_VERSION`. Declarations join the
+plan fingerprint; `CheckpointManifest` records one `StaticInputDigest` per
+name under its `static_inputs` field, omitted when empty. See
+[static inputs](streaming-guide.md#static-inputs) for the full per-job,
+digest, and recovery contract.
+
 The source-driven runtime consumes that plan after a whole-job
 preflight. It runs one task per source, compiled operator, and graph output;
 preserves per-ingress FIFO; routes source control through a job-scoped progress

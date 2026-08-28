@@ -64,6 +64,7 @@ The `calc_flow` crate re-exports its supported public types from
 | UDF/providers      | `UdfRegistry`, `UdfReference`, `ProviderRegistry`, `BatchOperatorFactory`, `StreamOperatorFactory`                       |
 | Sources and sinks  | `StreamSource`, `StreamSink`, `TransactionalStreamSink`, `SourceBinding`, `SinkBinding`                                  |
 | Continuous runtime | `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`, `Cursor`, `SourceEvent`, `JobStatus`, `JobOutcome`        |
+| Static inputs      | `StaticInputSpec`, `StaticInputDigest`, `StaticMutability`                                                               |
 | Projects           | `ProjectSpec`, `compile_project`, `validate_project`                                                                     |
 | Persistence        | `FileProjectStore`, `LocalStateBackend`, `CheckpointManifest`                                                            |
 | Errors             | `CalcFlowError`, `Result<T>`                                                                                             |
@@ -73,8 +74,9 @@ The `calc_flow` crate re-exports its supported public types from
 `StreamExecutionPlan` is consumed by the public source-driven
 `StreamingRunner`. The runner owns source and sink bindings plus a
 `ManagedCheckpointRuntime`; `start(self)` consumes it and returns the sole
-`StreamingJob` lifecycle owner. The v2 source/sink traits, micro-batch runner,
-push runner, and public checkpoint-document store are not exported.
+`StreamingJob` lifecycle owner. The static-input exports also include the
+`STATIC_INPUT_DIGEST_VERSION` constant. The v2 source/sink traits, micro-batch
+runner, push runner, and public checkpoint-document store are not exported.
 
 `EdgeBudget::new(R, B)` keeps its two-field public shape and caps queued
 envelopes and charged rows independently at `R`, plus charged bytes at `B`.
@@ -250,12 +252,15 @@ documents through a public store.
 
 ### Continuous runner
 
-`StreamingRunner(stream_plan, sources, sinks, checkpoints, *, config=None)`
-owns async `StreamSource` and sink connectors. `start_async()` consumes the
+`StreamingRunner(stream_plan, sources, sinks, checkpoints, *, config=None,
+static_inputs=None)` owns async `StreamSource` and sink connectors.
+`start_async()` consumes the
 runner and returns a `StreamingJob`; use `trigger_checkpoint_async()`,
 `shutdown_async()`, `cancel_async()`, or `wait_async()` to drive the job.
 Guarded blocking forms are available outside an event loop. Connector methods
-must be declared with `async def`.
+must be declared with `async def`. `static_inputs` supplies the immutable
+`Batch` side values a plan declares; see
+[static inputs](streaming-guide.md#static-inputs).
 
 Blocking `start()` owns a dedicated event-loop thread for the lifetime of its
 job. Blocking terminal calls execute on that loop, and async terminal calls
@@ -349,6 +354,12 @@ or the standard request-validation error list. Malformed stream Join input
 carries the stable issue codes `unsupported_join_type`, `invalid_time_bound`,
 `invalid_join_limit`, `invalid_join_keys`, `incompatible_key_type`,
 `invalid_event_time`, and `invalid_output_prefix`.
+
+REST payloads cannot carry live values, so `POST /jobs` fails closed for a
+stored project that declares static inputs: the response is `422`, its
+`detail` names the first `static_inputs.{name}` as unresolvable over REST, and
+no run, handle, or worker is created. Supply static values through the Python
+runtime instead.
 
 The checked contract is [web-ui/openapi.json](../web-ui/openapi.json).
 `npm run sync:api` regenerates it and
