@@ -8,7 +8,7 @@
 
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     io::Cursor,
     sync::Arc,
 };
@@ -667,24 +667,25 @@ impl CrossSectionOperator {
     }
 
     /// Groups accepted rows for the batch lifecycle and rejects duplicate
-    /// identities before any output is produced (SCE-00 D4).
+    /// identities before any output is produced (SCE-00 D4). The identity is
+    /// unique per logical input, so duplicates are rejected across partition
+    /// groups, not only within one group.
     fn assemble(&self, rows: Vec<BufferedRow>, node_id: &str) -> Result<Groups> {
         let mut groups = Groups::new();
+        let mut identities = BTreeSet::new();
         for row in rows {
-            let group = self.compiled.group_key(&row, node_id)?;
-            if let Some(previous) = groups
-                .entry(group)
-                .or_default()
-                .insert(row.identity.clone(), row)
-            {
+            let event_time = row.identity.event_time;
+            if !identities.insert(row.identity.clone()) {
                 return Err(operator_error(
                     node_id,
-                    &format!(
-                        "duplicate row identity at event_time_micros={}",
-                        previous.identity.event_time
-                    ),
+                    &format!("duplicate row identity at event_time_micros={event_time}"),
                 ));
             }
+            let group = self.compiled.group_key(&row, node_id)?;
+            groups
+                .entry(group)
+                .or_default()
+                .insert(row.identity.clone(), row);
         }
         Ok(groups)
     }
@@ -702,7 +703,9 @@ impl CrossSectionOperator {
     ) -> Result<(AcceptedRows, LateMetricDelta)> {
         let mut accepted: AcceptedRows = Vec::with_capacity(rows.len());
         let mut metrics = PreparedLateMetrics::default();
-        let mut staged: BTreeMap<RowIdentity, GroupKey> = BTreeMap::new();
+        // Staged identities are unique per logical input (SCE-00 D4): a
+        // duplicate is rejected across partition groups, not only within one.
+        let mut staged: BTreeSet<RowIdentity> = BTreeSet::new();
         for (row_index, row) in rows.into_iter().enumerate() {
             let event_time = row.identity.event_time;
             let group = self.compiled.group_key(&row, node_id)?;
@@ -711,16 +714,14 @@ impl CrossSectionOperator {
                 continue;
             }
             let duplicate = self.state.identity_groups.contains_key(&row.identity)
-                || staged
-                    .get(&row.identity)
-                    .is_some_and(|staged_group| *staged_group == group);
+                || staged.contains(&row.identity);
             if duplicate {
                 return Err(operator_error(
                     node_id,
                     &format!("duplicate row identity at event_time_micros={event_time}"),
                 ));
             }
-            staged.insert(row.identity.clone(), group.clone());
+            staged.insert(row.identity.clone());
             accepted.push((group, row.identity.clone(), row));
         }
         Ok((accepted, metrics.into_delta()))

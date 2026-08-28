@@ -589,6 +589,24 @@ async fn batch_duplicate_row_identity_fails_before_output() {
 }
 
 #[tokio::test]
+async fn batch_duplicate_identity_across_partition_groups_fails() {
+    // The identity is unique per logical input regardless of which partition
+    // group each row maps to (SCE-00 D4): splitting the duplicate across
+    // groups must not let both rows through.
+    let rows = vec![
+        (100, "a", Some("tech"), 1, Some(1.0)),
+        (100, "a", Some("fin"), 1, Some(2.0)),
+    ];
+    let error = execute(
+        rank_percentile_spec("average", "exclude", "ascending"),
+        input_batch(&rows),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("duplicate row identity"));
+}
+
+#[tokio::test]
 async fn batch_empty_input_emits_an_empty_schema_correct_batch() {
     let output = execute(
         rank_percentile_spec("average", "exclude", "ascending"),

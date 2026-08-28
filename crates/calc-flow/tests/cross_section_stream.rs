@@ -642,6 +642,42 @@ async fn duplicate_identity_within_one_envelope_fails_transactionally() {
 }
 
 #[tokio::test]
+async fn duplicate_identity_across_partition_groups_fails_transactionally() {
+    // Same row identity in two partition groups of one envelope is still a
+    // duplicate of the logical input (SCE-00 D4) and must fail before any
+    // state or output changes.
+    let job = job();
+    let mut operator = error_operator();
+    let mut collected = collector(&operator);
+    let mut observed = Observed::default();
+
+    let error = operator
+        .process_data(
+            "input",
+            input_batch(&[
+                (100, "a", Some("tech"), 1, Some(1.0)),
+                (100, "a", Some("fin"), 1, Some(2.0)),
+            ]),
+            &context(&job, None),
+            &mut collected,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("duplicate row identity"),
+        "{error}"
+    );
+
+    // Nothing from the rejected envelope reached any group.
+    operator
+        .on_end(&context(&job, None), &mut collected)
+        .await
+        .unwrap();
+    drain(&mut collected, &mut observed);
+    assert!(observed.symbols.is_empty());
+}
+
+#[tokio::test]
 async fn watermarks_must_advance_strictly() {
     let job = job();
     let mut operator = error_operator();
