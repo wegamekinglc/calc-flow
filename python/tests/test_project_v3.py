@@ -108,6 +108,57 @@ class TestConnectorCapabilities:
                 options_schema={},
             )
 
+    def test_requires_strict_field_types(self) -> None:
+        def capability(**overrides: object) -> ConnectorCapability:
+            base: dict[str, object] = {
+                "provider": "p",
+                "name": "n",
+                "version": "1",
+                "kind": "source",
+                "capabilities": ConnectorCapabilities(
+                    delivery="at_least_once",
+                    replay="unreplayable",
+                    watermark="generated_only",
+                    transaction="none",
+                    snapshot=False,
+                    polling=False,
+                    cdc=False,
+                    lookup=False,
+                ),
+                "formats": (),
+                "options_schema": {},
+            }
+            return ConnectorCapability(**{**base, **overrides})  # type: ignore[arg-type]
+
+        with pytest.raises(ValueError, match="name must be a non-empty string"):
+            capability(name="")
+        with pytest.raises(ValueError, match="version must be a non-empty string"):
+            capability(version="")
+        with pytest.raises(
+            TypeError, match="capabilities must be a ConnectorCapabilities"
+        ):
+            capability(capabilities={"delivery": "at_least_once"})
+        with pytest.raises(TypeError, match="formats must be a tuple of strings"):
+            capability(formats=["csv"])
+        with pytest.raises(TypeError, match="options_schema must be a Mapping"):
+            capability(options_schema=[])
+
+    def test_parses_dict_and_non_string_option_schemas(self) -> None:
+        native = {
+            "provider": "p",
+            "name": "n",
+            "version": "1",
+            "kind": "source",
+            "capabilities": {},
+            "formats": (),
+            "options_schema": {"path": {"type": "string"}},
+        }
+        (parsed,) = connector_capabilities([native])
+        assert parsed.options_schema == {"path": {"type": "string"}}
+
+        (fallback,) = connector_capabilities([{**native, "options_schema": None}])
+        assert fallback.options_schema == {}
+
 
 class TestProjectV3Surface:
     def test_v3_types_are_re_exported(self) -> None:

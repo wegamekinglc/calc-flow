@@ -133,15 +133,16 @@ retained. The operator checkpoints its delta-based state and an independent
 output frontier, and exposes a payload-free per-node status through the job
 status surface.
 
-## Row-window rolling
+## Rolling windows
 
 `RollingOperator` evaluates native lag, delta, and aggregate outputs over
 entity-partitioned, event-time-ordered rows and runs in both batch and
 stream graphs. Its `RollingSpec` declares ordered partition and sequence
 keys, a non-null UTC `timestamp[us]` event-time column, lag/delta outputs
-with positive row distances or count/sum/mean/variance/stddev outputs over
-row frames with minimum-period gates, allowed lateness, and an
-envelope-scoped `error` or metrics-recorded `drop` late-row policy.
+with positive row distances or count/sum/mean/min/max/variance/stddev and
+covariance/correlation outputs over row-count or duration frames with
+minimum-period gates, allowed lateness, and an envelope-scoped `error` or
+metrics-recorded `drop` late-row policy.
 
 Aggregates count valid samples — non-null, non-NaN values, with infinities
 counting as numeric samples — and outputs over the same input column and
@@ -151,7 +152,12 @@ transient slide, and the statistical outputs read a West accumulator with
 explicit infinity classification: a mean over one sign of infinity is that
 infinity, over both signs it is NaN, and variance and standard deviation
 over any infinity window are NaN behind the minimum-period and divisor null
-gates.
+gates. `min` and `max` read a monotonic extrema queue that preserves the
+input type and orders floating samples by the IEEE total order; covariance
+and correlation read a reversible West co-moment accumulator over
+pairwise-valid positions — any infinity on either side reads NaN behind the
+minimum-period and divisor gates, and only a finite zero-variance window
+reads null for correlation.
 
 Stream execution buffers rows until the input watermark passes each row's
 event time plus the allowed lateness, then emits final rows in canonical

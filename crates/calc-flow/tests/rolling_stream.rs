@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use calc_flow::{
-    Batch, BatchMetadata, CancellationToken, EdgeCollector, EventTime, JsonMap, OperatorMetadata,
-    RollingOperator, RollingSpec, StreamJobContext, StreamOperator, StreamOperatorContext,
+    Batch, BatchMetadata, CancellationToken, EdgeCollector, Epoch, EventTime, JsonMap,
+    OperatorMetadata, RollingOperator, RollingSpec, StreamJobContext, StreamOperator,
+    StreamOperatorContext,
 };
 use datafusion::arrow::{
     array::{
@@ -977,4 +978,374 @@ async fn aggregate_inf_classification_is_independent_of_segmentation() {
     drain_aggregates(&mut segmented_collector, &mut actual);
 
     assert_inf_observed_matches(&actual, &expected);
+}
+
+// ---------------------------------------------------------------------------
+// SCE-08: duration frames and correlation under the stream lifecycle
+// ---------------------------------------------------------------------------
+
+fn duration_pair_operator(lateness: u64, late_policy: &serde_json::Value) -> RollingOperator {
+    RollingOperator::new(
+        "rolling",
+        input_schema(),
+        serde_json::from_value(serde_json::json!({
+            "configuration_version": 1,
+            "state_layout_version": 1,
+            "partition_by": ["symbol"],
+            "event_time": "ts",
+            "sequence_by": ["sequence"],
+            "outputs": [
+                {
+                    "kind": "mean",
+                    "primitive_version": 1,
+                    "input": "price",
+                    "output": "price_mean_10us",
+                    "frame": {"kind": "duration", "micros": 10},
+                    "min_periods": 1
+                },
+                {
+                    "kind": "max",
+                    "primitive_version": 1,
+                    "input": "price",
+                    "output": "price_max_10us",
+                    "frame": {"kind": "duration", "micros": 10},
+                    "min_periods": 1
+                },
+                {
+                    "kind": "correlation",
+                    "primitive_version": 1,
+                    "left": "price",
+                    "right": "volume",
+                    "output": "price_volume_corr_10us",
+                    "frame": {"kind": "duration", "micros": 10},
+                    "min_periods": 2,
+                    "ddof": 1
+                }
+            ],
+            "allowed_lateness_micros": lateness,
+            "late_policy": late_policy,
+            "value_policy": "stateful_numeric_v1"
+        }))
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+#[derive(Default, PartialEq, Debug)]
+struct DurationObserved {
+    event_times: Vec<i64>,
+    sequences: Vec<u64>,
+    means: Vec<Option<f64>>,
+    maxes: Vec<Option<f64>>,
+    correlations: Vec<Option<f64>>,
+}
+
+fn drain_duration(collector: &mut EdgeCollector, observed: &mut DurationObserved) {
+    for message in collector.drain("output") {
+        let batch = message.as_data().unwrap();
+        for record in batch.table_payload().unwrap().batches() {
+            let event_times = record
+                .column_by_name("ts")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
+            let sequences = record
+                .column_by_name("sequence")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            let means = record
+                .column_by_name("price_mean_10us")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let maxes = record
+                .column_by_name("price_max_10us")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let correlations = record
+                .column_by_name("price_volume_corr_10us")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            for index in 0..record.num_rows() {
+                observed.event_times.push(event_times.value(index));
+                observed.sequences.push(sequences.value(index));
+                observed.means.push(means.iter().nth(index).unwrap());
+                observed.maxes.push(maxes.iter().nth(index).unwrap());
+                observed
+                    .correlations
+                    .push(correlations.iter().nth(index).unwrap());
+            }
+        }
+    }
+}
+
+fn duration_rows() -> Vec<InputRow> {
+    vec![
+        (10, "a", 1, Some(1.0), Some(2)),
+        (15, "a", 2, Some(2.0), Some(4)),
+        (20, "a", 3, Some(3.0), Some(6)),
+        (25, "a", 4, Some(4.0), Some(8)),
+    ]
+}
+
+/// Compares duration observations: identities, means, and maxes exactly;
+/// correlations within the D13 pair tolerance (the West readout drifts by
+/// ulps, never by classification).
+fn assert_duration_observed_matches(actual: &DurationObserved, expected: &DurationObserved) {
+    assert_eq!(actual.event_times, expected.event_times);
+    assert_eq!(actual.sequences, expected.sequences);
+    assert_eq!(actual.means, expected.means);
+    assert_eq!(actual.maxes, expected.maxes);
+    for (left, right) in actual.correlations.iter().zip(&expected.correlations) {
+        match (left, right) {
+            (None, None) => {}
+            (Some(left), Some(right)) => assert!(
+                (left - right).abs() < 1e-10,
+                "correlation {left} vs {right}"
+            ),
+            (left, right) => panic!("correlation nullness {left:?} vs {right:?}"),
+        }
+    }
+}
+
+fn expected_duration_observed() -> DurationObserved {
+    // Windows (t - 10, t] over the canonical order hold the current and the
+    // previous row for these fixtures.
+    DurationObserved {
+        event_times: vec![10, 15, 20, 25],
+        sequences: vec![1, 2, 3, 4],
+        means: vec![Some(1.0), Some(1.5), Some(2.5), Some(3.5)],
+        maxes: vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)],
+        correlations: vec![None, Some(1.0), Some(1.0), Some(1.0)],
+    }
+}
+
+#[tokio::test]
+async fn duration_and_correlation_outputs_emit_at_the_closing_watermark() {
+    let job = job();
+    let mut operator = duration_pair_operator(
+        5,
+        &serde_json::json!({"kind": "error", "scope": "envelope"}),
+    );
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    let mut observed = DurationObserved::default();
+
+    operator
+        .process_data(
+            "input",
+            input_batch(&duration_rows()),
+            &context(&job, None),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    operator
+        .on_watermark(
+            EventTime::from_micros(30),
+            &context(&job, Some(30)),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    drain_duration(&mut collector, &mut observed);
+    assert_duration_observed_matches(&observed, &expected_duration_observed());
+}
+
+#[tokio::test]
+async fn exact_watermark_boundary_closes_only_the_matching_rows() {
+    let job = job();
+    let mut operator = duration_pair_operator(
+        5,
+        &serde_json::json!({"kind": "error", "scope": "envelope"}),
+    );
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    let mut observed = DurationObserved::default();
+
+    operator
+        .process_data(
+            "input",
+            input_batch(&duration_rows()),
+            &context(&job, None),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    // t + L = W closes the row exactly: 10 + 5 = 15 closes only row 10.
+    operator
+        .on_watermark(
+            EventTime::from_micros(15),
+            &context(&job, Some(15)),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    drain_duration(&mut collector, &mut observed);
+    assert_eq!(observed.event_times, vec![10]);
+    assert_eq!(observed.means, vec![Some(1.0)]);
+}
+
+#[tokio::test]
+async fn bounded_out_of_order_arrival_reorders_within_the_lateness_bound() {
+    let job = job();
+    let mut operator = duration_pair_operator(
+        5,
+        &serde_json::json!({"kind": "error", "scope": "envelope"}),
+    );
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    let mut observed = DurationObserved::default();
+
+    // The later rows arrive first; the earlier rows stay within the
+    // lateness bound at watermark 12 (10 + 5 > 12) and reorder on arrival.
+    operator
+        .process_data(
+            "input",
+            input_batch(&[
+                (20, "a", 3, Some(3.0), Some(6)),
+                (25, "a", 4, Some(4.0), Some(8)),
+            ]),
+            &context(&job, None),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    operator
+        .process_data(
+            "input",
+            input_batch(&[
+                (15, "a", 2, Some(2.0), Some(4)),
+                (10, "a", 1, Some(1.0), Some(2)),
+            ]),
+            &context(&job, Some(12)),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    operator
+        .on_watermark(
+            EventTime::from_micros(30),
+            &context(&job, Some(30)),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    drain_duration(&mut collector, &mut observed);
+    assert_duration_observed_matches(&observed, &expected_duration_observed());
+}
+
+#[tokio::test]
+async fn too_late_duration_rows_drop_with_deterministic_metrics() {
+    let job = job();
+    let mut operator = duration_pair_operator(
+        5,
+        &serde_json::json!({"kind": "drop", "metrics_version": 1}),
+    );
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    let mut observed = DurationObserved::default();
+
+    // Row 14 closed at 19 <= 20 (dropped, lateness 6); row 18 stays open.
+    operator
+        .process_data(
+            "input",
+            input_batch(&[
+                (14, "a", 1, Some(1.0), Some(2)),
+                (18, "a", 2, Some(2.0), Some(4)),
+            ]),
+            &context(&job, Some(20)),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    operator
+        .on_watermark(
+            EventTime::from_micros(23),
+            &context(&job, Some(23)),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    drain_duration(&mut collector, &mut observed);
+    assert_eq!(observed.event_times, vec![18]);
+    assert_eq!(observed.means, vec![Some(2.0)]);
+
+    let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(
+        snapshot.inline_metadata["metrics"],
+        serde_json::json!({
+            "late_rows": 1,
+            "affected_batches": 1,
+            "max_lateness_micros": 6,
+            "null_event_time_rows": 0,
+            "null_event_time_batches": 0
+        })
+    );
+}
+
+#[tokio::test]
+async fn duration_outputs_are_segmentation_invariant() {
+    let job = job();
+    let mut whole = duration_pair_operator(
+        5,
+        &serde_json::json!({"kind": "error", "scope": "envelope"}),
+    );
+    let mut whole_collector = EdgeCollector::new(whole.output_ports().to_vec());
+    whole
+        .process_data(
+            "input",
+            input_batch(&duration_rows()),
+            &context(&job, None),
+            &mut whole_collector,
+        )
+        .await
+        .unwrap();
+    whole
+        .on_watermark(
+            EventTime::from_micros(30),
+            &context(&job, Some(30)),
+            &mut whole_collector,
+        )
+        .await
+        .unwrap();
+    let mut expected = DurationObserved::default();
+    drain_duration(&mut whole_collector, &mut expected);
+    assert_duration_observed_matches(&expected, &expected_duration_observed());
+
+    let mut segmented = duration_pair_operator(
+        5,
+        &serde_json::json!({"kind": "error", "scope": "envelope"}),
+    );
+    let mut segmented_collector = EdgeCollector::new(segmented.output_ports().to_vec());
+    let mut actual = DurationObserved::default();
+    for (index, rows) in [duration_rows()[..2].to_vec(), duration_rows()[2..].to_vec()]
+        .into_iter()
+        .enumerate()
+    {
+        segmented
+            .process_data(
+                "input",
+                input_batch(&rows),
+                &context(&job, Some(12)),
+                &mut segmented_collector,
+            )
+            .await
+            .unwrap();
+        let closing = if index == 0 { 22 } else { 30 };
+        segmented
+            .on_watermark(
+                EventTime::from_micros(closing),
+                &context(&job, Some(closing)),
+                &mut segmented_collector,
+            )
+            .await
+            .unwrap();
+    }
+    drain_duration(&mut segmented_collector, &mut actual);
+    assert_duration_observed_matches(&actual, &expected);
 }

@@ -1160,7 +1160,7 @@
       ]
     },
     "RollingFrameSpec": {
-      "description": "Rolling frame declaration (SCE-00 D5). Only row-count frames are\nsupported in this release; duration frames arrive with SCE-08.",
+      "description": "Rolling frame declaration (SCE-00 D5): a row-count frame or an\nevent-time duration frame.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -1180,6 +1180,27 @@
           "required": [
             "kind",
             "size"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Event-time frame `(t - micros, t]` over the entity total order\n(SCE-00 D5: open lower bound, closed upper bound).",
+          "properties": {
+            "kind": {
+              "const": "duration",
+              "type": "string"
+            },
+            "micros": {
+              "description": "Positive exact frame width in microseconds.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "micros"
           ],
           "type": "object"
         }
@@ -1488,6 +1509,204 @@
             "kind",
             "primitive_version",
             "input",
+            "output",
+            "frame",
+            "min_periods",
+            "ddof"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Minimum valid sample over the frame; preserves the input type (SCE-00\nD3.2).",
+          "properties": {
+            "frame": {
+              "$ref": "#/$defs/RollingFrameSpec",
+              "description": "Row-count or duration frame."
+            },
+            "input": {
+              "description": "Input column name.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "min",
+              "type": "string"
+            },
+            "min_periods": {
+              "description": "Minimum valid samples for a non-null result.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "output": {
+              "description": "Output column name.",
+              "type": "string"
+            },
+            "primitive_version": {
+              "description": "Primitive version; must equal `1`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "primitive_version",
+            "input",
+            "output",
+            "frame",
+            "min_periods"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Maximum valid sample over the frame; preserves the input type (SCE-00\nD3.2).",
+          "properties": {
+            "frame": {
+              "$ref": "#/$defs/RollingFrameSpec",
+              "description": "Row-count or duration frame."
+            },
+            "input": {
+              "description": "Input column name.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "max",
+              "type": "string"
+            },
+            "min_periods": {
+              "description": "Minimum valid samples for a non-null result.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "output": {
+              "description": "Output column name.",
+              "type": "string"
+            },
+            "primitive_version": {
+              "description": "Primitive version; must equal `1`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "primitive_version",
+            "input",
+            "output",
+            "frame",
+            "min_periods"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Float64 covariance of two columns over the frame, counting only\npairwise-valid positions (SCE-00 D3.2/D5).",
+          "properties": {
+            "ddof": {
+              "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
+              "format": "uint8",
+              "maximum": 1,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "frame": {
+              "$ref": "#/$defs/RollingFrameSpec",
+              "description": "Row-count or duration frame."
+            },
+            "kind": {
+              "const": "covariance",
+              "type": "string"
+            },
+            "left": {
+              "description": "Left input column name.",
+              "type": "string"
+            },
+            "min_periods": {
+              "description": "Minimum pairwise-valid samples for a non-null result.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "output": {
+              "description": "Output column name.",
+              "type": "string"
+            },
+            "primitive_version": {
+              "description": "Primitive version; must equal `1`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "right": {
+              "description": "Right input column name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "primitive_version",
+            "left",
+            "right",
+            "output",
+            "frame",
+            "min_periods",
+            "ddof"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Float64 Pearson correlation of two columns over the frame; null when\neither side has zero variance (SCE-00 D3.2).",
+          "properties": {
+            "ddof": {
+              "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
+              "format": "uint8",
+              "maximum": 1,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "frame": {
+              "$ref": "#/$defs/RollingFrameSpec",
+              "description": "Row-count or duration frame."
+            },
+            "kind": {
+              "const": "correlation",
+              "type": "string"
+            },
+            "left": {
+              "description": "Left input column name.",
+              "type": "string"
+            },
+            "min_periods": {
+              "description": "Minimum pairwise-valid samples for a non-null result.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "output": {
+              "description": "Output column name.",
+              "type": "string"
+            },
+            "primitive_version": {
+              "description": "Primitive version; must equal `1`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "right": {
+              "description": "Right input column name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "primitive_version",
+            "left",
+            "right",
             "output",
             "frame",
             "min_periods",

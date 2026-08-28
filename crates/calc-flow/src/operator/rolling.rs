@@ -80,8 +80,8 @@ pub enum RollingValuePolicy {
     StatefulNumericV1,
 }
 
-/// Rolling frame declaration (SCE-00 D5). Only row-count frames are
-/// supported in this release; duration frames arrive with SCE-08.
+/// Rolling frame declaration (SCE-00 D5): a row-count frame or an
+/// event-time duration frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RollingFrameSpec {
@@ -91,13 +91,38 @@ pub enum RollingFrameSpec {
         #[schemars(range(min = 1))]
         size: u64,
     },
+    /// Event-time frame `(t - micros, t]` over the entity total order
+    /// (SCE-00 D5: open lower bound, closed upper bound).
+    Duration {
+        /// Positive exact frame width in microseconds.
+        #[schemars(range(min = 1))]
+        micros: u64,
+    },
 }
 
 impl RollingFrameSpec {
     const fn size(self) -> u64 {
         match self {
             Self::Rows { size } => size,
+            Self::Duration { .. } => 0,
         }
+    }
+
+    const fn micros(self) -> u64 {
+        match self {
+            Self::Rows { .. } => 0,
+            Self::Duration { micros } => micros,
+        }
+    }
+
+    /// Retained-row bound contribution: row frames retain their size;
+    /// duration frames retain by event time instead (SCE-08).
+    const fn row_retention(self) -> u64 {
+        self.size()
+    }
+
+    const fn is_duration(self) -> bool {
+        matches!(self, Self::Duration { .. })
     }
 }
 
@@ -206,6 +231,76 @@ pub enum RollingOutputSpec {
         #[schemars(range(min = 0, max = 1))]
         ddof: u8,
     },
+    /// Minimum valid sample over the frame; preserves the input type (SCE-00
+    /// D3.2).
+    Min {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Input column name.
+        input: String,
+        /// Output column name.
+        output: String,
+        /// Row-count or duration frame.
+        frame: RollingFrameSpec,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+    },
+    /// Maximum valid sample over the frame; preserves the input type (SCE-00
+    /// D3.2).
+    Max {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Input column name.
+        input: String,
+        /// Output column name.
+        output: String,
+        /// Row-count or duration frame.
+        frame: RollingFrameSpec,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+    },
+    /// Float64 covariance of two columns over the frame, counting only
+    /// pairwise-valid positions (SCE-00 D3.2/D5).
+    Covariance {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Left input column name.
+        left: String,
+        /// Right input column name.
+        right: String,
+        /// Output column name.
+        output: String,
+        /// Row-count or duration frame.
+        frame: RollingFrameSpec,
+        /// Minimum pairwise-valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+        /// Degrees-of-freedom adjustment; must be `0` or `1`.
+        #[schemars(range(min = 0, max = 1))]
+        ddof: u8,
+    },
+    /// Float64 Pearson correlation of two columns over the frame; null when
+    /// either side has zero variance (SCE-00 D3.2).
+    Correlation {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Left input column name.
+        left: String,
+        /// Right input column name.
+        right: String,
+        /// Output column name.
+        output: String,
+        /// Row-count or duration frame.
+        frame: RollingFrameSpec,
+        /// Minimum pairwise-valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+        /// Degrees-of-freedom adjustment; must be `0` or `1`.
+        #[schemars(range(min = 0, max = 1))]
+        ddof: u8,
+    },
 }
 
 impl RollingOutputSpec {
@@ -231,10 +326,23 @@ impl RollingOutputSpec {
             }
             | Self::Stddev {
                 primitive_version, ..
+            }
+            | Self::Min {
+                primitive_version, ..
+            }
+            | Self::Max {
+                primitive_version, ..
+            }
+            | Self::Covariance {
+                primitive_version, ..
+            }
+            | Self::Correlation {
+                primitive_version, ..
             } => *primitive_version,
         }
     }
 
+    /// Declared operand column; pair outputs report their left operand.
     fn input(&self) -> &str {
         match self {
             Self::Lag { input, .. }
@@ -243,7 +351,18 @@ impl RollingOutputSpec {
             | Self::Sum { input, .. }
             | Self::Mean { input, .. }
             | Self::Variance { input, .. }
-            | Self::Stddev { input, .. } => input,
+            | Self::Stddev { input, .. }
+            | Self::Min { input, .. }
+            | Self::Max { input, .. } => input,
+            Self::Covariance { left, .. } | Self::Correlation { left, .. } => left,
+        }
+    }
+
+    /// The second operand of a pair output, when declared.
+    fn pair_right(&self) -> Option<&str> {
+        match self {
+            Self::Covariance { right, .. } | Self::Correlation { right, .. } => Some(right),
+            _ => None,
         }
     }
 
@@ -255,12 +374,16 @@ impl RollingOutputSpec {
             | Self::Sum { output, .. }
             | Self::Mean { output, .. }
             | Self::Variance { output, .. }
-            | Self::Stddev { output, .. } => output,
+            | Self::Stddev { output, .. }
+            | Self::Min { output, .. }
+            | Self::Max { output, .. }
+            | Self::Covariance { output, .. }
+            | Self::Correlation { output, .. } => output,
         }
     }
 
     /// Rows one output needs retained per entity: the lag/delta distance or
-    /// the row-frame size.
+    /// the row-frame size. Duration frames retain by event time instead.
     const fn retained_rows(&self) -> u64 {
         match self {
             Self::Lag { periods, .. } | Self::Delta { periods, .. } => *periods,
@@ -268,7 +391,34 @@ impl RollingOutputSpec {
             | Self::Sum { frame, .. }
             | Self::Mean { frame, .. }
             | Self::Variance { frame, .. }
-            | Self::Stddev { frame, .. } => frame.size(),
+            | Self::Stddev { frame, .. }
+            | Self::Min { frame, .. }
+            | Self::Max { frame, .. }
+            | Self::Covariance { frame, .. }
+            | Self::Correlation { frame, .. } => frame.row_retention(),
+        }
+    }
+
+    /// The widest duration frame one output declares, for time-based
+    /// retention.
+    const fn retained_micros(&self) -> Option<u64> {
+        match self {
+            Self::Lag { .. } | Self::Delta { .. } => None,
+            Self::Count { frame, .. }
+            | Self::Sum { frame, .. }
+            | Self::Mean { frame, .. }
+            | Self::Variance { frame, .. }
+            | Self::Stddev { frame, .. }
+            | Self::Min { frame, .. }
+            | Self::Max { frame, .. }
+            | Self::Covariance { frame, .. }
+            | Self::Correlation { frame, .. } => {
+                if frame.is_duration() {
+                    Some(frame.micros())
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -279,7 +429,11 @@ impl RollingOutputSpec {
             | Self::Sum { frame, .. }
             | Self::Mean { frame, .. }
             | Self::Variance { frame, .. }
-            | Self::Stddev { frame, .. } => Some(*frame),
+            | Self::Stddev { frame, .. }
+            | Self::Min { frame, .. }
+            | Self::Max { frame, .. }
+            | Self::Covariance { frame, .. }
+            | Self::Correlation { frame, .. } => Some(*frame),
         }
     }
 
@@ -290,13 +444,20 @@ impl RollingOutputSpec {
             | Self::Sum { min_periods, .. }
             | Self::Mean { min_periods, .. }
             | Self::Variance { min_periods, .. }
-            | Self::Stddev { min_periods, .. } => Some(*min_periods),
+            | Self::Stddev { min_periods, .. }
+            | Self::Min { min_periods, .. }
+            | Self::Max { min_periods, .. }
+            | Self::Covariance { min_periods, .. }
+            | Self::Correlation { min_periods, .. } => Some(*min_periods),
         }
     }
 
     const fn ddof(&self) -> Option<u8> {
         match self {
-            Self::Variance { ddof, .. } | Self::Stddev { ddof, .. } => Some(*ddof),
+            Self::Variance { ddof, .. }
+            | Self::Stddev { ddof, .. }
+            | Self::Covariance { ddof, .. }
+            | Self::Correlation { ddof, .. } => Some(*ddof),
             _ => None,
         }
     }
@@ -1278,13 +1439,28 @@ fn validate_decoded_state(
     decoded: &DecodedRollingState,
     compiled: &CompiledRollingSpec,
 ) -> Result<()> {
-    let max_retained = usize::try_from(compiled.max_retained_rows)
+    let max_retained = usize::try_from(compiled.max_row_retention)
         .map_err(|_| internal_error("rolling max retained rows does not fit usize"))?;
     for state in decoded.histories.by_entity.values() {
-        if state.rows.len() > max_retained {
-            return Err(state_format(
-                "rolling state segment retains more history than the declared frames".to_owned(),
-            ));
+        let bound = compiled
+            .max_duration_micros
+            .zip(
+                state
+                    .rows
+                    .back()
+                    .map(|values| history_event_time(values, compiled)),
+            )
+            .map(|(micros, last)| i128::from(last) - i128::from(micros));
+        for (index, values) in state.rows.iter().enumerate() {
+            let needed_by_count = state.rows.len() - index <= max_retained;
+            let needed_by_time =
+                bound.is_some_and(|bound| i128::from(history_event_time(values, compiled)) > bound);
+            if !needed_by_count && !needed_by_time {
+                return Err(state_format(
+                    "rolling state segment retains more history than the declared frames"
+                        .to_owned(),
+                ));
+            }
         }
     }
     Ok(())
@@ -1292,7 +1468,9 @@ fn validate_decoded_state(
 
 /// Rebuilds every window accumulator as the ordered fold over the retained
 /// history tail; the segment stores rows only, and the accumulator is the
-/// deterministic function of those rows frozen in D5/D11.
+/// deterministic function of those rows frozen in D5/D11. Extrema groups
+/// fold pushes and expiries so the rebuilt queue front is the window
+/// extremum, exactly as the live slide left it (SCE-08).
 fn rebuild_windows(
     histories: &mut RollingHistories,
     compiled: &CompiledRollingSpec,
@@ -1300,20 +1478,177 @@ fn rebuild_windows(
 ) -> Result<()> {
     for state in histories.by_entity.values_mut() {
         let mut windows = fresh_windows(compiled);
+        let last_time = state
+            .rows
+            .back()
+            .map(|values| history_event_time(values, compiled));
         for (group_index, group) in compiled.window_groups.iter().enumerate() {
-            let frame = usize::try_from(group.frame_rows)
-                .map_err(|_| internal_error("rolling frame rows do not fit usize"))?;
-            let start = state.rows.len().saturating_sub(frame);
-            for values in state.rows.iter().skip(start) {
-                let value = &values[group.input_index];
-                if is_valid_sample(value) {
-                    windows[group_index].add(value, node_id)?;
+            match group {
+                CompiledWindowGroup::Numeric {
+                    input_index, frame, ..
+                } => {
+                    let WindowState::Numeric(accumulator) = &mut windows[group_index] else {
+                        return Err(internal_error("rolling numeric group state mismatch"));
+                    };
+                    let start = retained_window_start(*frame, state, compiled);
+                    for values in state.rows.iter().skip(start) {
+                        let value = &values[*input_index];
+                        if is_valid_sample(value) {
+                            accumulator.add(value, node_id)?;
+                        }
+                    }
+                    if let CompiledFrame::Duration(micros) = frame {
+                        accumulator.expired_through = expired_through_bound(last_time, *micros);
+                    }
+                }
+                CompiledWindowGroup::Extrema {
+                    input_index, frame, ..
+                } => {
+                    let WindowState::Extrema(accumulator) = &mut windows[group_index] else {
+                        return Err(internal_error("rolling extrema group state mismatch"));
+                    };
+                    rebuild_extrema_group(
+                        accumulator,
+                        state,
+                        *input_index,
+                        *frame,
+                        compiled,
+                        node_id,
+                    )?;
+                }
+                CompiledWindowGroup::Pair {
+                    left_index,
+                    right_index,
+                    frame,
+                } => {
+                    let WindowState::Pair(accumulator) = &mut windows[group_index] else {
+                        return Err(internal_error("rolling pair group state mismatch"));
+                    };
+                    let start = retained_window_start(*frame, state, compiled);
+                    for values in state.rows.iter().skip(start) {
+                        let x = &values[*left_index];
+                        let y = &values[*right_index];
+                        if is_valid_sample(x) && is_valid_sample(y) {
+                            accumulator.add(x, y, node_id)?;
+                        }
+                    }
+                    if let CompiledFrame::Duration(micros) = frame {
+                        accumulator.expired_through = expired_through_bound(last_time, *micros);
+                    }
                 }
             }
         }
         state.windows = windows;
     }
     Ok(())
+}
+
+/// Duration-frame expiry bound for a rebuild: the last retained row's
+/// window lower edge, or "nothing expired" when no row is retained.
+fn expired_through_bound(last_time: Option<i64>, micros: u64) -> i128 {
+    last_time.map_or(i128::MIN, |last| i128::from(last) - i128::from(micros))
+}
+
+/// Canonical expiry key of one retained history row.
+fn history_extrema_key(
+    values: &[ScalarValue],
+    compiled: &CompiledRollingSpec,
+    node_id: &str,
+) -> Result<ExtremaKey> {
+    Ok(ExtremaKey {
+        event_time: history_event_time(values, compiled),
+        sequence: compiled
+            .sequence_columns
+            .iter()
+            .map(|column| KeyValue::from_required_scalar(&values[column.index], node_id))
+            .collect::<Result<Vec<_>>>()?,
+    })
+}
+
+/// Rebuilds one extrema queue as the ordered push/expire fold over the
+/// retained rows, mirroring the live slide so queue front, expiry keys, and
+/// valid count match an uninterrupted run exactly.
+fn rebuild_extrema_group(
+    accumulator: &mut ExtremaAccumulator,
+    state: &EntityRollingState,
+    input_index: usize,
+    frame: CompiledFrame,
+    compiled: &CompiledRollingSpec,
+    node_id: &str,
+) -> Result<()> {
+    let rows = usize::try_from(frame.rows())
+        .map_err(|_| internal_error("rolling frame rows do not fit usize"))?;
+    let mut cursor = 0_usize;
+    for position in 0..state.rows.len() {
+        let values = &state.rows[position];
+        let key = history_extrema_key(values, compiled, node_id)?;
+        let value = &values[input_index];
+        if is_valid_sample(value) {
+            accumulator.add(key.clone(), value.clone());
+        }
+        match frame {
+            CompiledFrame::Rows(..) => {
+                if position >= rows {
+                    let leaving_row = &state.rows[position - rows];
+                    if is_valid_sample(&leaving_row[input_index]) {
+                        accumulator.remove();
+                    }
+                    accumulator.expire_through_key(&history_extrema_key(
+                        leaving_row,
+                        compiled,
+                        node_id,
+                    )?);
+                }
+            }
+            CompiledFrame::Duration(micros) => {
+                let bound = i128::from(key.event_time) - i128::from(micros);
+                while cursor < position
+                    && i128::from(history_event_time(&state.rows[cursor], compiled)) <= bound
+                {
+                    if is_valid_sample(&state.rows[cursor][input_index]) {
+                        accumulator.remove();
+                    }
+                    cursor += 1;
+                }
+                accumulator.expire_through_time(bound);
+                accumulator.expired_through = bound;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Start position of the retained window of the last retained row: the last
+/// `rows` positions for row frames, the positions with event time in
+/// `(t_last - d, t_last]` for duration frames. Restore-time only, so a
+/// linear scan over the retained tail is acceptable.
+fn retained_window_start(
+    frame: CompiledFrame,
+    state: &EntityRollingState,
+    compiled: &CompiledRollingSpec,
+) -> usize {
+    let len = state.rows.len();
+    let last_time = state
+        .rows
+        .back()
+        .map(|values| history_event_time(values, compiled));
+    match frame {
+        CompiledFrame::Rows(rows) => {
+            let rows = usize::try_from(rows).unwrap_or(usize::MAX);
+            len.saturating_sub(rows)
+        }
+        CompiledFrame::Duration(micros) => match last_time {
+            None => 0,
+            Some(last) => {
+                let bound = i128::from(last) - i128::from(micros);
+                state
+                    .rows
+                    .iter()
+                    .position(|values| i128::from(history_event_time(values, compiled)) > bound)
+                    .unwrap_or(len)
+            }
+        },
+    }
 }
 
 fn parse_snapshot_metadata(
@@ -1665,7 +2000,8 @@ struct CompiledRollingSpec {
     sequence_columns: Vec<CompiledKeyColumn>,
     outputs: Vec<CompiledRollingOutput>,
     window_groups: Vec<CompiledWindowGroup>,
-    max_retained_rows: u64,
+    max_row_retention: u64,
+    max_duration_micros: Option<u64>,
     configuration_hash: String,
     state_schema_fingerprint: String,
 }
@@ -1689,12 +2025,21 @@ enum CompiledEvaluation {
     Lag { periods: u64 },
     Delta { periods: u64 },
     Aggregate(CompiledAggregate),
+    Pair(CompiledPairAggregate),
 }
 
 #[derive(Clone)]
 struct CompiledAggregate {
     group: usize,
     statistic: Statistic,
+    min_periods: u64,
+    ddof: u8,
+}
+
+#[derive(Clone)]
+struct CompiledPairAggregate {
+    group: usize,
+    correlation: bool,
     min_periods: u64,
     ddof: u8,
 }
@@ -1706,6 +2051,8 @@ enum Statistic {
     Mean,
     Variance,
     Stddev,
+    Min,
+    Max,
 }
 
 impl Statistic {
@@ -1716,18 +2063,54 @@ impl Statistic {
             Self::Mean => "mean",
             Self::Variance => "variance",
             Self::Stddev => "stddev",
+            Self::Min => "min",
+            Self::Max => "max",
         }
     }
 }
 
-/// One shared per-entity sliding window: every output on the same
-/// `(input column, row-frame)` pair reads this one accumulator set instead
-/// of maintaining duplicate windows (SCE-07 state sharing).
+/// One shared per-entity sliding window (SCE-07 state sharing): every output
+/// on the same accumulator key reads one group instead of maintaining
+/// duplicate windows.
 #[derive(Clone)]
-struct CompiledWindowGroup {
-    input_index: usize,
-    frame_rows: u64,
-    sum_class: SumClass,
+enum CompiledWindowGroup {
+    /// Reversible numeric accumulator shared by count/sum/mean/variance/
+    /// stddev outputs on one `(input column, frame)`.
+    Numeric {
+        input_index: usize,
+        frame: CompiledFrame,
+        sum_class: SumClass,
+    },
+    /// Monotonic queue for one min or max output on `(input column, frame)`
+    /// (SCE-08); min and max keep separate queues.
+    Extrema {
+        input_index: usize,
+        frame: CompiledFrame,
+        descending: bool,
+    },
+    /// Reversible co-moment accumulator shared by covariance and correlation
+    /// outputs on one `(left column, right column, frame)`.
+    Pair {
+        left_index: usize,
+        right_index: usize,
+        frame: CompiledFrame,
+    },
+}
+
+/// Compiled frame declaration: row count or event-time duration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompiledFrame {
+    Rows(u64),
+    Duration(u64),
+}
+
+impl CompiledFrame {
+    fn rows(self) -> u64 {
+        match self {
+            Self::Rows(rows) => rows,
+            Self::Duration(..) => usize::MAX as u64,
+        }
+    }
 }
 
 /// Integer sums stay exact in their frozen 64-bit class; floating sums and
@@ -1891,7 +2274,7 @@ impl BufferedRow {
 #[derive(Clone, Debug, Default)]
 struct EntityRollingState {
     rows: VecDeque<Vec<ScalarValue>>,
-    windows: Vec<WindowAccumulator>,
+    windows: Vec<WindowState>,
 }
 
 impl EntityRollingState {
@@ -1903,11 +2286,27 @@ impl EntityRollingState {
     }
 }
 
-fn fresh_windows(compiled: &CompiledRollingSpec) -> Vec<WindowAccumulator> {
+/// Live accumulator of one compiled window group.
+#[derive(Clone, Debug)]
+enum WindowState {
+    Numeric(WindowAccumulator),
+    Extrema(ExtremaAccumulator),
+    Pair(PairAccumulator),
+}
+
+fn fresh_windows(compiled: &CompiledRollingSpec) -> Vec<WindowState> {
     compiled
         .window_groups
         .iter()
-        .map(|group| WindowAccumulator::new(group.sum_class))
+        .map(|group| match group {
+            CompiledWindowGroup::Numeric { sum_class, .. } => {
+                WindowState::Numeric(WindowAccumulator::new(*sum_class))
+            }
+            CompiledWindowGroup::Extrema { descending, .. } => {
+                WindowState::Extrema(ExtremaAccumulator::new(*descending))
+            }
+            CompiledWindowGroup::Pair { .. } => WindowState::Pair(PairAccumulator::default()),
+        })
         .collect()
 }
 
@@ -1944,6 +2343,10 @@ struct WindowAccumulator {
     m2: f64,
     pos_inf: u64,
     neg_inf: u64,
+    /// Duration frames only: event-time bound (exclusive) whose rows this
+    /// accumulator has already expired, kept so each slide removes only the
+    /// newly expired prefix (SCE-08). `i128::MIN` while nothing expired.
+    expired_through: i128,
 }
 
 /// Integer sums accumulate in the wide transient class so the
@@ -1972,6 +2375,7 @@ impl WindowAccumulator {
             m2: 0.0,
             pos_inf: 0,
             neg_inf: 0,
+            expired_through: i128::MIN,
         }
     }
 
@@ -2085,6 +2489,238 @@ impl WindowAccumulator {
     }
 }
 
+/// Canonical expiry key of one queued extrema candidate: the entity-local
+/// total order `(event_time, sequence...)` (SCE-00 D5 equal-time rule).
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ExtremaKey {
+    event_time: i64,
+    sequence: Vec<KeyValue>,
+}
+
+/// Monotonic-queue min/max accumulator (SCE-08): the queue keeps valid
+/// candidates in canonical key order with values monotone from the front, so
+/// the front is always the window extremum and each row is pushed and popped
+/// at most once. Entries carry their canonical key so row-count frames expire
+/// by identity comparison with the leaving row and duration frames expire by
+/// event time; the queue is therefore coordinate-free across batches and
+/// checkpoint restores.
+#[derive(Clone, Debug)]
+struct ExtremaAccumulator {
+    valid_count: u64,
+    descending: bool,
+    queue: VecDeque<(ExtremaKey, ScalarValue)>,
+    /// Duration frames only: exclusive event-time bound whose rows the count
+    /// has already regressed; the queue expires by its own keys.
+    expired_through: i128,
+}
+
+impl ExtremaAccumulator {
+    fn new(descending: bool) -> Self {
+        Self {
+            valid_count: 0,
+            descending,
+            queue: VecDeque::new(),
+            expired_through: i128::MIN,
+        }
+    }
+
+    /// Adds one valid sample with its canonical key, dropping dominated
+    /// candidates from the back.
+    fn add(&mut self, key: ExtremaKey, value: ScalarValue) {
+        self.valid_count = self.valid_count.saturating_add(1);
+        while let Some((_, back)) = self.queue.back() {
+            let dominated = if self.descending {
+                compare_samples(back, &value) != Ordering::Greater
+            } else {
+                compare_samples(back, &value) != Ordering::Less
+            };
+            if !dominated {
+                break;
+            }
+            self.queue.pop_back();
+        }
+        self.queue.push_back((key, value));
+    }
+
+    /// Removes one previously added valid sample from the count; dominated
+    /// candidates were already dropped, so only the count regresses.
+    fn remove(&mut self) {
+        self.valid_count = self
+            .valid_count
+            .checked_sub(1)
+            .unwrap_or_else(|| panic!("rolling extrema removal without a matching add"));
+    }
+
+    /// Row-count frame expiry: every candidate at or before the leaving
+    /// row's canonical key has left the window.
+    fn expire_through_key(&mut self, leaving: &ExtremaKey) {
+        while self.queue.front().is_some_and(|(key, _)| key <= leaving) {
+            self.queue.pop_front();
+        }
+    }
+
+    /// Duration frame expiry: candidates at or before `bound` (exclusive)
+    /// have left the window.
+    fn expire_through_time(&mut self, bound: i128) {
+        while self
+            .queue
+            .front()
+            .is_some_and(|(key, _)| i128::from(key.event_time) <= bound)
+        {
+            self.queue.pop_front();
+        }
+    }
+
+    fn extremum(&self) -> Option<&ScalarValue> {
+        self.queue.front().map(|(_, value)| value)
+    }
+}
+
+/// Reversible pairwise co-moment accumulator (SCE-08, SCE-00 D5): a
+/// West-style joint add/remove maintains `mean_x`, `mean_y`, the co-moment
+/// `Σ(x - x̄)(y - ȳ)`, and the per-column second moments `M2_x`/`M2_y` over
+/// the pairwise-valid positions only. ±inf counts per column keep the
+/// classification a pure multiset function, mirroring the SCE-07 variance
+/// ruling: any infinity on either side makes covariance and correlation NaN
+/// (undefined ∞ − ∞ territory), never null.
+#[derive(Clone, Copy, Debug)]
+struct PairAccumulator {
+    valid_count: u64,
+    mean_x: f64,
+    mean_y: f64,
+    co_moment: f64,
+    m2_x: f64,
+    m2_y: f64,
+    pos_inf_x: u64,
+    neg_inf_x: u64,
+    pos_inf_y: u64,
+    neg_inf_y: u64,
+    /// Duration frames only: exclusive event-time bound already expired.
+    expired_through: i128,
+}
+
+impl Default for PairAccumulator {
+    fn default() -> Self {
+        Self {
+            valid_count: 0,
+            mean_x: 0.0,
+            mean_y: 0.0,
+            co_moment: 0.0,
+            m2_x: 0.0,
+            m2_y: 0.0,
+            pos_inf_x: 0,
+            neg_inf_x: 0,
+            pos_inf_y: 0,
+            neg_inf_y: 0,
+            expired_through: i128::MIN,
+        }
+    }
+}
+
+impl PairAccumulator {
+    /// Adds one pairwise-valid sample. Null/NaN operands never reach this
+    /// method.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "the frozen covariance/correlation output type is Float64"
+    )]
+    fn add(&mut self, x: &ScalarValue, y: &ScalarValue, node_id: &str) -> Result<()> {
+        self.valid_count = self
+            .valid_count
+            .checked_add(1)
+            .ok_or_else(|| operator_error(node_id, "rolling pair sample count overflowed"))?;
+        let sample_x = float_sample(x);
+        let sample_y = float_sample(y);
+        if sample_x.is_infinite() {
+            if sample_x > 0.0 {
+                self.pos_inf_x = self.pos_inf_x.saturating_add(1);
+            } else {
+                self.neg_inf_x = self.neg_inf_x.saturating_add(1);
+            }
+        }
+        if sample_y.is_infinite() {
+            if sample_y > 0.0 {
+                self.pos_inf_y = self.pos_inf_y.saturating_add(1);
+            } else {
+                self.neg_inf_y = self.neg_inf_y.saturating_add(1);
+            }
+        }
+        let count = self.valid_count as f64;
+        let delta_x = sample_x - self.mean_x;
+        self.mean_x += delta_x / count;
+        let delta_y = sample_y - self.mean_y;
+        self.mean_y += delta_y / count;
+        self.co_moment += delta_x * (sample_y - self.mean_y);
+        self.m2_x += delta_x * (sample_x - self.mean_x);
+        self.m2_y += delta_y * (sample_y - self.mean_y);
+        Ok(())
+    }
+
+    /// Removes one previously added pairwise-valid sample (reverse step).
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "the frozen covariance/correlation output type is Float64"
+    )]
+    fn remove(&mut self, x: &ScalarValue, y: &ScalarValue) -> Result<()> {
+        self.valid_count = self
+            .valid_count
+            .checked_sub(1)
+            .ok_or_else(|| internal_error("rolling pair removal without a matching add"))?;
+        let sample_x = float_sample(x);
+        let sample_y = float_sample(y);
+        if sample_x.is_infinite() {
+            if sample_x > 0.0 {
+                self.pos_inf_x = self.pos_inf_x.saturating_sub(1);
+            } else {
+                self.neg_inf_x = self.neg_inf_x.saturating_sub(1);
+            }
+        }
+        if sample_y.is_infinite() {
+            if sample_y > 0.0 {
+                self.pos_inf_y = self.pos_inf_y.saturating_sub(1);
+            } else {
+                self.neg_inf_y = self.neg_inf_y.saturating_sub(1);
+            }
+        }
+        if self.valid_count == 0 {
+            self.mean_x = 0.0;
+            self.mean_y = 0.0;
+            self.co_moment = 0.0;
+            self.m2_x = 0.0;
+            self.m2_y = 0.0;
+        } else {
+            let count = self.valid_count as f64;
+            let delta_x = sample_x - self.mean_x;
+            self.mean_x -= delta_x / count;
+            let delta_y = sample_y - self.mean_y;
+            self.mean_y -= delta_y / count;
+            self.co_moment -= delta_x * (sample_y - self.mean_y);
+            self.m2_x -= delta_x * (sample_x - self.mean_x);
+            self.m2_y -= delta_y * (sample_y - self.mean_y);
+        }
+        Ok(())
+    }
+
+    fn is_non_finite(&self) -> bool {
+        !self.mean_x.is_finite()
+            || !self.mean_y.is_finite()
+            || !self.co_moment.is_finite()
+            || !self.m2_x.is_finite()
+            || !self.m2_y.is_finite()
+    }
+
+    fn holds_infinity(&self) -> bool {
+        self.pos_inf_x > 0 || self.neg_inf_x > 0 || self.pos_inf_y > 0 || self.neg_inf_y > 0
+    }
+
+    fn reset(&mut self) {
+        *self = Self {
+            expired_through: self.expired_through,
+            ..Self::default()
+        };
+    }
+}
+
 /// A rolling sample is valid when it is neither null nor NaN (SCE-00 D3.2);
 /// infinities stay numeric.
 fn is_valid_sample(value: &ScalarValue) -> bool {
@@ -2135,6 +2771,70 @@ fn float_sample(value: &ScalarValue) -> f64 {
     }
 }
 
+/// Total order over comparable rolling samples of one column type (SCE-08
+/// min/max): floats use the IEEE total order so −0.0/0.0 and ±inf compare
+/// deterministically; NaN never reaches the queue.
+fn compare_samples(left: &ScalarValue, right: &ScalarValue) -> Ordering {
+    fn rank(value: &ScalarValue) -> u8 {
+        match value {
+            ScalarValue::Boolean(_) => 0,
+            ScalarValue::Int8(_) | ScalarValue::Int16(_) | ScalarValue::Int32(_) => 1,
+            ScalarValue::Int64(_) => 2,
+            ScalarValue::UInt8(_) | ScalarValue::UInt16(_) | ScalarValue::UInt32(_) => 3,
+            ScalarValue::UInt64(_) => 4,
+            ScalarValue::Float32(_) => 5,
+            ScalarValue::Float64(_) => 6,
+            ScalarValue::Utf8(_) | ScalarValue::LargeUtf8(_) => 7,
+            ScalarValue::Date32(_) => 8,
+            ScalarValue::Date64(_) => 9,
+            ScalarValue::TimestampMicrosecond(_, _) => 10,
+            _ => 11,
+        }
+    }
+    let (left, right) = match (left, right) {
+        (ScalarValue::Float32(Some(left)), ScalarValue::Float32(Some(right))) => {
+            // Samples in the extrema queue are always valid; NaN never
+            // reaches this comparison and ±inf orders by sign.
+            return left.total_cmp(right);
+        }
+        (ScalarValue::Float64(Some(left)), ScalarValue::Float64(Some(right))) => {
+            return left.total_cmp(right);
+        }
+        _ => (left, right),
+    };
+    match (left, right) {
+        (ScalarValue::Boolean(left), ScalarValue::Boolean(right)) => left.cmp(right),
+        (
+            ScalarValue::Utf8(left) | ScalarValue::LargeUtf8(left),
+            ScalarValue::Utf8(right) | ScalarValue::LargeUtf8(right),
+        ) => left.cmp(right),
+        _ => match (signed_order_key(left), signed_order_key(right)) {
+            (Some(left), Some(right)) => left.cmp(&right),
+            _ => rank(left).cmp(&rank(right)),
+        },
+    }
+}
+
+/// Wide signed view of the integer-like sample classes for total-order
+/// comparison; `None` for values compared by their own arm above.
+fn signed_order_key(value: &ScalarValue) -> Option<i128> {
+    match value {
+        ScalarValue::Int8(Some(value)) => Some(i128::from(*value)),
+        ScalarValue::Int16(Some(value)) => Some(i128::from(*value)),
+        ScalarValue::Int32(Some(value)) | ScalarValue::Date32(Some(value)) => {
+            Some(i128::from(*value))
+        }
+        ScalarValue::Int64(Some(value))
+        | ScalarValue::Date64(Some(value))
+        | ScalarValue::TimestampMicrosecond(Some(value), _) => Some(i128::from(*value)),
+        ScalarValue::UInt8(Some(value)) => Some(i128::from(*value)),
+        ScalarValue::UInt16(Some(value)) => Some(i128::from(*value)),
+        ScalarValue::UInt32(Some(value)) => Some(i128::from(*value)),
+        ScalarValue::UInt64(Some(value)) => Some(i128::from(*value)),
+        _ => None,
+    }
+}
+
 /// Kernel result: derived output columns plus the per-entity history updates
 /// the caller installs only after complete success (transactional state).
 #[derive(Debug)]
@@ -2180,6 +2880,7 @@ fn compute_output_columns(
                 rows,
                 indices: &indices,
                 history: &entity_state.rows,
+                event_time_index: compiled.event_time_index,
             };
             for (position, &row_index) in indices.iter().enumerate() {
                 slide_windows(
@@ -2205,15 +2906,48 @@ fn compute_output_columns(
         for &row_index in &indices {
             entity_state.rows.push_back(rows[row_index].values.clone());
         }
-        while entity_state.rows.len()
-            > usize::try_from(compiled.max_retained_rows).unwrap_or(usize::MAX)
-        {
-            entity_state.rows.pop_front();
-        }
+        evict_retained_history(&mut entity_state, compiled);
         touched.push((entity.clone(), entity_state));
     }
     let columns = encode_derived_columns(derived, compiled, node_id)?;
     Ok(ComputedOutputs { columns, touched })
+}
+
+/// Evicts rows that no declared output can ever observe again (SCE-08): a
+/// row stays retained while it is within the last `max_row_retention` rows
+/// of the entity's total order or inside the widest duration frame of the
+/// last processed row. Both needs are suffixes of the canonical order, so
+/// eviction pops from the front.
+fn evict_retained_history(state: &mut EntityRollingState, compiled: &CompiledRollingSpec) {
+    let max_rows = usize::try_from(compiled.max_row_retention).unwrap_or(usize::MAX);
+    let bound = compiled
+        .max_duration_micros
+        .zip(
+            state
+                .rows
+                .back()
+                .map(|values| history_event_time(values, compiled)),
+        )
+        .map(|(micros, last)| i128::from(last) - i128::from(micros));
+    while state.rows.len() > max_rows {
+        let still_needed_by_time = bound.is_some_and(|bound| {
+            state
+                .rows
+                .front()
+                .is_some_and(|values| i128::from(history_event_time(values, compiled)) > bound)
+        });
+        if still_needed_by_time {
+            break;
+        }
+        state.rows.pop_front();
+    }
+}
+
+fn history_event_time(values: &[ScalarValue], compiled: &CompiledRollingSpec) -> i64 {
+    match &values[compiled.event_time_index] {
+        ScalarValue::TimestampMicrosecond(Some(value), _) => *value,
+        _ => unreachable!("rolling history rows carry a timestamp event time"),
+    }
 }
 
 fn group_rows_by_entity(rows: &[BufferedRow]) -> BTreeMap<&Vec<Option<KeyValue>>, Vec<usize>> {
@@ -2258,6 +2992,7 @@ struct EntityRowView<'a> {
     rows: &'a [BufferedRow],
     indices: &'a [usize],
     history: &'a VecDeque<Vec<ScalarValue>>,
+    event_time_index: usize,
 }
 
 impl EntityRowView<'_> {
@@ -2268,64 +3003,343 @@ impl EntityRowView<'_> {
             &self.rows[self.indices[combined - self.history.len()]].values[input_index]
         }
     }
+
+    fn event_time(&self, combined: usize) -> i64 {
+        if combined < self.history.len() {
+            match &self.history[combined][self.event_time_index] {
+                ScalarValue::TimestampMicrosecond(Some(value), _) => *value,
+                _ => unreachable!("rolling history rows carry a timestamp event time"),
+            }
+        } else {
+            self.rows[self.indices[combined - self.history.len()]]
+                .identity
+                .event_time
+        }
+    }
+
+    /// Canonical expiry key of the row at one combined position.
+    fn extrema_key(&self, combined: usize, compiled: &CompiledRollingSpec) -> ExtremaKey {
+        if combined < self.history.len() {
+            ExtremaKey {
+                event_time: self.event_time(combined),
+                sequence: compiled
+                    .sequence_columns
+                    .iter()
+                    .map(|column| {
+                        KeyValue::from_required_scalar(
+                            &self.history[combined][column.index],
+                            "rolling",
+                        )
+                        .expect("rolling history rows carry required sequence keys")
+                    })
+                    .collect(),
+            }
+        } else {
+            let identity = &self.rows[self.indices[combined - self.history.len()]].identity;
+            ExtremaKey {
+                event_time: identity.event_time,
+                sequence: identity.sequence.clone(),
+            }
+        }
+    }
+
+    /// First combined position whose event time exceeds `bound`; both the
+    /// retained history and the batch rows are key-ordered, so the search is
+    /// two partition points.
+    fn first_after_bound(&self, bound: i128) -> usize {
+        let (front, _back) = self.history.as_slices();
+        let in_front = front.partition_point(|values| {
+            matches!(
+                &values[self.event_time_index],
+                ScalarValue::TimestampMicrosecond(Some(time), _) if i128::from(*time) <= bound
+            )
+        });
+        if in_front < front.len() {
+            return in_front;
+        }
+        let in_back = self.history.as_slices().1.partition_point(|values| {
+            matches!(
+                &values[self.event_time_index],
+                ScalarValue::TimestampMicrosecond(Some(time), _) if i128::from(*time) <= bound
+            )
+        });
+        if in_front + in_back < self.history.len() {
+            return in_front + in_back;
+        }
+        self.history.len()
+            + self.indices.partition_point(|&row_index| {
+                i128::from(self.rows[row_index].identity.event_time) <= bound
+            })
+    }
 }
 
 /// Slides every shared window group to the current row: add the current
-/// valid sample, remove the sample that left the frame, then repair any
+/// valid sample, remove every sample that left the frame, then repair any
 /// non-finite accumulator by re-folding the window so live state and the
 /// checkpoint rebuild agree on non-finite classifications (SCE-00 D3.2).
 // Add precedes removal so the frozen order matches the rebuild fold exactly.
+// #lizard forgives
 fn slide_windows(
     view: &EntityRowView<'_>,
     position: usize,
     row_index: usize,
     compiled: &CompiledRollingSpec,
-    windows: &mut [WindowAccumulator],
+    windows: &mut [WindowState],
     node_id: &str,
 ) -> Result<()> {
+    let combined = view.history.len() + position;
     for (group_index, group) in compiled.window_groups.iter().enumerate() {
-        let frame = usize::try_from(group.frame_rows)
-            .map_err(|_| operator_error(node_id, "rolling frame rows do not fit usize"))?;
-        let combined = view.history.len() + position;
-        let current = &view.rows[row_index].values[group.input_index];
-        if is_valid_sample(current) {
-            windows[group_index].add(current, node_id)?;
-        }
-        if combined >= frame {
-            let expiring = view.value(combined - frame, group.input_index);
-            if is_valid_sample(expiring) {
-                windows[group_index].remove(expiring)?;
+        match group {
+            CompiledWindowGroup::Numeric {
+                input_index, frame, ..
+            } => {
+                let current = &view.rows[row_index].values[*input_index];
+                let WindowState::Numeric(accumulator) = &mut windows[group_index] else {
+                    return Err(internal_error("rolling numeric group has the wrong state"));
+                };
+                if is_valid_sample(current) {
+                    accumulator.add(current, node_id)?;
+                }
+                expire_numeric(accumulator, view, combined, *input_index, *frame, node_id)?;
+                if accumulator.is_non_finite() {
+                    refold_numeric(accumulator, view, combined, *input_index, *frame, node_id)?;
+                }
             }
-        }
-        if windows[group_index].is_non_finite() {
-            refold_window(view, position, group, &mut windows[group_index], node_id)?;
+            CompiledWindowGroup::Extrema {
+                input_index, frame, ..
+            } => {
+                let WindowState::Extrema(accumulator) = &mut windows[group_index] else {
+                    return Err(internal_error("rolling extrema group has the wrong state"));
+                };
+                let current = &view.rows[row_index].values[*input_index];
+                if is_valid_sample(current) {
+                    accumulator.add(view.extrema_key(combined, compiled), current.clone());
+                }
+                match frame {
+                    CompiledFrame::Rows(rows) => {
+                        let rows = usize::try_from(*rows).map_err(|_| {
+                            operator_error(node_id, "rolling frame rows do not fit usize")
+                        })?;
+                        if combined >= rows {
+                            let expiring = view.value(combined - rows, *input_index);
+                            if is_valid_sample(expiring) {
+                                accumulator.remove();
+                            }
+                            let leaving = view.extrema_key(combined - rows, compiled);
+                            accumulator.expire_through_key(&leaving);
+                        }
+                    }
+                    CompiledFrame::Duration(micros) => {
+                        let current_time = view.event_time(combined);
+                        let bound = duration_bound(current_time, *micros);
+                        let mut index = view.first_after_bound(accumulator.expired_through);
+                        while index < combined && i128::from(view.event_time(index)) <= bound {
+                            if is_valid_sample(view.value(index, *input_index)) {
+                                accumulator.remove();
+                            }
+                            index += 1;
+                        }
+                        accumulator.expired_through = accumulator.expired_through.max(bound);
+                        accumulator.expire_through_time(bound);
+                    }
+                }
+            }
+            CompiledWindowGroup::Pair {
+                left_index,
+                right_index,
+                frame,
+            } => {
+                let x = &view.rows[row_index].values[*left_index];
+                let y = &view.rows[row_index].values[*right_index];
+                let WindowState::Pair(accumulator) = &mut windows[group_index] else {
+                    return Err(internal_error("rolling pair group has the wrong state"));
+                };
+                if is_valid_sample(x) && is_valid_sample(y) {
+                    accumulator.add(x, y, node_id)?;
+                }
+                expire_pair(
+                    accumulator,
+                    view,
+                    combined,
+                    *left_index,
+                    *right_index,
+                    *frame,
+                    node_id,
+                )?;
+                if accumulator.is_non_finite() {
+                    refold_pair(
+                        accumulator,
+                        view,
+                        combined,
+                        *left_index,
+                        *right_index,
+                        *frame,
+                        node_id,
+                    )?;
+                }
+            }
         }
     }
     Ok(())
 }
 
-/// Rebuilds one accumulator as the ordered fold over the current window;
-/// this is the same construction the checkpoint restore applies to retained
-/// history (SCE-00 D11/D13).
-fn refold_window(
-    view: &EntityRowView<'_>,
-    position: usize,
-    group: &CompiledWindowGroup,
+/// Exclusive duration lower bound `t - d` in exact `i128` arithmetic; the
+/// frame is `(t - d, t]` (SCE-00 D5), and the widened subtraction cannot
+/// wrap.
+fn duration_bound(event_time: i64, micros: u64) -> i128 {
+    i128::from(event_time) - i128::from(micros)
+}
+
+/// Removes every numeric sample that left the frame at the current row: one
+/// row for row-count frames, the newly expired event-time prefix for
+/// duration frames.
+fn expire_numeric(
     accumulator: &mut WindowAccumulator,
+    view: &EntityRowView<'_>,
+    combined: usize,
+    input_index: usize,
+    frame: CompiledFrame,
     node_id: &str,
 ) -> Result<()> {
-    let frame = usize::try_from(group.frame_rows)
-        .map_err(|_| operator_error(node_id, "rolling frame rows do not fit usize"))?;
-    let combined = view.history.len() + position;
-    let start = (combined + 1).saturating_sub(frame);
+    match frame {
+        CompiledFrame::Rows(rows) => {
+            let rows = usize::try_from(rows)
+                .map_err(|_| operator_error(node_id, "rolling frame rows do not fit usize"))?;
+            if combined >= rows {
+                let expiring = view.value(combined - rows, input_index);
+                if is_valid_sample(expiring) {
+                    accumulator.remove(expiring)?;
+                }
+            }
+            Ok(())
+        }
+        CompiledFrame::Duration(micros) => {
+            let bound = duration_bound(view.event_time(combined), micros);
+            let mut index = view.first_after_bound(accumulator.expired_through);
+            while index < combined && i128::from(view.event_time(index)) <= bound {
+                let expiring = view.value(index, input_index);
+                if is_valid_sample(expiring) {
+                    accumulator.remove(expiring)?;
+                }
+                index += 1;
+            }
+            accumulator.expired_through = accumulator.expired_through.max(bound);
+            Ok(())
+        }
+    }
+}
+
+/// Removes every pairwise-valid sample that left the frame at the current
+/// row (SCE-08).
+fn expire_pair(
+    accumulator: &mut PairAccumulator,
+    view: &EntityRowView<'_>,
+    combined: usize,
+    left_index: usize,
+    right_index: usize,
+    frame: CompiledFrame,
+    node_id: &str,
+) -> Result<()> {
+    match frame {
+        CompiledFrame::Rows(rows) => {
+            let rows = usize::try_from(rows)
+                .map_err(|_| operator_error(node_id, "rolling frame rows do not fit usize"))?;
+            if combined >= rows {
+                let x = view.value(combined - rows, left_index);
+                let y = view.value(combined - rows, right_index);
+                if is_valid_sample(x) && is_valid_sample(y) {
+                    accumulator.remove(x, y)?;
+                }
+            }
+            Ok(())
+        }
+        CompiledFrame::Duration(micros) => {
+            let bound = duration_bound(view.event_time(combined), micros);
+            let mut index = view.first_after_bound(accumulator.expired_through);
+            while index < combined && i128::from(view.event_time(index)) <= bound {
+                let x = view.value(index, left_index);
+                let y = view.value(index, right_index);
+                if is_valid_sample(x) && is_valid_sample(y) {
+                    accumulator.remove(x, y)?;
+                }
+                index += 1;
+            }
+            accumulator.expired_through = accumulator.expired_through.max(bound);
+            Ok(())
+        }
+    }
+}
+
+/// Rebuilds one numeric accumulator as the ordered fold over the current
+/// window; this is the same construction the checkpoint restore applies to
+/// retained history (SCE-00 D11/D13).
+fn refold_numeric(
+    accumulator: &mut WindowAccumulator,
+    view: &EntityRowView<'_>,
+    combined: usize,
+    input_index: usize,
+    frame: CompiledFrame,
+    node_id: &str,
+) -> Result<()> {
     accumulator.reset();
-    for index in start..=combined {
-        let value = view.value(index, group.input_index);
+    for index in window_positions(view, combined, frame, node_id)? {
+        let value = view.value(index, input_index);
         if is_valid_sample(value) {
             accumulator.add(value, node_id)?;
         }
     }
+    if let CompiledFrame::Duration(micros) = frame {
+        accumulator.expired_through = duration_bound(view.event_time(combined), micros);
+    }
     Ok(())
+}
+
+/// Rebuilds one pair accumulator as the ordered fold over the current
+/// pairwise-valid window (SCE-00 D11/D13).
+fn refold_pair(
+    accumulator: &mut PairAccumulator,
+    view: &EntityRowView<'_>,
+    combined: usize,
+    left_index: usize,
+    right_index: usize,
+    frame: CompiledFrame,
+    node_id: &str,
+) -> Result<()> {
+    accumulator.reset();
+    for index in window_positions(view, combined, frame, node_id)? {
+        let x = view.value(index, left_index);
+        let y = view.value(index, right_index);
+        if is_valid_sample(x) && is_valid_sample(y) {
+            accumulator.add(x, y, node_id)?;
+        }
+    }
+    if let CompiledFrame::Duration(micros) = frame {
+        accumulator.expired_through = duration_bound(view.event_time(combined), micros);
+    }
+    Ok(())
+}
+
+/// Combined positions of the current row's window members in canonical
+/// order: the last `rows` positions for row frames, the positions with
+/// event time in `(t - d, t]` for duration frames.
+fn window_positions(
+    view: &EntityRowView<'_>,
+    combined: usize,
+    frame: CompiledFrame,
+    node_id: &str,
+) -> Result<std::ops::RangeInclusive<usize>> {
+    let start = match frame {
+        CompiledFrame::Rows(rows) => {
+            let rows = usize::try_from(rows)
+                .map_err(|_| operator_error(node_id, "rolling frame rows do not fit usize"))?;
+            (combined + 1).saturating_sub(rows)
+        }
+        CompiledFrame::Duration(micros) => {
+            let bound = duration_bound(view.event_time(combined), micros);
+            view.first_after_bound(bound)
+        }
+    };
+    Ok(start..=combined)
 }
 
 fn compute_output_value(
@@ -2333,7 +3347,7 @@ fn compute_output_value(
     position: usize,
     row_index: usize,
     output: &CompiledRollingOutput,
-    windows: &[WindowAccumulator],
+    windows: &[WindowState],
     node_id: &str,
 ) -> Result<ScalarValue> {
     let periods = match &output.evaluation {
@@ -2343,6 +3357,9 @@ fn compute_output_value(
         }
         CompiledEvaluation::Aggregate(aggregate) => {
             return evaluate_aggregate(aggregate, windows, output, node_id);
+        }
+        CompiledEvaluation::Pair(aggregate) => {
+            return evaluate_pair_aggregate(aggregate, windows, output);
         }
     };
     let referenced = if position + view.history.len() < periods {
@@ -2384,11 +3401,28 @@ fn compute_output_value(
 )]
 fn evaluate_aggregate(
     aggregate: &CompiledAggregate,
-    windows: &[WindowAccumulator],
+    windows: &[WindowState],
     output: &CompiledRollingOutput,
     node_id: &str,
 ) -> Result<ScalarValue> {
-    let accumulator = &windows[aggregate.group];
+    let accumulator = match &windows[aggregate.group] {
+        WindowState::Numeric(accumulator) => accumulator,
+        WindowState::Extrema(accumulator) => {
+            // Min/max read the monotonic queue front after the count gate.
+            if accumulator.valid_count < aggregate.min_periods {
+                return Ok(typed_null(&output.output_type));
+            }
+            return Ok(accumulator
+                .extremum()
+                .cloned()
+                .unwrap_or_else(|| typed_null(&output.output_type)));
+        }
+        WindowState::Pair(_) => {
+            return Err(internal_error(
+                "rolling pair group serves a numeric aggregate output",
+            ));
+        }
+    };
     if accumulator.valid_count < aggregate.min_periods {
         return Ok(typed_null(&output.output_type));
     }
@@ -2436,6 +3470,62 @@ fn evaluate_aggregate(
                 _ => variance.sqrt(),
             })))
         }
+        Statistic::Min | Statistic::Max => Err(internal_error(
+            "rolling extrema statistic reads an extrema group",
+        )),
+    }
+}
+
+/// Reads one covariance/correlation output from its shared pair
+/// accumulator (SCE-00 D3.2/D5): null below the pairwise minimum count or a
+/// non-positive divisor, null for correlation with zero variance on either
+/// side, NaN when the window holds any infinity, and the West-style
+/// co-moment readout otherwise. The ddof divisor cancels in the correlation
+/// ratio; it only participates in the divisor gate.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the frozen pair output type is Float64"
+)]
+fn evaluate_pair_aggregate(
+    aggregate: &CompiledPairAggregate,
+    windows: &[WindowState],
+    output: &CompiledRollingOutput,
+) -> Result<ScalarValue> {
+    let WindowState::Pair(accumulator) = &windows[aggregate.group] else {
+        return Err(internal_error("rolling pair output reads a pair group"));
+    };
+    if accumulator.valid_count < aggregate.min_periods {
+        return Ok(typed_null(&output.output_type));
+    }
+    let divisor = accumulator.valid_count - u64::from(aggregate.ddof);
+    if divisor == 0 {
+        return Ok(typed_null(&output.output_type));
+    }
+    if accumulator.holds_infinity() {
+        return Ok(ScalarValue::Float64(Some(f64::NAN)));
+    }
+    if aggregate.correlation {
+        // Clamp negative drift to zero: a true zero-variance side yields the
+        // frozen null; tiny negative M2 is removal drift.
+        let m2_x = if accumulator.m2_x < 0.0 {
+            0.0
+        } else {
+            accumulator.m2_x
+        };
+        let m2_y = if accumulator.m2_y < 0.0 {
+            0.0
+        } else {
+            accumulator.m2_y
+        };
+        if m2_x == 0.0 || m2_y == 0.0 {
+            return Ok(typed_null(&output.output_type));
+        }
+        let scale = m2_x.sqrt() * m2_y.sqrt();
+        Ok(ScalarValue::Float64(Some(accumulator.co_moment / scale)))
+    } else {
+        Ok(ScalarValue::Float64(Some(
+            accumulator.co_moment / divisor as f64,
+        )))
     }
 }
 
@@ -2501,12 +3591,23 @@ fn validate_outputs(outputs: &[RollingOutputSpec]) -> Result<()> {
                 "unsupported rolling primitive version",
             ));
         }
-        if output.retained_rows() == 0 {
-            let field = match output.frame() {
-                Some(_) => format!("{base}.frame.size"),
-                None => format!("{base}.periods"),
+        if let Some(frame) = output.frame() {
+            let zero = match frame {
+                RollingFrameSpec::Rows { size } => size == 0,
+                RollingFrameSpec::Duration { micros } => micros == 0,
             };
-            return Err(invalid_argument(&field, "must be greater than zero"));
+            if zero {
+                let field = match frame {
+                    RollingFrameSpec::Rows { .. } => format!("{base}.frame.size"),
+                    RollingFrameSpec::Duration { .. } => format!("{base}.frame.micros"),
+                };
+                return Err(invalid_argument(&field, "must be greater than zero"));
+            }
+        } else if output.retained_rows() == 0 {
+            return Err(invalid_argument(
+                &format!("{base}.periods"),
+                "must be greater than zero",
+            ));
         }
         if let Some(min_periods) = output.min_periods() {
             if min_periods == 0 {
@@ -2515,7 +3616,11 @@ fn validate_outputs(outputs: &[RollingOutputSpec]) -> Result<()> {
                     "must be greater than zero",
                 ));
             }
-            if min_periods > output.retained_rows() {
+            // Only row-count frames cap min_periods at their size; a duration
+            // frame has no row-count ceiling (SCE-00 D5).
+            if matches!(output.frame(), Some(RollingFrameSpec::Rows { .. }))
+                && min_periods > output.retained_rows()
+            {
                 return Err(invalid_argument(
                     &format!("{base}.min_periods"),
                     "must not exceed the row-frame size",
@@ -2530,6 +3635,14 @@ fn validate_outputs(outputs: &[RollingOutputSpec]) -> Result<()> {
         if output.input().is_empty() {
             return Err(invalid_argument(
                 &format!("{base}.input"),
+                "must not be empty",
+            ));
+        }
+        if let Some(right) = output.pair_right()
+            && right.is_empty()
+        {
+            return Err(invalid_argument(
+                &format!("{base}.right"),
                 "must not be empty",
             ));
         }
@@ -2590,19 +3703,25 @@ fn compile_spec_against_schema(
         .enumerate()
         .map(|(ordinal, output)| compile_output(input_schema, output, ordinal, &mut window_groups))
         .collect::<Result<Vec<_>>>()?;
-    let max_retained_rows = spec
+    let max_row_retention = spec
         .outputs
         .iter()
         .map(RollingOutputSpec::retained_rows)
         .max()
         .unwrap_or(1);
+    let max_duration_micros = spec
+        .outputs
+        .iter()
+        .filter_map(RollingOutputSpec::retained_micros)
+        .max();
     Ok(CompiledRollingSpec {
         event_time_index,
         partition_columns,
         sequence_columns,
         outputs,
         window_groups,
-        max_retained_rows,
+        max_row_retention,
+        max_duration_micros,
         configuration_hash,
         state_schema_fingerprint: state_schema_fingerprint(input_schema),
     })
@@ -2675,10 +3794,45 @@ fn compile_output(
             require_numeric(output.input(), &input_type, "delta")?;
             CompiledEvaluation::Delta { periods: *periods }
         }
+        RollingOutputSpec::Covariance {
+            left,
+            right,
+            frame,
+            min_periods,
+            ddof,
+            ..
+        }
+        | RollingOutputSpec::Correlation {
+            left,
+            right,
+            frame,
+            min_periods,
+            ddof,
+            ..
+        } => {
+            let correlation = matches!(output, RollingOutputSpec::Correlation { .. });
+            let left_index = exact_field_index(input_schema, left)?;
+            let right_index = exact_field_index(input_schema, right)?;
+            let left_type = input_schema.field(left_index).data_type().clone();
+            let right_type = input_schema.field(right_index).data_type().clone();
+            require_numeric(left, &left_type, "covariance")?;
+            require_numeric(right, &right_type, "covariance")?;
+            let group = compile_pair_group(left_index, right_index, *frame, window_groups);
+            CompiledEvaluation::Pair(CompiledPairAggregate {
+                group,
+                correlation,
+                min_periods: *min_periods,
+                ddof: *ddof,
+            })
+        }
         aggregate => compile_aggregate_output(aggregate, input_index, &input_type, window_groups)?,
     };
     let output_type = match &evaluation {
         CompiledEvaluation::Lag { .. } | CompiledEvaluation::Delta { .. } => input_type.clone(),
+        CompiledEvaluation::Pair(aggregate) => {
+            let _ = aggregate;
+            DataType::Float64
+        }
         CompiledEvaluation::Aggregate(aggregate) => match aggregate.statistic {
             Statistic::Count => DataType::UInt64,
             Statistic::Sum => match SumClass::from_input(&input_type) {
@@ -2687,6 +3841,8 @@ fn compile_output(
                 _ => DataType::Float64,
             },
             Statistic::Mean | Statistic::Variance | Statistic::Stddev => DataType::Float64,
+            // Min/max preserve the input type (SCE-00 D3.2).
+            Statistic::Min | Statistic::Max => input_type.clone(),
         },
     };
     Ok(CompiledRollingOutput {
@@ -2696,6 +3852,44 @@ fn compile_output(
         input_type,
         evaluation,
     })
+}
+
+fn compile_pair_group(
+    left_index: usize,
+    right_index: usize,
+    frame: RollingFrameSpec,
+    window_groups: &mut Vec<CompiledWindowGroup>,
+) -> usize {
+    let frame = compiled_frame(frame);
+    window_groups
+        .iter()
+        .position(|group| match group {
+            CompiledWindowGroup::Pair {
+                left_index: existing_left,
+                right_index: existing_right,
+                frame: existing_frame,
+            } => {
+                *existing_left == left_index
+                    && *existing_right == right_index
+                    && *existing_frame == frame
+            }
+            _ => false,
+        })
+        .unwrap_or_else(|| {
+            window_groups.push(CompiledWindowGroup::Pair {
+                left_index,
+                right_index,
+                frame,
+            });
+            window_groups.len() - 1
+        })
+}
+
+fn compiled_frame(frame: RollingFrameSpec) -> CompiledFrame {
+    match frame {
+        RollingFrameSpec::Rows { size } => CompiledFrame::Rows(size),
+        RollingFrameSpec::Duration { micros } => CompiledFrame::Duration(micros),
+    }
 }
 
 fn compile_aggregate_output(
@@ -2726,12 +3920,32 @@ fn compile_aggregate_output(
             ddof,
             ..
         } => (*frame, *min_periods, *ddof, Statistic::Stddev),
-        RollingOutputSpec::Lag { .. } | RollingOutputSpec::Delta { .. } => {
-            unreachable!("lag and delta compile before aggregates")
+        RollingOutputSpec::Min {
+            frame, min_periods, ..
+        } => (*frame, *min_periods, 0, Statistic::Min),
+        RollingOutputSpec::Max {
+            frame, min_periods, ..
+        } => (*frame, *min_periods, 0, Statistic::Max),
+        RollingOutputSpec::Lag { .. }
+        | RollingOutputSpec::Delta { .. }
+        | RollingOutputSpec::Covariance { .. }
+        | RollingOutputSpec::Correlation { .. } => {
+            unreachable!("lag, delta, and pair outputs compile before aggregates")
         }
     };
-    if !matches!(statistic, Statistic::Count) {
+    if !matches!(
+        statistic,
+        Statistic::Count | Statistic::Min | Statistic::Max
+    ) {
         require_numeric(output.input(), input_type, statistic.name())?;
+    } else if matches!(statistic, Statistic::Min | Statistic::Max)
+        && !supports_total_order(input_type)
+    {
+        return Err(compile_error(format!(
+            "rolling {} does not support column {:?} with type {input_type}",
+            statistic.name(),
+            output.input()
+        )));
     }
     Ok(compile_aggregate(
         input_index,
@@ -2762,18 +3976,51 @@ fn compile_aggregate(
     statistic: Statistic,
     window_groups: &mut Vec<CompiledWindowGroup>,
 ) -> CompiledEvaluation {
-    let frame_rows = frame.size();
-    let group = window_groups
-        .iter()
-        .position(|group| group.input_index == input_index && group.frame_rows == frame_rows)
-        .unwrap_or_else(|| {
-            window_groups.push(CompiledWindowGroup {
-                input_index,
-                frame_rows,
-                sum_class: SumClass::from_input(input_type),
-            });
-            window_groups.len() - 1
-        });
+    let frame = compiled_frame(frame);
+    let group = if matches!(statistic, Statistic::Min | Statistic::Max) {
+        let descending = matches!(statistic, Statistic::Max);
+        window_groups
+            .iter()
+            .position(|group| match group {
+                CompiledWindowGroup::Extrema {
+                    input_index: existing_input,
+                    frame: existing_frame,
+                    descending: existing_descending,
+                } => {
+                    *existing_input == input_index
+                        && *existing_frame == frame
+                        && *existing_descending == descending
+                }
+                _ => false,
+            })
+            .unwrap_or_else(|| {
+                window_groups.push(CompiledWindowGroup::Extrema {
+                    input_index,
+                    frame,
+                    descending,
+                });
+                window_groups.len() - 1
+            })
+    } else {
+        window_groups
+            .iter()
+            .position(|group| match group {
+                CompiledWindowGroup::Numeric {
+                    input_index: existing_input,
+                    frame: existing_frame,
+                    ..
+                } => *existing_input == input_index && *existing_frame == frame,
+                _ => false,
+            })
+            .unwrap_or_else(|| {
+                window_groups.push(CompiledWindowGroup::Numeric {
+                    input_index,
+                    frame,
+                    sum_class: SumClass::from_input(input_type),
+                });
+                window_groups.len() - 1
+            })
+    };
     CompiledEvaluation::Aggregate(CompiledAggregate {
         group,
         statistic,
@@ -3024,7 +4271,7 @@ mod tests {
 
     #[test]
     fn unsupported_output_kind_is_rejected() {
-        for kind in ["min", "max", "covariance", "correlation"] {
+        for kind in ["std", "median", "ewma"] {
             let mut document = valid_spec_json();
             document["outputs"][0] = json!({
                 "kind": kind,
@@ -3435,6 +4682,38 @@ mod tests {
         declaration
     }
 
+    fn duration_output(kind: &str, input: &str, output: &str, micros: u64) -> Value {
+        json!({
+            "kind": kind,
+            "primitive_version": 1,
+            "input": input,
+            "output": output,
+            "frame": {"kind": "duration", "micros": micros},
+            "min_periods": 1
+        })
+    }
+
+    fn pair_output(
+        kind: &str,
+        left: &str,
+        right: &str,
+        output: &str,
+        frame: Value,
+        ddof: u64,
+    ) -> Value {
+        let mut declaration = json!({
+            "kind": kind,
+            "primitive_version": 1,
+            "left": left,
+            "right": right,
+            "output": output,
+            "min_periods": 1,
+            "ddof": ddof
+        });
+        declaration["frame"] = frame;
+        declaration
+    }
+
     fn aggregate_spec(outputs: Value) -> RollingSpec {
         serde_json::from_value(aggregate_spec_json(outputs)).unwrap()
     }
@@ -3453,11 +4732,271 @@ mod tests {
     }
 
     #[test]
-    fn duration_frames_are_rejected_in_this_release() {
-        let mut declaration = aggregate_output("mean", "price", "price_mean", 20);
-        declaration["frame"] = json!({"kind": "duration", "micros": 60_000_000});
+    fn duration_frames_round_trip_the_frozen_json() {
+        let document = aggregate_spec_json(json!([
+            duration_output("mean", "price", "price_mean_60s", 60_000_000),
+            duration_output("count", "label", "label_count_60s", 60_000_000),
+            pair_output(
+                "correlation",
+                "price",
+                "volume",
+                "price_volume_corr_60s",
+                json!({"kind": "duration", "micros": 60_000_000}),
+                1,
+            ),
+        ]));
+        let spec: RollingSpec = serde_json::from_value(document.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&spec).unwrap(), document);
+    }
+
+    #[test]
+    fn zero_duration_micros_is_rejected() {
+        let spec = aggregate_spec(json!([duration_output("mean", "price", "m", 0)]));
+        let error = spec.validate(&input_schema()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                CalcFlowError::InvalidArgument { ref field, .. }
+                    if field == "rolling.outputs[0].frame.micros"
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn duration_frames_allow_min_periods_above_any_row_count() {
+        // A duration frame has no row-count ceiling; only row frames cap
+        // min_periods at their size (SCE-00 D5).
+        let mut declaration = duration_output("mean", "price", "m", 60_000_000);
+        declaration["min_periods"] = json!(10_000);
+        let spec = aggregate_spec(json!([declaration]));
+        assert!(spec.validate(&input_schema()).is_ok());
+    }
+
+    #[test]
+    fn duration_frames_still_reject_zero_min_periods() {
+        let mut declaration = duration_output("mean", "price", "m", 60_000_000);
+        declaration["min_periods"] = json!(0);
+        let spec = aggregate_spec(json!([declaration]));
+        let error = spec.validate(&input_schema()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                CalcFlowError::InvalidArgument { ref field, .. }
+                    if field == "rolling.outputs[0].min_periods"
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn duration_frames_reject_unknown_frame_fields() {
+        let mut declaration = duration_output("mean", "price", "m", 60_000_000);
+        declaration["frame"]["size"] = json!(5);
         let document = aggregate_spec_json(json!([declaration]));
         assert!(serde_json::from_value::<RollingSpec>(document).is_err());
+    }
+
+    #[test]
+    fn extrema_outputs_round_trip_the_frozen_json() {
+        let document = aggregate_spec_json(json!([
+            aggregate_output("min", "price", "price_min_20", 20),
+            aggregate_output("max", "price", "price_max_20", 20),
+            duration_output("max", "volume", "volume_max_60s", 60_000_000),
+        ]));
+        let spec: RollingSpec = serde_json::from_value(document.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&spec).unwrap(), document);
+    }
+
+    #[test]
+    fn extrema_outputs_reject_ddof() {
+        for kind in ["min", "max"] {
+            let declaration = ddof_output(kind, "price", "price_extrema", 20, 1);
+            let document = aggregate_spec_json(json!([declaration]));
+            assert!(
+                serde_json::from_value::<RollingSpec>(document).is_err(),
+                "{kind} with ddof was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn pair_outputs_round_trip_the_frozen_json() {
+        let document = aggregate_spec_json(json!([
+            pair_output(
+                "covariance",
+                "price",
+                "volume",
+                "price_volume_cov_20",
+                json!({"kind": "rows", "size": 20}),
+                1,
+            ),
+            pair_output(
+                "correlation",
+                "price",
+                "volume",
+                "price_volume_corr_20",
+                json!({"kind": "rows", "size": 20}),
+                0,
+            ),
+        ]));
+        let spec: RollingSpec = serde_json::from_value(document.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&spec).unwrap(), document);
+    }
+
+    #[test]
+    fn pair_outputs_reject_missing_ddof_left_or_right() {
+        let mut missing_ddof = pair_output(
+            "covariance",
+            "price",
+            "volume",
+            "price_volume_cov",
+            json!({"kind": "rows", "size": 20}),
+            1,
+        );
+        missing_ddof.as_object_mut().unwrap().remove("ddof");
+        assert!(
+            serde_json::from_value::<RollingSpec>(aggregate_spec_json(json!([missing_ddof])))
+                .is_err()
+        );
+        for field in ["left", "right"] {
+            let mut missing_operand = pair_output(
+                "correlation",
+                "price",
+                "volume",
+                "price_volume_corr",
+                json!({"kind": "rows", "size": 20}),
+                1,
+            );
+            missing_operand.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<RollingSpec>(aggregate_spec_json(json!([
+                    missing_operand
+                ])))
+                .is_err(),
+                "pair output without {field} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn pair_outputs_reject_the_single_input_field() {
+        let mut declaration = pair_output(
+            "covariance",
+            "price",
+            "volume",
+            "price_volume_cov",
+            json!({"kind": "rows", "size": 20}),
+            1,
+        );
+        declaration["input"] = json!("price");
+        let document = aggregate_spec_json(json!([declaration]));
+        assert!(serde_json::from_value::<RollingSpec>(document).is_err());
+    }
+
+    #[test]
+    fn single_input_outputs_reject_left_and_right() {
+        for kind in ["mean", "min", "max"] {
+            let mut declaration = aggregate_output(kind, "price", "price_agg", 20);
+            declaration["left"] = json!("price");
+            let document = aggregate_spec_json(json!([declaration]));
+            assert!(
+                serde_json::from_value::<RollingSpec>(document).is_err(),
+                "{kind} with left was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn pair_outputs_reject_an_empty_right_column() {
+        let spec = aggregate_spec(json!([pair_output(
+            "covariance",
+            "price",
+            "",
+            "price_volume_cov",
+            json!({"kind": "rows", "size": 20}),
+            1,
+        )]));
+        let error = spec.validate(&input_schema()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                CalcFlowError::InvalidArgument { ref field, .. }
+                    if field == "rolling.outputs[0].right"
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn extrema_over_a_column_without_total_order_are_rejected() {
+        let schema = with_field(
+            &input_schema(),
+            5,
+            &Field::new(
+                "label",
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                true,
+            ),
+        );
+        for kind in ["min", "max"] {
+            let spec = aggregate_spec(json!([aggregate_output(
+                kind,
+                "label",
+                "label_extrema_20",
+                20
+            )]));
+            let error = spec.validate(&schema).unwrap_err();
+            let expected = format!("rolling {kind} does not support column");
+            assert!(
+                matches!(
+                    error,
+                    CalcFlowError::Compile { ref message } if message.contains(&expected)
+                ),
+                "unexpected error for {kind}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn pair_output_ddof_above_one_is_rejected() {
+        let spec = aggregate_spec(json!([pair_output(
+            "correlation",
+            "price",
+            "volume",
+            "price_volume_corr",
+            json!({"kind": "rows", "size": 20}),
+            2,
+        )]));
+        let error = spec.validate(&input_schema()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                CalcFlowError::InvalidArgument { ref field, .. }
+                    if field == "rolling.outputs[0].ddof"
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn pair_outputs_reject_non_numeric_operands() {
+        for left in ["label", "price"] {
+            let right = if left == "label" { "price" } else { "label" };
+            let spec = aggregate_spec(json!([pair_output(
+                "covariance",
+                left,
+                right,
+                "pair_stat",
+                json!({"kind": "rows", "size": 20}),
+                1,
+            )]));
+            let error = spec.validate(&input_schema()).unwrap_err();
+            assert!(
+                matches!(error, CalcFlowError::Compile { .. }),
+                "unexpected error: {error}"
+            );
+        }
     }
 
     #[test]
@@ -3523,12 +5062,54 @@ mod tests {
     }
 
     #[test]
+    fn extrema_and_pair_output_schema_uses_the_frozen_type_table() {
+        let spec = aggregate_spec(json!([
+            aggregate_output("min", "price", "price_min", 20),
+            aggregate_output("max", "volume", "volume_max", 20),
+            aggregate_output("max", "label", "label_max", 20),
+            pair_output(
+                "covariance",
+                "price",
+                "volume",
+                "price_volume_cov",
+                json!({"kind": "rows", "size": 20}),
+                1,
+            ),
+            pair_output(
+                "correlation",
+                "price",
+                "volume",
+                "price_volume_corr",
+                json!({"kind": "duration", "micros": 60_000_000}),
+                1,
+            ),
+        ]));
+        let output_schema = spec.validate(&input_schema()).unwrap();
+        let derived = &output_schema.fields()[input_schema().fields().len()..];
+        let expected = [
+            ("price_min", DataType::Float64),
+            ("volume_max", DataType::Int64),
+            ("label_max", DataType::Utf8),
+            ("price_volume_cov", DataType::Float64),
+            ("price_volume_corr", DataType::Float64),
+        ];
+        assert_eq!(derived.len(), expected.len());
+        for (field, (name, data_type)) in derived.iter().zip(expected) {
+            assert_eq!(field.name(), name);
+            assert_eq!(field.data_type(), &data_type);
+            assert!(field.is_nullable());
+        }
+    }
+
+    #[test]
     fn zero_frame_size_is_rejected() {
         let mut spec = aggregate_spec(json!([aggregate_output("mean", "price", "m", 20)]));
         let RollingOutputSpec::Mean { frame, .. } = &mut spec.outputs[0] else {
             panic!("expected a mean output");
         };
-        let RollingFrameSpec::Rows { size } = frame;
+        let RollingFrameSpec::Rows { size } = frame else {
+            panic!("expected a rows frame");
+        };
         *size = 0;
         let error = spec.validate(&input_schema()).unwrap_err();
         assert!(
