@@ -163,6 +163,28 @@ def test_rank_zscore_lower_to_one_cross_section_node_with_the_frozen_shape() -> 
     )
 
 
+def test_nested_cross_section_materializes_before_final_rewrite() -> None:
+    quotes = _ordered()
+    program = _program(
+        [("adjusted_rank", cs.rank(quotes["x"], group=_group(quotes)) + 1.0)]
+    )
+
+    document = lower_program_document(program, Runtime(), "batch")
+
+    (node,) = _cross_section_nodes(document)
+    outputs = node["operator"]["spec"]["outputs"]  # type: ignore[index]
+    assert outputs[0]["kind"] == "rank"
+    assert outputs[0]["output"] == "signals__cf_cs_0"
+    final = next(
+        graph_node
+        for graph_node in document["graph"]["nodes"]  # type: ignore[index]
+        if graph_node["id"] == "signals"
+    )
+    assert (
+        '("signals__cf_cs_0" + 1.0) AS "adjusted_rank"' in final["operator"]["select"]  # type: ignore[index]
+    )
+
+
 def test_bucketed_grouping_writes_the_fixed_width_shape() -> None:
     quotes = _ordered()
     bucketed = event_time_bucket(
