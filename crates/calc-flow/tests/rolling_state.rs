@@ -1609,3 +1609,277 @@ async fn aggregate_inf_classification_continues_across_checkpoint_and_restore() 
     }
     assert_eq!(variances[4], Some(0.5));
 }
+
+// ---------------------------------------------------------------------------
+// SCE-08: duration windows, extrema, and pair state across recovery
+// ---------------------------------------------------------------------------
+
+fn duration_state_operator() -> RollingOperator {
+    RollingOperator::new(
+        "rolling",
+        input_schema(),
+        serde_json::from_value(serde_json::json!({
+            "configuration_version": 1,
+            "state_layout_version": 1,
+            "partition_by": ["symbol"],
+            "event_time": "ts",
+            "sequence_by": ["sequence"],
+            "outputs": [
+                {
+                    "kind": "mean",
+                    "primitive_version": 1,
+                    "input": "price",
+                    "output": "price_mean_10",
+                    "frame": {"kind": "duration", "micros": 10},
+                    "min_periods": 1
+                },
+                {
+                    "kind": "max",
+                    "primitive_version": 1,
+                    "input": "price",
+                    "output": "price_max_10",
+                    "frame": {"kind": "duration", "micros": 10},
+                    "min_periods": 1
+                },
+                {
+                    "kind": "covariance",
+                    "primitive_version": 1,
+                    "left": "price",
+                    "right": "volume",
+                    "output": "price_volume_cov_10",
+                    "frame": {"kind": "duration", "micros": 10},
+                    "min_periods": 2,
+                    "ddof": 1
+                }
+            ],
+            "allowed_lateness_micros": 0,
+            "late_policy": {"kind": "error", "scope": "envelope"},
+            "value_policy": "stateful_numeric_v1"
+        }))
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+type ObservedDurationRow = (i64, String, u64, Option<f64>, Option<f64>, Option<f64>);
+
+fn drain_duration_state(collector: &mut EdgeCollector, rows: &mut Vec<ObservedDurationRow>) {
+    for message in collector.drain("output") {
+        let batch = message.as_data().unwrap();
+        for record in batch.table_payload().unwrap().batches() {
+            let event_times = record
+                .column_by_name("ts")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
+            let symbols = record
+                .column_by_name("symbol")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let sequences = record
+                .column_by_name("sequence")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            let means = record
+                .column_by_name("price_mean_10")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let maxes = record
+                .column_by_name("price_max_10")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let covariances = record
+                .column_by_name("price_volume_cov_10")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            for index in 0..record.num_rows() {
+                rows.push((
+                    event_times.value(index),
+                    symbols.value(index).to_owned(),
+                    sequences.value(index),
+                    means.iter().nth(index).unwrap(),
+                    maxes.iter().nth(index).unwrap(),
+                    covariances.iter().nth(index).unwrap(),
+                ));
+            }
+        }
+    }
+}
+
+async fn drive_duration_state(
+    operator: &mut RollingOperator,
+    chunks: &[&[InputRow]],
+    job: &StreamJobContext,
+    collector: &mut EdgeCollector,
+    rows: &mut Vec<ObservedDurationRow>,
+) {
+    for chunk in chunks {
+        operator
+            .process_data("input", input_batch(chunk), &context(job, None), collector)
+            .await
+            .unwrap();
+        let closing = chunk.iter().map(|row| row.0).max().unwrap_or(0);
+        operator
+            .on_watermark(
+                EventTime::from_micros(closing),
+                &context(job, Some(closing)),
+                collector,
+            )
+            .await
+            .unwrap();
+        drain_duration_state(collector, rows);
+    }
+}
+
+fn duration_state_rows() -> Vec<InputRow> {
+    // Entity a: linear pairs so every 2-sample covariance is exact; entity b
+    // interleaves to exercise per-entity retention.
+    vec![
+        (10, "a", 1, Some(1.0), Some(2)),
+        (10, "b", 1, Some(5.0), Some(50)),
+        (15, "a", 2, Some(2.0), Some(4)),
+        (20, "a", 3, Some(3.0), Some(6)),
+        (20, "b", 2, Some(7.0), Some(70)),
+        (25, "a", 4, Some(4.0), Some(8)),
+        (30, "a", 5, Some(5.0), Some(10)),
+        (30, "b", 3, Some(9.0), Some(90)),
+    ]
+}
+
+#[tokio::test]
+async fn duration_extrema_and_pair_state_continue_across_checkpoint_and_restore() {
+    let job = job();
+    let rows = duration_state_rows();
+    let chunks: Vec<&[_]> = rows.chunks(3).collect();
+
+    let mut reference = duration_state_operator();
+    let mut reference_collector = EdgeCollector::new(reference.output_ports().to_vec());
+    let mut reference_rows = Vec::new();
+    drive_duration_state(
+        &mut reference,
+        &chunks,
+        &job,
+        &mut reference_collector,
+        &mut reference_rows,
+    )
+    .await;
+
+    let mut restarted = duration_state_operator();
+    let mut restarted_collector = EdgeCollector::new(restarted.output_ports().to_vec());
+    let mut restarted_rows = Vec::new();
+    drive_duration_state(
+        &mut restarted,
+        &chunks[..2],
+        &job,
+        &mut restarted_collector,
+        &mut restarted_rows,
+    )
+    .await;
+    let snapshot = restarted.checkpoint(Epoch::new(1).unwrap()).unwrap();
+
+    let mut recovered = duration_state_operator();
+    recovered.restore(&snapshot).unwrap();
+    let mut recovered_collector = EdgeCollector::new(recovered.output_ports().to_vec());
+    drive_duration_state(
+        &mut recovered,
+        &chunks[2..],
+        &job,
+        &mut recovered_collector,
+        &mut restarted_rows,
+    )
+    .await;
+
+    assert_eq!(reference_rows, restarted_rows);
+    assert_eq!(reference_rows.len(), rows.len());
+    // Entity a windows hold the current plus previous row: the last window
+    // is (20, 30] with samples (4, 8) and (5, 10), so cov = 2 * var = 1.
+    let last_a = reference_rows
+        .iter()
+        .rev()
+        .find(|row| row.1 == "a")
+        .unwrap();
+    assert_eq!(last_a.0, 30);
+    assert_eq!(last_a.3, Some(4.5));
+    assert_eq!(last_a.4, Some(5.0));
+    assert_eq!(last_a.5, Some(1.0));
+}
+
+#[tokio::test]
+async fn checkpoint_keeps_unfinalized_reorder_state_for_duration_windows() {
+    let job = job();
+    let mut operator = duration_state_operator();
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+
+    // Accepted but not yet final: watermark has not closed any row.
+    operator
+        .process_data(
+            "input",
+            input_batch(&duration_state_rows()),
+            &context(&job, None),
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert!(
+        !snapshot.segments.is_empty(),
+        "unfinalized reorder rows must persist in a state segment"
+    );
+
+    let mut recovered = duration_state_operator();
+    recovered.restore(&snapshot).unwrap();
+    let mut recovered_collector = EdgeCollector::new(recovered.output_ports().to_vec());
+    let mut rows = Vec::new();
+    drive_duration_state(
+        &mut recovered,
+        &[],
+        &job,
+        &mut recovered_collector,
+        &mut rows,
+    )
+    .await;
+    recovered
+        .on_watermark(
+            EventTime::from_micros(1_000),
+            &context(&job, Some(1_000)),
+            &mut recovered_collector,
+        )
+        .await
+        .unwrap();
+    drain_duration_state(&mut recovered_collector, &mut rows);
+
+    // Recovery without any new input emits exactly the buffered rows with
+    // the same values an uninterrupted run produces at that watermark.
+    let mut reference = duration_state_operator();
+    let mut reference_collector = EdgeCollector::new(reference.output_ports().to_vec());
+    let mut reference_rows = Vec::new();
+    drive_duration_state(
+        &mut reference,
+        &[&duration_state_rows()],
+        &job,
+        &mut reference_collector,
+        &mut reference_rows,
+    )
+    .await;
+    reference
+        .on_watermark(
+            EventTime::from_micros(1_000),
+            &context(&job, Some(1_000)),
+            &mut reference_collector,
+        )
+        .await
+        .unwrap();
+    drain_duration_state(&mut reference_collector, &mut reference_rows);
+    assert_eq!(rows, reference_rows);
+}

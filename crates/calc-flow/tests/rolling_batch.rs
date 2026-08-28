@@ -725,3 +725,467 @@ async fn batch_emits_aggregate_columns_with_frozen_null_nan_min_period_rules() {
         vec![None, None, Some(4.0), Some(4.0), Some(4.0)]
     );
 }
+
+// ---------------------------------------------------------------------------
+// SCE-08: duration frames, extrema, covariance, and correlation
+// ---------------------------------------------------------------------------
+
+fn duration_spec() -> RollingSpec {
+    serde_json::from_value(serde_json::json!({
+        "configuration_version": 1,
+        "state_layout_version": 1,
+        "partition_by": ["symbol"],
+        "event_time": "ts",
+        "sequence_by": ["sequence"],
+        "outputs": [
+            {
+                "kind": "mean",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "price_mean_10s",
+                "frame": {"kind": "duration", "micros": 10_000_000},
+                "min_periods": 1
+            },
+            {
+                "kind": "max",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "price_max_10s",
+                "frame": {"kind": "duration", "micros": 10_000_000},
+                "min_periods": 1
+            }
+        ],
+        "allowed_lateness_micros": 0,
+        "late_policy": {"kind": "error", "scope": "envelope"},
+        "value_policy": "stateful_numeric_v1"
+    }))
+    .unwrap()
+}
+
+async fn execute_duration(input: Batch, spec: RollingSpec) -> calc_flow::Result<Batch> {
+    let plan = PipelineBuilder::new("rolling duration batch")
+        .unwrap()
+        .add_node(
+            "rolling",
+            RollingOperator::new("rolling", input_schema(), spec).unwrap(),
+        )
+        .unwrap()
+        .compile_batch(&UdfRegistry::new().snapshot())
+        .unwrap();
+    let outputs = plan
+        .execute(
+            BTreeMap::from([("input".into(), input)]),
+            ExecutionOptions::default(),
+        )
+        .await?;
+    Ok(outputs.outputs["output"].clone())
+}
+
+#[tokio::test]
+async fn batch_duration_windows_evict_on_the_open_lower_boundary() {
+    // One entity, event times 0s/5s/10s/15s/20s, frame (t - 10s, t].
+    let output = execute_duration(
+        input_batch(
+            vec![0, 5_000_000, 10_000_000, 15_000_000, 20_000_000],
+            vec!["a"; 5],
+            vec![1, 2, 3, 4, 5],
+            vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0)],
+            vec![Some(8); 5],
+        ),
+        duration_spec(),
+    )
+    .await
+    .unwrap();
+    let record = output.table_payload().unwrap().batches()[0].clone();
+    assert_eq!(record.num_rows(), 5);
+    let floats = |name: &str| -> Vec<Option<f64>> {
+        record
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .iter()
+            .collect()
+    };
+    // The row at exactly t - 10s is excluded (open lower, closed upper).
+    assert_eq!(
+        floats("price_mean_10s"),
+        vec![Some(1.0), Some(1.5), Some(2.5), Some(3.5), Some(4.5)]
+    );
+    assert_eq!(
+        floats("price_max_10s"),
+        vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0)]
+    );
+}
+
+#[tokio::test]
+async fn batch_duration_windows_apply_the_equal_time_sequence_rule() {
+    // Two rows share event time 5s; the canonical order places the lower
+    // sequence first, so the earlier-sequence window holds only itself.
+    let output = execute_duration(
+        input_batch(
+            vec![5_000_000, 5_000_000],
+            vec!["a"; 2],
+            vec![2, 1],
+            vec![Some(7.0), Some(9.0)],
+            vec![Some(8); 2],
+        ),
+        duration_spec(),
+    )
+    .await
+    .unwrap();
+    let record = output.table_payload().unwrap().batches()[0].clone();
+    let floats = |name: &str| -> Vec<Option<f64>> {
+        record
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .iter()
+            .collect()
+    };
+    assert_eq!(floats("price_max_10s"), vec![Some(9.0), Some(9.0)]);
+    assert_eq!(floats("price_mean_10s"), vec![Some(9.0), Some(8.0)]);
+}
+
+fn extrema_spec() -> RollingSpec {
+    serde_json::from_value(serde_json::json!({
+        "configuration_version": 1,
+        "state_layout_version": 1,
+        "partition_by": ["symbol"],
+        "event_time": "ts",
+        "sequence_by": ["sequence"],
+        "outputs": [
+            {
+                "kind": "min",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "price_min_3",
+                "frame": {"kind": "rows", "size": 3},
+                "min_periods": 1
+            },
+            {
+                "kind": "max",
+                "primitive_version": 1,
+                "input": "volume",
+                "output": "volume_max_3",
+                "frame": {"kind": "rows", "size": 3},
+                "min_periods": 2
+            }
+        ],
+        "allowed_lateness_micros": 0,
+        "late_policy": {"kind": "error", "scope": "envelope"},
+        "value_policy": "stateful_numeric_v1"
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn batch_extrema_preserve_input_type_and_exclude_null_nan_samples() {
+    let output = execute_duration(
+        input_batch(
+            vec![10, 10, 11, 12, 13],
+            vec!["a", "b", "a", "a", "a"],
+            vec![1, 1, 2, 3, 4],
+            vec![Some(1.0), Some(10.0), None, Some(3.0), Some(f64::NAN)],
+            vec![Some(8), Some(80), Some(16), None, Some(32)],
+        ),
+        extrema_spec(),
+    )
+    .await
+    .unwrap();
+    let record = output.table_payload().unwrap().batches()[0].clone();
+    let price_min = record
+        .column_by_name("price_min_3")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap()
+        .iter()
+        .collect::<Vec<_>>();
+    let volume_max = record
+        .column_by_name("volume_max_3")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap()
+        .iter()
+        .collect::<Vec<_>>();
+    // Entity a prices in order: 1.0, null, 3.0, NaN; volumes: 8, 16, null, 32.
+    assert_eq!(
+        price_min,
+        vec![Some(1.0), Some(10.0), Some(1.0), Some(1.0), Some(3.0)]
+    );
+    // volume_max needs two valid samples in the row frame; entity a
+    // volumes in order are 8, 16, null, 32.
+    assert_eq!(volume_max, vec![None, None, Some(16), Some(16), Some(32)]);
+}
+
+fn pair_spec() -> RollingSpec {
+    serde_json::from_value(serde_json::json!({
+        "configuration_version": 1,
+        "state_layout_version": 1,
+        "partition_by": ["symbol"],
+        "event_time": "ts",
+        "sequence_by": ["sequence"],
+        "outputs": [
+            {
+                "kind": "covariance",
+                "primitive_version": 1,
+                "left": "price",
+                "right": "volume",
+                "output": "cov_4",
+                "frame": {"kind": "rows", "size": 4},
+                "min_periods": 2,
+                "ddof": 1
+            },
+            {
+                "kind": "correlation",
+                "primitive_version": 1,
+                "left": "price",
+                "right": "volume",
+                "output": "corr_4",
+                "frame": {"kind": "rows", "size": 4},
+                "min_periods": 2,
+                "ddof": 1
+            }
+        ],
+        "allowed_lateness_micros": 0,
+        "late_policy": {"kind": "error", "scope": "envelope"},
+        "value_policy": "stateful_numeric_v1"
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn batch_covariance_and_correlation_match_the_exact_reference() {
+    let output = execute_duration(
+        input_batch(
+            vec![10, 11, 12, 13, 14],
+            vec!["a"; 5],
+            vec![1, 2, 3, 4, 5],
+            vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0)],
+            vec![Some(2), Some(4), Some(6), Some(8), Some(10)],
+        ),
+        pair_spec(),
+    )
+    .await
+    .unwrap();
+    let record = output.table_payload().unwrap().batches()[0].clone();
+    let floats = |name: &str| -> Vec<Option<f64>> {
+        record
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .iter()
+            .collect()
+    };
+    // Perfectly linear pair: covariance tracks the 4-row window, correlation 1.
+    assert_eq!(
+        floats("cov_4"),
+        vec![
+            None,
+            Some(1.0),
+            Some(2.0),
+            Some(10.0 / 3.0),
+            Some(10.0 / 3.0)
+        ]
+    );
+    for value in floats("corr_4").into_iter().flatten() {
+        assert!((value - 1.0).abs() < 1e-10, "corr {value}");
+    }
+}
+
+#[tokio::test]
+async fn batch_pair_outputs_count_only_pairwise_valid_positions() {
+    let mut spec = pair_spec();
+    for output in &mut spec.outputs {
+        if let calc_flow::RollingOutputSpec::Covariance { frame, .. }
+        | calc_flow::RollingOutputSpec::Correlation { frame, .. } = output
+        {
+            *frame = calc_flow::RollingFrameSpec::Rows { size: 5 };
+        }
+    }
+    let output = execute_duration(
+        input_batch(
+            vec![10, 11, 12, 13, 14],
+            vec!["a"; 5],
+            vec![1, 2, 3, 4, 5],
+            vec![Some(1.0), None, Some(3.0), Some(f64::NAN), Some(5.0)],
+            vec![Some(10), Some(8), None, Some(4), Some(2)],
+        ),
+        spec,
+    )
+    .await
+    .unwrap();
+    let record = output.table_payload().unwrap().batches()[0].clone();
+    let floats = |name: &str| -> Vec<Option<f64>> {
+        record
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .iter()
+            .collect()
+    };
+    // Only rows 0 and 4 hold a pairwise-valid pair in the 5-row frame:
+    // x = [1, 5], y = [10, 2] gives covariance -16 and correlation -1
+    // (within the D13 pair tolerance for the West readout).
+    assert_eq!(floats("cov_4"), vec![None, None, None, None, Some(-16.0)]);
+    for correlation in floats("corr_4").into_iter().flatten() {
+        assert!((correlation + 1.0).abs() < 1e-10, "corr {correlation}");
+    }
+}
+
+#[tokio::test]
+async fn batch_correlation_is_null_for_zero_variance_and_nan_for_infinity() {
+    let spec = serde_json::from_value(serde_json::json!({
+        "configuration_version": 1,
+        "state_layout_version": 1,
+        "partition_by": ["symbol"],
+        "event_time": "ts",
+        "sequence_by": ["sequence"],
+        "outputs": [
+            {
+                "kind": "covariance",
+                "primitive_version": 1,
+                "left": "price",
+                "right": "volume",
+                "output": "cov",
+                "frame": {"kind": "rows", "size": 3},
+                "min_periods": 1,
+                "ddof": 0
+            },
+            {
+                "kind": "correlation",
+                "primitive_version": 1,
+                "left": "price",
+                "right": "volume",
+                "output": "corr",
+                "frame": {"kind": "rows", "size": 3},
+                "min_periods": 1,
+                "ddof": 0
+            }
+        ],
+        "allowed_lateness_micros": 0,
+        "late_policy": {"kind": "error", "scope": "envelope"},
+        "value_policy": "stateful_numeric_v1"
+    }))
+    .unwrap();
+    // Row 0: one pair, ddof 0 — covariance 0, correlation null (zero
+    // variance). Rows 1-2: constant volume keeps correlation null and
+    // covariance 0. Rows 3-4 hold +inf on the left: any infinity in either
+    // operand makes the pair statistic NaN, never null.
+    let output = execute_duration(
+        input_batch(
+            vec![10, 11, 12, 13, 14],
+            vec!["a"; 5],
+            vec![1, 2, 3, 4, 5],
+            vec![
+                Some(1.0),
+                Some(2.0),
+                Some(3.0),
+                Some(f64::INFINITY),
+                Some(5.0),
+            ],
+            vec![Some(7); 5],
+        ),
+        spec,
+    )
+    .await
+    .unwrap();
+    let record = output.table_payload().unwrap().batches()[0].clone();
+    let floats = |name: &str| -> Vec<Option<f64>> {
+        record
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .iter()
+            .collect()
+    };
+    let cov = floats("cov");
+    let corr = floats("corr");
+    assert_eq!(cov[0], Some(0.0));
+    assert_eq!(corr[0], None);
+    assert_eq!(cov[1], Some(0.0));
+    assert_eq!(corr[1], None);
+    assert_eq!(corr[2], None);
+    assert!(cov[3].unwrap().is_nan(), "infinity covariance {cov:?}");
+    assert!(corr[3].unwrap().is_nan(), "infinity correlation {corr:?}");
+    assert!(cov[4].unwrap().is_nan(), "infinity covariance {cov:?}");
+    assert!(corr[4].unwrap().is_nan(), "infinity correlation {corr:?}");
+}
+
+#[tokio::test]
+async fn batch_mixed_lag_and_duration_outputs_share_one_operator() {
+    let spec = serde_json::from_value(serde_json::json!({
+        "configuration_version": 1,
+        "state_layout_version": 1,
+        "partition_by": ["symbol"],
+        "event_time": "ts",
+        "sequence_by": ["sequence"],
+        "outputs": [
+            {
+                "kind": "lag",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "price_lag_2",
+                "periods": 2
+            },
+            {
+                "kind": "mean",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "price_mean_10s",
+                "frame": {"kind": "duration", "micros": 10_000_000},
+                "min_periods": 1
+            }
+        ],
+        "allowed_lateness_micros": 0,
+        "late_policy": {"kind": "error", "scope": "envelope"},
+        "value_policy": "stateful_numeric_v1"
+    }))
+    .unwrap();
+    let output = execute_duration(
+        input_batch(
+            vec![0, 5_000_000, 10_000_000, 15_000_000, 20_000_000],
+            vec!["a"; 5],
+            vec![1, 2, 3, 4, 5],
+            vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0)],
+            vec![Some(8); 5],
+        ),
+        spec,
+    )
+    .await
+    .unwrap();
+    let record = output.table_payload().unwrap().batches()[0].clone();
+    let lag = record
+        .column_by_name("price_lag_2")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap()
+        .iter()
+        .collect::<Vec<_>>();
+    let mean = record
+        .column_by_name("price_mean_10s")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap()
+        .iter()
+        .collect::<Vec<_>>();
+    // Duration eviction must not shorten the row-based lag history.
+    assert_eq!(lag, vec![None, None, Some(1.0), Some(2.0), Some(3.0)]);
+    assert_eq!(
+        mean,
+        vec![Some(1.0), Some(1.5), Some(2.5), Some(3.5), Some(4.5)]
+    );
+}
