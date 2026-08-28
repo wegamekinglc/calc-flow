@@ -1256,6 +1256,25 @@ def _program_needs_cross_section(program: Program, /) -> bool:
 
 # The cross-section gate mirrors the rolling gate over the frozen
 # group-final stream lifecycle facts.
+def _cross_section_checkpoint_capability(operator: object, /) -> bool:
+    return (
+        operator.stateful
+        and operator.checkpoint_support == "checkpointed_stateful"
+        and isinstance(operator.state_version, int)
+        and operator.state_version > 0
+    )
+
+
+def _cross_section_stream_capability(operator: object, /) -> bool:
+    return (
+        operator.finality != "unproven"
+        and operator.microbatch_invariant
+        and _cross_section_checkpoint_capability(operator)
+        and operator.deterministic
+        and operator.replay_safe
+    )
+
+
 def _check_cross_section_capability(
     program: Program,
     capabilities: object,
@@ -1272,16 +1291,7 @@ def _check_cross_section_capability(
                 f"the cross-section operator does not support {mode} mode in"
                 " the selected capability snapshot",
             )
-        if mode == "stream" and (
-            operator.finality == "unproven"
-            or not operator.stateful
-            or not operator.microbatch_invariant
-            or operator.checkpoint_support != "checkpointed_stateful"
-            or not isinstance(operator.state_version, int)
-            or operator.state_version <= 0
-            or not operator.deterministic
-            or not operator.replay_safe
-        ):
+        if mode == "stream" and not _cross_section_stream_capability(operator):
             errors.raise_compile(
                 program.name,
                 errors.CAPABILITY_MISMATCH,

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import dataclasses
+
 import pyarrow as pa
 import pytest
 
 from calc_flow import Batch, Runtime
+from calc_flow.capabilities import RuntimeCapabilities
 from calc_flow.errors import CompileError
 from calc_flow.symbolic import (
     FeatureSet,
@@ -53,6 +56,24 @@ def _cross_section_nodes(document: dict[str, object]) -> list[dict[str, object]]
         for node in graph["nodes"]  # type: ignore[index]
         if node["operator"]["kind"] == "cross_section"  # type: ignore[index]
     ]
+
+
+def _runtime_with_cross_section_capability(
+    *, drop: bool = False, **changes: object
+) -> Runtime:
+    class CapabilityRuntime(Runtime):
+        def capabilities(self) -> RuntimeCapabilities:
+            base = super().capabilities()
+            operators = tuple(
+                dataclasses.replace(operator, **changes)
+                if operator.kind == "cross_section" and not drop
+                else operator
+                for operator in base.operators
+                if operator.kind != "cross_section" or not drop
+            )
+            return dataclasses.replace(base, operators=operators)
+
+    return CapabilityRuntime()
 
 
 def test_rank_zscore_lower_to_one_cross_section_node_with_the_frozen_shape() -> None:
@@ -307,6 +328,45 @@ def test_mixed_bucket_widths_with_equal_partitions_are_rejected() -> None:
     with pytest.raises(CompileError) as error:
         lower_program_document(program, Runtime(), "batch")
     assert "one grouping declaration" in str(error.value)
+
+
+def test_cross_section_capability_requires_the_operator_and_selected_mode() -> None:
+    quotes = _ordered()
+    program = _program([("rank", cs.rank(quotes["x"], group=_group(quotes)))])
+
+    with pytest.raises(CompileError, match="does not offer the cross-section"):
+        lower_program_document(
+            program, _runtime_with_cross_section_capability(drop=True), "stream"
+        )
+    with pytest.raises(CompileError, match="does not support stream mode"):
+        lower_program_document(
+            program,
+            _runtime_with_cross_section_capability(modes=("batch",)),
+            "stream",
+        )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"finality": "unproven"},
+        {"stateful": False},
+        {"microbatch_invariant": False},
+        {"checkpoint_support": "unproven", "state_version": None},
+        {"deterministic": False},
+        {"replay_safe": False},
+    ],
+)
+def test_cross_section_stream_capability_requires_every_lifecycle_fact(
+    changes: dict[str, object],
+) -> None:
+    quotes = _ordered()
+    program = _program([("rank", cs.rank(quotes["x"], group=_group(quotes)))])
+
+    with pytest.raises(CompileError, match="does not prove stream lifecycle facts"):
+        lower_program_document(
+            program, _runtime_with_cross_section_capability(**changes), "stream"
+        )
 
 
 def test_cross_section_lowering_compiles_and_executes_in_batch_mode() -> None:

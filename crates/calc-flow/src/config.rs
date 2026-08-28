@@ -2047,6 +2047,31 @@ fn validate_rolling_operator(
 
 // Cross-section validation mirrors rolling construction while accumulating
 // stable issue paths.
+fn cross_section_input_valid(node: &NodeSpec) -> bool {
+    matches!(
+        node.input_ports.as_slice(),
+        [input]
+            if input.name == "input"
+                && input.kind == BatchKind::Table
+                && input.required
+                && !input.schema.is_empty()
+    )
+}
+
+fn validate_cross_section_build(
+    node: &NodeSpec,
+    spec: &CrossSectionSpec,
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if let Ok(input) = port_from_spec(&node.input_ports[0])
+        && let Some(schema) = input.schema().cloned()
+        && let Err(error) = CrossSectionOperator::new(&node.id, schema, spec.clone())
+    {
+        issues.push(issue(base, "invalid_operator", error.to_string()));
+    }
+}
+
 fn validate_cross_section_operator(
     node: &NodeSpec,
     index: usize,
@@ -2054,26 +2079,15 @@ fn validate_cross_section_operator(
     base: &str,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    let valid_input = matches!(
-        node.input_ports.as_slice(),
-        [input]
-            if input.name == "input"
-                && input.kind == BatchKind::Table
-                && input.required
-                && !input.schema.is_empty()
-    );
-    if !valid_input {
+    if !cross_section_input_valid(node) {
         issues.push(issue(
             format!("graph.nodes[{index}].input_ports"),
             "invalid_ports",
             "cross-section requires one required table input named `input` with an exact schema",
         ));
-    } else if let Ok(input) = port_from_spec(&node.input_ports[0])
-        && let Some(schema) = input.schema().cloned()
-        && let Err(error) = CrossSectionOperator::new(&node.id, schema, spec.clone())
-    {
-        issues.push(issue(base, "invalid_operator", error.to_string()));
+        return;
     }
+    validate_cross_section_build(node, spec, base, issues);
 }
 
 fn validate_stream_join_operator(

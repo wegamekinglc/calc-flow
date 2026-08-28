@@ -365,6 +365,33 @@ impl OperatorMetadata for CrossSectionOperator {
     }
 }
 
+impl CrossSectionOperator {
+    fn batch_groups(
+        &self,
+        inputs: &BTreeMap<String, Batch>,
+        context: &BatchOperatorContext<'_>,
+    ) -> Result<Groups> {
+        let input = required_input(inputs, "input", &self.name, None)?;
+        self.input_ports[0].validate(input, &format!("{}.input", self.name))?;
+        context.run.check_cancelled()?;
+        let rows = read_rows(input.table_payload()?, &self.compiled, &self.name)?;
+        self.assemble(rows, &self.name)
+    }
+
+    fn grouped_batch(&self, groups: &Groups) -> Result<Batch> {
+        let record = build_grouped_record(
+            groups,
+            &self.compiled,
+            self.output_ports[0]
+                .schema()
+                .expect("cross-section output always has an exact schema"),
+            &self.name,
+        )?;
+        let metadata = BatchMetadata::new(&self.name, 0, BTreeMap::new())?;
+        Batch::table(vec![record], metadata)
+    }
+}
+
 #[async_trait]
 impl BatchOperator for CrossSectionOperator {
     /// Evaluates every group as complete at end-of-input without late-row
@@ -375,21 +402,8 @@ impl BatchOperator for CrossSectionOperator {
         inputs: &BTreeMap<String, Batch>,
         context: &BatchOperatorContext<'_>,
     ) -> Result<BTreeMap<String, Batch>> {
-        let input = required_input(inputs, "input", &self.name, None)?;
-        self.input_ports[0].validate(input, &format!("{}.input", self.name))?;
-        context.run.check_cancelled()?;
-        let rows = read_rows(input.table_payload()?, &self.compiled, &self.name)?;
-        let groups = self.assemble(rows, &self.name)?;
-        let record = build_grouped_record(
-            &groups,
-            &self.compiled,
-            self.output_ports[0]
-                .schema()
-                .expect("cross-section output always has an exact schema"),
-            &self.name,
-        )?;
-        let metadata = BatchMetadata::new(&self.name, 0, BTreeMap::new())?;
-        let batch = Batch::table(vec![record], metadata)?;
+        let groups = self.batch_groups(inputs, context)?;
+        let batch = self.grouped_batch(&groups)?;
         Ok(BTreeMap::from([("output".into(), batch)]))
     }
 }
@@ -449,6 +463,66 @@ impl PreparedLateMetrics {
     }
 }
 
+impl CrossSectionOperator {
+    fn validate_stream_data(
+        &self,
+        ingress: &str,
+        batch: &Batch,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        if ingress != "input" {
+            return Err(operator_error(
+                context.operator_id(),
+                &format!("unknown ingress {ingress:?}; expected \"input\""),
+            ));
+        }
+        self.input_ports[0].validate(batch, &format!("{}.input", self.name))?;
+        self.observe_context(context)?;
+        if self.state.ended {
+            return Err(operator_error(
+                context.operator_id(),
+                "received data after end-of-input",
+            ));
+        }
+        Ok(())
+    }
+
+    fn prepare_stream_data(
+        &self,
+        ingress: &str,
+        batch: &Batch,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<(AcceptedRows, LateMetricDelta, LateMetricDelta)> {
+        self.validate_stream_data(ingress, batch, context)?;
+        let watermark = context.input_watermark();
+        let rows = read_rows(batch.table_payload()?, &self.compiled, &self.name)?;
+        let (accepted, metrics) = self.classify_envelope(rows, watermark, context.operator_id())?;
+        let next_metrics = accumulate_late_metrics(self.state.metrics, metrics)?;
+        Ok((accepted, metrics, next_metrics))
+    }
+
+    fn install_stream_data(
+        &mut self,
+        accepted: AcceptedRows,
+        metrics: LateMetricDelta,
+        next_metrics: LateMetricDelta,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        for (group, identity, row) in accepted {
+            self.state
+                .groups
+                .entry(group.clone())
+                .or_default()
+                .insert(identity.clone(), row);
+            self.state.identity_groups.insert(identity, group);
+        }
+        context.record_window_metrics(metrics.late_rows, metrics.max_lateness_micros, 0)?;
+        self.state.metrics = next_metrics;
+        self.install_context_identity(context);
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl StreamOperator for CrossSectionOperator {
     /// Classifies and buffers one input envelope atomically (SCE-00 D7): the
@@ -463,36 +537,9 @@ impl StreamOperator for CrossSectionOperator {
         context: &StreamOperatorContext<'_>,
         _output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        if ingress != "input" {
-            return Err(operator_error(
-                context.operator_id(),
-                &format!("unknown ingress {ingress:?}; expected \"input\""),
-            ));
-        }
-        self.input_ports[0].validate(&batch, &format!("{}.input", self.name))?;
-        self.observe_context(context)?;
-        if self.state.ended {
-            return Err(operator_error(
-                context.operator_id(),
-                "received data after end-of-input",
-            ));
-        }
-        let watermark = context.input_watermark();
-        let rows = read_rows(batch.table_payload()?, &self.compiled, &self.name)?;
-        let (accepted, metrics) = self.classify_envelope(rows, watermark, context.operator_id())?;
-        let next_metrics = accumulate_late_metrics(self.state.metrics, metrics)?;
-        for (group, identity, row) in accepted {
-            self.state
-                .groups
-                .entry(group.clone())
-                .or_default()
-                .insert(identity.clone(), row);
-            self.state.identity_groups.insert(identity, group);
-        }
-        context.record_window_metrics(metrics.late_rows, metrics.max_lateness_micros, 0)?;
-        self.state.metrics = next_metrics;
-        self.install_context_identity(context);
-        Ok(())
+        let (accepted, metrics, next_metrics) =
+            self.prepare_stream_data(ingress, &batch, context)?;
+        self.install_stream_data(accepted, metrics, next_metrics, context)
     }
 
     /// Emits every newly closed group once in canonical order before the
@@ -970,6 +1017,47 @@ fn state_schema(
 
 // State serialization writes deterministic group rows column by column with
 // checked conversions for every value class.
+fn state_column_values(groups: &Groups, width: usize) -> (Vec<u8>, Vec<Vec<ScalarValue>>) {
+    let row_count: usize = groups.values().map(BTreeMap::len).sum();
+    let mut kinds = Vec::with_capacity(row_count);
+    let mut columns = vec![Vec::with_capacity(row_count); width];
+    for rows in groups.values() {
+        for row in rows.values() {
+            kinds.push(0_u8);
+            for (index, column) in columns.iter_mut().enumerate() {
+                column.push(row.values[index].clone());
+            }
+        }
+    }
+    (kinds, columns)
+}
+
+fn state_arrays(kinds: Vec<u8>, columns: Vec<Vec<ScalarValue>>) -> Result<Vec<ArrayRef>> {
+    let mut arrays: Vec<ArrayRef> = vec![Arc::new(UInt8Array::from(kinds))];
+    for column in columns {
+        arrays.push(
+            ScalarValue::iter_to_array(column.into_iter()).map_err(|error| {
+                state_format(format!("cross-section state array failed: {error}"))
+            })?,
+        );
+    }
+    Ok(arrays)
+}
+
+fn write_state_record(record: &RecordBatch, schema: &Schema) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut writer = FileWriter::try_new(&mut bytes, schema)
+        .map_err(|error| state_format(format!("cross-section state IPC header failed: {error}")))?;
+    writer
+        .write(record)
+        .map_err(|error| state_format(format!("cross-section state IPC write failed: {error}")))?;
+    writer
+        .finish()
+        .map_err(|error| state_format(format!("cross-section state IPC finish failed: {error}")))?;
+    drop(writer);
+    Ok(bytes)
+}
+
 fn encode_state_segment(
     groups: &Groups,
     input_schema: &Schema,
@@ -978,44 +1066,12 @@ fn encode_state_segment(
     operator_id: &str,
 ) -> Result<Vec<u8>> {
     let width = input_schema.fields().len();
-    let row_count: usize = groups.values().map(BTreeMap::len).sum();
-    let mut kinds = Vec::with_capacity(row_count);
-    let mut columns: Vec<Vec<Option<ScalarValue>>> = vec![Vec::with_capacity(row_count); width];
-    for rows in groups.values() {
-        for row in rows.values() {
-            kinds.push(0_u8);
-            for (index, column) in columns.iter_mut().enumerate() {
-                column.push(Some(row.values[index].clone()));
-            }
-        }
-    }
+    let (kinds, columns) = state_column_values(groups, width);
     let schema = state_schema(input_schema, compiled, pipeline_fingerprint, operator_id);
-    let mut arrays: Vec<ArrayRef> = vec![Arc::new(UInt8Array::from(kinds))];
-    for column in columns {
-        arrays.push(
-            ScalarValue::iter_to_array(
-                column
-                    .into_iter()
-                    .map(|value| value.expect("cross-section state rows carry full typed values")),
-            )
-            .map_err(|error| state_format(format!("cross-section state array failed: {error}")))?,
-        );
-    }
+    let arrays = state_arrays(kinds, columns)?;
     let record = RecordBatch::try_new(Arc::new(schema.clone()), arrays)
         .map_err(|error| state_format(format!("cross-section state batch is invalid: {error}")))?;
-    let mut bytes = Vec::new();
-    {
-        let mut writer = FileWriter::try_new(&mut bytes, &schema).map_err(|error| {
-            state_format(format!("cross-section state IPC header failed: {error}"))
-        })?;
-        writer.write(&record).map_err(|error| {
-            state_format(format!("cross-section state IPC write failed: {error}"))
-        })?;
-        writer.finish().map_err(|error| {
-            state_format(format!("cross-section state IPC finish failed: {error}"))
-        })?;
-    }
-    Ok(bytes)
+    write_state_record(&record, &schema)
 }
 
 // State decode intentionally validates header metadata, shape, deterministic
@@ -1803,6 +1859,124 @@ enum OrderSlot {
     Value(f64),
 }
 
+fn compare_order_slots(left: OrderSlot, right: OrderSlot, direction: SortDirection) -> Ordering {
+    let ordering = match (left, right) {
+        (OrderSlot::Value(left_value), OrderSlot::Value(right_value)) => {
+            left_value.total_cmp(&right_value)
+        }
+        (OrderSlot::Null, OrderSlot::Null) => Ordering::Equal,
+        (OrderSlot::Null, OrderSlot::Value(_)) | (OrderSlot::Value(_), OrderSlot::Null) => {
+            Ordering::Equal
+        }
+    };
+    match direction {
+        SortDirection::Ascending => ordering,
+        SortDirection::Descending => ordering.reverse(),
+    }
+}
+
+fn value_order_slots(samples: &[Sample], direction: SortDirection) -> Vec<(OrderSlot, usize)> {
+    let mut slots: Vec<(OrderSlot, usize)> = samples
+        .iter()
+        .enumerate()
+        .filter_map(|(index, sample)| match sample {
+            Sample::Valid(value) => Some((OrderSlot::Value(*value), index)),
+            Sample::Null | Sample::Nan => None,
+        })
+        .collect();
+    slots.sort_by(|left, right| compare_order_slots(left.0, right.0, direction));
+    slots
+}
+
+fn null_order_slots(samples: &[Sample]) -> Vec<(OrderSlot, usize)> {
+    samples
+        .iter()
+        .enumerate()
+        .filter(|(_, sample)| matches!(sample, Sample::Null))
+        .map(|(index, _)| (OrderSlot::Null, index))
+        .collect()
+}
+
+fn ordered_slots(
+    samples: &[Sample],
+    direction: SortDirection,
+    null_placement: NullPlacement,
+) -> Vec<(OrderSlot, usize)> {
+    let mut values = value_order_slots(samples, direction);
+    match null_placement {
+        NullPlacement::Exclude => values,
+        NullPlacement::First => {
+            let mut nulls = null_order_slots(samples);
+            nulls.extend(values);
+            nulls
+        }
+        NullPlacement::Last => {
+            values.extend(null_order_slots(samples));
+            values
+        }
+    }
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the frozen rank/percentile output type is float64"
+)]
+fn rank_order_slots(
+    slots: &[(OrderSlot, usize)],
+    sample_count: usize,
+    tie_method: RankTieMethod,
+) -> Vec<Option<f64>> {
+    let mut ranks = vec![None; sample_count];
+    let mut position = 0_usize;
+    while position < slots.len() {
+        let mut end = position;
+        while end < slots.len() && slots[end].0 == slots[position].0 {
+            end += 1;
+        }
+        let first_position = f64::from(u32::try_from(position + 1).unwrap_or(u32::MAX));
+        let last_position = f64::from(u32::try_from(end).unwrap_or(u32::MAX));
+        let rank = match tie_method {
+            RankTieMethod::Average => first_position.midpoint(last_position),
+            RankTieMethod::Min => first_position,
+            RankTieMethod::Max => last_position,
+        };
+        for slot in &slots[position..end] {
+            ranks[slot.1] = Some(rank);
+        }
+        position = end;
+    }
+    ranks
+}
+
+fn render_order_statistics(
+    samples: &[Sample],
+    ranks: &[Option<f64>],
+    null_placement: NullPlacement,
+    min_samples: u64,
+    ordered_count: usize,
+    percentile: bool,
+) -> Vec<Option<f64>> {
+    let valid_count = samples
+        .iter()
+        .filter(|sample| matches!(sample, Sample::Valid(_)))
+        .count();
+    samples
+        .iter()
+        .enumerate()
+        .map(|(index, sample)| match sample {
+            Sample::Nan => Some(f64::NAN),
+            Sample::Null if null_placement == NullPlacement::Exclude => None,
+            _ => apply_statistic(
+                ranks[index],
+                valid_count,
+                min_samples,
+                ordered_count,
+                percentile,
+            ),
+        })
+        .collect()
+}
+
 /// Computes one rank or percentile column: the ordering places valid values
 /// by direction and included nulls as one tied class at the requested end of
 /// the final sort order; excluded nulls and unmet samples produce null and
@@ -1819,87 +1993,17 @@ fn order_statistic_column(
     min_samples: u64,
     percentile: bool,
 ) -> Vec<Option<f64>> {
-    let valid_count = samples
-        .iter()
-        .filter(|sample| matches!(sample, Sample::Valid(_)))
-        .count();
-    let mut slots: Vec<(OrderSlot, usize)> = samples
-        .iter()
-        .enumerate()
-        .filter_map(|(index, sample)| match sample {
-            Sample::Valid(value) => Some((OrderSlot::Value(*value), index)),
-            Sample::Null | Sample::Nan => None,
-        })
-        .collect();
-    slots.sort_by(|left, right| {
-        let ordering = match (left.0, right.0) {
-            (OrderSlot::Value(left_value), OrderSlot::Value(right_value)) => {
-                left_value.total_cmp(&right_value)
-            }
-            (OrderSlot::Null, OrderSlot::Null) => Ordering::Equal,
-            (OrderSlot::Null, OrderSlot::Value(_)) | (OrderSlot::Value(_), OrderSlot::Null) => {
-                Ordering::Equal
-            }
-        };
-        match direction {
-            SortDirection::Ascending => ordering,
-            SortDirection::Descending => ordering.reverse(),
-        }
-    });
-    if null_placement != NullPlacement::Exclude {
-        let nulls: Vec<(OrderSlot, usize)> = samples
-            .iter()
-            .enumerate()
-            .filter(|(_, sample)| matches!(sample, Sample::Null))
-            .map(|(index, _)| (OrderSlot::Null, index))
-            .collect();
-        if null_placement == NullPlacement::First {
-            let mut ordering = nulls;
-            ordering.extend(slots);
-            slots = ordering;
-        } else {
-            slots.extend(nulls);
-        }
-    }
-    // Positions are one-based over the ordered slots; every run of equal
-    // slots is one tied class.
+    let slots = ordered_slots(samples, direction, null_placement);
     let ordered_count = slots.len();
-    let mut ranks = vec![None; samples.len()];
-    let mut position = 0_usize;
-    while position < slots.len() {
-        let mut end = position;
-        while end < slots.len() && slots[end].0 == slots[position].0 {
-            end += 1;
-        }
-        let first = position + 1;
-        let last = end;
-        let first_position = f64::from(u32::try_from(first).unwrap_or(u32::MAX));
-        let last_position = f64::from(u32::try_from(last).unwrap_or(u32::MAX));
-        let rank = match tie_method {
-            RankTieMethod::Average => first_position.midpoint(last_position),
-            RankTieMethod::Min => first_position,
-            RankTieMethod::Max => last_position,
-        };
-        for slot in &slots[position..end] {
-            ranks[slot.1] = Some(rank);
-        }
-        position = end;
-    }
-    samples
-        .iter()
-        .enumerate()
-        .map(|(index, sample)| match sample {
-            Sample::Nan => Some(f64::NAN),
-            Sample::Null if null_placement == NullPlacement::Exclude => None,
-            _ => apply_statistic(
-                ranks[index],
-                valid_count,
-                min_samples,
-                ordered_count,
-                percentile,
-            ),
-        })
-        .collect()
+    let ranks = rank_order_slots(&slots, samples.len(), tie_method);
+    render_order_statistics(
+        samples,
+        &ranks,
+        null_placement,
+        min_samples,
+        ordered_count,
+        percentile,
+    )
 }
 
 /// Applies the min-samples gate and the percentile transform to one rank
@@ -1982,6 +2086,59 @@ impl StatisticAccumulator {
     }
 }
 
+fn accumulate_statistics(samples: &[Sample]) -> StatisticAccumulator {
+    let mut accumulator = StatisticAccumulator::default();
+    for sample in samples {
+        if let Sample::Valid(value) = sample {
+            accumulator.add(*value);
+        }
+    }
+    accumulator
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the frozen z-score output type is float64"
+)]
+fn zscore_value(value: f64, mean: f64, m2: f64, divisor: u64) -> Option<f64> {
+    if divisor == 0 {
+        return None;
+    }
+    let variance = m2 / divisor as f64;
+    if variance.is_nan() {
+        return Some(f64::NAN);
+    }
+    let stddev = variance.sqrt();
+    if stddev == 0.0 {
+        return None;
+    }
+    Some((value - mean) / stddev)
+}
+
+fn statistic_value(
+    sample: Sample,
+    accumulator: StatisticAccumulator,
+    min_samples: u64,
+    ddof: u8,
+    zscore: bool,
+) -> Option<f64> {
+    match sample {
+        Sample::Null => None,
+        Sample::Nan => Some(f64::NAN),
+        Sample::Valid(value) => {
+            if accumulator.count < min_samples {
+                return None;
+            }
+            let mean = accumulator.classified_mean();
+            if !zscore {
+                return Some(value - mean);
+            }
+            let divisor = accumulator.count.saturating_sub(u64::from(ddof));
+            zscore_value(value, mean, accumulator.classified_m2(), divisor)
+        }
+    }
+}
+
 /// Computes one demean or z-score column over the valid sample; null rows
 /// preserve null, NaN rows preserve NaN, an unmet sample count nulls the
 /// statistic, and a non-positive divisor or zero standard deviation nulls
@@ -1996,45 +2153,14 @@ fn statistic_column(
     ddof: u8,
     zscore: bool,
 ) -> Vec<Option<f64>> {
-    let mut accumulator = StatisticAccumulator::default();
-    for sample in samples {
-        if let Sample::Valid(value) = sample {
-            accumulator.add(*value);
-        }
-    }
-    let count = accumulator.count;
-    let mean = accumulator.classified_mean();
-    let divisor = count.saturating_sub(u64::from(ddof));
+    let accumulator = accumulate_statistics(samples);
     samples
         .iter()
-        .map(|sample| match sample {
-            Sample::Null => None,
-            Sample::Nan => Some(f64::NAN),
-            Sample::Valid(value) => {
-                if count < min_samples {
-                    return None;
-                }
-                if !zscore {
-                    return Some(value - mean);
-                }
-                if divisor == 0 {
-                    return None;
-                }
-                let variance = accumulator.classified_m2() / divisor as f64;
-                if variance.is_nan() {
-                    return Some(f64::NAN);
-                }
-                let stddev = variance.sqrt();
-                if stddev == 0.0 {
-                    return None;
-                }
-                Some((value - mean) / stddev)
-            }
-        })
+        .map(|sample| statistic_value(*sample, accumulator, min_samples, ddof, zscore))
         .collect()
 }
 
-fn validate_arguments(spec: &CrossSectionSpec) -> Result<()> {
+fn validate_versions(spec: &CrossSectionSpec) -> Result<()> {
     if spec.configuration_version != CROSS_SECTION_CONFIGURATION_VERSION {
         return Err(invalid_argument(
             "cross_section.configuration_version",
@@ -2047,7 +2173,11 @@ fn validate_arguments(spec: &CrossSectionSpec) -> Result<()> {
             "unsupported cross-section state layout version",
         ));
     }
-    if let CrossSectionGroupingSpec::FixedBucket { width_micros } = spec.grouping
+    Ok(())
+}
+
+fn validate_grouping(grouping: CrossSectionGroupingSpec) -> Result<()> {
+    if let CrossSectionGroupingSpec::FixedBucket { width_micros } = grouping
         && width_micros == 0
     {
         return Err(invalid_argument(
@@ -2055,6 +2185,10 @@ fn validate_arguments(spec: &CrossSectionSpec) -> Result<()> {
             "must be greater than zero",
         ));
     }
+    Ok(())
+}
+
+fn validate_key_declarations(spec: &CrossSectionSpec) -> Result<()> {
     if spec.entity_by.is_empty() {
         return Err(invalid_argument(
             "cross_section.entity_by",
@@ -2069,9 +2203,11 @@ fn validate_arguments(spec: &CrossSectionSpec) -> Result<()> {
     }
     validate_key_names("cross_section.entity_by", &spec.entity_by)?;
     validate_key_names("cross_section.partition_by", &spec.partition_by)?;
-    validate_key_names("cross_section.sequence_by", &spec.sequence_by)?;
-    validate_outputs(&spec.outputs)?;
-    if let LatePolicySpec::Drop { metrics_version } = spec.late_policy
+    validate_key_names("cross_section.sequence_by", &spec.sequence_by)
+}
+
+fn validate_late_policy(late_policy: LatePolicySpec) -> Result<()> {
+    if let LatePolicySpec::Drop { metrics_version } = late_policy
         && metrics_version != 1
     {
         return Err(invalid_argument(
@@ -2080,6 +2216,14 @@ fn validate_arguments(spec: &CrossSectionSpec) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn validate_arguments(spec: &CrossSectionSpec) -> Result<()> {
+    validate_versions(spec)?;
+    validate_grouping(spec.grouping)?;
+    validate_key_declarations(spec)?;
+    validate_outputs(&spec.outputs)?;
+    validate_late_policy(spec.late_policy)
 }
 
 fn validate_key_names(field: &str, columns: &[String]) -> Result<()> {
@@ -2098,6 +2242,56 @@ fn validate_key_names(field: &str, columns: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn validate_output_version_and_counts(output: &CrossSectionOutputSpec, base: &str) -> Result<()> {
+    if output.primitive_version() != 1 {
+        return Err(invalid_argument(
+            &format!("{base}.primitive_version"),
+            "unsupported cross-section primitive version",
+        ));
+    }
+    if output.min_samples() == 0 {
+        return Err(invalid_argument(
+            &format!("{base}.min_samples"),
+            "must be greater than zero",
+        ));
+    }
+    if let Some(ddof) = output.ddof()
+        && ddof > 1
+    {
+        return Err(invalid_argument(&format!("{base}.ddof"), "must be 0 or 1"));
+    }
+    Ok(())
+}
+
+fn validate_output_names(
+    output: &CrossSectionOutputSpec,
+    earlier: &[CrossSectionOutputSpec],
+    base: &str,
+) -> Result<()> {
+    if output.input().is_empty() {
+        return Err(invalid_argument(
+            &format!("{base}.input"),
+            "must not be empty",
+        ));
+    }
+    if output.output().is_empty() {
+        return Err(invalid_argument(
+            &format!("{base}.output"),
+            "must not be empty",
+        ));
+    }
+    if earlier
+        .iter()
+        .any(|candidate| candidate.output() == output.output())
+    {
+        return Err(invalid_argument(
+            &format!("{base}.output"),
+            "duplicates an earlier cross-section output",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_outputs(outputs: &[CrossSectionOutputSpec]) -> Result<()> {
     if outputs.is_empty() {
         return Err(invalid_argument(
@@ -2107,44 +2301,8 @@ fn validate_outputs(outputs: &[CrossSectionOutputSpec]) -> Result<()> {
     }
     for (index, output) in outputs.iter().enumerate() {
         let base = format!("cross_section.outputs[{index}]");
-        if output.primitive_version() != 1 {
-            return Err(invalid_argument(
-                &format!("{base}.primitive_version"),
-                "unsupported cross-section primitive version",
-            ));
-        }
-        if output.min_samples() == 0 {
-            return Err(invalid_argument(
-                &format!("{base}.min_samples"),
-                "must be greater than zero",
-            ));
-        }
-        if let Some(ddof) = output.ddof()
-            && ddof > 1
-        {
-            return Err(invalid_argument(&format!("{base}.ddof"), "must be 0 or 1"));
-        }
-        if output.input().is_empty() {
-            return Err(invalid_argument(
-                &format!("{base}.input"),
-                "must not be empty",
-            ));
-        }
-        if output.output().is_empty() {
-            return Err(invalid_argument(
-                &format!("{base}.output"),
-                "must not be empty",
-            ));
-        }
-        if outputs[..index]
-            .iter()
-            .any(|earlier| earlier.output() == output.output())
-        {
-            return Err(invalid_argument(
-                &format!("{base}.output"),
-                "duplicates an earlier cross-section output",
-            ));
-        }
+        validate_output_version_and_counts(output, &base)?;
+        validate_output_names(output, &outputs[..index], &base)?;
     }
     Ok(())
 }
@@ -2459,5 +2617,704 @@ fn compile_error(message: String) -> CalcFlowError {
 fn format_error(error: &serde_json::Error) -> CalcFlowError {
     CalcFlowError::Format {
         message: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input_schema() -> Schema {
+        Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC"))),
+                false,
+            ),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("industry", DataType::Utf8, true),
+            Field::new("sequence", DataType::UInt64, false),
+            Field::new("value", DataType::Float64, true),
+        ])
+    }
+
+    fn rank_output(input: &str, output: &str) -> CrossSectionOutputSpec {
+        CrossSectionOutputSpec::Rank {
+            primitive_version: 1,
+            input: input.into(),
+            output: output.into(),
+            direction: SortDirection::Ascending,
+            tie_method: RankTieMethod::Average,
+            null_placement: NullPlacement::Exclude,
+            min_samples: 1,
+        }
+    }
+
+    fn valid_spec() -> CrossSectionSpec {
+        CrossSectionSpec {
+            configuration_version: CROSS_SECTION_CONFIGURATION_VERSION,
+            state_layout_version: CROSS_SECTION_STATE_LAYOUT_VERSION,
+            event_time: "ts".into(),
+            entity_by: vec!["symbol".into()],
+            partition_by: vec!["industry".into()],
+            sequence_by: vec!["sequence".into()],
+            grouping: CrossSectionGroupingSpec::ExactTime,
+            outputs: vec![rank_output("value", "rank")],
+            allowed_lateness_micros: 0,
+            late_policy: LatePolicySpec::Drop { metrics_version: 1 },
+            value_policy: CrossSectionValuePolicy::NanExcludePreserveV1,
+        }
+    }
+
+    fn compiled_spec() -> CompiledCrossSectionSpec {
+        let spec = valid_spec();
+        let schema = input_schema();
+        let settings = configuration(&spec).unwrap();
+        compile_spec_full(&spec, &schema, &settings).unwrap()
+    }
+
+    fn assert_invalid(spec: &CrossSectionSpec, expected_field: &str) {
+        let error = validate_arguments(spec).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                CalcFlowError::InvalidArgument { ref field, .. } if field == expected_field
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn declaration_validation_reports_each_stable_field() {
+        let mut spec = valid_spec();
+        spec.configuration_version = 2;
+        assert_invalid(&spec, "cross_section.configuration_version");
+
+        let mut spec = valid_spec();
+        spec.state_layout_version = 2;
+        assert_invalid(&spec, "cross_section.state_layout_version");
+
+        let mut spec = valid_spec();
+        spec.grouping = CrossSectionGroupingSpec::FixedBucket { width_micros: 0 };
+        assert_invalid(&spec, "cross_section.grouping.width_micros");
+
+        let mut spec = valid_spec();
+        spec.entity_by.clear();
+        assert_invalid(&spec, "cross_section.entity_by");
+
+        let mut spec = valid_spec();
+        spec.sequence_by.clear();
+        assert_invalid(&spec, "cross_section.sequence_by");
+
+        let mut spec = valid_spec();
+        spec.entity_by = vec![String::new()];
+        assert_invalid(&spec, "cross_section.entity_by[0]");
+
+        let mut spec = valid_spec();
+        spec.partition_by = vec!["industry".into(), "industry".into()];
+        assert_invalid(&spec, "cross_section.partition_by[1]");
+
+        let mut spec = valid_spec();
+        spec.outputs.clear();
+        assert_invalid(&spec, "cross_section.outputs");
+
+        let mut spec = valid_spec();
+        spec.late_policy = LatePolicySpec::Drop { metrics_version: 2 };
+        assert_invalid(&spec, "cross_section.late_policy.metrics_version");
+    }
+
+    #[test]
+    fn output_validation_reports_each_stable_field() {
+        let mut spec = valid_spec();
+        let CrossSectionOutputSpec::Rank {
+            primitive_version, ..
+        } = &mut spec.outputs[0]
+        else {
+            unreachable!();
+        };
+        *primitive_version = 2;
+        assert_invalid(&spec, "cross_section.outputs[0].primitive_version");
+
+        let mut spec = valid_spec();
+        let CrossSectionOutputSpec::Rank { min_samples, .. } = &mut spec.outputs[0] else {
+            unreachable!();
+        };
+        *min_samples = 0;
+        assert_invalid(&spec, "cross_section.outputs[0].min_samples");
+
+        let mut spec = valid_spec();
+        spec.outputs = vec![CrossSectionOutputSpec::Zscore {
+            primitive_version: 1,
+            input: "value".into(),
+            output: "zscore".into(),
+            min_samples: 1,
+            ddof: 2,
+        }];
+        assert_invalid(&spec, "cross_section.outputs[0].ddof");
+
+        let mut spec = valid_spec();
+        spec.outputs = vec![rank_output("", "rank")];
+        assert_invalid(&spec, "cross_section.outputs[0].input");
+
+        let mut spec = valid_spec();
+        spec.outputs = vec![rank_output("value", "")];
+        assert_invalid(&spec, "cross_section.outputs[0].output");
+
+        let mut spec = valid_spec();
+        spec.outputs = vec![rank_output("value", "rank"), rank_output("value", "rank")];
+        assert_invalid(&spec, "cross_section.outputs[1].output");
+    }
+
+    #[test]
+    fn schema_compilation_rejects_unsupported_columns() {
+        let schema = input_schema();
+        assert!(valid_spec().validate(&schema).is_ok());
+        assert!(exact_field_index(&schema, "missing").is_err());
+
+        let ambiguous = Schema::new(vec![
+            Field::new("duplicate", DataType::Int64, false),
+            Field::new("duplicate", DataType::Int64, false),
+        ]);
+        assert!(exact_field_index(&ambiguous, "duplicate").is_err());
+
+        let nullable_event_time = Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC"))),
+            true,
+        )]);
+        assert!(validate_event_time(&nullable_event_time, 0, "ts").is_err());
+        let wrong_event_time = Schema::new(vec![Field::new("ts", DataType::Int64, false)]);
+        assert!(validate_event_time(&wrong_event_time, 0, "ts").is_err());
+
+        let unsupported = Schema::new(vec![Field::new("key", DataType::Binary, false)]);
+        assert!(compile_key_column(&unsupported, "key", KeyRole::Entity).is_err());
+        assert!(compile_key_column(&unsupported, "key", KeyRole::Sequence).is_err());
+        let nullable_sequence = Schema::new(vec![Field::new("key", DataType::UInt64, true)]);
+        assert!(compile_key_column(&nullable_sequence, "key", KeyRole::Sequence).is_err());
+        let float_sequence = Schema::new(vec![Field::new("key", DataType::Float64, false)]);
+        assert!(compile_key_column(&float_sequence, "key", KeyRole::Sequence).is_err());
+
+        let non_numeric = Schema::new(vec![Field::new("label", DataType::Utf8, false)]);
+        assert!(compile_output(&non_numeric, &rank_output("label", "rank"), 0).is_err());
+        assert!(compile_output(&schema, &rank_output("value", "value"), 0).is_err());
+    }
+
+    #[test]
+    fn type_tables_cover_every_supported_key_and_numeric_class() {
+        for data_type in [
+            DataType::Boolean,
+            DataType::Int8,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::UInt8,
+            DataType::UInt16,
+            DataType::UInt32,
+            DataType::UInt64,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Utf8,
+            DataType::LargeUtf8,
+            DataType::Date32,
+            DataType::Date64,
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC"))),
+        ] {
+            assert!(supports_total_order(&data_type), "unsupported {data_type}");
+        }
+        assert!(!supports_total_order(&DataType::Binary));
+        for data_type in [
+            DataType::Int8,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::UInt8,
+            DataType::UInt16,
+            DataType::UInt32,
+            DataType::UInt64,
+            DataType::Float32,
+            DataType::Float64,
+        ] {
+            assert!(is_numeric(&data_type), "non-numeric {data_type}");
+        }
+        assert!(!is_numeric(&DataType::Utf8));
+    }
+
+    fn assert_key(scalar: ScalarValue, expected: KeyValue) {
+        assert_eq!(
+            KeyValue::from_required_scalar(&scalar, "cross_section").unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn key_values_cover_every_scalar_and_total_order_variant() {
+        assert_eq!(
+            KeyValue::from_nullable_scalar(&ScalarValue::Utf8(None), "cross_section").unwrap(),
+            None
+        );
+        assert_key(ScalarValue::Boolean(Some(true)), KeyValue::Boolean(true));
+        assert_key(ScalarValue::Int8(Some(1)), KeyValue::Signed(1));
+        assert_key(ScalarValue::Int16(Some(2)), KeyValue::Signed(2));
+        assert_key(ScalarValue::Int32(Some(3)), KeyValue::Signed(3));
+        assert_key(ScalarValue::Int64(Some(4)), KeyValue::Signed(4));
+        assert_key(ScalarValue::UInt8(Some(5)), KeyValue::Unsigned(5));
+        assert_key(ScalarValue::UInt16(Some(6)), KeyValue::Unsigned(6));
+        assert_key(ScalarValue::UInt32(Some(7)), KeyValue::Unsigned(7));
+        assert_key(ScalarValue::UInt64(Some(8)), KeyValue::Unsigned(8));
+        assert_key(ScalarValue::Float32(Some(1.5)), KeyValue::Float32(1.5));
+        assert_key(ScalarValue::Float64(Some(2.5)), KeyValue::Float64(2.5));
+        assert_key(
+            ScalarValue::Utf8(Some("a".into())),
+            KeyValue::String("a".into()),
+        );
+        assert_key(
+            ScalarValue::LargeUtf8(Some("b".into())),
+            KeyValue::String("b".into()),
+        );
+        assert_key(ScalarValue::Date32(Some(9)), KeyValue::Date32(9));
+        assert_key(ScalarValue::Date64(Some(10)), KeyValue::Date64(10));
+        assert_key(
+            ScalarValue::TimestampMicrosecond(Some(11), Some(Arc::from("UTC"))),
+            KeyValue::Timestamp(11),
+        );
+        assert!(
+            KeyValue::from_required_scalar(&ScalarValue::Binary(Some(vec![1])), "cross_section")
+                .is_err()
+        );
+        assert!(
+            KeyValue::from_required_scalar(&ScalarValue::UInt64(None), "cross_section").is_err()
+        );
+
+        let pairs = [
+            (KeyValue::Boolean(false), KeyValue::Boolean(true)),
+            (KeyValue::Signed(1), KeyValue::Signed(2)),
+            (KeyValue::Unsigned(1), KeyValue::Unsigned(2)),
+            (KeyValue::Float32(1.0), KeyValue::Float32(2.0)),
+            (KeyValue::Float64(1.0), KeyValue::Float64(2.0)),
+            (KeyValue::String("a".into()), KeyValue::String("b".into())),
+            (KeyValue::Date32(1), KeyValue::Date32(2)),
+            (KeyValue::Date64(1), KeyValue::Date64(2)),
+            (KeyValue::Timestamp(1), KeyValue::Timestamp(2)),
+        ];
+        for (left, right) in pairs {
+            assert!(left < right);
+            assert_eq!(left.partial_cmp(&right), Some(Ordering::Less));
+        }
+        assert!(KeyValue::Boolean(true) < KeyValue::Signed(0));
+    }
+
+    #[test]
+    fn order_and_statistic_helpers_cover_edge_semantics() {
+        let samples = [
+            Sample::Valid(2.0),
+            Sample::Valid(2.0),
+            Sample::Valid(1.0),
+            Sample::Null,
+            Sample::Nan,
+        ];
+        let ranks = order_statistic_column(
+            &samples,
+            SortDirection::Ascending,
+            RankTieMethod::Average,
+            NullPlacement::Exclude,
+            1,
+            false,
+        );
+        assert_eq!(&ranks[..4], &[Some(2.5), Some(2.5), Some(1.0), None]);
+        assert!(ranks[4].unwrap().is_nan());
+        assert_eq!(
+            order_statistic_column(
+                &[Sample::Valid(1.0)],
+                SortDirection::Descending,
+                RankTieMethod::Min,
+                NullPlacement::First,
+                1,
+                true,
+            ),
+            vec![Some(0.5)]
+        );
+        assert_eq!(
+            order_statistic_column(
+                &[Sample::Null, Sample::Valid(1.0)],
+                SortDirection::Descending,
+                RankTieMethod::Max,
+                NullPlacement::Last,
+                2,
+                false,
+            ),
+            vec![None, None]
+        );
+
+        let centered = statistic_column(
+            &[
+                Sample::Null,
+                Sample::Nan,
+                Sample::Valid(1.0),
+                Sample::Valid(3.0),
+            ],
+            1,
+            0,
+            false,
+        );
+        assert_eq!(centered[0], None);
+        assert!(centered[1].unwrap().is_nan());
+        assert_eq!(&centered[2..], &[Some(-1.0), Some(1.0)]);
+        assert_eq!(
+            statistic_column(&[Sample::Valid(1.0)], 2, 0, false),
+            vec![None]
+        );
+        assert_eq!(
+            statistic_column(&[Sample::Valid(1.0)], 1, 1, true),
+            vec![None]
+        );
+        assert_eq!(
+            statistic_column(&[Sample::Valid(2.0), Sample::Valid(2.0)], 1, 0, true),
+            vec![None, None]
+        );
+        let infinities = statistic_column(
+            &[
+                Sample::Valid(f64::INFINITY),
+                Sample::Valid(f64::NEG_INFINITY),
+            ],
+            1,
+            0,
+            true,
+        );
+        assert!(infinities.iter().all(|value| value.unwrap().is_nan()));
+        let negative = statistic_column(&[Sample::Valid(f64::NEG_INFINITY)], 1, 0, false);
+        assert!(negative[0].unwrap().is_nan());
+    }
+
+    #[test]
+    fn group_coordinates_reject_unrepresentable_ranges() {
+        assert!(bucket_width(0, "cross_section").is_err());
+        assert!(bucket_width(u64::MAX, "cross_section").is_err());
+
+        let mut compiled = compiled_spec();
+        compiled.grouping = CrossSectionGroupingSpec::FixedBucket {
+            width_micros: u64::MAX,
+        };
+        let row = BufferedRow::new(
+            vec![Some(KeyValue::String("a".into()))],
+            vec![KeyValue::Unsigned(1)],
+            0,
+            vec![
+                ScalarValue::TimestampMicrosecond(Some(0), Some(Arc::from("UTC"))),
+                ScalarValue::Utf8(Some("a".into())),
+                ScalarValue::Utf8(None),
+                ScalarValue::UInt64(Some(1)),
+                ScalarValue::Float64(Some(1.0)),
+            ],
+        );
+        assert!(compiled.group_key(&row, "cross_section").is_err());
+
+        compiled.grouping = CrossSectionGroupingSpec::ExactTime;
+        compiled.allowed_lateness_micros = u64::MAX;
+        let group = GroupKey {
+            base: 0,
+            partition: Vec::new(),
+        };
+        assert!(compiled.group_closing(&group, "cross_section").is_err());
+        compiled.allowed_lateness_micros = 1;
+        let group = GroupKey {
+            base: i64::MAX,
+            partition: Vec::new(),
+        };
+        assert!(compiled.group_closing(&group, "cross_section").is_err());
+        compiled.grouping = CrossSectionGroupingSpec::FixedBucket { width_micros: 1 };
+        compiled.allowed_lateness_micros = 0;
+        assert!(compiled.group_closing(&group, "cross_section").is_err());
+    }
+
+    fn descriptor_fixture(
+        compiled: &CompiledCrossSectionSpec,
+        operator_id: &str,
+        epoch: Epoch,
+        bytes: Vec<u8>,
+    ) -> (SegmentDescriptor, crate::StateSegment) {
+        let segment = crate::StateSegment::new(bytes);
+        let segment_id = format!("base-{:020}-00000000", epoch.as_u64());
+        let relative_path = format!(
+            "committed/{operator_id}/{:020}-{segment_id}.arrow",
+            epoch.as_u64()
+        );
+        let handle = StateHandle::new(
+            operator_id,
+            epoch,
+            &segment_id,
+            &relative_path,
+            u64::try_from(segment.bytes().len()).unwrap(),
+            segment.sha256(),
+        )
+        .unwrap();
+        (
+            SegmentDescriptor {
+                kind: SegmentKind::Base,
+                state_layout_version: CROSS_SECTION_STATE_LAYOUT_VERSION,
+                schema_fingerprint: compiled.state_schema_fingerprint.clone(),
+                handle,
+            },
+            segment,
+        )
+    }
+
+    fn snapshot_metadata(
+        compiled: &CompiledCrossSectionSpec,
+        descriptors: Vec<SegmentDescriptor>,
+    ) -> CrossSectionSnapshotMetadata {
+        CrossSectionSnapshotMetadata {
+            state_layout_version: CROSS_SECTION_STATE_LAYOUT_VERSION,
+            configuration_hash: compiled.configuration_hash.clone(),
+            state_schema_fingerprint: compiled.state_schema_fingerprint.clone(),
+            epoch: Epoch::INITIAL,
+            pipeline_fingerprint: Some("a".repeat(64)),
+            operator_id: Some("cross_section".into()),
+            last_input_watermark: None,
+            next_output_sequence: 0,
+            ended: false,
+            metrics: LateMetricDelta::default(),
+            segment_inventory: descriptors,
+        }
+    }
+
+    #[test]
+    fn segment_schema_metadata_rejects_mismatch_and_missing_identity() {
+        let compiled = compiled_spec();
+        let schema = state_schema(&input_schema(), &compiled, &"a".repeat(64), "cross_section");
+        assert!(validate_segment_schema_metadata(schema.metadata(), &compiled).is_ok());
+
+        let mut metadata = schema.metadata().clone();
+        metadata.insert(
+            "calc_flow.operator_configuration_hash".into(),
+            "b".repeat(64),
+        );
+        assert!(validate_segment_schema_metadata(&metadata, &compiled).is_err());
+
+        let mut metadata = schema.metadata().clone();
+        metadata.remove("calc_flow.operator_id");
+        assert!(validate_segment_schema_metadata(&metadata, &compiled).is_err());
+    }
+
+    #[test]
+    fn snapshot_metadata_rejects_each_identity_and_inventory_mismatch() {
+        let compiled = compiled_spec();
+        let empty = crate::OperatorStateSnapshot::default();
+
+        let mut metadata = snapshot_metadata(&compiled, Vec::new());
+        metadata.state_layout_version = 2;
+        assert!(validate_snapshot_metadata(&metadata, &compiled, &empty).is_err());
+        let mut metadata = snapshot_metadata(&compiled, Vec::new());
+        metadata.configuration_hash = "b".repeat(64);
+        assert!(validate_snapshot_metadata(&metadata, &compiled, &empty).is_err());
+        let mut metadata = snapshot_metadata(&compiled, Vec::new());
+        metadata.state_schema_fingerprint = "b".repeat(64);
+        assert!(validate_snapshot_metadata(&metadata, &compiled, &empty).is_err());
+        let mut metadata = snapshot_metadata(&compiled, Vec::new());
+        metadata.pipeline_fingerprint = Some("not-a-digest".into());
+        assert!(validate_snapshot_metadata(&metadata, &compiled, &empty).is_err());
+        let mut metadata = snapshot_metadata(&compiled, Vec::new());
+        metadata.operator_id = Some(String::new());
+        assert!(validate_snapshot_metadata(&metadata, &compiled, &empty).is_err());
+
+        let (descriptor, segment) =
+            descriptor_fixture(&compiled, "cross_section", Epoch::INITIAL, vec![1, 2, 3]);
+        let segment_id = descriptor.handle.segment_id().to_owned();
+        let snapshot = crate::OperatorStateSnapshot {
+            inline_metadata: JsonMap::new(),
+            segments: BTreeMap::from([(segment_id, segment)]),
+        };
+        let metadata = snapshot_metadata(&compiled, vec![descriptor.clone()]);
+        assert!(validate_snapshot_metadata(&metadata, &compiled, &snapshot).is_ok());
+
+        let mut wrong_layout = descriptor.clone();
+        wrong_layout.state_layout_version = 2;
+        let metadata = snapshot_metadata(&compiled, vec![wrong_layout]);
+        assert!(validate_snapshot_metadata(&metadata, &compiled, &snapshot).is_err());
+
+        let (future, _) = descriptor_fixture(
+            &compiled,
+            "cross_section",
+            Epoch::new(2).unwrap(),
+            vec![1, 2, 3],
+        );
+        let metadata = snapshot_metadata(&compiled, vec![future]);
+        assert!(validate_snapshot_metadata(&metadata, &compiled, &snapshot).is_err());
+
+        let (other, _) = descriptor_fixture(&compiled, "other", Epoch::INITIAL, vec![1, 2, 3]);
+        let metadata = snapshot_metadata(&compiled, vec![other]);
+        assert!(validate_snapshot_metadata(&metadata, &compiled, &snapshot).is_err());
+
+        let metadata = snapshot_metadata(&compiled, vec![descriptor.clone()]);
+        assert!(validate_snapshot_metadata(&metadata, &compiled, &empty).is_err());
+        let mut metadata = snapshot_metadata(&compiled, vec![descriptor]);
+        metadata.pipeline_fingerprint = None;
+        assert!(validate_snapshot_metadata(&metadata, &compiled, &snapshot).is_err());
+    }
+
+    #[test]
+    fn snapshot_segments_revalidate_presence_length_and_checksum() {
+        let compiled = compiled_spec();
+        let (descriptor, segment) =
+            descriptor_fixture(&compiled, "cross_section", Epoch::INITIAL, vec![1, 2, 3]);
+        let segment_id = descriptor.handle.segment_id().to_owned();
+        assert!(
+            snapshot_segments(
+                &crate::OperatorStateSnapshot::default(),
+                &[descriptor.clone()]
+            )
+            .is_err()
+        );
+
+        let short = crate::OperatorStateSnapshot {
+            inline_metadata: JsonMap::new(),
+            segments: BTreeMap::from([(segment_id.clone(), crate::StateSegment::new(vec![1]))]),
+        };
+        assert!(snapshot_segments(&short, &[descriptor.clone()]).is_err());
+        let corrupt = crate::OperatorStateSnapshot {
+            inline_metadata: JsonMap::new(),
+            segments: BTreeMap::from([(
+                segment_id.clone(),
+                crate::StateSegment::new(vec![3, 2, 1]),
+            )]),
+        };
+        assert!(snapshot_segments(&corrupt, &[descriptor.clone()]).is_err());
+        let valid = crate::OperatorStateSnapshot {
+            inline_metadata: JsonMap::new(),
+            segments: BTreeMap::from([(segment_id, segment)]),
+        };
+        assert_eq!(
+            snapshot_segments(&valid, &[descriptor]).unwrap()[0].as_slice(),
+            &[1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn late_metrics_and_chunking_cover_failure_boundaries() {
+        let mut metrics = PreparedLateMetrics::default();
+        record_late_row(&mut metrics, None, 10, "cross_section").unwrap();
+        record_late_row(
+            &mut metrics,
+            Some(EventTime::from_micros(20)),
+            10,
+            "cross_section",
+        )
+        .unwrap();
+        assert_eq!(metrics.late_rows, 1);
+        assert_eq!(metrics.max_lateness_micros, Some(10));
+        metrics.late_rows = u64::MAX;
+        assert!(
+            record_late_row(
+                &mut metrics,
+                Some(EventTime::from_micros(20)),
+                10,
+                "cross_section",
+            )
+            .is_err()
+        );
+        let mut metrics = PreparedLateMetrics::default();
+        assert!(
+            record_late_row(
+                &mut metrics,
+                Some(EventTime::from_micros(10)),
+                20,
+                "cross_section",
+            )
+            .is_err()
+        );
+
+        let record = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "value",
+                DataType::Int64,
+                false,
+            )])),
+            vec![Arc::new(datafusion::arrow::array::Int64Array::from(vec![
+                1_i64,
+            ]))],
+        )
+        .unwrap();
+        assert!(
+            chunk_output_record(
+                &record,
+                "cross_section",
+                0,
+                crate::EdgeBudget::new(1, 1).unwrap(),
+            )
+            .is_err()
+        );
+        assert!(
+            chunk_output_record(
+                &record,
+                "cross_section",
+                u64::MAX,
+                crate::EdgeBudget::new(1, usize::MAX).unwrap(),
+            )
+            .is_err()
+        );
+        let empty = record.slice(0, 0);
+        assert!(
+            chunk_output_record(&empty, "cross_section", 0, crate::EdgeBudget::default(),)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn metadata_accessors_and_empty_group_record_are_observable() {
+        let spec = valid_spec();
+        let operator =
+            CrossSectionOperator::new("cross_section", Arc::new(input_schema()), spec).unwrap();
+        assert_eq!(operator.name(), "cross_section");
+        assert_eq!(operator.spec(), &valid_spec());
+        assert!(format!("{operator:?}").contains("cross_section"));
+        let record = build_grouped_record(
+            &Groups::new(),
+            &operator.compiled,
+            operator.output_ports()[0].schema().unwrap(),
+            operator.name(),
+        )
+        .unwrap();
+        assert_eq!(record.num_rows(), 0);
+
+        for output in [
+            rank_output("value", "rank"),
+            CrossSectionOutputSpec::Percentile {
+                primitive_version: 1,
+                input: "value".into(),
+                output: "percentile".into(),
+                direction: SortDirection::Ascending,
+                tie_method: RankTieMethod::Average,
+                null_placement: NullPlacement::Exclude,
+                min_samples: 1,
+            },
+            CrossSectionOutputSpec::Demean {
+                primitive_version: 1,
+                input: "value".into(),
+                output: "demean".into(),
+                min_samples: 1,
+            },
+            CrossSectionOutputSpec::Zscore {
+                primitive_version: 1,
+                input: "value".into(),
+                output: "zscore".into(),
+                min_samples: 1,
+                ddof: 0,
+            },
+        ] {
+            assert!(!output_kind(&output).is_empty());
+        }
+        assert!(matches!(
+            internal_error("test"),
+            CalcFlowError::Internal { .. }
+        ));
+        assert!(matches!(
+            state_format("test".into()),
+            CalcFlowError::Format { .. }
+        ));
+        assert!(matches!(
+            compile_error("test".into()),
+            CalcFlowError::Compile { .. }
+        ));
     }
 }

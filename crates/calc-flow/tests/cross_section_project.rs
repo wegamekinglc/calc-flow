@@ -236,3 +236,47 @@ fn non_applicable_ordering_fields_on_statistics_are_rejected_at_parse() {
     ));
     assert!(error.is_err(), "zscore accepted a direction field");
 }
+
+#[test]
+fn cross_section_project_rejects_a_missing_exact_schema_at_validation() {
+    let mut node = cross_section_node_json();
+    node["input_ports"][0]["schema"] = json!([]);
+    let project: ProjectSpec = serde_json::from_value(project_json(
+        &json!({"mode": "batch", "options": {}}),
+        &node,
+    ))
+    .unwrap();
+    let (providers, udfs) = registries();
+    let report = validate_project(&project, &providers, &udfs);
+    assert!(!report.valid);
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| { issue.code == "invalid_ports" && issue.path.contains("input_ports") }),
+        "expected an invalid_ports issue: {:?}",
+        report.issues
+    );
+}
+
+#[test]
+fn cross_section_project_reports_operator_construction_failure_as_a_validation_issue() {
+    let mut node = cross_section_node_json();
+    node["operator"]["spec"]["entity_by"] = json!([]);
+    let project: ProjectSpec = serde_json::from_value(project_json(
+        &json!({"mode": "batch", "options": {}}),
+        &node,
+    ))
+    .unwrap();
+    let (providers, udfs) = registries();
+    let report = validate_project(&project, &providers, &udfs);
+    assert!(!report.valid);
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "invalid_operator" && issue.path.contains("operator")),
+        "expected an invalid_operator issue: {:?}",
+        report.issues
+    );
+}
