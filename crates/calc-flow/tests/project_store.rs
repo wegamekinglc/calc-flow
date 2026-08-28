@@ -26,6 +26,7 @@ fn project(id: &str, name: &str) -> ProjectSpec {
         sources: Vec::new(),
         sinks: Vec::new(),
         state: StateConfig::default(),
+        static_inputs: Vec::new(),
     }
 }
 

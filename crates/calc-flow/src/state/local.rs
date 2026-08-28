@@ -1077,6 +1077,7 @@ mod tests {
                 },
             )]),
             sinks: BTreeMap::new(),
+            static_inputs: BTreeMap::new(),
         })
         .unwrap()
     }

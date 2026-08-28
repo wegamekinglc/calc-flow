@@ -7,7 +7,8 @@ use sha2::{Digest, Sha256};
 
 use super::{StateHandle, backend::validate_sha256};
 use crate::{
-    CalcFlowError, Epoch, EventTime, JsonMap, Result, canonical_json,
+    CalcFlowError, Epoch, EventTime, JsonMap, Result, STATIC_INPUT_DIGEST_VERSION,
+    StaticInputDigest, canonical_json,
     json::{parse_json_value, validate_json_depth_at, validate_portable_identifier},
 };
 
@@ -177,6 +178,8 @@ pub struct CheckpointManifestFields {
     pub operators: BTreeMap<String, OperatorManifestEntry>,
     /// Stable sink ID to persisted sink state.
     pub sinks: BTreeMap<String, SinkManifestEntry>,
+    /// Name-sorted static-input digest evidence (SCE-11).
+    pub static_inputs: BTreeMap<String, StaticInputDigest>,
 }
 
 /// Exact prepared-job identity expected while loading a manifest.
@@ -195,6 +198,8 @@ pub struct ManifestExpectation<'a> {
     pub operator_ids: &'a BTreeSet<String>,
     /// Exact expected sink IDs.
     pub sink_ids: &'a BTreeSet<String>,
+    /// Exact expected static-input name/digest evidence (SCE-11).
+    pub static_inputs: &'a BTreeMap<String, StaticInputDigest>,
 }
 
 /// Canonical v3 checkpoint manifest.
@@ -210,6 +215,8 @@ pub struct CheckpointManifest {
     sources: BTreeMap<String, SourceManifestEntry>,
     operators: BTreeMap<String, OperatorManifestEntry>,
     sinks: BTreeMap<String, SinkManifestEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    static_inputs: BTreeMap<String, StaticInputDigest>,
     state_checksum: String,
 }
 
@@ -226,6 +233,8 @@ struct SerializedManifest {
     sources: BTreeMap<String, SourceManifestEntry>,
     operators: BTreeMap<String, OperatorManifestEntry>,
     sinks: BTreeMap<String, SinkManifestEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    static_inputs: BTreeMap<String, StaticInputDigest>,
     state_checksum: String,
 }
 
@@ -242,6 +251,7 @@ impl From<SerializedManifest> for CheckpointManifest {
             sources: fields.sources,
             operators: fields.operators,
             sinks: fields.sinks,
+            static_inputs: fields.static_inputs,
             state_checksum: fields.state_checksum,
         }
     }
@@ -266,6 +276,7 @@ impl CheckpointManifest {
             sources: fields.sources,
             operators: fields.operators,
             sinks: fields.sinks,
+            static_inputs: fields.static_inputs,
             state_checksum: String::new(),
         };
         manifest.validate_contents()?;
@@ -302,6 +313,7 @@ impl CheckpointManifest {
     pub fn validate(&self, expected: &ManifestExpectation<'_>) -> Result<()> {
         self.validate_internal()?;
         self.validate_identity(expected)?;
+        self.validate_static_inputs(expected)?;
         self.validate_epoch(expected.epoch)?;
         validate_id_set("source", self.sources.keys(), expected.source_ids)?;
         validate_id_set("operator", self.operators.keys(), expected.operator_ids)?;
@@ -357,11 +369,20 @@ impl CheckpointManifest {
     ///
     /// Returns [`CalcFlowError::Format`] if state cannot be canonically serialized.
     pub fn recompute_state_checksum(&self) -> Result<String> {
-        let value = json!({
-            "operators": &self.operators,
-            "sinks": &self.sinks,
-            "sources": &self.sources,
-        });
+        let value = if self.static_inputs.is_empty() {
+            json!({
+                "operators": &self.operators,
+                "sinks": &self.sinks,
+                "sources": &self.sources,
+            })
+        } else {
+            json!({
+                "operators": &self.operators,
+                "sinks": &self.sinks,
+                "sources": &self.sources,
+                "static_inputs": &self.static_inputs,
+            })
+        };
         Ok(hex::encode(Sha256::digest(
             canonical_json(&value)?.as_bytes(),
         )))
@@ -417,6 +438,38 @@ impl CheckpointManifest {
         &self.sinks
     }
 
+    /// Returns static-input digest evidence in stable name order (SCE-11).
+    pub const fn static_inputs(&self) -> &BTreeMap<String, StaticInputDigest> {
+        &self.static_inputs
+    }
+
+    /// Compares the exact static name/version/digest map before the
+    /// remaining manifest-set validation runs (API note section 8 order).
+    fn validate_static_inputs(&self, expected: &ManifestExpectation<'_>) -> Result<()> {
+        for (name, prepared) in expected.static_inputs {
+            let Some(stored) = self.static_inputs.get(name) else {
+                return Err(mismatch(format!(
+                    "static_inputs.{name}: checkpoint does not include the prepared static input"
+                )));
+            };
+            if stored.digest_version != prepared.digest_version || stored.sha256 != prepared.sha256
+            {
+                return Err(mismatch(format!(
+                    "static_inputs.{name}.digest: checkpoint digest {} does not match prepared digest {} for {}",
+                    stored.sha256, prepared.sha256, STATIC_INPUT_DIGEST_VERSION
+                )));
+            }
+        }
+        for name in self.static_inputs.keys() {
+            if !expected.static_inputs.contains_key(name) {
+                return Err(mismatch(format!(
+                    "static_inputs.{name}: checkpoint records an unexpected static input"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Returns the deterministic state checksum.
     pub fn state_checksum(&self) -> &str {
         &self.state_checksum
@@ -457,7 +510,17 @@ impl CheckpointManifest {
         let mut identities = BTreeSet::new();
         let mut paths = BTreeSet::new();
         validate_operators(&self.operators, self.epoch, &mut identities, &mut paths)?;
-        validate_sinks(&self.sinks, self.epoch, &mut identities, &mut paths)
+        validate_sinks(&self.sinks, self.epoch, &mut identities, &mut paths)?;
+        for (name, digest) in &self.static_inputs {
+            validate_portable_identifier("static_inputs.name", name)?;
+            if digest.digest_version != STATIC_INPUT_DIGEST_VERSION {
+                return Err(format_error(format!(
+                    "static_inputs.{name}.digest_version is unsupported"
+                )));
+            }
+            validate_sha256(&format!("static_inputs.{name}.sha256"), &digest.sha256)?;
+        }
+        Ok(())
     }
 
     fn ensure_size_bound(&self) -> Result<()> {
@@ -673,4 +736,174 @@ fn mismatch(message: String) -> CalcFlowError {
 
 fn format_error(message: String) -> CalcFlowError {
     CalcFlowError::Format { message }
+}
+
+#[cfg(test)]
+mod static_input_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use chrono::{TimeZone, Utc};
+
+    use super::{
+        CheckpointManifest, CheckpointManifestFields, ManifestExpectation, RecoveryStatus,
+        STATIC_INPUT_DIGEST_VERSION, StaticInputDigest,
+    };
+    use crate::{CalcFlowError, Epoch};
+
+    fn digest(sha256: &str) -> StaticInputDigest {
+        StaticInputDigest {
+            digest_version: STATIC_INPUT_DIGEST_VERSION.into(),
+            sha256: sha256.into(),
+        }
+    }
+
+    static EMPTY_ID_SET: BTreeSet<String> = BTreeSet::new();
+
+    const FINGERPRINT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const CONFIG: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn fields(static_inputs: BTreeMap<String, StaticInputDigest>) -> CheckpointManifestFields {
+        CheckpointManifestFields {
+            pipeline_name: "orders".into(),
+            pipeline_fingerprint: FINGERPRINT.into(),
+            runtime_config_hash: CONFIG.into(),
+            epoch: Epoch::INITIAL,
+            created_at: Utc.with_ymd_and_hms(2026, 8, 8, 7, 0, 0).unwrap(),
+            recovery_status: RecoveryStatus::Final,
+            sources: BTreeMap::new(),
+            operators: BTreeMap::new(),
+            sinks: BTreeMap::new(),
+            static_inputs,
+        }
+    }
+
+    fn expectation<'a>(
+        fingerprint: &'a str,
+        config: &'a str,
+        static_inputs: &'a BTreeMap<String, StaticInputDigest>,
+        source_ids: &'a BTreeSet<String>,
+    ) -> ManifestExpectation<'a> {
+        ManifestExpectation {
+            pipeline_name: "orders",
+            pipeline_fingerprint: fingerprint,
+            runtime_config_hash: config,
+            epoch: Epoch::INITIAL,
+            source_ids,
+            operator_ids: &EMPTY_ID_SET,
+            sink_ids: &EMPTY_ID_SET,
+            static_inputs,
+        }
+    }
+
+    #[test]
+    fn empty_static_evidence_is_omitted_and_bytes_stay_compatible() {
+        let manifest = CheckpointManifest::new(fields(BTreeMap::new())).unwrap();
+        let bytes = manifest.canonical_bytes().unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("static_inputs"));
+        assert!(CheckpointManifest::from_bytes(text.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn static_evidence_serializes_and_roundtrips() {
+        let statics = BTreeMap::from([("weights".to_string(), digest(&"c".repeat(64)))]);
+        let manifest = CheckpointManifest::new(fields(statics.clone())).unwrap();
+        let bytes = manifest.canonical_bytes().unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("\"static_inputs\":{\"weights\":{"));
+        let restored = CheckpointManifest::from_bytes(text.as_bytes()).unwrap();
+        assert_eq!(restored.static_inputs(), &statics);
+        assert!(
+            restored
+                .validate(&expectation(
+                    FINGERPRINT,
+                    CONFIG,
+                    &statics,
+                    &BTreeSet::new()
+                ))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn non_empty_static_evidence_joins_the_state_checksum() {
+        let empty = CheckpointManifest::new(fields(BTreeMap::new())).unwrap();
+        let statics = BTreeMap::from([("weights".to_string(), digest(&"c".repeat(64)))]);
+        let with_statics = CheckpointManifest::new(fields(statics)).unwrap();
+        assert_ne!(
+            empty.state_checksum(),
+            with_statics.state_checksum(),
+            "the digest evidence must change the state checksum"
+        );
+        let changed = BTreeMap::from([("weights".to_string(), digest(&"d".repeat(64)))]);
+        let with_changed = CheckpointManifest::new(fields(changed)).unwrap();
+        assert_ne!(with_statics.state_checksum(), with_changed.state_checksum());
+    }
+
+    #[test]
+    fn recovery_digest_mismatch_uses_the_frozen_message() {
+        let stored = digest(&"c".repeat(64));
+        let manifest =
+            CheckpointManifest::new(fields(BTreeMap::from([("weights".into(), stored.clone())])))
+                .unwrap();
+        let prepared = digest(&"d".repeat(64));
+        let error = manifest
+            .validate(&expectation(
+                FINGERPRINT,
+                CONFIG,
+                &BTreeMap::from([("weights".into(), prepared.clone())]),
+                &BTreeSet::new(),
+            ))
+            .unwrap_err();
+        let CalcFlowError::CheckpointMismatch { message } = error else {
+            panic!("expected a checkpoint mismatch");
+        };
+        assert_eq!(
+            message,
+            format!(
+                "static_inputs.weights.digest: checkpoint digest {} does not match prepared digest {} for {}",
+                stored.sha256, prepared.sha256, STATIC_INPUT_DIGEST_VERSION
+            )
+        );
+    }
+
+    #[test]
+    fn recovery_reports_missing_and_extra_static_names() {
+        let manifest = CheckpointManifest::new(fields(BTreeMap::from([(
+            "weights".into(),
+            digest(&"c".repeat(64)),
+        )])))
+        .unwrap();
+        let error = manifest
+            .validate(&expectation(
+                FINGERPRINT,
+                CONFIG,
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+            ))
+            .unwrap_err();
+        assert!(error.to_string().contains("static_inputs.weights"));
+
+        let empty = CheckpointManifest::new(fields(BTreeMap::new())).unwrap();
+        let error = empty
+            .validate(&expectation(
+                FINGERPRINT,
+                CONFIG,
+                &BTreeMap::from([("weights".into(), digest(&"c".repeat(64)))]),
+                &BTreeSet::new(),
+            ))
+            .unwrap_err();
+        assert!(error.to_string().contains("static_inputs.weights"));
+    }
+
+    #[test]
+    fn manifest_rejects_unsupported_static_digest_versions() {
+        let stored = StaticInputDigest {
+            digest_version: "calc_flow.static_input.digest.v0".into(),
+            sha256: "c".repeat(64),
+        };
+        let error = CheckpointManifest::new(fields(BTreeMap::from([("weights".into(), stored)])))
+            .unwrap_err();
+        assert!(error.to_string().contains("static_inputs.weights"));
+    }
 }

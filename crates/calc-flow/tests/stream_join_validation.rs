@@ -363,6 +363,7 @@ fn typed_join_project(
         sources: Vec::new(),
         sinks: Vec::new(),
         state: StateConfig::default(),
+        static_inputs: Vec::new(),
     }
 }
 

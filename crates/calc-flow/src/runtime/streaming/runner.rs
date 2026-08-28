@@ -2032,6 +2032,7 @@ fn checkpoint_identity(
             .map(|node| node.operator_id.as_str().to_owned())
             .collect(),
         sink_ids: sink_outputs.into_keys().collect(),
+        static_inputs: job.static_inputs.digests.clone(),
     })
 }
 
@@ -2403,6 +2404,7 @@ async fn run_job_driver(
         progress: prepared_progress,
         delivery_mode: _,
         delivery_proofs: _,
+        static_inputs: _,
     } = validated;
     let cancellation = context.cancellation().clone();
     let checkpoint = match checkpoint {
@@ -3101,6 +3103,11 @@ fn sanitize_managed_preflight_error(
 ) -> CalcFlowError {
     if !managed {
         return error;
+    }
+    if let CalcFlowError::CheckpointMismatch { message } = &error {
+        if message.starts_with("static_inputs.") {
+            return error;
+        }
     }
     match error {
         CalcFlowError::Conflict { .. } | CalcFlowError::PlanLeased { .. } => {
@@ -4943,6 +4950,7 @@ fn build_epoch_manifest(
         sources: assembly.sources.clone(),
         operators: assembly.operators.clone(),
         sinks,
+        static_inputs: checkpoint.identity.static_inputs.clone(),
     })
 }
 
@@ -5628,6 +5636,7 @@ mod tests {
                     segments: Vec::new(),
                 },
             )]),
+            static_inputs: BTreeMap::new(),
         })
         .unwrap();
         std::fs::write(
@@ -5751,6 +5760,7 @@ mod tests {
                     segments: Vec::new(),
                 },
             )]),
+            static_inputs: BTreeMap::new(),
         })
         .unwrap();
         let backend = LocalStateBackend::new(root.join("state")).await.unwrap();
@@ -6312,6 +6322,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let checkpoint = ManagedCheckpointRuntime::new(directory.path()).unwrap();
         let job = OneShotContinuousRunner::new()
@@ -8211,6 +8222,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         }
     }
 
@@ -8317,6 +8329,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         }
     }
 
@@ -8512,6 +8525,7 @@ mod tests {
                 max_bytes: 1,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         }
     }
 
@@ -8559,6 +8573,7 @@ mod tests {
                 max_bytes: 1,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         }
     }
 
@@ -8656,6 +8671,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         }
     }
 
@@ -8896,6 +8912,7 @@ mod tests {
                     segments: Vec::new(),
                 },
             )]),
+            static_inputs: BTreeMap::new(),
         })
         .unwrap()
     }
@@ -9206,6 +9223,7 @@ mod tests {
                     max_bytes: 1 << 20,
                 },
                 delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+                static_inputs: crate::static_input::PreparedStaticInputs::default(),
             };
             let mut runner = ContinuousRunner::new();
             let job = runner
@@ -9850,6 +9868,7 @@ mod tests {
             }],
             edge_budget: EdgeBudget::default(),
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let mut runner = ContinuousRunner::new();
 
@@ -9902,6 +9921,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let mut runner = ContinuousRunner::new();
         let observer = runner.start(job_spec);
@@ -10099,6 +10119,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let mut runner = ContinuousRunner::new();
         let job = runner.start(job_spec).await.unwrap();
@@ -10609,6 +10630,7 @@ mod tests {
             }],
             edge_budget: EdgeBudget::default(),
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let mut runner = ContinuousRunner::new();
         let observer = runner.start(job_spec);
@@ -10676,6 +10698,7 @@ mod tests {
             }],
             edge_budget: EdgeBudget::default(),
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let mut runner = ContinuousRunner::new();
         let observer = runner.start(job_spec);
@@ -10785,6 +10808,7 @@ mod tests {
             }],
             edge_budget: EdgeBudget::default(),
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let mut runner = ContinuousRunner::new();
         let probe = Arc::new(super::TestLaunchProbe::new(
@@ -11241,6 +11265,7 @@ mod tests {
                     max_bytes: 1 << 20,
                 },
                 delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+                static_inputs: crate::static_input::PreparedStaticInputs::default(),
             };
             let mut runner = ContinuousRunner::new();
             let job = runner.start(spec).await.unwrap();
@@ -11485,6 +11510,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let mut runner = ContinuousRunner::new();
         let job = runner.start(identity_spec).await.unwrap();
@@ -11848,6 +11874,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let mut runner = ContinuousRunner::new();
         let job = runner.start(spec).await.unwrap();
@@ -11913,6 +11940,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let mut runner = ContinuousRunner::new();
         let job = runner.start(spec).await.unwrap();
@@ -12039,6 +12067,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let mut runner = ContinuousRunner::new();
         let job = runner.start(spec).await.unwrap();
@@ -12184,6 +12213,7 @@ mod tests {
             }],
             edge_budget: EdgeBudget::default(),
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let mut runner = ContinuousRunner::new();
         let job = runner.start(spec).await.unwrap();
@@ -12244,6 +12274,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let mut runner = ContinuousRunner::new();
         let job = runner.start(spec).await.unwrap();
@@ -12334,6 +12365,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let mut runner = ContinuousRunner::new();
         let job = runner.start(spec).await.unwrap();
@@ -12414,6 +12446,7 @@ mod tests {
                     max_bytes: 1 << 20,
                 },
                 delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+                static_inputs: crate::static_input::PreparedStaticInputs::default(),
             };
             let mut runner = ContinuousRunner::new();
             let job = runner.start(spec).await.unwrap();
@@ -12501,6 +12534,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let checkpoint = CheckpointRuntimeSpec::new(
             backend.clone(),
@@ -12624,6 +12658,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let checkpoint = CheckpointRuntimeSpec::new(
             backend.clone(),
@@ -12726,6 +12761,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let mut runner = ContinuousRunner::new();
 
@@ -12837,6 +12873,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let checkpoint = CheckpointRuntimeSpec::new(
             backend,
@@ -12927,6 +12964,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let checkpoint = CheckpointRuntimeSpec::new(
             backend,
@@ -13051,6 +13089,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let checkpoint = CheckpointRuntimeSpec::new(
             backend,
@@ -13165,6 +13204,7 @@ mod tests {
                     max_bytes: 1 << 20,
                 },
                 delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+                static_inputs: crate::static_input::PreparedStaticInputs::default(),
             }
         };
         let first_source_polls = Arc::new(AtomicUsize::new(0));
@@ -13934,6 +13974,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let manifest_root = directory.path().join("manifests");
         let checkpoint = CheckpointRuntimeSpec::new(
@@ -14304,6 +14345,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let checkpoint = CheckpointRuntimeSpec::managed(
             ManagedCheckpointRuntime::new(directory.path()).unwrap(),
@@ -14375,6 +14417,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let restored_checkpoint = CheckpointRuntimeSpec::managed(
             ManagedCheckpointRuntime::new(directory.path()).unwrap(),
@@ -14495,6 +14538,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let mut runner = ContinuousRunner::new();
         let job = runner.start_checkpointed(spec, checkpoint()).await.unwrap();
@@ -14576,6 +14620,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let mut restored_runner = ContinuousRunner::new();
         let restored_job = restored_runner
@@ -14700,6 +14745,7 @@ mod tests {
                     segments: Vec::new(),
                 },
             )]),
+            static_inputs: BTreeMap::new(),
         })
         .unwrap();
         let key = StateLineageKey::new(plan.name(), plan.fingerprint()).unwrap();
@@ -14762,6 +14808,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let checkpoint = CheckpointRuntimeSpec::managed(
             ManagedCheckpointRuntime::new(directory.path()).unwrap(),
@@ -14936,6 +14983,7 @@ mod tests {
                     segments: Vec::new(),
                 },
             )]),
+            static_inputs: BTreeMap::new(),
         })
         .unwrap();
         let key = StateLineageKey::new(plan.name(), plan.fingerprint()).unwrap();
@@ -15025,6 +15073,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
         let checkpoint =
             CheckpointRuntimeSpec::new(backend, directory.path().join("manifests"), config)
@@ -15235,6 +15284,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         }
     }
 
@@ -16064,6 +16114,7 @@ mod tests {
                 max_bytes: 1 << 20,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         }
     }
 

@@ -1371,6 +1371,21 @@ class RunManager:
         runtime = root.get("runtime")
         if not isinstance(runtime, dict) or runtime.get("mode") != "stream":
             raise RunManagerError("continuous jobs require runtime.mode 'stream'")
+        # SCE-11: REST payloads cannot carry live static values, so a project
+        # declaring static inputs fails closed before any worker is spawned;
+        # engine-level preflight remains the in-process backstop.
+        static_inputs = root.get("static_inputs")
+        if isinstance(static_inputs, list) and static_inputs:
+            first = static_inputs[0]
+            name = (
+                first.get("name", "<unnamed>")
+                if isinstance(first, dict)
+                else "<unnamed>"
+            )
+            raise RunManagerError(
+                f"static_inputs.{name}: REST-submitted runs cannot resolve "
+                "declared static inputs; supply them through the Python runtime"
+            )
         project_id = str(root["id"])
         with self._lock:
             if self._shutdown:

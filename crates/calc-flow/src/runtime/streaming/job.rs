@@ -269,6 +269,7 @@ pub(crate) struct ContinuousJobSpec {
     pub(crate) sinks: Vec<NamedSinkBinding>,
     pub(crate) edge_budget: EdgeBudget,
     pub(crate) delivery_mode: M2DeliveryMode,
+    pub(crate) static_inputs: crate::static_input::PreparedStaticInputs,
 }
 
 type OwningJobCompletion = futures::future::Shared<BoxFuture<'static, Arc<ContinuousJobOutcome>>>;
@@ -433,6 +434,7 @@ pub(crate) struct ValidatedContinuousJob {
     pub(crate) progress: PreparedStreamJob,
     pub(crate) delivery_mode: M2DeliveryMode,
     pub(crate) delivery_proofs: BTreeMap<String, OutputDeliveryProof>,
+    pub(crate) static_inputs: crate::static_input::PreparedStaticInputs,
 }
 
 pub(crate) struct OutputDeliveryProof {
@@ -453,6 +455,7 @@ pub(crate) fn preflight_job(spec: ContinuousJobSpec) -> Result<ValidatedContinuo
         sinks,
         edge_budget,
         delivery_mode,
+        static_inputs,
     } = spec;
     let plan = plan.into_runtime_parts(edge_budget)?;
     validate_runtime_id(&plan.name, "plan.name")?;
@@ -472,6 +475,7 @@ pub(crate) fn preflight_job(spec: ContinuousJobSpec) -> Result<ValidatedContinuo
         progress,
         delivery_mode,
         delivery_proofs,
+        static_inputs,
     })
 }
 
@@ -902,6 +906,11 @@ fn validate_runtime_topology(plan: &StreamRuntimePlanParts) -> Result<()> {
 
 fn validate_node_ingresses(plan: &StreamRuntimePlanParts, node: &RuntimeStreamNode) -> Result<()> {
     for ingress in node.input_ports.keys() {
+        if plan.static_input_ids.contains(ingress) {
+            // Static input ports carry no runtime edge: the latched value is
+            // installed through the prepared static inputs (SCE-11).
+            continue;
+        }
         let edge_id = node
             .ingress_edges
             .get(ingress)
@@ -1264,6 +1273,7 @@ mod tests {
                 max_bytes: 1,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         }
     }
 
@@ -1329,6 +1339,7 @@ mod tests {
                 max_bytes: 1,
             },
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: crate::static_input::PreparedStaticInputs::default(),
         };
 
         for calls in [&left_capability_calls, &right_capability_calls] {

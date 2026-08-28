@@ -14,9 +14,9 @@ use calc_flow::{
     ConnectorKind, ConnectorRegistry, ConnectorSinkFactory, ConnectorSourceFactory,
     DeliveryCapability, DeliveryGuarantee, ManagedCheckpointRuntime, NativeWatermarkCapability,
     ProjectSpec, ProviderRegistry, ReplayCapability, ReplayPositioning, Result, SecretResolver,
-    SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema, StreamRequirements,
-    StreamSink, StreamSource, StreamingRunner, TransactionSupport, UdfRegistry, WatermarkSupport,
-    compile_stream_project,
+    SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema, StreamExecutionPlan,
+    StreamRequirements, StreamSink, StreamSource, StreamingRunner, TransactionSupport, UdfRegistry,
+    WatermarkSupport, compile_stream_project,
 };
 
 struct TestSource;
@@ -450,4 +450,145 @@ fn project_v3_rejects_window_in_batch_runtime() {
         "{:?}",
         report.issues
     );
+}
+
+mod static_input_declarations {
+    use super::*;
+
+    fn static_project(static_inputs: serde_json::Value) -> ProjectSpec {
+        let mut value = serde_json::to_value(stream_project(true)).unwrap();
+        value["graph"]["nodes"] = serde_json::json!([{
+            "id": "merge",
+            "operator": {"kind": "union"},
+            "input_ports": [{"name": "main", "kind": "table"}, {"name": "weights", "kind": "table"}]
+        }]);
+        value["sources"][0]["binding"] = serde_json::json!("main");
+        if static_inputs.is_null() {
+            value.as_object_mut().unwrap().remove("static_inputs");
+        } else {
+            value["static_inputs"] = static_inputs;
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn registered_connectors() -> calc_flow::ConnectorRegistrySnapshot {
+        let mut connectors = ConnectorRegistry::new();
+        let source = source_descriptor();
+        connectors
+            .register_connector(
+                source.clone(),
+                ConnectorFactories::source_only(Arc::new(CountingSourceFactory {
+                    descriptor: source,
+                    opens: Arc::new(AtomicUsize::new(0)),
+                })),
+            )
+            .unwrap();
+        let sink = sink_descriptor();
+        connectors
+            .register_connector(
+                sink.clone(),
+                ConnectorFactories::sink_only(Arc::new(CountingSinkFactory {
+                    descriptor: sink,
+                    opens: Arc::new(AtomicUsize::new(0)),
+                })),
+            )
+            .unwrap();
+        connectors.snapshot()
+    }
+
+    fn table_declaration() -> serde_json::Value {
+        serde_json::json!([{
+            "kind": "table",
+            "name": "weights",
+            "mutability": "static",
+            "schema": [{"name": "factor", "data_type": "float64", "nullable": false}]
+        }])
+    }
+
+    fn compile(project: &ProjectSpec) -> Result<StreamExecutionPlan> {
+        compile_stream_project(
+            project,
+            &ProviderRegistry::default(),
+            &UdfRegistry::new().snapshot(),
+            &registered_connectors(),
+            &StreamRequirements::default(),
+        )
+    }
+
+    #[test]
+    fn static_declarations_attach_to_the_plan_and_leave_source_bindings_alone() {
+        let plan = compile(&static_project(table_declaration())).unwrap();
+        assert_eq!(plan.static_input_ids(), vec!["weights"]);
+        assert_eq!(plan.source_binding_ids(), vec!["main"]);
+        assert_eq!(
+            plan.static_inputs()["weights"].name(),
+            "weights",
+            "the map is keyed by the declared name"
+        );
+    }
+
+    #[test]
+    fn static_declarations_participate_in_the_semantic_fingerprint() {
+        let float64 = compile(&static_project(table_declaration())).unwrap();
+        let mut int64_declaration = table_declaration();
+        int64_declaration[0]["schema"][0]["data_type"] = serde_json::json!("int64");
+        let int64 = compile(&static_project(int64_declaration)).unwrap();
+        assert_ne!(
+            float64.fingerprint(),
+            int64.fingerprint(),
+            "declarations must change the plan fingerprint"
+        );
+    }
+
+    #[test]
+    fn static_declarations_reject_unknown_source_conflicting_and_duplicate_names() {
+        let unknown = compile(&static_project(serde_json::json!([{
+            "kind": "array", "name": "nope", "mutability": "static",
+            "backend": "numpy", "dtype": "float32", "shape": [1]
+        }])))
+        .unwrap_err();
+        assert!(unknown.to_string().contains("unknown_binding"), "{unknown}");
+
+        let conflict = compile(&static_project(serde_json::json!([{
+            "kind": "array", "name": "main", "mutability": "static",
+            "backend": "numpy", "dtype": "float32", "shape": [1]
+        }])))
+        .unwrap_err();
+        assert!(
+            conflict.to_string().contains("source_binding_conflict"),
+            "{conflict}"
+        );
+
+        let duplicate = compile(&static_project(serde_json::json!([
+            {"kind": "array", "name": "weights", "mutability": "static",
+             "backend": "numpy", "dtype": "float32", "shape": [1]},
+            {"kind": "array", "name": "weights", "mutability": "static",
+             "backend": "numpy", "dtype": "float32", "shape": [1]}
+        ])))
+        .unwrap_err();
+        assert!(
+            duplicate.to_string().contains("duplicate_name"),
+            "{duplicate}"
+        );
+    }
+
+    #[test]
+    fn static_declarations_reject_unsupported_array_dtypes() {
+        let error = compile(&static_project(serde_json::json!([{
+            "kind": "array", "name": "weights", "mutability": "static",
+            "backend": "numpy", "dtype": "complex128", "shape": [1]
+        }])))
+        .unwrap_err();
+        assert!(error.to_string().contains("unsupported_dtype"), "{error}");
+    }
+
+    #[test]
+    fn static_declarations_are_strict_about_unknown_fields() {
+        let mut document = serde_json::to_value(static_project(serde_json::json!([]))).unwrap();
+        document["static_inputs"] = serde_json::json!([{
+            "kind": "array", "name": "weights", "mutability": "static",
+            "backend": "numpy", "dtype": "float32", "shape": [1], "payload": {}
+        }]);
+        assert!(serde_json::from_value::<ProjectSpec>(document).is_err());
+    }
 }

@@ -19,10 +19,10 @@ use crate::{
     Port, PortEndpoint, ProviderRegistry, Result, RetentionClass, RollingOperator, RollingSpec,
     SecretHandle, SecretReference, SecretResolver, SecretResolverKind,
     SinkBinding as RuntimeSinkBinding, SinkRecovery, SourceBinding as RuntimeSourceBinding,
-    SourceCapabilities, SourceEvent, SourceSchema, SqlOperator, StreamExecutionPlan,
-    StreamJoinOperator, StreamJoinSpec, StreamRequirements, StreamSink, StreamSource,
-    TransactionSupport, TransactionalStreamSink, UdfKind, UdfReference, UdfRegistrySnapshot,
-    UnionOperator, WatermarkPolicy, WindowAggregateOperator, WindowSpec,
+    SourceCapabilities, SourceEvent, SourceSchema, SqlOperator, StaticInputSpec,
+    StreamExecutionPlan, StreamJoinOperator, StreamJoinSpec, StreamRequirements, StreamSink,
+    StreamSource, TransactionSupport, TransactionalStreamSink, UdfKind, UdfReference,
+    UdfRegistrySnapshot, UnionOperator, WatermarkPolicy, WindowAggregateOperator, WindowSpec,
     validate_delivery_guarantee, validate_selected_udfs,
 };
 
@@ -56,6 +56,8 @@ pub struct ProjectSpec {
     pub sinks: Vec<ProjectSinkBinding>,
     #[serde(default)]
     pub state: StateConfig,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub static_inputs: Vec<StaticInputSpec>,
 }
 
 /// Runtime mode and mode-specific limits for a project-v3 document.
@@ -457,7 +459,8 @@ pub fn compile_stream_project(
     }
     let requirements = project_stream_requirements(project, requirements)?;
     let plan = build_project_builder(project, providers, CompileMode::Stream)?
-        .compile_stream(udfs, &requirements)?;
+        .compile_stream(udfs, &requirements)?
+        .with_static_input_specs(project.static_inputs.clone())?;
     let mut coverage = Vec::new();
     validate_source_coverage(
         project,
@@ -550,7 +553,8 @@ pub fn compile_stream_project_graph(
         });
     }
     build_project_builder(project, providers, CompileMode::Stream)?
-        .compile_stream(udfs, requirements)
+        .compile_stream(udfs, requirements)?
+        .with_static_input_specs(project.static_inputs.clone())
 }
 
 fn validate_project_connectors(
@@ -1760,6 +1764,7 @@ fn validate_nodes(
         validate_operator(node, node_index, providers, udfs, mode, issues);
         selected_udfs.extend(operator_udfs(&node.operator).iter().cloned());
     }
+    validate_static_inputs(project, issues);
     if validate_selected_udfs(&selected_udfs).is_err() {
         let path = project
             .graph
@@ -1775,6 +1780,139 @@ fn validate_nodes(
             path,
             "conflicting_udf",
             "selected native UDFs contain conflicting DataFusion SQL names",
+        ));
+    }
+}
+
+/// Validates static-input declarations (SCE-11): unique portable names
+/// naming graph external input bindings that are not source bindings,
+/// with strict digest-v1 table schemas or array descriptors.
+// #lizard forgives
+fn validate_static_inputs(project: &ProjectSpec, issues: &mut Vec<ValidationIssue>) {
+    let connected = project
+        .graph
+        .edges
+        .iter()
+        .map(|edge| (edge.target_node.as_str(), edge.target_port.as_str()))
+        .map(|(node, port)| (node.to_owned(), port.to_owned()))
+        .collect::<BTreeSet<(String, String)>>();
+    let external_inputs = project
+        .graph
+        .nodes
+        .iter()
+        .flat_map(|node| {
+            node.input_ports
+                .iter()
+                .filter(|port| !connected.contains(&(node.id.clone(), port.name.clone())))
+                .map(|port| port.name.as_str())
+        })
+        .collect::<BTreeSet<_>>();
+    let source_bindings = project
+        .sources
+        .iter()
+        .map(|binding| binding.binding.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut names = BTreeSet::new();
+    for (index, spec) in project.static_inputs.iter().enumerate() {
+        let base = format!("static_inputs[{index}]");
+        let name = match spec {
+            StaticInputSpec::Table { name, schema, .. } => {
+                let mut field_names = BTreeSet::new();
+                for (field_index, field) in schema.iter().enumerate() {
+                    let field_base = format!("{base}.schema[{field_index}]");
+                    if !field_names.insert(field.name.as_str()) {
+                        issues.push(issue(
+                            format!("{field_base}.name"),
+                            "duplicate_field",
+                            format!("duplicate Arrow field {:?}", field.name),
+                        ));
+                    }
+                    if arrow_data_type(&field.data_type).is_none() {
+                        issues.push(issue(
+                            format!("{field_base}.data_type"),
+                            "unsupported_arrow_type",
+                            format!("unsupported Arrow type {:?}", field.data_type),
+                        ));
+                    }
+                }
+                name
+            }
+            StaticInputSpec::Array {
+                name,
+                backend,
+                dtype,
+                shape,
+                ..
+            } => {
+                if backend.is_empty() || backend.len() > 64 {
+                    issues.push(issue(
+                        format!("{base}.backend"),
+                        "out_of_range",
+                        "backend must contain 1 to 64 bytes",
+                    ));
+                }
+                if !crate::static_input::is_supported_array_dtype(dtype) {
+                    issues.push(issue(
+                        format!("{base}.dtype"),
+                        "unsupported_dtype",
+                        format!("array dtype {dtype:?} is outside the digest-v1 set"),
+                    ));
+                }
+                if shape.len() > 16 {
+                    issues.push(issue(
+                        format!("{base}.shape"),
+                        "out_of_range",
+                        "array rank must not exceed 16 dimensions",
+                    ));
+                }
+                name
+            }
+        };
+        validate_static_input_name(
+            name,
+            &base,
+            &external_inputs,
+            &source_bindings,
+            &mut names,
+            issues,
+        );
+    }
+}
+
+fn validate_static_input_name(
+    name: &str,
+    base: &str,
+    external_inputs: &BTreeSet<&str>,
+    source_bindings: &BTreeSet<&str>,
+    names: &mut BTreeSet<String>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if !is_port_identifier(name) {
+        issues.push(issue(
+            format!("{base}.name"),
+            "invalid_field",
+            "static input name must be a portable SQL identifier",
+        ));
+    }
+    if !names.insert(name.to_owned()) {
+        issues.push(issue(
+            format!("{base}.name"),
+            "duplicate_name",
+            format!("duplicate static input name {name:?}"),
+        ));
+    }
+    if !external_inputs.contains(name) {
+        issues.push(issue(
+            format!("{base}.name"),
+            "unknown_binding",
+            format!("static input {name:?} does not name a graph external input binding"),
+        ));
+    }
+    if source_bindings.contains(name) {
+        issues.push(issue(
+            format!("{base}.name"),
+            "source_binding_conflict",
+            format!("static input {name:?} is also declared as a source binding"),
         ));
     }
 }

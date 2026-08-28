@@ -108,6 +108,7 @@ fn project(id: String, name: String, description: String, data: Value) -> Projec
         sources: Vec::new(),
         sinks: Vec::new(),
         state: calc_flow::StateConfig::default(),
+        static_inputs: Vec::new(),
     }
 }
 

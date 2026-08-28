@@ -607,6 +607,7 @@ export interface components {
              *     }
              */
             state: components["schemas"]["ProjectCreateRequest"]["$defs"]["StateConfig"];
+            static_inputs?: components["schemas"]["ProjectCreateRequest"]["$defs"]["StaticInputSpec"][];
             $defs: {
                 /** @description Aggregate function supported by the first built-in window operator. */
                 AggregateFunction: "count" | "sum" | "min" | "max" | "avg";
@@ -1104,6 +1105,32 @@ export interface components {
                     /** @default .calc-flow-state */
                     root: string;
                 };
+                /** @description The declared external-input descriptor for one static input. */
+                StaticInputSpec: {
+                    /** @constant */
+                    kind: "table";
+                    /** @description Declared mutability; always `Static` in v1. */
+                    mutability: components["schemas"]["ProjectCreateRequest"]["$defs"]["StaticMutability"];
+                    /** @description Declared external input name. */
+                    name: string;
+                    /** @description Exact declared Arrow schema in field order. */
+                    schema: components["schemas"]["ProjectCreateRequest"]["$defs"]["ArrowFieldSpec"][];
+                } | {
+                    /** @description Declared array backend identifier (for example `numpy`). */
+                    backend: string;
+                    /** @description Declared dtype spelling (for example `float64`). */
+                    dtype: string;
+                    /** @constant */
+                    kind: "array";
+                    /** @description Declared mutability; always `Static` in v1. */
+                    mutability: components["schemas"]["ProjectCreateRequest"]["$defs"]["StaticMutability"];
+                    /** @description Declared external input name. */
+                    name: string;
+                    /** @description Declared logical shape in element dimensions. */
+                    shape: number[];
+                };
+                /** @description The declared mutability of one static input; only `Static` exists in v1. */
+                StaticMutability: "static";
                 /** @description Immutable declaration for a two-input bounded inner stream Join. */
                 StreamJoinSpec: {
                     bounds: components["schemas"]["ProjectCreateRequest"]["$defs"]["JoinTimeBounds"];
@@ -1203,6 +1230,7 @@ export interface components {
              *     }
              */
             state: components["schemas"]["ProjectDocument"]["$defs"]["StateConfig"];
+            static_inputs?: components["schemas"]["ProjectDocument"]["$defs"]["StaticInputSpec"][];
             $defs: {
                 /** @description Aggregate function supported by the first built-in window operator. */
                 AggregateFunction: "count" | "sum" | "min" | "max" | "avg";
@@ -1700,6 +1728,32 @@ export interface components {
                     /** @default .calc-flow-state */
                     root: string;
                 };
+                /** @description The declared external-input descriptor for one static input. */
+                StaticInputSpec: {
+                    /** @constant */
+                    kind: "table";
+                    /** @description Declared mutability; always `Static` in v1. */
+                    mutability: components["schemas"]["ProjectDocument"]["$defs"]["StaticMutability"];
+                    /** @description Declared external input name. */
+                    name: string;
+                    /** @description Exact declared Arrow schema in field order. */
+                    schema: components["schemas"]["ProjectDocument"]["$defs"]["ArrowFieldSpec"][];
+                } | {
+                    /** @description Declared array backend identifier (for example `numpy`). */
+                    backend: string;
+                    /** @description Declared dtype spelling (for example `float64`). */
+                    dtype: string;
+                    /** @constant */
+                    kind: "array";
+                    /** @description Declared mutability; always `Static` in v1. */
+                    mutability: components["schemas"]["ProjectDocument"]["$defs"]["StaticMutability"];
+                    /** @description Declared external input name. */
+                    name: string;
+                    /** @description Declared logical shape in element dimensions. */
+                    shape: number[];
+                };
+                /** @description The declared mutability of one static input; only `Static` exists in v1. */
+                StaticMutability: "static";
                 /** @description Immutable declaration for a two-input bounded inner stream Join. */
                 StreamJoinSpec: {
                     bounds: components["schemas"]["ProjectDocument"]["$defs"]["JoinTimeBounds"];

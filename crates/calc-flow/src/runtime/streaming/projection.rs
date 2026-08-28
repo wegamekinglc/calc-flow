@@ -673,18 +673,26 @@ fn preflight_failure_fields(
             | CalcFlowError::Io { .. }
     )
     .then_some(ComponentKind::Checkpoint);
-    let message = match category {
-        StreamingErrorCategory::Validation => "streaming job validation failed",
-        StreamingErrorCategory::Compile => "streaming plan compilation failed",
-        StreamingErrorCategory::Conflict => "streaming runtime ownership conflict",
-        StreamingErrorCategory::Cancelled => "streaming job was cancelled",
-        StreamingErrorCategory::CheckpointMismatch => {
-            "checkpoint lineage contains invalid recovery data"
+    let message = match error {
+        CalcFlowError::CheckpointMismatch { message } if message.starts_with("static_inputs.") => {
+            message.clone()
         }
-        StreamingErrorCategory::Io => "managed checkpoint storage operation failed",
-        _ => "streaming runtime initialization failed",
+        _ => {
+            let canned = match category {
+                StreamingErrorCategory::Validation => "streaming job validation failed",
+                StreamingErrorCategory::Compile => "streaming plan compilation failed",
+                StreamingErrorCategory::Conflict => "streaming runtime ownership conflict",
+                StreamingErrorCategory::Cancelled => "streaming job was cancelled",
+                StreamingErrorCategory::CheckpointMismatch => {
+                    "checkpoint lineage contains invalid recovery data"
+                }
+                StreamingErrorCategory::Io => "managed checkpoint storage operation failed",
+                _ => "streaming runtime initialization failed",
+            };
+            canned.to_owned()
+        }
     };
-    (category, message.into(), component_kind, None)
+    (category, message, component_kind, None)
 }
 
 fn invalid_argument_failure_fields(

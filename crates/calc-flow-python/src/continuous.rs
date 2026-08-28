@@ -11,7 +11,8 @@ use std::{
 use parking_lot::Mutex;
 use pyo3::{
     IntoPyObjectExt, PyTraverseError, PyVisit,
-    exceptions::{PyRuntimeError, PyTypeError},
+    exceptions::{PyRuntimeError, PyTypeError, PyValueError},
+    intern,
     prelude::*,
     sync::PyOnceLock,
     types::{PyAny, PyCFunction, PyCapsule, PyDict, PyDictMethods, PyList, PyTuple, PyType},
@@ -865,6 +866,96 @@ fn edge_budget_config(config: &Bound<'_, PyDict>) -> PyResult<calc_flow::EdgeBud
     .map_err(crate::error::to_py_err)
 }
 
+/// Latches one Python host array batch into engine-owned storage (SCE-11).
+///
+/// This is the trusted provider boundary of API note section 7.3: the
+/// declared backend, dtype, and shape are extracted from the host array and
+/// the logical C-order values are copied out of caller-mutable memory, so
+/// the returned batch can never alias it.
+fn latch_static_array(name: &str, batch: &calc_flow::Batch) -> PyResult<calc_flow::Batch> {
+    let payload = batch.external_payload().map_err(|_| {
+        PyTypeError::new_err(format!(
+            "static_inputs.{name}: table batches do not carry an array payload"
+        ))
+    })?;
+    let backend = payload.backend().to_owned();
+    let object = payload
+        .as_any()
+        .downcast_ref::<crate::batch::PythonPayload>()
+        .map(|payload| Python::attach(|py| payload.object.clone_ref(py)))
+        .ok_or_else(|| {
+            PyTypeError::new_err(format!(
+                "static_inputs.{name}.backend: array static inputs must be latched engine-owned values"
+            ))
+        })?;
+    Python::attach(|py| {
+        let array = object.bind(py);
+        let dtype: String = array.getattr(intern!(py, "dtype"))?.str()?.extract()?;
+        let shape: Vec<usize> = array.getattr(intern!(py, "shape"))?.extract()?;
+        let shape: Vec<u64> = shape
+            .into_iter()
+            .map(|dimension| dimension as u64)
+            .collect();
+        let values = array
+            .call_method0(intern!(py, "ravel"))?
+            .call_method0(intern!(py, "tolist"))?
+            .extract::<Vec<Bound<'_, PyAny>>>()?;
+        macro_rules! latched {
+            ($constructor:ident, $cast:ty) => {{
+                let mut extracted = Vec::with_capacity(values.len());
+                for value in &values {
+                    extracted.push(value.extract::<$cast>()?);
+                }
+                calc_flow::Batch::$constructor(&backend, &dtype, shape.clone(), None, extracted)
+            }};
+        }
+        let latched = match dtype.as_str() {
+            "bool" => {
+                let mut extracted = Vec::with_capacity(values.len());
+                for value in &values {
+                    extracted.push(value.extract::<bool>()?);
+                }
+                calc_flow::Batch::static_array_bool(&backend, shape, None, extracted)
+            }
+            "int8" | "int16" | "int32" | "int64" => latched!(static_array_int, i64),
+            "uint8" | "uint16" | "uint32" | "uint64" => latched!(static_array_uint, u64),
+            "float32" | "float64" => latched!(static_array_float, f64),
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "static_inputs.{name}.dtype: array dtype {other:?} is outside the digest-v1 set"
+                )));
+            }
+        }
+        .map_err(|error| PyValueError::new_err(format!("static_inputs.{name}: {error}")))?;
+        Ok(latched)
+    })
+}
+
+/// Converts the adapter-supplied static input mapping into engine-owned
+/// batches. Table batches pass through unchanged; array batches are
+/// snapshotted out of Python memory at this seam.
+fn build_static_inputs(
+    static_inputs: &Bound<'_, PyDict>,
+) -> PyResult<BTreeMap<String, calc_flow::Batch>> {
+    let mut converted = BTreeMap::new();
+    for (key, value) in static_inputs {
+        let name: String = key.extract()?;
+        let batch = value
+            .extract::<PyRef<'_, PyBatch>>()
+            .map_err(|_| {
+                PyTypeError::new_err("static_inputs must be a mapping of calc_flow.Batch values")
+            })?
+            .clone_inner()?;
+        let batch = if batch.kind() == calc_flow::BatchKind::Array {
+            latch_static_array(&name, &batch)?
+        } else {
+            batch
+        };
+        converted.insert(name, batch);
+    }
+    Ok(converted)
+}
+
 fn runtime_config(config: &Bound<'_, PyDict>) -> PyResult<calc_flow::StreamRuntimeConfig> {
     Ok(calc_flow::StreamRuntimeConfig {
         checkpoint_interval: duration_config(config, "checkpoint_interval_micros")?,
@@ -887,6 +978,7 @@ impl PyContinuousStreamingRunner {
         sinks: &Bound<'_, PyDict>,
         checkpoints: PyRef<'_, PyManagedCheckpointRuntime>,
         config: &Bound<'_, PyDict>,
+        static_inputs: &Bound<'_, PyDict>,
     ) -> PyResult<Self> {
         let awaits = Arc::new(PythonAwaitRegistry::new());
         let context = Arc::new(Mutex::new(None));
@@ -898,8 +990,10 @@ impl PyContinuousStreamingRunner {
         let (plan, plan_owner) = plan.take()?;
         roots.push(Arc::new(PythonRoot::new(plan_owner)));
         let checkpoints = checkpoints.take()?;
+        let static_inputs = build_static_inputs(static_inputs)?;
         let runner = calc_flow::StreamingRunner::new(plan, sources, sinks, checkpoints)
             .and_then(|runner| runner.with_runtime_config(config))
+            .and_then(|runner| runner.with_static_inputs(static_inputs))
             .map_err(streaming_py_err)?;
         Ok(Self {
             inner: Arc::new(RunnerStartState {
@@ -2457,12 +2551,14 @@ mod tests {
                 PyManagedCheckpointRuntime::new(directory.path().to_str().unwrap()).unwrap(),
             )
             .unwrap();
+            let static_inputs = PyDict::new(py);
             let runner = PyContinuousStreamingRunner::new(
                 plan.borrow(py),
                 &sources,
                 &sinks,
                 checkpoints.borrow(py),
                 &config,
+                &static_inputs,
             )
             .unwrap();
             locals
