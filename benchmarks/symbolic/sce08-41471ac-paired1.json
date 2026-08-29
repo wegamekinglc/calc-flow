@@ -1,0 +1,385 @@
+{
+    "machine_info": {
+        "node": "chengli-i9",
+        "processor": "",
+        "machine": "x86_64",
+        "python_compiler": "GCC 11.2.0",
+        "python_implementation": "CPython",
+        "python_implementation_version": "3.13.9",
+        "python_version": "3.13.9",
+        "python_build": [
+            "main",
+            "Oct 21 2025 19:16:10"
+        ],
+        "release": "5.15.167.4-microsoft-standard-WSL2",
+        "system": "Linux",
+        "cpu": {
+            "python_version": "3.13.9.final.0 (64 bit)",
+            "cpuinfo_version": [
+                10,
+                1,
+                1
+            ],
+            "cpuinfo_version_string": "10.1.1",
+            "arch": "X86_64",
+            "bits": 64,
+            "count": 32,
+            "arch_string_raw": "x86_64",
+            "vendor_id_raw": "GenuineIntel",
+            "brand_raw": "13th Gen Intel(R) Core(TM) i9-13900HX",
+            "hz_advertised_friendly": "2.4192 GHz",
+            "hz_actual_friendly": "2.4192 GHz",
+            "hz_advertised": [
+                2419199000,
+                0
+            ],
+            "hz_actual": [
+                2419199000,
+                0
+            ],
+            "stepping": 1,
+            "model": 183,
+            "family": 6,
+            "flags": [
+                "3dnowprefetch",
+                "abm",
+                "adx",
+                "aes",
+                "apic",
+                "arch_capabilities",
+                "avx",
+                "avx2",
+                "avx_vnni",
+                "bmi1",
+                "bmi2",
+                "clflush",
+                "clflushopt",
+                "clwb",
+                "cmov",
+                "constant_tsc",
+                "cpuid",
+                "cx16",
+                "cx8",
+                "de",
+                "ept",
+                "ept_ad",
+                "erms",
+                "f16c",
+                "flush_l1d",
+                "fma",
+                "fpu",
+                "fsgsbase",
+                "fsrm",
+                "fxsr",
+                "gfni",
+                "ht",
+                "hypervisor",
+                "ibpb",
+                "ibrs",
+                "ibrs_enhanced",
+                "invpcid",
+                "invpcid_single",
+                "lahf_lm",
+                "lm",
+                "mca",
+                "mce",
+                "md_clear",
+                "mmx",
+                "movbe",
+                "movdir64b",
+                "movdiri",
+                "msr",
+                "mtrr",
+                "nonstop_tsc",
+                "nopl",
+                "nx",
+                "osxsave",
+                "pae",
+                "pat",
+                "pcid",
+                "pclmulqdq",
+                "pdpe1gb",
+                "pge",
+                "pni",
+                "popcnt",
+                "pse",
+                "pse36",
+                "rdpid",
+                "rdrand",
+                "rdrnd",
+                "rdseed",
+                "rdtscp",
+                "rep_good",
+                "sep",
+                "serialize",
+                "sha",
+                "sha_ni",
+                "smap",
+                "smep",
+                "ss",
+                "ssbd",
+                "sse",
+                "sse2",
+                "sse4_1",
+                "sse4_2",
+                "ssse3",
+                "stibp",
+                "syscall",
+                "tpr_shadow",
+                "tsc",
+                "tsc_adjust",
+                "tsc_deadline_timer",
+                "tsc_reliable",
+                "tscdeadline",
+                "umip",
+                "vaes",
+                "vme",
+                "vmx",
+                "vnmi",
+                "vpclmulqdq",
+                "vpid",
+                "waitpkg",
+                "x2apic",
+                "xgetbv1",
+                "xsave",
+                "xsavec",
+                "xsaveopt",
+                "xsaves",
+                "xtopology"
+            ],
+            "l3_cache_size": 37748736,
+            "l2_cache_size": 33554432,
+            "l1_data_cache_size": 786432,
+            "l1_instruction_cache_size": 524288,
+            "l2_cache_line_size": 2048,
+            "l2_cache_associativity": 7
+        }
+    },
+    "commit_info": {
+        "id": "41471acf05d6c54308bd6bed28f2eaf3b66c3daf",
+        "time": "2026-08-29T22:51:47+08:00",
+        "author_time": "2026-08-29T21:33:03+08:00",
+        "dirty": false,
+        "project": "calc-flow",
+        "branch": "(detached head)"
+    },
+    "benchmarks": [
+        {
+            "group": "sce08-temporal-pair [standard rows=100000 array=100000 matmul=256]",
+            "name": "test_sce08_temporal_milestone_pair[standard]",
+            "fullname": "benchmarks/test_symbolic_baseline.py::test_sce08_temporal_milestone_pair[standard]",
+            "params": {
+                "_scale": "standard"
+            },
+            "param": "standard",
+            "extra_info": {
+                "scenario": "sce08_temporal_catalog",
+                "scale": "standard",
+                "table_rows": 100000,
+                "array_elements": 100000,
+                "matrix_dimension": 256,
+                "input_rows": 99968,
+                "output_rows": 99968,
+                "process_rss_bytes": 322039808,
+                "datafusion_planning_ns": 315191,
+                "datafusion_execution_ns": 84394,
+                "datafusion_query_count": 1,
+                "peak_rss_bytes": 322039808,
+                "comparison_contract": "same-process-alternating-v1",
+                "workload_contract": "sce08-temporal-v1",
+                "duration_micros": 60000000,
+                "entities": 64,
+                "maximum_retained_rows_per_entity": 60,
+                "temporal_outputs": 4,
+                "paired_samples": [
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.131269309,
+                        "symbolic_seconds": 0.138188073
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.121806912,
+                        "symbolic_seconds": 0.124698703
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.124289776,
+                        "symbolic_seconds": 0.122641993
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.120944315,
+                        "symbolic_seconds": 0.121328256
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.127443459,
+                        "symbolic_seconds": 0.128918093
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.126170556,
+                        "symbolic_seconds": 0.126263283
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.124555125,
+                        "symbolic_seconds": 0.1247387
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.122452072,
+                        "symbolic_seconds": 0.125256414
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.127882972,
+                        "symbolic_seconds": 0.12684781
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.12984804,
+                        "symbolic_seconds": 0.126317474
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.124490639,
+                        "symbolic_seconds": 0.127648564
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.126171337,
+                        "symbolic_seconds": 0.129313419
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.126155414,
+                        "symbolic_seconds": 0.125922703
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.127388764,
+                        "symbolic_seconds": 0.128035902
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.127666442,
+                        "symbolic_seconds": 0.127029119
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.127235333,
+                        "symbolic_seconds": 0.124833172
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.127851796,
+                        "symbolic_seconds": 0.126345554
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.123822146,
+                        "symbolic_seconds": 0.130875208
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.123048122,
+                        "symbolic_seconds": 0.128503751
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.123135245,
+                        "symbolic_seconds": 0.123248789
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.124202003,
+                        "symbolic_seconds": 0.124318552
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.123776978,
+                        "symbolic_seconds": 0.123535222
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.124227547,
+                        "symbolic_seconds": 0.122891381
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.126338358,
+                        "symbolic_seconds": 0.127787821
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.125747531,
+                        "symbolic_seconds": 0.123221956
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.125759323,
+                        "symbolic_seconds": 0.126285915
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.125100106,
+                        "symbolic_seconds": 0.124600187
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.129791955,
+                        "symbolic_seconds": 0.130910499
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.12769981,
+                        "symbolic_seconds": 0.126681013
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.127956612,
+                        "symbolic_seconds": 0.126257534
+                    }
+                ]
+            },
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 3,
+                "max_time": 0.5,
+                "min_time": 5e-06,
+                "precision": null,
+                "confidence": null,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.2450930699997116,
+                "max": 0.2547540400046273,
+                "mean": 0.24888423333565393,
+                "stddev": 0.005155012506137698,
+                "rounds": 3,
+                "median": 0.24680559000262292,
+                "iqr": 0.007245727503686794,
+                "q1": 0.24552120000043942,
+                "q3": 0.2527669275041262,
+                "iqr_outliers": 0,
+                "stddev_outliers": 1,
+                "outliers": "1;0",
+                "ld15iqr": 0.2450930699997116,
+                "hd15iqr": 0.2547540400046273,
+                "ops": 4.017932299678321,
+                "total": 0.7466527000069618,
+                "data": [
+                    0.24680559000262292,
+                    0.2547540400046273,
+                    0.2450930699997116
+                ],
+                "iterations": 1
+            }
+        }
+    ],
+    "datetime": "2026-08-29T15:38:36.231451+00:00",
+    "version": "5.3.0"
+}
