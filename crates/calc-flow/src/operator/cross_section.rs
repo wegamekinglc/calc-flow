@@ -2048,12 +2048,8 @@ impl PreparedCrossSectionColumn {
             .enumerate()
             .filter_map(|(index, sample)| matches!(sample, OrderSample::Valid(_)).then_some(index))
             .collect::<Vec<_>>();
-        ascending_value_indices.sort_by(|left, right| {
-            match (&order_samples[*left], &order_samples[*right]) {
-                (OrderSample::Valid(left), OrderSample::Valid(right)) => left.cmp(right),
-                _ => Ordering::Equal,
-            }
-        });
+        ascending_value_indices
+            .sort_by(|left, right| compare_order_sample_indices(&order_samples, *left, *right));
         let accumulator = accumulate_statistics(&samples);
         Self {
             values,
@@ -2100,6 +2096,18 @@ fn same_order_class(samples: &[OrderSample], left: usize, right: usize) -> bool 
         (OrderSample::Valid(left), OrderSample::Valid(right)) => left == right,
         _ => false,
     }
+}
+
+fn compare_order_sample_indices(
+    samples: &[OrderSample],
+    left_index: usize,
+    right_index: usize,
+) -> Ordering {
+    let value_order = match (&samples[left_index], &samples[right_index]) {
+        (OrderSample::Valid(left), OrderSample::Valid(right)) => left.cmp(right),
+        _ => Ordering::Equal,
+    };
+    value_order.then_with(|| left_index.cmp(&right_index))
 }
 
 #[allow(
@@ -2185,10 +2193,8 @@ fn order_statistic_column(
         .enumerate()
         .filter_map(|(index, sample)| matches!(sample, OrderSample::Valid(_)).then_some(index))
         .collect::<Vec<_>>();
-    ascending_value_indices.sort_by(|left, right| match (&samples[*left], &samples[*right]) {
-        (OrderSample::Valid(left), OrderSample::Valid(right)) => left.cmp(right),
-        _ => Ordering::Equal,
-    });
+    ascending_value_indices
+        .sort_by(|left, right| compare_order_sample_indices(samples, *left, *right));
     let prepared = PreparedCrossSectionColumn {
         values: Vec::new(),
         samples: Vec::new(),
@@ -2280,15 +2286,7 @@ fn winsorize_column(
 ) -> Vec<ScalarValue> {
     let valid_count = prepared.ascending_value_indices.len() as u64;
     if valid_count < min_samples {
-        return prepared
-            .values
-            .iter()
-            .zip(&prepared.samples)
-            .map(|(value, sample)| match sample {
-                Sample::Nan => value.clone(),
-                Sample::Null | Sample::Valid(_) => float_scalar_like(value, None),
-            })
-            .collect();
+        return unmet_winsorize_column(prepared);
     }
     let sorted = prepared
         .ascending_value_indices
@@ -2304,22 +2302,46 @@ fn winsorize_column(
         .values
         .iter()
         .zip(&prepared.samples)
-        .map(|(original, sample)| match sample {
-            Sample::Null | Sample::Nan => original.clone(),
-            Sample::Valid(value) => {
-                let winsorized = if lower.is_nan() || upper.is_nan() {
-                    f64::NAN
-                } else if *value < lower {
-                    lower
-                } else if *value > upper {
-                    upper
-                } else {
-                    *value
-                };
-                float_scalar_like(original, Some(winsorized))
-            }
+        .map(|(original, sample)| winsorized_scalar(original, sample, lower, upper))
+        .collect()
+}
+
+fn unmet_winsorize_column(prepared: &PreparedCrossSectionColumn) -> Vec<ScalarValue> {
+    prepared
+        .values
+        .iter()
+        .zip(&prepared.samples)
+        .map(|(value, sample)| match sample {
+            Sample::Nan => value.clone(),
+            Sample::Null | Sample::Valid(_) => float_scalar_like(value, None),
         })
         .collect()
+}
+
+fn winsorized_scalar(
+    original: &ScalarValue,
+    sample: &Sample,
+    lower: f64,
+    upper: f64,
+) -> ScalarValue {
+    match sample {
+        Sample::Null | Sample::Nan => original.clone(),
+        Sample::Valid(value) => {
+            float_scalar_like(original, Some(winsorized_value(*value, lower, upper)))
+        }
+    }
+}
+
+fn winsorized_value(value: f64, lower: f64, upper: f64) -> f64 {
+    if lower.is_nan() || upper.is_nan() {
+        f64::NAN
+    } else if value < lower {
+        lower
+    } else if value > upper {
+        upper
+    } else {
+        value
+    }
 }
 
 fn descending_value_indices(prepared: &PreparedCrossSectionColumn) -> Vec<usize> {
