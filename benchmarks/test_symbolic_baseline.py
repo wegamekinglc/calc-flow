@@ -1,12 +1,11 @@
-"""SCE-01 symbolic execution baselines over hand-built calc-flow plans.
+"""SCE-01 baselines and milestone pairs over calc-flow plans.
 
 Each scenario measures the existing runtime doing the shape of work the
 symbolic layer will later compile: row-local projections, rolling
 per-entity features, complete-group cross sections, provider-owned matrix
-products, and stateful stream checkpoints. The plans are hand-built with
-current public APIs (plus the documented private graph hook for the
-stream-only window node) so no symbolic implementation can influence the
-numbers.
+products, and stateful stream checkpoints. Delivered milestone scenarios
+pair equivalent hand-built and symbolic plans in one benchmark process;
+scenarios awaiting their milestone pair remain hand-built baselines.
 """
 
 from __future__ import annotations
@@ -48,12 +47,14 @@ from calc_flow import (
     NativeWatermarkCapability,
     PipelineBuilder,
     ReplayPositioning,
+    Runtime,
     SinkBinding,
     SourceBinding,
     SourceCapabilities,
     SourceDeliveryCapability,
     StreamingRunner,
 )
+from calc_flow.symbolic import FeatureSet, Field, Program, row, table, table_input
 
 PROJECTION_QUERY = """
 SELECT
@@ -80,6 +81,119 @@ SELECT
   power(volume / 10000.0, 2) AS f20
 FROM input
 """
+
+_ROW_LOCAL_SCENARIO = "sce05_row_local_20_columns"
+_ROW_LOCAL_WORKLOAD_CONTRACT = "sce05-row-local-v1"
+_ROW_LOCAL_PAIRED_SAMPLES = 60
+_ROW_LOCAL_PAIR_PROJECTIONS = (
+    "ln(close) AS f01",
+    "sqrt(close) AS f02",
+    "close * volume / 10000.0 AS f03",
+    "close / volume * 1000.0 AS f04",
+    "close * close / 10000.0 AS f05",
+    "abs(close - 100.0) AS f06",
+    "ln(volume) AS f07",
+    "sqrt(volume) AS f08",
+    "close + volume / 10000.0 AS f09",
+    "close - volume / 100000.0 AS f10",
+    "exp(close / 100.0) AS f11",
+    "ln(close * (volume + 0.5)) AS f12",
+    "sqrt(close * (volume / 9999.0)) AS f13",
+    "(close + 3.0) / (volume + 4.0) AS f14",
+    "abs(volume - 5000.0) AS f15",
+    "ln(abs(close - 101.0) + 1.0) AS f16",
+    "sqrt(abs(close - 102.0) + 1.0) AS f17",
+    "close / (volume + 1.0) AS f18",
+    "ln(volume + 2.0) AS f19",
+    "volume * volume / 100000000.0 AS f20",
+)
+_ROW_LOCAL_PAIR_QUERY = (
+    "SELECT\n  sequence,\n  "
+    + ",\n  ".join(_ROW_LOCAL_PAIR_PROJECTIONS)
+    + "\nFROM input"
+)
+
+
+def _projection_symbolic_program() -> Program:
+    quotes = table_input(
+        "quotes",
+        schema=[
+            Field("event_time", "timestamp[us]", nullable=False),
+            Field("sequence", "uint64", nullable=False),
+            Field("symbol", "string", nullable=False),
+            Field("industry", "string", nullable=False),
+            Field("close", "float64"),
+            Field("volume", "float64"),
+        ],
+    )
+    close = quotes["close"]
+    volume = quotes["volume"]
+    feature_names = tuple(f"f{index:02d}" for index in range(1, 21))
+    derived = quotes.with_columns(
+        FeatureSet(
+            [
+                ("f01", row.log(close)),
+                ("f02", row.sqrt(close)),
+                ("f03", close * volume / 10_000.0),
+                ("f04", close / volume * 1_000.0),
+                ("f05", close * close / 10_000.0),
+                ("f06", row.abs(close - 100.0)),
+                ("f07", row.log(volume)),
+                ("f08", row.sqrt(volume)),
+                ("f09", close + volume / 10_000.0),
+                ("f10", close - volume / 100_000.0),
+                ("f11", row.exp(close / 100.0)),
+                ("f12", row.log(close * (volume + 0.5))),
+                ("f13", row.sqrt(close * (volume / 9_999.0))),
+                ("f14", (close + 3.0) / (volume + 4.0)),
+                ("f15", row.abs(volume - 5_000.0)),
+                ("f16", row.log(row.abs(close - 101.0) + 1.0)),
+                ("f17", row.sqrt(row.abs(close - 102.0) + 1.0)),
+                ("f18", close / (volume + 1.0)),
+                ("f19", row.log(volume + 2.0)),
+                ("f20", volume * volume / 100_000_000.0),
+            ]
+        )
+    )
+    projected = table.project(derived, ("sequence", *feature_names))
+    return Program(
+        "symbolic-projection-pair",
+        inputs=[quotes],
+        outputs=[("features", projected)],
+    )
+
+
+def _timed_execute(plan: object, inputs: dict[str, Batch]) -> tuple[Any, float]:
+    start = time.perf_counter_ns()
+    result = plan.execute(inputs)
+    seconds = (time.perf_counter_ns() - start) / 1_000_000_000
+    return result, seconds
+
+
+def _alternating_plan_samples(
+    hand_built_plan: object,
+    symbolic_plan: object,
+    inputs: dict[str, Batch],
+) -> list[dict[str, object]]:
+    samples: list[dict[str, object]] = []
+    for index in range(_ROW_LOCAL_PAIRED_SAMPLES):
+        if index % 2 == 0:
+            _hand_result, hand_seconds = _timed_execute(hand_built_plan, inputs)
+            _symbolic_result, symbolic_seconds = _timed_execute(symbolic_plan, inputs)
+            order = "hand-built-first"
+        else:
+            _symbolic_result, symbolic_seconds = _timed_execute(symbolic_plan, inputs)
+            _hand_result, hand_seconds = _timed_execute(hand_built_plan, inputs)
+            order = "symbolic-first"
+        samples.append(
+            {
+                "order": order,
+                "hand_built_seconds": hand_seconds,
+                "symbolic_seconds": symbolic_seconds,
+            }
+        )
+    return samples
+
 
 _ROLLING_FRAME = (
     "PARTITION BY symbol ORDER BY event_time, sequence ROWS BETWEEN "
@@ -207,6 +321,65 @@ def test_projection_twenty_derived_columns(
     derived = [name for name in output.column_names if name.startswith("f")]
     assert len(derived) == PROJECTION_COLUMN_COUNT
     assert sum(output[name].null_count for name in derived) == 0
+
+
+@pytest.mark.benchmark(
+    group=benchmark_group("sce05-row-local-pair"), min_rounds=3, max_time=0.5
+)
+@pytest.mark.parametrize("_scale", [selected_scale().name])
+def test_sce05_row_local_milestone_pair(
+    benchmark: BenchmarkFixture, _scale: str
+) -> None:
+    workload = quote_workload()
+    hand_built_plan = (
+        PipelineBuilder("sce05-row-local-hand-built")
+        .sql("features", _ROW_LOCAL_PAIR_QUERY)
+        .compile_batch()
+    )
+    symbolic_plan = _projection_symbolic_program().compile_batch(Runtime())
+
+    hand_built_output = (
+        hand_built_plan.execute({"input": workload.batch})
+        .outputs["output"]
+        .to_pyarrow()
+    )
+    symbolic_output = (
+        symbolic_plan.execute({"input": workload.batch}).outputs["output"].to_pyarrow()
+    )
+    assert hand_built_output.equals(symbolic_output)
+    symbolic_warm_result = symbolic_plan.execute({"input": workload.batch})
+    assert len(symbolic_warm_result.datafusion_metrics) == 1
+    inputs = {"input": workload.batch}
+    paired_samples = _alternating_plan_samples(
+        hand_built_plan,
+        symbolic_plan,
+        inputs,
+    )
+
+    record_symbolic_benchmark(
+        benchmark,
+        scenario=_ROW_LOCAL_SCENARIO,
+        input_rows=workload.rows,
+        output_rows=symbolic_output.num_rows,
+        metrics=symbolic_warm_result.datafusion_metrics,
+        extra={
+            "comparison_contract": "same-process-alternating-v1",
+            "workload_contract": _ROW_LOCAL_WORKLOAD_CONTRACT,
+            "derived_columns": PROJECTION_COLUMN_COUNT,
+            "paired_samples": paired_samples,
+        },
+    )
+
+    def execute_pair() -> tuple[Any, Any]:
+        return hand_built_plan.execute(inputs), symbolic_plan.execute(inputs)
+
+    hand_built_result, symbolic_result = benchmark(execute_pair)
+    assert hand_built_result.outputs["output"].num_rows == workload.rows
+    output = symbolic_result.outputs["output"].to_pyarrow()
+    assert output.column_names == [
+        "sequence",
+        *(f"f{index:02d}" for index in range(1, 21)),
+    ]
 
 
 @pytest.mark.benchmark(

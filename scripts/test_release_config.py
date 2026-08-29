@@ -481,7 +481,9 @@ class ReleaseConfigTests(unittest.TestCase):
             "scripts.test_run_rust_coverage "
             "scripts.test_build_python_release scripts.test_inspect_wheel "
             "scripts.test_release_config scripts.test_verify_python_release "
-            "scripts.test_verify_perf_gates scripts.test_verify_security_gates"
+            "scripts.test_verify_perf_gates "
+            "scripts.test_verify_symbolic_milestone_perf "
+            "scripts.test_verify_security_gates"
         )
         windows_test = (
             "scripts.test_run_rust_tests.RustTestHarnessTests."
