@@ -1,0 +1,573 @@
+{
+    "machine_info": {
+        "node": "chengli-i9",
+        "processor": "",
+        "machine": "x86_64",
+        "python_compiler": "GCC 11.2.0",
+        "python_implementation": "CPython",
+        "python_implementation_version": "3.13.9",
+        "python_version": "3.13.9",
+        "python_build": [
+            "main",
+            "Oct 21 2025 19:16:10"
+        ],
+        "release": "5.15.167.4-microsoft-standard-WSL2",
+        "system": "Linux",
+        "cpu": {
+            "python_version": "3.13.9.final.0 (64 bit)",
+            "cpuinfo_version": [
+                10,
+                1,
+                1
+            ],
+            "cpuinfo_version_string": "10.1.1",
+            "arch": "X86_64",
+            "bits": 64,
+            "count": 32,
+            "arch_string_raw": "x86_64",
+            "vendor_id_raw": "GenuineIntel",
+            "brand_raw": "13th Gen Intel(R) Core(TM) i9-13900HX",
+            "hz_advertised_friendly": "2.4192 GHz",
+            "hz_actual_friendly": "2.4192 GHz",
+            "hz_advertised": [
+                2419199000,
+                0
+            ],
+            "hz_actual": [
+                2419199000,
+                0
+            ],
+            "stepping": 1,
+            "model": 183,
+            "family": 6,
+            "flags": [
+                "3dnowprefetch",
+                "abm",
+                "adx",
+                "aes",
+                "apic",
+                "arch_capabilities",
+                "avx",
+                "avx2",
+                "avx_vnni",
+                "bmi1",
+                "bmi2",
+                "clflush",
+                "clflushopt",
+                "clwb",
+                "cmov",
+                "constant_tsc",
+                "cpuid",
+                "cx16",
+                "cx8",
+                "de",
+                "ept",
+                "ept_ad",
+                "erms",
+                "f16c",
+                "flush_l1d",
+                "fma",
+                "fpu",
+                "fsgsbase",
+                "fsrm",
+                "fxsr",
+                "gfni",
+                "ht",
+                "hypervisor",
+                "ibpb",
+                "ibrs",
+                "ibrs_enhanced",
+                "invpcid",
+                "invpcid_single",
+                "lahf_lm",
+                "lm",
+                "mca",
+                "mce",
+                "md_clear",
+                "mmx",
+                "movbe",
+                "movdir64b",
+                "movdiri",
+                "msr",
+                "mtrr",
+                "nonstop_tsc",
+                "nopl",
+                "nx",
+                "osxsave",
+                "pae",
+                "pat",
+                "pcid",
+                "pclmulqdq",
+                "pdpe1gb",
+                "pge",
+                "pni",
+                "popcnt",
+                "pse",
+                "pse36",
+                "rdpid",
+                "rdrand",
+                "rdrnd",
+                "rdseed",
+                "rdtscp",
+                "rep_good",
+                "sep",
+                "serialize",
+                "sha",
+                "sha_ni",
+                "smap",
+                "smep",
+                "ss",
+                "ssbd",
+                "sse",
+                "sse2",
+                "sse4_1",
+                "sse4_2",
+                "ssse3",
+                "stibp",
+                "syscall",
+                "tpr_shadow",
+                "tsc",
+                "tsc_adjust",
+                "tsc_deadline_timer",
+                "tsc_reliable",
+                "tscdeadline",
+                "umip",
+                "vaes",
+                "vme",
+                "vmx",
+                "vnmi",
+                "vpclmulqdq",
+                "vpid",
+                "waitpkg",
+                "x2apic",
+                "xgetbv1",
+                "xsave",
+                "xsavec",
+                "xsaveopt",
+                "xsaves",
+                "xtopology"
+            ],
+            "l3_cache_size": 37748736,
+            "l2_cache_size": 33554432,
+            "l1_data_cache_size": 786432,
+            "l1_instruction_cache_size": 524288,
+            "l2_cache_line_size": 2048,
+            "l2_cache_associativity": 7
+        }
+    },
+    "commit_info": {
+        "id": "b5b0af00d41c5b56e33b3ae25cdeb2c9a9f0a27c",
+        "time": "2026-08-29T21:13:50+08:00",
+        "author_time": "2026-08-29T21:05:36+08:00",
+        "dirty": false,
+        "project": "calc-flow",
+        "branch": "fix/sce05-performance-gate"
+    },
+    "benchmarks": [
+        {
+            "group": "sce05-row-local-pair [standard rows=100000 array=100000 matmul=256]",
+            "name": "test_sce05_row_local_milestone_pair[standard]",
+            "fullname": "benchmarks/test_symbolic_baseline.py::test_sce05_row_local_milestone_pair[standard]",
+            "params": {
+                "_scale": "standard"
+            },
+            "param": "standard",
+            "extra_info": {
+                "scenario": "sce05_row_local_20_columns",
+                "scale": "standard",
+                "table_rows": 100000,
+                "array_elements": 100000,
+                "matrix_dimension": 256,
+                "input_rows": 99968,
+                "output_rows": 99968,
+                "process_rss_bytes": 277188608,
+                "datafusion_planning_ns": 1527864,
+                "datafusion_execution_ns": 7249955,
+                "datafusion_query_count": 1,
+                "peak_rss_bytes": 277188608,
+                "comparison_contract": "same-process-alternating-v1",
+                "workload_contract": "sce05-row-local-v1",
+                "derived_columns": 20,
+                "paired_samples": [
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.008996232,
+                        "symbolic_seconds": 0.009717307
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.007255351,
+                        "symbolic_seconds": 0.009010446
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.006063655,
+                        "symbolic_seconds": 0.006222139
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.006246026,
+                        "symbolic_seconds": 0.005832781
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.006092217,
+                        "symbolic_seconds": 0.006170182
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.005848185,
+                        "symbolic_seconds": 0.006245992
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.005810171,
+                        "symbolic_seconds": 0.006183953
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.005945839,
+                        "symbolic_seconds": 0.005913944
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.005982169,
+                        "symbolic_seconds": 0.005755369
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.005948089,
+                        "symbolic_seconds": 0.006064237
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.006033854,
+                        "symbolic_seconds": 0.0058302
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.005551793,
+                        "symbolic_seconds": 0.005702809
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.005612385,
+                        "symbolic_seconds": 0.005591696
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.006414005,
+                        "symbolic_seconds": 0.006129539
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.006253363,
+                        "symbolic_seconds": 0.006229367
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.006579221,
+                        "symbolic_seconds": 0.006373443
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.006653355,
+                        "symbolic_seconds": 0.006489433
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.006222114,
+                        "symbolic_seconds": 0.006291878
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.00620026,
+                        "symbolic_seconds": 0.006140219
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.005773723,
+                        "symbolic_seconds": 0.005934071
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.005820785,
+                        "symbolic_seconds": 0.005700659
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.006297191,
+                        "symbolic_seconds": 0.005872478
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.006039291,
+                        "symbolic_seconds": 0.005840643
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.005916792,
+                        "symbolic_seconds": 0.005893884
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.006397216,
+                        "symbolic_seconds": 0.006442652
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.005771233,
+                        "symbolic_seconds": 0.006101813
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.0057031,
+                        "symbolic_seconds": 0.006016662
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.005696327,
+                        "symbolic_seconds": 0.005866077
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.005914489,
+                        "symbolic_seconds": 0.005615424
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.005767795,
+                        "symbolic_seconds": 0.005679366
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.005749593,
+                        "symbolic_seconds": 0.005651763
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.00578003,
+                        "symbolic_seconds": 0.021305385
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.006328797,
+                        "symbolic_seconds": 0.00581896
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.005909454,
+                        "symbolic_seconds": 0.005797958
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.00586104,
+                        "symbolic_seconds": 0.005832123
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.005468915,
+                        "symbolic_seconds": 0.005648169
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.005841404,
+                        "symbolic_seconds": 0.005513778
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.006264251,
+                        "symbolic_seconds": 0.005717032
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.005928678,
+                        "symbolic_seconds": 0.006331414
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.005855819,
+                        "symbolic_seconds": 0.005886703
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.006201727,
+                        "symbolic_seconds": 0.005684017
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.00596452,
+                        "symbolic_seconds": 0.005630298
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.005811246,
+                        "symbolic_seconds": 0.005699338
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.005532651,
+                        "symbolic_seconds": 0.005647126
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.005824698,
+                        "symbolic_seconds": 0.005724182
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.005602085,
+                        "symbolic_seconds": 0.00584365
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.005618955,
+                        "symbolic_seconds": 0.005535712
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.005759321,
+                        "symbolic_seconds": 0.00567904
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.006510778,
+                        "symbolic_seconds": 0.005628894
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.007866606,
+                        "symbolic_seconds": 0.007152971
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.005895342,
+                        "symbolic_seconds": 0.005678721
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.005806634,
+                        "symbolic_seconds": 0.005573633
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.005700564,
+                        "symbolic_seconds": 0.005760235
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.005577584,
+                        "symbolic_seconds": 0.005861213
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.005718844,
+                        "symbolic_seconds": 0.005630048
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.005670414,
+                        "symbolic_seconds": 0.005575455
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.005700979,
+                        "symbolic_seconds": 0.005627067
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.005537051,
+                        "symbolic_seconds": 0.005726027
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.005630259,
+                        "symbolic_seconds": 0.005907667
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.005602489,
+                        "symbolic_seconds": 0.005871262
+                    }
+                ]
+            },
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 3,
+                "max_time": 0.5,
+                "min_time": 5e-06,
+                "precision": null,
+                "confidence": null,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.01108317100079148,
+                "max": 0.02438084700042964,
+                "mean": 0.012025308613374364,
+                "stddev": 0.0019460972237106456,
+                "rounds": 44,
+                "median": 0.011744770999939647,
+                "iqr": 0.00043260850179649424,
+                "q1": 0.011508989498906885,
+                "q3": 0.01194159800070338,
+                "iqr_outliers": 3,
+                "stddev_outliers": 1,
+                "outliers": "1;3",
+                "ld15iqr": 0.01108317100079148,
+                "hd15iqr": 0.012836597998102661,
+                "ops": 83.15794896837951,
+                "total": 0.529113578988472,
+                "data": [
+                    0.011476659998152172,
+                    0.01118479399883654,
+                    0.011128566999104805,
+                    0.011602585000218824,
+                    0.01156067199917743,
+                    0.02438084700042964,
+                    0.012569462000101339,
+                    0.012836597998102661,
+                    0.01193094900008873,
+                    0.011698897997121094,
+                    0.011259857001277851,
+                    0.011963780998485163,
+                    0.011578019999433309,
+                    0.01157802099987748,
+                    0.01199544200062519,
+                    0.011496963998069987,
+                    0.0115888990003441,
+                    0.011788261002948275,
+                    0.011306876000162447,
+                    0.01137425300112227,
+                    0.012889770001493162,
+                    0.011991187999228714,
+                    0.01232302499920479,
+                    0.011779790998843964,
+                    0.011738528999558184,
+                    0.01177985599861131,
+                    0.011811136999313021,
+                    0.011408071997720981,
+                    0.011877892997290473,
+                    0.011780339002143592,
+                    0.011979209000855917,
+                    0.011406204001104925,
+                    0.011887484000908444,
+                    0.011609852001129184,
+                    0.011952247001318028,
+                    0.011270884999248665,
+                    0.01108317100079148,
+                    0.011521014999743784,
+                    0.011591741997108329,
+                    0.011758870001358446,
+                    0.012226388000271982,
+                    0.011751013000321109,
+                    0.011573828996915836,
+                    0.011821664000308374
+                ],
+                "iterations": 1
+            }
+        }
+    ],
+    "datetime": "2026-08-29T13:14:00.270412+00:00",
+    "version": "5.3.0"
+}
