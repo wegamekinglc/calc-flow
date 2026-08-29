@@ -184,6 +184,9 @@ impl PipelineBuilder {
             NodeOperator::Rolling(_) => OperatorCheckpointCapability::CheckpointedStateful {
                 state_version: crate::operator::ROLLING_STATE_LAYOUT_VERSION,
             },
+            NodeOperator::CrossSection(_) => OperatorCheckpointCapability::CheckpointedStateful {
+                state_version: crate::operator::CROSS_SECTION_STATE_LAYOUT_VERSION,
+            },
             NodeOperator::StreamJoin(_) => {
                 OperatorCheckpointCapability::CheckpointedStateful { state_version: 1 }
             }

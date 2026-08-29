@@ -153,6 +153,7 @@ pub(crate) enum CompiledStreamOperator {
     Union(UnionOperator),
     Window(crate::WindowAggregateOperator),
     Rolling(crate::RollingOperator),
+    CrossSection(crate::CrossSectionOperator),
     StreamJoin(Box<StreamJoinOperator>),
 }
 
@@ -364,7 +365,8 @@ impl CompiledStreamOperator {
             | Self::Sql(_)
             | Self::Union(_)
             | Self::Window(_)
-            | Self::Rolling(_) => Ok(aggregate_input_frontier),
+            | Self::Rolling(_)
+            | Self::CrossSection(_) => Ok(aggregate_input_frontier),
         }
     }
 
@@ -380,6 +382,7 @@ impl CompiledStreamOperator {
             Self::Union(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::Window(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::Rolling(operator) => operator.on_ingress_progress(ingress, context).await,
+            Self::CrossSection(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::StreamJoin(operator) => operator.on_ingress_progress(ingress, context).await,
         }
     }
@@ -409,6 +412,7 @@ impl CompiledStreamOperator {
             NodeOperator::Union(operator) => Ok(Self::Union(operator)),
             NodeOperator::Window(operator) => Ok(Self::Window(operator)),
             NodeOperator::Rolling(operator) => Ok(Self::Rolling(operator)),
+            NodeOperator::CrossSection(operator) => Ok(Self::CrossSection(operator)),
             NodeOperator::StreamJoin(mut operator) => {
                 if let Some(table) = table {
                     operator.set_stream_resources(table.config, table.udfs.clone());
@@ -433,6 +437,7 @@ impl CompiledStreamOperator {
             Self::Union(operator) => operator.reset(),
             Self::Window(operator) => operator.reset(),
             Self::Rolling(operator) => operator.reset(),
+            Self::CrossSection(operator) => operator.reset(),
             Self::StreamJoin(operator) => operator.reset(),
         }
     }
@@ -452,6 +457,7 @@ impl CompiledStreamOperator {
             Self::Union(operator) => operator.checkpoint(epoch),
             Self::Window(operator) => operator.checkpoint(epoch),
             Self::Rolling(operator) => operator.checkpoint(epoch),
+            Self::CrossSection(operator) => operator.checkpoint(epoch),
             Self::StreamJoin(operator) => operator.checkpoint(epoch),
         }
     }
@@ -468,6 +474,7 @@ impl CompiledStreamOperator {
             Self::Union(operator) => operator.restore(snapshot),
             Self::Window(operator) => operator.restore(snapshot),
             Self::Rolling(operator) => operator.restore(snapshot),
+            Self::CrossSection(operator) => operator.restore(snapshot),
             Self::StreamJoin(operator) => operator.restore(snapshot),
         }
     }
@@ -490,6 +497,9 @@ impl CompiledStreamOperator {
             Self::Union(operator) => operator.process_data(ingress, batch, context, output).await,
             Self::Window(operator) => operator.process_data(ingress, batch, context, output).await,
             Self::Rolling(operator) => operator.process_data(ingress, batch, context, output).await,
+            Self::CrossSection(operator) => {
+                operator.process_data(ingress, batch, context, output).await
+            }
             Self::StreamJoin(operator) => {
                 operator.process_data(ingress, batch, context, output).await
             }
@@ -509,6 +519,7 @@ impl CompiledStreamOperator {
             Self::Union(operator) => operator.on_watermark(watermark, context, output).await,
             Self::Window(operator) => operator.on_watermark(watermark, context, output).await,
             Self::Rolling(operator) => operator.on_watermark(watermark, context, output).await,
+            Self::CrossSection(operator) => operator.on_watermark(watermark, context, output).await,
             Self::StreamJoin(operator) => operator.on_watermark(watermark, context, output).await,
         }
     }
@@ -525,6 +536,7 @@ impl CompiledStreamOperator {
             Self::Union(operator) => operator.on_end(context, output).await,
             Self::Window(operator) => operator.on_end(context, output).await,
             Self::Rolling(operator) => operator.on_end(context, output).await,
+            Self::CrossSection(operator) => operator.on_end(context, output).await,
             Self::StreamJoin(operator) => operator.on_end(context, output).await,
         }
     }
@@ -534,7 +546,11 @@ impl CompiledStreamOperator {
             Self::Expression(operator) => operator.stream_runtime_initialized(),
             Self::Sql(operator) => operator.stream_runtime_initialized(),
             Self::StreamJoin(operator) => operator.stream_runtime_initialized(),
-            Self::External(_) | Self::Union(_) | Self::Window(_) | Self::Rolling(_) => false,
+            Self::External(_)
+            | Self::Union(_)
+            | Self::Window(_)
+            | Self::Rolling(_)
+            | Self::CrossSection(_) => false,
         }
     }
 }
@@ -717,6 +733,7 @@ fn validate_stream_node(node_id: &str, operator: &NodeOperator) -> Result<()> {
         | NodeOperator::Union(_)
         | NodeOperator::Window(_)
         | NodeOperator::Rolling(_)
+        | NodeOperator::CrossSection(_)
         | NodeOperator::StreamJoin(_)
         | NodeOperator::Stream(_) => Ok(()),
         NodeOperator::Sql(operator) if operator.input_ports().len() == 1 => Ok(()),

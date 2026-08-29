@@ -184,20 +184,23 @@ name/version pair fails construction. `ProviderArrayRules` pairs the exact
 `supported_dtypes` tuple with a `safe_dtype_rule` and `shape_rules`, and
 stores both tuples sorted by identity.
 
-The `operators` tuple contains exactly `expression@1`, `rolling@1`, `sql@1`,
-and `stream_join@1`, with truths anchored in the engine implementation:
+The `operators` tuple contains exactly `cross_section@1`, `expression@1`,
+`rolling@1`, `sql@1`, and `stream_join@1`, with truths anchored in the
+engine implementation:
 
-| Operator        | Modes         | Finality      | Checkpoint support     | State version |
-| --------------- | ------------- | ------------- | ---------------------- | ------------- |
-| `expression@1`  | batch, stream | per_row_final | stateless              | —             |
-| `rolling@1`     | batch, stream | per_row_final | checkpointed_stateful  | 1             |
-| `sql@1`         | batch, stream | unproven      | stateless              | —             |
-| `stream_join@1` | stream        | unproven      | checkpointed_stateful  | 1             |
+| Operator          | Modes         | Finality                | Checkpoint support    | State version |
+| ----------------- | ------------- | ----------------------- | --------------------- | ------------- |
+| `cross_section@1` | batch, stream | group_final_append_only | checkpointed_stateful | 1             |
+| `expression@1`    | batch, stream | per_row_final           | stateless             | —             |
+| `rolling@1`       | batch, stream | per_row_final           | checkpointed_stateful | 1             |
+| `sql@1`           | batch, stream | unproven                | stateless             | —             |
+| `stream_join@1`   | stream        | unproven                | checkpointed_stateful | 1             |
 
-`rolling@1` and `stream_join@1` are the stateful operators and the only ones
-that require a watermark; `expression@1` and `rolling@1` are micro-batch
-invariant. All four report `deterministic=True` and `replay_safe=True`. For
-`sql@1` those two claims hold from the engine viewpoint: exactly-once stream
+`cross_section@1`, `rolling@1`, and `stream_join@1` are the stateful
+operators and the only ones that require a watermark; `cross_section@1`,
+`expression@1`, and `rolling@1` are micro-batch invariant. All five report
+`deterministic=True` and `replay_safe=True`. For `sql@1` those two claims
+hold from the engine viewpoint: exactly-once stream
 plans reject nodes that select volatile registered UDFs, and stream
 compilation rejects read-only queries that call volatile built-in SQL
 functions such as `random()` or wall-clock built-ins such as `now()`,
@@ -624,13 +627,41 @@ referenced value. Batch lowering writes the default lateness values, batch
 evaluation classifies no late rows, and a program without rolling
 declarations is unaffected by the lateness arguments.
 
+`cs.rank`, `cs.percentile`, `cs.demean`, and `cs.zscore` lower to one native
+`cross_section` node per program output, placed ahead of the fused row-local
+stages, with the same `ordering_required` key requirement as rolling and —
+in this release — the same plain-input-column rule for the measured value,
+the grouping event time, and every group column. A group is declared with
+`exact_time(event_time, *, partition_by=())` or
+`event_time_bucket(event_time, *, width_micros, partition_by=())`, and every
+cross-section occurrence in one output must share one grouping declaration:
+the same partition columns and the same grouping shape — exact time, or one
+bucket width — or compilation fails with `schema_mismatch` rooted at the
+output. `rank` and `percentile` carry `direction` (default `ascending`),
+`tie_method` (default `average`), and `null_placement` (default `exclude`);
+every primitive carries `min_samples` (default `1`), and `zscore` adds `ddof`
+of `0` or `1` (default `0`), with construction rejecting other values. As
+with rolling, a whole-feature occurrence keeps its feature name as the
+output column while an occurrence nested inside a larger expression
+materializes as a deterministically named `<output>__cf_cs_<index>` column,
+and a filter below every cross-section feature becomes the shared
+`<output>__cf_prefilter` node. Every cross-section column is nullable
+`float64`, and the engine evaluates the frozen complete-group semantics
+described in the [Rust API guide](rust-api.md). The lowered node's frozen
+spec carries `configuration_version` and `state_layout_version` 1, the
+declared ordering and partition keys, the shared grouping, one entry per
+output, the `allowed_lateness_micros` and `late_policy` values validated by
+`compile_stream`, and the `nan_exclude_preserve_v1` value policy.
+
 Analysis rejections surface as `CompileError` with the first issue's
 `{path}: {code}: {message}`. Declarations the lowerer does not implement —
-`cs` cross-section statistics, event `window` nodes, `linalg` array bridges,
-and `parameter` static inputs — fail with the eighth issue code
-`unknown_primitive_version` rooted at the output or `static_inputs.<name>`,
-in both batch and stream modes; a stream aggregate or SQL window is never
-silently made batch-local. Array outputs
+event `window` nodes, `linalg` array bridges, and `parameter` static inputs
+— fail with the eighth issue code `unknown_primitive_version` rooted at the
+output or `static_inputs.<name>`, in both batch and stream modes; a stream
+aggregate or SQL window is never silently made batch-local. A
+`cs.winsorize` declaration — the one cross-section primitive withheld in
+this release — fails with `unsupported_type` rooted at the output feature.
+Array outputs
 fail with `unknown_primitive_version` in batch mode; stream mode rejects
 them earlier, at the analysis phase, with `unbounded_state` rooted at
 `outputs.<name>` — the stream-safety rule for an array output with row-axis

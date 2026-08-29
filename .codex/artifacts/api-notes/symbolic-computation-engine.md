@@ -1131,7 +1131,11 @@ map after duplicate rejection.
 ### 5.5 Omission and default rules
 
 The strict parser has no defaults inside `rolling` or `cross_section` specs.
-Python constructor defaults are normalized and serialized as values:
+The one structural exception is `cross_section`'s `partition_by`: it is
+optional, omits to `[]`, and an empty partition key selects one global group
+per grouping coordinate — an explicit group shape rather than an elided
+per-field value, so it is absent from the list below. Python constructor
+defaults are normalized and serialized as values:
 
 - `allowed_lateness_micros` is `0`;
 - `late_policy` is `{"kind":"error","scope":"envelope"}`;
