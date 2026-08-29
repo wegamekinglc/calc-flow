@@ -5,6 +5,11 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-29: Keep incremental window checkpoints self-contained across
+  epochs by carrying every retained immutable state segment named by the
+  snapshot inventory. Restart recovery no longer depends on an earlier
+  process retaining those segment bytes in memory.
+
 - 2026-08-29: Add stateless external stream providers (SCE-12 / DAL-144).
   Rust gains the public `StreamOperatorLifecycle` proof: external
   `StreamOperator` implementations default to `Unproven`, while trusted

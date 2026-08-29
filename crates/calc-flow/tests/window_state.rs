@@ -432,12 +432,13 @@ async fn later_delta_restores_with_the_complete_retained_segment_inventory() {
         .unwrap();
     let second = source.checkpoint(Epoch::new(2).unwrap()).unwrap();
     assert_eq!(first.segments.len(), 1);
-    assert_eq!(second.segments.len(), 1);
+    assert_eq!(second.segments.len(), 2);
+    for (segment_id, segment) in first.segments {
+        assert_eq!(second.segments.get(&segment_id), Some(&segment));
+    }
 
-    let mut complete = second;
-    complete.segments.extend(first.segments);
     let mut restored = operator();
-    restored.restore(&complete).unwrap();
+    restored.restore(&second).unwrap();
     let mut output = EdgeCollector::new(restored.output_ports().to_vec());
     restored.on_end(&context, &mut output).await.unwrap();
     assert_eq!(first_output_sum(&mut output), (0, 12));
