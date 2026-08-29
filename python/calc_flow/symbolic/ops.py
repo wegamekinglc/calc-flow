@@ -23,6 +23,7 @@ from calc_flow.symbolic.expr import (
     TableExpr,
 )
 from calc_flow.symbolic.nodes import (
+    CBool,
     CDType,
     CEnum,
     CFloat,
@@ -113,6 +114,13 @@ def _min_periods(value: object, frame: object, function: str, /) -> int:
 
 def _min_samples(value: object, function: str, /) -> int:
     return require_positive_int(value, f"calc_flow.symbolic.{function}.min_samples")
+
+
+def _include_ties(value: object, function: str, /) -> bool:
+    path = f"calc_flow.symbolic.{function}.include_ties"
+    if type(value) is not bool:
+        raise TypeError(f"{path} must be a boolean; got {type_name(value)}")
+    return value
 
 
 def _ddof(value: object, function: str, /) -> int:
@@ -469,7 +477,7 @@ class TsNamespace:
 
 
 class CsNamespace:
-    """Cross-section statistics over explicit complete groups."""
+    """Cross-section features over explicit complete groups."""
 
     __slots__ = ()
 
@@ -678,6 +686,92 @@ class CsNamespace:
                     "min_samples": CInt(_min_samples(min_samples, function)),
                     "lower": _number_value(lower_value),
                     "upper": _number_value(upper_value),
+                },
+            )
+        )
+
+    def _selection(
+        self,
+        kind: Literal["top", "bottom"],
+        value: ColumnExpr,
+        group: CrossSectionGroup,
+        count: int,
+        include_ties: bool,
+        min_samples: int,
+        /,
+    ) -> ColumnExpr:
+        function = f"cs.{kind}"
+        validated = self._group(group, function)
+        return ColumnExpr(
+            build(
+                kind,
+                (
+                    _column(value, function, "value")._node,
+                    *self._group_args(validated),
+                ),
+                {
+                    "grouping": self._grouping(validated),
+                    "count": CInt(
+                        require_positive_int(
+                            count, f"calc_flow.symbolic.{function}.count"
+                        )
+                    ),
+                    "include_ties": CBool(_include_ties(include_ties, function)),
+                    "min_samples": CInt(_min_samples(min_samples, function)),
+                },
+            )
+        )
+
+    def top(
+        self,
+        value: ColumnExpr,
+        /,
+        *,
+        group: CrossSectionGroup,
+        count: int,
+        include_ties: bool = True,
+        min_samples: int = 1,
+    ) -> ColumnExpr:
+        """Select the largest valid values in each complete group."""
+
+        return self._selection("top", value, group, count, include_ties, min_samples)
+
+    def bottom(
+        self,
+        value: ColumnExpr,
+        /,
+        *,
+        group: CrossSectionGroup,
+        count: int,
+        include_ties: bool = True,
+        min_samples: int = 1,
+    ) -> ColumnExpr:
+        """Select the smallest valid values in each complete group."""
+
+        return self._selection("bottom", value, group, count, include_ties, min_samples)
+
+    def mean_fill(
+        self,
+        value: ColumnExpr,
+        /,
+        *,
+        group: CrossSectionGroup,
+        min_samples: int = 1,
+    ) -> ColumnExpr:
+        """Fill nulls with the complete group's mean while preserving NaN."""
+
+        function = "cs.mean_fill"
+        validated = self._group(group, function)
+        return ColumnExpr(
+            build(
+                "mean_fill",
+                (
+                    _column(value, function, "value")._node,
+                    *self._group_args(validated),
+                ),
+                {
+                    "grouping": self._grouping(validated),
+                    "min_samples": CInt(_min_samples(min_samples, function)),
                 },
             )
         )

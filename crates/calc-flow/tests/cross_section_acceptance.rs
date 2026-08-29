@@ -9,7 +9,10 @@ use calc_flow::{
     EventTime, JsonMap, OperatorMetadata, StreamJobContext, StreamOperator, StreamOperatorContext,
 };
 use datafusion::arrow::{
-    array::{Array, ArrayRef, Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
+    array::{
+        Array, ArrayRef, BooleanArray, Float64Array, StringArray, TimestampMicrosecondArray,
+        UInt64Array,
+    },
     datatypes::{DataType, Field, Schema, TimeUnit},
     record_batch::RecordBatch,
 };
@@ -102,6 +105,40 @@ fn spec() -> CrossSectionSpec {
                 "output": "momentum_z",
                 "min_samples": 2,
                 "ddof": 1
+            },
+            {
+                "kind": "winsorize",
+                "primitive_version": 1,
+                "input": "momentum_20",
+                "output": "momentum_winsorized",
+                "min_samples": 1,
+                "lower": 0.25,
+                "upper": 0.75
+            },
+            {
+                "kind": "top",
+                "primitive_version": 1,
+                "input": "momentum_20",
+                "output": "is_top",
+                "count": 2,
+                "include_ties": true,
+                "min_samples": 1
+            },
+            {
+                "kind": "bottom",
+                "primitive_version": 1,
+                "input": "momentum_20",
+                "output": "is_bottom",
+                "count": 2,
+                "include_ties": false,
+                "min_samples": 1
+            },
+            {
+                "kind": "mean_fill",
+                "primitive_version": 1,
+                "input": "momentum_20",
+                "output": "momentum_filled",
+                "min_samples": 1
             }
         ],
         "allowed_lateness_micros": 0,
@@ -119,6 +156,10 @@ struct Observed {
     percentiles: Vec<Option<f64>>,
     demeans: Vec<Option<f64>>,
     zscores: Vec<Option<f64>>,
+    winsorized: Vec<Option<f64>>,
+    top: Vec<Option<bool>>,
+    bottom: Vec<Option<bool>>,
+    filled: Vec<Option<f64>>,
 }
 
 /// Float comparison under the frozen 1e-10 cross-section tolerance with NaN
@@ -146,6 +187,10 @@ impl PartialEq for Observed {
             && same_column(&self.percentiles, &other.percentiles)
             && same_column(&self.demeans, &other.demeans)
             && same_column(&self.zscores, &other.zscores)
+            && same_column(&self.winsorized, &other.winsorized)
+            && self.top == other.top
+            && self.bottom == other.bottom
+            && same_column(&self.filled, &other.filled)
     }
 }
 
@@ -168,12 +213,32 @@ fn observe(batch: &Batch, observed: &mut Observed) {
             ("momentum_pct", &mut observed.percentiles),
             ("momentum_demean", &mut observed.demeans),
             ("momentum_z", &mut observed.zscores),
+            ("momentum_winsorized", &mut observed.winsorized),
+            ("momentum_filled", &mut observed.filled),
         ] {
             let column = record
                 .column_by_name(name)
                 .unwrap()
                 .as_any()
                 .downcast_ref::<Float64Array>()
+                .unwrap();
+            for index in 0..column.len() {
+                target.push(if column.is_null(index) {
+                    None
+                } else {
+                    Some(column.value(index))
+                });
+            }
+        }
+        for (name, target) in [
+            ("is_top", &mut observed.top),
+            ("is_bottom", &mut observed.bottom),
+        ] {
+            let column = record
+                .column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<BooleanArray>()
                 .unwrap();
             for index in 0..column.len() {
                 target.push(if column.is_null(index) {
@@ -419,4 +484,43 @@ async fn matrix_reference_values_match_the_frozen_semantics() {
         assert!(value.is_finite(), "zscores[{index}] = {value}");
     }
     assert!(reference.zscores[10].is_some_and(f64::is_nan));
+
+    assert_grouped_feature_values(&reference);
+}
+
+fn assert_grouped_feature_values(reference: &Observed) {
+    let expected_top = [
+        Some(true),
+        None,
+        Some(true),
+        Some(true),
+        Some(false),
+        None,
+        Some(true),
+        Some(true),
+        Some(true),
+        Some(true),
+        None,
+        Some(true),
+    ];
+    let expected_bottom = [
+        Some(true),
+        None,
+        Some(true),
+        Some(false),
+        Some(true),
+        None,
+        Some(false),
+        Some(true),
+        Some(true),
+        Some(false),
+        None,
+        Some(true),
+    ];
+    assert_eq!(reference.top, expected_top);
+    assert_eq!(reference.bottom, expected_bottom);
+    assert!(reference.winsorized[10].is_some_and(f64::is_nan));
+    assert!(reference.filled[10].is_some_and(f64::is_nan));
+    assert_eq!(reference.filled[1], Some(2.0));
+    assert_eq!(reference.filled[5], Some(2.0));
 }

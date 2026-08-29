@@ -242,15 +242,87 @@ def test_percentile_and_demean_carry_their_own_options() -> None:
     }
 
 
-def test_winsorize_is_rejected_until_its_stage_lands() -> None:
+def test_winsorize_lowers_with_bounds_and_preserves_the_input_type() -> None:
     quotes = _ordered()
     program = _program(
         [("w", cs.winsorize(quotes["x"], group=_group(quotes), lower=0.1, upper=0.9))]
     )
 
-    with pytest.raises(CompileError) as error:
-        lower_program_document(program, Runtime(), "batch")
-    assert "not supported in this release" in str(error.value)
+    document = lower_program_document(program, Runtime(), "batch")
+
+    (node,) = _cross_section_nodes(document)
+    assert node["operator"]["spec"]["outputs"] == [  # type: ignore[index]
+        {
+            "kind": "winsorize",
+            "primitive_version": 1,
+            "input": "x",
+            "output": "w",
+            "min_samples": 1,
+            "lower": 0.1,
+            "upper": 0.9,
+        }
+    ]
+    assert node["output_ports"][0]["schema"][-1] == {  # type: ignore[index]
+        "name": "w",
+        "data_type": "float64",
+        "nullable": True,
+    }
+
+
+def test_top_bottom_and_mean_fill_lower_to_one_shared_group_stage() -> None:
+    quotes = _ordered()
+    program = _program(
+        [
+            ("top", cs.top(quotes["x"], group=_group(quotes), count=3)),
+            (
+                "bottom",
+                cs.bottom(
+                    quotes["x"],
+                    group=_group(quotes),
+                    count=2,
+                    include_ties=False,
+                    min_samples=4,
+                ),
+            ),
+            ("filled", cs.mean_fill(quotes["x"], group=_group(quotes))),
+        ]
+    )
+
+    document = lower_program_document(program, Runtime(), "batch")
+
+    (node,) = _cross_section_nodes(document)
+    assert node["operator"]["spec"]["outputs"] == [  # type: ignore[index]
+        {
+            "kind": "top",
+            "primitive_version": 1,
+            "input": "x",
+            "output": "top",
+            "count": 3,
+            "include_ties": True,
+            "min_samples": 1,
+        },
+        {
+            "kind": "bottom",
+            "primitive_version": 1,
+            "input": "x",
+            "output": "bottom",
+            "count": 2,
+            "include_ties": False,
+            "min_samples": 4,
+        },
+        {
+            "kind": "mean_fill",
+            "primitive_version": 1,
+            "input": "x",
+            "output": "filled",
+            "min_samples": 1,
+        },
+    ]
+    assert node["output_ports"][0]["schema"][-3:] == [  # type: ignore[index]
+        {"name": "top", "data_type": "bool", "nullable": True},
+        {"name": "bottom", "data_type": "bool", "nullable": True},
+        {"name": "filled", "data_type": "float64", "nullable": True},
+    ]
 
 
 def test_missing_ordering_keys_are_rejected() -> None:
@@ -443,6 +515,121 @@ def test_cross_section_lowering_compiles_and_executes_in_batch_mode() -> None:
     assert demean[3] == 0.0
     assert abs(demean[0] - (1.0 / 3.0)) < 1e-10
     assert abs(demean[2] - (-2.0 / 3.0)) < 1e-10
+
+
+def test_grouped_features_execute_with_partition_ties_and_missing_values() -> None:
+    quotes = _ordered()
+    group = _group(quotes)
+    signals = quotes.with_columns(
+        FeatureSet(
+            [
+                (
+                    "winsorized",
+                    cs.winsorize(quotes["x"], group=group, lower=0.25, upper=0.75),
+                ),
+                ("top", cs.top(quotes["x"], group=group, count=2)),
+                (
+                    "bottom",
+                    cs.bottom(quotes["x"], group=group, count=2, include_ties=False),
+                ),
+                ("filled", cs.mean_fill(quotes["x"], group=group)),
+            ]
+        )
+    )
+    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    schema = pa.schema(
+        [
+            pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+            pa.field("symbol", pa.string(), nullable=False),
+            pa.field("industry", pa.string(), nullable=True),
+            pa.field("seq", pa.uint64(), nullable=False),
+            pa.field("x", pa.float64(), nullable=True),
+        ]
+    )
+    table = pa.table(
+        {
+            "ts": pa.array([100] * 7, type=pa.timestamp("us", tz="UTC")),
+            "symbol": pa.array(["a", "b", "c", "d", "e", "f", "g"]),
+            "industry": pa.array(["tech"] * 6 + ["fin"]),
+            "seq": pa.array(range(1, 8), type=pa.uint64()),
+            "x": pa.array([0.0, 10.0, 20.0, 20.0, None, float("nan"), 100.0]),
+        },
+        schema=schema,
+    )
+
+    outputs = program.compile_batch(Runtime()).execute(
+        {"input": Batch.from_pyarrow(table)}
+    )
+    result = outputs.outputs["output"].to_pyarrow()
+
+    assert result.column("symbol").to_pylist() == ["g", "a", "b", "c", "d", "e", "f"]
+    assert result.column("top").to_pylist() == [
+        True,
+        False,
+        False,
+        True,
+        True,
+        None,
+        None,
+    ]
+    assert result.column("bottom").to_pylist() == [
+        True,
+        True,
+        True,
+        False,
+        False,
+        None,
+        None,
+    ]
+    assert result.column("filled").to_pylist()[:6] == [
+        100.0,
+        0.0,
+        10.0,
+        20.0,
+        20.0,
+        12.5,
+    ]
+    assert (
+        result.column("filled").to_pylist()[6] != result.column("filled").to_pylist()[6]
+    )
+
+
+def test_winsorize_and_mean_fill_lower_as_float32_for_float32_inputs() -> None:
+    quotes = table_input(
+        "quotes",
+        schema=[
+            Field("ts", "timestamp[us, UTC]", nullable=False),
+            Field("symbol", "string", nullable=False),
+            Field("seq", "uint64", nullable=False),
+            Field("x", "float32", nullable=True),
+        ],
+        entity_by=["symbol"],
+        event_time="ts",
+        sequence_by=["seq"],
+    )
+    group = exact_time(quotes["ts"])
+    signals = quotes.with_columns(
+        FeatureSet(
+            [
+                (
+                    "winsorized",
+                    cs.winsorize(quotes["x"], group=group, lower=0.1, upper=0.9),
+                ),
+                ("filled", cs.mean_fill(quotes["x"], group=group)),
+            ]
+        )
+    )
+    document = lower_program_document(
+        Program("p", inputs=[quotes], outputs=[("signals", signals)]),
+        Runtime(),
+        "batch",
+    )
+
+    (node,) = _cross_section_nodes(document)
+    assert node["output_ports"][0]["schema"][-2:] == [  # type: ignore[index]
+        {"name": "winsorized", "data_type": "float32", "nullable": True},
+        {"name": "filled", "data_type": "float32", "nullable": True},
+    ]
 
 
 def test_rolling_outputs_feed_the_cross_section_stage() -> None:

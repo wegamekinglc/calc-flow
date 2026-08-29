@@ -91,9 +91,7 @@ def test_batch_rolling_pair_arguments_must_be_input_columns() -> None:
         program.compile_batch(Runtime())
 
 
-def test_cross_section_winsorize_is_rejected() -> None:
-    # SCE-09 lowers the first four cross-section primitives; winsorization
-    # stays rejected until SCE-10 lands.
+def test_cross_section_winsorize_compiles_in_both_modes() -> None:
     quotes = _ordered()
     signals = quotes.with_columns(
         FeatureSet(
@@ -112,12 +110,8 @@ def test_cross_section_winsorize_is_rejected() -> None:
     )
     program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
 
-    with pytest.raises(CompileError) as excinfo:
-        program.compile_stream(Runtime())
-
-    message = _reject_message(excinfo)
-    assert "outputs.signals.clipped" in message
-    assert "not supported in this release" in message
+    program.compile_batch(Runtime())
+    program.compile_stream(Runtime())
 
 
 def test_sql_window_is_rejected_in_stream_mode() -> None:

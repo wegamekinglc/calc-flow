@@ -737,6 +737,98 @@ export interface components {
                      * @description Primitive version; must equal `1`.
                      */
                     primitive_version: number;
+                } | {
+                    /** @description Input floating column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "winsorize";
+                    /**
+                     * Format: double
+                     * @description Inclusive lower quantile probability.
+                     */
+                    lower: number;
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_samples: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                    /**
+                     * Format: double
+                     * @description Inclusive upper quantile probability.
+                     */
+                    upper: number;
+                } | {
+                    /**
+                     * Format: uint64
+                     * @description Positive number of ordered values to select.
+                     */
+                    count: number;
+                    /** @description Whether every value tied with the boundary is selected. */
+                    include_ties: boolean;
+                    /** @description Input numeric column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "top";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null selection result.
+                     */
+                    min_samples: number;
+                    /** @description Output boolean column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /**
+                     * Format: uint64
+                     * @description Positive number of ordered values to select.
+                     */
+                    count: number;
+                    /** @description Whether every value tied with the boundary is selected. */
+                    include_ties: boolean;
+                    /** @description Input numeric column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "bottom";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null selection result.
+                     */
+                    min_samples: number;
+                    /** @description Output boolean column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Input floating column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "mean_fill";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples required before nulls are filled.
+                     */
+                    min_samples: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
                 };
                 /** @description Data-only declaration of one native cross-section operation. */
                 CrossSectionSpec: {
@@ -1609,6 +1701,98 @@ export interface components {
                     /**
                      * Format: uint64
                      * @description Minimum valid samples for a non-null result.
+                     */
+                    min_samples: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Input floating column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "winsorize";
+                    /**
+                     * Format: double
+                     * @description Inclusive lower quantile probability.
+                     */
+                    lower: number;
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_samples: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                    /**
+                     * Format: double
+                     * @description Inclusive upper quantile probability.
+                     */
+                    upper: number;
+                } | {
+                    /**
+                     * Format: uint64
+                     * @description Positive number of ordered values to select.
+                     */
+                    count: number;
+                    /** @description Whether every value tied with the boundary is selected. */
+                    include_ties: boolean;
+                    /** @description Input numeric column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "top";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null selection result.
+                     */
+                    min_samples: number;
+                    /** @description Output boolean column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /**
+                     * Format: uint64
+                     * @description Positive number of ordered values to select.
+                     */
+                    count: number;
+                    /** @description Whether every value tied with the boundary is selected. */
+                    include_ties: boolean;
+                    /** @description Input numeric column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "bottom";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null selection result.
+                     */
+                    min_samples: number;
+                    /** @description Output boolean column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Input floating column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "mean_fill";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples required before nulls are filled.
                      */
                     min_samples: number;
                     /** @description Output column name. */

@@ -5,6 +5,22 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-29: Complete grouped cross-section features (SCE-10). The shared
+  native `CrossSectionOperator` now evaluates winsorize, top/bottom selection,
+  and mean-fill alongside rank/percentile/demean/z-score without duplicating
+  grouping, sample classification, or measured-value sorting for compatible
+  outputs. Winsorize uses Hyndman-Fan type-7 quantiles and preserves float32 or
+  float64; top/bottom return nullable boolean masks with positive `count`,
+  explicit `include_ties`, exact scalar ordering, and canonical-identity
+  boundary tie breaking; mean-fill replaces only null floating values when
+  `min_samples` is met and preserves valid values, NaN, and input type. The
+  strict project-v3 variants, Python `cs.winsorize`/`cs.top`/`cs.bottom`/
+  `cs.mean_fill` lowering, generated JSON Schema/OpenAPI/TypeScript contracts,
+  and Rust/Python docs move together. Batch, final-only stream, segmentation,
+  exact/fixed-bucket partitioning, late-event policy, state release, and
+  checkpoint/recovery continue to use the existing group-final lifecycle and
+  state layout version 1.
+
 - 2026-08-28: Add the native cross-section operator for complete-group
   rank, percentile, z-score, and demean across Rust, Python, and the
   regenerated contracts. `CrossSectionOperator` evaluates exact-time or

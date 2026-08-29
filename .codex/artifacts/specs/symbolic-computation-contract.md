@@ -335,10 +335,12 @@ from numeric samples. A rolling aggregate still produces the frame result at
 a row whose current input is null or NaN when its minimum count is met; lag and
 delta instead preserve a null/NaN current or referenced operand. A
 cross-section transform preserves null or NaN at that input row except for the
-explicit rank/percentile null-placement modes in D6. Null and NaN therefore
-remain observably distinct, and other rows in the same frame/group are not
-poisoned by an excluded NaN. Positive and negative infinity are numeric sample
-values and follow IEEE arithmetic; an undefined result is NaN, not null.
+explicit rank/percentile null-placement modes, `mean_fill`'s null replacement,
+and the nullable boolean result of top/bottom selection in D6. Null and NaN
+therefore remain observably distinct wherever the output type can represent
+both, and other rows in the same frame/group are not poisoned by an excluded
+NaN. Positive and negative infinity are numeric sample values and follow IEEE
+arithmetic; an undefined result is NaN, not null.
 
 `min_periods` and `min_samples` count non-null, non-NaN values. Pairwise
 covariance/correlation count only positions where both operands are non-null
@@ -359,6 +361,8 @@ The initial native output types are frozen semantically:
 | covariance, correlation            | nullable `float64`                                         |
 | rank, percentile, z-score, demean  | nullable `float64`                                         |
 | winsorize                          | input floating type, nullable                              |
+| top, bottom                        | nullable `bool`                                            |
+| mean_fill                          | input floating type, nullable                              |
 
 Decimal inputs and outputs are outside the first native rolling/cross-section
 catalog. Supporting them later requires a separate overflow, scale, and
@@ -475,12 +479,21 @@ The initial order/statistic rules are:
   for valid rows when the divisor is not positive or standard deviation is
   zero; and
 - winsorization uses lower/upper probabilities satisfying
-  `0 <= lower <= upper <= 1` and the Hyndman-Fan type-7 linear quantile.
+  `0 <= lower <= upper <= 1` and the Hyndman-Fan type-7 linear quantile;
+- top/bottom selection declares a positive `count`, `include_ties` defaults to
+  true, and the output is a nullable boolean mask. Valid values are ordered by
+  the exact scalar total order; null and NaN rows produce null. When
+  `include_ties` is true, every value equal to the count boundary is selected.
+  When false, exactly `min(count, valid_count)` rows are selected and canonical
+  row identity breaks the boundary tie without reordering output rows; and
+- `mean_fill` accepts only `float32` or `float64`, preserves every valid or NaN
+  input, and replaces a null with the complete valid sample's arithmetic mean
+  only when `min_samples` is met. Its output preserves the input floating type.
 
 Null placement other than `exclude` is valid only for order-statistic
-primitives. Applying it to demean, z-score, or winsorize is a compile error.
-Unsupported direction/tie arguments on non-ordering primitives are likewise
-errors rather than ignored options.
+primitives. Applying it to demean, z-score, winsorize, top, bottom, or
+mean_fill is a compile error. Unsupported direction/tie arguments on
+non-ordering primitives are likewise errors rather than ignored options.
 
 ## 9. D7 — Watermarks, lateness, and final-only output
 
@@ -761,9 +774,10 @@ always exact.
 | Primitive family                                      | `rtol`  | `atol`  |
 | ----------------------------------------------------- | ------- | ------- |
 | row-local, lag/delta, min/max, rank/percentile        | exact   | exact   |
+| cross-section top/bottom selection                    | exact   | exact   |
 | rolling sum/mean (`float64` result)                   | `1e-12` | `1e-12` |
 | variance/stddev/covariance/correlation                | `1e-10` | `1e-12` |
-| cross-section demean/z-score/winsorize                | `1e-10` | `1e-12` |
+| cross-section demean/z-score/winsorize/mean-fill      | `1e-10` | `1e-12` |
 | matrix/provider `float64` within one provider/version | `1e-12` | `1e-12` |
 | matrix/provider `float32` within one provider/version | `1e-5`  | `1e-6`  |
 

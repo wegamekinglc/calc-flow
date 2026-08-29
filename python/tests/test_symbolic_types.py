@@ -285,6 +285,20 @@ def test_cs_primitives_validate_bounds() -> None:
     assert len(valid.digest) == 64
 
 
+def test_cs_grouped_features_validate_selection_and_fill_declarations() -> None:
+    x = _column()
+    group = exact_time(x)
+    with pytest.raises(ValueError, match=re.escape("calc_flow.symbolic.cs.top.count")):
+        cs.top(x, group=group, count=0)
+    with pytest.raises(
+        TypeError, match=re.escape("calc_flow.symbolic.cs.bottom.include_ties")
+    ):
+        cs.bottom(x, group=group, count=1, include_ties=1)  # type: ignore[arg-type]
+    assert len(cs.top(x, group=group, count=2).digest) == 64
+    assert len(cs.bottom(x, group=group, count=2, include_ties=False).digest) == 64
+    assert len(cs.mean_fill(x, group=group, min_samples=2).digest) == 64
+
+
 def test_row_primitives_validate_declarations() -> None:
     x = _column()
     with pytest.raises(

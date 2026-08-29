@@ -4,13 +4,13 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use calc_flow::{
-    Batch, BatchMetadata, CrossSectionOperator, CrossSectionSpec, ExecutionOptions,
-    OperatorMetadata, PipelineBuilder, UdfRegistry,
+    Batch, BatchMetadata, CrossSectionOperator, CrossSectionOutputSpec, CrossSectionSpec,
+    ExecutionOptions, OperatorMetadata, PipelineBuilder, UdfRegistry,
 };
 use datafusion::arrow::{
     array::{
-        Array, ArrayRef, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray,
-        UInt64Array,
+        Array, ArrayRef, Float32Array, Float64Array, Int64Array, StringArray,
+        TimestampMicrosecondArray, UInt64Array,
     },
     datatypes::{DataType, Field, Schema, TimeUnit},
     record_batch::RecordBatch,
@@ -133,6 +133,24 @@ fn integer_rank_percentile_spec() -> CrossSectionSpec {
                     "null_placement": "exclude",
                     "min_samples": 1
                 }),
+                serde_json::json!({
+                    "kind": "top",
+                    "primitive_version": 1,
+                    "input": input,
+                    "output": format!("{input}_top"),
+                    "count": 1,
+                    "include_ties": false,
+                    "min_samples": 1
+                }),
+                serde_json::json!({
+                    "kind": "bottom",
+                    "primitive_version": 1,
+                    "input": input,
+                    "output": format!("{input}_bottom"),
+                    "count": 1,
+                    "include_ties": false,
+                    "min_samples": 1
+                }),
             ]
         })
         .collect::<Vec<_>>();
@@ -157,6 +175,69 @@ fn statistics_spec(ddof: u8, min_samples: u64) -> CrossSectionSpec {
                 "output": "momentum_z",
                 "min_samples": min_samples,
                 "ddof": ddof
+            }),
+        ],
+        0,
+    )
+}
+
+fn winsorize_spec(lower: f64, upper: f64, min_samples: u64) -> CrossSectionSpec {
+    spec_value(
+        &serde_json::json!({"kind": "exact_time"}),
+        &[serde_json::json!({
+            "kind": "winsorize",
+            "primitive_version": 1,
+            "input": "momentum_20",
+            "output": "momentum_winsorized",
+            "min_samples": min_samples,
+            "lower": lower,
+            "upper": upper
+        })],
+        0,
+    )
+}
+
+fn grouped_features_spec() -> CrossSectionSpec {
+    grouped_features_spec_for(&serde_json::json!({"kind": "exact_time"}))
+}
+
+fn grouped_features_spec_for(grouping: &serde_json::Value) -> CrossSectionSpec {
+    spec_value(
+        grouping,
+        &[
+            serde_json::json!({
+                "kind": "top",
+                "primitive_version": 1,
+                "input": "momentum_20",
+                "output": "is_top",
+                "count": 2,
+                "include_ties": true,
+                "min_samples": 1
+            }),
+            serde_json::json!({
+                "kind": "bottom",
+                "primitive_version": 1,
+                "input": "momentum_20",
+                "output": "is_bottom",
+                "count": 2,
+                "include_ties": false,
+                "min_samples": 1
+            }),
+            serde_json::json!({
+                "kind": "mean_fill",
+                "primitive_version": 1,
+                "input": "momentum_20",
+                "output": "momentum_filled",
+                "min_samples": 1
+            }),
+            serde_json::json!({
+                "kind": "winsorize",
+                "primitive_version": 1,
+                "input": "momentum_20",
+                "output": "momentum_winsorized",
+                "min_samples": 1,
+                "lower": 0.25,
+                "upper": 0.75
             }),
         ],
         0,
@@ -259,6 +340,42 @@ fn float_column(batch: &Batch, name: &str) -> Vec<Option<f64>> {
                 Some(array.value(index))
             });
         }
+    }
+    values
+}
+
+fn bool_column(batch: &Batch, name: &str) -> Vec<Option<bool>> {
+    let table = batch.table_payload().unwrap();
+    let mut values = Vec::new();
+    for record in table.batches() {
+        let array = record
+            .column_by_name(name)
+            .unwrap_or_else(|| panic!("missing output column {name}"))
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::BooleanArray>()
+            .unwrap_or_else(|| panic!("output column {name} is not boolean"));
+        for index in 0..array.len() {
+            values.push(if array.is_null(index) {
+                None
+            } else {
+                Some(array.value(index))
+            });
+        }
+    }
+    values
+}
+
+fn float32_column(batch: &Batch, name: &str) -> Vec<Option<f32>> {
+    let table = batch.table_payload().unwrap();
+    let mut values = Vec::new();
+    for record in table.batches() {
+        let array = record
+            .column_by_name(name)
+            .unwrap_or_else(|| panic!("missing output column {name}"))
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap_or_else(|| panic!("output column {name} is not float32"));
+        values.extend(array.iter());
     }
     values
 }
@@ -388,6 +505,14 @@ async fn batch_integer_order_statistics_preserve_values_above_f64_precision() {
         assert_eq!(
             float_column(&output, &format!("{input}_pct")),
             vec![Some(0.0), Some(1.0), Some(0.5), Some(0.5)]
+        );
+        assert_eq!(
+            bool_column(&output, &format!("{input}_top")),
+            vec![Some(false), Some(true), Some(true), Some(false)]
+        );
+        assert_eq!(
+            bool_column(&output, &format!("{input}_bottom")),
+            vec![Some(true), Some(false), Some(true), Some(false)]
         );
     }
 }
@@ -588,6 +713,255 @@ async fn batch_nan_rows_are_excluded_and_produce_nan() {
 }
 
 #[tokio::test]
+async fn batch_winsorize_uses_type_seven_quantiles_per_partition() {
+    let rows = vec![
+        (100, "a", Some("tech"), 1, Some(0.0)),
+        (100, "b", Some("tech"), 2, Some(10.0)),
+        (100, "c", Some("tech"), 3, Some(20.0)),
+        (100, "d", Some("tech"), 4, Some(30.0)),
+        (100, "e", Some("tech"), 5, Some(40.0)),
+        (100, "f", Some("tech"), 6, None),
+        (100, "g", Some("tech"), 7, Some(f64::NAN)),
+        (100, "h", Some("fin"), 8, Some(100.0)),
+    ];
+
+    let output = execute(winsorize_spec(0.25, 0.75, 1), input_batch(&rows))
+        .await
+        .unwrap();
+    let values = float_column(&output, "momentum_winsorized");
+
+    assert_eq!(
+        &values[..6],
+        &[
+            Some(100.0),
+            Some(10.0),
+            Some(10.0),
+            Some(20.0),
+            Some(30.0),
+            Some(30.0),
+        ]
+    );
+    assert_eq!(values[6], None);
+    assert!(values[7].is_some_and(f64::is_nan));
+}
+
+#[tokio::test]
+async fn batch_winsorize_min_samples_nulls_valid_rows_but_preserves_nan() {
+    let rows = vec![
+        (100, "a", Some("tech"), 1, Some(1.0)),
+        (100, "b", Some("tech"), 2, Some(f64::NAN)),
+        (100, "c", Some("tech"), 3, None),
+    ];
+
+    let output = execute(winsorize_spec(0.0, 1.0, 2), input_batch(&rows))
+        .await
+        .unwrap();
+    let values = float_column(&output, "momentum_winsorized");
+
+    assert_eq!(values[0], None);
+    assert!(values[1].is_some_and(f64::is_nan));
+    assert_eq!(values[2], None);
+}
+
+#[tokio::test]
+async fn batch_winsorize_maps_undefined_infinite_quantiles_to_nan() {
+    let rows = vec![
+        (100, "a", Some("tech"), 1, Some(f64::NEG_INFINITY)),
+        (100, "b", Some("tech"), 2, Some(f64::INFINITY)),
+    ];
+
+    let output = execute(winsorize_spec(0.5, 0.5, 1), input_batch(&rows))
+        .await
+        .unwrap();
+
+    assert!(
+        float_column(&output, "momentum_winsorized")
+            .iter()
+            .all(|value| value.is_some_and(f64::is_nan))
+    );
+}
+
+#[tokio::test]
+async fn batch_grouped_feature_min_samples_gates_selection_and_fill() {
+    let rows = vec![
+        (100, "a", Some("tech"), 1, Some(1.0)),
+        (100, "b", Some("tech"), 2, None),
+        (100, "c", Some("tech"), 3, Some(f64::NAN)),
+    ];
+    let spec = spec_value(
+        &serde_json::json!({"kind": "exact_time"}),
+        &[
+            serde_json::json!({
+                "kind": "top",
+                "primitive_version": 1,
+                "input": "momentum_20",
+                "output": "is_top",
+                "count": 1,
+                "include_ties": true,
+                "min_samples": 2
+            }),
+            serde_json::json!({
+                "kind": "mean_fill",
+                "primitive_version": 1,
+                "input": "momentum_20",
+                "output": "filled",
+                "min_samples": 2
+            }),
+        ],
+        0,
+    );
+
+    let output = execute(spec, input_batch(&rows)).await.unwrap();
+
+    assert_eq!(bool_column(&output, "is_top"), vec![None, None, None]);
+    let filled = float_column(&output, "filled");
+    assert_eq!(filled[0], Some(1.0));
+    assert_eq!(filled[1], None);
+    assert!(filled[2].is_some_and(f64::is_nan));
+}
+
+#[tokio::test]
+async fn batch_grouped_features_share_partition_order_and_missing_value_rules() {
+    let rows = vec![
+        (100, "a", Some("tech"), 1, Some(0.0)),
+        (100, "b", Some("tech"), 2, Some(10.0)),
+        (100, "c", Some("tech"), 3, Some(20.0)),
+        (100, "d", Some("tech"), 4, Some(20.0)),
+        (100, "e", Some("tech"), 5, None),
+        (100, "f", Some("tech"), 6, Some(f64::NAN)),
+        (100, "g", Some("fin"), 7, Some(100.0)),
+    ];
+
+    let output = execute(grouped_features_spec(), input_batch(&rows))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        string_column(&output, "symbol"),
+        vec!["g", "a", "b", "c", "d", "e", "f"]
+    );
+    assert_eq!(
+        bool_column(&output, "is_top"),
+        vec![
+            Some(true),
+            Some(false),
+            Some(false),
+            Some(true),
+            Some(true),
+            None,
+            None
+        ]
+    );
+    assert_eq!(
+        bool_column(&output, "is_bottom"),
+        vec![
+            Some(true),
+            Some(true),
+            Some(true),
+            Some(false),
+            Some(false),
+            None,
+            None
+        ]
+    );
+    let filled = float_column(&output, "momentum_filled");
+    assert_eq!(
+        &filled[..6],
+        &[
+            Some(100.0),
+            Some(0.0),
+            Some(10.0),
+            Some(20.0),
+            Some(20.0),
+            Some(12.5)
+        ]
+    );
+    assert!(filled[6].is_some_and(f64::is_nan));
+    let schema = output.table_payload().unwrap().schema();
+    assert_eq!(
+        schema.field_with_name("is_top").unwrap().data_type(),
+        &DataType::Boolean
+    );
+    assert_eq!(
+        schema.field_with_name("is_bottom").unwrap().data_type(),
+        &DataType::Boolean
+    );
+    assert_eq!(
+        schema
+            .field_with_name("momentum_filled")
+            .unwrap()
+            .data_type(),
+        &DataType::Float64
+    );
+}
+
+#[tokio::test]
+async fn batch_winsorize_and_mean_fill_preserve_float32() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC"))),
+            false,
+        ),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("industry", DataType::Utf8, true),
+        Field::new("sequence", DataType::UInt64, false),
+        Field::new("momentum_20", DataType::Float32, true),
+    ]));
+    let record = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(TimestampMicrosecondArray::from(vec![100_i64; 4]).with_timezone("UTC"))
+                as ArrayRef,
+            Arc::new(StringArray::from(vec!["a", "b", "c", "d"])),
+            Arc::new(StringArray::from(vec!["tech"; 4])),
+            Arc::new(UInt64Array::from(vec![1_u64, 2, 3, 4])),
+            Arc::new(Float32Array::from(vec![
+                Some(0.0_f32),
+                Some(10.0),
+                None,
+                Some(30.0),
+            ])),
+        ],
+    )
+    .unwrap();
+    let input = Batch::table(vec![record], BatchMetadata::default()).unwrap();
+    let spec = spec_value(
+        &serde_json::json!({"kind": "exact_time"}),
+        &[
+            serde_json::json!({
+                "kind": "winsorize",
+                "primitive_version": 1,
+                "input": "momentum_20",
+                "output": "winsorized",
+                "min_samples": 1,
+                "lower": 0.25,
+                "upper": 0.75
+            }),
+            serde_json::json!({
+                "kind": "mean_fill",
+                "primitive_version": 1,
+                "input": "momentum_20",
+                "output": "filled",
+                "min_samples": 1
+            }),
+        ],
+        0,
+    );
+
+    let output = execute_with_schema(schema, spec, input).await.unwrap();
+
+    assert_eq!(
+        float32_column(&output, "winsorized"),
+        vec![Some(5.0), Some(10.0), None, Some(20.0)]
+    );
+    assert_eq!(
+        float32_column(&output, "filled"),
+        vec![Some(0.0), Some(10.0), Some(40.0 / 3.0), Some(30.0)]
+    );
+}
+
+#[tokio::test]
 async fn batch_fixed_buckets_floor_divide_and_close_on_bucket_end() {
     let rows = vec![
         (100, "a", Some("tech"), 1, Some(1.0)),
@@ -637,6 +1011,45 @@ async fn batch_fixed_buckets_floor_divide_and_close_on_bucket_end() {
         percentiles,
         vec![Some(0.5), Some(0.0), Some(1.0), Some(0.5)]
     );
+}
+
+#[tokio::test]
+async fn batch_grouped_features_share_fixed_bucket_boundaries() {
+    let rows = vec![
+        (100, "a", Some("tech"), 1, Some(0.0)),
+        (150, "b", Some("tech"), 2, Some(10.0)),
+        (199, "c", Some("tech"), 3, Some(10.0)),
+        (199, "e", Some("tech"), 4, None),
+        (200, "d", Some("tech"), 1, Some(30.0)),
+    ];
+    let spec = grouped_features_spec_for(
+        &serde_json::json!({"kind": "fixed_bucket", "width_micros": 100}),
+    );
+
+    let output = execute(spec, input_batch(&rows)).await.unwrap();
+
+    assert_eq!(
+        string_column(&output, "symbol"),
+        vec!["a", "b", "c", "e", "d"]
+    );
+    assert_eq!(
+        bool_column(&output, "is_top"),
+        vec![Some(false), Some(true), Some(true), None, Some(true)]
+    );
+    assert_eq!(
+        bool_column(&output, "is_bottom"),
+        vec![Some(true), Some(true), Some(false), None, Some(true)]
+    );
+    assert_eq!(
+        float_column(&output, "momentum_winsorized"),
+        vec![Some(5.0), Some(10.0), Some(10.0), None, Some(30.0)]
+    );
+    let filled = float_column(&output, "momentum_filled");
+    assert_eq!(filled[0], Some(0.0));
+    assert_eq!(filled[1], Some(10.0));
+    assert_eq!(filled[2], Some(10.0));
+    assert!(filled[3].is_some_and(|value| (value - 20.0 / 3.0).abs() < 1e-12));
+    assert_eq!(filled[4], Some(30.0));
 }
 
 #[tokio::test]
@@ -922,6 +1335,41 @@ fn ordering_fields_reject_invalid_declarations() {
         .is_err(),
         "an empty entity key was accepted"
     );
+}
+
+#[test]
+fn grouped_feature_arguments_fail_closed() {
+    let mut non_finite = winsorize_spec(0.1, 0.9, 1);
+    non_finite.outputs[0] = CrossSectionOutputSpec::Winsorize {
+        primitive_version: 1,
+        input: "momentum_20".into(),
+        output: "winsorized".into(),
+        min_samples: 1,
+        lower: f64::NAN,
+        upper: 0.9,
+    };
+    let error = CrossSectionOperator::new("cross_section", input_schema(), non_finite)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("cross_section.outputs[0].lower"), "{error}");
+
+    let zero_count = spec_value(
+        &serde_json::json!({"kind": "exact_time"}),
+        &[serde_json::json!({
+            "kind": "top",
+            "primitive_version": 1,
+            "input": "momentum_20",
+            "output": "is_top",
+            "count": 0,
+            "include_ties": true,
+            "min_samples": 1
+        })],
+        0,
+    );
+    let error = CrossSectionOperator::new("cross_section", input_schema(), zero_count)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("cross_section.outputs[0].count"), "{error}");
 }
 
 #[test]

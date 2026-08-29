@@ -198,7 +198,8 @@ only: it exposes no `eval`, data, or runner path.
 row-local expressions, the `ts` rolling declarations — lag, delta, the
 count/sum/mean/min/max/variance/stddev aggregates, and the
 covariance/correlation pairs — and the `cs` cross-section declarations —
-rank, percentile, demean, and z-score — into the same strict project-v3
+rank, percentile, demean, z-score, winsorize, top/bottom selection, and
+mean-fill — into the same strict project-v3
 execution plans, and execution remains owned by the execution plans and
 runners above.
 

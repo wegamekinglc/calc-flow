@@ -408,6 +408,17 @@ _PRIMITIVES: dict[str, PrimitiveSpec] = {
         frozenset({"grouping", "min_samples", "lower", "upper"}),
         CMap.from_mapping({"min_samples": CInt(1)}),
     ),
+    **{
+        name: PrimitiveSpec(
+            frozenset({"grouping", "count", "include_ties", "min_samples"}),
+            CMap.from_mapping({"include_ties": CBool(True), "min_samples": CInt(1)}),
+        )
+        for name in ("top", "bottom")
+    },
+    "mean_fill": PrimitiveSpec(
+        frozenset({"grouping", "min_samples"}),
+        CMap.from_mapping({"min_samples": CInt(1)}),
+    ),
     "project": PrimitiveSpec(frozenset({"columns"}), CMap(())),
     "with_columns": PrimitiveSpec(frozenset({"names"}), CMap(())),
     "attach_columns": PrimitiveSpec(frozenset({"names"}), CMap(())),
