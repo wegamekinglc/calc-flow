@@ -440,6 +440,28 @@ separate `register_batch`/`resolve_batch` and `register_stream`/`resolve_stream`
 paths. External provider state and payloads must satisfy Rust's `Send + Sync`
 boundaries.
 
+An external `StreamOperator` reports its proof through `lifecycle()`. The
+default is `StreamOperatorLifecycle::Unproven`. A trusted factory may return
+`StreamOperatorLifecycle::Stateless` only when the operator owns no checkpoint
+state; its `microbatch_invariant` flag must also be true so splitting or
+combining input micro-batches cannot change the output rows.
+
+Stream planning keeps lifecycle proof and checkpoint capability distinct.
+`PipelineBuilder::add_node` classifies a proven external stateless operator as
+`Stateless`, and `compile_stream` revalidates its lifecycle proof. The
+stateless proof keeps `deterministic` and `replay_safe` separate: best-effort
+and at-least-once plans may compile without those two claims, but a plan
+requesting exactly-once delivery rejects the provider unless both are true.
+Operators classified as `CheckpointedStateful` instead qualify through their
+positive checkpoint state version and do not need a stateless lifecycle claim.
+
+An `Unproven` external operator is not rejected merely by `compile_stream`, so
+ordinary plan construction retains the existing two-stage contract. If a
+`StreamingRunner` is configured with a checkpoint runtime, job admission
+rejects that operator before any connector opens. Exactly-once delivery
+requires a checkpoint runtime, so an unproven operator cannot be admitted on
+that route either.
+
 ## Continuous execution and recovery
 
 The complete checked example is

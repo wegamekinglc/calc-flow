@@ -220,6 +220,16 @@ registration evidence establishes no output-finality contract; it is the
 truthful conservative value for a batch-only registration and does not narrow
 existing batch selectability.
 
+The trusted `register_numpy` and `register_jax` helpers additionally attach a
+process-local stateless stream proof to their `expression@1` registrations.
+Those provider entries report `modes=("batch", "stream")`,
+`finality="per_row_final"`, `microbatch_invariant=True`,
+`deterministic=True`, `replay_safe=True`, and the
+`row_axis_independent`/`elementwise_broadcast@1` array contract. The public
+`Runtime.register_provider` signature has no lifecycle arguments, so an
+arbitrary Python callback remains batch-only rather than acquiring this proof
+from caller-supplied metadata.
+
 Compiled-in connector registrations surface on the snapshot's `connectors`
 tuple as `ConnectorCapability` entries. Each entry pairs its
 `(provider, name, version)` identity and `source`/`sink`/`both` kind with a
@@ -418,6 +428,23 @@ inputs remain valid. `register_jax` provides the same explicit provider
 boundary.
 The full version is [`examples/06_numpy_array.py`](../examples/06_numpy_array.py).
 
+Both helpers also make `expression@1` available to stream compilation, but
+only for a conservative row-axis-independent subset. The parsed expression
+must reference `x` and may contain no function call or matrix multiplication;
+for example, `x * 2 + 1` is eligible, while `sum(x)`, `transpose(x)`,
+`reshape(x, ...)`, `x @ x`, and a constant-only expression fail compilation.
+The broader bounded expression language remains available to batch plans.
+
+For this stateless stream path, the provider callback receives
+`(batch, provider_options)` exactly once for each accepted data micro-batch.
+It runs on a blocking worker and receives no public cancellation token or
+`ProviderContext`. A callback exception surfaces as a provider error and emits
+nothing. Cancellation is checked before dispatch and again after a successful
+callback, before output validation and emission. The running
+`spawn_blocking` callback itself cannot be preempted, so cancellation waits for
+it to return; once the post-callback check observes cancellation, the result is
+discarded and no output is emitted.
+
 ### Table-array matrix multiplication
 
 `pyarrow.Table` is the table input for table-array matrix multiplication. The
@@ -435,7 +462,9 @@ def table_matmul(
 
 It selects `columns` in the supplied order, accepts a rank-two `weights` array
 with shape `(len(columns), output_width)`, and returns a same-backend array
-batch named `output`.
+batch named `output`. `table_matmul@1` remains batch-only in this release;
+static-input matrix multiplication is follow-up work rather than part of the
+stateless stream-provider proof.
 
 ```python
 import numpy as np

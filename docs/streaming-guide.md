@@ -168,6 +168,40 @@ bound sink. The entire route is checked before connector `open()`.
 output. Treat that status as the runtime proof for the compiled route, not as a
 substitute for configuring the external system correctly.
 
+## External provider lifecycles
+
+Rust external stream operators must report a public `StreamOperatorLifecycle`
+proof. The default is `Unproven`. When a trusted `StreamOperatorFactory`
+creates a stateless operator, `compile_stream` requires
+`microbatch_invariant: true`; if any output requests exactly-once delivery,
+compilation also requires `deterministic: true` and `replay_safe: true`.
+Stateful operators follow a separate path: a positive versioned
+`CheckpointedStateful` capability is sufficient, without a stateless
+lifecycle claim.
+
+An `Unproven` operator is not rejected merely because ordinary stream
+compilation ran. Instead, the existing second admission stage fails closed
+when a runner is configured with a checkpoint runtime, before any connector
+opens. Exactly-once delivery requires that checkpoint runtime, so it cannot
+admit an unproven operator. This preserves the existing separation between
+plan construction and checkpointed job admission without turning missing
+evidence into an exactly-once claim.
+
+The current Python stream-provider path is the trusted NumPy/JAX
+`expression@1` registration installed by `register_numpy` or `register_jax`.
+Each accepted data micro-batch calls the provider once with
+`(batch, provider_options)`. Callback failures are provider errors and emit no
+output. Cancellation is checked before dispatch and after a successful
+callback, before emission. The callback runs through `spawn_blocking` and
+cannot be preempted once running; if cancellation is observed when it returns,
+its successful result is not emitted.
+
+NumPy/JAX stream expressions must depend on `x` and contain neither function
+calls nor matrix multiplication, keeping the accepted subset conservatively
+row-axis-independent. Reductions, transpose, reshape, constant-only
+expressions, and `@` therefore remain batch-only. `table_matmul@1` is also
+batch-only; static-input matrix multiplication is deferred to SCE-13.
+
 ## Static inputs
 
 A static input is an immutable per-job side value — model weights, a reference
