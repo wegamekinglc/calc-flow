@@ -2945,15 +2945,15 @@ mod tests {
 
     #[test]
     fn order_and_statistic_helpers_cover_edge_semantics() {
-        let samples = [
-            Sample::Valid(2.0),
-            Sample::Valid(2.0),
-            Sample::Valid(1.0),
-            Sample::Null,
-            Sample::Nan,
+        let order_samples = [
+            OrderSample::Valid(KeyValue::Float64(2.0)),
+            OrderSample::Valid(KeyValue::Float64(2.0)),
+            OrderSample::Valid(KeyValue::Float64(1.0)),
+            OrderSample::Null,
+            OrderSample::Nan,
         ];
         let ranks = order_statistic_column(
-            &samples,
+            &order_samples,
             SortDirection::Ascending,
             RankTieMethod::Average,
             NullPlacement::Exclude,
@@ -2964,7 +2964,7 @@ mod tests {
         assert!(ranks[4].unwrap().is_nan());
         assert_eq!(
             order_statistic_column(
-                &[Sample::Valid(1.0)],
+                &[OrderSample::Valid(KeyValue::Float64(1.0))],
                 SortDirection::Descending,
                 RankTieMethod::Min,
                 NullPlacement::First,
@@ -2975,7 +2975,10 @@ mod tests {
         );
         assert_eq!(
             order_statistic_column(
-                &[Sample::Null, Sample::Valid(1.0)],
+                &[
+                    OrderSample::Null,
+                    OrderSample::Valid(KeyValue::Float64(1.0)),
+                ],
                 SortDirection::Descending,
                 RankTieMethod::Max,
                 NullPlacement::Last,
@@ -2985,17 +2988,13 @@ mod tests {
             vec![None, None]
         );
 
-        let centered = statistic_column(
-            &[
-                Sample::Null,
-                Sample::Nan,
-                Sample::Valid(1.0),
-                Sample::Valid(3.0),
-            ],
-            1,
-            0,
-            false,
-        );
+        let samples = [
+            Sample::Null,
+            Sample::Nan,
+            Sample::Valid(1.0),
+            Sample::Valid(3.0),
+        ];
+        let centered = statistic_column(&samples, 1, 0, false);
         assert_eq!(centered[0], None);
         assert!(centered[1].unwrap().is_nan());
         assert_eq!(&centered[2..], &[Some(-1.0), Some(1.0)]);
