@@ -9,7 +9,12 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from calc_flow import _native
-from calc_flow.capabilities import ProviderOption, ProviderOptionsSchema
+from calc_flow.capabilities import (
+    CapabilityRule,
+    ProviderArrayRules,
+    ProviderOption,
+    ProviderOptionsSchema,
+)
 
 if TYPE_CHECKING:
     from calc_flow.pipeline import Runtime
@@ -27,6 +32,40 @@ _TABLE_MATMUL_INPUT_PORTS = (("table", "table"), ("weights", "array"))
 _TABLE_MATMUL_OUTPUT_PORTS = (("output", "array"),)
 _EXPRESSION_OPTIONS_SCHEMA = ProviderOptionsSchema(
     fields=(ProviderOption("expression", "string", required=True),)
+)
+_NUMPY_STREAM_ARRAY_RULES = ProviderArrayRules(
+    supported_dtypes=(
+        "bool",
+        "complex128",
+        "complex64",
+        "float32",
+        "float64",
+        "int16",
+        "int32",
+        "int64",
+        "int8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "uint8",
+    ),
+    safe_dtype_rule=CapabilityRule("array_api_safe_dtype", "1"),
+    shape_rules=(CapabilityRule("elementwise_broadcast", "1"),),
+)
+_JAX_STREAM_ARRAY_RULES = ProviderArrayRules(
+    supported_dtypes=(
+        "bool",
+        "complex64",
+        "float32",
+        "int16",
+        "int32",
+        "int8",
+        "uint16",
+        "uint32",
+        "uint8",
+    ),
+    safe_dtype_rule=CapabilityRule("array_api_safe_dtype", "1"),
+    shape_rules=(CapabilityRule("elementwise_broadcast", "1"),),
 )
 
 _ALLOWED_BINARY = {
@@ -237,6 +276,19 @@ def _validate_options(options: Mapping[str, object]) -> ast.Expression:
     if udfs:
         raise _array_error("custom array UDFs are unavailable")
     return _parse_expression(options.get("expression"))
+
+
+def _validate_stream_options(options: Mapping[str, object]) -> None:
+    parsed = _validate_options(options)
+    if not any(
+        isinstance(node, ast.Name) and node.id == "x" for node in ast.walk(parsed)
+    ):
+        raise _array_error("stream expressions must depend on the input rows")
+    if any(isinstance(node, (ast.Call, ast.MatMult)) for node in ast.walk(parsed)):
+        raise _array_error(
+            "stream expressions support only row-axis-independent "
+            "elementwise operations"
+        )
 
 
 def _validate_provider_options(
@@ -636,6 +688,9 @@ class _ArrayProvider:
     def validate(self, options: Mapping[str, object]) -> None:
         _validate_options(options)
 
+    def validate_stream(self, options: Mapping[str, object]) -> None:
+        _validate_stream_options(options)
+
     def __call__(
         self, batch: _native.Batch, options: Mapping[str, object]
     ) -> _native.Batch:
@@ -752,12 +807,24 @@ class _TableMatmulProvider:
 def register_numpy(runtime: Runtime) -> None:
     import numpy as np
 
+    expression = _ArrayProvider("numpy", np)
     runtime.register_provider(
         "numpy",
         "expression",
         "1",
-        _ArrayProvider("numpy", np),
+        expression,
         options_schema=_EXPRESSION_OPTIONS_SCHEMA,
+    )
+    runtime._register_stateless_stream_provider(
+        "numpy",
+        "expression",
+        "1",
+        expression,
+        microbatch_invariant=True,
+        deterministic=True,
+        replay_safe=True,
+        supports_static_inputs=False,
+        array_rules=_NUMPY_STREAM_ARRAY_RULES,
     )
     runtime._register_mapping_provider(
         "numpy",
@@ -772,12 +839,24 @@ def register_numpy(runtime: Runtime) -> None:
 def register_jax(runtime: Runtime) -> None:
     import jax.numpy as jnp
 
+    expression = _ArrayProvider("jax", jnp)
     runtime.register_provider(
         "jax",
         "expression",
         "1",
-        _ArrayProvider("jax", jnp),
+        expression,
         options_schema=_EXPRESSION_OPTIONS_SCHEMA,
+    )
+    runtime._register_stateless_stream_provider(
+        "jax",
+        "expression",
+        "1",
+        expression,
+        microbatch_invariant=True,
+        deterministic=True,
+        replay_safe=True,
+        supports_static_inputs=False,
+        array_rules=_JAX_STREAM_ARRAY_RULES,
     )
     runtime._register_mapping_provider(
         "jax",

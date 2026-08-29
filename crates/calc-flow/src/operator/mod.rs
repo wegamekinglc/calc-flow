@@ -30,7 +30,7 @@ pub use rolling::{
 pub use sql::SqlOperator;
 pub use stream::{
     EdgeCollector, IngressProgress, IngressProgressSnapshot, IngressState, OperatorStateSnapshot,
-    StateSegment, StreamCollector, StreamOperator, StreamOperatorContext,
+    StateSegment, StreamCollector, StreamOperator, StreamOperatorContext, StreamOperatorLifecycle,
 };
 pub use union::UnionOperator;
 pub use window::{

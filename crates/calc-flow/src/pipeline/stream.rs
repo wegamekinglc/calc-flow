@@ -622,6 +622,7 @@ impl PipelineBuilder {
             }
         }
         validate_deterministic_udfs(&self.nodes, requirements, udfs)?;
+        validate_external_provider_lifecycles(&self.nodes, requirements)?;
         let edges = self
             .edges
             .iter()
@@ -801,6 +802,37 @@ fn validate_deterministic_udfs(
                     ),
                 });
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_external_provider_lifecycles(
+    nodes: &BTreeMap<String, NodeDefinition>,
+    requirements: &StreamRequirements,
+) -> Result<()> {
+    let exactly_once = requirements
+        .delivery
+        .values()
+        .any(|guarantee| *guarantee == DeliveryGuarantee::ExactlyOnce);
+    for (node_id, node) in nodes {
+        let NodeOperator::Stream(operator) = &node.operator else {
+            continue;
+        };
+        let lifecycle = operator.lifecycle();
+        if !lifecycle.is_proven_stateless() {
+            return Err(CalcFlowError::Compile {
+                message: format!(
+                    "stream provider node {node_id:?} does not prove a stateless micro-batch-invariant lifecycle"
+                ),
+            });
+        }
+        if exactly_once && !lifecycle.is_exactly_once_safe() {
+            return Err(CalcFlowError::Compile {
+                message: format!(
+                    "stream provider node {node_id:?} is not deterministic and replay safe; exactly-once delivery is unavailable"
+                ),
+            });
         }
     }
     Ok(())
@@ -1357,7 +1389,7 @@ mod runtime_projection_tests {
             OperatorCheckpointCapability::CheckpointedStateful { state_version: 1 }
         );
         assert_eq!(
-            only_capability(external),
+            external.nodes["external"].checkpoint_capability,
             OperatorCheckpointCapability::Unproven
         );
     }

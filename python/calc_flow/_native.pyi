@@ -151,6 +151,17 @@ class Runtime:
         output_ports: Sequence[tuple[str, str]],
         accepts_context: bool = False,
     ) -> None: ...
+    def _register_stateless_stream_provider(
+        self,
+        provider: str,
+        name: str,
+        version: str,
+        callback: object,
+        *,
+        microbatch_invariant: bool,
+        deterministic: bool,
+        replay_safe: bool,
+    ) -> None: ...
     def register_scalar_udf(
         self,
         *,

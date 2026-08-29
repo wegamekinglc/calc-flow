@@ -45,6 +45,7 @@ pub(crate) struct PythonOperatorFactory {
     version: String,
     mode: PythonProviderMode,
     accepts_context: bool,
+    stream_lifecycle: Option<calc_flow::StreamOperatorLifecycle>,
 }
 
 impl PythonOperatorFactory {
@@ -72,6 +73,30 @@ impl PythonOperatorFactory {
             version: version.into(),
             mode: PythonProviderMode::SingleArray,
             accepts_context,
+            stream_lifecycle: None,
+        }
+    }
+
+    pub(crate) fn new_stateless_stream(
+        callback: Arc<PythonRoot>,
+        provider: &str,
+        name: &str,
+        version: &str,
+        deterministic: bool,
+        replay_safe: bool,
+    ) -> Self {
+        Self {
+            callback,
+            provider: provider.into(),
+            name: name.into(),
+            version: version.into(),
+            mode: PythonProviderMode::SingleArray,
+            accepts_context: false,
+            stream_lifecycle: Some(calc_flow::StreamOperatorLifecycle::Stateless {
+                microbatch_invariant: true,
+                deterministic,
+                replay_safe,
+            }),
         }
     }
 
@@ -107,6 +132,7 @@ impl PythonOperatorFactory {
             version: version.into(),
             mode: PythonProviderMode::Mapping { inputs, outputs },
             accepts_context,
+            stream_lifecycle: None,
         }
     }
 }
@@ -137,6 +163,44 @@ impl calc_flow::BatchOperatorFactory for PythonOperatorFactory {
             options_json,
             inputs,
             outputs,
+            stream_lifecycle: self.stream_lifecycle,
+        }))
+    }
+}
+
+impl calc_flow::StreamOperatorFactory for PythonOperatorFactory {
+    fn create(
+        &self,
+        spec: &calc_flow::ExternalOperatorSpec,
+        inputs: Vec<calc_flow::Port>,
+        outputs: Vec<calc_flow::Port>,
+    ) -> calc_flow::Result<Box<dyn calc_flow::StreamOperator>> {
+        let lifecycle =
+            self.stream_lifecycle
+                .ok_or_else(|| calc_flow::CalcFlowError::InvalidArgument {
+                    field: "provider.lifecycle".into(),
+                    message: "Python provider has no proven stateless stream lifecycle".into(),
+                })?;
+        validate_ports(&self.mode, &inputs, &outputs)?;
+        let options_json = encode_provider_options(spec.options())?;
+        validate_stream_callback(&self.callback, &options_json).map_err(|message| {
+            calc_flow::CalcFlowError::InvalidArgument {
+                field: "provider.options".into(),
+                message,
+            }
+        })?;
+        Ok(Box::new(PythonOperator {
+            callback: Arc::clone(&self.callback),
+            provider: self.provider.clone(),
+            name: self.name.clone(),
+            version: self.version.clone(),
+            mode: self.mode.clone(),
+            accepts_context: false,
+            options: spec.options().clone(),
+            options_json,
+            inputs,
+            outputs,
+            stream_lifecycle: Some(lifecycle),
         }))
     }
 }
@@ -200,6 +264,23 @@ fn validate_callback(callback: &PythonRoot, options_json: &str) -> Result<(), St
     })
 }
 
+fn validate_stream_callback(callback: &PythonRoot, options_json: &str) -> Result<(), String> {
+    Python::attach(|py| {
+        let callback = callback.object().bind(py);
+        if !callback
+            .hasattr(pyo3::intern!(py, "validate_stream"))
+            .map_err(|error| error.to_string())?
+        {
+            return Err("stream provider callback must define validate_stream(options)".into());
+        }
+        let options = json_to_python(py, options_json).map_err(|error| error.to_string())?;
+        callback
+            .call_method1(pyo3::intern!(py, "validate_stream"), (options,))
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    })
+}
+
 struct PythonOperator {
     callback: Arc<PythonRoot>,
     provider: String,
@@ -211,6 +292,7 @@ struct PythonOperator {
     options_json: String,
     inputs: Vec<calc_flow::Port>,
     outputs: Vec<calc_flow::Port>,
+    stream_lifecycle: Option<calc_flow::StreamOperatorLifecycle>,
 }
 
 impl PythonOperator {
@@ -244,6 +326,59 @@ impl calc_flow::OperatorMetadata for PythonOperator {
             ("provider".into(), json!(self.provider)),
             ("version".into(), json!(self.version)),
         ])
+    }
+}
+
+#[async_trait]
+impl calc_flow::StreamOperator for PythonOperator {
+    fn lifecycle(&self) -> calc_flow::StreamOperatorLifecycle {
+        self.stream_lifecycle.unwrap_or_default()
+    }
+
+    async fn process_data(
+        &mut self,
+        ingress: &str,
+        batch: calc_flow::Batch,
+        context: &calc_flow::StreamOperatorContext<'_>,
+        output: &mut dyn calc_flow::StreamCollector,
+    ) -> calc_flow::Result<()> {
+        context.check_cancelled()?;
+        if ingress != "input" {
+            return Err(
+                self.provider_error(format!("unexpected stream provider ingress {ingress:?}"))
+            );
+        }
+        let callback = Arc::clone(&self.callback);
+        let options_json = self.options_json.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            Python::attach(|py| call_python_operator(py, &callback, &batch, &options_json, None))
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|_| self.provider_error("stream callback worker terminated"))?
+        .map_err(|message| self.provider_error(message))?;
+        context.check_cancelled()?;
+        self.outputs[0]
+            .validate(&result, "provider.output output")
+            .map_err(|error| self.provider_error(error.to_string()))?;
+        output.emit("output", result).await
+    }
+
+    async fn on_watermark(
+        &mut self,
+        _watermark: calc_flow::EventTime,
+        context: &calc_flow::StreamOperatorContext<'_>,
+        _output: &mut dyn calc_flow::StreamCollector,
+    ) -> calc_flow::Result<()> {
+        context.check_cancelled()
+    }
+
+    async fn on_end(
+        &mut self,
+        context: &calc_flow::StreamOperatorContext<'_>,
+        _output: &mut dyn calc_flow::StreamCollector,
+    ) -> calc_flow::Result<()> {
+        context.check_cancelled()
     }
 }
 
@@ -618,6 +753,133 @@ mod tests {
             assert_eq!(output.num_rows(), 1);
             assert_eq!(options, BTreeMap::from([("value".into(), json!(1))]));
         });
+    }
+
+    #[tokio::test]
+    async fn stateless_stream_factory_calls_once_per_batch_and_replays_immutably() {
+        Python::initialize();
+        let (root, calls) = Python::attach(|py| {
+            let locals = PyDict::new(py);
+            py.run(
+                c"class Callback:\n    def __init__(self): self.calls = 0\n    def validate_stream(self, options): pass\n    def __call__(self, batch, options):\n        self.calls += 1\n        return batch\ncallback = Callback()",
+                None,
+                Some(&locals),
+            )
+            .unwrap();
+            let callback = locals.get_item("callback").unwrap().unwrap();
+            (
+                Arc::new(PythonRoot::new(callback.clone().unbind())),
+                callback.unbind(),
+            )
+        });
+        let factory = PythonOperatorFactory::new_stateless_stream(
+            root, "python", "identity", "1", true, true,
+        );
+        let spec = calc_flow::ExternalOperatorSpec::new("python", "identity", "1", BTreeMap::new())
+            .unwrap();
+        let mut operator = calc_flow::StreamOperatorFactory::create(
+            &factory,
+            &spec,
+            vec![array_port("input")],
+            vec![array_port("output")],
+        )
+        .unwrap();
+        let cancellation = calc_flow::CancellationToken::new();
+        let job =
+            calc_flow::StreamJobContext::new(1, "fingerprint", BTreeMap::new(), None, cancellation);
+        let context = calc_flow::StreamOperatorContext::new(&job, "identity", None);
+        let mut output = calc_flow::EdgeCollector::new(vec![array_port("output")]);
+        let input = Python::attach(python_array_batch);
+
+        operator
+            .process_data("input", input.clone(), &context, &mut output)
+            .await
+            .unwrap();
+        operator
+            .process_data("input", input, &context, &mut output)
+            .await
+            .unwrap();
+
+        let batches = output.drain("output");
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].as_data().unwrap().num_rows(), 1);
+        assert_eq!(batches[1].as_data().unwrap().num_rows(), 1);
+        Python::attach(|py| {
+            assert_eq!(
+                calls
+                    .bind(py)
+                    .getattr("calls")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                2
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn stateless_stream_factory_fails_closed_on_ports_errors_and_cancellation() {
+        Python::initialize();
+        let root = Python::attach(|py| {
+            let locals = PyDict::new(py);
+            py.run(
+                c"class Callback:\n    def validate_stream(self, options): pass\n    def __call__(self, batch, options): raise ValueError('callback failed')\ncallback = Callback()",
+                None,
+                Some(&locals),
+            )
+            .unwrap();
+            Arc::new(PythonRoot::new(
+                locals.get_item("callback").unwrap().unwrap().unbind(),
+            ))
+        });
+        let factory =
+            PythonOperatorFactory::new_stateless_stream(root, "python", "failing", "1", true, true);
+        let spec = calc_flow::ExternalOperatorSpec::new("python", "failing", "1", BTreeMap::new())
+            .unwrap();
+        let wrong_ports = calc_flow::StreamOperatorFactory::create(
+            &factory,
+            &spec,
+            vec![array_port("wrong")],
+            vec![array_port("output")],
+        )
+        .err()
+        .unwrap();
+        assert!(wrong_ports.to_string().contains("provider.ports"));
+
+        let mut operator = calc_flow::StreamOperatorFactory::create(
+            &factory,
+            &spec,
+            vec![array_port("input")],
+            vec![array_port("output")],
+        )
+        .unwrap();
+        let cancellation = calc_flow::CancellationToken::new();
+        let job = calc_flow::StreamJobContext::new(
+            2,
+            "fingerprint",
+            BTreeMap::new(),
+            None,
+            cancellation.clone(),
+        );
+        let context = calc_flow::StreamOperatorContext::new(&job, "failing", None);
+        let mut output = calc_flow::EdgeCollector::new(vec![array_port("output")]);
+        let input = Python::attach(python_array_batch);
+        let error = operator
+            .process_data("input", input.clone(), &context, &mut output)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            calc_flow::CalcFlowError::ExternalProvider { .. }
+        ));
+        assert!(output.drain("output").is_empty());
+
+        cancellation.cancel();
+        let error = operator
+            .process_data("input", input, &context, &mut output)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, calc_flow::CalcFlowError::Cancelled { .. }));
     }
 
     #[tokio::test]

@@ -264,6 +264,16 @@ class ProviderArrayRules:
 
 
 @dataclass(frozen=True, slots=True)
+class _StatelessProviderLifecycle:
+    """Trusted process-local proof attached by the native stream seam."""
+
+    deterministic: bool
+    replay_safe: bool
+    supports_static_inputs: bool
+    array_rules: ProviderArrayRules
+
+
+@dataclass(frozen=True, slots=True)
 class OperatorCapability:
     kind: str
     version: str
@@ -431,39 +441,60 @@ def runtime_capabilities(
             key=lambda item: (item.provider, item.name, item.version),
         )
     )
+
+    def provider_capability(registration: Mapping[str, Any]) -> ProviderCapability:
+        lifecycle = registration.get("stream_lifecycle")
+        if isinstance(lifecycle, _StatelessProviderLifecycle):
+            modes: tuple[ExecutionMode, ...] = ("batch", "stream")
+            finality: OutputFinality = "per_row_final"
+            microbatch_invariant = True
+            deterministic = lifecycle.deterministic
+            replay_safe = lifecycle.replay_safe
+            supports_static_inputs = lifecycle.supports_static_inputs
+            partition_contract: PartitionContract = "row_axis_independent"
+            array_rules: ProviderArrayRules | None = lifecycle.array_rules
+        else:
+            modes = ("batch",)
+            finality = "unproven"
+            microbatch_invariant = False
+            deterministic = False
+            replay_safe = False
+            supports_static_inputs = False
+            partition_contract = "none"
+            array_rules = None
+        return ProviderCapability(
+            provider=str(registration["provider"]),
+            name=str(registration["name"]),
+            version=str(registration["version"]),
+            input_ports=tuple(
+                ProviderPort(str(name), kind, required=True)
+                for name, kind in registration.get("input_ports", (("input", "array"),))
+            ),
+            output_ports=tuple(
+                ProviderPort(str(name), kind, required=True)
+                for name, kind in registration.get(
+                    "output_ports", (("output", "array"),)
+                )
+            ),
+            options_schema=registration.get("options_schema"),
+            modes=modes,
+            finality=finality,
+            stateful=False,
+            microbatch_invariant=microbatch_invariant,
+            requires_watermark=False,
+            checkpoint_support="stateless",
+            state_version=None,
+            deterministic=deterministic,
+            replay_safe=replay_safe,
+            supports_static_inputs=supports_static_inputs,
+            partition_contract=partition_contract,
+            array_rules=array_rules,
+        )
+
     providers = tuple(
         sorted(
             (
-                ProviderCapability(
-                    provider=str(registration["provider"]),
-                    name=str(registration["name"]),
-                    version=str(registration["version"]),
-                    input_ports=tuple(
-                        ProviderPort(str(name), kind, required=True)
-                        for name, kind in registration.get(
-                            "input_ports", (("input", "array"),)
-                        )
-                    ),
-                    output_ports=tuple(
-                        ProviderPort(str(name), kind, required=True)
-                        for name, kind in registration.get(
-                            "output_ports", (("output", "array"),)
-                        )
-                    ),
-                    options_schema=registration.get("options_schema"),
-                    modes=("batch",),
-                    finality="unproven",
-                    stateful=False,
-                    microbatch_invariant=False,
-                    requires_watermark=False,
-                    checkpoint_support="stateless",
-                    state_version=None,
-                    deterministic=False,
-                    replay_safe=False,
-                    supports_static_inputs=False,
-                    partition_contract="none",
-                    array_rules=None,
-                )
+                provider_capability(registration)
                 for registration in registrations
                 if registration["kind"] == "provider"
             ),

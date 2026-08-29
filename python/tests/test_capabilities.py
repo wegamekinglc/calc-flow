@@ -424,21 +424,29 @@ def test_array_helpers_expose_expression_and_mapped_provider_contracts(
         ProviderPort("output", "array", required=True),
     )
     assert snapshot.providers[1].options_schema is None
-    assert all(
-        provider.modes == ("batch",)
-        and provider.finality == "unproven"
-        and provider.stateful is False
-        and provider.microbatch_invariant is False
-        and provider.requires_watermark is False
-        and provider.checkpoint_support == "stateless"
-        and provider.state_version is None
-        and provider.deterministic is False
-        and provider.replay_safe is False
-        and provider.supports_static_inputs is False
-        and provider.partition_contract == "none"
-        and provider.array_rules is None
-        for provider in snapshot.providers
+    expression, table_matmul = snapshot.providers
+    assert expression.modes == ("batch", "stream")
+    assert expression.finality == "per_row_final"
+    assert expression.stateful is False
+    assert expression.microbatch_invariant is True
+    assert expression.requires_watermark is False
+    assert expression.checkpoint_support == "stateless"
+    assert expression.state_version is None
+    assert expression.deterministic is True
+    assert expression.replay_safe is True
+    assert expression.supports_static_inputs is False
+    assert expression.partition_contract == "row_axis_independent"
+    assert expression.array_rules is not None
+    assert tuple(rule.name for rule in expression.array_rules.shape_rules) == (
+        "elementwise_broadcast",
     )
+    assert table_matmul.modes == ("batch",)
+    assert table_matmul.finality == "unproven"
+    assert table_matmul.microbatch_invariant is False
+    assert table_matmul.deterministic is False
+    assert table_matmul.replay_safe is False
+    assert table_matmul.partition_contract == "none"
+    assert table_matmul.array_rules is None
 
 
 def test_compound_registration_exposes_a_real_partial_success() -> None:
