@@ -323,6 +323,79 @@ output schema is derived from the prefixes rather than declared:
 }
 ```
 
+## Static input declarations
+
+A stream project declares immutable static side inputs as a data-only root
+array. Each entry names an unconnected external input port of a graph node —
+the same port a source binding would feed, minus the connector:
+
+```json
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "merge",
+        "operator": {"kind": "union"},
+        "input_ports": [
+          {"name": "left", "kind": "table", "required": true},
+          {"name": "weights", "kind": "table", "required": true}
+        ]
+      }
+    ]
+  },
+  "static_inputs": [
+    {
+      "kind": "table",
+      "name": "weights",
+      "mutability": "static",
+      "schema": [
+        {"name": "factor", "data_type": "float64", "nullable": false}
+      ]
+    }
+  ]
+}
+```
+
+An array-valued input declares the provider identity instead of a schema:
+
+```json
+{
+  "kind": "array",
+  "name": "weights",
+  "mutability": "static",
+  "backend": "numpy",
+  "dtype": "float64",
+  "shape": [3]
+}
+```
+
+`mutability` accepts only `static`. Validation is strict and fail-closed:
+
+| Rule                                   | Failure path                                        |
+| -------------------------------------- | --------------------------------------------------- |
+| Unique portable SQL identifier names   | `static_inputs[i].name`                             |
+| Name must be a graph external input    | `static_inputs[i].name` (`unknown_binding`)         |
+| Name must not be a source binding      | `static_inputs[i].name` (`source_binding_conflict`) |
+| Unique table field names               | `static_inputs[i].schema[j].name`                   |
+| Table fields in the digest-v1 type set | `static_inputs[i].schema[j].data_type`              |
+| Array backend of 1 to 64 bytes         | `static_inputs[i].backend`                          |
+| Array dtype in the digest-v1 set       | `static_inputs[i].dtype`                            |
+| Array rank at most 16                  | `static_inputs[i].shape`                            |
+
+The declaration joins the compiled plan's semantic fingerprint, so changing it
+selects a fresh lineage. Live values never enter the document: the caller
+supplies them per job through the runner, and a restart with a different value
+is rejected against the recorded digest before sources open. See
+[static inputs](streaming-guide.md#static-inputs) for the runner semantics and
+the digest contract. An empty declaration array is omitted from canonical
+JSON, so previously valid project documents keep their exact bytes.
+
+Studio REST cannot carry live values, so submitting a stored project that
+declares static inputs fails closed with `422` before any worker is spawned;
+the `detail` names the first `static_inputs.{name}` as unresolvable and no
+run, handle, or worker is created. Supply the values through the Python
+runtime instead.
+
 ## Recovery ownership
 
 Set stream runtime and managed state once at the project root:

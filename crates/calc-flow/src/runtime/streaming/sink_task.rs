@@ -2231,6 +2231,7 @@ mod tests {
             sources: BTreeMap::new(),
             operators: BTreeMap::new(),
             sinks: acknowledgement.sinks,
+            static_inputs: BTreeMap::new(),
         })
         .unwrap();
         let recovery_sink = |id: &str| ValidatedOrdinarySink {
@@ -2282,6 +2283,7 @@ mod tests {
                     segments: Vec::new(),
                 },
             )]),
+            static_inputs: BTreeMap::new(),
         })
         .unwrap();
         let mut sinks = vec![ValidatedOrdinarySink {
@@ -2322,6 +2324,7 @@ mod tests {
             sources: BTreeMap::new(),
             operators: BTreeMap::new(),
             sinks: BTreeMap::new(),
+            static_inputs: BTreeMap::new(),
         })
         .unwrap();
         let mut sinks = vec![validated_sink("ordinary", &log, None, false, None, &closes)];
@@ -2361,6 +2364,7 @@ mod tests {
                     segments: Vec::new(),
                 },
             )]),
+            static_inputs: BTreeMap::new(),
         })
         .unwrap();
         let mut sinks = vec![ValidatedOrdinarySink {
@@ -2557,6 +2561,7 @@ mod tests {
                     segments: Vec::new(),
                 },
             )]),
+            static_inputs: BTreeMap::new(),
         })
         .unwrap();
         let mut sinks = vec![ValidatedOrdinarySink {
@@ -2611,6 +2616,7 @@ mod tests {
                     segments: Vec::new(),
                 },
             )]),
+            static_inputs: BTreeMap::new(),
         })
         .unwrap();
         let mut sinks = vec![ValidatedOrdinarySink {

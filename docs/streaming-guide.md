@@ -168,6 +168,84 @@ bound sink. The entire route is checked before connector `open()`.
 output. Treat that status as the runtime proof for the compiled route, not as a
 substitute for configuring the external system correctly.
 
+## Static inputs
+
+A static input is an immutable per-job side value — model weights, a reference
+matrix, a small lookup table — declared by the plan and supplied by the caller
+at runner construction. It is latched once, never re-sent as stream data, and
+never treated as a source.
+
+Declarations are data-only: a project-v3 `static_inputs` array whose entries
+name an unconnected external input port of a graph node. A table entry pins
+the exact Arrow schema; an array entry pins the backend, dtype, and shape. The
+[connector guide](connectors.md) carries the exact syntax and validation
+rules.
+
+Python callers supply values through the keyword-only runner argument:
+
+```python
+runner = StreamingRunner(
+    plan,
+    {"input": SourceBinding(source, watermark_policy=DisabledWatermarks())},
+    {"output": [SinkBinding.ordinary("archive", sink)]},
+    ManagedCheckpointRuntime(".calc-flow-state/weights"),
+    static_inputs={"weights": weights_batch},
+)
+```
+
+`None` normalizes to an empty mapping. Keys must be `str` and values must be
+`Batch`; anything else raises `TypeError` before any native construction. The
+mapping is defensively copied immediately. Project-backed plans keep rejecting
+externally supplied `sources`, `sinks`, `checkpoints`, and `config`, but
+`static_inputs` is exempt from that rejection and is required when the plan
+declares static inputs. `plan.static_input_ids` returns the declared names,
+and `plan.source_binding_ids` excludes them.
+
+Rust uses an additive builder on the unchanged `StreamingRunner::new`:
+
+```rust
+let runner = StreamingRunner::new(plan, sources, sinks, checkpoints)?
+    .with_static_inputs(BTreeMap::from([("weights".to_owned(), weights)]))?;
+```
+
+Validation, latching, and digest computation happen exactly once per job,
+inside `start`, and complete before any source, operator, sink, or provider
+lifecycle method runs. A missing or unexpected input, a wrong batch kind, a
+table schema mismatch, an array backend/dtype/shape mismatch, and an
+unsupported digest dtype all fail on a `static_inputs.{name}` error path
+before sources open. After the latch the job-visible value is frozen: mutating
+the caller's mapping, the original Python `Batch`, or externally mutable
+NumPy backing memory cannot change what the job observes or what a later
+restart compares. Handles are released exactly once on every exit path —
+success, cancellation, startup failure, and recovery failure.
+
+Each latched value is reduced to a lowercase-hexadecimal SHA-256 digest with
+version string `calc_flow.static_input.digest.v1`. The byte-level encoding is
+the canonical tagged-bytes grammar of
+[API note §7](../.codex/artifacts/api-notes/symbolic-computation-engine.md):
+independent of record-batch chunking, dictionary layout, strides, and batch
+metadata, with NaNs canonicalized per dtype. Declarations join the semantic
+plan fingerprint; payload digests never join the lineage key. A restart that
+supplies a different value therefore reaches the existing lineage and is
+rejected before sources open with the exact message:
+
+```text
+static_inputs.{name}.digest: checkpoint digest {stored} does not match prepared digest {prepared} for calc_flow.static_input.digest.v1
+```
+
+On the Python surface this recovery rejection arrives as a structured
+`StreamingRuntimeError` with category `checkpoint_mismatch`; engine-level it
+is the checkpoint-mismatch error class. Checkpoint manifests record one digest
+entry per static input under the root field `static_inputs`; the field is
+omitted when the set is empty, so existing manifests keep their bytes. Status,
+metrics, and errors expose at most the input name, digest version, and digest
+— never payloads or backing memory. In this release no built-in operator
+consumes a static value; the surface carries preflight, digest, lineage, and
+checkpoint evidence. The follow-up work bound to the first consuming
+operators is recorded in the
+[SCE-11 review record](../.codex/artifacts/analysis/sce-11-static-stream-inputs-review-record.md).
+The [API reference](api-reference.md) lists the exported static-input types.
+
 ## Bounded event-time Join
 
 Calc Flow 4.0 adds a two-input inner equi-Join for stream plans. Each retained

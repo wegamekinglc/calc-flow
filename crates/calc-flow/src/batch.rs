@@ -168,6 +168,280 @@ enum BatchPayload {
     External(Arc<dyn ExternalPayload>),
 }
 
+/// The engine-owned immutable storage behind one latched static array
+/// (SCE-11). Values are copied out of any host array at latch time, so the
+/// payload can never alias caller-mutable memory.
+#[derive(Debug)]
+pub(crate) struct LatchedArrayPayload {
+    backend: String,
+    dtype: String,
+    shape: Vec<u64>,
+    nulls: Option<Vec<bool>>,
+    values: LatchedArrayValues,
+}
+
+#[derive(Debug)]
+enum LatchedArrayValues {
+    Bool(Vec<bool>),
+    Int(Vec<i64>),
+    Uint(Vec<u64>),
+    Float(Vec<f64>),
+}
+
+impl LatchedArrayPayload {
+    pub(crate) fn backend(&self) -> &str {
+        &self.backend
+    }
+
+    pub(crate) fn dtype(&self) -> &str {
+        &self.dtype
+    }
+
+    pub(crate) fn shape(&self) -> &[u64] {
+        &self.shape
+    }
+
+    /// Total logical element count including null positions.
+    pub(crate) fn element_count(&self) -> usize {
+        self.shape.iter().fold(1_usize, |total, dimension| {
+            total.saturating_mul(usize::try_from(*dimension).unwrap_or(usize::MAX))
+        })
+    }
+
+    pub(crate) fn is_null(&self, position: usize) -> bool {
+        self.nulls.as_ref().is_some_and(|nulls| nulls[position])
+    }
+
+    /// Returns the canonical scalar bytes for the next non-null value.
+    ///
+    /// Constructors already reject values outside the declared dtype's
+    /// range, so the narrowing casts here are lossless.
+    pub(crate) fn cell(&self, value_index: usize) -> Option<Vec<u8>> {
+        match &self.values {
+            LatchedArrayValues::Bool(values) => {
+                values.get(value_index).map(|value| vec![u8::from(*value)])
+            }
+            LatchedArrayValues::Int(values) => {
+                values
+                    .get(value_index)
+                    .map(|value| match self.dtype.as_str() {
+                        "int8" => i8::try_from(*value)
+                            .expect("constructors validate the declared width")
+                            .to_be_bytes()
+                            .to_vec(),
+                        "int16" => i16::try_from(*value)
+                            .expect("constructors validate the declared width")
+                            .to_be_bytes()
+                            .to_vec(),
+                        "int32" => i32::try_from(*value)
+                            .expect("constructors validate the declared width")
+                            .to_be_bytes()
+                            .to_vec(),
+                        _ => value.to_be_bytes().to_vec(),
+                    })
+            }
+            LatchedArrayValues::Uint(values) => {
+                values
+                    .get(value_index)
+                    .map(|value| match self.dtype.as_str() {
+                        "uint8" => u8::try_from(*value)
+                            .expect("constructors validate the declared width")
+                            .to_be_bytes()
+                            .to_vec(),
+                        "uint16" => u16::try_from(*value)
+                            .expect("constructors validate the declared width")
+                            .to_be_bytes()
+                            .to_vec(),
+                        "uint32" => u32::try_from(*value)
+                            .expect("constructors validate the declared width")
+                            .to_be_bytes()
+                            .to_vec(),
+                        _ => value.to_be_bytes().to_vec(),
+                    })
+            }
+            LatchedArrayValues::Float(values) => values.get(value_index).map(|value| {
+                if self.dtype == "float32" {
+                    // f64 to f32 narrowing is the documented lossless carrier
+                    // rule for latched float32 values (digest v1).
+                    #[allow(clippy::cast_possible_truncation)]
+                    let narrowed = *value as f32;
+                    let bits = if value.is_nan() {
+                        0x7fc0_0000u32
+                    } else {
+                        narrowed.to_bits()
+                    };
+                    bits.to_be_bytes().to_vec()
+                } else {
+                    let bits = if value.is_nan() {
+                        0x7ff8_0000_0000_0000u64
+                    } else {
+                        value.to_bits()
+                    };
+                    bits.to_be_bytes().to_vec()
+                }
+            }),
+        }
+    }
+}
+
+impl ExternalPayload for LatchedArrayPayload {
+    fn backend(&self) -> &str {
+        &self.backend
+    }
+
+    fn len(&self) -> usize {
+        self.element_count()
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        let per_element = match &self.values {
+            LatchedArrayValues::Bool(values) => size_of::<bool>() * values.len(),
+            LatchedArrayValues::Int(values) => size_of::<i64>() * values.len(),
+            LatchedArrayValues::Uint(values) => size_of::<u64>() * values.len(),
+            LatchedArrayValues::Float(values) => size_of::<f64>() * values.len(),
+        };
+        per_element
+            + self.backend.len()
+            + self.dtype.len()
+            + self.shape.len().saturating_mul(size_of::<u64>())
+            + self
+                .nulls
+                .as_ref()
+                .map_or(0, |nulls| nulls.len().saturating_mul(size_of::<bool>()))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Family tag used to check that the value carrier matches the dtype
+/// spelling supplied by the latch caller.
+#[derive(Clone, Copy, PartialEq)]
+enum LatchedValuesFamily {
+    Bool,
+    Int,
+    Uint,
+    Float,
+}
+
+fn latched_family(dtype: &str) -> Option<LatchedValuesFamily> {
+    Some(match dtype {
+        "bool" => LatchedValuesFamily::Bool,
+        "int8" | "int16" | "int32" | "int64" => LatchedValuesFamily::Int,
+        "uint8" | "uint16" | "uint32" | "uint64" => LatchedValuesFamily::Uint,
+        "float32" | "float64" => LatchedValuesFamily::Float,
+        _ => return None,
+    })
+}
+
+fn validate_latched_descriptor(
+    backend: &str,
+    dtype: &str,
+    family: LatchedValuesFamily,
+) -> Result<()> {
+    if backend.is_empty() {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "static_inputs.backend".into(),
+            message: "must not be empty".into(),
+        });
+    }
+    if latched_family(dtype) != Some(family) {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "static_inputs.dtype".into(),
+            message: format!("dtype {dtype:?} does not match the supplied value family"),
+        });
+    }
+    Ok(())
+}
+
+fn latched_element_count(shape: &[u64]) -> Result<usize> {
+    shape.iter().try_fold(1_usize, |element_count, dimension| {
+        let dimension =
+            usize::try_from(*dimension).map_err(|_| CalcFlowError::InvalidArgument {
+                field: "static_inputs.shape".into(),
+                message: "dimension exceeds the platform address range".into(),
+            })?;
+        element_count
+            .checked_mul(dimension)
+            .ok_or_else(|| CalcFlowError::InvalidArgument {
+                field: "static_inputs.shape".into(),
+                message: "element count overflowed usize".into(),
+            })
+    })
+}
+
+fn validate_latched_counts(
+    nulls: Option<&[bool]>,
+    value_count: usize,
+    element_count: usize,
+) -> Result<()> {
+    if nulls.is_some_and(|nulls| nulls.len() != element_count) {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "static_inputs.shape".into(),
+            message: "null mask length must equal the element count".into(),
+        });
+    }
+    let null_count = nulls.map_or(0, |nulls| nulls.iter().filter(|null| **null).count());
+    if value_count != element_count - null_count {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "static_inputs.shape".into(),
+            message: "value count must equal the non-null element count".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_latched_shape(
+    backend: &str,
+    dtype: &str,
+    family: LatchedValuesFamily,
+    shape: &[u64],
+    nulls: Option<&[bool]>,
+    value_count: usize,
+) -> Result<usize> {
+    validate_latched_descriptor(backend, dtype, family)?;
+    let element_count = latched_element_count(shape)?;
+    validate_latched_counts(nulls, value_count, element_count)?;
+    Ok(element_count)
+}
+
+fn validate_int_widths(dtype: &str, values: &[i64]) -> Result<()> {
+    let out_of_range = |value: i64| match dtype {
+        "int8" => !(i64::from(i8::MIN)..=i64::from(i8::MAX)).contains(&value),
+        "int16" => !(i64::from(i16::MIN)..=i64::from(i16::MAX)).contains(&value),
+        "int32" => !(i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&value),
+        _ => false,
+    };
+    values
+        .iter()
+        .find(|value| out_of_range(**value))
+        .map_or(Ok(()), |value| {
+            Err(CalcFlowError::InvalidArgument {
+                field: "static_inputs.dtype".into(),
+                message: format!("value {value} does not fit the declared {dtype} width"),
+            })
+        })
+}
+
+fn validate_uint_widths(dtype: &str, values: &[u64]) -> Result<()> {
+    let out_of_range = |value: u64| match dtype {
+        "uint8" => value > u64::from(u8::MAX),
+        "uint16" => value > u64::from(u16::MAX),
+        "uint32" => value > u64::from(u32::MAX),
+        _ => false,
+    };
+    values
+        .iter()
+        .find(|value| out_of_range(**value))
+        .map_or(Ok(()), |value| {
+            Err(CalcFlowError::InvalidArgument {
+                field: "static_inputs.dtype".into(),
+                message: format!("value {value} does not fit the declared {dtype} width"),
+            })
+        })
+}
+
 #[derive(Clone, Debug)]
 pub struct Batch {
     payload: BatchPayload,
@@ -205,6 +479,144 @@ impl Batch {
             payload: BatchPayload::External(payload),
             metadata,
         })
+    }
+
+    /// Latches a boolean static array into engine-owned immutable storage.
+    ///
+    /// The values are copied at construction, so the returned batch can never
+    /// alias caller-mutable memory (SCE-11).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] when the backend is empty,
+    /// the shape does not match the value and mask lengths, or the element
+    /// count overflows.
+    pub fn static_array_bool(
+        backend: &str,
+        shape: Vec<u64>,
+        nulls: Option<Vec<bool>>,
+        values: Vec<bool>,
+    ) -> Result<Self> {
+        validate_latched_shape(
+            backend,
+            "bool",
+            LatchedValuesFamily::Bool,
+            &shape,
+            nulls.as_deref(),
+            values.len(),
+        )?;
+        Ok(Self::latched(LatchedArrayPayload {
+            backend: backend.into(),
+            dtype: "bool".into(),
+            shape,
+            nulls,
+            values: LatchedArrayValues::Bool(values),
+        }))
+    }
+
+    /// Latches a signed-integer static array (`int8`–`int64`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] for an empty backend, an
+    /// unsupported dtype spelling, a width overflow, or a shape, mask, and
+    /// value-length disagreement.
+    pub fn static_array_int(
+        backend: &str,
+        dtype: &str,
+        shape: Vec<u64>,
+        nulls: Option<Vec<bool>>,
+        values: Vec<i64>,
+    ) -> Result<Self> {
+        validate_latched_shape(
+            backend,
+            dtype,
+            LatchedValuesFamily::Int,
+            &shape,
+            nulls.as_deref(),
+            values.len(),
+        )?;
+        validate_int_widths(dtype, &values)?;
+        Ok(Self::latched(LatchedArrayPayload {
+            backend: backend.into(),
+            dtype: dtype.into(),
+            shape,
+            nulls,
+            values: LatchedArrayValues::Int(values),
+        }))
+    }
+
+    /// Latches an unsigned-integer static array (`uint8`–`uint64`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] for an empty backend, an
+    /// unsupported dtype spelling, a width overflow, or a shape, mask, and
+    /// value-length disagreement.
+    pub fn static_array_uint(
+        backend: &str,
+        dtype: &str,
+        shape: Vec<u64>,
+        nulls: Option<Vec<bool>>,
+        values: Vec<u64>,
+    ) -> Result<Self> {
+        validate_latched_shape(
+            backend,
+            dtype,
+            LatchedValuesFamily::Uint,
+            &shape,
+            nulls.as_deref(),
+            values.len(),
+        )?;
+        validate_uint_widths(dtype, &values)?;
+        Ok(Self::latched(LatchedArrayPayload {
+            backend: backend.into(),
+            dtype: dtype.into(),
+            shape,
+            nulls,
+            values: LatchedArrayValues::Uint(values),
+        }))
+    }
+
+    /// Latches a floating-point static array (`float32`/`float64`).
+    ///
+    /// `float32` values are carried at `f64` width losslessly and re-derived
+    /// for digesting; NaN payloads canonicalize per digest v1.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] for an empty backend, an
+    /// unsupported dtype spelling, or a shape, mask, and value-length
+    /// disagreement.
+    pub fn static_array_float(
+        backend: &str,
+        dtype: &str,
+        shape: Vec<u64>,
+        nulls: Option<Vec<bool>>,
+        values: Vec<f64>,
+    ) -> Result<Self> {
+        validate_latched_shape(
+            backend,
+            dtype,
+            LatchedValuesFamily::Float,
+            &shape,
+            nulls.as_deref(),
+            values.len(),
+        )?;
+        Ok(Self::latched(LatchedArrayPayload {
+            backend: backend.into(),
+            dtype: dtype.into(),
+            shape,
+            nulls,
+            values: LatchedArrayValues::Float(values),
+        }))
+    }
+
+    fn latched(payload: LatchedArrayPayload) -> Self {
+        Self {
+            payload: BatchPayload::External(Arc::new(payload)),
+            metadata: BatchMetadata::default(),
+        }
     }
 
     pub fn kind(&self) -> BatchKind {
@@ -274,6 +686,16 @@ impl Batch {
         }
     }
 
+    /// Returns the engine-owned latched static array payload, when this batch
+    /// carries one (SCE-11).
+    #[must_use]
+    pub(crate) fn latched_array_payload(&self) -> Option<&LatchedArrayPayload> {
+        self.external_payload()
+            .ok()?
+            .as_any()
+            .downcast_ref::<LatchedArrayPayload>()
+    }
+
     #[must_use]
     pub fn with_metadata(&self, metadata: BatchMetadata) -> Self {
         Self {
@@ -287,6 +709,13 @@ impl Batch {
 mod tests {
     use super::*;
 
+    fn invalid_argument_field(result: Result<Batch>) -> String {
+        match result.unwrap_err() {
+            CalcFlowError::InvalidArgument { field, .. } => field,
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
     #[test]
     fn checked_accumulate_sums_within_usize() {
         assert_eq!(checked_accumulate(2, 3, "batch").unwrap(), 5);
@@ -299,5 +728,179 @@ mod tests {
             checked_accumulate(usize::MAX, 1, "batch"),
             Err(CalcFlowError::InvalidArgument { ref field, .. }) if field == "batch"
         ));
+    }
+
+    #[test]
+    fn latched_arrays_reject_invalid_descriptors_shapes_and_counts() {
+        assert_eq!(
+            invalid_argument_field(Batch::static_array_float(
+                "",
+                "float64",
+                vec![1],
+                None,
+                vec![1.0],
+            )),
+            "static_inputs.backend"
+        );
+        assert_eq!(
+            invalid_argument_field(Batch::static_array_int(
+                "numpy",
+                "float64",
+                vec![1],
+                None,
+                vec![1],
+            )),
+            "static_inputs.dtype"
+        );
+        assert_eq!(
+            invalid_argument_field(Batch::static_array_bool(
+                "numpy",
+                vec![u64::MAX, 2],
+                None,
+                vec![],
+            )),
+            "static_inputs.shape"
+        );
+        assert_eq!(
+            invalid_argument_field(Batch::static_array_uint(
+                "numpy",
+                "uint8",
+                vec![2],
+                Some(vec![false]),
+                vec![1, 2],
+            )),
+            "static_inputs.shape"
+        );
+        assert_eq!(
+            invalid_argument_field(Batch::static_array_uint(
+                "numpy",
+                "uint8",
+                vec![2],
+                Some(vec![false, true]),
+                vec![1, 2],
+            )),
+            "static_inputs.shape"
+        );
+        assert_eq!(
+            invalid_argument_field(Batch::static_array_uint(
+                "numpy",
+                "uint8",
+                vec![1],
+                None,
+                vec![u64::from(u8::MAX) + 1],
+            )),
+            "static_inputs.dtype"
+        );
+    }
+
+    #[test]
+    fn latched_signed_array_cells_preserve_each_declared_width() {
+        let cases = [
+            ("int8", i64::from(i8::MIN), i8::MIN.to_be_bytes().to_vec()),
+            (
+                "int16",
+                i64::from(i16::MIN),
+                i16::MIN.to_be_bytes().to_vec(),
+            ),
+            (
+                "int32",
+                i64::from(i32::MIN),
+                i32::MIN.to_be_bytes().to_vec(),
+            ),
+            ("int64", i64::MIN, i64::MIN.to_be_bytes().to_vec()),
+        ];
+
+        for (dtype, value, expected) in cases {
+            let batch =
+                Batch::static_array_int("numpy", dtype, vec![1], None, vec![value]).unwrap();
+            let payload = batch.latched_array_payload().unwrap();
+
+            assert_eq!(payload.dtype(), dtype);
+            assert_eq!(payload.cell(0).as_deref(), Some(expected.as_slice()));
+            assert_eq!(payload.cell(1), None);
+        }
+    }
+
+    #[test]
+    fn latched_unsigned_array_cells_preserve_each_declared_width() {
+        let cases = [
+            ("uint8", u64::from(u8::MAX), u8::MAX.to_be_bytes().to_vec()),
+            (
+                "uint16",
+                u64::from(u16::MAX),
+                u16::MAX.to_be_bytes().to_vec(),
+            ),
+            (
+                "uint32",
+                u64::from(u32::MAX),
+                u32::MAX.to_be_bytes().to_vec(),
+            ),
+            ("uint64", u64::MAX, u64::MAX.to_be_bytes().to_vec()),
+        ];
+
+        for (dtype, value, expected) in cases {
+            let batch =
+                Batch::static_array_uint("numpy", dtype, vec![1], None, vec![value]).unwrap();
+            let payload = batch.latched_array_payload().unwrap();
+
+            assert_eq!(payload.dtype(), dtype);
+            assert_eq!(payload.cell(0).as_deref(), Some(expected.as_slice()));
+            assert_eq!(payload.cell(1), None);
+        }
+    }
+
+    #[test]
+    fn latched_bool_and_float64_cells_preserve_canonical_values_and_nulls() {
+        let boolean =
+            Batch::static_array_bool("numpy", vec![2], Some(vec![false, true]), vec![true])
+                .unwrap();
+        let boolean_payload = boolean.latched_array_payload().unwrap();
+        assert_eq!(boolean_payload.element_count(), 2);
+        assert!(!boolean_payload.is_null(0));
+        assert!(boolean_payload.is_null(1));
+        assert_eq!(boolean_payload.cell(0), Some(vec![1]));
+
+        let nan = f64::from_bits(0xfff8_0000_0000_0001);
+        let float =
+            Batch::static_array_float("numpy", "float64", vec![1], None, vec![nan]).unwrap();
+        assert_eq!(
+            float.latched_array_payload().unwrap().cell(0),
+            Some(0x7ff8_0000_0000_0000u64.to_be_bytes().to_vec())
+        );
+    }
+
+    #[test]
+    fn latched_arrays_report_owned_lengths_backends_and_byte_estimates() {
+        let cases = [
+            (
+                Batch::static_array_bool("numpy", vec![1], None, vec![true]).unwrap(),
+                size_of::<bool>() + 5 + 4 + size_of::<u64>(),
+            ),
+            (
+                Batch::static_array_int("numpy", "int8", vec![1], None, vec![1]).unwrap(),
+                size_of::<i64>() + 5 + 4 + size_of::<u64>(),
+            ),
+            (
+                Batch::static_array_uint("numpy", "uint8", vec![1], None, vec![1]).unwrap(),
+                size_of::<u64>() + 5 + 5 + size_of::<u64>(),
+            ),
+            (
+                Batch::static_array_float(
+                    "numpy",
+                    "float64",
+                    vec![1],
+                    Some(vec![false]),
+                    vec![1.0],
+                )
+                .unwrap(),
+                size_of::<f64>() + 5 + 7 + size_of::<u64>() + size_of::<bool>(),
+            ),
+        ];
+
+        for (batch, expected_bytes) in cases {
+            assert_eq!(batch.num_rows(), 1);
+            assert_eq!(batch.external_payload().unwrap().backend(), "numpy");
+            assert_eq!(batch.estimated_bytes().unwrap(), expected_bytes);
+        }
     }
 }

@@ -20,10 +20,10 @@ use crate::{
     RollingOperator, RollingSpec, SecretHandle, SecretReference, SecretResolver,
     SecretResolverKind, SinkBinding as RuntimeSinkBinding, SinkRecovery,
     SourceBinding as RuntimeSourceBinding, SourceCapabilities, SourceEvent, SourceSchema,
-    SqlOperator, StreamExecutionPlan, StreamJoinOperator, StreamJoinSpec, StreamRequirements,
-    StreamSink, StreamSource, TransactionSupport, TransactionalStreamSink, UdfKind, UdfReference,
-    UdfRegistrySnapshot, UnionOperator, WatermarkPolicy, WindowAggregateOperator, WindowSpec,
-    validate_delivery_guarantee, validate_selected_udfs,
+    SqlOperator, StaticInputSpec, StreamExecutionPlan, StreamJoinOperator, StreamJoinSpec,
+    StreamRequirements, StreamSink, StreamSource, TransactionSupport, TransactionalStreamSink,
+    UdfKind, UdfReference, UdfRegistrySnapshot, UnionOperator, WatermarkPolicy,
+    WindowAggregateOperator, WindowSpec, validate_delivery_guarantee, validate_selected_udfs,
 };
 
 pub const PROJECT_FORMAT_VERSION: u32 = 3;
@@ -56,6 +56,8 @@ pub struct ProjectSpec {
     pub sinks: Vec<ProjectSinkBinding>,
     #[serde(default)]
     pub state: StateConfig,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub static_inputs: Vec<StaticInputSpec>,
 }
 
 /// Runtime mode and mode-specific limits for a project-v3 document.
@@ -459,7 +461,8 @@ pub fn compile_stream_project(
     }
     let requirements = project_stream_requirements(project, requirements)?;
     let plan = build_project_builder(project, providers, CompileMode::Stream)?
-        .compile_stream(udfs, &requirements)?;
+        .compile_stream(udfs, &requirements)?
+        .with_static_input_specs(project.static_inputs.clone())?;
     let mut coverage = Vec::new();
     validate_source_coverage(
         project,
@@ -552,7 +555,8 @@ pub fn compile_stream_project_graph(
         });
     }
     build_project_builder(project, providers, CompileMode::Stream)?
-        .compile_stream(udfs, requirements)
+        .compile_stream(udfs, requirements)?
+        .with_static_input_specs(project.static_inputs.clone())
 }
 
 fn validate_project_connectors(
@@ -978,12 +982,10 @@ fn source_capabilities(
             .schema
             .iter()
             .map(|field| {
-                arrow_data_type(&field.data_type)
-                    .map(|data_type| Field::new(&field.name, data_type, field.nullable))
-                    .ok_or_else(|| CalcFlowError::InvalidArgument {
-                        field: "sources.schema.data_type".into(),
-                        message: format!("unsupported Arrow type {:?}", field.data_type),
-                    })
+                arrow_field(field).ok_or_else(|| CalcFlowError::InvalidArgument {
+                    field: "sources.schema.data_type".into(),
+                    message: format!("unsupported Arrow type {:?}", field.data_type),
+                })
             })
             .collect::<Result<Vec<_>>>()?;
         SourceSchema::Exact(Arc::new(datafusion::arrow::datatypes::Schema::new(fields)))
@@ -1598,13 +1600,11 @@ fn port_from_spec(spec: &PortSpec) -> Result<Port> {
     Port::new(&spec.name, spec.kind, spec.required, fields)
 }
 
-fn field_from_spec(spec: &ArrowFieldSpec) -> Result<Field> {
-    let data_type =
-        arrow_data_type(&spec.data_type).ok_or_else(|| CalcFlowError::InvalidArgument {
-            field: "port.schema.data_type".into(),
-            message: format!("unsupported Arrow type {:?}", spec.data_type),
-        })?;
-    Ok(Field::new(&spec.name, data_type, spec.nullable))
+pub(crate) fn field_from_spec(spec: &ArrowFieldSpec) -> Result<Field> {
+    arrow_field(spec).ok_or_else(|| CalcFlowError::InvalidArgument {
+        field: "port.schema.data_type".into(),
+        message: format!("unsupported Arrow type {:?}", spec.data_type),
+    })
 }
 
 fn builtin_ports(
@@ -1838,6 +1838,7 @@ fn validate_nodes(
         validate_operator(node, node_index, providers, udfs, mode, issues);
         selected_udfs.extend(operator_udfs(&node.operator).iter().cloned());
     }
+    validate_static_inputs(project, issues);
     if validate_selected_udfs(&selected_udfs).is_err() {
         let path = project
             .graph
@@ -1853,6 +1854,139 @@ fn validate_nodes(
             path,
             "conflicting_udf",
             "selected native UDFs contain conflicting DataFusion SQL names",
+        ));
+    }
+}
+
+/// Validates static-input declarations (SCE-11): unique portable names
+/// naming graph external input bindings that are not source bindings,
+/// with strict digest-v1 table schemas or array descriptors.
+// #lizard forgives
+fn validate_static_inputs(project: &ProjectSpec, issues: &mut Vec<ValidationIssue>) {
+    let connected = project
+        .graph
+        .edges
+        .iter()
+        .map(|edge| (edge.target_node.as_str(), edge.target_port.as_str()))
+        .map(|(node, port)| (node.to_owned(), port.to_owned()))
+        .collect::<BTreeSet<(String, String)>>();
+    let external_inputs = project
+        .graph
+        .nodes
+        .iter()
+        .flat_map(|node| {
+            node.input_ports
+                .iter()
+                .filter(|port| !connected.contains(&(node.id.clone(), port.name.clone())))
+                .map(|port| port.name.as_str())
+        })
+        .collect::<BTreeSet<_>>();
+    let source_bindings = project
+        .sources
+        .iter()
+        .map(|binding| binding.binding.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut names = BTreeSet::new();
+    for (index, spec) in project.static_inputs.iter().enumerate() {
+        let base = format!("static_inputs[{index}]");
+        let name = match spec {
+            StaticInputSpec::Table { name, schema, .. } => {
+                let mut field_names = BTreeSet::new();
+                for (field_index, field) in schema.iter().enumerate() {
+                    let field_base = format!("{base}.schema[{field_index}]");
+                    if !field_names.insert(field.name.as_str()) {
+                        issues.push(issue(
+                            format!("{field_base}.name"),
+                            "duplicate_field",
+                            format!("duplicate Arrow field {:?}", field.name),
+                        ));
+                    }
+                    if arrow_data_type(&field.data_type).is_none() {
+                        issues.push(issue(
+                            format!("{field_base}.data_type"),
+                            "unsupported_arrow_type",
+                            format!("unsupported Arrow type {:?}", field.data_type),
+                        ));
+                    }
+                }
+                name
+            }
+            StaticInputSpec::Array {
+                name,
+                backend,
+                dtype,
+                shape,
+                ..
+            } => {
+                if backend.is_empty() || backend.len() > 64 {
+                    issues.push(issue(
+                        format!("{base}.backend"),
+                        "out_of_range",
+                        "backend must contain 1 to 64 bytes",
+                    ));
+                }
+                if !crate::static_input::is_supported_array_dtype(dtype) {
+                    issues.push(issue(
+                        format!("{base}.dtype"),
+                        "unsupported_dtype",
+                        format!("array dtype {dtype:?} is outside the digest-v1 set"),
+                    ));
+                }
+                if shape.len() > 16 {
+                    issues.push(issue(
+                        format!("{base}.shape"),
+                        "out_of_range",
+                        "array rank must not exceed 16 dimensions",
+                    ));
+                }
+                name
+            }
+        };
+        validate_static_input_name(
+            name,
+            &base,
+            &external_inputs,
+            &source_bindings,
+            &mut names,
+            issues,
+        );
+    }
+}
+
+fn validate_static_input_name(
+    name: &str,
+    base: &str,
+    external_inputs: &BTreeSet<&str>,
+    source_bindings: &BTreeSet<&str>,
+    names: &mut BTreeSet<String>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if !is_port_identifier(name) {
+        issues.push(issue(
+            format!("{base}.name"),
+            "invalid_field",
+            "static input name must be a portable SQL identifier",
+        ));
+    }
+    if !names.insert(name.to_owned()) {
+        issues.push(issue(
+            format!("{base}.name"),
+            "duplicate_name",
+            format!("duplicate static input name {name:?}"),
+        ));
+    }
+    if !external_inputs.contains(name) {
+        issues.push(issue(
+            format!("{base}.name"),
+            "unknown_binding",
+            format!("static input {name:?} does not name a graph external input binding"),
+        ));
+    }
+    if source_bindings.contains(name) {
+        issues.push(issue(
+            format!("{base}.name"),
+            "source_binding_conflict",
+            format!("static input {name:?} is also declared as a source binding"),
         ));
     }
 }
@@ -2709,7 +2843,7 @@ fn is_port_identifier(value: &str) -> bool {
         && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
 }
 
-fn arrow_data_type(value: &str) -> Option<DataType> {
+fn primitive_arrow_data_type(value: &str) -> Option<DataType> {
     Some(match value {
         "bool" => DataType::Boolean,
         "date32" => DataType::Date32,
@@ -2733,6 +2867,105 @@ fn arrow_data_type(value: &str) -> Option<DataType> {
         "uint64" => DataType::UInt64,
         _ => return None,
     })
+}
+
+struct ParsedArrowFieldType {
+    data_type: DataType,
+    dictionary_ordered: Option<bool>,
+}
+
+fn parse_arrow_field_type(value: &str) -> Option<ParsedArrowFieldType> {
+    if let Some(data_type) = primitive_arrow_data_type(value) {
+        return Some(ParsedArrowFieldType {
+            data_type,
+            dictionary_ordered: None,
+        });
+    }
+    let dictionary = value.strip_prefix("dictionary<index=")?.strip_suffix('>')?;
+    let (index, value_and_ordered) = dictionary.split_once(";value=")?;
+    let (value, ordered) = value_and_ordered.split_once(";ordered=")?;
+    let index = primitive_arrow_data_type(index)?;
+    if !matches!(
+        index,
+        DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+    ) {
+        return None;
+    }
+    let value = primitive_arrow_data_type(value)?;
+    let ordered = match ordered {
+        "false" => false,
+        "true" => true,
+        _ => return None,
+    };
+    Some(ParsedArrowFieldType {
+        data_type: DataType::Dictionary(Box::new(index), Box::new(value)),
+        dictionary_ordered: Some(ordered),
+    })
+}
+
+fn arrow_field(spec: &ArrowFieldSpec) -> Option<Field> {
+    let parsed = parse_arrow_field_type(&spec.data_type)?;
+    Some(
+        Field::new(&spec.name, parsed.data_type, spec.nullable)
+            .with_dict_is_ordered(parsed.dictionary_ordered.unwrap_or(false)),
+    )
+}
+
+fn arrow_data_type(value: &str) -> Option<DataType> {
+    parse_arrow_field_type(value).map(|parsed| parsed.data_type)
+}
+
+fn canonical_primitive_arrow_type(data_type: &DataType) -> Option<&'static str> {
+    Some(match data_type {
+        DataType::Boolean => "bool",
+        DataType::Date32 => "date32",
+        DataType::Date64 => "date64",
+        DataType::Float32 => "float32",
+        DataType::Float64 => "float64",
+        DataType::Int8 => "int8",
+        DataType::Int16 => "int16",
+        DataType::Int32 => "int32",
+        DataType::Int64 => "int64",
+        DataType::LargeUtf8 => "large_string",
+        DataType::Utf8 => "string",
+        DataType::Time32(TimeUnit::Second) => "time32[s]",
+        DataType::Time64(TimeUnit::Microsecond) => "time64[us]",
+        DataType::Timestamp(TimeUnit::Millisecond, None) => "timestamp[ms]",
+        DataType::Timestamp(TimeUnit::Microsecond, None) => "timestamp[us]",
+        DataType::Timestamp(TimeUnit::Microsecond, Some(zone)) if zone.as_ref() == "UTC" => {
+            "timestamp[us, UTC]"
+        }
+        DataType::UInt8 => "uint8",
+        DataType::UInt16 => "uint16",
+        DataType::UInt32 => "uint32",
+        DataType::UInt64 => "uint64",
+        _ => return None,
+    })
+}
+
+pub(crate) fn canonical_arrow_field_type(field: &Field) -> Option<String> {
+    let DataType::Dictionary(index, value) = field.data_type() else {
+        return canonical_primitive_arrow_type(field.data_type()).map(str::to_owned);
+    };
+    let index = canonical_primitive_arrow_type(index)?;
+    if !matches!(
+        index,
+        "int8" | "int16" | "int32" | "int64" | "uint8" | "uint16" | "uint32" | "uint64"
+    ) {
+        return None;
+    }
+    let value = canonical_primitive_arrow_type(value)?;
+    let ordered = field.dict_is_ordered()?;
+    Some(format!(
+        "dictionary<index={index};value={value};ordered={ordered}>"
+    ))
 }
 
 fn operator_udfs(operator: &OperatorSpec) -> &[UdfReference] {
@@ -2820,4 +3053,80 @@ fn default_input() -> String {
 
 fn default_output() -> String {
     "output".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ArrowFieldSpec, canonical_arrow_field_type, field_from_spec};
+
+    #[test]
+    fn dictionary_type_spellings_round_trip_all_frozen_combinations() {
+        let indices = [
+            "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
+        ];
+        let values = [
+            "bool",
+            "int8",
+            "int16",
+            "int32",
+            "int64",
+            "uint8",
+            "uint16",
+            "uint32",
+            "uint64",
+            "float32",
+            "float64",
+            "string",
+            "large_string",
+            "date32",
+            "date64",
+            "time32[s]",
+            "time64[us]",
+            "timestamp[ms]",
+            "timestamp[us]",
+            "timestamp[us, UTC]",
+        ];
+
+        for index in indices {
+            for value in values {
+                for ordered in [false, true] {
+                    let spelling =
+                        format!("dictionary<index={index};value={value};ordered={ordered}>");
+                    let field = field_from_spec(&ArrowFieldSpec {
+                        name: "value".into(),
+                        data_type: spelling.clone(),
+                        nullable: true,
+                    })
+                    .unwrap();
+
+                    assert_eq!(field.dict_is_ordered(), Some(ordered), "{spelling}");
+                    assert_eq!(canonical_arrow_field_type(&field), Some(spelling));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dictionary_type_parser_rejects_non_canonical_and_nested_spellings() {
+        for spelling in [
+            "dictionary<index=float32;value=string;ordered=false>",
+            "dictionary<index=int32;value=binary;ordered=false>",
+            "dictionary<index=int32;value=dictionary<index=int8;value=string;ordered=false>;ordered=false>",
+            "dictionary<value=string;index=int32;ordered=false>",
+            "dictionary<index=int32;value=string>",
+            "dictionary<index=int32;value=string;ordered=False>",
+            "dictionary<index=int32;value=string;ordered=false >",
+            "dictionary<index=int32; value=string;ordered=false>",
+        ] {
+            assert!(
+                field_from_spec(&ArrowFieldSpec {
+                    name: "value".into(),
+                    data_type: spelling.into(),
+                    nullable: true,
+                })
+                .is_err(),
+                "{spelling} must be rejected"
+            );
+        }
+    }
 }

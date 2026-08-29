@@ -644,6 +644,10 @@ class StreamExecutionPlan:
         return self._inner.source_binding_ids
 
     @property
+    def static_input_ids(self) -> tuple[str, ...]:
+        return self._inner.static_input_ids
+
+    @property
     def sink_binding_ids(self) -> tuple[str, ...]:
         return self._inner.sink_binding_ids
 

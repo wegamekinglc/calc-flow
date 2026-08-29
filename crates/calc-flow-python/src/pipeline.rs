@@ -134,6 +134,17 @@ impl PyStreamExecutionPlan {
     }
 
     #[getter]
+    fn static_input_ids<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let values = self.with_plan(|plan| {
+            plan.static_input_ids()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })?;
+        PyTuple::new(py, values)
+    }
+
+    #[getter]
     fn requirements<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let requirements = self.with_plan(|plan| {
             plan.requirements()

@@ -337,6 +337,7 @@ pub(crate) struct StreamRuntimePlanParts {
     pub(crate) edges: BTreeMap<String, RuntimeEdge>,
     pub(crate) source_routes: BTreeMap<String, RuntimeSourceRoute>,
     pub(crate) sink_routes: BTreeMap<String, RuntimeSinkRoute>,
+    pub(crate) static_input_ids: BTreeSet<String>,
 }
 
 impl CompiledStreamOperator {
@@ -578,6 +579,7 @@ pub struct StreamExecutionPlan {
     table: Option<TablePlanResources>,
     project_sources: Option<BTreeMap<String, SourceBinding>>,
     project_sinks: Option<BTreeMap<String, Vec<SinkBinding>>>,
+    static_inputs: BTreeMap<String, crate::StaticInputSpec>,
 }
 
 impl PipelineBuilder {
@@ -639,6 +641,7 @@ impl PipelineBuilder {
             table,
             project_sources: None,
             project_sinks: None,
+            static_inputs: BTreeMap::new(),
         })
     }
 }
@@ -830,6 +833,44 @@ impl StreamExecutionPlan {
         self
     }
 
+    /// Attaches the plan's static-input declarations (SCE-11).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::Compile`] when a declaration duplicates a
+    /// name or does not name a graph external input binding.
+    pub(crate) fn with_static_input_specs(
+        mut self,
+        specs: Vec<crate::StaticInputSpec>,
+    ) -> Result<Self> {
+        for spec in specs {
+            let name = spec.name().to_owned();
+            if !self.external_inputs.contains_key(&name) {
+                return Err(CalcFlowError::Compile {
+                    message: format!(
+                        "static input {name:?} does not name a graph external input binding"
+                    ),
+                });
+            }
+            if self.static_inputs.contains_key(&name) {
+                return Err(CalcFlowError::Compile {
+                    message: format!("static input name {name:?} is declared twice"),
+                });
+            }
+            self.static_inputs.insert(name, spec);
+        }
+        if !self.static_inputs.is_empty() {
+            let value = json!({
+                "graph_fingerprint": self.fingerprint.as_str(),
+                "static_inputs": &self.static_inputs,
+            });
+            let canonical = canonical_json(&value)
+                .expect("static input declarations are always canonical JSON values");
+            self.fingerprint = hex::encode(Sha256::digest(canonical.as_bytes()));
+        }
+        Ok(self)
+    }
+
     pub(crate) fn take_project_bindings(&mut self) -> Option<ProjectRuntimeBindings> {
         match (self.project_sources.take(), self.project_sinks.take()) {
             (Some(sources), Some(sinks)) => Some((sources, sinks)),
@@ -883,9 +924,24 @@ impl StreamExecutionPlan {
     }
 
     /// The stable source binding slots: external graph input names in
-    /// deterministic order (plan M1.1).
+    /// deterministic order (plan M1.1). Static input names are excluded
+    /// because they are not source bindings (SCE-11).
     pub fn source_binding_ids(&self) -> Vec<&str> {
-        self.external_inputs.keys().map(String::as_str).collect()
+        self.external_inputs
+            .keys()
+            .filter(|name| !self.static_inputs.contains_key(*name))
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// The static input names declared by this plan in sorted order (SCE-11).
+    pub fn static_input_ids(&self) -> Vec<&str> {
+        self.static_inputs.keys().map(String::as_str).collect()
+    }
+
+    /// The static input declarations by name (SCE-11).
+    pub const fn static_inputs(&self) -> &BTreeMap<String, crate::StaticInputSpec> {
+        &self.static_inputs
     }
 
     /// The stable sink binding slots: external graph output names in
@@ -917,6 +973,7 @@ impl StreamExecutionPlan {
                     .contains(endpoint.node_id.as_str())
                     .then_some(binding.as_str())
             })
+            .filter(|binding| !self.static_inputs.contains_key(*binding))
             .collect()
     }
 
@@ -995,7 +1052,13 @@ impl StreamExecutionPlan {
             table: _,
             project_sources: _,
             project_sinks: _,
+            static_inputs,
         } = self;
+        let static_input_ids = static_inputs.into_keys().collect::<BTreeSet<_>>();
+        let external_inputs = external_inputs
+            .into_iter()
+            .filter(|(name, _)| !static_input_ids.contains(name))
+            .collect::<BTreeMap<_, _>>();
         let mut edges = project_internal_edges(compiled_edges, default_budget)?;
         let node_indexes = nodes
             .iter()
@@ -1025,6 +1088,7 @@ impl StreamExecutionPlan {
             edges,
             source_routes,
             sink_routes,
+            static_input_ids,
         })
     }
 }

@@ -71,6 +71,30 @@ engine or Studio capabilities.
   OpenAPI document, and TypeScript contract are regenerated in the same
   commit.
 
+- 2026-08-28: Add immutable static stream inputs (SCE-11). Stream plans can
+  now declare per-job immutable side values — model weights, reference
+  matrices, lookup tables — that are validated, latched, and digested exactly
+  once per job during runner start, before any source opens. Python gains the
+  keyword-only `StreamingRunner(..., static_inputs=...)` mapping of `Batch`
+  values and the `StreamExecutionPlan.static_input_ids` property; Rust gains
+  the additive `StreamingRunner::with_static_inputs` builder, plan-level
+  `static_input_ids()`/`static_inputs()` accessors, and the crate-root
+  `StaticInputSpec`, `StaticInputDigest`, `StaticMutability`, and
+  `STATIC_INPUT_DIGEST_VERSION` exports. Project-v3 documents declare the
+  inputs as a data-only root `static_inputs` array naming graph external
+  input ports; live values never enter the document. Each value is reduced to
+  a `calc_flow.static_input.digest.v1` SHA-256 digest over canonical tagged
+  bytes; declarations join the plan fingerprint while payload digests stay
+  out of the lineage key, so a restart with a different value reaches the
+  existing lineage and is rejected before sources open with a frozen message.
+  Checkpoint manifests record one digest per name under `static_inputs`,
+  omitted when empty. Studio `POST /jobs` fails closed with `422` before
+  spawning a worker for projects declaring static inputs, since REST cannot
+  carry live values. Compatibility is fully additive: existing Python and
+  Rust call sites are unchanged, previously valid project-v3 documents and
+  checkpoint manifests serialize byte-for-byte identically, and the project
+  format version stays `3`.
+
 - 2026-08-28: Reject wall-clock built-in functions in stream query
   compilation (DAL-166). `compile_stream` now rejects read-only expression
   and SQL queries that call `now`, `current_date`, or `current_time`:

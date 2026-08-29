@@ -1139,6 +1139,7 @@ fn soak_spec(
         sinks,
         edge_budget: EDGE_BUDGET,
         delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+        static_inputs: crate::static_input::PreparedStaticInputs::default(),
     }
 }
 
@@ -2179,6 +2180,7 @@ fn checkpoint_matrix_spec(
             max_bytes: 1 << 20,
         },
         delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+        static_inputs: crate::static_input::PreparedStaticInputs::default(),
     }
 }
 
@@ -3279,6 +3281,7 @@ fn private_benchmark_identity(operator_ids: BTreeSet<String>) -> PreparedManifes
         source_ids: BTreeSet::new(),
         operator_ids,
         sink_ids: BTreeSet::new(),
+        static_inputs: BTreeMap::new(),
     }
 }
 
@@ -3296,6 +3299,7 @@ fn private_benchmark_manifest(
         sources: BTreeMap::new(),
         operators,
         sinks: BTreeMap::new(),
+        static_inputs: BTreeMap::new(),
     })
     .unwrap()
 }

@@ -38,6 +38,7 @@ mod pipeline;
 mod project_store;
 mod runtime;
 mod state;
+mod static_input;
 mod time;
 mod udf;
 
@@ -106,6 +107,9 @@ pub use state::{
     ManifestIngressState, OperatorIngressManifestEntry, OperatorManifestEntry, RecoveryStatus,
     RetentionClass, SinkDeliveryManifest, SinkManifestEntry, SourceManifestEntry,
     SourceWatermarkManifestState, StateBackend, StateHandle, StateLineageBackend, StateLineageKey,
+};
+pub use static_input::{
+    STATIC_INPUT_DIGEST_VERSION, StaticInputDigest, StaticInputSpec, StaticMutability,
 };
 pub use time::{Epoch, EventTime};
 pub use udf::{

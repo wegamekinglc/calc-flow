@@ -28,7 +28,7 @@ use super::{
 };
 use crate::{
     CalcFlowError, CancellationToken, Epoch, JsonMap, OperatorManifestEntry, OperatorStateSnapshot,
-    Result, StateSegment,
+    Result, StateSegment, StaticInputDigest,
 };
 
 const MAX_MANIFEST_ENTRIES: usize = 4_096;
@@ -84,6 +84,7 @@ pub(crate) struct PreparedManifestIdentity {
     pub(crate) source_ids: BTreeSet<String>,
     pub(crate) operator_ids: BTreeSet<String>,
     pub(crate) sink_ids: BTreeSet<String>,
+    pub(crate) static_inputs: BTreeMap<String, StaticInputDigest>,
 }
 
 impl PreparedManifestIdentity {
@@ -96,6 +97,7 @@ impl PreparedManifestIdentity {
             source_ids: &self.source_ids,
             operator_ids: &self.operator_ids,
             sink_ids: &self.sink_ids,
+            static_inputs: &self.static_inputs,
         }
     }
 }
@@ -1640,6 +1642,7 @@ mod tests {
             sources: BTreeMap::new(),
             operators: BTreeMap::new(),
             sinks: BTreeMap::new(),
+            static_inputs: BTreeMap::new(),
         })
         .unwrap()
     }
@@ -1652,6 +1655,7 @@ mod tests {
             source_ids: BTreeSet::default(),
             operator_ids: BTreeSet::default(),
             sink_ids: BTreeSet::default(),
+            static_inputs: BTreeMap::new(),
         }
     }
 
@@ -1676,6 +1680,7 @@ mod tests {
                 },
             )]),
             sinks: BTreeMap::new(),
+            static_inputs: BTreeMap::new(),
         })
         .unwrap()
     }

@@ -283,6 +283,37 @@ def test_batch_projects_cannot_start_continuous_jobs(tmp_path: Path) -> None:
     assert "runtime.mode 'stream'" in response.json()["detail"]
 
 
+def test_static_input_projects_fail_closed_before_worker_spawn(tmp_path: Path) -> None:
+    app = create_app(project_directory=tmp_path / "projects")
+    project = _stream_project(tmp_path, project_id="static_project")
+    project["graph"]["nodes"] = [
+        {
+            "id": "merge",
+            "operator": {"kind": "union"},
+            "input_ports": [
+                {"name": "input", "kind": "table"},
+                {"name": "weights", "kind": "table"},
+            ],
+        }
+    ]
+    project["static_inputs"] = [
+        {
+            "kind": "table",
+            "name": "weights",
+            "mutability": "static",
+            "schema": [{"name": "factor", "data_type": "float64", "nullable": False}],
+        }
+    ]
+    with TestClient(app) as client:
+        assert client.post("/api/v3/projects", json=project).status_code == 201
+        response = client.post("/api/v3/jobs", json={"project_id": "static_project"})
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "static_inputs.weights" in detail
+    assert "cannot resolve" in detail
+
+
 def test_concurrency_limit_is_enforced_before_starting_another_job(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

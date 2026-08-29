@@ -1943,6 +1943,97 @@
       },
       "type": "object"
     },
+    "StaticInputSpec": {
+      "description": "The declared external-input descriptor for one static input.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "An Arrow table value with an exact declared schema.",
+          "properties": {
+            "kind": {
+              "const": "table",
+              "type": "string"
+            },
+            "mutability": {
+              "$ref": "#/$defs/StaticMutability",
+              "description": "Declared mutability; always `Static` in v1."
+            },
+            "name": {
+              "description": "Declared external input name.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "Exact declared Arrow schema in field order.",
+              "items": {
+                "$ref": "#/$defs/ArrowFieldSpec"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "mutability",
+            "schema"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An Array API value with an exact declared backend, dtype, and shape.",
+          "properties": {
+            "backend": {
+              "description": "Declared array backend identifier (for example `numpy`).",
+              "type": "string"
+            },
+            "dtype": {
+              "description": "Declared dtype spelling (for example `float64`).",
+              "type": "string"
+            },
+            "kind": {
+              "const": "array",
+              "type": "string"
+            },
+            "mutability": {
+              "$ref": "#/$defs/StaticMutability",
+              "description": "Declared mutability; always `Static` in v1."
+            },
+            "name": {
+              "description": "Declared external input name.",
+              "type": "string"
+            },
+            "shape": {
+              "description": "Declared logical shape in element dimensions.",
+              "items": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "mutability",
+            "backend",
+            "dtype",
+            "shape"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "StaticMutability": {
+      "description": "The declared mutability of one static input; only `Static` exists in v1.",
+      "oneOf": [
+        {
+          "const": "static",
+          "description": "The payload is latched once and never mutates for the job's lifetime.",
+          "type": "string"
+        }
+      ]
+    },
     "StreamJoinSpec": {
       "additionalProperties": false,
       "description": "Immutable declaration for a two-input bounded inner stream Join.",
@@ -2201,6 +2292,12 @@
         "retention": 3,
         "root": ".calc-flow-state"
       }
+    },
+    "static_inputs": {
+      "items": {
+        "$ref": "#/$defs/StaticInputSpec"
+      },
+      "type": "array"
     }
   },
   "required": [

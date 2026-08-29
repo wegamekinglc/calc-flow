@@ -27,7 +27,7 @@
 //!             max_batch_rows: 1,
 //!             max_batch_bytes: 1024,
 //!             schema: SourceSchema::DynamicOrUnknown,
-//!             native_watermarks: NativeWatermarkCapability::NeverEmits,
+//!             native_watermarks: NativeWatermarkCapability::EmitsNative,
 //!         }
 //!     }
 //!     async fn open(&mut self, _: Option<Cursor>) -> Result<()> { Ok(()) }
@@ -883,6 +883,7 @@ pub struct StreamingRunner {
     sinks: BTreeMap<String, Vec<SinkBinding>>,
     checkpoints: ManagedCheckpointRuntime,
     config: StreamRuntimeConfig,
+    static_inputs: BTreeMap<String, Batch>,
 }
 
 impl StreamingRunner {
@@ -915,7 +916,24 @@ impl StreamingRunner {
             sinks,
             checkpoints,
             config: StreamRuntimeConfig::default(),
+            static_inputs: BTreeMap::new(),
         })
+    }
+
+    /// Attaches the immutable static input values for this job (SCE-11).
+    ///
+    /// The mapping is copied immediately; validation, latching, and digest
+    /// computation happen exactly once during [`Self::start`], completing
+    /// before any source, operator, sink, or provider lifecycle runs.
+    ///
+    /// # Errors
+    ///
+    /// Reserved for future builder-time shape checks; static value
+    /// validation is deliberately deferred to job start.
+    #[must_use = "the runner owns the supplied static input handles"]
+    pub fn with_static_inputs(mut self, inputs: BTreeMap<String, Batch>) -> Result<Self> {
+        self.static_inputs = inputs;
+        Ok(self)
     }
 
     /// Returns the runner with validated runtime tuning.
@@ -948,13 +966,17 @@ impl StreamingRunner {
             sinks,
             checkpoints,
             config,
+            static_inputs,
         } = self;
         let job_id = allocate_job_id()?;
+        let prepared_static_inputs =
+            crate::static_input::prepare_static_inputs(plan.static_inputs(), &static_inputs)
+                .map_err(static_preflight_error)?;
         let fingerprint = plan.fingerprint().to_owned();
         let context = StreamJobContext::new(
             job_id,
             fingerprint,
-            JsonMap::new(),
+            static_input_settings(&prepared_static_inputs),
             None,
             CancellationToken::new(),
         );
@@ -982,6 +1004,7 @@ impl StreamingRunner {
             sinks,
             edge_budget: config.edge_budget,
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
+            static_inputs: prepared_static_inputs,
         };
         #[cfg(test)]
         let (start, fault_probe) = match checkpoints.fault {
@@ -1121,6 +1144,39 @@ impl StreamingJob {
             runner_registries: self.inner.runner_probe_for_test().registry_counts(),
         }
     }
+}
+
+fn static_preflight_error(error: CalcFlowError) -> CalcFlowError {
+    let CalcFlowError::InvalidArgument { field, message } = error else {
+        return safe_error(error);
+    };
+    CalcFlowError::Streaming(projection::validation_error(
+        ComponentKind::Job,
+        None,
+        format!("{field}: {message}"),
+    ))
+}
+
+/// Builds the payload-free static-input digest evidence carried on the job
+/// context settings; operators observe it read-only from job start.
+fn static_input_settings(prepared: &crate::static_input::PreparedStaticInputs) -> JsonMap {
+    let evidence = prepared
+        .digests
+        .iter()
+        .map(|(name, digest)| {
+            (
+                name.clone(),
+                serde_json::json!({
+                    "digest_version": digest.digest_version,
+                    "sha256": digest.sha256,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    BTreeMap::from([(
+        "static_inputs".to_owned(),
+        serde_json::Value::Object(evidence),
+    )])
 }
 
 fn validate_binding_shapes(
@@ -1735,5 +1791,316 @@ mod tests {
         assert_eq!(error.epoch(), Some(crate::Epoch::INITIAL));
         assert!(!format!("{error:?}").contains("credential-canary"));
         let _ = job.wait().await;
+    }
+}
+
+#[cfg(test)]
+mod static_input_runner_tests {
+    use std::{
+        collections::BTreeMap,
+        path::Path,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
+
+    use async_trait::async_trait;
+    use datafusion::arrow::{
+        array::{ArrayRef, Float64Array},
+        datatypes::{DataType, Field, Schema},
+        record_batch::RecordBatch,
+    };
+
+    use super::{
+        Cursor, ManagedCheckpointRuntime, NativeWatermarkCapability, ReplayPositioning,
+        SinkBinding, SinkRecovery, SourceBinding, SourceCapabilities, SourceDeliveryCapability,
+        SourceEvent, SourceSchema, StreamSource, StreamingErrorCategory, StreamingRunner,
+        TransactionalStreamSink,
+    };
+    use crate::{
+        ArrowFieldSpec, Batch, BatchKind, BatchMetadata, CalcFlowError, JsonMap, PipelineBuilder,
+        Port, Result, StaticInputSpec, StaticMutability, StreamExecutionPlan, StreamRequirements,
+        UdfRegistry, UnionOperator, static_input::digest_for_name,
+    };
+
+    struct OpeningProbeSource {
+        opened: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl StreamSource for OpeningProbeSource {
+        fn capabilities(&self) -> SourceCapabilities {
+            SourceCapabilities {
+                replay_positioning: ReplayPositioning::ExactPauseReportAndSeek,
+                delivery: SourceDeliveryCapability::Lossless,
+                max_batch_rows: 1,
+                max_batch_bytes: 1024,
+                schema: SourceSchema::DynamicOrUnknown,
+                native_watermarks: NativeWatermarkCapability::EmitsNative,
+            }
+        }
+
+        async fn open(&mut self, _cursor: Option<Cursor>) -> Result<()> {
+            self.opened.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn next(&mut self) -> Result<Option<SourceEvent>> {
+            std::future::pending().await
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct NoopSink;
+
+    #[async_trait]
+    impl TransactionalStreamSink for NoopSink {
+        async fn open(&mut self) -> Result<()> {
+            Ok(())
+        }
+        async fn begin_epoch(&mut self, _epoch: crate::Epoch) -> Result<()> {
+            Ok(())
+        }
+        async fn write(&mut self, _batch: &Batch) -> Result<()> {
+            Ok(())
+        }
+        async fn pre_commit(&mut self, _epoch: crate::Epoch) -> Result<JsonMap> {
+            Ok(JsonMap::new())
+        }
+        async fn commit(&mut self, _epoch: crate::Epoch, _pre_commit: &JsonMap) -> Result<()> {
+            Ok(())
+        }
+        async fn abort(
+            &mut self,
+            _epoch: crate::Epoch,
+            _pre_commit: Option<&JsonMap>,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn recover(&mut self, _recovery: &SinkRecovery) -> Result<()> {
+            Ok(())
+        }
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn weights_table(values: &[f64]) -> Batch {
+        Batch::table(
+            vec![
+                RecordBatch::try_new(
+                    Arc::new(Schema::new(vec![Field::new(
+                        "factor",
+                        DataType::Float64,
+                        false,
+                    )])),
+                    vec![Arc::new(Float64Array::from(values.to_vec())) as ArrayRef],
+                )
+                .unwrap(),
+            ],
+            BatchMetadata::default(),
+        )
+        .unwrap()
+    }
+
+    fn static_plan() -> StreamExecutionPlan {
+        PipelineBuilder::new("static-inputs")
+            .unwrap()
+            .add_node(
+                "merge",
+                Box::new(
+                    UnionOperator::new(
+                        "merge",
+                        vec![
+                            Port::new("main", BatchKind::Table, true, None).unwrap(),
+                            Port::new("weights", BatchKind::Table, true, None).unwrap(),
+                        ],
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap()
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements::default(),
+            )
+            .unwrap()
+            .with_static_input_specs(vec![StaticInputSpec::Table {
+                name: "weights".into(),
+                mutability: StaticMutability::Static,
+                schema: vec![ArrowFieldSpec {
+                    name: "factor".into(),
+                    data_type: "float64".into(),
+                    nullable: false,
+                }],
+            }])
+            .unwrap()
+    }
+
+    fn runner_with(
+        plan: StreamExecutionPlan,
+        root: &Path,
+        opened: Arc<AtomicBool>,
+        static_inputs: BTreeMap<String, Batch>,
+    ) -> Result<StreamingRunner> {
+        StreamingRunner::new(
+            plan,
+            BTreeMap::from([(
+                "main".into(),
+                SourceBinding::new(OpeningProbeSource { opened }),
+            )]),
+            BTreeMap::from([(
+                "output".into(),
+                vec![SinkBinding::transactional("sink", NoopSink).unwrap()],
+            )]),
+            ManagedCheckpointRuntime::new(root.join("managed")).unwrap(),
+        )
+        .unwrap()
+        .with_static_inputs(static_inputs)
+    }
+
+    async fn start_with(
+        plan: StreamExecutionPlan,
+        root: &Path,
+        opened: Arc<AtomicBool>,
+        static_inputs: BTreeMap<String, Batch>,
+    ) -> Result<super::StreamingJob> {
+        runner_with(plan, root, opened, static_inputs)?
+            .start()
+            .await
+    }
+
+    #[test]
+    fn static_input_payloads_do_not_enter_the_semantic_fingerprint() {
+        let first_payload = weights_table(&[1.0, 2.0, 3.0]);
+        let second_payload = weights_table(&[9.0, 9.0, 9.0]);
+        assert_ne!(
+            digest_for_name("weights", &first_payload).unwrap(),
+            digest_for_name("weights", &second_payload).unwrap()
+        );
+        let first_directory = tempfile::tempdir().unwrap();
+        let second_directory = tempfile::tempdir().unwrap();
+        let first = runner_with(
+            static_plan(),
+            first_directory.path(),
+            Arc::new(AtomicBool::new(false)),
+            BTreeMap::from([("weights".into(), first_payload)]),
+        )
+        .unwrap();
+        let second = runner_with(
+            static_plan(),
+            second_directory.path(),
+            Arc::new(AtomicBool::new(false)),
+            BTreeMap::from([("weights".into(), second_payload)]),
+        )
+        .unwrap();
+
+        assert_eq!(first.plan.fingerprint(), second.plan.fingerprint());
+    }
+
+    #[tokio::test]
+    async fn static_input_preflight_fails_before_any_source_opens() {
+        let opened = Arc::new(AtomicBool::new(false));
+        let directory = tempfile::tempdir().unwrap();
+        let error = start_with(
+            static_plan(),
+            directory.path(),
+            Arc::clone(&opened),
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap_err();
+        let CalcFlowError::Streaming(error) = error else {
+            panic!("static preflight failures must use the streaming boundary");
+        };
+        assert_eq!(error.category(), StreamingErrorCategory::Validation);
+        assert!(
+            error
+                .to_string()
+                .contains("static_inputs.weights: required static input is missing"),
+            "{}",
+            error
+        );
+        assert!(
+            !opened.load(Ordering::SeqCst),
+            "preflight must fail before the source opens"
+        );
+    }
+
+    #[tokio::test]
+    async fn static_input_recovery_rejects_a_changed_value_before_source_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let opened = Arc::new(AtomicBool::new(false));
+        let job = start_with(
+            static_plan(),
+            directory.path(),
+            Arc::clone(&opened),
+            BTreeMap::from([("weights".into(), weights_table(&[1.0, 2.0, 3.0]))]),
+        )
+        .await
+        .expect("the first launch must start with the declared static input");
+        let epoch = tokio::time::timeout(Duration::from_secs(10), job.trigger_checkpoint())
+            .await
+            .expect("checkpoint must settle")
+            .unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), job.shutdown())
+            .await
+            .expect("shutdown must settle");
+        assert!(outcome.completed_epoch >= Some(epoch));
+
+        let reopened = Arc::new(AtomicBool::new(false));
+        let error = start_with(
+            static_plan(),
+            directory.path(),
+            Arc::clone(&reopened),
+            BTreeMap::from([("weights".into(), weights_table(&[9.0, 9.0, 9.0]))]),
+        )
+        .await
+        .unwrap_err();
+        let CalcFlowError::Streaming(error) = error else {
+            panic!("recovery mismatches must use the streaming boundary");
+        };
+        assert_eq!(error.category(), StreamingErrorCategory::CheckpointMismatch);
+        let stored = digest_for_name("weights", &weights_table(&[1.0, 2.0, 3.0]))
+            .unwrap()
+            .sha256;
+        let prepared = digest_for_name("weights", &weights_table(&[9.0, 9.0, 9.0]))
+            .unwrap()
+            .sha256;
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "static_inputs.weights.digest: checkpoint digest {stored} does not match prepared digest {prepared} for calc_flow.static_input.digest.v1"
+            )
+        );
+        assert!(
+            !reopened.load(Ordering::SeqCst),
+            "recovery mismatch must fail before the source opens"
+        );
+
+        // The graceful shutdown wrote a terminal manifest, so the identical
+        // restart recovers to the terminal outcome without reopening sources
+        // (D11); the comparison itself must simply succeed.
+        let terminal_opened = Arc::new(AtomicBool::new(false));
+        let job = start_with(
+            static_plan(),
+            directory.path(),
+            Arc::clone(&terminal_opened),
+            BTreeMap::from([("weights".into(), weights_table(&[1.0, 2.0, 3.0]))]),
+        )
+        .await
+        .expect("restart with the identical value must pass the digest comparison");
+        let outcome = tokio::time::timeout(Duration::from_secs(10), job.wait())
+            .await
+            .expect("terminal recovery must settle");
+        assert!(
+            outcome.completed_epoch >= Some(epoch),
+            "terminal recovery keeps the completed epoch"
+        );
     }
 }

@@ -703,9 +703,12 @@ at-least-once, or exactly-once delivery requests.
 through the runtime's connector registry and secret resolver. Its returned plan
 owns deferred connector bindings and project runtime/state settings, so launch
 uses `StreamingRunner(plan)` without separate Python connector objects.
-`PipelineBuilder.compile_stream()` is the graph-only path for
-application-owned `SourceBinding` and `SinkBinding` values. Project JSON never
-embeds a connector object or credential value.
+Stream projects may additionally declare immutable static side inputs; see
+[static input declarations](connectors.md#static-input-declarations) for the
+syntax and validation rules. `PipelineBuilder.compile_stream()` is the
+graph-only path for application-owned `SourceBinding` and `SinkBinding`
+values. Project JSON never embeds a connector object, credential value, or
+live static payload.
 
 `FileProjectStore` has async `create`, `put`, `get`, `list`, and `delete`
 methods and explicit `*_blocking` variants. Safe JSON/YAML import/export helpers
@@ -733,6 +736,21 @@ job = await runner.start_async()
 print(job.status())  # synchronous and safe inside the event loop
 outcome = await job.wait_async()
 ```
+
+The constructor accepts one further keyword-only argument,
+`static_inputs: Mapping[str, Batch] | None = None`, supplying the immutable
+per-job side values a plan declares. `None` normalizes to an empty mapping;
+non-`str` keys or non-`Batch` values raise `TypeError` before native
+construction, and the mapping is defensively copied. Project-backed plans
+reject externally supplied `sources`, `sinks`, `checkpoints`, and `config`
+but exempt `static_inputs`, which is required when the plan declares static
+inputs. `plan.static_input_ids` returns the declared names as a sorted tuple
+and `plan.source_binding_ids` excludes them. The values are validated,
+latched, and digested exactly once inside `start_async`/`start`, before any
+source or connector lifecycle runs; restarts that supply different values are
+rejected against the recorded digest before sources open. The full per-job
+semantics, digest contract, and recovery behavior are in
+[static inputs](streaming-guide.md#static-inputs).
 
 A bounded event-time Join is declared on the builder with
 `stream_join(name, *, left_schema, right_schema, left_keys, right_keys,

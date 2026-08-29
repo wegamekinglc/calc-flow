@@ -67,7 +67,9 @@ fn handle() -> StateHandle {
     .unwrap()
 }
 
-fn manifest_fields() -> CheckpointManifestFields {
+fn manifest_fields(
+    static_inputs: BTreeMap<String, calc_flow::StaticInputDigest>,
+) -> CheckpointManifestFields {
     CheckpointManifestFields {
         pipeline_name: "orders".into(),
         pipeline_fingerprint: SHA256.into(),
@@ -110,8 +112,11 @@ fn manifest_fields() -> CheckpointManifestFields {
                 segments: Vec::new(),
             },
         )]),
+        static_inputs,
     }
 }
+
+static EMPTY_STATIC_INPUTS: BTreeMap<String, calc_flow::StaticInputDigest> = BTreeMap::new();
 
 fn expectation<'a>(
     source_ids: &'a BTreeSet<String>,
@@ -126,6 +131,7 @@ fn expectation<'a>(
         source_ids,
         operator_ids,
         sink_ids,
+        static_inputs: &EMPTY_STATIC_INPUTS,
     }
 }
 
@@ -278,7 +284,7 @@ fn lineage_key_validates_logical_identity_without_exposing_raw_paths() {
 
 #[test]
 fn manifest_canonical_bytes_ignore_mapping_insertion_order() {
-    let fields = manifest_fields();
+    let fields = manifest_fields(BTreeMap::new());
     let first = CheckpointManifest::new(fields.clone()).unwrap();
 
     let mut reversed = fields;
@@ -298,7 +304,7 @@ fn manifest_canonical_bytes_ignore_mapping_insertion_order() {
 
 #[test]
 fn manifest_strict_loader_rejects_unknown_duplicate_missing_and_bounded_json() {
-    let manifest = CheckpointManifest::new(manifest_fields()).unwrap();
+    let manifest = CheckpointManifest::new(manifest_fields(BTreeMap::new())).unwrap();
     let canonical = String::from_utf8(manifest.canonical_bytes().unwrap()).unwrap();
 
     let unknown = canonical.replacen('{', r#"{"unknown":true,"#, 1);
@@ -372,7 +378,7 @@ fn manifest_strict_loader_rejects_unknown_duplicate_missing_and_bounded_json() {
 
 #[test]
 fn manifest_validates_expected_plan_and_handle_ownership_before_load() {
-    let manifest = CheckpointManifest::new(manifest_fields()).unwrap();
+    let manifest = CheckpointManifest::new(manifest_fields(BTreeMap::new())).unwrap();
     let sources = BTreeSet::from(["source".into()]);
     let operators = BTreeSet::from(["window".into()]);
     let sinks = BTreeSet::from(["sink".into()]);
@@ -386,7 +392,7 @@ fn manifest_validates_expected_plan_and_handle_ownership_before_load() {
         Err(CalcFlowError::CheckpointMismatch { .. })
     ));
 
-    let mut wrong_operator = manifest_fields();
+    let mut wrong_operator = manifest_fields(BTreeMap::new());
     wrong_operator.operators.get_mut("window").unwrap().segments[0] = StateHandle::new(
         "other",
         Epoch::INITIAL,
@@ -401,7 +407,7 @@ fn manifest_validates_expected_plan_and_handle_ownership_before_load() {
         Err(CalcFlowError::CheckpointMismatch { .. })
     ));
 
-    let mut wrong_epoch = manifest_fields();
+    let mut wrong_epoch = manifest_fields(BTreeMap::new());
     wrong_epoch.operators.get_mut("window").unwrap().segments[0] = StateHandle::new(
         "window",
         Epoch::INITIAL.next().unwrap(),
@@ -419,7 +425,7 @@ fn manifest_validates_expected_plan_and_handle_ownership_before_load() {
 
 #[test]
 fn manifest_runtime_configuration_mismatch_is_diagnostic_only() {
-    let manifest = CheckpointManifest::new(manifest_fields()).unwrap();
+    let manifest = CheckpointManifest::new(manifest_fields(BTreeMap::new())).unwrap();
     let sources = BTreeSet::from(["source".into()]);
     let operators = BTreeSet::from(["window".into()]);
     let sinks = BTreeSet::from(["sink".into()]);
@@ -432,6 +438,7 @@ fn manifest_runtime_configuration_mismatch_is_diagnostic_only() {
         source_ids: &sources,
         operator_ids: &operators,
         sink_ids: &sinks,
+        static_inputs: &EMPTY_STATIC_INPUTS,
     };
 
     manifest.validate(&expected).unwrap();
@@ -440,7 +447,7 @@ fn manifest_runtime_configuration_mismatch_is_diagnostic_only() {
 
 #[test]
 fn manifest_accepts_older_inventory_handles_and_rejects_future_handles() {
-    let mut later_manifest = manifest_fields();
+    let mut later_manifest = manifest_fields(BTreeMap::new());
     later_manifest.epoch = Epoch::INITIAL.next().unwrap();
     let manifest = CheckpointManifest::new(later_manifest).unwrap();
     assert_eq!(
@@ -448,7 +455,7 @@ fn manifest_accepts_older_inventory_handles_and_rejects_future_handles() {
         Epoch::INITIAL
     );
 
-    let mut future_handle = manifest_fields();
+    let mut future_handle = manifest_fields(BTreeMap::new());
     future_handle.operators.get_mut("window").unwrap().segments[0] = StateHandle::new(
         "window",
         Epoch::INITIAL.next().unwrap(),
@@ -466,7 +473,7 @@ fn manifest_accepts_older_inventory_handles_and_rejects_future_handles() {
 
 #[test]
 fn manifest_checksum_mismatch_fails_closed() {
-    let manifest = CheckpointManifest::new(manifest_fields()).unwrap();
+    let manifest = CheckpointManifest::new(manifest_fields(BTreeMap::new())).unwrap();
     let mut value: Value = serde_json::from_slice(&manifest.canonical_bytes().unwrap()).unwrap();
     value["state_checksum"] =
         json!("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
@@ -480,7 +487,7 @@ fn manifest_checksum_mismatch_fails_closed() {
 
 #[test]
 fn manifest_keeps_large_state_bytes_out_of_the_bounded_document() {
-    let mut fields = manifest_fields();
+    let mut fields = manifest_fields(BTreeMap::new());
     let handle = fields.operators["window"].segments[0].clone();
     fields.operators.get_mut("window").unwrap().segments[0] = StateHandle::new(
         handle.operator_id(),
@@ -502,7 +509,7 @@ fn manifest_keeps_large_state_bytes_out_of_the_bounded_document() {
 
 #[test]
 fn cursor_payload_and_sink_pre_commit_remain_bounded_strict_json() {
-    let mut fields = manifest_fields();
+    let mut fields = manifest_fields(BTreeMap::new());
     fields.sources.get_mut("source").unwrap().cursor = Some(CursorManifestEntry {
         order: "opaque".into(),
         payload: BTreeMap::from([("offset".into(), json!(7))]),

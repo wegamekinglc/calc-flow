@@ -135,7 +135,17 @@ def test_openapi_contains_only_v3_routes_and_exact_rust_schema(tmp_path) -> None
     assert not any(path.startswith("/api/v2/") for path in openapi["paths"])
     assert schema == json.loads(project_json_schema())
     assert schema["properties"]["format_version"]["const"] == 3
-    assert "backend" not in json.dumps(schema).lower()
+
+    # The v2 table backend selector must stay dead: no part of the project
+    # schema may mention "backend" except the static array declaration
+    # descriptor, whose `backend` field names the array provider (SCE-11).
+    without_static_defs = dict(schema)
+    without_static_defs["$defs"] = {
+        name: definition
+        for name, definition in schema["$defs"].items()
+        if name != "StaticInputSpec"
+    }
+    assert "backend" not in json.dumps(without_static_defs).lower()
 
     def without_none_defaults(value: object) -> object:
         if isinstance(value, dict):

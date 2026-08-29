@@ -11,7 +11,8 @@ use std::{
 use parking_lot::Mutex;
 use pyo3::{
     IntoPyObjectExt, PyTraverseError, PyVisit,
-    exceptions::{PyRuntimeError, PyTypeError},
+    exceptions::{PyRuntimeError, PyTypeError, PyValueError},
+    intern,
     prelude::*,
     sync::PyOnceLock,
     types::{PyAny, PyCFunction, PyCapsule, PyDict, PyDictMethods, PyList, PyTuple, PyType},
@@ -865,6 +866,158 @@ fn edge_budget_config(config: &Bound<'_, PyDict>) -> PyResult<calc_flow::EdgeBud
     .map_err(crate::error::to_py_err)
 }
 
+fn checked_static_array_shape(name: &str, shape: &[usize]) -> PyResult<Vec<u64>> {
+    shape
+        .iter()
+        .map(|dimension| {
+            u64::try_from(*dimension).map_err(|_| {
+                PyValueError::new_err(format!(
+                    "static_inputs.{name}.shape: dimension exceeds the u64 range"
+                ))
+            })
+        })
+        .collect()
+}
+
+fn latch_static_array_values(
+    name: &str,
+    backend: &str,
+    dtype: &str,
+    shape: Vec<u64>,
+    values: &[Bound<'_, PyAny>],
+) -> PyResult<calc_flow::Batch> {
+    let latched = match dtype {
+        "bool" => calc_flow::Batch::static_array_bool(
+            backend,
+            shape,
+            None,
+            values
+                .iter()
+                .map(PyAnyMethods::extract::<bool>)
+                .collect::<PyResult<Vec<_>>>()?,
+        ),
+        "int8" | "int16" | "int32" | "int64" => calc_flow::Batch::static_array_int(
+            backend,
+            dtype,
+            shape,
+            None,
+            values
+                .iter()
+                .map(PyAnyMethods::extract::<i64>)
+                .collect::<PyResult<Vec<_>>>()?,
+        ),
+        "uint8" | "uint16" | "uint32" | "uint64" => calc_flow::Batch::static_array_uint(
+            backend,
+            dtype,
+            shape,
+            None,
+            values
+                .iter()
+                .map(PyAnyMethods::extract::<u64>)
+                .collect::<PyResult<Vec<_>>>()?,
+        ),
+        "float32" | "float64" => calc_flow::Batch::static_array_float(
+            backend,
+            dtype,
+            shape,
+            None,
+            values
+                .iter()
+                .map(PyAnyMethods::extract::<f64>)
+                .collect::<PyResult<Vec<_>>>()?,
+        ),
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "static_inputs.{name}.dtype: array dtype {other:?} is outside the digest-v1 set"
+            )));
+        }
+    };
+    latched.map_err(|error| PyValueError::new_err(format!("static_inputs.{name}: {error}")))
+}
+
+fn static_array_object(name: &str, batch: &calc_flow::Batch) -> PyResult<(String, Py<PyAny>)> {
+    let payload = batch.external_payload().map_err(|_| {
+        PyTypeError::new_err(format!(
+            "static_inputs.{name}: table batches do not carry an array payload"
+        ))
+    })?;
+    let backend = payload.backend().to_owned();
+    let object = payload
+        .as_any()
+        .downcast_ref::<crate::batch::PythonPayload>()
+        .map(|payload| Python::attach(|py| payload.object.clone_ref(py)))
+        .ok_or_else(|| {
+            PyTypeError::new_err(format!(
+                "static_inputs.{name}.backend: array static inputs must be latched engine-owned values"
+            ))
+        })?;
+    Ok((backend, object))
+}
+
+fn static_array_descriptor(name: &str, array: &Bound<'_, PyAny>) -> PyResult<(String, Vec<u64>)> {
+    let dtype = array
+        .getattr(intern!(array.py(), "dtype"))?
+        .str()?
+        .extract()?;
+    let shape: Vec<usize> = array.getattr(intern!(array.py(), "shape"))?.extract()?;
+    Ok((dtype, checked_static_array_shape(name, &shape)?))
+}
+
+fn flattened_static_array_values<'py>(
+    array: &Bound<'py, PyAny>,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    array
+        .call_method0(intern!(array.py(), "ravel"))?
+        .call_method0(intern!(array.py(), "tolist"))?
+        .extract()
+}
+
+fn latch_attached_static_array(
+    name: &str,
+    backend: &str,
+    array: &Bound<'_, PyAny>,
+) -> PyResult<calc_flow::Batch> {
+    let (dtype, shape) = static_array_descriptor(name, array)?;
+    let values = flattened_static_array_values(array)?;
+    latch_static_array_values(name, backend, &dtype, shape, &values)
+}
+
+/// Latches one Python host array batch into engine-owned storage (SCE-11).
+///
+/// This is the trusted provider boundary of API note section 7.3: the
+/// declared backend, dtype, and shape are extracted from the host array and
+/// the logical C-order values are copied out of caller-mutable memory, so
+/// the returned batch can never alias it.
+fn latch_static_array(name: &str, batch: &calc_flow::Batch) -> PyResult<calc_flow::Batch> {
+    let (backend, object) = static_array_object(name, batch)?;
+    Python::attach(|py| latch_attached_static_array(name, &backend, object.bind(py)))
+}
+
+/// Converts the adapter-supplied static input mapping into engine-owned
+/// batches. Table batches pass through unchanged; array batches are
+/// snapshotted out of Python memory at this seam.
+fn build_static_inputs(
+    static_inputs: &Bound<'_, PyDict>,
+) -> PyResult<BTreeMap<String, calc_flow::Batch>> {
+    let mut converted = BTreeMap::new();
+    for (key, value) in static_inputs {
+        let name: String = key.extract()?;
+        let batch = value
+            .extract::<PyRef<'_, PyBatch>>()
+            .map_err(|_| {
+                PyTypeError::new_err("static_inputs must be a mapping of calc_flow.Batch values")
+            })?
+            .clone_inner()?;
+        let batch = if batch.kind() == calc_flow::BatchKind::Array {
+            latch_static_array(&name, &batch)?
+        } else {
+            batch
+        };
+        converted.insert(name, batch);
+    }
+    Ok(converted)
+}
+
 fn runtime_config(config: &Bound<'_, PyDict>) -> PyResult<calc_flow::StreamRuntimeConfig> {
     Ok(calc_flow::StreamRuntimeConfig {
         checkpoint_interval: duration_config(config, "checkpoint_interval_micros")?,
@@ -887,6 +1040,7 @@ impl PyContinuousStreamingRunner {
         sinks: &Bound<'_, PyDict>,
         checkpoints: PyRef<'_, PyManagedCheckpointRuntime>,
         config: &Bound<'_, PyDict>,
+        static_inputs: &Bound<'_, PyDict>,
     ) -> PyResult<Self> {
         let awaits = Arc::new(PythonAwaitRegistry::new());
         let context = Arc::new(Mutex::new(None));
@@ -898,8 +1052,10 @@ impl PyContinuousStreamingRunner {
         let (plan, plan_owner) = plan.take()?;
         roots.push(Arc::new(PythonRoot::new(plan_owner)));
         let checkpoints = checkpoints.take()?;
+        let static_inputs = build_static_inputs(static_inputs)?;
         let runner = calc_flow::StreamingRunner::new(plan, sources, sinks, checkpoints)
             .and_then(|runner| runner.with_runtime_config(config))
+            .and_then(|runner| runner.with_static_inputs(static_inputs))
             .map_err(streaming_py_err)?;
         Ok(Self {
             inner: Arc::new(RunnerStartState {
@@ -1848,11 +2004,21 @@ mod tests {
         types::{PyAnyMethods, PyDict, PyDictMethods},
     };
 
-    use super::{PyContinuousStreamingRunner, PyManagedCheckpointRuntime};
+    use super::{
+        PyContinuousStreamingRunner, PyManagedCheckpointRuntime, checked_static_array_shape,
+    };
     use crate::{batch::PyBatch, pipeline::PyStreamExecutionPlan};
 
     struct PendingSource {
         closed: Arc<AtomicBool>,
+    }
+
+    #[test]
+    fn checked_static_array_shape_preserves_dimensions() {
+        assert_eq!(
+            checked_static_array_shape("weights", &[2, 3]).unwrap(),
+            vec![2_u64, 3_u64]
+        );
     }
 
     struct FailingOpenSource;
@@ -2457,12 +2623,14 @@ mod tests {
                 PyManagedCheckpointRuntime::new(directory.path().to_str().unwrap()).unwrap(),
             )
             .unwrap();
+            let static_inputs = PyDict::new(py);
             let runner = PyContinuousStreamingRunner::new(
                 plan.borrow(py),
                 &sources,
                 &sinks,
                 checkpoints.borrow(py),
                 &config,
+                &static_inputs,
             )
             .unwrap();
             locals

@@ -876,6 +876,22 @@ def _runner_sinks(
     return copied
 
 
+def _runner_static_inputs(
+    static_inputs: Mapping[str, _native.Batch] | None,
+) -> dict[str, _native.Batch]:
+    if static_inputs is None:
+        return {}
+    if not isinstance(static_inputs, Mapping):
+        raise TypeError("static_inputs must be a mapping of calc_flow.Batch values")
+    copied = dict(static_inputs)
+    if not all(
+        isinstance(name, str) and isinstance(batch, _native.Batch)
+        for name, batch in copied.items()
+    ):
+        raise TypeError("static_inputs must be a mapping of calc_flow.Batch values")
+    return copied
+
+
 def _runner_config(config: StreamRuntimeConfig | None) -> StreamRuntimeConfig:
     selected = StreamRuntimeConfig() if config is None else config
     if not isinstance(selected, StreamRuntimeConfig):
@@ -896,6 +912,7 @@ class StreamingRunner:
         checkpoints: ManagedCheckpointRuntime | None = None,
         *,
         config: StreamRuntimeConfig | None = None,
+        static_inputs: Mapping[str, _native.Batch] | None = None,
     ) -> None:
         from calc_flow.pipeline import StreamExecutionPlan
 
@@ -934,6 +951,7 @@ class StreamingRunner:
             _runner_sinks(sinks),
             checkpoints._inner,
             _runner_config(config)._native(),
+            _runner_static_inputs(static_inputs),
         )
 
     async def start_async(self) -> StreamingJob:
