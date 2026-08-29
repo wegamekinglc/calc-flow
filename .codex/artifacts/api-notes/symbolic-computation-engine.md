@@ -466,6 +466,9 @@ cs.percentile(value: ColumnExpr, /, *, group: CrossSectionGroup, direction: Lite
 cs.demean(value: ColumnExpr, /, *, group: CrossSectionGroup, min_samples: int = 1) -> ColumnExpr
 cs.zscore(value: ColumnExpr, /, *, group: CrossSectionGroup, min_samples: int = 1, ddof: Literal[0, 1] = 0) -> ColumnExpr
 cs.winsorize(value: ColumnExpr, /, *, group: CrossSectionGroup, lower: float, upper: float, min_samples: int = 1) -> ColumnExpr
+cs.top(value: ColumnExpr, /, *, group: CrossSectionGroup, count: int, include_ties: bool = True, min_samples: int = 1) -> ColumnExpr
+cs.bottom(value: ColumnExpr, /, *, group: CrossSectionGroup, count: int, include_ties: bool = True, min_samples: int = 1) -> ColumnExpr
+cs.mean_fill(value: ColumnExpr, /, *, group: CrossSectionGroup, min_samples: int = 1) -> ColumnExpr
 ```
 
 `table`, `linalg`, and `window` expose the initial bridge/cardinality-changing
@@ -733,6 +736,9 @@ pub enum CrossSectionOutputSpec {
     Demean { primitive_version: u32, input: String, output: String, min_samples: u64 },
     Zscore { primitive_version: u32, input: String, output: String, min_samples: u64, ddof: u8 },
     Winsorize { primitive_version: u32, input: String, output: String, min_samples: u64, lower: f64, upper: f64 },
+    Top { primitive_version: u32, input: String, output: String, count: u64, include_ties: bool, min_samples: u64 },
+    Bottom { primitive_version: u32, input: String, output: String, count: u64, include_ties: bool, min_samples: u64 },
+    MeanFill { primitive_version: u32, input: String, output: String, min_samples: u64 },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1092,9 +1098,12 @@ Bucket grouping changes only the grouping value:
 ```
 
 Rank/percentile carry direction, tie method, null placement, and minimum
-samples explicitly. Demean, z-score, and winsorize reject those ordering
-fields. Z-score alone carries `ddof`; winsorize alone carries `lower` and
-`upper`. The lower/upper JSON values must be finite and satisfy D6.
+samples explicitly. Demean, z-score, winsorize, top, bottom, and mean-fill
+reject those ordering fields. Z-score alone carries `ddof`; winsorize alone
+carries `lower` and `upper`; top/bottom carry positive `count` and boolean
+`include_ties`. The lower/upper JSON values must be finite and satisfy D6.
+Mean-fill and winsorize accept only float32/float64 and preserve that input
+type; top/bottom return nullable boolean columns.
 
 `value_policy: "nan_exclude_preserve_v1"` means exactly D3/D6: NaN is
 excluded from every order/statistic sample and remains NaN at its own row,
@@ -1144,6 +1153,7 @@ defaults are normalized and serialized as values:
 - cross-section z-score `ddof` is `0`;
 - direction is `ascending`, tie method is `average`, and null placement is
   `exclude`;
+- top/bottom `include_ties` is `true` (`count` has no default);
 - all primitive/configuration/layout versions are `1`; and
 - drop metrics version is `1`.
 

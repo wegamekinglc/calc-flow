@@ -10,7 +10,10 @@ use calc_flow::{
     StreamOperatorContext,
 };
 use datafusion::arrow::{
-    array::{Array, ArrayRef, Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
+    array::{
+        Array, ArrayRef, BooleanArray, Float64Array, StringArray, TimestampMicrosecondArray,
+        UInt64Array,
+    },
     datatypes::{DataType, Field, Schema, TimeUnit},
     record_batch::RecordBatch,
 };
@@ -86,6 +89,40 @@ fn spec() -> CrossSectionSpec {
                 "output": "momentum_z",
                 "min_samples": 1,
                 "ddof": 0
+            },
+            {
+                "kind": "winsorize",
+                "primitive_version": 1,
+                "input": "momentum_20",
+                "output": "momentum_winsorized",
+                "min_samples": 1,
+                "lower": 0.25,
+                "upper": 0.75
+            },
+            {
+                "kind": "top",
+                "primitive_version": 1,
+                "input": "momentum_20",
+                "output": "is_top",
+                "count": 2,
+                "include_ties": true,
+                "min_samples": 1
+            },
+            {
+                "kind": "bottom",
+                "primitive_version": 1,
+                "input": "momentum_20",
+                "output": "is_bottom",
+                "count": 2,
+                "include_ties": false,
+                "min_samples": 1
+            },
+            {
+                "kind": "mean_fill",
+                "primitive_version": 1,
+                "input": "momentum_20",
+                "output": "momentum_filled",
+                "min_samples": 1
             }
         ],
         "allowed_lateness_micros": 0,
@@ -154,6 +191,10 @@ struct Observed {
     symbols: Vec<String>,
     ranks: Vec<Option<f64>>,
     zscores: Vec<Option<f64>>,
+    winsorized: Vec<Option<f64>>,
+    top: Vec<Option<bool>>,
+    bottom: Vec<Option<bool>>,
+    filled: Vec<Option<f64>>,
 }
 
 fn drain(collector: &mut EdgeCollector, observed: &mut Observed) {
@@ -162,7 +203,37 @@ fn drain(collector: &mut EdgeCollector, observed: &mut Observed) {
         observed.symbols.extend(symbols(batch));
         observed.ranks.extend(float_column(batch, "momentum_rank"));
         observed.zscores.extend(float_column(batch, "momentum_z"));
+        observed
+            .winsorized
+            .extend(float_column(batch, "momentum_winsorized"));
+        observed
+            .filled
+            .extend(float_column(batch, "momentum_filled"));
+        for (name, target) in [
+            ("is_top", &mut observed.top),
+            ("is_bottom", &mut observed.bottom),
+        ] {
+            for record in batch.table_payload().unwrap().batches() {
+                let array = record
+                    .column_by_name(name)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .unwrap();
+                target.extend(array.iter());
+            }
+        }
     }
+}
+
+fn assert_observed_eq(restored: &Observed, reference: &Observed) {
+    assert_eq!(restored.symbols, reference.symbols);
+    assert_eq!(restored.ranks, reference.ranks);
+    assert_eq!(restored.zscores, reference.zscores);
+    assert_eq!(restored.winsorized, reference.winsorized);
+    assert_eq!(restored.top, reference.top);
+    assert_eq!(restored.bottom, reference.bottom);
+    assert_eq!(restored.filled, reference.filled);
 }
 
 /// The shared scenario: two interleaved groups, one closing before the cut
@@ -281,9 +352,7 @@ async fn half_built_group_checkpoint_recovery_matches_uninterrupted_execution() 
         .unwrap();
     drain(&mut restored_collector, &mut restored_observed);
 
-    assert_eq!(restored_observed.symbols, reference_observed.symbols);
-    assert_eq!(restored_observed.ranks, reference_observed.ranks);
-    assert_eq!(restored_observed.zscores, reference_observed.zscores);
+    assert_observed_eq(&restored_observed, &reference_observed);
 }
 
 #[tokio::test]

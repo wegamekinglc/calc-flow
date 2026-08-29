@@ -593,12 +593,20 @@ families are expressed as compositions. A new primitive is justified only by
 an unavailable algorithm, materially better native state structure, or a
 measured fusion/performance requirement.
 
-## Deferred Work
+## Deferred Work at the Initial Freeze
 
 Cross-section top/bottom selection and mean fill are not part of the frozen
 initial primitive catalog. They require a separate approved API and semantic
 design after the initial release; implementations must not infer signatures or
 lower them through another primitive.
+
+SCE-10 subsequently approves these additions through the normative
+`symbolic-computation-contract` D6 and API note: `cs.top`/`cs.bottom` return
+nullable boolean masks with positive `count`, explicit boundary-tie behavior,
+and canonical-identity tie breaking; `cs.mean_fill` fills null floating values
+from the complete valid sample while preserving NaN and the input floating
+type. They share the native cross-section grouping, sort, finality, and
+checkpoint state rather than lowering through separate primitives.
 
 ## Frozen Decision Gates
 

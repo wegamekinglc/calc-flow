@@ -656,11 +656,12 @@ referenced value. Batch lowering writes the default lateness values, batch
 evaluation classifies no late rows, and a program without rolling
 declarations is unaffected by the lateness arguments.
 
-`cs.rank`, `cs.percentile`, `cs.demean`, and `cs.zscore` lower to one native
+`cs.rank`, `cs.percentile`, `cs.demean`, `cs.zscore`, `cs.winsorize`,
+`cs.top`, `cs.bottom`, and `cs.mean_fill` lower to one shared native
 `cross_section` node per program output, placed ahead of the fused row-local
-stages, with the same `ordering_required` key requirement as rolling and —
-in this release — the same plain-input-column rule for the measured value,
-the grouping event time, and every group column. A group is declared with
+stages. They use the same `ordering_required` key requirement as rolling and
+the same plain-input-column rule for the measured value, grouping event time,
+and every group column. A group is declared with
 `exact_time(event_time, *, partition_by=())` or
 `event_time_bucket(event_time, *, width_micros, partition_by=())`, and every
 cross-section occurrence in one output must share one grouping declaration:
@@ -669,13 +670,20 @@ bucket width — or compilation fails with `schema_mismatch` rooted at the
 output. `rank` and `percentile` carry `direction` (default `ascending`),
 `tie_method` (default `average`), and `null_placement` (default `exclude`);
 every primitive carries `min_samples` (default `1`), and `zscore` adds `ddof`
-of `0` or `1` (default `0`), with construction rejecting other values. As
-with rolling, a whole-feature occurrence keeps its feature name as the
+of `0` or `1` (default `0`). `winsorize` requires finite `lower`/`upper`
+probabilities with `0 <= lower <= upper <= 1`. `top` and `bottom` require a
+positive `count`, default `include_ties` to true, and return nullable boolean
+masks; disabling tie inclusion uses canonical row identity at the boundary.
+`mean_fill` fills null float32/float64 values from the complete valid sample
+while preserving NaN and the input floating type. Construction rejects every
+invalid option before lowering. As with rolling, a whole-feature occurrence
+keeps its feature name as the
 output column while an occurrence nested inside a larger expression
 materializes as a deterministically named `<output>__cf_cs_<index>` column,
 and a filter below every cross-section feature becomes the shared
-`<output>__cf_prefilter` node. Every cross-section column is nullable
-`float64`, and the engine evaluates the frozen complete-group semantics
+`<output>__cf_prefilter` node. Rank, percentile, demean, and z-score are
+nullable float64; winsorize and mean-fill preserve float32/float64; top/bottom
+are nullable boolean. The engine evaluates the frozen complete-group semantics
 described in the [Rust API guide](rust-api.md). The lowered node's frozen
 spec carries `configuration_version` and `state_layout_version` 1, the
 declared ordering and partition keys, the shared grouping, one entry per
@@ -687,10 +695,7 @@ Analysis rejections surface as `CompileError` with the first issue's
 event `window` nodes, `linalg` array bridges, and `parameter` static inputs
 — fail with the eighth issue code `unknown_primitive_version` rooted at the
 output or `static_inputs.<name>`, in both batch and stream modes; a stream
-aggregate or SQL window is never silently made batch-local. A
-`cs.winsorize` declaration — the one cross-section primitive withheld in
-this release — fails with `unsupported_type` rooted at the output feature.
-Array outputs
+aggregate or SQL window is never silently made batch-local. Array outputs
 fail with `unknown_primitive_version` in batch mode; stream mode rejects
 them earlier, at the analysis phase, with `unbounded_state` rooted at
 `outputs.<name>` — the stream-safety rule for an array output with row-axis

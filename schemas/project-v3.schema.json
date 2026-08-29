@@ -334,6 +334,198 @@
             "ddof"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Input value clamped to the Hyndman-Fan type-7 quantiles selected by\n`lower` and `upper`; the output preserves the input floating type.",
+          "properties": {
+            "input": {
+              "description": "Input floating column name.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "winsorize",
+              "type": "string"
+            },
+            "lower": {
+              "description": "Inclusive lower quantile probability.",
+              "format": "double",
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            "min_samples": {
+              "description": "Minimum valid samples for a non-null result.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "output": {
+              "description": "Output column name.",
+              "type": "string"
+            },
+            "primitive_version": {
+              "description": "Primitive version; must equal `1`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "upper": {
+              "description": "Inclusive upper quantile probability.",
+              "format": "double",
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            }
+          },
+          "required": [
+            "kind",
+            "primitive_version",
+            "input",
+            "output",
+            "min_samples",
+            "lower",
+            "upper"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Boolean mask selecting the largest `count` valid values. Null and NaN\nrows produce null; boundary ties are either all included or broken by\ncanonical row identity.",
+          "properties": {
+            "count": {
+              "description": "Positive number of ordered values to select.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "include_ties": {
+              "description": "Whether every value tied with the boundary is selected.",
+              "type": "boolean"
+            },
+            "input": {
+              "description": "Input numeric column name.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "top",
+              "type": "string"
+            },
+            "min_samples": {
+              "description": "Minimum valid samples for a non-null selection result.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "output": {
+              "description": "Output boolean column name.",
+              "type": "string"
+            },
+            "primitive_version": {
+              "description": "Primitive version; must equal `1`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "primitive_version",
+            "input",
+            "output",
+            "count",
+            "include_ties",
+            "min_samples"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Boolean mask selecting the smallest `count` valid values. Null and NaN\nrows produce null; boundary ties are either all included or broken by\ncanonical row identity.",
+          "properties": {
+            "count": {
+              "description": "Positive number of ordered values to select.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "include_ties": {
+              "description": "Whether every value tied with the boundary is selected.",
+              "type": "boolean"
+            },
+            "input": {
+              "description": "Input numeric column name.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "bottom",
+              "type": "string"
+            },
+            "min_samples": {
+              "description": "Minimum valid samples for a non-null selection result.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "output": {
+              "description": "Output boolean column name.",
+              "type": "string"
+            },
+            "primitive_version": {
+              "description": "Primitive version; must equal `1`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "primitive_version",
+            "input",
+            "output",
+            "count",
+            "include_ties",
+            "min_samples"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Floating input with null rows replaced by the complete group's mean;\nvalid and NaN rows are preserved.",
+          "properties": {
+            "input": {
+              "description": "Input floating column name.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "mean_fill",
+              "type": "string"
+            },
+            "min_samples": {
+              "description": "Minimum valid samples required before nulls are filled.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "output": {
+              "description": "Output column name.",
+              "type": "string"
+            },
+            "primitive_version": {
+              "description": "Primitive version; must equal `1`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "primitive_version",
+            "input",
+            "output",
+            "min_samples"
+          ],
+          "type": "object"
         }
       ]
     },
