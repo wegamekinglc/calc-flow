@@ -16,7 +16,7 @@ use calc_flow::{
     ProjectSpec, ProviderRegistry, ReplayCapability, ReplayPositioning, Result, SecretResolver,
     SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema, StreamExecutionPlan,
     StreamRequirements, StreamSink, StreamSource, StreamingRunner, TransactionSupport, UdfRegistry,
-    WatermarkSupport, compile_stream_project,
+    WatermarkSupport, compile_stream_project, compile_stream_project_graph,
 };
 
 struct TestSource;
@@ -454,6 +454,11 @@ fn project_v3_rejects_window_in_batch_runtime() {
 
 mod static_input_declarations {
     use super::*;
+    use datafusion::arrow::{
+        array::{DictionaryArray, Int8Array, StringArray},
+        datatypes::{DataType, Field, Schema},
+        record_batch::RecordBatch,
+    };
 
     fn static_project(static_inputs: serde_json::Value) -> ProjectSpec {
         let mut value = serde_json::to_value(stream_project(true)).unwrap();
@@ -471,7 +476,10 @@ mod static_input_declarations {
         serde_json::from_value(value).unwrap()
     }
 
-    fn registered_connectors() -> calc_flow::ConnectorRegistrySnapshot {
+    fn registered_connectors_with_opens(
+        source_opens: Arc<AtomicUsize>,
+        sink_opens: Arc<AtomicUsize>,
+    ) -> calc_flow::ConnectorRegistrySnapshot {
         let mut connectors = ConnectorRegistry::new();
         let source = source_descriptor();
         connectors
@@ -479,7 +487,7 @@ mod static_input_declarations {
                 source.clone(),
                 ConnectorFactories::source_only(Arc::new(CountingSourceFactory {
                     descriptor: source,
-                    opens: Arc::new(AtomicUsize::new(0)),
+                    opens: source_opens,
                 })),
             )
             .unwrap();
@@ -489,11 +497,18 @@ mod static_input_declarations {
                 sink.clone(),
                 ConnectorFactories::sink_only(Arc::new(CountingSinkFactory {
                     descriptor: sink,
-                    opens: Arc::new(AtomicUsize::new(0)),
+                    opens: sink_opens,
                 })),
             )
             .unwrap();
         connectors.snapshot()
+    }
+
+    fn registered_connectors() -> calc_flow::ConnectorRegistrySnapshot {
+        registered_connectors_with_opens(
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+        )
     }
 
     fn table_declaration() -> serde_json::Value {
@@ -505,12 +520,63 @@ mod static_input_declarations {
         }])
     }
 
+    fn dictionary_declaration(ordered: bool) -> serde_json::Value {
+        serde_json::json!([{
+            "kind": "table",
+            "name": "weights",
+            "mutability": "static",
+            "schema": [{
+                "name": "color",
+                "data_type": format!(
+                    "dictionary<index=int8;value=string;ordered={ordered}>"
+                ),
+                "nullable": true
+            }]
+        }])
+    }
+
+    fn dictionary_table(ordered: bool) -> Batch {
+        let dictionary = DictionaryArray::new(
+            Int8Array::from(vec![Some(0_i8), None, Some(1_i8), Some(0_i8)]),
+            Arc::new(StringArray::from(vec!["red", "blue"])),
+        );
+        let field = Field::new(
+            "color",
+            DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Utf8)),
+            true,
+        )
+        .with_dict_is_ordered(ordered);
+        Batch::table(
+            vec![
+                RecordBatch::try_new(
+                    Arc::new(Schema::new(vec![field])),
+                    vec![Arc::new(dictionary)],
+                )
+                .unwrap(),
+            ],
+            calc_flow::BatchMetadata::default(),
+        )
+        .unwrap()
+    }
+
     fn compile(project: &ProjectSpec) -> Result<StreamExecutionPlan> {
         compile_stream_project(
             project,
             &ProviderRegistry::default(),
             &UdfRegistry::new().snapshot(),
             &registered_connectors(),
+            &StreamRequirements::default(),
+        )
+    }
+
+    fn compile_graph(project: &ProjectSpec) -> Result<StreamExecutionPlan> {
+        let mut project = project.clone();
+        project.sources.clear();
+        project.sinks.clear();
+        compile_stream_project_graph(
+            &project,
+            &ProviderRegistry::default(),
+            &UdfRegistry::new().snapshot(),
             &StreamRequirements::default(),
         )
     }
@@ -529,14 +595,25 @@ mod static_input_declarations {
 
     #[test]
     fn static_declarations_participate_in_the_semantic_fingerprint() {
-        let float64 = compile(&static_project(table_declaration())).unwrap();
+        let float64_project = static_project(table_declaration());
         let mut int64_declaration = table_declaration();
         int64_declaration[0]["schema"][0]["data_type"] = serde_json::json!("int64");
-        let int64 = compile(&static_project(int64_declaration)).unwrap();
+        let int64_project = static_project(int64_declaration);
+
+        let float64 = compile(&float64_project).unwrap();
+        let int64 = compile(&int64_project).unwrap();
         assert_ne!(
             float64.fingerprint(),
             int64.fingerprint(),
-            "declarations must change the plan fingerprint"
+            "connector-backed declarations must change the plan fingerprint"
+        );
+
+        let float64 = compile_graph(&float64_project).unwrap();
+        let int64 = compile_graph(&int64_project).unwrap();
+        assert_ne!(
+            float64.fingerprint(),
+            int64.fingerprint(),
+            "graph-only declarations must change the plan fingerprint"
         );
     }
 
@@ -590,5 +667,103 @@ mod static_input_declarations {
             "backend": "numpy", "dtype": "float32", "shape": [1], "payload": {}
         }]);
         assert!(serde_json::from_value::<ProjectSpec>(document).is_err());
+    }
+
+    #[test]
+    fn dictionary_declarations_reject_aliases_and_nested_values_at_the_frozen_path() {
+        for spelling in [
+            "dictionary<int8,string,false>",
+            "dictionary<index=int8;value=dictionary<index=int8;value=string;ordered=false>;ordered=false>",
+        ] {
+            let declaration = serde_json::json!([{
+                "kind": "table",
+                "name": "weights",
+                "mutability": "static",
+                "schema": [{"name": "color", "data_type": spelling, "nullable": true}]
+            }]);
+            let error = compile(&static_project(declaration)).unwrap_err();
+            let message = error.to_string();
+            assert!(
+                message.contains("static_inputs[0].schema[0].data_type [unsupported_arrow_type]"),
+                "{message}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn canonical_dictionary_declaration_passes_compiled_runner_preflight() {
+        let source_opens = Arc::new(AtomicUsize::new(0));
+        let sink_opens = Arc::new(AtomicUsize::new(0));
+        let connectors =
+            registered_connectors_with_opens(Arc::clone(&source_opens), Arc::clone(&sink_opens));
+        let plan = compile_stream_project(
+            &static_project(dictionary_declaration(false)),
+            &ProviderRegistry::default(),
+            &UdfRegistry::new().snapshot(),
+            &connectors,
+            &StreamRequirements::default(),
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let job = StreamingRunner::new(
+            plan,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            ManagedCheckpointRuntime::new(directory.path()).unwrap(),
+        )
+        .unwrap()
+        .with_static_inputs(BTreeMap::from([(
+            "weights".into(),
+            dictionary_table(false),
+        )]))
+        .unwrap()
+        .start()
+        .await
+        .unwrap();
+
+        let _outcome = job.wait().await;
+        assert_eq!(source_opens.load(Ordering::SeqCst), 1);
+        assert_eq!(sink_opens.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn dictionary_ordered_mismatch_fails_before_connectors_open() {
+        let source_opens = Arc::new(AtomicUsize::new(0));
+        let sink_opens = Arc::new(AtomicUsize::new(0));
+        let connectors =
+            registered_connectors_with_opens(Arc::clone(&source_opens), Arc::clone(&sink_opens));
+        let plan = compile_stream_project(
+            &static_project(dictionary_declaration(true)),
+            &ProviderRegistry::default(),
+            &UdfRegistry::new().snapshot(),
+            &connectors,
+            &StreamRequirements::default(),
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let error = StreamingRunner::new(
+            plan,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            ManagedCheckpointRuntime::new(directory.path()).unwrap(),
+        )
+        .unwrap()
+        .with_static_inputs(BTreeMap::from([(
+            "weights".into(),
+            dictionary_table(false),
+        )]))
+        .unwrap()
+        .start()
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("static_inputs.weights.schema[0].data_type"),
+            "{error}"
+        );
+        assert_eq!(source_opens.load(Ordering::SeqCst), 0);
+        assert_eq!(sink_opens.load(Ordering::SeqCst), 0);
     }
 }

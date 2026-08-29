@@ -151,7 +151,7 @@ fn table_type_tag(data_type: &DataType) -> Option<u8> {
         DataType::Date64 => Some(0x4e),
         DataType::Time32(TimeUnit::Second) => Some(0x4f),
         DataType::Time64(TimeUnit::Microsecond) => Some(0x50),
-        DataType::Timestamp(TimeUnit::Millisecond, _) => Some(0x51),
+        DataType::Timestamp(TimeUnit::Millisecond, None) => Some(0x51),
         DataType::Timestamp(TimeUnit::Microsecond, None) => Some(0x52),
         DataType::Timestamp(TimeUnit::Microsecond, Some(zone)) if zone.as_ref() == "UTC" => {
             Some(0x53)
@@ -305,7 +305,7 @@ fn write_flat_cell(writer: &mut DigestWriter, array: &dyn Array, row: usize) -> 
         DataType::Time64(TimeUnit::Microsecond) => {
             scalar!(Time64MicrosecondArray, |value: i64| value.to_be_bytes());
         }
-        DataType::Timestamp(TimeUnit::Millisecond, _) => {
+        DataType::Timestamp(TimeUnit::Millisecond, None) => {
             scalar!(TimestampMillisecondArray, |value: i64| value.to_be_bytes());
         }
         DataType::Timestamp(TimeUnit::Microsecond, _) => {
@@ -316,33 +316,14 @@ fn write_flat_cell(writer: &mut DigestWriter, array: &dyn Array, row: usize) -> 
     Ok(())
 }
 
-/// Returns the array-carried ordered flag for one dictionary column.
-fn dictionary_ordered_flag(array: &dyn Array) -> Option<bool> {
-    if !matches!(array.data_type(), DataType::Dictionary(_, _)) {
-        return None;
-    }
-    macro_rules! ordered {
-        ($key:ty) => {
-            if let Some(dictionary) = array.as_any().downcast_ref::<DictionaryArray<$key>>() {
-                return Some(dictionary.is_ordered());
-            }
-        };
-    }
-    ordered!(datafusion::arrow::datatypes::Int8Type);
-    ordered!(datafusion::arrow::datatypes::Int16Type);
-    ordered!(datafusion::arrow::datatypes::Int32Type);
-    ordered!(datafusion::arrow::datatypes::Int64Type);
-    ordered!(datafusion::arrow::datatypes::UInt8Type);
-    ordered!(datafusion::arrow::datatypes::UInt16Type);
-    ordered!(datafusion::arrow::datatypes::UInt32Type);
-    ordered!(datafusion::arrow::datatypes::UInt64Type);
-    None
-}
-
 /// Writes one logical cell, resolving dictionary values to their logical
 /// scalar form.
 fn write_cell(writer: &mut DigestWriter, array: &dyn Array, row: usize) -> Result<()> {
     if let DataType::Dictionary(_, _) = array.data_type() {
+        if array.is_null(row) {
+            writer.tag(0x30);
+            return Ok(());
+        }
         macro_rules! dictionary {
             ($key:ty) => {
                 if let Some(dictionary) = array.as_any().downcast_ref::<DictionaryArray<$key>>() {
@@ -352,6 +333,12 @@ fn write_cell(writer: &mut DigestWriter, array: &dyn Array, row: usize) -> Resul
                             message: "dictionary index does not fit usize".into(),
                         }
                     })?;
+                    if index >= dictionary.values().len() {
+                        return Err(CalcFlowError::InvalidArgument {
+                            field: "static_inputs.schema".into(),
+                            message: format!("dictionary value cannot be resolved at row {row}"),
+                        });
+                    }
                     return write_flat_cell(writer, dictionary.values().as_ref(), index);
                 }
             };
@@ -376,19 +363,10 @@ fn write_table_schema(writer: &mut DigestWriter, table: &TableBatch) -> Result<u
     let schema = table.schema();
     let fields = schema.fields();
     writer.checked_len(fields.len())?;
-    let first_chunk_columns = table
-        .batches()
-        .first()
-        .map(datafusion::arrow::record_batch::RecordBatch::columns);
-    for (index, field) in fields.iter().enumerate() {
+    for field in fields {
         writer.tag(0x20);
         writer.text(field.name().as_bytes())?;
-        let ordered = first_chunk_columns.and_then(|columns| {
-            columns
-                .get(index)
-                .and_then(|column| dictionary_ordered_flag(column.as_ref()))
-        });
-        write_table_type_ordered(writer, field.data_type(), ordered)?;
+        write_table_type_ordered(writer, field.data_type(), field.dict_is_ordered())?;
         writer.tag(u8::from(field.is_nullable()));
     }
     Ok(fields.len())
@@ -527,39 +505,6 @@ pub(crate) struct PreparedStaticInputs {
     pub(crate) digests: BTreeMap<String, StaticInputDigest>,
 }
 
-/// Returns the canonical project-v3 spelling for one Arrow type, or `None`
-/// for types the strict schema vocabulary cannot express.
-fn canonical_type_string(data_type: &DataType) -> Option<String> {
-    Some(
-        match data_type {
-            DataType::Boolean => "bool",
-            DataType::Date32 => "date32",
-            DataType::Date64 => "date64",
-            DataType::Float32 => "float32",
-            DataType::Float64 => "float64",
-            DataType::Int8 => "int8",
-            DataType::Int16 => "int16",
-            DataType::Int32 => "int32",
-            DataType::Int64 => "int64",
-            DataType::LargeUtf8 => "large_string",
-            DataType::Utf8 => "string",
-            DataType::Time32(TimeUnit::Second) => "time32[s]",
-            DataType::Time64(TimeUnit::Microsecond) => "time64[us]",
-            DataType::Timestamp(TimeUnit::Millisecond, _) => "timestamp[ms]",
-            DataType::Timestamp(TimeUnit::Microsecond, None) => "timestamp[us]",
-            DataType::Timestamp(TimeUnit::Microsecond, Some(zone)) if zone.as_ref() == "UTC" => {
-                "timestamp[us, UTC]"
-            }
-            DataType::UInt8 => "uint8",
-            DataType::UInt16 => "uint16",
-            DataType::UInt32 => "uint32",
-            DataType::UInt64 => "uint64",
-            _ => return None,
-        }
-        .to_owned(),
-    )
-}
-
 fn static_error(path: String, message: String) -> CalcFlowError {
     CalcFlowError::InvalidArgument {
         field: path,
@@ -670,7 +615,7 @@ fn validate_table_field(
             ),
         ));
     }
-    let canonical = canonical_type_string(field.data_type()).ok_or_else(|| {
+    let canonical = crate::config::canonical_arrow_field_type(field).ok_or_else(|| {
         static_error(
             format!("static_inputs.{name}.schema[{index}].data_type"),
             format!(
@@ -794,7 +739,7 @@ mod tests {
             StringArray, Time32SecondArray, Time64MicrosecondArray, TimestampMicrosecondArray,
             TimestampMillisecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
         },
-        datatypes::{DataType, Field, Schema},
+        datatypes::{DataType, Field, Schema, TimeUnit},
         record_batch::RecordBatch,
     };
     use sha2::{Digest, Sha256};
@@ -818,6 +763,40 @@ mod tests {
     fn table_batch(schema: Schema, columns: Vec<ArrayRef>) -> Batch {
         Batch::table(
             vec![RecordBatch::try_new(Arc::new(schema), columns).unwrap()],
+            BatchMetadata::default(),
+        )
+        .unwrap()
+    }
+
+    fn dictionary_record_batch(
+        values: Vec<&str>,
+        hidden_keys: Vec<i8>,
+        valid: Vec<bool>,
+        ordered: bool,
+    ) -> RecordBatch {
+        let keys = Int8Array::new(hidden_keys.into(), Some(valid.into()));
+        let dictionary = DictionaryArray::new(keys, Arc::new(StringArray::from(values)));
+        let field = Field::new(
+            "color",
+            DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Utf8)),
+            true,
+        )
+        .with_dict_is_ordered(ordered);
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![field])),
+            vec![Arc::new(dictionary)],
+        )
+        .unwrap()
+    }
+
+    fn dictionary_batch(
+        values: Vec<&str>,
+        hidden_keys: Vec<i8>,
+        valid: Vec<bool>,
+        ordered: bool,
+    ) -> Batch {
+        Batch::table(
+            vec![dictionary_record_batch(values, hidden_keys, valid, ordered)],
             BatchMetadata::default(),
         )
         .unwrap()
@@ -949,6 +928,102 @@ mod tests {
     }
 
     #[test]
+    fn dictionary_digest_matches_the_literal_golden_across_physical_layouts() {
+        let layout_a = dictionary_batch(
+            vec!["red", "blue"],
+            vec![0, 0, 1, 0],
+            vec![true, false, true, true],
+            false,
+        );
+        let layout_b = dictionary_batch(
+            vec!["blue", "unused", "red"],
+            vec![2, 1, 0, 2],
+            vec![true, false, true, true],
+            false,
+        );
+        let chunked = Batch::table(
+            vec![
+                dictionary_record_batch(vec!["red", "blue"], vec![0, 1], vec![true, false], false),
+                dictionary_record_batch(
+                    vec!["blue", "red", "unused"],
+                    vec![0, 1],
+                    vec![true, true],
+                    false,
+                ),
+            ],
+            BatchMetadata::default(),
+        )
+        .unwrap();
+
+        let expected = "d1f3b0c589c58b966d863243efffcf5e314e558016a19f8d4dfdbf45f629072e";
+        assert_eq!(
+            digest_for_name("weights", &layout_a).unwrap().sha256,
+            expected
+        );
+        assert_eq!(
+            digest_for_name("weights", &layout_b).unwrap().sha256,
+            expected
+        );
+        assert_eq!(
+            digest_for_name("weights", &chunked).unwrap().sha256,
+            expected
+        );
+    }
+
+    #[test]
+    fn dictionary_digest_uses_the_schema_ordered_bit() {
+        let unordered = dictionary_batch(vec!["red", "blue"], vec![0, 1], vec![true, true], false);
+        let ordered = dictionary_batch(vec!["red", "blue"], vec![0, 1], vec![true, true], true);
+
+        assert_ne!(
+            digest_for_name("weights", &unordered).unwrap(),
+            digest_for_name("weights", &ordered).unwrap()
+        );
+    }
+
+    #[test]
+    fn dictionary_digest_preserves_index_value_and_descriptor_identity() {
+        let int8_string =
+            dictionary_batch(vec!["red", "blue"], vec![0, 1], vec![true, true], false);
+        let int16_dictionary = DictionaryArray::new(
+            Int16Array::from(vec![0_i16, 1_i16]),
+            Arc::new(StringArray::from(vec!["red", "blue"])),
+        );
+        let int16_string = table_batch(
+            Schema::new(vec![Field::new(
+                "color",
+                DataType::Dictionary(Box::new(DataType::Int16), Box::new(DataType::Utf8)),
+                false,
+            )]),
+            vec![Arc::new(int16_dictionary)],
+        );
+        let large_dictionary = DictionaryArray::new(
+            Int8Array::from(vec![0_i8, 1_i8]),
+            Arc::new(LargeStringArray::from(vec!["red", "blue"])),
+        );
+        let int8_large_string = table_batch(
+            Schema::new(vec![Field::new(
+                "color",
+                DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::LargeUtf8)),
+                false,
+            )]),
+            vec![Arc::new(large_dictionary)],
+        );
+        let plain_string = table_batch(
+            Schema::new(vec![Field::new("color", DataType::Utf8, false)]),
+            vec![Arc::new(StringArray::from(vec!["red", "blue"]))],
+        );
+        let digest = digest_for_name("weights", &int8_string).unwrap();
+
+        assert_ne!(digest_for_name("weights", &int16_string).unwrap(), digest);
+        assert_ne!(
+            digest_for_name("weights", &int8_large_string).unwrap(),
+            digest
+        );
+        assert_ne!(digest_for_name("weights", &plain_string).unwrap(), digest);
+    }
+
+    #[test]
     fn table_digest_canonicalizes_float_nans_and_ignores_chunk_boundaries() {
         let schema = Schema::new(vec![Field::new("v", DataType::Float64, true)]);
         let whole = table_batch(
@@ -1046,7 +1121,7 @@ mod tests {
             Arc::new(Date64Array::from(vec![12_i64])),
             Arc::new(Time32SecondArray::from(vec![13_i32])),
             Arc::new(Time64MicrosecondArray::from(vec![14_i64])),
-            Arc::new(TimestampMillisecondArray::from(vec![15_i64]).with_timezone("UTC")),
+            Arc::new(TimestampMillisecondArray::from(vec![15_i64])),
             Arc::new(TimestampMicrosecondArray::from(vec![16_i64])),
             Arc::new(TimestampMicrosecondArray::from(vec![17_i64]).with_timezone("UTC")),
         ];
@@ -1120,7 +1195,7 @@ mod tests {
             (
                 "timestamp_ms",
                 "timestamp[ms]",
-                Arc::new(TimestampMillisecondArray::from(vec![15_i64]).with_timezone("UTC")),
+                Arc::new(TimestampMillisecondArray::from(vec![15_i64])),
             ),
             (
                 "timestamp_us",
@@ -1168,6 +1243,56 @@ mod tests {
 
         assert_eq!(prepared.latched["all_types"].num_rows(), 1);
         assert_eq!(prepared.digests["all_types"].sha256.len(), 64);
+    }
+
+    #[test]
+    fn timezone_bearing_millisecond_timestamps_fail_digest_and_preflight_at_the_type_path() {
+        let batch = table_batch(
+            Schema::new(vec![Field::new(
+                "captured_at",
+                DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+                false,
+            )]),
+            vec![Arc::new(
+                TimestampMillisecondArray::from(vec![15_i64]).with_timezone("UTC"),
+            )],
+        );
+
+        let digest_error = digest_for_name("weights", &batch).unwrap_err();
+        let crate::CalcFlowError::InvalidArgument { field, message } = digest_error else {
+            panic!("unsupported digest-v1 types must be invalid arguments");
+        };
+        assert_eq!(field, "static_inputs.schema");
+        assert!(
+            message.contains("outside the digest-v1 table set"),
+            "{message}"
+        );
+
+        let declared = BTreeMap::from([(
+            "weights".to_string(),
+            super::StaticInputSpec::Table {
+                name: "weights".into(),
+                mutability: super::StaticMutability::Static,
+                schema: vec![crate::ArrowFieldSpec {
+                    name: "captured_at".into(),
+                    data_type: "timestamp[ms]".into(),
+                    nullable: false,
+                }],
+            },
+        )]);
+        let error = super::prepare_static_inputs(
+            &declared,
+            &BTreeMap::from([("weights".to_string(), batch)]),
+        )
+        .unwrap_err();
+        let crate::CalcFlowError::InvalidArgument { field, message } = error else {
+            panic!("preflight schema mismatches must be invalid arguments");
+        };
+        assert_eq!(field, "static_inputs.weights.schema[0].data_type");
+        assert!(
+            message.contains("has no strict schema spelling"),
+            "{message}"
+        );
     }
 
     #[test]

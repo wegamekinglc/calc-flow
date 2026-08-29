@@ -980,12 +980,10 @@ fn source_capabilities(
             .schema
             .iter()
             .map(|field| {
-                arrow_data_type(&field.data_type)
-                    .map(|data_type| Field::new(&field.name, data_type, field.nullable))
-                    .ok_or_else(|| CalcFlowError::InvalidArgument {
-                        field: "sources.schema.data_type".into(),
-                        message: format!("unsupported Arrow type {:?}", field.data_type),
-                    })
+                arrow_field(field).ok_or_else(|| CalcFlowError::InvalidArgument {
+                    field: "sources.schema.data_type".into(),
+                    message: format!("unsupported Arrow type {:?}", field.data_type),
+                })
             })
             .collect::<Result<Vec<_>>>()?;
         SourceSchema::Exact(Arc::new(datafusion::arrow::datatypes::Schema::new(fields)))
@@ -1566,13 +1564,11 @@ fn port_from_spec(spec: &PortSpec) -> Result<Port> {
     Port::new(&spec.name, spec.kind, spec.required, fields)
 }
 
-fn field_from_spec(spec: &ArrowFieldSpec) -> Result<Field> {
-    let data_type =
-        arrow_data_type(&spec.data_type).ok_or_else(|| CalcFlowError::InvalidArgument {
-            field: "port.schema.data_type".into(),
-            message: format!("unsupported Arrow type {:?}", spec.data_type),
-        })?;
-    Ok(Field::new(&spec.name, data_type, spec.nullable))
+pub(crate) fn field_from_spec(spec: &ArrowFieldSpec) -> Result<Field> {
+    arrow_field(spec).ok_or_else(|| CalcFlowError::InvalidArgument {
+        field: "port.schema.data_type".into(),
+        message: format!("unsupported Arrow type {:?}", spec.data_type),
+    })
 }
 
 fn builtin_ports(
@@ -2743,7 +2739,7 @@ fn is_port_identifier(value: &str) -> bool {
         && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
 }
 
-fn arrow_data_type(value: &str) -> Option<DataType> {
+fn primitive_arrow_data_type(value: &str) -> Option<DataType> {
     Some(match value {
         "bool" => DataType::Boolean,
         "date32" => DataType::Date32,
@@ -2767,6 +2763,105 @@ fn arrow_data_type(value: &str) -> Option<DataType> {
         "uint64" => DataType::UInt64,
         _ => return None,
     })
+}
+
+struct ParsedArrowFieldType {
+    data_type: DataType,
+    dictionary_ordered: Option<bool>,
+}
+
+fn parse_arrow_field_type(value: &str) -> Option<ParsedArrowFieldType> {
+    if let Some(data_type) = primitive_arrow_data_type(value) {
+        return Some(ParsedArrowFieldType {
+            data_type,
+            dictionary_ordered: None,
+        });
+    }
+    let dictionary = value.strip_prefix("dictionary<index=")?.strip_suffix('>')?;
+    let (index, value_and_ordered) = dictionary.split_once(";value=")?;
+    let (value, ordered) = value_and_ordered.split_once(";ordered=")?;
+    let index = primitive_arrow_data_type(index)?;
+    if !matches!(
+        index,
+        DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+    ) {
+        return None;
+    }
+    let value = primitive_arrow_data_type(value)?;
+    let ordered = match ordered {
+        "false" => false,
+        "true" => true,
+        _ => return None,
+    };
+    Some(ParsedArrowFieldType {
+        data_type: DataType::Dictionary(Box::new(index), Box::new(value)),
+        dictionary_ordered: Some(ordered),
+    })
+}
+
+fn arrow_field(spec: &ArrowFieldSpec) -> Option<Field> {
+    let parsed = parse_arrow_field_type(&spec.data_type)?;
+    Some(
+        Field::new(&spec.name, parsed.data_type, spec.nullable)
+            .with_dict_is_ordered(parsed.dictionary_ordered.unwrap_or(false)),
+    )
+}
+
+fn arrow_data_type(value: &str) -> Option<DataType> {
+    parse_arrow_field_type(value).map(|parsed| parsed.data_type)
+}
+
+fn canonical_primitive_arrow_type(data_type: &DataType) -> Option<&'static str> {
+    Some(match data_type {
+        DataType::Boolean => "bool",
+        DataType::Date32 => "date32",
+        DataType::Date64 => "date64",
+        DataType::Float32 => "float32",
+        DataType::Float64 => "float64",
+        DataType::Int8 => "int8",
+        DataType::Int16 => "int16",
+        DataType::Int32 => "int32",
+        DataType::Int64 => "int64",
+        DataType::LargeUtf8 => "large_string",
+        DataType::Utf8 => "string",
+        DataType::Time32(TimeUnit::Second) => "time32[s]",
+        DataType::Time64(TimeUnit::Microsecond) => "time64[us]",
+        DataType::Timestamp(TimeUnit::Millisecond, None) => "timestamp[ms]",
+        DataType::Timestamp(TimeUnit::Microsecond, None) => "timestamp[us]",
+        DataType::Timestamp(TimeUnit::Microsecond, Some(zone)) if zone.as_ref() == "UTC" => {
+            "timestamp[us, UTC]"
+        }
+        DataType::UInt8 => "uint8",
+        DataType::UInt16 => "uint16",
+        DataType::UInt32 => "uint32",
+        DataType::UInt64 => "uint64",
+        _ => return None,
+    })
+}
+
+pub(crate) fn canonical_arrow_field_type(field: &Field) -> Option<String> {
+    let DataType::Dictionary(index, value) = field.data_type() else {
+        return canonical_primitive_arrow_type(field.data_type()).map(str::to_owned);
+    };
+    let index = canonical_primitive_arrow_type(index)?;
+    if !matches!(
+        index,
+        "int8" | "int16" | "int32" | "int64" | "uint8" | "uint16" | "uint32" | "uint64"
+    ) {
+        return None;
+    }
+    let value = canonical_primitive_arrow_type(value)?;
+    let ordered = field.dict_is_ordered()?;
+    Some(format!(
+        "dictionary<index={index};value={value};ordered={ordered}>"
+    ))
 }
 
 fn operator_udfs(operator: &OperatorSpec) -> &[UdfReference] {
@@ -2853,4 +2948,80 @@ fn default_input() -> String {
 
 fn default_output() -> String {
     "output".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ArrowFieldSpec, canonical_arrow_field_type, field_from_spec};
+
+    #[test]
+    fn dictionary_type_spellings_round_trip_all_frozen_combinations() {
+        let indices = [
+            "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
+        ];
+        let values = [
+            "bool",
+            "int8",
+            "int16",
+            "int32",
+            "int64",
+            "uint8",
+            "uint16",
+            "uint32",
+            "uint64",
+            "float32",
+            "float64",
+            "string",
+            "large_string",
+            "date32",
+            "date64",
+            "time32[s]",
+            "time64[us]",
+            "timestamp[ms]",
+            "timestamp[us]",
+            "timestamp[us, UTC]",
+        ];
+
+        for index in indices {
+            for value in values {
+                for ordered in [false, true] {
+                    let spelling =
+                        format!("dictionary<index={index};value={value};ordered={ordered}>");
+                    let field = field_from_spec(&ArrowFieldSpec {
+                        name: "value".into(),
+                        data_type: spelling.clone(),
+                        nullable: true,
+                    })
+                    .unwrap();
+
+                    assert_eq!(field.dict_is_ordered(), Some(ordered), "{spelling}");
+                    assert_eq!(canonical_arrow_field_type(&field), Some(spelling));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dictionary_type_parser_rejects_non_canonical_and_nested_spellings() {
+        for spelling in [
+            "dictionary<index=float32;value=string;ordered=false>",
+            "dictionary<index=int32;value=binary;ordered=false>",
+            "dictionary<index=int32;value=dictionary<index=int8;value=string;ordered=false>;ordered=false>",
+            "dictionary<value=string;index=int32;ordered=false>",
+            "dictionary<index=int32;value=string>",
+            "dictionary<index=int32;value=string;ordered=False>",
+            "dictionary<index=int32;value=string;ordered=false >",
+            "dictionary<index=int32; value=string;ordered=false>",
+        ] {
+            assert!(
+                field_from_spec(&ArrowFieldSpec {
+                    name: "value".into(),
+                    data_type: spelling.into(),
+                    nullable: true,
+                })
+                .is_err(),
+                "{spelling} must be rejected"
+            );
+        }
+    }
 }

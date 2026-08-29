@@ -842,6 +842,15 @@ impl StreamExecutionPlan {
             }
             self.static_inputs.insert(name, spec);
         }
+        if !self.static_inputs.is_empty() {
+            let value = json!({
+                "graph_fingerprint": self.fingerprint.as_str(),
+                "static_inputs": &self.static_inputs,
+            });
+            let canonical = canonical_json(&value)
+                .expect("static input declarations are always canonical JSON values");
+            self.fingerprint = hex::encode(Sha256::digest(canonical.as_bytes()));
+        }
         Ok(self)
     }
 

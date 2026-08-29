@@ -1942,12 +1942,12 @@ mod static_input_runner_tests {
             .unwrap()
     }
 
-    async fn start_with(
+    fn runner_with(
         plan: StreamExecutionPlan,
         root: &Path,
         opened: Arc<AtomicBool>,
         static_inputs: BTreeMap<String, Batch>,
-    ) -> Result<super::StreamingJob> {
+    ) -> Result<StreamingRunner> {
         StreamingRunner::new(
             plan,
             BTreeMap::from([(
@@ -1962,9 +1962,45 @@ mod static_input_runner_tests {
         )
         .unwrap()
         .with_static_inputs(static_inputs)
-        .unwrap()
-        .start()
-        .await
+    }
+
+    async fn start_with(
+        plan: StreamExecutionPlan,
+        root: &Path,
+        opened: Arc<AtomicBool>,
+        static_inputs: BTreeMap<String, Batch>,
+    ) -> Result<super::StreamingJob> {
+        runner_with(plan, root, opened, static_inputs)?
+            .start()
+            .await
+    }
+
+    #[test]
+    fn static_input_payloads_do_not_enter_the_semantic_fingerprint() {
+        let first_payload = weights_table(&[1.0, 2.0, 3.0]);
+        let second_payload = weights_table(&[9.0, 9.0, 9.0]);
+        assert_ne!(
+            digest_for_name("weights", &first_payload).unwrap(),
+            digest_for_name("weights", &second_payload).unwrap()
+        );
+        let first_directory = tempfile::tempdir().unwrap();
+        let second_directory = tempfile::tempdir().unwrap();
+        let first = runner_with(
+            static_plan(),
+            first_directory.path(),
+            Arc::new(AtomicBool::new(false)),
+            BTreeMap::from([("weights".into(), first_payload)]),
+        )
+        .unwrap();
+        let second = runner_with(
+            static_plan(),
+            second_directory.path(),
+            Arc::new(AtomicBool::new(false)),
+            BTreeMap::from([("weights".into(), second_payload)]),
+        )
+        .unwrap();
+
+        assert_eq!(first.plan.fingerprint(), second.plan.fingerprint());
     }
 
     #[tokio::test]
