@@ -11,6 +11,7 @@ scenarios awaiting their milestone pair remain hand-built baselines.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from itertools import count
 from pathlib import Path
@@ -54,7 +55,16 @@ from calc_flow import (
     SourceDeliveryCapability,
     StreamingRunner,
 )
-from calc_flow.symbolic import FeatureSet, Field, Program, row, table, table_input
+from calc_flow.symbolic import (
+    FeatureSet,
+    Field,
+    Program,
+    duration,
+    row,
+    table,
+    table_input,
+    ts,
+)
 
 PROJECTION_QUERY = """
 SELECT
@@ -174,9 +184,11 @@ def _alternating_plan_samples(
     hand_built_plan: object,
     symbolic_plan: object,
     inputs: dict[str, Batch],
+    *,
+    sample_count: int,
 ) -> list[dict[str, object]]:
     samples: list[dict[str, object]] = []
-    for index in range(_ROW_LOCAL_PAIRED_SAMPLES):
+    for index in range(sample_count):
         if index % 2 == 0:
             _hand_result, hand_seconds = _timed_execute(hand_built_plan, inputs)
             _symbolic_result, symbolic_seconds = _timed_execute(symbolic_plan, inputs)
@@ -239,6 +251,244 @@ SELECT
     AS count_close_{ROLLING_LONG_WINDOW}
 FROM input
 """
+
+_SCE08_SCENARIO = "sce08_temporal_catalog"
+_SCE08_WORKLOAD_CONTRACT = "sce08-temporal-v1"
+_SCE08_DURATION_MICROS = 60_000_000
+_SCE08_PAIRED_SAMPLES = 30
+
+
+def _sce08_input_schema() -> list[dict[str, object]]:
+    return [
+        {"name": "event_time", "data_type": "timestamp[us, UTC]", "nullable": False},
+        {"name": "sequence", "data_type": "uint64", "nullable": False},
+        {"name": "symbol", "data_type": "string", "nullable": False},
+        {"name": "industry", "data_type": "string", "nullable": False},
+        {"name": "close", "data_type": "float64", "nullable": True},
+        {"name": "volume", "data_type": "float64", "nullable": True},
+    ]
+
+
+def _sce08_output_schema() -> list[dict[str, object]]:
+    return [
+        *_sce08_input_schema(),
+        {
+            "name": "duration_min_close",
+            "data_type": "float64",
+            "nullable": True,
+        },
+        {
+            "name": "duration_max_close",
+            "data_type": "float64",
+            "nullable": True,
+        },
+        {
+            "name": "duration_cov_close_volume",
+            "data_type": "float64",
+            "nullable": True,
+        },
+        {
+            "name": "duration_corr_close_volume",
+            "data_type": "float64",
+            "nullable": True,
+        },
+    ]
+
+
+def _sce08_output_spec(
+    kind: str,
+    output: str,
+    *,
+    input_name: str | None = None,
+    right: str | None = None,
+) -> dict[str, object]:
+    spec: dict[str, object] = {
+        "frame": {"kind": "duration", "micros": _SCE08_DURATION_MICROS},
+        "kind": kind,
+        "min_periods": 1,
+        "output": output,
+        "primitive_version": 1,
+    }
+    if input_name is not None:
+        spec["input"] = input_name
+    if right is not None:
+        spec.update({"ddof": 1, "left": "close", "right": right})
+    return spec
+
+
+def _sce08_hand_built_project_json() -> str:
+    input_schema = _sce08_input_schema()
+    output_schema = _sce08_output_schema()
+    selected = [f'"{field["name"]}"' for field in output_schema]
+    project = {
+        "data_sources": [
+            {"data": [], "format": "inline_json", "id": "source_1", "input": "input"}
+        ],
+        "format_version": 3,
+        "graph": {
+            "edges": [
+                {
+                    "source_node": "features__cf_rolling",
+                    "source_port": "output",
+                    "target_node": "features",
+                    "target_port": "input",
+                }
+            ],
+            "name": "sce08-temporal-pair",
+            "nodes": [
+                {
+                    "id": "features__cf_rolling",
+                    "input_ports": [
+                        {
+                            "kind": "table",
+                            "name": "input",
+                            "required": True,
+                            "schema": input_schema,
+                        }
+                    ],
+                    "operator": {
+                        "kind": "rolling",
+                        "spec": {
+                            "allowed_lateness_micros": 0,
+                            "configuration_version": 1,
+                            "event_time": "event_time",
+                            "late_policy": {"kind": "error", "scope": "envelope"},
+                            "outputs": [
+                                _sce08_output_spec(
+                                    "min", "duration_min_close", input_name="close"
+                                ),
+                                _sce08_output_spec(
+                                    "max", "duration_max_close", input_name="close"
+                                ),
+                                _sce08_output_spec(
+                                    "covariance",
+                                    "duration_cov_close_volume",
+                                    right="volume",
+                                ),
+                                _sce08_output_spec(
+                                    "correlation",
+                                    "duration_corr_close_volume",
+                                    right="volume",
+                                ),
+                            ],
+                            "partition_by": ["symbol"],
+                            "sequence_by": ["sequence"],
+                            "state_layout_version": 1,
+                            "value_policy": "stateful_numeric_v1",
+                        },
+                    },
+                    "output_ports": [
+                        {
+                            "kind": "table",
+                            "name": "output",
+                            "required": True,
+                            "schema": output_schema,
+                        }
+                    ],
+                },
+                {
+                    "id": "features",
+                    "input_ports": [
+                        {
+                            "kind": "table",
+                            "name": "input",
+                            "required": True,
+                            "schema": output_schema,
+                        }
+                    ],
+                    "operator": {
+                        "expression": "",
+                        "filter": None,
+                        "kind": "expression",
+                        "select": selected,
+                        "udfs": [],
+                    },
+                },
+            ],
+        },
+        "id": "sce08-temporal-pair",
+        "name": "sce08-temporal-pair",
+        "runtime": {"mode": "batch", "options": {}},
+    }
+    return json.dumps(project, sort_keys=True, separators=(",", ":"))
+
+
+def _sce08_symbolic_program() -> Program:
+    quotes = table_input(
+        "quotes",
+        schema=[
+            Field("event_time", "timestamp[us, UTC]", nullable=False),
+            Field("sequence", "uint64", nullable=False),
+            Field("symbol", "string", nullable=False),
+            Field("industry", "string", nullable=False),
+            Field("close", "float64"),
+            Field("volume", "float64"),
+        ],
+        entity_by=["symbol"],
+        event_time="event_time",
+        sequence_by=["sequence"],
+    )
+    frame = duration(_SCE08_DURATION_MICROS)
+    enriched = quotes.with_columns(
+        FeatureSet(
+            [
+                ("duration_min_close", ts.min(quotes["close"], window=frame)),
+                ("duration_max_close", ts.max(quotes["close"], window=frame)),
+                (
+                    "duration_cov_close_volume",
+                    ts.covariance(
+                        quotes["close"], quotes["volume"], window=frame, ddof=1
+                    ),
+                ),
+                (
+                    "duration_corr_close_volume",
+                    ts.correlation(
+                        quotes["close"], quotes["volume"], window=frame, ddof=1
+                    ),
+                ),
+            ]
+        )
+    )
+    return Program(
+        "sce08-temporal-pair",
+        inputs=[quotes],
+        outputs=[("features", enriched)],
+    )
+
+
+def _sorted_temporal_output(value: pa.Table) -> pa.Table:
+    return value.sort_by(
+        [
+            ("event_time", "ascending"),
+            ("symbol", "ascending"),
+            ("sequence", "ascending"),
+        ]
+    )
+
+
+def _assert_sce08_outputs_equal(hand_built: pa.Table, symbolic: pa.Table) -> None:
+    baseline = _sorted_temporal_output(hand_built)
+    candidate = _sorted_temporal_output(symbolic)
+    exact_columns = (
+        "event_time",
+        "sequence",
+        "symbol",
+        "industry",
+        "close",
+        "volume",
+        "duration_min_close",
+        "duration_max_close",
+    )
+    assert baseline.select(exact_columns).equals(candidate.select(exact_columns))
+    for name in ("duration_cov_close_volume", "duration_corr_close_volume"):
+        np.testing.assert_allclose(
+            baseline[name].to_numpy(zero_copy_only=False),
+            candidate[name].to_numpy(zero_copy_only=False),
+            rtol=1e-10,
+            atol=1e-12,
+            equal_nan=True,
+        )
+
 
 CROSS_SECTION_QUERY = """
 WITH bucketed AS (
@@ -354,6 +604,7 @@ def test_sce05_row_local_milestone_pair(
         hand_built_plan,
         symbolic_plan,
         inputs,
+        sample_count=_ROW_LOCAL_PAIRED_SAMPLES,
     )
 
     record_symbolic_benchmark(
@@ -380,6 +631,65 @@ def test_sce05_row_local_milestone_pair(
         "sequence",
         *(f"f{index:02d}" for index in range(1, 21)),
     ]
+
+
+@pytest.mark.benchmark(
+    group=benchmark_group("sce08-temporal-pair"), min_rounds=3, max_time=0.5
+)
+@pytest.mark.parametrize("_scale", [selected_scale().name])
+def test_sce08_temporal_milestone_pair(
+    benchmark: BenchmarkFixture, _scale: str
+) -> None:
+    workload = quote_workload()
+    input_table = workload.batch.to_pyarrow()
+    event_time_index = input_table.schema.get_field_index("event_time")
+    input_table = input_table.set_column(
+        event_time_index,
+        pa.field("event_time", pa.timestamp("us", tz="UTC"), nullable=False),
+        input_table["event_time"].cast(pa.timestamp("us", tz="UTC")),
+    )
+    hand_built_plan = PipelineBuilder._from_json(
+        _sce08_hand_built_project_json()
+    ).compile_batch()
+    symbolic_plan = _sce08_symbolic_program().compile_batch(Runtime())
+    assert hand_built_plan.fingerprint == symbolic_plan.fingerprint
+    inputs = {"input": Batch.from_pyarrow(input_table)}
+
+    hand_built_output = hand_built_plan.execute(inputs).outputs["output"].to_pyarrow()
+    symbolic_warm_result = symbolic_plan.execute(inputs)
+    symbolic_output = symbolic_warm_result.outputs["output"].to_pyarrow()
+    _assert_sce08_outputs_equal(hand_built_output, symbolic_output)
+    assert len(symbolic_warm_result.datafusion_metrics) == 1
+    paired_samples = _alternating_plan_samples(
+        hand_built_plan,
+        symbolic_plan,
+        inputs,
+        sample_count=_SCE08_PAIRED_SAMPLES,
+    )
+
+    record_symbolic_benchmark(
+        benchmark,
+        scenario=_SCE08_SCENARIO,
+        input_rows=workload.rows,
+        output_rows=symbolic_output.num_rows,
+        metrics=symbolic_warm_result.datafusion_metrics,
+        extra={
+            "comparison_contract": "same-process-alternating-v1",
+            "workload_contract": _SCE08_WORKLOAD_CONTRACT,
+            "duration_micros": _SCE08_DURATION_MICROS,
+            "entities": workload.entities,
+            "maximum_retained_rows_per_entity": 60,
+            "temporal_outputs": 4,
+            "paired_samples": paired_samples,
+        },
+    )
+
+    def execute_pair() -> tuple[Any, Any]:
+        return hand_built_plan.execute(inputs), symbolic_plan.execute(inputs)
+
+    hand_built_result, symbolic_result = benchmark(execute_pair)
+    assert hand_built_result.outputs["output"].num_rows == workload.rows
+    assert symbolic_result.outputs["output"].num_rows == workload.rows
 
 
 @pytest.mark.benchmark(
