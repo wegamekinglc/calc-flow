@@ -819,20 +819,29 @@ fn validate_external_provider_lifecycles(
         let NodeOperator::Stream(operator) = &node.operator else {
             continue;
         };
-        let lifecycle = operator.lifecycle();
-        if !lifecycle.is_proven_stateless() {
-            return Err(CalcFlowError::Compile {
-                message: format!(
-                    "stream provider node {node_id:?} does not prove a stateless micro-batch-invariant lifecycle"
-                ),
-            });
-        }
-        if exactly_once && !lifecycle.is_exactly_once_safe() {
-            return Err(CalcFlowError::Compile {
-                message: format!(
-                    "stream provider node {node_id:?} is not deterministic and replay safe; exactly-once delivery is unavailable"
-                ),
-            });
+        match node.checkpoint_capability {
+            OperatorCheckpointCapability::Stateless => {
+                let lifecycle = operator.lifecycle();
+                if !lifecycle.is_proven_stateless() {
+                    return Err(CalcFlowError::Compile {
+                        message: format!(
+                            "stream provider node {node_id:?} does not prove a stateless micro-batch-invariant lifecycle"
+                        ),
+                    });
+                }
+                if exactly_once && !lifecycle.is_exactly_once_safe() {
+                    return Err(CalcFlowError::Compile {
+                        message: format!(
+                            "stream provider node {node_id:?} is not deterministic and replay safe; exactly-once delivery is unavailable"
+                        ),
+                    });
+                }
+            }
+            // Stateful operators prove eligibility through their checkpoint
+            // capability. Unproven operators preserve the existing two-stage
+            // contract: job admission rejects them before connectors open.
+            OperatorCheckpointCapability::CheckpointedStateful { .. }
+            | OperatorCheckpointCapability::Unproven => {}
         }
     }
     Ok(())
