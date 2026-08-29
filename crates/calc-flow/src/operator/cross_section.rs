@@ -1811,6 +1811,32 @@ fn classify_sample(value: &ScalarValue) -> Sample {
     }
 }
 
+/// One measured value's exact order-statistic classification. Valid numeric
+/// values keep their lossless scalar order key; float64 conversion belongs
+/// only to the separate arithmetic statistic path.
+#[derive(Clone, Debug)]
+enum OrderSample {
+    Valid(KeyValue),
+    Null,
+    Nan,
+}
+
+fn classify_order_sample(value: &ScalarValue) -> OrderSample {
+    if value.is_null() {
+        return OrderSample::Null;
+    }
+    let is_nan = match value {
+        ScalarValue::Float32(Some(sample)) => sample.is_nan(),
+        ScalarValue::Float64(Some(sample)) => sample.is_nan(),
+        _ => false,
+    };
+    if is_nan {
+        return OrderSample::Nan;
+    }
+    KeyValue::from_required_scalar(value, "cross_section order statistic")
+        .map_or(OrderSample::Null, OrderSample::Valid)
+}
+
 /// Computes every declared output for one complete group and returns one
 /// aligned column per output in declaration order (SCE-00 D6). Rows arrive
 /// and return in the group's canonical order; the measured-value sort never
@@ -1821,10 +1847,6 @@ fn compute_group(
 ) -> Vec<Vec<Option<f64>>> {
     let mut columns = Vec::with_capacity(compiled.outputs.len());
     for output in &compiled.outputs {
-        let samples: Vec<Sample> = rows
-            .values()
-            .map(|row| classify_sample(&row.values[output.input_index]))
-            .collect();
         let column = match &output.evaluation {
             CompiledEvaluation::OrderStatistic {
                 direction,
@@ -1832,19 +1854,31 @@ fn compute_group(
                 null_placement,
                 min_samples,
                 percentile,
-            } => order_statistic_column(
-                &samples,
-                *direction,
-                *tie_method,
-                *null_placement,
-                *min_samples,
-                *percentile,
-            ),
+            } => {
+                let samples = rows
+                    .values()
+                    .map(|row| classify_order_sample(&row.values[output.input_index]))
+                    .collect::<Vec<_>>();
+                order_statistic_column(
+                    &samples,
+                    *direction,
+                    *tie_method,
+                    *null_placement,
+                    *min_samples,
+                    *percentile,
+                )
+            }
             CompiledEvaluation::Statistic {
                 min_samples,
                 ddof,
                 zscore,
-            } => statistic_column(&samples, *min_samples, *ddof, *zscore),
+            } => {
+                let samples = rows
+                    .values()
+                    .map(|row| classify_sample(&row.values[output.input_index]))
+                    .collect::<Vec<_>>();
+                statistic_column(&samples, *min_samples, *ddof, *zscore)
+            }
         };
         columns.push(column);
     }
@@ -1853,16 +1887,20 @@ fn compute_group(
 
 /// One row's slot in the ordering of an order-statistic output: an equal
 /// value class or the single null class.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum OrderSlot {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OrderSlot<'a> {
     Null,
-    Value(f64),
+    Value(&'a KeyValue),
 }
 
-fn compare_order_slots(left: OrderSlot, right: OrderSlot, direction: SortDirection) -> Ordering {
+fn compare_order_slots(
+    left: OrderSlot<'_>,
+    right: OrderSlot<'_>,
+    direction: SortDirection,
+) -> Ordering {
     let ordering = match (left, right) {
         (OrderSlot::Value(left_value), OrderSlot::Value(right_value)) => {
-            left_value.total_cmp(&right_value)
+            left_value.cmp(right_value)
         }
         (OrderSlot::Null, OrderSlot::Null) => Ordering::Equal,
         (OrderSlot::Null, OrderSlot::Value(_)) | (OrderSlot::Value(_), OrderSlot::Null) => {
@@ -1875,33 +1913,36 @@ fn compare_order_slots(left: OrderSlot, right: OrderSlot, direction: SortDirecti
     }
 }
 
-fn value_order_slots(samples: &[Sample], direction: SortDirection) -> Vec<(OrderSlot, usize)> {
-    let mut slots: Vec<(OrderSlot, usize)> = samples
+fn value_order_slots(
+    samples: &[OrderSample],
+    direction: SortDirection,
+) -> Vec<(OrderSlot<'_>, usize)> {
+    let mut slots: Vec<(OrderSlot<'_>, usize)> = samples
         .iter()
         .enumerate()
         .filter_map(|(index, sample)| match sample {
-            Sample::Valid(value) => Some((OrderSlot::Value(*value), index)),
-            Sample::Null | Sample::Nan => None,
+            OrderSample::Valid(order) => Some((OrderSlot::Value(order), index)),
+            OrderSample::Null | OrderSample::Nan => None,
         })
         .collect();
     slots.sort_by(|left, right| compare_order_slots(left.0, right.0, direction));
     slots
 }
 
-fn null_order_slots(samples: &[Sample]) -> Vec<(OrderSlot, usize)> {
+fn null_order_slots(samples: &[OrderSample]) -> Vec<(OrderSlot<'_>, usize)> {
     samples
         .iter()
         .enumerate()
-        .filter(|(_, sample)| matches!(sample, Sample::Null))
+        .filter(|(_, sample)| matches!(sample, OrderSample::Null))
         .map(|(index, _)| (OrderSlot::Null, index))
         .collect()
 }
 
 fn ordered_slots(
-    samples: &[Sample],
+    samples: &[OrderSample],
     direction: SortDirection,
     null_placement: NullPlacement,
-) -> Vec<(OrderSlot, usize)> {
+) -> Vec<(OrderSlot<'_>, usize)> {
     let mut values = value_order_slots(samples, direction);
     match null_placement {
         NullPlacement::Exclude => values,
@@ -1922,7 +1963,7 @@ fn ordered_slots(
     reason = "the frozen rank/percentile output type is float64"
 )]
 fn rank_order_slots(
-    slots: &[(OrderSlot, usize)],
+    slots: &[(OrderSlot<'_>, usize)],
     sample_count: usize,
     tie_method: RankTieMethod,
 ) -> Vec<Option<f64>> {
@@ -1949,7 +1990,7 @@ fn rank_order_slots(
 }
 
 fn render_order_statistics(
-    samples: &[Sample],
+    samples: &[OrderSample],
     ranks: &[Option<f64>],
     null_placement: NullPlacement,
     min_samples: u64,
@@ -1958,14 +1999,14 @@ fn render_order_statistics(
 ) -> Vec<Option<f64>> {
     let valid_count = samples
         .iter()
-        .filter(|sample| matches!(sample, Sample::Valid(_)))
+        .filter(|sample| matches!(sample, OrderSample::Valid(_)))
         .count();
     samples
         .iter()
         .enumerate()
         .map(|(index, sample)| match sample {
-            Sample::Nan => Some(f64::NAN),
-            Sample::Null if null_placement == NullPlacement::Exclude => None,
+            OrderSample::Nan => Some(f64::NAN),
+            OrderSample::Null if null_placement == NullPlacement::Exclude => None,
             _ => apply_statistic(
                 ranks[index],
                 valid_count,
@@ -1986,7 +2027,7 @@ fn render_order_statistics(
     reason = "the frozen rank/percentile output type is float64"
 )]
 fn order_statistic_column(
-    samples: &[Sample],
+    samples: &[OrderSample],
     direction: SortDirection,
     tie_method: RankTieMethod,
     null_placement: NullPlacement,

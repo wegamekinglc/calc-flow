@@ -8,7 +8,10 @@ use calc_flow::{
     OperatorMetadata, PipelineBuilder, UdfRegistry,
 };
 use datafusion::arrow::{
-    array::{Array, ArrayRef, Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
+    array::{
+        Array, ArrayRef, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray,
+        UInt64Array,
+    },
     datatypes::{DataType, Field, Schema, TimeUnit},
     record_batch::RecordBatch,
 };
@@ -105,6 +108,37 @@ fn rank_percentile_spec(tie: &str, placement: &str, direction: &str) -> CrossSec
     )
 }
 
+fn integer_rank_percentile_spec() -> CrossSectionSpec {
+    let outputs = ["signed_measure", "unsigned_measure"]
+        .into_iter()
+        .flat_map(|input| {
+            [
+                serde_json::json!({
+                    "kind": "rank",
+                    "primitive_version": 1,
+                    "input": input,
+                    "output": format!("{input}_rank"),
+                    "direction": "ascending",
+                    "tie_method": "average",
+                    "null_placement": "exclude",
+                    "min_samples": 1
+                }),
+                serde_json::json!({
+                    "kind": "percentile",
+                    "primitive_version": 1,
+                    "input": input,
+                    "output": format!("{input}_pct"),
+                    "direction": "ascending",
+                    "tie_method": "average",
+                    "null_placement": "exclude",
+                    "min_samples": 1
+                }),
+            ]
+        })
+        .collect::<Vec<_>>();
+    spec_value(&serde_json::json!({"kind": "exact_time"}), &outputs, 0)
+}
+
 fn statistics_spec(ddof: u8, min_samples: u64) -> CrossSectionSpec {
     spec_value(
         &serde_json::json!({"kind": "exact_time"}),
@@ -129,14 +163,18 @@ fn statistics_spec(ddof: u8, min_samples: u64) -> CrossSectionSpec {
     )
 }
 
-fn operator(spec: CrossSectionSpec) -> CrossSectionOperator {
-    CrossSectionOperator::new("cross_section", input_schema(), spec).unwrap()
+fn operator(schema: Arc<Schema>, spec: CrossSectionSpec) -> CrossSectionOperator {
+    CrossSectionOperator::new("cross_section", schema, spec).unwrap()
 }
 
-async fn execute(spec: CrossSectionSpec, input: Batch) -> calc_flow::Result<Batch> {
+async fn execute_with_schema(
+    schema: Arc<Schema>,
+    spec: CrossSectionSpec,
+    input: Batch,
+) -> calc_flow::Result<Batch> {
     let plan = PipelineBuilder::new("cross section batch")
         .unwrap()
-        .add_node("cross_section", operator(spec))
+        .add_node("cross_section", operator(schema, spec))
         .unwrap()
         .compile_batch(&UdfRegistry::new().snapshot())
         .unwrap();
@@ -147,6 +185,10 @@ async fn execute(spec: CrossSectionSpec, input: Batch) -> calc_flow::Result<Batc
         )
         .await?;
     Ok(outputs.outputs["output"].clone())
+}
+
+async fn execute(spec: CrossSectionSpec, input: Batch) -> calc_flow::Result<Batch> {
+    execute_with_schema(input_schema(), spec, input).await
 }
 
 fn string_column(batch: &Batch, name: &str) -> Vec<String> {
@@ -289,6 +331,63 @@ async fn batch_rank_tie_min_and_max_use_class_extremes() {
             ranks[1..3],
             [Some(expected), Some(expected)],
             "tie method {tie} produced {ranks:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn batch_integer_order_statistics_preserve_values_above_f64_precision() {
+    const ADJACENT: i64 = 9_007_199_254_740_992;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC"))),
+            false,
+        ),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("industry", DataType::Utf8, true),
+        Field::new("sequence", DataType::UInt64, false),
+        Field::new("signed_measure", DataType::Int64, false),
+        Field::new("unsigned_measure", DataType::UInt64, false),
+    ]));
+    let record = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(
+                TimestampMicrosecondArray::from(vec![100_i64, 100, 200, 200]).with_timezone("UTC"),
+            ) as ArrayRef,
+            Arc::new(StringArray::from(vec!["a", "b", "c", "d"])),
+            Arc::new(StringArray::from(vec!["tech", "tech", "tech", "tech"])),
+            Arc::new(UInt64Array::from(vec![1_u64, 2, 3, 4])),
+            Arc::new(Int64Array::from(vec![
+                ADJACENT,
+                ADJACENT + 1,
+                ADJACENT + 1,
+                ADJACENT + 1,
+            ])),
+            Arc::new(UInt64Array::from(vec![
+                ADJACENT as u64,
+                ADJACENT as u64 + 1,
+                ADJACENT as u64 + 1,
+                ADJACENT as u64 + 1,
+            ])),
+        ],
+    )
+    .unwrap();
+    let input = Batch::table(vec![record], BatchMetadata::default()).unwrap();
+
+    let output = execute_with_schema(schema, integer_rank_percentile_spec(), input)
+        .await
+        .unwrap();
+
+    for input in ["signed_measure", "unsigned_measure"] {
+        assert_eq!(
+            float_column(&output, &format!("{input}_rank")),
+            vec![Some(1.0), Some(2.0), Some(1.5), Some(1.5)]
+        );
+        assert_eq!(
+            float_column(&output, &format!("{input}_pct")),
+            vec![Some(0.0), Some(1.0), Some(0.5), Some(0.5)]
         );
     }
 }
