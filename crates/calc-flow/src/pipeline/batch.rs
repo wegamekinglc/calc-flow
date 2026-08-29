@@ -24,6 +24,7 @@ pub(crate) enum CompiledBatchOperator {
     Expression(ExpressionOperator),
     Sql(SqlOperator),
     Rolling(crate::RollingOperator),
+    CrossSection(crate::CrossSectionOperator),
 }
 
 impl CompiledBatchOperator {
@@ -32,6 +33,7 @@ impl CompiledBatchOperator {
             NodeOperator::Expression(operator) => Ok(Self::Expression(operator)),
             NodeOperator::Sql(operator) => Ok(Self::Sql(operator)),
             NodeOperator::Rolling(operator) => Ok(Self::Rolling(operator)),
+            NodeOperator::CrossSection(operator) => Ok(Self::CrossSection(operator)),
             NodeOperator::Batch(operator) => Ok(Self::External(operator)),
             NodeOperator::Union(_)
             | NodeOperator::Window(_)
@@ -48,24 +50,32 @@ impl CompiledBatchOperator {
     pub(crate) fn snapshot(&self) -> Result<Value> {
         match self {
             Self::External(operator) => operator.snapshot(),
-            Self::Expression(_) | Self::Sql(_) | Self::Rolling(_) => Ok(Value::Null),
+            Self::Expression(_) | Self::Sql(_) | Self::Rolling(_) | Self::CrossSection(_) => {
+                Ok(Value::Null)
+            }
         }
     }
 
     pub(crate) fn restore(&mut self, state: &Value) -> Result<()> {
         match self {
             Self::External(operator) => operator.restore(state),
-            Self::Expression(_) | Self::Sql(_) | Self::Rolling(_) if state.is_null() => Ok(()),
-            Self::Expression(_) | Self::Sql(_) | Self::Rolling(_) => Err(CalcFlowError::Format {
-                message: "stateless operator state must be null".into(),
-            }),
+            Self::Expression(_) | Self::Sql(_) | Self::Rolling(_) | Self::CrossSection(_)
+                if state.is_null() =>
+            {
+                Ok(())
+            }
+            Self::Expression(_) | Self::Sql(_) | Self::Rolling(_) | Self::CrossSection(_) => {
+                Err(CalcFlowError::Format {
+                    message: "stateless operator state must be null".into(),
+                })
+            }
         }
     }
 
     pub(crate) fn reset(&mut self) -> Result<()> {
         match self {
             Self::External(operator) => operator.reset(),
-            Self::Expression(_) | Self::Sql(_) | Self::Rolling(_) => Ok(()),
+            Self::Expression(_) | Self::Sql(_) | Self::Rolling(_) | Self::CrossSection(_) => Ok(()),
         }
     }
 
@@ -82,6 +92,11 @@ impl CompiledBatchOperator {
                     .await
             }
             Self::Rolling(operator) => {
+                operator
+                    .process(inputs, &BatchOperatorContext { run })
+                    .await
+            }
+            Self::CrossSection(operator) => {
                 operator
                     .process(inputs, &BatchOperatorContext { run })
                     .await

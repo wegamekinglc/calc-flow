@@ -266,9 +266,15 @@ def test_capabilities_route_exposes_the_typed_runtime_session_snapshot(
     assert document["runtime"]["providers"][0]["modes"] == ["batch"]
     assert document["runtime"]["providers"][0]["finality"] == "unproven"
     assert document["runtime"]["providers"][0]["supportsStaticInputs"] is False
-    assert document["runtime"]["operators"][0]["kind"] == "expression"
+    assert [operator["kind"] for operator in document["runtime"]["operators"]] == [
+        "cross_section",
+        "expression",
+        "rolling",
+        "sql",
+        "stream_join",
+    ]
     assert document["runtime"]["operators"][0]["modes"] == ["batch", "stream"]
-    assert document["runtime"]["operators"][0]["finality"] == "per_row_final"
+    assert document["runtime"]["operators"][0]["finality"] == "group_final_append_only"
     assert document["preview"]["inputBatchKinds"] == ["table"]
     assert catalog.json() == []
     capability_operation = openapi["paths"][f"{API_PREFIX}/capabilities"]["get"]

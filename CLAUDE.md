@@ -193,10 +193,11 @@ The frontend talks to the backend over the `/api/v3` REST contract only.
 - `Port` declares name, `BatchKind`, required flag, and optional exact Arrow
   schema. `OperatorMetadata` owns shared graph metadata; custom finite and
   continuous operators implement `BatchOperator` and `StreamOperator`
-  respectively. `ExpressionOperator`, `SqlOperator`, and `RollingOperator`
-  implement both; `UnionOperator`, `WindowAggregateOperator`, and
-  `StreamJoinOperator` are stream-only. External operators resolve through
-  lifecycle-specific factories in `ProviderRegistry`.
+  respectively. `ExpressionOperator`, `SqlOperator`, `RollingOperator`, and
+  `CrossSectionOperator` implement both; `UnionOperator`,
+  `WindowAggregateOperator`, and `StreamJoinOperator` are stream-only.
+  External operators resolve through lifecycle-specific factories in
+  `ProviderRegistry`.
 - `PipelineBuilder` consumes immutable graph-building steps. `compile_batch()`
   and `compile_stream()` validate endpoints, kinds, schemas, one-writer inputs,
   UDFs, cycles, deterministic topology, inputs/outputs, and fingerprint.

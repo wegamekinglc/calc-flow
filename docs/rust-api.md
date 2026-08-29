@@ -277,6 +277,69 @@ floating samples by the IEEE total order, so −0.0 and +0.0 are
 distinguishable extrema — a self-consistent deterministic choice, not SQL
 `MIN`/`MAX` semantics, which compare them equal.
 
+## Cross-section statistics
+
+`CrossSectionOperator` evaluates native complete-group rank, percentile,
+z-score, and demean outputs. Its data-only `CrossSectionSpec` declares
+`configuration_version` and `state_layout_version` (both 1 in this release),
+a non-null UTC `timestamp[us]` `event_time` column, ordered non-empty
+`entity_by` and `sequence_by` keys, an ordered `partition_by` group key —
+optional, and empty means one global group per grouping coordinate — an
+`ExactTime` or `FixedBucket { width_micros }` grouping (one group per exact
+event time, or per UTC `[start, start + width)` bucket with the Unix-epoch
+origin flooring toward negative infinity), one `CrossSectionOutputSpec` per
+output, `allowed_lateness_micros`, a `LatePolicySpec` of `Error` (envelope
+scope) or `Drop` (metrics version 1), and the frozen
+`CrossSectionValuePolicy` `NanExcludePreserveV1`. A row identity is the
+`(event_time, entity_by, sequence_by)` value.
+
+Each output declares kind `rank`, `percentile`, `demean`, or `zscore`, with
+`primitive_version` 1, input and output column names, and `min_samples`; a
+group with fewer than `min_samples` valid samples reads null. `rank` and
+`percentile` add `direction` (`ascending`/`descending`), `tie_method`
+(`average`/`min`/`max`), and `null_placement` (`exclude`/`first`/`last`);
+`zscore` adds `ddof` of 0 or 1. Every output column is nullable `float64`:
+rank is the one-based position after the tie method, percentile is
+`(rank - 1) / (ordered_count - 1)` with a single ordered value reading
+exactly `0.5`, demean subtracts the valid-sample mean, and z-score divides
+by the standard deviation over the divisor `valid_count − ddof` — null when
+the divisor is not positive or the deviation is zero.
+
+Under `nan_exclude_preserve_v1`, NaN is excluded from every sample and stays
+NaN at its own row, infinity is numeric, and null handling comes only from
+`null_placement` or the fixed non-ordering rule: excluded nulls read null
+and leave the ordering, included nulls form one tied class at the requested
+end, and a null `demean` or `zscore` input reads null. The mean and
+deviation classify infinities exactly as the rolling aggregates do: a sample
+over one sign of infinity has that infinity as its mean and over both signs
+reads NaN, and any infinity in the group makes the variance — and with it
+the z-score — NaN. Validation rejects
+unknown fields, zero bucket widths, empty keys or output lists, duplicate key
+or output names, input-colliding output names, non-numeric input columns,
+nullable or floating sequence columns, unsupported key types, and ambiguous
+column references. The output schema is the input schema followed by the
+declared outputs in declaration order.
+
+One micro-batch is never evidence of completeness. Batch evaluation treats
+every group as complete at end-of-input, classifies no late rows, and emits
+all groups once, ordered by finality coordinate then group key, with rows
+inside a group ordered by `(event_time, entity, sequence)`. Stream
+evaluation accumulates groups across envelopes: a group closes when the
+input watermark reaches its finality coordinate — the exact event time or
+the bucket end, plus the allowed lateness, with equality closing — and emits
+once in the same canonical order, releasing its rows and identity index.
+End of input flushes every open group once without synthesizing a sentinel
+watermark; a repeated end is a no-op and data after end is rejected. A row
+whose group has closed is late: the `error` policy rejects the whole
+envelope before any state changes, and the `drop` policy discards the row
+and records the late metrics. Duplicate row identities are rejected
+transactionally — within one envelope across partition groups, and across
+envelopes while the identity is still open. Open groups checkpoint at the
+aligned epoch cut as an Arrow IPC base segment with state version 1 —
+configuration-hash and schema-fingerprint metadata plus bounded inline
+manifest fields — and a restored operator reproduces the same ordered
+output, watermark frontier, output sequence, and metrics.
+
 ## Stream compilation and continuous runtime
 
 `PipelineBuilder::compile_stream` produces an immutable

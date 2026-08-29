@@ -102,6 +102,333 @@
       ],
       "type": "object"
     },
+    "CrossSectionGroupingSpec": {
+      "description": "Group membership rule of one cross-section operator (SCE-00 D6).",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "One group per exact event-time value and partition key.",
+          "properties": {
+            "kind": {
+              "const": "exact_time",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "One group per fixed UTC bucket `[start, start + width)` and partition\nkey; the origin is Unix epoch zero and negative timestamps floor\ntoward negative infinity.",
+          "properties": {
+            "kind": {
+              "const": "fixed_bucket",
+              "type": "string"
+            },
+            "width_micros": {
+              "description": "Positive bucket width in exact microseconds.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "width_micros"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CrossSectionOutputSpec": {
+      "description": "One declared cross-section output and its output column name. Ordering\nfields are valid only on the order-statistic primitives; the strict\nvariant shapes reject them everywhere else (SCE-00 D6).",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "One-based rank over the complete group sample, returned as `float64`.",
+          "properties": {
+            "direction": {
+              "$ref": "#/$defs/SortDirection",
+              "description": "Sort direction of the measured value."
+            },
+            "input": {
+              "description": "Input column name.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "rank",
+              "type": "string"
+            },
+            "min_samples": {
+              "description": "Minimum valid samples for a non-null result.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "null_placement": {
+              "$ref": "#/$defs/NullPlacement",
+              "description": "Null placement."
+            },
+            "output": {
+              "description": "Output column name.",
+              "type": "string"
+            },
+            "primitive_version": {
+              "description": "Primitive version; must equal `1`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "tie_method": {
+              "$ref": "#/$defs/RankTieMethod",
+              "description": "Rank tie method."
+            }
+          },
+          "required": [
+            "kind",
+            "primitive_version",
+            "input",
+            "output",
+            "direction",
+            "tie_method",
+            "null_placement",
+            "min_samples"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "`(rank - 1) / (ordered_count - 1)` after the selected tie method; one\nordered value is exactly `0.5`.",
+          "properties": {
+            "direction": {
+              "$ref": "#/$defs/SortDirection",
+              "description": "Sort direction of the measured value."
+            },
+            "input": {
+              "description": "Input column name.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "percentile",
+              "type": "string"
+            },
+            "min_samples": {
+              "description": "Minimum valid samples for a non-null result.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "null_placement": {
+              "$ref": "#/$defs/NullPlacement",
+              "description": "Null placement."
+            },
+            "output": {
+              "description": "Output column name.",
+              "type": "string"
+            },
+            "primitive_version": {
+              "description": "Primitive version; must equal `1`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "tie_method": {
+              "$ref": "#/$defs/RankTieMethod",
+              "description": "Rank tie method."
+            }
+          },
+          "required": [
+            "kind",
+            "primitive_version",
+            "input",
+            "output",
+            "direction",
+            "tie_method",
+            "null_placement",
+            "min_samples"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Measured value minus the arithmetic mean of the valid sample.",
+          "properties": {
+            "input": {
+              "description": "Input column name.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "demean",
+              "type": "string"
+            },
+            "min_samples": {
+              "description": "Minimum valid samples for a non-null result.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "output": {
+              "description": "Output column name.",
+              "type": "string"
+            },
+            "primitive_version": {
+              "description": "Primitive version; must equal `1`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "primitive_version",
+            "input",
+            "output",
+            "min_samples"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "`(value - mean) / stddev` with the selected degrees of freedom; null\nwhen the divisor is not positive or the standard deviation is zero.",
+          "properties": {
+            "ddof": {
+              "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
+              "format": "uint8",
+              "maximum": 1,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "input": {
+              "description": "Input column name.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "zscore",
+              "type": "string"
+            },
+            "min_samples": {
+              "description": "Minimum valid samples for a non-null result.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "output": {
+              "description": "Output column name.",
+              "type": "string"
+            },
+            "primitive_version": {
+              "description": "Primitive version; must equal `1`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "primitive_version",
+            "input",
+            "output",
+            "min_samples",
+            "ddof"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CrossSectionSpec": {
+      "additionalProperties": false,
+      "description": "Data-only declaration of one native cross-section operation.",
+      "properties": {
+        "allowed_lateness_micros": {
+          "description": "Allowed lateness in exact microseconds (SCE-00 D7).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "configuration_version": {
+          "description": "Semantic configuration version; must equal\n[`CROSS_SECTION_CONFIGURATION_VERSION`].",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "entity_by": {
+          "description": "Ordered non-empty entity key used for row identity.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "event_time": {
+          "description": "Non-null UTC `timestamp[us]` event-time column.",
+          "type": "string"
+        },
+        "grouping": {
+          "$ref": "#/$defs/CrossSectionGroupingSpec",
+          "description": "Exact-time or fixed-bucket grouping."
+        },
+        "late_policy": {
+          "$ref": "#/$defs/LatePolicySpec",
+          "description": "Late-row policy."
+        },
+        "outputs": {
+          "description": "Cross-section outputs in semantic declaration order.",
+          "items": {
+            "$ref": "#/$defs/CrossSectionOutputSpec"
+          },
+          "type": "array"
+        },
+        "partition_by": {
+          "default": [],
+          "description": "Ordered group partition key; empty means one global group per\ngrouping coordinate.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sequence_by": {
+          "description": "Ordered non-empty sequence key; floating columns are forbidden.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "state_layout_version": {
+          "description": "Durable state-layout version; must equal\n[`CROSS_SECTION_STATE_LAYOUT_VERSION`].",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "value_policy": {
+          "$ref": "#/$defs/CrossSectionValuePolicy",
+          "description": "Frozen null/NaN value policy."
+        }
+      },
+      "required": [
+        "configuration_version",
+        "state_layout_version",
+        "event_time",
+        "entity_by",
+        "sequence_by",
+        "grouping",
+        "outputs",
+        "allowed_lateness_micros",
+        "late_policy",
+        "value_policy"
+      ],
+      "type": "object"
+    },
+    "CrossSectionValuePolicy": {
+      "description": "Frozen null/NaN policy for cross-section values (SCE-00 D3.2/D6).",
+      "oneOf": [
+        {
+          "const": "nan_exclude_preserve_v1",
+          "description": "NaN is excluded from every sample and preserved at its own row;\ninfinity stays numeric; null handling comes only from\n[`NullPlacement`] or row preservation.",
+          "type": "string"
+        }
+      ]
+    },
     "DataFusionConfig": {
       "additionalProperties": false,
       "properties": {
@@ -341,6 +668,26 @@
       ],
       "type": "object"
     },
+    "NullPlacement": {
+      "description": "Null placement of an order-statistic output (SCE-00 D6). Excluded nulls\nproduce null; included nulls form one tied class at the requested end of\nthe final sort order.",
+      "oneOf": [
+        {
+          "const": "exclude",
+          "description": "Null rows produce null and leave the ordering.",
+          "type": "string"
+        },
+        {
+          "const": "first",
+          "description": "Null rows form the first tied class of the final sort order.",
+          "type": "string"
+        },
+        {
+          "const": "last",
+          "description": "Null rows form the last tied class of the final sort order.",
+          "type": "string"
+        }
+      ]
+    },
     "OperatorSpec": {
       "oneOf": [
         {
@@ -454,6 +801,24 @@
             },
             "spec": {
               "$ref": "#/$defs/RollingSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "spec"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Native complete-group cross-section statistics over event-time groups.",
+          "properties": {
+            "kind": {
+              "const": "cross_section",
+              "type": "string"
+            },
+            "spec": {
+              "$ref": "#/$defs/CrossSectionSpec"
             }
           },
           "required": [
@@ -771,6 +1136,26 @@
             "policy"
           ],
           "type": "object"
+        }
+      ]
+    },
+    "RankTieMethod": {
+      "description": "Rank tie method of an order-statistic output (SCE-00 D6).",
+      "oneOf": [
+        {
+          "const": "average",
+          "description": "Mean of the tied class's one-based position range.",
+          "type": "string"
+        },
+        {
+          "const": "min",
+          "description": "First one-based position of the tied class.",
+          "type": "string"
+        },
+        {
+          "const": "max",
+          "description": "Last one-based position of the tied class.",
+          "type": "string"
         }
       ]
     },
@@ -1522,6 +1907,21 @@
         {
           "const": "registered",
           "description": "Resolved from a trusted in-process registry.",
+          "type": "string"
+        }
+      ]
+    },
+    "SortDirection": {
+      "description": "Sort direction of an order-statistic output (SCE-00 D6).",
+      "oneOf": [
+        {
+          "const": "ascending",
+          "description": "Smallest measured value first.",
+          "type": "string"
+        },
+        {
+          "const": "descending",
+          "description": "Largest measured value first.",
           "type": "string"
         }
       ]
