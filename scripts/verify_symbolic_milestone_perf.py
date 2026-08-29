@@ -17,8 +17,8 @@ import argparse
 import hashlib
 import json
 import math
-import random
 import re
+import struct
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -229,12 +229,19 @@ def _bootstrap_regression_interval(
 ) -> tuple[float, float]:
     if resamples < 1_000:
         raise ValueError("bootstrap_resamples must be at least 1000")
-    generator = random.Random(BOOTSTRAP_SEED)
     regressions: list[float] = []
-    for _ in range(resamples):
-        mean_log_ratio = math.fsum(
-            generator.choice(log_ratios) for _ in range(len(log_ratios))
-        ) / len(log_ratios)
+    sample_size = len(log_ratios)
+    for resample_index in range(resamples):
+        random_bytes = hashlib.shake_256(
+            f"{BOOTSTRAP_SEED}:{resample_index}".encode()
+        ).digest(sample_size * 8)
+        mean_log_ratio = (
+            math.fsum(
+                log_ratios[value[0] % sample_size]
+                for value in struct.iter_unpack(">Q", random_bytes)
+            )
+            / sample_size
+        )
         regressions.append(math.exp(mean_log_ratio) - 1.0)
     regressions.sort()
     return _quantile(regressions, 0.025), _quantile(regressions, 0.975)
@@ -264,6 +271,94 @@ def _report_digest(path: Path) -> str:
         raise ValueError(f"cannot hash benchmark report {path}: {error}") from error
 
 
+def _validate_comparison_request(
+    report_paths: Sequence[Path], scenarios: Sequence[str], threshold: float
+) -> None:
+    if not report_paths:
+        raise ValueError("at least one benchmark report is required")
+    if not scenarios or len(set(scenarios)) != len(scenarios):
+        raise ValueError("scenarios must be a non-empty unique sequence")
+    if not math.isfinite(threshold) or threshold < 0.0:
+        raise ValueError("threshold must be finite and non-negative")
+
+
+def _validated_reports(
+    report_paths: Sequence[Path],
+) -> tuple[str, dict[str, object], list[tuple[Path, dict[str, Any]]]]:
+    reports = [(path, _read_report(path)) for path in report_paths]
+    first_path, first_report = reports[0]
+    commit_id = _validated_commit(first_report, first_path)
+    machine = _machine_fingerprint(first_report, first_path)
+    for path, report in reports[1:]:
+        if _validated_commit(report, path) != commit_id:
+            raise ValueError("benchmark reports do not share one exact commit")
+        if _machine_fingerprint(report, path) != machine:
+            raise ValueError("benchmark reports do not share one stable machine")
+    return commit_id, machine, reports
+
+
+def _combined_evidence(
+    reports: Sequence[tuple[Path, Mapping[str, object]]],
+    scenarios: Sequence[str],
+) -> tuple[dict[str, ScenarioEvidence], list[dict[str, str]]]:
+    combined: dict[str, ScenarioEvidence] = {
+        scenario: {"workload": {}, "pairs": []} for scenario in scenarios
+    }
+    report_digests: list[dict[str, str]] = []
+    for path, report in reports:
+        evidence = _report_evidence(report, path, scenarios)
+        for scenario, current in evidence.items():
+            target = combined[scenario]
+            if target["workload"] and target["workload"] != current["workload"]:
+                raise ValueError(
+                    f"benchmark reports have a workload mismatch for {scenario!r}"
+                )
+            target["workload"] = current["workload"]
+            target["pairs"].extend(current["pairs"])
+        report_digests.append({"path": path.as_posix(), "sha256": _report_digest(path)})
+    return combined, report_digests
+
+
+def _scenario_result(
+    scenario: str,
+    evidence: ScenarioEvidence,
+    *,
+    threshold: float,
+    bootstrap_resamples: int,
+) -> tuple[dict[str, object], Decision]:
+    pairs = evidence["pairs"]
+    if len(pairs) < MIN_PAIRED_SAMPLES:
+        raise ValueError(
+            f"scenario {scenario!r} requires at least "
+            f"{MIN_PAIRED_SAMPLES} paired samples"
+        )
+    log_ratios = _paired_log_ratios(pairs)
+    interval = _bootstrap_regression_interval(log_ratios, resamples=bootstrap_resamples)
+    decision = _decision(interval, threshold)
+    mean_log_ratio = math.fsum(log_ratios) / len(log_ratios)
+    return (
+        {
+            "scenario": scenario,
+            "decision": decision,
+            "threshold_percent": threshold * 100.0,
+            "geometric_regression_percent": (math.exp(mean_log_ratio) - 1.0) * 100.0,
+            "regression_interval_percent": [
+                interval[0] * 100.0,
+                interval[1] * 100.0,
+            ],
+            "paired_samples": len(pairs),
+            "hand_built_first_samples": sum(
+                pair["order"] == "hand-built-first" for pair in pairs
+            ),
+            "symbolic_first_samples": sum(
+                pair["order"] == "symbolic-first" for pair in pairs
+            ),
+            "workload": evidence["workload"],
+        },
+        decision,
+    )
+
+
 def compare_reports(
     report_paths: Sequence[Path],
     *,
@@ -272,84 +367,20 @@ def compare_reports(
     bootstrap_resamples: int = DEFAULT_BOOTSTRAP_RESAMPLES,
 ) -> dict[str, object]:
     """Validate reports and return a deterministic comparison summary."""
-    if not report_paths:
-        raise ValueError("at least one benchmark report is required")
-    if not scenarios or len(set(scenarios)) != len(scenarios):
-        raise ValueError("scenarios must be a non-empty unique sequence")
-    if not math.isfinite(threshold) or threshold < 0.0:
-        raise ValueError("threshold must be finite and non-negative")
-
-    commit_id: str | None = None
-    machine: dict[str, object] | None = None
-    combined: dict[str, ScenarioEvidence] = {
-        scenario: {"workload": {}, "pairs": []} for scenario in scenarios
-    }
-    report_digests: list[dict[str, str]] = []
-    for path in report_paths:
-        report = _read_report(path)
-        current_commit = _validated_commit(report, path)
-        current_machine = _machine_fingerprint(report, path)
-        if commit_id is None:
-            commit_id = current_commit
-            machine = current_machine
-        elif current_commit != commit_id:
-            raise ValueError("benchmark reports do not share one exact commit")
-        elif current_machine != machine:
-            raise ValueError("benchmark reports do not share one stable machine")
-
-        evidence = _report_evidence(report, path, scenarios)
-        for scenario, current in evidence.items():
-            target = combined[scenario]
-            if not target["workload"]:
-                target["workload"] = current["workload"]
-            elif target["workload"] != current["workload"]:
-                raise ValueError(
-                    f"benchmark reports have a workload mismatch for {scenario!r}"
-                )
-            target["pairs"].extend(current["pairs"])
-        report_digests.append({"path": path.as_posix(), "sha256": _report_digest(path)})
-
-    scenario_results: list[dict[str, object]] = []
-    decisions: list[Decision] = []
-    for scenario in scenarios:
-        evidence = combined[scenario]
-        pairs = evidence["pairs"]
-        if len(pairs) < MIN_PAIRED_SAMPLES:
-            raise ValueError(
-                f"scenario {scenario!r} requires at least "
-                f"{MIN_PAIRED_SAMPLES} paired samples"
-            )
-        log_ratios = _paired_log_ratios(pairs)
-        interval = _bootstrap_regression_interval(
-            log_ratios, resamples=bootstrap_resamples
+    _validate_comparison_request(report_paths, scenarios, threshold)
+    commit_id, machine, reports = _validated_reports(report_paths)
+    combined, report_digests = _combined_evidence(reports, scenarios)
+    results = [
+        _scenario_result(
+            scenario,
+            combined[scenario],
+            threshold=threshold,
+            bootstrap_resamples=bootstrap_resamples,
         )
-        decision = _decision(interval, threshold)
-        decisions.append(decision)
-        mean_log_ratio = math.fsum(log_ratios) / len(log_ratios)
-        scenario_results.append(
-            {
-                "scenario": scenario,
-                "decision": decision,
-                "threshold_percent": threshold * 100.0,
-                "geometric_regression_percent": (math.exp(mean_log_ratio) - 1.0)
-                * 100.0,
-                "regression_interval_percent": [
-                    interval[0] * 100.0,
-                    interval[1] * 100.0,
-                ],
-                "paired_samples": len(pairs),
-                "hand_built_first_samples": sum(
-                    pair["order"] == "hand-built-first" for pair in pairs
-                ),
-                "symbolic_first_samples": sum(
-                    pair["order"] == "symbolic-first" for pair in pairs
-                ),
-                "workload": evidence["workload"],
-            }
-        )
-
-    if commit_id is None or machine is None:
-        raise AssertionError("validated reports must establish provenance")
+        for scenario in scenarios
+    ]
+    scenario_results = [result for result, _decision_name in results]
+    decisions = [decision for _result, decision in results]
     return {
         "format_version": 1,
         "decision": _overall_decision(decisions),

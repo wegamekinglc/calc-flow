@@ -33,8 +33,8 @@
       "hand_built_first_samples": 60,
       "paired_samples": 120,
       "regression_interval_percent": [
-        -1.115591231562705,
-        3.6398657152151848
+        -1.113593269398995,
+        3.6630495978980884
       ],
       "scenario": "sce05_row_local_20_columns",
       "symbolic_first_samples": 60,

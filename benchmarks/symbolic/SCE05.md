@@ -33,7 +33,7 @@ is `inconclusive`, not a pass.
 
 | Scenario                       | Pairs | Geometric regression | 95% bootstrap interval | Gate    | Decision |
 | ------------------------------ | ----: | -------------------: | ---------------------: | ------: | -------- |
-| `sce05_row_local_20_columns`   |   120 |              +0.776% |       -1.116% to +3.640% | +5.000% | pass     |
+| `sce05_row_local_20_columns`   |   120 |              +0.776% |       -1.114% to +3.663% | +5.000% | pass     |
 
 The upper bound is 1.360 percentage points below the gate. This is a relative
 comparison only; it makes no absolute throughput claim.

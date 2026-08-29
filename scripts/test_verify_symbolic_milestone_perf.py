@@ -77,6 +77,24 @@ def _write_report(
 
 
 class TestCompareReports(unittest.TestCase):
+    def test_bootstrap_summary_is_deterministic(self) -> None:
+        with TemporaryDirectory() as raw:
+            report = Path(raw) / "report.json"
+            _write_report(report, _pairs([1.0] * 20, [0.98, 1.04] * 10))
+
+            first = compare_reports(
+                (report,),
+                scenarios=("sce05_row_local_20_columns",),
+                bootstrap_resamples=2_000,
+            )
+            second = compare_reports(
+                (report,),
+                scenarios=("sce05_row_local_20_columns",),
+                bootstrap_resamples=2_000,
+            )
+
+        self.assertEqual(first, second)
+
     def test_upper_interval_below_gate_passes(self) -> None:
         with TemporaryDirectory() as raw:
             root = Path(raw)
