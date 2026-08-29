@@ -280,7 +280,8 @@ distinguishable extrema — a self-consistent deterministic choice, not SQL
 ## Cross-section statistics
 
 `CrossSectionOperator` evaluates native complete-group rank, percentile,
-z-score, and demean outputs. Its data-only `CrossSectionSpec` declares
+z-score, demean, winsorize, top/bottom selection, and mean-fill outputs. Its
+data-only `CrossSectionSpec` declares
 `configuration_version` and `state_layout_version` (both 1 in this release),
 a non-null UTC `timestamp[us]` `event_time` column, ordered non-empty
 `entity_by` and `sequence_by` keys, an ordered `partition_by` group key —
@@ -293,23 +294,37 @@ scope) or `Drop` (metrics version 1), and the frozen
 `CrossSectionValuePolicy` `NanExcludePreserveV1`. A row identity is the
 `(event_time, entity_by, sequence_by)` value.
 
-Each output declares kind `rank`, `percentile`, `demean`, or `zscore`, with
-`primitive_version` 1, input and output column names, and `min_samples`; a
-group with fewer than `min_samples` valid samples reads null. `rank` and
-`percentile` add `direction` (`ascending`/`descending`), `tie_method`
-(`average`/`min`/`max`), and `null_placement` (`exclude`/`first`/`last`);
-`zscore` adds `ddof` of 0 or 1. Every output column is nullable `float64`:
-rank is the one-based position after the tie method, percentile is
+Each output declares `primitive_version` 1, input and output column names, and
+`min_samples`; the per-variant rules below define which values are gated when
+a group has fewer valid samples. `rank` and `percentile` add `direction`
+(`ascending`/`descending`),
+`tie_method` (`average`/`min`/`max`), and `null_placement`
+(`exclude`/`first`/`last`); `zscore` adds `ddof` of 0 or 1. Rank, percentile,
+demean, and z-score produce nullable `float64`: rank is the one-based position
+after the tie method, percentile is
 `(rank - 1) / (ordered_count - 1)` with a single ordered value reading
 exactly `0.5`, demean subtracts the valid-sample mean, and z-score divides
 by the standard deviation over the divisor `valid_count − ddof` — null when
 the divisor is not positive or the deviation is zero.
 
+`winsorize` accepts only float32/float64, carries finite `lower` and `upper`
+probabilities satisfying `0 <= lower <= upper <= 1`, and clamps to the
+Hyndman-Fan type-7 quantiles while preserving the input type. `top` and
+`bottom` carry a positive `count` and `include_ties`: they produce nullable
+boolean masks over the exact scalar total order, include every boundary tie
+when requested, and otherwise use canonical row identity to select exactly
+`min(count, valid_count)` rows. `mean_fill` accepts float32/float64, replaces a
+null with the complete valid sample's mean when `min_samples` is met, and
+preserves valid values, NaN, and the input type. All compatible outputs share
+one grouping, sample classification, and measured-value sort per input column.
+
 Under `nan_exclude_preserve_v1`, NaN is excluded from every sample and stays
 NaN at its own row, infinity is numeric, and null handling comes only from
-`null_placement` or the fixed non-ordering rule: excluded nulls read null
+`null_placement` or the variant's fixed non-ordering rule: excluded nulls read
+null
 and leave the ordering, included nulls form one tied class at the requested
-end, and a null `demean` or `zscore` input reads null. The mean and
+end; a null `demean`, `zscore`, or `winsorize` input reads null; top/bottom
+map both null and NaN to null; and mean-fill replaces only null. The mean and
 deviation classify infinities exactly as the rolling aggregates do: a sample
 over one sign of infinity has that infinity as its mean and over both signs
 reads NaN, and any infinity in the group makes the variance — and with it

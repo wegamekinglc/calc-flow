@@ -46,6 +46,40 @@ fn cross_section_node_json() -> serde_json::Value {
                         "output": "alpha",
                         "min_samples": 1,
                         "ddof": 0
+                    },
+                    {
+                        "kind": "winsorize",
+                        "primitive_version": 1,
+                        "input": "momentum_20",
+                        "output": "momentum_winsorized",
+                        "min_samples": 1,
+                        "lower": 0.1,
+                        "upper": 0.9
+                    },
+                    {
+                        "kind": "top",
+                        "primitive_version": 1,
+                        "input": "momentum_20",
+                        "output": "is_top",
+                        "count": 2,
+                        "include_ties": true,
+                        "min_samples": 1
+                    },
+                    {
+                        "kind": "bottom",
+                        "primitive_version": 1,
+                        "input": "momentum_20",
+                        "output": "is_bottom",
+                        "count": 2,
+                        "include_ties": false,
+                        "min_samples": 1
+                    },
+                    {
+                        "kind": "mean_fill",
+                        "primitive_version": 1,
+                        "input": "momentum_20",
+                        "output": "momentum_filled",
+                        "min_samples": 1
                     }
                 ],
                 "allowed_lateness_micros": 0,

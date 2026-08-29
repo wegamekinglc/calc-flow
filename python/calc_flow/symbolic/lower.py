@@ -103,7 +103,16 @@ _ROLLING_DDOF_PRIMITIVES: Final = frozenset(
 _ROLLING_PAIR_PRIMITIVES: Final = frozenset({"covariance", "correlation"})
 
 _CROSS_SECTION_PRIMITIVES: Final = frozenset(
-    {"rank", "percentile", "demean", "zscore", "winsorize"}
+    {
+        "rank",
+        "percentile",
+        "demean",
+        "zscore",
+        "winsorize",
+        "top",
+        "bottom",
+        "mean_fill",
+    }
 )
 
 _CROSS_SECTION_ORDERING: Final = ("rank", "percentile")
@@ -430,6 +439,14 @@ def _field_json(field: Field, /) -> dict[str, object]:
 
 def _cint(value: CValue | None, /) -> int | None:
     return value.value if isinstance(value, CInt) else None
+
+
+def _cnumber(value: CValue | None, /) -> int | float | None:
+    return value.value if isinstance(value, (CInt, CFloat)) else None
+
+
+def _cbool(value: CValue | None, /) -> bool | None:
+    return value.value if isinstance(value, CBool) else None
 
 
 def _replace_rolling(node: Node, replacements: dict[str, str], /) -> Node:
@@ -777,12 +794,6 @@ def _plan_cross_section(
                 )
             used_names.add(name)
         replacements[subtree.digest] = name
-        if kind == "winsorize":
-            errors.raise_compile(
-                f"{path}.{name}",
-                errors.UNSUPPORTED_TYPE,
-                "cross-section winsorize is not supported in this release",
-            )
         argument = subtree.args[0]
         if argument.op.name != "column_ref":
             errors.raise_compile(
@@ -860,8 +871,21 @@ def _plan_cross_section(
         declaration["min_samples"] = _cint(subtree.attr("min_samples")) or 1
         if kind == _CROSS_SECTION_DDOF:
             declaration["ddof"] = _cint(subtree.attr("ddof")) or 0
+        if kind == "winsorize":
+            declaration["lower"] = _cnumber(subtree.attr("lower"))
+            declaration["upper"] = _cnumber(subtree.attr("upper"))
+        if kind in ("top", "bottom"):
+            declaration["count"] = _cint(subtree.attr("count"))
+            declaration["include_ties"] = _cbool(subtree.attr("include_ties"))
         declarations.append(declaration)
-        derived_fields.append(Field(name, "float64", nullable=True))
+        output_type = (
+            "bool"
+            if kind in ("top", "bottom")
+            else input_types[input_name].data_type
+            if kind in ("winsorize", "mean_fill")
+            else "float64"
+        )
+        derived_fields.append(Field(name, output_type, nullable=True))
 
     node_id = f"{output_name}__cf_cross_section"
     node: dict[str, object] = {

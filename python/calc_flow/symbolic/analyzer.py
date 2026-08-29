@@ -108,7 +108,16 @@ _ROLLING_AGGREGATES: Final = frozenset(
 )
 _ROLLING_DDOF: Final = frozenset({"variance", "stddev"})
 _CROSS_SECTION: Final = frozenset(
-    {"rank", "percentile", "demean", "zscore", "winsorize"}
+    {
+        "rank",
+        "percentile",
+        "demean",
+        "zscore",
+        "winsorize",
+        "top",
+        "bottom",
+        "mean_fill",
+    }
 )
 
 
@@ -982,7 +991,7 @@ class _Analyzer:
         /,
     ) -> ColumnFacts:
         unresolved = ColumnFacts(None, True, operand.lineage, states)
-        if primitive == "winsorize":
+        if primitive in ("winsorize", "mean_fill"):
             if operand.data_type is not None and operand.data_type not in (
                 "float32",
                 "float64",
@@ -990,10 +999,16 @@ class _Analyzer:
                 self.issue(
                     f"{role}.value.dtype",
                     "unsupported_type",
-                    "winsorization is only provable for floating columns",
+                    f"{primitive} is only supported for floating columns",
                 )
                 return unresolved
             return ColumnFacts(operand.data_type, True, operand.lineage, states)
+        if primitive in ("top", "bottom"):
+            if not self._numeric_or_issue(
+                operand.data_type, f"{role}.value", primitive
+            ):
+                return unresolved
+            return ColumnFacts("bool", True, operand.lineage, states)
         if primitive in ("zscore", "demean") and not self._numeric_or_issue(
             operand.data_type, f"{role}.value", primitive
         ):

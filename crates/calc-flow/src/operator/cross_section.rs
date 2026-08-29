@@ -1,6 +1,7 @@
 //! Native cross-section operator: complete-group rank, percentile, z-score,
-//! and demean over exact-time or fixed-bucket groups (SCE-00 D6, API note
-//! `symbolic-computation-engine` section 3.2). One micro-batch is never
+//! demean, winsorize, top/bottom selection, and mean-fill over exact-time or
+//! fixed-bucket groups (SCE-00 D6, API note `symbolic-computation-engine`
+//! section 3.2). One micro-batch is never
 //! evidence of completeness: groups accumulate across envelopes and close
 //! only by the watermark rules of D7 (or end-of-input), then emit once in
 //! canonical order. The same calculation kernel serves the batch and stream
@@ -15,7 +16,7 @@ use std::{
 
 use async_trait::async_trait;
 use datafusion::arrow::{
-    array::{ArrayRef, Float64Array, UInt8Array, new_null_array},
+    array::{ArrayRef, UInt8Array, new_null_array},
     datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
     ipc::{
         convert::IpcSchemaEncoder,
@@ -180,6 +181,76 @@ pub enum CrossSectionOutputSpec {
         #[schemars(range(min = 0, max = 1))]
         ddof: u8,
     },
+    /// Input value clamped to the Hyndman-Fan type-7 quantiles selected by
+    /// `lower` and `upper`; the output preserves the input floating type.
+    Winsorize {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Input floating column name.
+        input: String,
+        /// Output column name.
+        output: String,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_samples: u64,
+        /// Inclusive lower quantile probability.
+        #[schemars(range(min = 0.0, max = 1.0))]
+        lower: f64,
+        /// Inclusive upper quantile probability.
+        #[schemars(range(min = 0.0, max = 1.0))]
+        upper: f64,
+    },
+    /// Boolean mask selecting the largest `count` valid values. Null and NaN
+    /// rows produce null; boundary ties are either all included or broken by
+    /// canonical row identity.
+    Top {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Input numeric column name.
+        input: String,
+        /// Output boolean column name.
+        output: String,
+        /// Positive number of ordered values to select.
+        #[schemars(range(min = 1))]
+        count: u64,
+        /// Whether every value tied with the boundary is selected.
+        include_ties: bool,
+        /// Minimum valid samples for a non-null selection result.
+        #[schemars(range(min = 1))]
+        min_samples: u64,
+    },
+    /// Boolean mask selecting the smallest `count` valid values. Null and NaN
+    /// rows produce null; boundary ties are either all included or broken by
+    /// canonical row identity.
+    Bottom {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Input numeric column name.
+        input: String,
+        /// Output boolean column name.
+        output: String,
+        /// Positive number of ordered values to select.
+        #[schemars(range(min = 1))]
+        count: u64,
+        /// Whether every value tied with the boundary is selected.
+        include_ties: bool,
+        /// Minimum valid samples for a non-null selection result.
+        #[schemars(range(min = 1))]
+        min_samples: u64,
+    },
+    /// Floating input with null rows replaced by the complete group's mean;
+    /// valid and NaN rows are preserved.
+    MeanFill {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Input floating column name.
+        input: String,
+        /// Output column name.
+        output: String,
+        /// Minimum valid samples required before nulls are filled.
+        #[schemars(range(min = 1))]
+        min_samples: u64,
+    },
 }
 
 impl CrossSectionOutputSpec {
@@ -196,6 +267,18 @@ impl CrossSectionOutputSpec {
             }
             | Self::Zscore {
                 primitive_version, ..
+            }
+            | Self::Winsorize {
+                primitive_version, ..
+            }
+            | Self::Top {
+                primitive_version, ..
+            }
+            | Self::Bottom {
+                primitive_version, ..
+            }
+            | Self::MeanFill {
+                primitive_version, ..
             } => *primitive_version,
         }
     }
@@ -205,7 +288,11 @@ impl CrossSectionOutputSpec {
             Self::Rank { input, .. }
             | Self::Percentile { input, .. }
             | Self::Demean { input, .. }
-            | Self::Zscore { input, .. } => input,
+            | Self::Zscore { input, .. }
+            | Self::Winsorize { input, .. }
+            | Self::Top { input, .. }
+            | Self::Bottom { input, .. }
+            | Self::MeanFill { input, .. } => input,
         }
     }
 
@@ -214,7 +301,11 @@ impl CrossSectionOutputSpec {
             Self::Rank { output, .. }
             | Self::Percentile { output, .. }
             | Self::Demean { output, .. }
-            | Self::Zscore { output, .. } => output,
+            | Self::Zscore { output, .. }
+            | Self::Winsorize { output, .. }
+            | Self::Top { output, .. }
+            | Self::Bottom { output, .. }
+            | Self::MeanFill { output, .. } => output,
         }
     }
 
@@ -223,13 +314,24 @@ impl CrossSectionOutputSpec {
             Self::Rank { min_samples, .. }
             | Self::Percentile { min_samples, .. }
             | Self::Demean { min_samples, .. }
-            | Self::Zscore { min_samples, .. } => *min_samples,
+            | Self::Zscore { min_samples, .. }
+            | Self::Winsorize { min_samples, .. }
+            | Self::Top { min_samples, .. }
+            | Self::Bottom { min_samples, .. }
+            | Self::MeanFill { min_samples, .. } => *min_samples,
         }
     }
 
     fn ddof(&self) -> Option<u8> {
         match self {
             Self::Zscore { ddof, .. } => Some(*ddof),
+            _ => None,
+        }
+    }
+
+    fn count(&self) -> Option<u64> {
+        match self {
+            Self::Top { count, .. } | Self::Bottom { count, .. } => Some(*count),
             _ => None,
         }
     }
@@ -1492,7 +1594,7 @@ fn build_grouped_record(
 ) -> Result<RecordBatch> {
     let input_width = compiled.input_width;
     let mut columns: Vec<Vec<ScalarValue>> = vec![Vec::new(); input_width];
-    let mut derived: Vec<Vec<Option<f64>>> = vec![Vec::new(); compiled.outputs.len()];
+    let mut derived: Vec<Vec<ScalarValue>> = vec![Vec::new(); compiled.outputs.len()];
     for rows in groups.values() {
         let group_outputs = compute_group(rows, compiled);
         for row in rows.values() {
@@ -1517,8 +1619,20 @@ fn build_grouped_record(
             })?);
         }
     }
-    for column in derived {
-        arrays.push(Arc::new(Float64Array::from(column)));
+    for (ordinal, column) in derived.into_iter().enumerate() {
+        if column.is_empty() {
+            arrays.push(new_null_array(
+                output_schema.field(input_width + ordinal).data_type(),
+                0,
+            ));
+        } else {
+            arrays.push(ScalarValue::iter_to_array(column).map_err(|error| {
+                operator_error(
+                    node_id,
+                    &format!("cross-section derived column encoding failed: {error}"),
+                )
+            })?);
+        }
     }
     RecordBatch::try_new(Arc::clone(output_schema), arrays).map_err(|error| {
         operator_error(
@@ -1551,6 +1665,7 @@ struct CompiledKeyColumn {
 struct CompiledCrossSectionOutput {
     input_index: usize,
     name: String,
+    data_type: DataType,
     evaluation: CompiledEvaluation,
 }
 
@@ -1567,6 +1682,20 @@ enum CompiledEvaluation {
         min_samples: u64,
         ddof: u8,
         zscore: bool,
+    },
+    Winsorize {
+        min_samples: u64,
+        lower: f64,
+        upper: f64,
+    },
+    Selection {
+        count: u64,
+        include_ties: bool,
+        min_samples: u64,
+        top: bool,
+    },
+    MeanFill {
+        min_samples: u64,
     },
 }
 
@@ -1840,13 +1969,18 @@ fn classify_order_sample(value: &ScalarValue) -> OrderSample {
 /// Computes every declared output for one complete group and returns one
 /// aligned column per output in declaration order (SCE-00 D6). Rows arrive
 /// and return in the group's canonical order; the measured-value sort never
-/// reorders output rows.
+/// reorders output rows. Compatible outputs over one input column reuse the
+/// same classified sample and ascending sort pass.
 fn compute_group(
     rows: &BTreeMap<RowIdentity, BufferedRow>,
     compiled: &CompiledCrossSectionSpec,
-) -> Vec<Vec<Option<f64>>> {
+) -> Vec<Vec<ScalarValue>> {
     let mut columns = Vec::with_capacity(compiled.outputs.len());
+    let mut prepared = BTreeMap::new();
     for output in &compiled.outputs {
+        let prepared = prepared
+            .entry(output.input_index)
+            .or_insert_with(|| PreparedCrossSectionColumn::new(rows, output.input_index));
         let column = match &output.evaluation {
             CompiledEvaluation::OrderStatistic {
                 direction,
@@ -1854,30 +1988,38 @@ fn compute_group(
                 null_placement,
                 min_samples,
                 percentile,
-            } => {
-                let samples = rows
-                    .values()
-                    .map(|row| classify_order_sample(&row.values[output.input_index]))
-                    .collect::<Vec<_>>();
-                order_statistic_column(
-                    &samples,
-                    *direction,
-                    *tie_method,
-                    *null_placement,
-                    *min_samples,
-                    *percentile,
-                )
-            }
+            } => float64_scalars(order_statistic_column_prepared(
+                prepared,
+                *direction,
+                *tie_method,
+                *null_placement,
+                *min_samples,
+                *percentile,
+            )),
             CompiledEvaluation::Statistic {
                 min_samples,
                 ddof,
                 zscore,
-            } => {
-                let samples = rows
-                    .values()
-                    .map(|row| classify_sample(&row.values[output.input_index]))
-                    .collect::<Vec<_>>();
-                statistic_column(&samples, *min_samples, *ddof, *zscore)
+            } => float64_scalars(statistic_column_with_accumulator(
+                &prepared.samples,
+                prepared.accumulator,
+                *min_samples,
+                *ddof,
+                *zscore,
+            )),
+            CompiledEvaluation::Winsorize {
+                min_samples,
+                lower,
+                upper,
+            } => winsorize_column(prepared, *min_samples, *lower, *upper),
+            CompiledEvaluation::Selection {
+                count,
+                include_ties,
+                min_samples,
+                top,
+            } => selection_column(prepared, *count, *include_ties, *min_samples, *top),
+            CompiledEvaluation::MeanFill { min_samples } => {
+                mean_fill_column(prepared, *min_samples)
             }
         };
         columns.push(column);
@@ -1885,76 +2027,78 @@ fn compute_group(
     columns
 }
 
-/// One row's slot in the ordering of an order-statistic output: an equal
-/// value class or the single null class.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OrderSlot<'a> {
-    Null,
-    Value(&'a KeyValue),
+struct PreparedCrossSectionColumn {
+    values: Vec<ScalarValue>,
+    samples: Vec<Sample>,
+    order_samples: Vec<OrderSample>,
+    ascending_value_indices: Vec<usize>,
+    accumulator: StatisticAccumulator,
 }
 
-fn compare_order_slots(
-    left: OrderSlot<'_>,
-    right: OrderSlot<'_>,
-    direction: SortDirection,
-) -> Ordering {
-    let ordering = match (left, right) {
-        (OrderSlot::Value(left_value), OrderSlot::Value(right_value)) => {
-            left_value.cmp(right_value)
+impl PreparedCrossSectionColumn {
+    fn new(rows: &BTreeMap<RowIdentity, BufferedRow>, input_index: usize) -> Self {
+        let values = rows
+            .values()
+            .map(|row| row.values[input_index].clone())
+            .collect::<Vec<_>>();
+        let samples = values.iter().map(classify_sample).collect::<Vec<_>>();
+        let order_samples = values.iter().map(classify_order_sample).collect::<Vec<_>>();
+        let mut ascending_value_indices = order_samples
+            .iter()
+            .enumerate()
+            .filter_map(|(index, sample)| matches!(sample, OrderSample::Valid(_)).then_some(index))
+            .collect::<Vec<_>>();
+        ascending_value_indices.sort_by(|left, right| {
+            match (&order_samples[*left], &order_samples[*right]) {
+                (OrderSample::Valid(left), OrderSample::Valid(right)) => left.cmp(right),
+                _ => Ordering::Equal,
+            }
+        });
+        let accumulator = accumulate_statistics(&samples);
+        Self {
+            values,
+            samples,
+            order_samples,
+            ascending_value_indices,
+            accumulator,
         }
-        (OrderSlot::Null, OrderSlot::Null) => Ordering::Equal,
-        (OrderSlot::Null, OrderSlot::Value(_)) | (OrderSlot::Value(_), OrderSlot::Null) => {
-            Ordering::Equal
-        }
-    };
-    match direction {
-        SortDirection::Ascending => ordering,
-        SortDirection::Descending => ordering.reverse(),
     }
 }
 
-fn value_order_slots(
-    samples: &[OrderSample],
-    direction: SortDirection,
-) -> Vec<(OrderSlot<'_>, usize)> {
-    let mut slots: Vec<(OrderSlot<'_>, usize)> = samples
-        .iter()
-        .enumerate()
-        .filter_map(|(index, sample)| match sample {
-            OrderSample::Valid(order) => Some((OrderSlot::Value(order), index)),
-            OrderSample::Null | OrderSample::Nan => None,
-        })
-        .collect();
-    slots.sort_by(|left, right| compare_order_slots(left.0, right.0, direction));
-    slots
-}
-
-fn null_order_slots(samples: &[OrderSample]) -> Vec<(OrderSlot<'_>, usize)> {
-    samples
-        .iter()
-        .enumerate()
-        .filter(|(_, sample)| matches!(sample, OrderSample::Null))
-        .map(|(index, _)| (OrderSlot::Null, index))
-        .collect()
-}
-
-fn ordered_slots(
-    samples: &[OrderSample],
+fn ordered_indices(
+    prepared: &PreparedCrossSectionColumn,
     direction: SortDirection,
     null_placement: NullPlacement,
-) -> Vec<(OrderSlot<'_>, usize)> {
-    let mut values = value_order_slots(samples, direction);
+) -> Vec<usize> {
+    let mut values = prepared.ascending_value_indices.clone();
+    if direction == SortDirection::Descending {
+        values.reverse();
+    }
+    let nulls = prepared
+        .order_samples
+        .iter()
+        .enumerate()
+        .filter_map(|(index, sample)| matches!(sample, OrderSample::Null).then_some(index))
+        .collect::<Vec<_>>();
     match null_placement {
         NullPlacement::Exclude => values,
         NullPlacement::First => {
-            let mut nulls = null_order_slots(samples);
+            let mut nulls = nulls;
             nulls.extend(values);
             nulls
         }
         NullPlacement::Last => {
-            values.extend(null_order_slots(samples));
+            values.extend(nulls);
             values
         }
+    }
+}
+
+fn same_order_class(samples: &[OrderSample], left: usize, right: usize) -> bool {
+    match (&samples[left], &samples[right]) {
+        (OrderSample::Null, OrderSample::Null) => true,
+        (OrderSample::Valid(left), OrderSample::Valid(right)) => left == right,
+        _ => false,
     }
 }
 
@@ -1962,16 +2106,17 @@ fn ordered_slots(
     clippy::cast_precision_loss,
     reason = "the frozen rank/percentile output type is float64"
 )]
-fn rank_order_slots(
-    slots: &[(OrderSlot<'_>, usize)],
+fn rank_order_indices(
+    samples: &[OrderSample],
+    indices: &[usize],
     sample_count: usize,
     tie_method: RankTieMethod,
 ) -> Vec<Option<f64>> {
     let mut ranks = vec![None; sample_count];
     let mut position = 0_usize;
-    while position < slots.len() {
+    while position < indices.len() {
         let mut end = position;
-        while end < slots.len() && slots[end].0 == slots[position].0 {
+        while end < indices.len() && same_order_class(samples, indices[end], indices[position]) {
             end += 1;
         }
         let first_position = f64::from(u32::try_from(position + 1).unwrap_or(u32::MAX));
@@ -1981,8 +2126,8 @@ fn rank_order_slots(
             RankTieMethod::Min => first_position,
             RankTieMethod::Max => last_position,
         };
-        for slot in &slots[position..end] {
-            ranks[slot.1] = Some(rank);
+        for index in &indices[position..end] {
+            ranks[*index] = Some(rank);
         }
         position = end;
     }
@@ -2026,6 +2171,7 @@ fn render_order_statistics(
     clippy::cast_precision_loss,
     reason = "the frozen rank/percentile output type is float64"
 )]
+#[cfg(test)]
 fn order_statistic_column(
     samples: &[OrderSample],
     direction: SortDirection,
@@ -2034,17 +2180,227 @@ fn order_statistic_column(
     min_samples: u64,
     percentile: bool,
 ) -> Vec<Option<f64>> {
-    let slots = ordered_slots(samples, direction, null_placement);
-    let ordered_count = slots.len();
-    let ranks = rank_order_slots(&slots, samples.len(), tie_method);
+    let mut ascending_value_indices = samples
+        .iter()
+        .enumerate()
+        .filter_map(|(index, sample)| matches!(sample, OrderSample::Valid(_)).then_some(index))
+        .collect::<Vec<_>>();
+    ascending_value_indices.sort_by(|left, right| match (&samples[*left], &samples[*right]) {
+        (OrderSample::Valid(left), OrderSample::Valid(right)) => left.cmp(right),
+        _ => Ordering::Equal,
+    });
+    let prepared = PreparedCrossSectionColumn {
+        values: Vec::new(),
+        samples: Vec::new(),
+        order_samples: samples.to_vec(),
+        ascending_value_indices,
+        accumulator: StatisticAccumulator::default(),
+    };
+    order_statistic_column_prepared(
+        &prepared,
+        direction,
+        tie_method,
+        null_placement,
+        min_samples,
+        percentile,
+    )
+}
+
+fn order_statistic_column_prepared(
+    prepared: &PreparedCrossSectionColumn,
+    direction: SortDirection,
+    tie_method: RankTieMethod,
+    null_placement: NullPlacement,
+    min_samples: u64,
+    percentile: bool,
+) -> Vec<Option<f64>> {
+    let indices = ordered_indices(prepared, direction, null_placement);
+    let ordered_count = indices.len();
+    let ranks = rank_order_indices(
+        &prepared.order_samples,
+        &indices,
+        prepared.order_samples.len(),
+        tie_method,
+    );
     render_order_statistics(
-        samples,
+        &prepared.order_samples,
         &ranks,
         null_placement,
         min_samples,
         ordered_count,
         percentile,
     )
+}
+
+fn float64_scalars(values: Vec<Option<f64>>) -> Vec<ScalarValue> {
+    values.into_iter().map(ScalarValue::Float64).collect()
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "the validated probability bounds the integral quantile indices to this slice"
+)]
+fn type_seven_quantile(sorted: &[f64], probability: f64) -> f64 {
+    let scaled = probability * (sorted.len() - 1) as f64;
+    let lower_index = scaled.floor() as usize;
+    let upper_index = scaled.ceil() as usize;
+    let lower = sorted[lower_index];
+    let upper = sorted[upper_index];
+    if lower_index == upper_index || lower.to_bits() == upper.to_bits() {
+        return lower;
+    }
+    let fraction = scaled - lower_index as f64;
+    match (lower, upper) {
+        (value, _) if value == f64::NEG_INFINITY && upper == f64::INFINITY => f64::NAN,
+        (value, _) if value == f64::NEG_INFINITY => f64::NEG_INFINITY,
+        (_, value) if value == f64::INFINITY => f64::INFINITY,
+        _ => lower + fraction * (upper - lower),
+    }
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "float32 cross-section inputs intentionally preserve their physical type"
+)]
+fn float_scalar_like(value: &ScalarValue, replacement: Option<f64>) -> ScalarValue {
+    match value {
+        ScalarValue::Float32(_) => ScalarValue::Float32(replacement.map(|value| value as f32)),
+        ScalarValue::Float64(_) => ScalarValue::Float64(replacement),
+        _ => unreachable!("compiled winsorize inputs are floating"),
+    }
+}
+
+fn winsorize_column(
+    prepared: &PreparedCrossSectionColumn,
+    min_samples: u64,
+    lower_probability: f64,
+    upper_probability: f64,
+) -> Vec<ScalarValue> {
+    let valid_count = prepared.ascending_value_indices.len() as u64;
+    if valid_count < min_samples {
+        return prepared
+            .values
+            .iter()
+            .zip(&prepared.samples)
+            .map(|(value, sample)| match sample {
+                Sample::Nan => value.clone(),
+                Sample::Null | Sample::Valid(_) => float_scalar_like(value, None),
+            })
+            .collect();
+    }
+    let sorted = prepared
+        .ascending_value_indices
+        .iter()
+        .filter_map(|index| match prepared.samples[*index] {
+            Sample::Valid(value) => Some(value),
+            Sample::Null | Sample::Nan => None,
+        })
+        .collect::<Vec<_>>();
+    let lower = type_seven_quantile(&sorted, lower_probability);
+    let upper = type_seven_quantile(&sorted, upper_probability);
+    prepared
+        .values
+        .iter()
+        .zip(&prepared.samples)
+        .map(|(original, sample)| match sample {
+            Sample::Null | Sample::Nan => original.clone(),
+            Sample::Valid(value) => {
+                let winsorized = if lower.is_nan() || upper.is_nan() {
+                    f64::NAN
+                } else if *value < lower {
+                    lower
+                } else if *value > upper {
+                    upper
+                } else {
+                    *value
+                };
+                float_scalar_like(original, Some(winsorized))
+            }
+        })
+        .collect()
+}
+
+fn descending_value_indices(prepared: &PreparedCrossSectionColumn) -> Vec<usize> {
+    let ascending = &prepared.ascending_value_indices;
+    let mut descending = Vec::with_capacity(ascending.len());
+    let mut end = ascending.len();
+    while end > 0 {
+        let mut start = end - 1;
+        while start > 0
+            && same_order_class(
+                &prepared.order_samples,
+                ascending[start - 1],
+                ascending[end - 1],
+            )
+        {
+            start -= 1;
+        }
+        descending.extend_from_slice(&ascending[start..end]);
+        end = start;
+    }
+    descending
+}
+
+fn selection_column(
+    prepared: &PreparedCrossSectionColumn,
+    count: u64,
+    include_ties: bool,
+    min_samples: u64,
+    top: bool,
+) -> Vec<ScalarValue> {
+    let valid_count = prepared.ascending_value_indices.len() as u64;
+    if valid_count < min_samples {
+        return vec![ScalarValue::Boolean(None); prepared.samples.len()];
+    }
+    let ordered = if top {
+        descending_value_indices(prepared)
+    } else {
+        prepared.ascending_value_indices.clone()
+    };
+    let selected_count = usize::try_from(count)
+        .unwrap_or(usize::MAX)
+        .min(ordered.len());
+    let mut selected = ordered[..selected_count]
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if include_ties && selected_count > 0 && selected_count < ordered.len() {
+        let boundary = ordered[selected_count - 1];
+        selected.extend(
+            ordered[selected_count..]
+                .iter()
+                .copied()
+                .take_while(|index| same_order_class(&prepared.order_samples, boundary, *index)),
+        );
+    }
+    prepared
+        .samples
+        .iter()
+        .enumerate()
+        .map(|(index, sample)| match sample {
+            Sample::Valid(_) => ScalarValue::Boolean(Some(selected.contains(&index))),
+            Sample::Null | Sample::Nan => ScalarValue::Boolean(None),
+        })
+        .collect()
+}
+
+fn mean_fill_column(prepared: &PreparedCrossSectionColumn, min_samples: u64) -> Vec<ScalarValue> {
+    let fill =
+        (prepared.accumulator.count >= min_samples).then(|| prepared.accumulator.classified_mean());
+    prepared
+        .values
+        .iter()
+        .zip(&prepared.samples)
+        .map(|(original, sample)| match sample {
+            Sample::Null => fill.map_or_else(
+                || original.clone(),
+                |mean| float_scalar_like(original, Some(mean)),
+            ),
+            Sample::Nan | Sample::Valid(_) => original.clone(),
+        })
+        .collect()
 }
 
 /// Applies the min-samples gate and the percentile transform to one rank
@@ -2188,6 +2544,7 @@ fn statistic_value(
     clippy::cast_precision_loss,
     reason = "the frozen z-score output type is float64"
 )]
+#[cfg(test)]
 fn statistic_column(
     samples: &[Sample],
     min_samples: u64,
@@ -2195,6 +2552,16 @@ fn statistic_column(
     zscore: bool,
 ) -> Vec<Option<f64>> {
     let accumulator = accumulate_statistics(samples);
+    statistic_column_with_accumulator(samples, accumulator, min_samples, ddof, zscore)
+}
+
+fn statistic_column_with_accumulator(
+    samples: &[Sample],
+    accumulator: StatisticAccumulator,
+    min_samples: u64,
+    ddof: u8,
+    zscore: bool,
+) -> Vec<Option<f64>> {
     samples
         .iter()
         .map(|sample| statistic_value(*sample, accumulator, min_samples, ddof, zscore))
@@ -2300,6 +2667,32 @@ fn validate_output_version_and_counts(output: &CrossSectionOutputSpec, base: &st
         && ddof > 1
     {
         return Err(invalid_argument(&format!("{base}.ddof"), "must be 0 or 1"));
+    }
+    if output.count() == Some(0) {
+        return Err(invalid_argument(
+            &format!("{base}.count"),
+            "must be greater than zero",
+        ));
+    }
+    if let CrossSectionOutputSpec::Winsorize { lower, upper, .. } = output {
+        if !lower.is_finite() {
+            return Err(invalid_argument(&format!("{base}.lower"), "must be finite"));
+        }
+        if !upper.is_finite() {
+            return Err(invalid_argument(&format!("{base}.upper"), "must be finite"));
+        }
+        if !(0.0..=1.0).contains(lower) || lower > upper {
+            return Err(invalid_argument(
+                &format!("{base}.lower"),
+                "bounds must satisfy 0 <= lower <= upper <= 1",
+            ));
+        }
+        if !(0.0..=1.0).contains(upper) {
+            return Err(invalid_argument(
+                &format!("{base}.upper"),
+                "bounds must satisfy 0 <= lower <= upper <= 1",
+            ));
+        }
     }
     Ok(())
 }
@@ -2468,7 +2861,32 @@ fn compile_output(
     }
     let input_index = exact_field_index(input_schema, output.input())?;
     let input_type = input_schema.field(input_index).data_type().clone();
-    if !is_numeric(&input_type) {
+    validate_output_input_type(output, &input_type)?;
+    Ok(CompiledCrossSectionOutput {
+        input_index,
+        name: output.output().to_owned(),
+        data_type: output_data_type(output, input_type),
+        evaluation: compile_evaluation(output),
+    })
+}
+
+fn validate_output_input_type(
+    output: &CrossSectionOutputSpec,
+    input_type: &DataType,
+) -> Result<()> {
+    if matches!(
+        output,
+        CrossSectionOutputSpec::Winsorize { .. } | CrossSectionOutputSpec::MeanFill { .. }
+    ) && !matches!(input_type, DataType::Float32 | DataType::Float64)
+    {
+        return Err(compile_error(format!(
+            "cross-section {} does not support column {:?} with type {}; expected float32 or float64",
+            output_kind(output),
+            output.input(),
+            input_type
+        )));
+    }
+    if !is_numeric(input_type) {
         return Err(compile_error(format!(
             "cross-section {} does not support column {:?} with type {}",
             output_kind(output),
@@ -2476,7 +2894,11 @@ fn compile_output(
             input_type
         )));
     }
-    let evaluation = match output {
+    Ok(())
+}
+
+fn compile_evaluation(output: &CrossSectionOutputSpec) -> CompiledEvaluation {
+    match output {
         CrossSectionOutputSpec::Rank {
             direction,
             tie_method,
@@ -2509,12 +2931,52 @@ fn compile_output(
             ddof: *ddof,
             zscore: true,
         },
-    };
-    Ok(CompiledCrossSectionOutput {
-        input_index,
-        name: output.output().to_owned(),
-        evaluation,
-    })
+        CrossSectionOutputSpec::Winsorize {
+            min_samples,
+            lower,
+            upper,
+            ..
+        } => CompiledEvaluation::Winsorize {
+            min_samples: *min_samples,
+            lower: *lower,
+            upper: *upper,
+        },
+        CrossSectionOutputSpec::Top {
+            count,
+            include_ties,
+            min_samples,
+            ..
+        }
+        | CrossSectionOutputSpec::Bottom {
+            count,
+            include_ties,
+            min_samples,
+            ..
+        } => CompiledEvaluation::Selection {
+            count: *count,
+            include_ties: *include_ties,
+            min_samples: *min_samples,
+            top: matches!(output, CrossSectionOutputSpec::Top { .. }),
+        },
+        CrossSectionOutputSpec::MeanFill { min_samples, .. } => CompiledEvaluation::MeanFill {
+            min_samples: *min_samples,
+        },
+    }
+}
+
+fn output_data_type(output: &CrossSectionOutputSpec, input_type: DataType) -> DataType {
+    match output {
+        CrossSectionOutputSpec::Winsorize { .. } | CrossSectionOutputSpec::MeanFill { .. } => {
+            input_type
+        }
+        CrossSectionOutputSpec::Top { .. } | CrossSectionOutputSpec::Bottom { .. } => {
+            DataType::Boolean
+        }
+        CrossSectionOutputSpec::Rank { .. }
+        | CrossSectionOutputSpec::Percentile { .. }
+        | CrossSectionOutputSpec::Demean { .. }
+        | CrossSectionOutputSpec::Zscore { .. } => DataType::Float64,
+    }
 }
 
 fn output_kind(output: &CrossSectionOutputSpec) -> &'static str {
@@ -2523,6 +2985,10 @@ fn output_kind(output: &CrossSectionOutputSpec) -> &'static str {
         CrossSectionOutputSpec::Percentile { .. } => "percentile",
         CrossSectionOutputSpec::Demean { .. } => "demean",
         CrossSectionOutputSpec::Zscore { .. } => "zscore",
+        CrossSectionOutputSpec::Winsorize { .. } => "winsorize",
+        CrossSectionOutputSpec::Top { .. } => "top",
+        CrossSectionOutputSpec::Bottom { .. } => "bottom",
+        CrossSectionOutputSpec::MeanFill { .. } => "mean_fill",
     }
 }
 
@@ -2610,7 +3076,7 @@ fn output_schema(input_schema: &Schema, outputs: &[CompiledCrossSectionOutput]) 
     fields.extend(
         outputs
             .iter()
-            .map(|output| Field::new(&output.name, DataType::Float64, true).into()),
+            .map(|output| Field::new(&output.name, output.data_type.clone(), true).into()),
     );
     Schema::new(fields)
 }
@@ -2945,6 +3411,21 @@ mod tests {
 
     #[test]
     fn order_and_statistic_helpers_cover_edge_semantics() {
+        assert!((type_seven_quantile(&[0.0, 10.0], 0.25) - 2.5).abs() < f64::EPSILON);
+        assert_eq!(
+            type_seven_quantile(&[1.0], 0.5).to_bits(),
+            1.0_f64.to_bits()
+        );
+        assert_eq!(
+            type_seven_quantile(&[1.0, 1.0], 0.5).to_bits(),
+            1.0_f64.to_bits()
+        );
+        assert!(type_seven_quantile(&[f64::NEG_INFINITY, f64::INFINITY], 0.5).is_nan());
+        let negative = type_seven_quantile(&[f64::NEG_INFINITY, 0.0], 0.5);
+        assert!(negative.is_infinite() && negative.is_sign_negative());
+        let positive = type_seven_quantile(&[0.0, f64::INFINITY], 0.5);
+        assert!(positive.is_infinite() && positive.is_sign_positive());
+
         let order_samples = [
             OrderSample::Valid(KeyValue::Float64(2.0)),
             OrderSample::Valid(KeyValue::Float64(2.0)),

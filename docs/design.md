@@ -170,8 +170,9 @@ reproduces the same ordered output.
 ## Cross-section groups
 
 `CrossSectionOperator` evaluates complete-group rank, percentile, z-score,
-and demean outputs over exact-time or fixed-bucket groups and runs in both
-batch and stream graphs. Its `CrossSectionSpec` declares the event-time
+demean, winsorize, top/bottom selection, and mean-fill outputs over exact-time
+or fixed-bucket groups and runs in both batch and stream graphs. Its
+`CrossSectionSpec` declares the event-time
 column, ordered entity and sequence keys, an optional partition key, the
 grouping, per-output ordering choices with minimum samples, allowed
 lateness, and a late-row policy; row identity is the event time, entity key,
