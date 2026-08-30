@@ -255,6 +255,24 @@ pub enum StaticArrayValues {
 /// snapshot.shape()[0] = 2;
 /// # Ok::<(), calc_flow::CalcFlowError>(())
 /// ```
+///
+/// ```compile_fail
+/// use calc_flow::Batch;
+///
+/// let batch = Batch::static_array_float("numpy", "float32", vec![1], None, vec![1.0])?;
+/// let snapshot = batch.static_array_snapshot().expect("latched array");
+/// let _copy = snapshot.clone();
+/// # Ok::<(), calc_flow::CalcFlowError>(())
+/// ```
+///
+/// ```compile_fail
+/// use calc_flow::Batch;
+///
+/// let batch = Batch::static_array_float("numpy", "float32", vec![1], None, vec![1.0])?;
+/// let snapshot = batch.static_array_snapshot().expect("latched array");
+/// let _rendered = format!("{snapshot:?}");
+/// # Ok::<(), calc_flow::CalcFlowError>(())
+/// ```
 #[must_use = "the owned snapshot contains a complete static-array value copy"]
 #[non_exhaustive]
 pub struct StaticArraySnapshot {

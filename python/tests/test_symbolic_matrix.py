@@ -247,7 +247,13 @@ def test_symbolic_matrix_rejects_columns_from_a_different_attached_table(
 
 @pytest.mark.parametrize(
     "case",
-    ("zero-matmul", "two-matmuls", "rhs-expression"),
+    (
+        "zero-matmul",
+        "two-matmuls",
+        "rhs-expression",
+        "weights-after-matmul",
+        "weights-in-matmul-left",
+    ),
 )
 @pytest.mark.parametrize("mode", ("batch", "stream"))
 def test_symbolic_matrix_requires_one_matmul_with_identity_weights_rhs(
@@ -270,8 +276,12 @@ def test_symbolic_matrix_requires_one_matmul_with_identity_weights_rhs(
         scores = matrix * weights
     elif case == "two-matmuls":
         scores = linalg.matmul(matrix, weights) + linalg.matmul(matrix, weights)
-    else:
+    elif case == "rhs-expression":
         scores = linalg.matmul(matrix, ArrayExpr(weights._node) + 0.0)
+    elif case == "weights-after-matmul":
+        scores = linalg.matmul(matrix, weights) + weights
+    else:
+        scores = linalg.matmul(matrix + weights, weights)
     program = Program(
         "symbolic-matrix-frozen-shape",
         inputs=(source, weights),

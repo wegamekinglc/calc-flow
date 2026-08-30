@@ -988,6 +988,7 @@ class _MatrixExpression:
     columns: tuple[str, ...]
     source_digests: frozenset[str]
     parameter: Node | None
+    weights_count: int
     matmul_count: int
     matmul_rhs_is_weights: bool
     tree: dict[str, object]
@@ -1091,6 +1092,7 @@ def _matrix_leaf_expression(
             frozenset({node.args[0].digest}),
             None,
             0,
+            0,
             True,
             {"op": "input"},
         )
@@ -1108,6 +1110,7 @@ def _matrix_leaf_expression(
             (),
             frozenset(),
             node,
+            1,
             0,
             True,
             {"op": "weights"},
@@ -1118,6 +1121,7 @@ def _matrix_leaf_expression(
             (),
             frozenset(),
             None,
+            0,
             0,
             True,
             {"op": "literal", "value": _matrix_literal(node, path)},
@@ -1137,6 +1141,7 @@ def _matrix_unary_expression(
         value.columns,
         value.source_digests,
         value.parameter,
+        value.weights_count,
         value.matmul_count,
         value.matmul_rhs_is_weights,
         {"op": operation, "value": value.tree},
@@ -1164,6 +1169,7 @@ def _matrix_binary_expression(
         columns,
         left.source_digests | right.source_digests,
         parameter,
+        left.weights_count + right.weights_count,
         left.matmul_count + right.matmul_count + (operation == "matmul"),
         left.matmul_rhs_is_weights
         and right.matmul_rhs_is_weights
@@ -1251,7 +1257,11 @@ def _require_frozen_matrix_shape(
     output_name: str,
     /,
 ) -> None:
-    if matrix.matmul_count != 1 or not matrix.matmul_rhs_is_weights:
+    if (
+        matrix.weights_count != 1
+        or matrix.matmul_count != 1
+        or not matrix.matmul_rhs_is_weights
+    ):
         errors.raise_compile(
             f"outputs.{output_name}.array",
             errors.CAPABILITY_MISMATCH,
