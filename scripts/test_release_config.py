@@ -413,13 +413,21 @@ class ReleaseConfigTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        for workflow, gate in ((linux, "linux-gate"), (windows, "windows-gate")):
+        for workflow, gate, next_job in (
+            (linux, "linux-gate", "docs-check"),
+            (windows, "windows-gate", "process-tree"),
+        ):
             with self.subTest(gate=gate):
+                changes = workflow.split("  changes:\n", 1)[1].split(
+                    f"  {next_job}:\n", 1
+                )[0]
                 self.assertIn("  changes:\n", workflow)
                 self.assertIn("scripts/classify_ci_changes.py", workflow)
                 self.assertIn(
                     "docs_only: ${{ steps.classify.outputs.docs_only }}", workflow
                 )
+                self.assertIn("uses: actions/setup-python@", changes)
+                self.assertIn("python-version-file: .python-version", changes)
                 self.assertIn("cancel-in-progress: true", workflow)
                 self.assertIn(f"  {gate}:\n", workflow)
                 self.assertIn("if: always()", workflow.split(f"  {gate}:\n", 1)[1])
@@ -567,6 +575,10 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("- lint-and-test", finish)
         self.assertIn("- studio-backend", finish)
         self.assertIn("- rust-coverage", finish)
+        self.assertIn(
+            "if: always() && needs.changes.outputs.docs_only != 'true'",
+            finish,
+        )
         self.assertIn("parallel-finished: true", finish)
 
     def test_scheduled_rust_benchmark_targets_only_core_harness(self) -> None:
