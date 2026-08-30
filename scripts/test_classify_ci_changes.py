@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from subprocess import CompletedProcess
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from scripts.classify_ci_changes import changed_paths, docs_only
@@ -36,9 +36,7 @@ class ClassifyCiChangesTests(unittest.TestCase):
 
     @patch("scripts.classify_ci_changes.subprocess.run")
     def test_changed_paths_disables_rename_detection(self, run: MagicMock) -> None:
-        run.return_value = CompletedProcess(
-            args=(), returncode=0, stdout=b"src/lib.rs\0docs/lib.md\0"
-        )
+        run.return_value = SimpleNamespace(stdout=b"src/lib.rs\0docs/lib.md\0")
 
         self.assertEqual(
             changed_paths("base", "head"),
