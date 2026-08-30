@@ -434,6 +434,18 @@ class ReleaseConfigTests(unittest.TestCase):
 
         self.assertIn("  docs-check:\n", linux)
         self.assertIn('run: git diff --check "$BASE_SHA" "$HEAD_SHA"', linux)
+        docs_check = linux.split("  docs-check:\n", 1)[1].split(
+            "  connector-containers:\n", 1
+        )[0]
+        self.assertNotIn("if: needs.changes.outputs.docs_only", docs_check)
+
+        linux_gate = linux.split("  linux-gate:\n", 1)[1]
+        docs_result_check = 'test "$DOCS_RESULT" = success'
+        self.assertIn(docs_result_check, linux_gate)
+        self.assertLess(
+            linux_gate.index(docs_result_check),
+            linux_gate.index('if [ "$DOCS_ONLY" = true ]; then'),
+        )
 
     def test_linux_ci_builds_the_core_wheel_once_for_consumers(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
