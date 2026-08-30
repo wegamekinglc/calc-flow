@@ -1,9 +1,9 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use tokio::sync::watch;
 
-use crate::{CalcFlowError, CancellationToken, JsonMap, Result};
+use crate::{Batch, CalcFlowError, CancellationToken, JsonMap, Result};
 
 /// The immutable, job-scoped context shared by every task of one streaming
 /// job (plan task M2.1 derives per-task scopes from this value).
@@ -11,13 +11,27 @@ use crate::{CalcFlowError, CancellationToken, JsonMap, Result};
 /// M1.1 introduces the type so `StreamOperatorContext` can expose the frozen
 /// `job()` accessor (API note A2); the supervisor model of M2 owns
 /// construction in production paths.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct StreamJobContext {
     job_id: u64,
     fingerprint: String,
     settings: JsonMap,
     deadline: Option<DateTime<Utc>>,
     cancellation: CancellationToken,
+    static_inputs: Arc<BTreeMap<String, Batch>>,
+}
+
+impl fmt::Debug for StreamJobContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StreamJobContext")
+            .field("job_id", &self.job_id)
+            .field("fingerprint", &self.fingerprint)
+            .field("settings", &self.settings)
+            .field("deadline", &self.deadline)
+            .field("static_input_count", &self.static_inputs.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl StreamJobContext {
@@ -36,7 +50,19 @@ impl StreamJobContext {
             settings,
             deadline,
             cancellation,
+            static_inputs: Arc::new(BTreeMap::new()),
         }
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_static_inputs(mut self, inputs: BTreeMap<String, Batch>) -> Self {
+        self.static_inputs = Arc::new(inputs);
+        self
+    }
+
+    pub(crate) fn static_input(&self, name: &str) -> Option<&Batch> {
+        self.static_inputs.get(name)
     }
 
     pub const fn job_id(&self) -> u64 {

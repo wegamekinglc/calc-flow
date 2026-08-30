@@ -12,48 +12,103 @@ import pytest
 
 from calc_flow import (
     Batch,
+    Cursor,
+    Data,
+    DisabledWatermarks,
     ManagedCheckpointRuntime,
+    NativeWatermarkCapability,
     ReplayPositioning,
+    Runtime,
     SinkBinding,
     SourceBinding,
     SourceCapabilities,
     SourceDeliveryCapability,
     StreamingRunner,
+    register_numpy,
 )
 from calc_flow.pipeline import PipelineBuilder, _canonical
 
 
 class _Source:
+    def __init__(self, batch: Batch | None = None) -> None:
+        self._batch = batch
+
     def capabilities(self) -> SourceCapabilities:
         return SourceCapabilities(
             ReplayPositioning.UNSUPPORTED,
             SourceDeliveryCapability.LOSSY,
-            max_batch_rows=1,
+            max_batch_rows=2,
             max_batch_bytes=1024,
+            native_watermarks=NativeWatermarkCapability.NEVER_EMITS,
         )
 
     async def open(self, cursor: object) -> None:
         return None
 
-    async def next(self) -> None:
-        return None
+    async def next(self) -> Data | None:
+        if self._batch is None:
+            return None
+        batch = self._batch
+        self._batch = None
+        return Data(batch, Cursor(b"1", {}))
 
     async def close(self) -> None:
         return None
 
 
 class _Sink:
+    def __init__(self) -> None:
+        self.batches: list[Batch] = []
+
     async def open(self) -> None:
         return None
 
-    async def write(self, batch: object) -> None:
-        return None
+    async def write(self, batch: Batch) -> None:
+        self.batches.append(batch)
 
     async def close(self) -> None:
         return None
 
 
 def _project(declaration: dict[str, object]) -> dict[str, object]:
+    nodes = (
+        [
+            {
+                "id": "matrix",
+                "operator": {
+                    "kind": "external",
+                    "provider": "numpy",
+                    "name": "symbolic_matrix",
+                    "version": "1",
+                    "options": {
+                        "columns": ["x"],
+                        "expression": {
+                            "left": {"op": "input"},
+                            "op": "matmul",
+                            "right": {"op": "weights"},
+                        },
+                        "names": ["score"],
+                    },
+                },
+                "input_ports": [
+                    {"name": "input", "kind": "table"},
+                    {"name": "weights", "kind": "array"},
+                ],
+                "output_ports": [{"name": "output", "kind": "table"}],
+            }
+        ]
+        if declaration["kind"] == "array"
+        else [
+            {
+                "id": "merge",
+                "operator": {"kind": "union"},
+                "input_ports": [
+                    {"name": "a", "kind": "table"},
+                    {"name": "w", "kind": "table"},
+                ],
+            }
+        ]
+    )
     return {
         "format_version": 3,
         "id": "static-inputs",
@@ -61,16 +116,7 @@ def _project(declaration: dict[str, object]) -> dict[str, object]:
         "runtime": {"mode": "stream", "options": {}},
         "graph": {
             "name": "static-inputs",
-            "nodes": [
-                {
-                    "id": "merge",
-                    "operator": {"kind": "union"},
-                    "input_ports": [
-                        {"name": "a", "kind": "table"},
-                        {"name": "w", "kind": "table"},
-                    ],
-                }
-            ],
+            "nodes": nodes,
         },
         "static_inputs": [declaration],
     }
@@ -88,18 +134,21 @@ def _table_declaration() -> dict[str, object]:
 def _array_declaration() -> dict[str, object]:
     return {
         "kind": "array",
-        "name": "w",
+        "name": "weights",
         "mutability": "static",
         "backend": "numpy",
         "dtype": "float64",
-        "shape": [3],
+        "shape": [1, 1],
     }
 
 
 def _plan(declaration: dict[str, object]) -> object:
-    return PipelineBuilder._from_json(
-        _canonical(_project(declaration))
-    ).compile_stream()
+    builder = PipelineBuilder._from_json(_canonical(_project(declaration)))
+    if declaration["kind"] != "array":
+        return builder.compile_stream()
+    runtime = Runtime()
+    register_numpy(runtime)
+    return builder.compile_stream(runtime=runtime)
 
 
 def _weights_table() -> Batch:
@@ -113,11 +162,21 @@ def _runner(
     plan: object,
     tmp_path: Path,
     static_inputs: Mapping[str, Batch] | None,
+    *,
+    source: _Source | None = None,
+    sink: _Sink | None = None,
 ) -> StreamingRunner:
+    selected_source = _Source() if source is None else source
+    selected_sink = _Sink() if sink is None else sink
     return StreamingRunner(
         plan,
-        {"a": SourceBinding(_Source())},
-        {"output": [SinkBinding.ordinary("archive", _Sink())]},
+        {
+            plan.source_binding_ids[0]: SourceBinding(
+                selected_source,
+                watermark_policy=DisabledWatermarks(),
+            )
+        },
+        {"output": [SinkBinding.ordinary("archive", selected_sink)]},
         ManagedCheckpointRuntime(tmp_path / "managed"),
         static_inputs=static_inputs,
     )
@@ -171,24 +230,34 @@ def test_latched_array_values_survive_caller_mutation(tmp_path: Path) -> None:
     latch seam, so caller-side mutation afterwards cannot reach the job."""
     import asyncio
 
-    values = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+    values = np.array([[4.0]], dtype=np.float64)
     weights = Batch.from_array(values, backend="numpy")
-    runner = _runner(_plan(_array_declaration()), tmp_path, {"w": weights})
+    source = _Source(
+        Batch.from_pyarrow(
+            pyarrow.table({"x": pyarrow.array([2.0, 3.0], type=pyarrow.float64())})
+        )
+    )
+    sink = _Sink()
+    runner = _runner(
+        _plan(_array_declaration()),
+        tmp_path,
+        {"weights": weights},
+        source=source,
+        sink=sink,
+    )
     values[:] = 99.0
 
-    # The union node forwards batches but never consumes the static port, so
-    # the job runs to completion with the pre-mutation snapshot latched; the
-    # mutated payload must never surface anywhere.
-    async def guarded() -> None:
+    async def exercise() -> None:
         job = await runner.start_async()
-        outcome = await job.shutdown_async()
-        assert outcome is not None
+        outcome = await job.wait_async()
+        assert outcome.state == "completed"
 
-    try:
-        asyncio.run(guarded())
-    except BaseException as error:  # noqa: BLE001
-        rendered = repr(error)
-        assert "99" not in rendered, rendered
+    asyncio.run(exercise())
+
+    assert len(sink.batches) == 1
+    observed = sink.batches[0].to_pyarrow().to_pydict()
+    assert observed == {"x": [2.0, 3.0], "score": [8.0, 12.0]}
+    assert 99.0 not in observed["score"]
 
 
 def test_missing_static_input_fails_before_sources_open(tmp_path: Path) -> None:

@@ -388,6 +388,59 @@ impl PyRuntime {
     }
 
     #[pyo3(
+        signature = (provider, name, version, callback, *, input_ports, output_ports, microbatch_invariant, deterministic, replay_safe),
+        text_signature = "($self, provider, name, version, callback, *, input_ports, output_ports, microbatch_invariant, deterministic, replay_safe)"
+    )]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the private binding carries the mapping contract and stream proof"
+    )]
+    fn _register_stateless_stream_mapping_provider(
+        &self,
+        py: Python<'_>,
+        provider: &str,
+        name: &str,
+        version: &str,
+        callback: Py<PyAny>,
+        input_ports: Vec<(String, String)>,
+        output_ports: Vec<(String, String)>,
+        microbatch_invariant: bool,
+        deterministic: bool,
+        replay_safe: bool,
+    ) -> PyResult<()> {
+        if !callback.bind(py).is_callable() {
+            return Err(PyTypeError::new_err("provider callback must be callable"));
+        }
+        if !microbatch_invariant {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "stateless stream providers must be micro-batch invariant",
+            ));
+        }
+        let inputs = input_ports
+            .into_iter()
+            .map(|(port, kind)| mapping_port_contract(&port, &kind))
+            .collect::<PyResult<Vec<_>>>()?;
+        let outputs = output_ports
+            .into_iter()
+            .map(|(port, kind)| mapping_port_contract(&port, &kind))
+            .collect::<PyResult<Vec<_>>>()?;
+        let root = Arc::new(PythonRoot::new(callback));
+        let factory: Arc<dyn calc_flow::StreamOperatorFactory> = Arc::new(
+            crate::provider::PythonOperatorFactory::new_stateless_stream_mapping(
+                Arc::clone(&root),
+                provider,
+                name,
+                version,
+                inputs,
+                outputs,
+                deterministic,
+                replay_safe,
+            ),
+        );
+        self.register_stream_provider_factory(provider, name, version, &factory, root)
+    }
+
+    #[pyo3(
         signature = (provider, name, version, callback, *, input_ports, output_ports, accepts_context = ExactBool(false)),
         text_signature = "($self, provider, name, version, callback, *, input_ports, output_ports, accepts_context=False)"
     )]

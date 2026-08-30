@@ -275,6 +275,59 @@ class Runtime:
                 array_rules=array_rules,
             )
 
+    def _register_stateless_stream_mapping_provider(
+        self,
+        provider: str,
+        name: str,
+        version: str,
+        callback: Any,
+        *,
+        microbatch_invariant: bool,
+        deterministic: bool,
+        replay_safe: bool,
+        supports_static_inputs: bool,
+        array_rules: ProviderArrayRules,
+    ) -> None:
+        _validate_stateless_lifecycle_values(
+            {
+                "microbatch_invariant": microbatch_invariant,
+                "deterministic": deterministic,
+                "replay_safe": replay_safe,
+                "supports_static_inputs": supports_static_inputs,
+            }
+        )
+        if not isinstance(array_rules, ProviderArrayRules):
+            raise TypeError(
+                "array_rules must be a ProviderArrayRules; "
+                f"found {type(array_rules).__name__}"
+            )
+        with self._registration_lock:
+            registration = _registered_batch_provider(
+                self._registrations, provider, name, version
+            )
+            if registration.get("provider_mode") != "mapping":
+                raise ValueError(
+                    "stateless stream mapping registration requires an existing "
+                    f"mapping provider {provider}:{name}@{version}"
+                )
+            self._inner._register_stateless_stream_mapping_provider(
+                provider,
+                name,
+                version,
+                callback,
+                input_ports=registration["input_ports"],
+                output_ports=registration["output_ports"],
+                microbatch_invariant=microbatch_invariant,
+                deterministic=deterministic,
+                replay_safe=replay_safe,
+            )
+            registration["stream_lifecycle"] = _StatelessProviderLifecycle(
+                deterministic=deterministic,
+                replay_safe=replay_safe,
+                supports_static_inputs=supports_static_inputs,
+                array_rules=array_rules,
+            )
+
     def register_scalar_udf(
         self,
         *,

@@ -11,7 +11,7 @@ while a compiled plan executes.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Never
 
 from calc_flow.pipeline import (
     Runtime,
@@ -35,6 +35,7 @@ from calc_flow.symbolic.nodes import (
     CInt,
     CMap,
     CNull,
+    CSeq,
     CStr,
     CValue,
     Node,
@@ -78,6 +79,26 @@ _COLUMN_PRIMITIVES: Final = frozenset(
 
 _TABLE_OUTPUT_PRIMITIVES: Final = frozenset(
     {"table_input", "project", "filter", "with_columns"}
+)
+
+_MATRIX_PRIMITIVES: Final = frozenset(
+    {
+        "add",
+        "and",
+        "eq",
+        "ge",
+        "gt",
+        "le",
+        "lt",
+        "matmul",
+        "mul",
+        "ne",
+        "neg",
+        "not",
+        "or",
+        "sub",
+        "truediv",
+    }
 )
 
 _ROLLING_PRIMITIVES: Final = frozenset(
@@ -961,17 +982,466 @@ def _check_declared_inputs(program: Program, /) -> None:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class _MatrixExpression:
+    backend: str
+    columns: tuple[str, ...]
+    source_digests: frozenset[str]
+    parameter: Node | None
+    weights_count: int
+    matmul_count: int
+    matmul_rhs_is_weights: bool
+    tree: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class _LoweringValue:
+    _node: Node
+
+
+@dataclass(frozen=True, slots=True)
+class _LoweringProgram:
+    name: str
+    inputs: tuple[_LoweringValue, ...]
+    outputs: tuple[tuple[str, _LoweringValue], ...]
+
+
+def _matrix_literal(node: Node, path: str, /) -> bool | int | float:
+    value = node.attr("value")
+    if isinstance(value, (CBool, CInt, CFloat)):
+        return value.value
+    errors.raise_compile(
+        path,
+        errors.UNSUPPORTED_TYPE,
+        "symbolic matrix literals must be finite bool, int, or float values",
+    )
+
+
+def _matrix_backend(
+    left: _MatrixExpression,
+    right: _MatrixExpression,
+    path: str,
+    /,
+) -> str:
+    if left.backend and right.backend and left.backend != right.backend:
+        errors.raise_compile(
+            path,
+            errors.CAPABILITY_MISMATCH,
+            "symbolic matrix operands must use one provider backend",
+        )
+    return left.backend or right.backend
+
+
+def _matrix_columns(
+    left: _MatrixExpression,
+    right: _MatrixExpression,
+    path: str,
+    /,
+) -> tuple[str, ...]:
+    if left.columns and right.columns and left.columns != right.columns:
+        errors.raise_compile(
+            path,
+            errors.SCHEMA_MISMATCH,
+            "symbolic matrix operands must use one ordered column selection",
+        )
+    return left.columns or right.columns
+
+
+def _matrix_parameter(
+    left: _MatrixExpression,
+    right: _MatrixExpression,
+    path: str,
+    /,
+) -> Node | None:
+    if (
+        left.parameter is not None
+        and right.parameter is not None
+        and left.parameter.digest != right.parameter.digest
+    ):
+        errors.raise_compile(
+            path,
+            errors.CAPABILITY_MISMATCH,
+            "one symbolic matrix output supports exactly one static parameter",
+        )
+    return left.parameter or right.parameter
+
+
+def _merge_matrix_expression(
+    left: _MatrixExpression,
+    right: _MatrixExpression,
+    path: str,
+    /,
+) -> tuple[str, tuple[str, ...], Node | None]:
+    return (
+        _matrix_backend(left, right, path),
+        _matrix_columns(left, right, path),
+        _matrix_parameter(left, right, path),
+    )
+
+
+def _matrix_leaf_expression(
+    node: Node,
+    path: str,
+    operation: str,
+    /,
+) -> _MatrixExpression | None:
+    if operation == "from_columns":
+        return _MatrixExpression(
+            _cstr(node.attr("backend")),
+            _cstr_seq(node.attr("columns")),
+            frozenset({node.args[0].digest}),
+            None,
+            0,
+            0,
+            True,
+            {"op": "input"},
+        )
+    if operation == "parameter":
+        name = _cstr(node.attr("name"))
+        if name != "weights":
+            errors.raise_compile(
+                f"static_inputs.{name}",
+                errors.CAPABILITY_MISMATCH,
+                "symbolic matrix lowering currently requires the static array"
+                " parameter name 'weights'",
+            )
+        return _MatrixExpression(
+            _cstr(node.attr("backend")),
+            (),
+            frozenset(),
+            node,
+            1,
+            0,
+            True,
+            {"op": "weights"},
+        )
+    if operation == "literal":
+        return _MatrixExpression(
+            "",
+            (),
+            frozenset(),
+            None,
+            0,
+            0,
+            True,
+            {"op": "literal", "value": _matrix_literal(node, path)},
+        )
+    return None
+
+
+def _matrix_unary_expression(
+    node: Node,
+    path: str,
+    operation: str,
+    /,
+) -> _MatrixExpression:
+    value = _matrix_expression(node.args[0], f"{path}.{operation}.value")
+    return _MatrixExpression(
+        value.backend,
+        value.columns,
+        value.source_digests,
+        value.parameter,
+        value.weights_count,
+        value.matmul_count,
+        value.matmul_rhs_is_weights,
+        {"op": operation, "value": value.tree},
+    )
+
+
+def _matrix_rhs_is_weights(node: Node, operation: str, /) -> bool:
+    return operation != "matmul" or (
+        node.args[1].op.name == "parameter"
+        and _cstr(node.args[1].attr("name")) == "weights"
+    )
+
+
+def _matrix_binary_expression(
+    node: Node,
+    path: str,
+    operation: str,
+    /,
+) -> _MatrixExpression:
+    left = _matrix_expression(node.args[0], f"{path}.{operation}.left")
+    right = _matrix_expression(node.args[1], f"{path}.{operation}.right")
+    backend, columns, parameter = _merge_matrix_expression(left, right, path)
+    return _MatrixExpression(
+        backend,
+        columns,
+        left.source_digests | right.source_digests,
+        parameter,
+        left.weights_count + right.weights_count,
+        left.matmul_count + right.matmul_count + (operation == "matmul"),
+        left.matmul_rhs_is_weights
+        and right.matmul_rhs_is_weights
+        and _matrix_rhs_is_weights(node, operation),
+        {"left": left.tree, "op": operation, "right": right.tree},
+    )
+
+
+def _matrix_expression(node: Node, path: str, /) -> _MatrixExpression:
+    operation = node.op.name
+    leaf = _matrix_leaf_expression(node, path, operation)
+    if leaf is not None:
+        return leaf
+    if operation not in _MATRIX_PRIMITIVES:
+        _reject_primitive(path, node)
+    if operation in ("neg", "not"):
+        return _matrix_unary_expression(node, path, operation)
+    return _matrix_binary_expression(node, path, operation)
+
+
+def _static_array_declaration(node: Node, /) -> dict[str, object]:
+    dtype = node.attr("dtype")
+    shape = node.attr("shape")
+    return {
+        "backend": _cstr(node.attr("backend")),
+        "dtype": dtype.name if isinstance(dtype, CDType) else "",
+        "kind": "array",
+        "mutability": "static",
+        "name": _cstr(node.attr("name")),
+        "shape": [
+            dimension.value
+            for dimension in (shape.items if isinstance(shape, CSeq) else ())
+            if isinstance(dimension, CInt)
+        ],
+    }
+
+
+def _matrix_program_output(
+    program: Program | _LoweringProgram,
+    /,
+) -> tuple[str, Node] | None:
+    if len(program.outputs) != 1:
+        return None
+    output_name, value = program.outputs[0]
+    if value._node.op.name != "attach_columns":
+        return None
+    return output_name, value._node
+
+
+def _required_matrix_expression(node: Node, output_name: str, /) -> _MatrixExpression:
+    path = f"outputs.{output_name}.array"
+    matrix = _matrix_expression(node.args[1], path)
+    if not matrix.backend or not matrix.columns:
+        errors.raise_compile(
+            path,
+            errors.UNRESOLVED_TYPE,
+            "symbolic matrix output requires linalg.from_columns",
+        )
+    return matrix
+
+
+def _required_matrix_parameter(
+    matrix: _MatrixExpression,
+    output_name: str,
+    /,
+) -> Node:
+    parameter = matrix.parameter
+    if parameter is None:
+        errors.raise_compile(
+            f"outputs.{output_name}.array",
+            errors.UNRESOLVED_TYPE,
+            "symbolic matrix output requires one static array parameter",
+        )
+    if _cstr(parameter.attr("name")) != "weights":
+        errors.raise_compile(
+            f"outputs.{output_name}.array",
+            errors.UNRESOLVED_TYPE,
+            "symbolic matrix output requires one static array parameter",
+        )
+    return parameter
+
+
+def _require_frozen_matrix_shape(
+    matrix: _MatrixExpression,
+    output_name: str,
+    /,
+) -> None:
+    if (
+        matrix.weights_count != 1
+        or matrix.matmul_count != 1
+        or not matrix.matmul_rhs_is_weights
+    ):
+        errors.raise_compile(
+            f"outputs.{output_name}.array",
+            errors.CAPABILITY_MISMATCH,
+            "symbolic matrix output requires exactly one matmul whose right"
+            " operand is the static 'weights' parameter",
+        )
+
+
+def _attached_matrix_input(
+    node: Node,
+    matrix: _MatrixExpression,
+    output_name: str,
+    /,
+) -> Node:
+    attached_input = node.args[0]
+    if matrix.source_digests != frozenset({attached_input.digest}):
+        errors.raise_compile(
+            f"outputs.{output_name}.value",
+            errors.SCHEMA_MISMATCH,
+            "attached matrix columns must come from the attached table",
+        )
+    return attached_input
+
+
+def _matrix_external_node(
+    output_name: str,
+    node: Node,
+    matrix: _MatrixExpression,
+    /,
+) -> dict[str, object]:
+    return {
+        "id": output_name,
+        "input_ports": [
+            {"kind": "table", "name": "input", "required": True},
+            {"kind": "array", "name": "weights", "required": True},
+        ],
+        "operator": {
+            "kind": "external",
+            "name": "symbolic_matrix",
+            "options": {
+                "columns": list(matrix.columns),
+                "expression": matrix.tree,
+                "names": list(_cstr_seq(node.attr("names"))),
+            },
+            "provider": matrix.backend,
+            "version": "1",
+        },
+        "output_ports": [{"kind": "table", "name": "output", "required": True}],
+    }
+
+
+def _matrix_upstream_project(
+    program: Program | _LoweringProgram,
+    attached_input: Node,
+    upstream_id: str,
+    mode: str,
+    allowed_lateness_micros: int,
+    late_policy: str,
+    /,
+) -> dict[str, object]:
+    upstream = _LoweringProgram(
+        program.name,
+        tuple(
+            _LoweringValue(item._node)
+            for item in program.inputs
+            if item._node.op.name == "table_input"
+        ),
+        ((upstream_id, _LoweringValue(attached_input)),),
+    )
+    return _lower_program(
+        upstream,
+        mode,
+        allowed_lateness_micros,
+        late_policy,
+    )
+
+
+def _raise_matrix_invariant(message: str, /) -> Never:
+    raise RuntimeError(f"symbolic matrix lowering invariant violated: {message}")
+
+
+def _matrix_graph_lists(
+    project: dict[str, object],
+    /,
+) -> tuple[list[object], list[object]]:
+    graph = project.get("graph")
+    if not isinstance(graph, dict):
+        _raise_matrix_invariant("project.graph must be a mapping")
+    nodes = graph.get("nodes")
+    if not isinstance(nodes, list):
+        _raise_matrix_invariant("project.graph.nodes must be a list")
+    edges = graph.get("edges")
+    if not isinstance(edges, list):
+        _raise_matrix_invariant("project.graph.edges must be a list")
+    return nodes, edges
+
+
+def _wire_matrix_node(
+    project: dict[str, object],
+    external: dict[str, object],
+    upstream_id: str,
+    output_name: str,
+    /,
+) -> None:
+    nodes, edges = _matrix_graph_lists(project)
+    nodes.append(external)
+    edges.append(
+        {
+            "source_node": upstream_id,
+            "source_port": "output",
+            "target_node": output_name,
+            "target_port": "input",
+        }
+    )
+
+
+def _lower_matrix_program(
+    program: Program | _LoweringProgram,
+    mode: str,
+    allowed_lateness_micros: int,
+    late_policy: str,
+    /,
+) -> dict[str, object] | None:
+    output = _matrix_program_output(program)
+    if output is None:
+        return None
+    output_name, node = output
+    matrix = _required_matrix_expression(node, output_name)
+    parameter = _required_matrix_parameter(matrix, output_name)
+    _require_frozen_matrix_shape(matrix, output_name)
+    attached_input = _attached_matrix_input(node, matrix, output_name)
+    external = _matrix_external_node(output_name, node, matrix)
+    upstream_id = f"{output_name}__cf_matrix_input"
+    project = _matrix_upstream_project(
+        program,
+        attached_input,
+        upstream_id,
+        mode,
+        allowed_lateness_micros,
+        late_policy,
+    )
+    _wire_matrix_node(project, external, upstream_id, output_name)
+    if mode == "stream":
+        project["static_inputs"] = [_static_array_declaration(parameter)]
+    else:
+        project["data_sources"] = _data_sources(project)
+    return project
+
+
+def _walk_nodes(root: Node, /) -> tuple[Node, ...]:
+    nodes: list[Node] = []
+
+    def visit(node: Node) -> None:
+        nodes.append(node)
+        for child in node.args:
+            visit(child)
+
+    visit(root)
+    return tuple(nodes)
+
+
 # The lowerer keeps per-output segment staging in one deterministic pass:
 # stage order, edge wiring, and id assignment are semantic, so the rolling,
 # prefilter, and CSE stages stay in one place.
 def _lower_program(
-    program: Program,
+    program: Program | _LoweringProgram,
     mode: str,
     allowed_lateness_micros: int,
     late_policy: str,
     /,
 ) -> dict[str, object]:
     # #lizard forgives
+    matrix_project = _lower_matrix_program(
+        program,
+        mode,
+        allowed_lateness_micros,
+        late_policy,
+    )
+    if matrix_project is not None:
+        return matrix_project
     _check_declared_inputs(program)
     segments = []
     for output_name, value in program.outputs:

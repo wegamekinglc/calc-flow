@@ -566,11 +566,10 @@ fn safe_failure_fields(
             Some(ComponentKind::Job),
             None,
         ),
-        FailureOrigin::OperatorEntry { node_id } => (
-            StreamingErrorCategory::Operator,
+        FailureOrigin::OperatorEntry { node_id } => operator_failure_fields(
+            node_id,
+            &failure.error,
             format!("operator {node_id:?} entry failed"),
-            Some(ComponentKind::Operator),
-            Some(node_id.clone()),
         ),
         FailureOrigin::SourceOpen { binding_id } => {
             connector_failure_fields(ComponentKind::Source, binding_id, "source", "open")
@@ -596,7 +595,7 @@ fn safe_failure_fields(
             Some(ComponentKind::Edge),
             Some(edge_id.clone()),
         ),
-        FailureOrigin::Task { task_name, .. } => task_failure_fields(task_name),
+        FailureOrigin::Task { task_name, .. } => task_failure_fields(task_name, &failure.error),
         FailureOrigin::Metrics { .. } => (
             StreamingErrorCategory::Internal,
             "streaming metrics accounting failed".into(),
@@ -608,6 +607,7 @@ fn safe_failure_fields(
 
 fn task_failure_fields(
     task_name: &str,
+    error: &CalcFlowError,
 ) -> (
     StreamingErrorCategory,
     String,
@@ -622,11 +622,10 @@ fn task_failure_fields(
         return connector_failure_fields(ComponentKind::Source, source_id, "source", "callback");
     }
     if let Some(node_id) = task_name.strip_prefix("operator:") {
-        return (
-            StreamingErrorCategory::Operator,
+        return operator_failure_fields(
+            node_id,
+            error,
             format!("operator {node_id:?} execution failed"),
-            Some(ComponentKind::Operator),
-            Some(node_id.into()),
         );
     }
     (
@@ -635,6 +634,34 @@ fn task_failure_fields(
         None,
         None,
     )
+}
+
+fn operator_failure_fields(
+    node_id: &str,
+    error: &CalcFlowError,
+    fallback: String,
+) -> (
+    StreamingErrorCategory,
+    String,
+    Option<ComponentKind>,
+    Option<String>,
+) {
+    (
+        StreamingErrorCategory::Operator,
+        static_input_null_message(error).unwrap_or(fallback),
+        Some(ComponentKind::Operator),
+        Some(node_id.into()),
+    )
+}
+
+fn static_input_null_message(error: &CalcFlowError) -> Option<String> {
+    const PREFIX: &str = "static_inputs.";
+    const SUFFIX: &str = ".nulls: Array API placement does not support null elements";
+    let CalcFlowError::ExternalProvider { message, .. } = error else {
+        return None;
+    };
+    let name = message.strip_prefix(PREFIX)?.strip_suffix(SUFFIX)?;
+    crate::operator::is_portable_identifier(name).then(|| message.clone())
 }
 
 fn preflight_failure_fields(
@@ -1573,6 +1600,62 @@ mod tests {
         assert_eq!(projected[2].component_id(), None);
         let rendered = serde_json::to_string(&projected).unwrap();
         for sentinel in [SECRET, METRIC_ID, "736563726574", "63726564656e7469616c"] {
+            assert!(!rendered.contains(sentinel), "leaked sentinel {sentinel:?}");
+        }
+    }
+
+    #[test]
+    fn operator_null_placement_failure_keeps_only_the_static_input_path() {
+        const NULL_MESSAGE: &str =
+            "static_inputs.weights.nulls: Array API placement does not support null elements";
+        let failures = vec![
+            Arc::new(RuntimeFailure {
+                origin: FailureOrigin::Task {
+                    task_id: TaskId::new(2),
+                    task_name: "operator:matrix".into(),
+                },
+                error: CalcFlowError::ExternalProvider {
+                    provider: format!("provider-{SECRET}"),
+                    name: "424242".into(),
+                    version: "positions-[1,3]-address-0x31337".into(),
+                    message: NULL_MESSAGE.into(),
+                },
+            }),
+            Arc::new(RuntimeFailure {
+                origin: FailureOrigin::OperatorEntry {
+                    node_id: "matrix".into(),
+                },
+                error: CalcFlowError::ExternalProvider {
+                    provider: format!("provider-{SECRET}"),
+                    name: "424242".into(),
+                    version: "positions-[1,3]-address-0x31337".into(),
+                    message: NULL_MESSAGE.into(),
+                },
+            }),
+            Arc::new(RuntimeFailure {
+                origin: FailureOrigin::Task {
+                    task_id: TaskId::new(3),
+                    task_name: "operator:matrix".into(),
+                },
+                error: CalcFlowError::ExternalProvider {
+                    provider: "python".into(),
+                    name: "symbolic_matrix".into(),
+                    version: "1".into(),
+                    message: format!("{NULL_MESSAGE}; positions [1,3] scalar 424242"),
+                },
+            }),
+        ];
+
+        let projected = project_runtime_failures(17, failures, None);
+
+        assert_eq!(projected[0].message(), NULL_MESSAGE);
+        assert_eq!(projected[1].message(), NULL_MESSAGE);
+        assert_eq!(
+            projected[2].message(),
+            "operator \"matrix\" execution failed"
+        );
+        let rendered = serde_json::to_string(&projected).unwrap();
+        for sentinel in [SECRET, "424242", "positions", "[1,3]", "0x31337"] {
             assert!(!rendered.contains(sentinel), "leaked sentinel {sentinel:?}");
         }
     }

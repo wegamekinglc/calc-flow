@@ -1988,11 +1988,13 @@ mod tests {
 
     use async_trait::async_trait;
     use calc_flow::{
-        Batch, CalcFlowError, Cursor, ExpressionOperator, ManagedCheckpointRuntime,
-        NativeWatermarkCapability, PipelineBuilder, ReplayPositioning, Result, SinkBinding,
-        SinkRecovery, SourceBinding, SourceCapabilities, SourceDeliveryCapability, SourceEvent,
-        SourceSchema, StreamExecutionPlan, StreamRequirements, StreamSink, StreamSource,
-        StreamingRunner, TransactionalStreamSink, UdfRegistry,
+        Batch, BatchKind, CalcFlowError, Cursor, EventTime, ExpressionOperator,
+        ManagedCheckpointRuntime, NativeWatermarkCapability, OperatorMetadata, PipelineBuilder,
+        Port, ReplayPositioning, Result, SinkBinding, SinkRecovery, SourceBinding,
+        SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema, StreamCollector,
+        StreamExecutionPlan, StreamOperator, StreamOperatorContext, StreamOperatorLifecycle,
+        StreamRequirements, StreamSink, StreamSource, StreamingRunner, TransactionalStreamSink,
+        UdfRegistry,
     };
     use datafusion::arrow::{
         array::Int64Array,
@@ -2022,6 +2024,85 @@ mod tests {
     }
 
     struct FailingOpenSource;
+
+    struct OneBatchSource {
+        batch: Option<Batch>,
+    }
+
+    struct NullPlacementOperator {
+        input_ports: [Port; 1],
+        output_ports: [Port; 1],
+    }
+
+    impl NullPlacementOperator {
+        fn boxed() -> Box<dyn StreamOperator> {
+            Box::new(Self {
+                input_ports: [Port::new("input", BatchKind::Table, true, None).unwrap()],
+                output_ports: [Port::new("output", BatchKind::Table, true, None).unwrap()],
+            })
+        }
+    }
+
+    impl OperatorMetadata for NullPlacementOperator {
+        fn name(&self) -> &'static str {
+            "null_placement"
+        }
+
+        fn input_ports(&self) -> &[Port] {
+            &self.input_ports
+        }
+
+        fn output_ports(&self) -> &[Port] {
+            &self.output_ports
+        }
+
+        fn configuration(&self) -> calc_flow::JsonMap {
+            BTreeMap::new()
+        }
+    }
+
+    #[async_trait]
+    impl StreamOperator for NullPlacementOperator {
+        fn lifecycle(&self) -> StreamOperatorLifecycle {
+            StreamOperatorLifecycle::Stateless {
+                microbatch_invariant: true,
+                deterministic: true,
+                replay_safe: true,
+            }
+        }
+
+        async fn process_data(
+            &mut self,
+            _ingress: &str,
+            _batch: Batch,
+            _context: &StreamOperatorContext<'_>,
+            _output: &mut dyn StreamCollector,
+        ) -> Result<()> {
+            Err(CalcFlowError::ExternalProvider {
+                provider: "false-true-positions-[1,3]".into(),
+                name: "index-1-index-3-scalar-424242".into(),
+                version: "address-0x31337".into(),
+                message: "static_inputs.weights.nulls: Array API placement does not support null elements".into(),
+            })
+        }
+
+        async fn on_watermark(
+            &mut self,
+            _watermark: EventTime,
+            _context: &StreamOperatorContext<'_>,
+            _output: &mut dyn StreamCollector,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn on_end(
+            &mut self,
+            _context: &StreamOperatorContext<'_>,
+            _output: &mut dyn StreamCollector,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
 
     struct BlockedOpenSource {
         dropped: Arc<AtomicBool>,
@@ -2089,6 +2170,38 @@ mod tests {
 
         async fn next(&mut self) -> Result<Option<SourceEvent>> {
             std::future::pending().await
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl StreamSource for OneBatchSource {
+        fn capabilities(&self) -> SourceCapabilities {
+            SourceCapabilities {
+                replay_positioning: ReplayPositioning::ExactPauseReportAndSeek,
+                delivery: SourceDeliveryCapability::Lossless,
+                max_batch_rows: 1,
+                max_batch_bytes: 1024,
+                schema: SourceSchema::DynamicOrUnknown,
+                native_watermarks: NativeWatermarkCapability::EmitsNative,
+            }
+        }
+
+        async fn open(&mut self, _cursor: Option<Cursor>) -> Result<()> {
+            Ok(())
+        }
+
+        async fn next(&mut self) -> Result<Option<SourceEvent>> {
+            self.batch
+                .take()
+                .map(|batch| {
+                    Cursor::unbound(vec![1], BTreeMap::new())
+                        .map(|cursor| SourceEvent::Data { batch, cursor })
+                })
+                .transpose()
         }
 
         async fn close(&mut self) -> Result<()> {
@@ -2280,6 +2393,10 @@ mod tests {
     }
 
     fn python_batch() -> PyBatch {
+        PyBatch::from_inner(native_batch())
+    }
+
+    fn native_batch() -> Batch {
         let schema = Arc::new(Schema::new(vec![Field::new(
             "value",
             DataType::Int64,
@@ -2287,9 +2404,7 @@ mod tests {
         )]));
         let values = Arc::new(Int64Array::from(vec![1_i64]));
         let record = RecordBatch::try_new(schema, vec![values]).unwrap();
-        PyBatch::from_inner(
-            Batch::table(vec![record], calc_flow::BatchMetadata::default()).unwrap(),
-        )
+        Batch::table(vec![record], calc_flow::BatchMetadata::default()).unwrap()
     }
 
     fn assert_native_source_variants(py: Python<'_>, locals: &Bound<'_, PyDict>) {
@@ -2701,6 +2816,35 @@ mod tests {
         .unwrap()
     }
 
+    fn null_placement_runner(managed_root: &std::path::Path) -> StreamingRunner {
+        let plan = PipelineBuilder::new("python-null-redaction")
+            .unwrap()
+            .add_node("matrix", NullPlacementOperator::boxed())
+            .unwrap()
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements::default(),
+            )
+            .unwrap();
+        let source_id = plan.source_binding_ids()[0].to_owned();
+        let output_id = plan.sink_binding_ids()[0].to_owned();
+        StreamingRunner::new(
+            plan,
+            BTreeMap::from([(
+                source_id,
+                SourceBinding::new(OneBatchSource {
+                    batch: Some(native_batch()),
+                }),
+            )]),
+            BTreeMap::from([(
+                output_id,
+                vec![SinkBinding::ordinary("sink", NoopSink).unwrap()],
+            )]),
+            ManagedCheckpointRuntime::new(managed_root).unwrap(),
+        )
+        .unwrap()
+    }
+
     fn blocked_start_runner(
         managed_root: &std::path::Path,
         dropped: Arc<AtomicBool>,
@@ -3050,6 +3194,59 @@ mod tests {
             py.run(
                 &CString::new(
                     "import asyncio, traceback\nasync def exercise():\n    try:\n        await runner.start_async()\n    except Exception as error:\n        assert type(error).__name__ == 'StreamingRuntimeError'\n        assert error.category == 'connector'\n        assert error.message == str(error)\n        assert error.job_id is not None\n        assert error.epoch is None\n        assert error.checkpoint_phase is None\n        assert error.component_kind == 'source'\n        assert error.component_id == 'input'\n        assert error.diagnostic_id is None\n        assert error.position == 0\n        assert error.__cause__ is None\n        assert error.__context__ is None\n        rendered = repr(error) + str(error) + ''.join(traceback.format_exception(error)) + repr(vars(error))\n        for sentinel in ('private-connector-payload-redaction-sentinel', 'python-private-provider', 'private-source', 'private-version'):\n            assert sentinel not in rendered\n        try:\n            error.category = 'tampered'\n        except AttributeError:\n            pass\n        else:\n            raise AssertionError('safe exception fields must be read-only')\n        backing = error._calc_flow_safe_fields\n        try:\n            backing['category'] = 'tampered-through-dict'\n        except TypeError:\n            pass\n        else:\n            raise AssertionError('safe exception backing must be immutable')\n        try:\n            error._calc_flow_safe_fields = {'category': 'tampered-through-replacement'}\n        except AttributeError:\n            pass\n        else:\n            raise AssertionError('safe exception backing must not be replaceable')\n        vars(error)['_calc_flow_safe_fields'] = {'category': 'shadowed'}\n        assert error._calc_flow_safe_fields['category'] == 'connector'\n        assert error.category == 'connector'\n        assert error.message == str(error)\n    else:\n        raise AssertionError('start unexpectedly succeeded')\nasyncio.run(exercise())",
+                )
+                .unwrap(),
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+        });
+    }
+
+    #[tokio::test]
+    async fn terminal_null_placement_error_is_redacted_in_rust_and_python() {
+        const NULL_MESSAGE: &str =
+            "static_inputs.weights.nulls: Array API placement does not support null elements";
+        Python::initialize();
+        let directory = tempfile::tempdir().unwrap();
+        let job = null_placement_runner(directory.path())
+            .start()
+            .await
+            .unwrap();
+        let outcome = job.wait().await;
+
+        assert_eq!(
+            outcome
+                .errors
+                .iter()
+                .filter(|error| error.message() == NULL_MESSAGE)
+                .count(),
+            1
+        );
+        let rendered_rust = format!("{outcome:?}");
+        for sentinel in [
+            "false-true",
+            "positions",
+            "[1,3]",
+            "index-1",
+            "index-3",
+            "424242",
+            "0x31337",
+        ] {
+            assert!(
+                !rendered_rust.contains(sentinel),
+                "Rust outcome leaked sentinel {sentinel:?}"
+            );
+        }
+
+        Python::attach(|py| {
+            let locals = PyDict::new(py);
+            locals
+                .set_item("outcome", super::job_outcome_to_py(py, &outcome).unwrap())
+                .unwrap();
+            py.run(
+                &CString::new(
+                    "messages = tuple(error['message'] for error in outcome['errors'])\nassert messages.count('static_inputs.weights.nulls: Array API placement does not support null elements') == 1\nrendered = repr(outcome)\nfor sentinel in ('false-true', 'positions', '[1,3]', 'index-1', 'index-3', '424242', '0x31337'):\n    assert sentinel not in rendered, sentinel",
                 )
                 .unwrap(),
                 Some(&locals),

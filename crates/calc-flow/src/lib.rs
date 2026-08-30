@@ -42,7 +42,10 @@ mod static_input;
 mod time;
 mod udf;
 
-pub use batch::{Batch, BatchKind, BatchMetadata, ExternalPayload, TableBatch};
+pub use batch::{
+    Batch, BatchKind, BatchMetadata, ExternalPayload, StaticArraySnapshot, StaticArrayValues,
+    TableBatch,
+};
 pub use config::{
     ArrowFieldSpec, ConnectorRef, DataSourceSpec, DeliveryRequest, EdgeSpec, FormatRef, NodeSpec,
     OperatorSpec, PROJECT_FORMAT_VERSION, PipelineSpec, PortSpec, PositionSpec, ProjectSinkBinding,

@@ -87,7 +87,8 @@ Every operator implements `OperatorMetadata`. Custom finite operators implement
 `BatchOperator`, whose `BatchOperatorContext` carries the run-scoped context;
 custom continuous operators implement `StreamOperator`, whose
 `StreamOperatorContext` carries the stream-job context, operator identity,
-current input watermark, and late-row counters. External operators resolve
+current input watermark, late-row counters, and read-only access to declared
+job-static batches through `static_input(name)`. External operators resolve
 through `ProviderRegistry` and lifecycle-specific factories, covered below.
 
 `BatchExecutionPlan::datafusion_config()` returns `Option<DataFusionConfig>`:
@@ -376,11 +377,14 @@ let runner = StreamingRunner::new(plan, sources, sinks, checkpoints)?
 
 `with_static_inputs` copies the mapping and is `#[must_use]`; validation,
 latching, and digest computation are deferred to `start`, where they happen
-exactly once before any source or operator lifecycle runs. The static-input
-crate-root exports are `StaticInputSpec`, `StaticInputDigest`,
-`StaticMutability`, and `STATIC_INPUT_DIGEST_VERSION`. Declarations join the
-plan fingerprint; `CheckpointManifest` records one `StaticInputDigest` per
-name under its `static_inputs` field, omitted when empty. See
+exactly once before any source or operator lifecycle runs. The complete frozen
+static-input crate-root export set is `StaticInputSpec`, `StaticInputDigest`,
+`StaticMutability`, `STATIC_INPUT_DIGEST_VERSION`, `StaticArraySnapshot`, and
+`StaticArrayValues`. The complete SCE-13 export delta is exactly the last two
+types; `Batch::static_array_snapshot()` and its five read-only accessors are
+the associated inherent API. Declarations join the plan fingerprint;
+`CheckpointManifest` records one `StaticInputDigest` per name under its
+`static_inputs` field, omitted when empty. See
 [static inputs](streaming-guide.md#static-inputs) for the full per-job,
 digest, and recovery contract.
 
@@ -435,6 +439,13 @@ capped at `B`. Direct callers must choose
 - `Batch::table(Vec<RecordBatch>, BatchMetadata)` creates an Arrow table batch.
 - `Batch::external(Arc<dyn ExternalPayload>, BatchMetadata)` creates an
   explicitly registered external-provider batch.
+- `Batch::static_array_snapshot()` returns `Some(StaticArraySnapshot)` only for
+  an engine-latched static array. It makes one detached `O(rank + bitmap +
+  non-null values)` copy with read-only backend, dtype, shape, null-bitmap, and
+  compact-value accessors; tables and general external arrays return `None`.
+  `StaticArraySnapshot` and `StaticArrayValues` are non-exhaustive, deliberately
+  non-`Clone`/non-`Debug`, and preserve `Send + Sync + Unpin` plus unwind-safe
+  auto traits.
 - `Batch::kind`, `num_rows`, `metadata`, `table_payload`, and
   `external_payload` expose immutable observations.
 - `Batch::with_metadata` returns a new envelope.
@@ -442,6 +453,13 @@ capped at `B`. Direct callers must choose
 `BatchMetadata::new(source, sequence, attributes)` validates the source and stores
 JSON-compatible attributes. Its sequence is descriptive batch metadata and is
 independent of continuous source cursors and checkpoint epochs.
+
+Python static placement creates this snapshot once per static input inside a
+blocking worker and caches only the provider-owned batch after successful
+placement and a post-worker cancellation check. The transient peak may include
+the engine latch, snapshot carriers, Python host list, NumPy storage, and JAX
+result simultaneously. `static_placement_bytes` counts only the logical
+provider transfer, not that peak memory or the internal snapshot copy.
 
 ## UDFs and external providers
 

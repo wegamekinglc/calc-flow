@@ -1268,6 +1268,7 @@ def test_table_matmul_registration_and_fingerprint_are_deterministic(
     ] == [
         (backend, "expression", "1"),
         (backend, "table_matmul", "1"),
+        (backend, "symbolic_matrix", "1"),
     ]
 
     plans = [

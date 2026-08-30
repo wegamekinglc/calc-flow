@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import calc_flow
+import calc_flow.array as array_module
 from calc_flow import (
     CalcFlowError,
     OperatorCapability,
@@ -402,29 +403,28 @@ def test_array_helpers_expose_expression_and_mapped_provider_contracts(
     register(runtime)
 
     snapshot = runtime.capabilities()
-    assert snapshot.scope.revision == 2
+    assert snapshot.scope.revision == 3
     identities = tuple(
         (item.provider, item.name, item.version) for item in snapshot.providers
     )
     assert identities == (
         (backend, "expression", "1"),
+        (backend, "symbolic_matrix", "1"),
         (backend, "table_matmul", "1"),
     )
-    assert snapshot.providers[0].input_ports == (
-        ProviderPort("input", "array", required=True),
-    )
-    assert snapshot.providers[0].options_schema == ProviderOptionsSchema(
+    expression, symbolic_matrix, table_matmul = snapshot.providers
+    assert expression.input_ports == (ProviderPort("input", "array", required=True),)
+    assert expression.options_schema == ProviderOptionsSchema(
         fields=(ProviderOption("expression", "string", required=True),)
     )
-    assert snapshot.providers[1].input_ports == (
+    assert table_matmul.input_ports == (
         ProviderPort("table", "table", required=True),
         ProviderPort("weights", "array", required=True),
     )
-    assert snapshot.providers[1].output_ports == (
+    assert table_matmul.output_ports == (
         ProviderPort("output", "array", required=True),
     )
-    assert snapshot.providers[1].options_schema is None
-    expression, table_matmul = snapshot.providers
+    assert table_matmul.options_schema is None
     assert expression.modes == ("batch", "stream")
     assert expression.finality == "per_row_final"
     assert expression.stateful is False
@@ -447,6 +447,25 @@ def test_array_helpers_expose_expression_and_mapped_provider_contracts(
     assert table_matmul.replay_safe is False
     assert table_matmul.partition_contract == "none"
     assert table_matmul.array_rules is None
+    assert symbolic_matrix.input_ports == (
+        ProviderPort("input", "table", required=True),
+        ProviderPort("weights", "array", required=True),
+    )
+    assert symbolic_matrix.output_ports == (
+        ProviderPort("output", "table", required=True),
+    )
+    assert symbolic_matrix.modes == ("batch", "stream")
+    assert symbolic_matrix.finality == "per_row_final"
+    assert symbolic_matrix.microbatch_invariant is True
+    assert symbolic_matrix.deterministic is True
+    assert symbolic_matrix.replay_safe is True
+    assert symbolic_matrix.supports_static_inputs is True
+    assert symbolic_matrix.partition_contract == "row_axis_independent"
+    assert symbolic_matrix.array_rules is not None
+    assert tuple(rule.name for rule in symbolic_matrix.array_rules.shape_rules) == (
+        "elementwise_broadcast",
+        "table_matmul_static_rhs",
+    )
 
 
 def test_compound_registration_exposes_a_real_partial_success() -> None:
@@ -469,6 +488,70 @@ def test_compound_registration_exposes_a_real_partial_success() -> None:
         "expression",
         "table_matmul",
     )
+
+
+def test_register_numpy_rejects_invalid_matrix_array_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = Runtime()
+    monkeypatch.setattr(
+        array_module,
+        "_NUMPY_MATRIX_STREAM_ARRAY_RULES",
+        object(),
+    )
+
+    with pytest.raises(
+        TypeError,
+        match="array_rules must be a ProviderArrayRules; found object",
+    ):
+        register_numpy(runtime)
+
+    assert tuple(provider.name for provider in runtime.capabilities().providers) == (
+        "expression",
+        "symbolic_matrix",
+        "table_matmul",
+    )
+
+
+def test_register_numpy_rejects_non_mapping_matrix_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def register_as_non_mapping(
+        runtime: Runtime,
+        provider: str,
+        name: str,
+        version: str,
+        callback: object,
+        **options: object,
+    ) -> None:
+        options_schema = options.get("options_schema")
+        assert options_schema is None or isinstance(
+            options_schema, ProviderOptionsSchema
+        )
+        runtime.register_provider(
+            provider,
+            name,
+            version,
+            callback,
+            options_schema=options_schema,
+            accepts_context=bool(options.get("accepts_context", False)),
+        )
+
+    monkeypatch.setattr(Runtime, "_register_mapping_provider", register_as_non_mapping)
+    runtime = Runtime()
+
+    with pytest.raises(
+        ValueError,
+        match="requires an existing mapping provider numpy:symbolic_matrix@1",
+    ):
+        register_numpy(runtime)
+
+    symbolic_matrix = next(
+        provider
+        for provider in runtime.capabilities().providers
+        if provider.name == "symbolic_matrix"
+    )
+    assert symbolic_matrix.modes == ("batch",)
 
 
 def test_capability_values_are_top_level_public_exports() -> None:

@@ -304,7 +304,7 @@ def test_matmul_rejects_inner_dimension_mismatch_with_d12_path() -> None:
     assert issue.code == "schema_mismatch"
 
 
-def test_matmul_rejects_rank_dtype_and_backend_mismatch() -> None:
+def test_matmul_rejects_rank_and_backend_mismatch_but_promotes_safe_dtype() -> None:
     quotes = _quotes_ordered()
     flat = parameter(
         "flat",
@@ -329,7 +329,7 @@ def test_matmul_rejects_rank_dtype_and_backend_mismatch() -> None:
     )
     base = linalg.from_columns(quotes, columns=["x", "y"], backend="numpy")
 
-    for name, weights in (("flat", flat), ("float32", float32), ("jax", jax_weights)):
+    for name, weights in (("flat", flat), ("jax", jax_weights)):
         program = Program(
             "p",
             inputs=[quotes, weights],
@@ -339,6 +339,17 @@ def test_matmul_rejects_rank_dtype_and_backend_mismatch() -> None:
         paths = _issue_paths(result)
         assert paths, name
         assert all(path.startswith("outputs.scores.matmul.right") for path in paths)
+
+    promoted = Program(
+        "p",
+        inputs=[quotes, float32],
+        outputs=[("scores", linalg.matmul(base, float32))],
+    )
+    promoted_result = promoted.analyze(Runtime(), mode="batch")
+    assert promoted_result.issues == ()
+    assert "output scores array backend numpy dtype float64" in promoted.explain(
+        Runtime(), mode="batch"
+    )
 
 
 def test_attach_rejects_foreign_row_axis_lineage() -> None:
@@ -1377,6 +1388,159 @@ def test_elementwise_broadcast_expands_unit_dimensions() -> None:
         " lineage quotes" in explanation
     )
     assert "output flags array backend numpy dtype bool" in explanation
+
+
+def test_array_elementwise_primitive_domains_are_checked_statically() -> None:
+    values = table_input(
+        "values",
+        schema=[
+            Field("flag", "bool", nullable=False),
+            Field("value", "float32", nullable=False),
+        ],
+    )
+    flags = linalg.from_columns(values, columns=("flag",), backend="numpy")
+    numbers = linalg.from_columns(values, columns=("value",), backend="numpy")
+    bool_weights = parameter(
+        "bool_weights",
+        kind="array",
+        backend="numpy",
+        dtype="bool",
+        shape=(1, 1),
+    )
+    valid = Program(
+        "valid-array-booleans",
+        inputs=(values,),
+        outputs=(("flags", (~flags) & flags),),
+    ).analyze(Runtime(), mode="batch")
+
+    assert valid.issues == ()
+
+    invalid = Program(
+        "invalid-array-domains",
+        inputs=(values, bool_weights),
+        outputs=(
+            ("not_numbers", ~numbers),
+            ("and_numbers", numbers & numbers),
+            ("bool_matmul", linalg.matmul(flags, bool_weights)),
+        ),
+    ).analyze(Runtime(), mode="batch")
+    paths = _issue_paths(invalid)
+
+    assert "outputs.not_numbers.not.value.dtype" in paths
+    assert "outputs.and_numbers.and.left.dtype" in paths
+    assert "outputs.bool_matmul.matmul.left.dtype" in paths
+
+
+def test_array_true_division_and_weak_scalars_follow_provider_dtypes() -> None:
+    values = table_input(
+        "values",
+        schema=[
+            Field("floating", "float32", nullable=False),
+            Field("integer", "int32", nullable=False),
+        ],
+    )
+    floating = linalg.from_columns(
+        values,
+        columns=("floating",),
+        backend="numpy",
+    )
+    numpy_integer = linalg.from_columns(
+        values,
+        columns=("integer",),
+        backend="numpy",
+    )
+    jax_integer = linalg.from_columns(
+        values,
+        columns=("integer",),
+        backend="jax",
+    )
+    program = Program(
+        "provider-array-dtypes",
+        inputs=(values,),
+        outputs=(
+            ("floating", floating * 2.0),
+            ("numpy_division", numpy_integer / 2),
+            ("jax_division", jax_integer / 2),
+        ),
+    )
+
+    assert program.analyze(Runtime(), mode="batch").issues == ()
+    explanation = program.explain(Runtime(), mode="batch")
+    assert "output floating array backend numpy dtype float32" in explanation
+    assert "output numpy_division array backend numpy dtype float64" in explanation
+    assert "output jax_division array backend jax dtype float32" in explanation
+
+
+def test_array_unary_and_binary_dtypes_use_provider_or_fail_closed() -> None:
+    values = table_input(
+        "values",
+        schema=[Field("value", "float32", nullable=False)],
+    )
+    supported = linalg.from_columns(
+        values,
+        columns=("value",),
+        backend="numpy",
+    )
+    unsupported = linalg.from_columns(
+        values,
+        columns=("value",),
+        backend="unavailable",
+    )
+    program = Program(
+        "provider-array-dtype-proof",
+        inputs=(values,),
+        outputs=(
+            ("negated", -supported),
+            ("unsupported_negated", -unsupported),
+            ("unsupported_added", unsupported + unsupported),
+        ),
+    )
+
+    result = program.analyze(Runtime(), mode="batch")
+    paths = _issue_paths(result)
+
+    assert "outputs.unsupported_negated.neg.value.dtype" in paths
+    assert "outputs.unsupported_added.add.right.dtype" in paths
+    assert "output negated array backend numpy dtype float32" in program.explain(
+        Runtime(), mode="batch"
+    )
+
+
+def test_matmul_keeps_known_dtype_when_other_operand_is_unresolved() -> None:
+    values = table_input(
+        "values",
+        schema=[Field("value", "float64", nullable=False)],
+    )
+    numbers = linalg.from_columns(
+        values,
+        columns=("value",),
+        backend="numpy",
+    )
+    unresolved = ~numbers
+    weights = parameter(
+        "weights",
+        kind="array",
+        backend="numpy",
+        dtype="float64",
+        shape=(1, 1),
+    )
+    program = Program(
+        "partial-matmul-dtype-proof",
+        inputs=(values, weights),
+        outputs=(
+            ("left_unresolved", linalg.matmul(unresolved, weights)),
+            ("right_unresolved", linalg.matmul(numbers, unresolved)),
+        ),
+    )
+
+    result = program.analyze(Runtime(), mode="batch")
+    explanation = program.explain(Runtime(), mode="batch")
+    paths = _issue_paths(result)
+
+    assert "outputs.left_unresolved.matmul.left.not.value.dtype" in paths
+    assert "outputs.right_unresolved.matmul.right.shape[0]" in paths
+    assert "output left_unresolved array backend numpy dtype float64" in explanation
+    assert "output right_unresolved array backend numpy dtype float64" in explanation
 
 
 def test_stream_ordering_checks_field_existence_and_nullability() -> None:

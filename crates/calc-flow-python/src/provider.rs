@@ -5,7 +5,7 @@ use std::{
 
 use async_trait::async_trait;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 use serde_json::json;
 
 use crate::{
@@ -13,6 +13,101 @@ use crate::{
     config::{PythonRoot, json_to_python},
     execution_options::PyProviderContext,
 };
+
+#[cfg(test)]
+struct TestPlacementGate {
+    runtime_thread: std::thread::ThreadId,
+    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<std::thread::ThreadId>>>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    fail_after_release: bool,
+    placement_calls: std::sync::atomic::AtomicUsize,
+    cache_commits: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl TestPlacementGate {
+    fn new(
+        runtime_thread: std::thread::ThreadId,
+        fail_after_release: bool,
+    ) -> (
+        Arc<Self>,
+        tokio::sync::oneshot::Receiver<std::thread::ThreadId>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        (
+            Arc::new(Self {
+                runtime_thread,
+                entered: std::sync::Mutex::new(Some(entered_tx)),
+                release: std::sync::Mutex::new(release_rx),
+                fail_after_release,
+                placement_calls: std::sync::atomic::AtomicUsize::new(0),
+                cache_commits: std::sync::atomic::AtomicUsize::new(0),
+            }),
+            entered_rx,
+            release_tx,
+        )
+    }
+
+    fn enter(&self) -> Result<(), String> {
+        use std::sync::atomic::Ordering;
+
+        self.placement_calls.fetch_add(1, Ordering::AcqRel);
+        let actual_thread = std::thread::current().id();
+        self.notify_entered(actual_thread)?;
+        self.ensure_blocking_worker(actual_thread)?;
+        self.wait_for_release()?;
+        self.inject_failure()
+    }
+
+    fn notify_entered(&self, actual_thread: std::thread::ThreadId) -> Result<(), String> {
+        self.entered
+            .lock()
+            .map_err(|_| "placement gate entered lock was poisoned".to_owned())?
+            .take()
+            .ok_or_else(|| "placement gate entered more than once".to_owned())?
+            .send(actual_thread)
+            .map_err(|_| "placement gate observer was dropped".to_owned())
+    }
+
+    fn ensure_blocking_worker(&self, actual_thread: std::thread::ThreadId) -> Result<(), String> {
+        if actual_thread == self.runtime_thread {
+            return Err("static placement ran on the Tokio runtime thread".into());
+        }
+        Ok(())
+    }
+
+    fn wait_for_release(&self) -> Result<(), String> {
+        self.release
+            .lock()
+            .map_err(|_| "placement gate release lock was poisoned".to_owned())?
+            .recv()
+            .map_err(|_| "placement gate release sender was dropped".to_owned())
+    }
+
+    fn inject_failure(&self) -> Result<(), String> {
+        if self.fail_after_release {
+            return Err("injected static placement failure".into());
+        }
+        Ok(())
+    }
+
+    fn record_cache_commit(&self) {
+        self.cache_commits
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    fn placement_calls(&self) -> usize {
+        self.placement_calls
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn cache_commits(&self) -> usize {
+        self.cache_commits
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct PortContract {
@@ -46,6 +141,8 @@ pub(crate) struct PythonOperatorFactory {
     mode: PythonProviderMode,
     accepts_context: bool,
     stream_lifecycle: Option<calc_flow::StreamOperatorLifecycle>,
+    #[cfg(test)]
+    placement_gate: Option<Arc<TestPlacementGate>>,
 }
 
 impl PythonOperatorFactory {
@@ -74,6 +171,8 @@ impl PythonOperatorFactory {
             mode: PythonProviderMode::SingleArray,
             accepts_context,
             stream_lifecycle: None,
+            #[cfg(test)]
+            placement_gate: None,
         }
     }
 
@@ -97,6 +196,39 @@ impl PythonOperatorFactory {
                 deterministic,
                 replay_safe,
             }),
+            #[cfg(test)]
+            placement_gate: None,
+        }
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the factory retains the complete mapping and lifecycle contract"
+    )]
+    pub(crate) fn new_stateless_stream_mapping(
+        callback: Arc<PythonRoot>,
+        provider: &str,
+        name: &str,
+        version: &str,
+        inputs: Vec<PortContract>,
+        outputs: Vec<PortContract>,
+        deterministic: bool,
+        replay_safe: bool,
+    ) -> Self {
+        Self {
+            callback,
+            provider: provider.into(),
+            name: name.into(),
+            version: version.into(),
+            mode: PythonProviderMode::Mapping { inputs, outputs },
+            accepts_context: false,
+            stream_lifecycle: Some(calc_flow::StreamOperatorLifecycle::Stateless {
+                microbatch_invariant: true,
+                deterministic,
+                replay_safe,
+            }),
+            #[cfg(test)]
+            placement_gate: None,
         }
     }
 
@@ -133,6 +265,8 @@ impl PythonOperatorFactory {
             mode: PythonProviderMode::Mapping { inputs, outputs },
             accepts_context,
             stream_lifecycle: None,
+            #[cfg(test)]
+            placement_gate: None,
         }
     }
 }
@@ -164,6 +298,9 @@ impl calc_flow::BatchOperatorFactory for PythonOperatorFactory {
             inputs,
             outputs,
             stream_lifecycle: self.stream_lifecycle,
+            placed_static_inputs: BTreeMap::new(),
+            #[cfg(test)]
+            placement_gate: self.placement_gate.clone(),
         }))
     }
 }
@@ -201,6 +338,9 @@ impl calc_flow::StreamOperatorFactory for PythonOperatorFactory {
             inputs,
             outputs,
             stream_lifecycle: Some(lifecycle),
+            placed_static_inputs: BTreeMap::new(),
+            #[cfg(test)]
+            placement_gate: self.placement_gate.clone(),
         }))
     }
 }
@@ -293,6 +433,70 @@ struct PythonOperator {
     inputs: Vec<calc_flow::Port>,
     outputs: Vec<calc_flow::Port>,
     stream_lifecycle: Option<calc_flow::StreamOperatorLifecycle>,
+    placed_static_inputs: BTreeMap<String, calc_flow::Batch>,
+    #[cfg(test)]
+    placement_gate: Option<Arc<TestPlacementGate>>,
+}
+
+type BatchMap = BTreeMap<String, calc_flow::Batch>;
+
+struct StreamMappingInputs {
+    batches: BatchMap,
+    unplaced: BatchMap,
+}
+
+struct StreamMappingWork {
+    callback: Arc<PythonRoot>,
+    batches: BatchMap,
+    unplaced: BatchMap,
+    input_contracts: Vec<PortContract>,
+    output_contracts: Vec<PortContract>,
+    output_ports: Vec<calc_flow::Port>,
+    options_json: String,
+    #[cfg(test)]
+    placement_gate: Option<Arc<TestPlacementGate>>,
+}
+
+impl StreamMappingWork {
+    fn spawn(self) -> tokio::task::JoinHandle<Result<(BatchMap, BatchMap), String>> {
+        tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            self.enter_placement_gate()?;
+            Python::attach(|py| self.call(py)).map_err(|error| error.to_string())
+        })
+    }
+
+    #[cfg(test)]
+    fn enter_placement_gate(&self) -> Result<(), String> {
+        if self.unplaced.is_empty() {
+            return Ok(());
+        }
+        if let Some(gate) = &self.placement_gate {
+            gate.enter()?;
+        }
+        Ok(())
+    }
+
+    fn call(self, py: Python<'_>) -> PyResult<(BatchMap, BatchMap)> {
+        let mut batches = self.batches;
+        let mut cache_entries = BatchMap::new();
+        for (name, latched) in self.unplaced {
+            let (placed, cached) = place_static_input(py, &name, &latched)?;
+            batches.insert(name.clone(), placed);
+            cache_entries.insert(name, cached);
+        }
+        call_python_operator_mapping(
+            py,
+            &self.callback,
+            &batches,
+            &self.input_contracts,
+            &self.output_contracts,
+            &self.output_ports,
+            &self.options_json,
+            None,
+        )
+        .map(|result| (result, cache_entries))
+    }
 }
 
 impl PythonOperator {
@@ -303,6 +507,77 @@ impl PythonOperator {
             version: self.version.clone(),
             message: message.into(),
         }
+    }
+
+    fn stream_mapping_contracts(
+        &self,
+    ) -> calc_flow::Result<(Vec<PortContract>, Vec<PortContract>)> {
+        let PythonProviderMode::Mapping { inputs, outputs } = &self.mode else {
+            return Err(self.provider_error("stream mapping mode is unavailable"));
+        };
+        Ok((inputs.clone(), outputs.clone()))
+    }
+
+    fn stream_mapping_worker(
+        &self,
+        batches: BatchMap,
+        unplaced: BatchMap,
+        input_contracts: Vec<PortContract>,
+        output_contracts: Vec<PortContract>,
+    ) -> tokio::task::JoinHandle<Result<(BatchMap, BatchMap), String>> {
+        StreamMappingWork {
+            callback: Arc::clone(&self.callback),
+            batches,
+            unplaced,
+            input_contracts,
+            output_contracts,
+            output_ports: self.outputs.clone(),
+            options_json: self.options_json.clone(),
+            #[cfg(test)]
+            placement_gate: self.placement_gate.clone(),
+        }
+        .spawn()
+    }
+
+    fn commit_static_inputs(&mut self, cache_entries: BatchMap) {
+        if cache_entries.is_empty() {
+            return;
+        }
+        self.placed_static_inputs.extend(cache_entries);
+        #[cfg(test)]
+        if let Some(gate) = &self.placement_gate {
+            gate.record_cache_commit();
+        }
+    }
+
+    async fn process_stream_mapping(
+        &mut self,
+        ingress: &str,
+        batch: &calc_flow::Batch,
+        context: &calc_flow::StreamOperatorContext<'_>,
+        output: &mut dyn calc_flow::StreamCollector,
+    ) -> calc_flow::Result<()> {
+        let (input_contracts, output_contracts) = self.stream_mapping_contracts()?;
+        let StreamMappingInputs { batches, unplaced } = stream_mapping_inputs(
+            ingress,
+            batch,
+            context,
+            &input_contracts,
+            &self.placed_static_inputs,
+        )
+        .map_err(|message| self.provider_error(message))?;
+        let worker =
+            self.stream_mapping_worker(batches, unplaced, input_contracts, output_contracts);
+        let (result, cache_entries) = worker
+            .await
+            .map_err(|_| self.provider_error("stream callback worker terminated"))?
+            .map_err(|message| self.provider_error(message))?;
+        context.check_cancelled()?;
+        self.commit_static_inputs(cache_entries);
+        for (port, batch) in result {
+            output.emit(&port, batch).await?;
+        }
+        Ok(())
     }
 }
 
@@ -343,6 +618,11 @@ impl calc_flow::StreamOperator for PythonOperator {
         output: &mut dyn calc_flow::StreamCollector,
     ) -> calc_flow::Result<()> {
         context.check_cancelled()?;
+        if matches!(self.mode, PythonProviderMode::Mapping { .. }) {
+            return self
+                .process_stream_mapping(ingress, &batch, context, output)
+                .await;
+        }
         if ingress != "input" {
             return Err(
                 self.provider_error(format!("unexpected stream provider ingress {ingress:?}"))
@@ -380,6 +660,214 @@ impl calc_flow::StreamOperator for PythonOperator {
     ) -> calc_flow::Result<()> {
         context.check_cancelled()
     }
+}
+
+fn stream_mapping_inputs(
+    ingress: &str,
+    batch: &calc_flow::Batch,
+    context: &calc_flow::StreamOperatorContext<'_>,
+    contracts: &[PortContract],
+    placed_static_inputs: &BTreeMap<String, calc_flow::Batch>,
+) -> Result<StreamMappingInputs, String> {
+    if !contracts.iter().any(|contract| contract.name == ingress) {
+        return Err(format!("unexpected stream provider ingress {ingress:?}"));
+    }
+    let mut inputs = BTreeMap::new();
+    let mut unplaced = BTreeMap::new();
+    for contract in contracts {
+        if contract.name == ingress {
+            inputs.insert(contract.name.clone(), batch.clone());
+            continue;
+        }
+        if let Some(cached) = placed_static_inputs.get(&contract.name) {
+            inputs.insert(contract.name.clone(), cached.clone());
+        } else {
+            let latched = context
+                .static_input(&contract.name)
+                .ok_or_else(|| format!("missing required static input {}", contract.name))?;
+            unplaced.insert(contract.name.clone(), latched.clone());
+        }
+    }
+    Ok(StreamMappingInputs {
+        batches: inputs,
+        unplaced,
+    })
+}
+
+fn place_static_input(
+    py: Python<'_>,
+    name: &str,
+    batch: &calc_flow::Batch,
+) -> PyResult<(calc_flow::Batch, calc_flow::Batch)> {
+    if batch.kind() == calc_flow::BatchKind::Table {
+        return Ok((batch.clone(), batch.clone()));
+    }
+    let snapshot = batch.static_array_snapshot().ok_or_else(|| {
+        pyo3::exceptions::PyTypeError::new_err(format!(
+            "static_inputs.{name}: expected an engine-latched array batch"
+        ))
+    })?;
+    validate_static_array_nulls(name, &snapshot)?;
+    let placement_bytes = static_array_copy_bytes(name, snapshot.dtype(), snapshot.shape())?;
+    validate_static_array_carrier(name, &snapshot)?;
+    let object = provider_static_array(py, name, &snapshot)?;
+    static_array_batches(py, batch, &snapshot, object, placement_bytes)
+}
+
+fn validate_static_array_nulls(
+    name: &str,
+    snapshot: &calc_flow::StaticArraySnapshot,
+) -> PyResult<()> {
+    if snapshot
+        .nulls()
+        .is_some_and(|nulls| nulls.iter().any(|value| *value))
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "static_inputs.{name}.nulls: Array API placement does not support null elements"
+        )));
+    }
+    Ok(())
+}
+
+fn static_array_carrier_matches(
+    dtype: &str,
+    values: &calc_flow::StaticArrayValues,
+) -> Option<bool> {
+    match values {
+        calc_flow::StaticArrayValues::Bool(_) => Some(dtype == "bool"),
+        calc_flow::StaticArrayValues::Int(_) => {
+            Some(matches!(dtype, "int8" | "int16" | "int32" | "int64"))
+        }
+        calc_flow::StaticArrayValues::Uint(_) => {
+            Some(matches!(dtype, "uint8" | "uint16" | "uint32" | "uint64"))
+        }
+        calc_flow::StaticArrayValues::Float(_) => Some(matches!(dtype, "float32" | "float64")),
+        _ => None,
+    }
+}
+
+fn validate_static_array_carrier(
+    name: &str,
+    snapshot: &calc_flow::StaticArraySnapshot,
+) -> PyResult<()> {
+    validate_static_array_values(name, snapshot.dtype(), snapshot.values())
+}
+
+fn validate_static_array_values(
+    name: &str,
+    dtype: &str,
+    values: &calc_flow::StaticArrayValues,
+) -> PyResult<()> {
+    match static_array_carrier_matches(dtype, values) {
+        Some(true) => Ok(()),
+        Some(false) => Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "static_inputs.{name}.dtype: latched value carrier does not match {dtype:?}"
+        ))),
+        None => Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "static_inputs.{name}.dtype: snapshot value family is not supported by this host"
+        ))),
+    }
+}
+
+fn static_array_values<'py>(
+    py: Python<'py>,
+    snapshot: &calc_flow::StaticArraySnapshot,
+) -> PyResult<Bound<'py, PyAny>> {
+    Ok(match snapshot.values() {
+        calc_flow::StaticArrayValues::Bool(values) => PyList::new(py, values)?.into_any(),
+        calc_flow::StaticArrayValues::Int(values) => PyList::new(py, values)?.into_any(),
+        calc_flow::StaticArrayValues::Uint(values) => PyList::new(py, values)?.into_any(),
+        calc_flow::StaticArrayValues::Float(values) => PyList::new(py, values)?.into_any(),
+        _ => {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "snapshot value family is not supported by this host",
+            ));
+        }
+    })
+}
+
+fn host_static_array<'py>(
+    py: Python<'py>,
+    snapshot: &calc_flow::StaticArraySnapshot,
+) -> PyResult<Bound<'py, PyAny>> {
+    let values = static_array_values(py, snapshot)?;
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", snapshot.dtype())?;
+    let host = numpy.getattr("asarray")?.call((values,), Some(&kwargs))?;
+    host.call_method1("reshape", (snapshot.shape(),))
+}
+
+fn provider_static_array(
+    py: Python<'_>,
+    name: &str,
+    snapshot: &calc_flow::StaticArraySnapshot,
+) -> PyResult<Py<PyAny>> {
+    match snapshot.backend() {
+        "numpy" => Ok(host_static_array(py, snapshot)?.unbind()),
+        "jax" => {
+            let host = host_static_array(py, snapshot)?;
+            Ok(py
+                .import("jax.numpy")?
+                .getattr("asarray")?
+                .call1((host,))?
+                .unbind())
+        }
+        backend => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "static_inputs.{name}.backend: unsupported static array backend {backend:?}"
+        ))),
+    }
+}
+
+fn static_array_batches(
+    py: Python<'_>,
+    batch: &calc_flow::Batch,
+    snapshot: &calc_flow::StaticArraySnapshot,
+    object: Py<PyAny>,
+    placement_bytes: usize,
+) -> PyResult<(calc_flow::Batch, calc_flow::Batch)> {
+    let placed = crate::batch::batch_from_python_array(
+        py,
+        object,
+        snapshot.backend().to_owned(),
+        static_placement_metadata(batch.metadata(), placement_bytes)?,
+    )?;
+    let cached = placed.with_metadata(static_placement_metadata(batch.metadata(), 0)?);
+    Ok((placed, cached))
+}
+
+fn static_array_copy_bytes(name: &str, dtype: &str, shape: &[u64]) -> PyResult<usize> {
+    let width: usize = match dtype {
+        "bool" | "int8" | "uint8" => 1,
+        "int16" | "uint16" => 2,
+        "float32" | "int32" | "uint32" => 4,
+        "float64" | "int64" | "uint64" => 8,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "static_inputs.{name}.dtype: unsupported static array dtype {other:?}"
+            )));
+        }
+    };
+    shape.iter().try_fold(width, |bytes, dimension| {
+        usize::try_from(*dimension)
+            .ok()
+            .and_then(|dimension| bytes.checked_mul(dimension))
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "static_inputs.{name}.shape: placement byte count exceeds usize"
+                ))
+            })
+    })
+}
+
+fn static_placement_metadata(
+    metadata: &calc_flow::BatchMetadata,
+    bytes: usize,
+) -> PyResult<calc_flow::BatchMetadata> {
+    let mut attributes = metadata.attributes().clone();
+    attributes.insert("static_placement_bytes".into(), json!(bytes));
+    calc_flow::BatchMetadata::new(metadata.source(), metadata.sequence(), attributes)
+        .map_err(crate::error::to_py_err)
 }
 
 #[async_trait]
@@ -627,12 +1115,213 @@ mod tests {
             .unwrap()
     }
 
+    fn python_payload(batch: &calc_flow::Batch) -> &PythonPayload {
+        batch
+            .external_payload()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<PythonPayload>()
+            .unwrap()
+    }
+
     #[test]
     fn operator_creation_preencodes_provider_options() {
         let options = BTreeMap::from([("nested".into(), json!({"value": [1, 2, 3]}))]);
         assert_eq!(
             encode_provider_options(&options).unwrap(),
             r#"{"nested":{"value":[1,2,3]}}"#
+        );
+    }
+
+    #[test]
+    fn static_array_placement_preserves_carriers_masks_and_empty_arrays() {
+        Python::initialize();
+        Python::attach(|py| {
+            let cases = [
+                (
+                    calc_flow::Batch::static_array_bool(
+                        "numpy",
+                        vec![2],
+                        Some(vec![false, false]),
+                        vec![true, false],
+                    )
+                    .unwrap(),
+                    "bool",
+                    "[True, False]",
+                    2,
+                ),
+                (
+                    calc_flow::Batch::static_array_int("numpy", "int8", vec![2], None, vec![-1, 2])
+                        .unwrap(),
+                    "int8",
+                    "[-1, 2]",
+                    2,
+                ),
+                (
+                    calc_flow::Batch::static_array_uint(
+                        "numpy",
+                        "uint16",
+                        vec![2],
+                        None,
+                        vec![1, 2],
+                    )
+                    .unwrap(),
+                    "uint16",
+                    "[1, 2]",
+                    4,
+                ),
+                (
+                    calc_flow::Batch::static_array_float(
+                        "numpy",
+                        "float32",
+                        vec![2],
+                        None,
+                        vec![1.25, 2.5],
+                    )
+                    .unwrap(),
+                    "float32",
+                    "[1.25, 2.5]",
+                    8,
+                ),
+                (
+                    calc_flow::Batch::static_array_float(
+                        "numpy",
+                        "float64",
+                        vec![0],
+                        Some(vec![]),
+                        vec![],
+                    )
+                    .unwrap(),
+                    "float64",
+                    "[]",
+                    0,
+                ),
+            ];
+
+            for (batch, dtype, expected, first_bytes) in cases {
+                let (placed, cached) = place_static_input(py, "weights", &batch).unwrap();
+                let object = python_payload(&placed).object.bind(py);
+                assert_eq!(
+                    object
+                        .getattr("dtype")
+                        .unwrap()
+                        .str()
+                        .unwrap()
+                        .to_str()
+                        .unwrap(),
+                    dtype,
+                );
+                assert_eq!(
+                    object
+                        .call_method0("tolist")
+                        .unwrap()
+                        .repr()
+                        .unwrap()
+                        .to_str()
+                        .unwrap(),
+                    expected,
+                );
+                assert_eq!(
+                    placed.metadata().attributes()["static_placement_bytes"],
+                    json!(first_bytes),
+                );
+                assert_eq!(
+                    cached.metadata().attributes()["static_placement_bytes"],
+                    json!(0),
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn static_array_placement_errors_are_path_first_and_redacted() {
+        Python::initialize();
+        Python::attach(|py| {
+            let metadata = calc_flow::BatchMetadata::new(
+                "",
+                0,
+                BTreeMap::from([("private".into(), json!("0xDEADBEEF raw-address-canary"))]),
+            )
+            .unwrap();
+            let nulls = calc_flow::Batch::static_array_int(
+                "numpy",
+                "int64",
+                vec![4],
+                Some(vec![false, true, false, true]),
+                vec![424_242, -31_337],
+            )
+            .unwrap()
+            .with_metadata(metadata);
+            let message = place_static_input(py, "weights", &nulls)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                message,
+                "ValueError: static_inputs.weights.nulls: Array API placement does not support null elements"
+            );
+            for secret in [
+                "424242",
+                "31337",
+                "false, true",
+                "positions [1, 3]",
+                "index 1",
+                "index 3",
+                "0xDEADBEEF",
+            ] {
+                assert!(
+                    !message.contains(secret),
+                    "error leaked {secret:?}: {message}"
+                );
+            }
+
+            let foreign = calc_flow::Batch::external(
+                Arc::new(ForeignPayload),
+                calc_flow::BatchMetadata::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                place_static_input(py, "weights", &foreign)
+                    .unwrap_err()
+                    .to_string(),
+                "TypeError: static_inputs.weights: expected an engine-latched array batch"
+            );
+            let unsupported_backend = calc_flow::Batch::static_array_float(
+                "unsupported",
+                "float64",
+                vec![1],
+                None,
+                vec![1.0],
+            )
+            .unwrap();
+            assert_eq!(
+                place_static_input(py, "weights", &unsupported_backend)
+                    .unwrap_err()
+                    .to_string(),
+                "ValueError: static_inputs.weights.backend: unsupported static array backend \"unsupported\""
+            );
+        });
+
+        assert_eq!(
+            static_array_copy_bytes("weights", "complex64", &[1])
+                .unwrap_err()
+                .to_string(),
+            "ValueError: static_inputs.weights.dtype: unsupported static array dtype \"complex64\""
+        );
+        assert_eq!(
+            static_array_copy_bytes("weights", "float64", &[u64::MAX, 2])
+                .unwrap_err()
+                .to_string(),
+            "ValueError: static_inputs.weights.shape: placement byte count exceeds usize"
+        );
+        assert_eq!(
+            validate_static_array_values(
+                "weights",
+                "float64",
+                &calc_flow::StaticArrayValues::Int(vec![1]),
+            )
+            .unwrap_err()
+            .to_string(),
+            "TypeError: static_inputs.weights.dtype: latched value carrier does not match \"float64\"",
         );
     }
 
@@ -815,6 +1504,236 @@ mod tests {
                 2
             );
         });
+    }
+
+    #[tokio::test]
+    async fn stateless_stream_mapping_factory_supplies_latched_static_inputs() {
+        Python::initialize();
+        let (root, calls) = Python::attach(|py| {
+            let locals = PyDict::new(py);
+            py.run(
+                c"class Callback:\n    def __init__(self): self.calls = 0\n    def validate_stream(self, options): pass\n    def __call__(self, inputs, options):\n        assert sorted(inputs) == ['input', 'weights']\n        self.calls += 1\n        return {'output': inputs['input']}\ncallback = Callback()",
+                None,
+                Some(&locals),
+            )
+            .unwrap();
+            let callback = locals.get_item("callback").unwrap().unwrap();
+            (
+                Arc::new(PythonRoot::new(callback.clone().unbind())),
+                callback.unbind(),
+            )
+        });
+        let factory = PythonOperatorFactory::new_stateless_stream_mapping(
+            root,
+            "python",
+            "matrix",
+            "1",
+            vec![
+                PortContract::new("input", calc_flow::BatchKind::Table),
+                PortContract::new("weights", calc_flow::BatchKind::Table),
+            ],
+            vec![PortContract::new("output", calc_flow::BatchKind::Table)],
+            true,
+            true,
+        );
+        let spec =
+            calc_flow::ExternalOperatorSpec::new("python", "matrix", "1", BTreeMap::new()).unwrap();
+        let mut operator = calc_flow::StreamOperatorFactory::create(
+            &factory,
+            &spec,
+            vec![table_port("input"), table_port("weights")],
+            vec![table_port("output")],
+        )
+        .unwrap();
+        let table = calc_flow::Batch::table(
+            vec![datafusion::arrow::record_batch::RecordBatch::new_empty(
+                Arc::new(datafusion::arrow::datatypes::Schema::empty()),
+            )],
+            calc_flow::BatchMetadata::default(),
+        )
+        .unwrap();
+        let job = calc_flow::StreamJobContext::new(
+            1,
+            "fingerprint",
+            BTreeMap::new(),
+            None,
+            calc_flow::CancellationToken::new(),
+        )
+        .with_static_inputs(BTreeMap::from([("weights".into(), table.clone())]));
+        let context = calc_flow::StreamOperatorContext::new(&job, "matrix", None);
+        let mut output = calc_flow::EdgeCollector::new(vec![table_port("output")]);
+
+        operator
+            .process_data("input", table, &context, &mut output)
+            .await
+            .unwrap();
+
+        assert_eq!(output.drain("output").len(), 1);
+        Python::attach(|py| {
+            assert_eq!(
+                calls
+                    .bind(py)
+                    .getattr("calls")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                1
+            );
+        });
+    }
+
+    #[derive(Clone, Copy)]
+    enum PlacementOutcome {
+        Failure,
+        Cancellation,
+        Success,
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one deterministic gate keeps failure, cancellation, success, and reuse ordered"
+    )]
+    async fn first_static_placement_uses_blocking_worker_and_atomic_cache() {
+        Python::initialize();
+        let runtime_thread = std::thread::current().id();
+
+        for outcome in [
+            PlacementOutcome::Failure,
+            PlacementOutcome::Cancellation,
+            PlacementOutcome::Success,
+        ] {
+            let (gate, entered, release) = TestPlacementGate::new(
+                runtime_thread,
+                matches!(outcome, PlacementOutcome::Failure),
+            );
+            let (root, calls) = Python::attach(|py| {
+                let locals = PyDict::new(py);
+                py.run(
+                    c"class Callback:\n    def __init__(self): self.bytes = []\n    def validate_stream(self, options): pass\n    def __call__(self, inputs, options):\n        self.bytes.append(inputs['weights'].metadata['static_placement_bytes'])\n        return {'output': inputs['input']}\ncallback = Callback()",
+                    None,
+                    Some(&locals),
+                )
+                .unwrap();
+                let callback = locals.get_item("callback").unwrap().unwrap();
+                (
+                    Arc::new(PythonRoot::new(callback.clone().unbind())),
+                    callback.unbind(),
+                )
+            });
+            let mut factory = PythonOperatorFactory::new_stateless_stream_mapping(
+                root,
+                "python",
+                "matrix",
+                "1",
+                vec![
+                    PortContract::new("input", calc_flow::BatchKind::Table),
+                    PortContract::new("weights", calc_flow::BatchKind::Array),
+                ],
+                vec![PortContract::new("output", calc_flow::BatchKind::Table)],
+                true,
+                true,
+            );
+            factory.placement_gate = Some(Arc::clone(&gate));
+            let spec =
+                calc_flow::ExternalOperatorSpec::new("python", "matrix", "1", BTreeMap::new())
+                    .unwrap();
+            let mut operator = calc_flow::StreamOperatorFactory::create(
+                &factory,
+                &spec,
+                vec![table_port("input"), array_port("weights")],
+                vec![table_port("output")],
+            )
+            .unwrap();
+            let table = calc_flow::Batch::table(
+                vec![datafusion::arrow::record_batch::RecordBatch::new_empty(
+                    Arc::new(datafusion::arrow::datatypes::Schema::empty()),
+                )],
+                calc_flow::BatchMetadata::default(),
+            )
+            .unwrap();
+            let weights =
+                calc_flow::Batch::static_array_float("numpy", "float64", vec![1], None, vec![2.0])
+                    .unwrap();
+            let cancellation = calc_flow::CancellationToken::new();
+            let job = calc_flow::StreamJobContext::new(
+                7,
+                "fingerprint",
+                BTreeMap::new(),
+                None,
+                cancellation.clone(),
+            )
+            .with_static_inputs(BTreeMap::from([("weights".into(), weights)]));
+            let processing = tokio::spawn(async move {
+                let context = calc_flow::StreamOperatorContext::new(&job, "matrix", None);
+                let mut output = calc_flow::EdgeCollector::new(vec![table_port("output")]);
+                let first = operator
+                    .process_data("input", table.clone(), &context, &mut output)
+                    .await;
+                let second = if matches!(outcome, PlacementOutcome::Success) && first.is_ok() {
+                    Some(
+                        operator
+                            .process_data("input", table, &context, &mut output)
+                            .await,
+                    )
+                } else {
+                    None
+                };
+                (first, second, output.drain("output").len())
+            });
+
+            let actual_thread = entered.await.unwrap();
+            assert_ne!(actual_thread, runtime_thread);
+            assert_eq!(
+                tokio::spawn(async { "progress" }).await.unwrap(),
+                "progress"
+            );
+            assert_eq!(gate.cache_commits(), 0);
+            if matches!(outcome, PlacementOutcome::Cancellation) {
+                cancellation.cancel();
+            }
+            release.send(()).unwrap();
+            let (first, second, emitted) = processing.await.unwrap();
+
+            match outcome {
+                PlacementOutcome::Failure => {
+                    assert!(matches!(
+                        first,
+                        Err(calc_flow::CalcFlowError::ExternalProvider { .. })
+                    ));
+                    assert!(second.is_none());
+                    assert_eq!(emitted, 0);
+                    assert_eq!(gate.cache_commits(), 0);
+                }
+                PlacementOutcome::Cancellation => {
+                    assert!(matches!(
+                        first,
+                        Err(calc_flow::CalcFlowError::Cancelled { .. })
+                    ));
+                    assert!(second.is_none());
+                    assert_eq!(emitted, 0);
+                    assert_eq!(gate.cache_commits(), 0);
+                }
+                PlacementOutcome::Success => {
+                    assert!(first.is_ok());
+                    assert!(second.is_some_and(|result| result.is_ok()));
+                    assert_eq!(emitted, 2);
+                    assert_eq!(gate.cache_commits(), 1);
+                    assert_eq!(gate.placement_calls(), 1);
+                    Python::attach(|py| {
+                        assert_eq!(
+                            calls
+                                .bind(py)
+                                .getattr("bytes")
+                                .unwrap()
+                                .extract::<Vec<usize>>()
+                                .unwrap(),
+                            vec![8, 0],
+                        );
+                    });
+                }
+            }
+        }
     }
 
     #[tokio::test]

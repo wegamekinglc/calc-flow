@@ -1878,9 +1878,9 @@ fn validate_static_inputs(project: &ProjectSpec, issues: &mut Vec<ValidationIssu
             node.input_ports
                 .iter()
                 .filter(|port| !connected.contains(&(node.id.clone(), port.name.clone())))
-                .map(|port| port.name.as_str())
+                .map(|port| (port.name.as_str(), port.kind))
         })
-        .collect::<BTreeSet<_>>();
+        .collect::<BTreeMap<_, _>>();
     let source_bindings = project
         .sources
         .iter()
@@ -1889,7 +1889,7 @@ fn validate_static_inputs(project: &ProjectSpec, issues: &mut Vec<ValidationIssu
     let mut names = BTreeSet::new();
     for (index, spec) in project.static_inputs.iter().enumerate() {
         let base = format!("static_inputs[{index}]");
-        let name = match spec {
+        let (name, declared_kind) = match spec {
             StaticInputSpec::Table { name, schema, .. } => {
                 let mut field_names = BTreeSet::new();
                 for (field_index, field) in schema.iter().enumerate() {
@@ -1909,7 +1909,7 @@ fn validate_static_inputs(project: &ProjectSpec, issues: &mut Vec<ValidationIssu
                         ));
                     }
                 }
-                name
+                (name, BatchKind::Table)
             }
             StaticInputSpec::Array {
                 name,
@@ -1939,7 +1939,7 @@ fn validate_static_inputs(project: &ProjectSpec, issues: &mut Vec<ValidationIssu
                         "array rank must not exceed 16 dimensions",
                     ));
                 }
-                name
+                (name, BatchKind::Array)
             }
         };
         validate_static_input_name(
@@ -1950,13 +1950,45 @@ fn validate_static_inputs(project: &ProjectSpec, issues: &mut Vec<ValidationIssu
             &mut names,
             issues,
         );
+        validate_static_input_kind(
+            name,
+            declared_kind,
+            external_inputs.get(name.as_str()).copied(),
+            &base,
+            issues,
+        );
     }
+}
+
+fn validate_static_input_kind(
+    name: &str,
+    declared: BatchKind,
+    port: Option<BatchKind>,
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let Some(port) = port else {
+        return;
+    };
+    if declared == port {
+        return;
+    }
+    let (declaration, required, found) = match (declared, port) {
+        (BatchKind::Array, BatchKind::Table) => ("array", "an array", "table"),
+        (BatchKind::Table, BatchKind::Array) => ("table", "a table", "array"),
+        _ => return,
+    };
+    issues.push(issue(
+        format!("{base}.kind"),
+        "incompatible_batch_kind",
+        format!("{declaration} static input {name:?} requires {required} port, found {found}"),
+    ));
 }
 
 fn validate_static_input_name(
     name: &str,
     base: &str,
-    external_inputs: &BTreeSet<&str>,
+    external_inputs: &BTreeMap<&str, BatchKind>,
     source_bindings: &BTreeSet<&str>,
     names: &mut BTreeSet<String>,
     issues: &mut Vec<ValidationIssue>,
@@ -1975,7 +2007,7 @@ fn validate_static_input_name(
             format!("duplicate static input name {name:?}"),
         ));
     }
-    if !external_inputs.contains(name) {
+    if !external_inputs.contains_key(name) {
         issues.push(issue(
             format!("{base}.name"),
             "unknown_binding",

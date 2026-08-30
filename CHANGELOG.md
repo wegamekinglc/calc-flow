@@ -5,6 +5,30 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-30: Compile symbolic table/array matrix segments (SCE-13 / DAL-145)
+  through built-in NumPy and JAX `symbolic_matrix@1` providers. Explicit
+  selected-column order, row lineage, safe float32/float64 promotion, static
+  weight matmul, and named table attachment now lower for batch and stream.
+  Streaming latches and places weights once per job, reuses the same immutable
+  weights object across micro-batches, invokes one fused callback per segment,
+  and exposes table/array and one-time weight-placement copy bytes in output
+  metadata. Placement bytes count logical provider transfer rather than peak
+  memory, process RSS, or the transient internal snapshot clone. Shape, width,
+  backend, JAX x64, and provider output row-count checks fail closed. Rust now
+  exposes the manually approved, non-exhaustive owned
+  `StaticArraySnapshot`/`StaticArrayValues` seam as the complete SCE-13
+  crate-root export delta, plus
+  `Batch::static_array_snapshot()` with five read-only accessors, without
+  `Clone`, value-bearing `Debug`, serde, construction, or mutation support.
+  Project compilation cross-checks both static declaration kinds against their
+  unconnected port kinds. Matrix lowering requires every `from_columns` source
+  to be the attached table and exactly one matmul; the only occurrence of the
+  static `weights` identity is that matmul's direct RHS. Analyzer/provider dtype
+  promotion and primitive domains agree. First placement, including the
+  transient snapshot clone and provider conversion, runs on a blocking worker
+  and commits its cache atomically only after success and a post-worker
+  cancellation check.
+
 - 2026-08-29: Complete grouped cross-section features (SCE-10). The shared
   native `CrossSectionOperator` now evaluates winsorize, top/bottom selection,
   and mean-fill alongside rank/percentile/demean/z-score without duplicating
