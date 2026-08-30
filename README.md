@@ -260,8 +260,9 @@ response types are in `web-ui/src/api/schema.d.ts`.
 Calc Flow 4.0 accepts only strict project-v3 documents and exposes only the
 Studio `/api/v3` surface. It does not load project-v2 documents; see the
 [v2-to-v3 migration guide](docs/migration-v2-to-v3.md) before upgrading.
-Historical v1 behavior remains available at the `v1-python-final` tag and as
-immutable semantic fixtures under `tests/fixtures/v1/`.
+Historical v1 behavior is preserved in
+[commit `c87324e`](https://github.com/wegamekinglc/calc-flow/tree/c87324ecaee30d8b883d3c30ae03704dee45f593)
+and as immutable semantic fixtures under `tests/fixtures/v1/`.
 
 ## Development
 

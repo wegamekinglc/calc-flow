@@ -20,9 +20,10 @@ DataFusion execution, project validation, checkpointing, and runner semantics.
 The Python package under `python/calc_flow/` is a PyO3 binding plus functional
 adapters; it is not a second engine. `calc-flow-studio` is a separate local
 FastAPI and React application. There is no `src/calc_flow/` pure-Python
-implementation; the frozen v1 implementation is preserved at the
-`v1-python-final` tag. See [docs/introduction.md](docs/introduction.md) for the
-data contract and execution model.
+implementation; the frozen v1 implementation is preserved in
+[commit `c87324e`](https://github.com/wegamekinglc/calc-flow/tree/c87324ecaee30d8b883d3c30ae03704dee45f593).
+See [docs/introduction.md](docs/introduction.md) for the data contract and
+execution model.
 
 ## Commands
 

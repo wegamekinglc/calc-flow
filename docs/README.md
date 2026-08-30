@@ -75,7 +75,8 @@ surfaces and are preserved for audit; leave them untouched. The current
   package versions, upgrade checklist, and release artifacts. This is the
   pointer for anyone moving from frozen Python v1 to Rust-native v2.
 - **[v1 final API](v1-final-api.md)** — the final Python v1 API reference.
-  The frozen v1 implementation is available at the `v1-python-final` tag.
+  The frozen v1 implementation is preserved in
+  [commit `c87324e`](https://github.com/wegamekinglc/calc-flow/tree/c87324ecaee30d8b883d3c30ae03704dee45f593).
 - **[v0.2 migration](migration-v0.2.md)** — the v0.1-to-v0.2 prototype
   migration, predating v1.
 - **[Engineering records](superpowers/)** — dated design notes,

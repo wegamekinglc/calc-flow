@@ -433,6 +433,8 @@ source boundary. No automated converter is provided. See the
 
 The historical [v1 API](v1-final-api.md) and
 [v0.2 migration guide](migration-v0.2.md) are references only. The frozen v1
-implementation is available at the `v1-python-final` tag, while
+implementation is preserved in
+[commit `c87324e`](https://github.com/wegamekinglc/calc-flow/tree/c87324ecaee30d8b883d3c30ae03704dee45f593),
+while
 [`tests/fixtures/v1/`](../tests/fixtures/v1/) preserves the semantic corpus
 as historical parity evidence.

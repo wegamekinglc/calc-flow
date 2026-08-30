@@ -63,8 +63,9 @@ outside these operator-execution ceilings. JAX performs
 no result-to-host round trip during operator execution.
 
 The previous v1 notebook was removed because it taught the frozen Python v1
-operator API. Historical v1 behavior remains available at the
-`v1-python-final` tag and in `tests/fixtures/v1/`.
+operator API. Historical v1 behavior is preserved in
+[commit `c87324e`](https://github.com/wegamekinglc/calc-flow/tree/c87324ecaee30d8b883d3c30ae03704dee45f593)
+and in `tests/fixtures/v1/`.
 
 ## Rust counterparts
 
