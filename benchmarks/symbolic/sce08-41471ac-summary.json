@@ -1,0 +1,60 @@
+{
+  "benchmark_commit": "41471acf05d6c54308bd6bed28f2eaf3b66c3daf",
+  "bootstrap_resamples": 20000,
+  "bootstrap_seed": 20260829,
+  "decision": "pass",
+  "format_version": 1,
+  "machine": {
+    "cpu_arch": "X86_64",
+    "cpu_bits": 64,
+    "cpu_brand": "13th Gen Intel(R) Core(TM) i9-13900HX",
+    "cpu_count": 32,
+    "machine": "x86_64",
+    "node": "chengli-i9",
+    "python_implementation": "CPython",
+    "python_version": "3.13.9",
+    "release": "5.15.167.4-microsoft-standard-WSL2",
+    "system": "Linux"
+  },
+  "reports": [
+    {
+      "path": "benchmarks/symbolic/sce08-41471ac-paired1.json",
+      "sha256": "e6f986432da61bd140268f129b5d0ceedb0829dcbcd6bd6c20880692efbbdcc2"
+    },
+    {
+      "path": "benchmarks/symbolic/sce08-41471ac-paired2.json",
+      "sha256": "b51dd981666a22d6d486df5b8fd33769eac29328257998566e340febdf443d20"
+    }
+  ],
+  "scenarios": [
+    {
+      "decision": "pass",
+      "geometric_regression_percent": 1.0159231030576699,
+      "hand_built_first_samples": 30,
+      "paired_samples": 60,
+      "regression_interval_percent": [
+        0.25711218455807705,
+        1.835828081084202
+      ],
+      "scenario": "sce08_temporal_catalog",
+      "symbolic_first_samples": 30,
+      "threshold_percent": 5.0,
+      "workload": {
+        "array_elements": 100000,
+        "comparison_contract": "same-process-alternating-v1",
+        "datafusion_query_count": 1,
+        "duration_micros": 60000000,
+        "entities": 64,
+        "input_rows": 99968,
+        "matrix_dimension": 256,
+        "maximum_retained_rows_per_entity": 60,
+        "output_rows": 99968,
+        "scale": "standard",
+        "scenario": "sce08_temporal_catalog",
+        "table_rows": 100000,
+        "temporal_outputs": 4,
+        "workload_contract": "sce08-temporal-v1"
+      }
+    }
+  ]
+}

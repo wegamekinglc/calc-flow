@@ -97,8 +97,9 @@ least 20 comparable main-branch samples exist on stable runners.
 `test_symbolic_baseline.py` retains the hand-built SCE-01 baselines and adds
 same-process hand-built/symbolic pairs as later milestones land. The baseline
 method is documented in [symbolic/BASELINE.md](symbolic/BASELINE.md); the
-accepted SCE-05 row-local gate and its raw evidence are documented in
-[symbolic/SCE05.md](symbolic/SCE05.md).
+accepted milestone gates and their raw evidence are documented in
+[symbolic/SCE05.md](symbolic/SCE05.md) and
+[symbolic/SCE08.md](symbolic/SCE08.md).
 
 | Scenario                                | Timed boundary                                        |
 | --------------------------------------- | ----------------------------------------------------- |
@@ -108,6 +109,7 @@ accepted SCE-05 row-local gate and its raw evidence are documented in
 | `symbolic_table_matmul_numpy`/`_jax`    | SQL features plus one counting table_matmul call      |
 | `symbolic_stream_window_checkpoint`     | full stream lifecycle (see below)                     |
 | `sce05_row_local_20_columns`            | alternating hand-built/symbolic single projections    |
+| `sce08_temporal_catalog`                | alternating native/symbolic duration rolling runs     |
 
 Every scenario records rows, batches, peak RSS (`VmHWM`), provider or
 DataFusion query counts, and Arrow/dense copy bytes in `extra_info`. The
