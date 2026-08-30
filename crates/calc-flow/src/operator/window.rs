@@ -308,6 +308,7 @@ struct WindowState {
     metrics: LateMetricDelta,
     prepared_segments: Vec<PreparedStateSegment>,
     retained_inventory: StateInventory,
+    retained_segments: BTreeMap<String, crate::StateSegment>,
     replace_retained_on_checkpoint: bool,
     last_checkpoint_epoch: Option<crate::Epoch>,
     pipeline_fingerprint: Option<String>,
@@ -1036,6 +1037,7 @@ impl StreamOperator for WindowAggregateOperator {
         }
         let prepared = self.prepare_snapshot_segments(epoch)?;
         let retained_inventory = self.next_snapshot_inventory(prepared.descriptors)?;
+        let retained_segments = self.next_snapshot_segments(&retained_inventory, prepared.bytes)?;
         let metadata = WindowSnapshotMetadata {
             state_layout_version: WINDOW_STATE_LAYOUT_VERSION,
             configuration_hash: self.compiled.configuration_hash.clone(),
@@ -1063,11 +1065,12 @@ impl StreamOperator for WindowAggregateOperator {
         }
         self.state.dirty.clear();
         self.state.retained_inventory = retained_inventory;
+        self.state.retained_segments = retained_segments.clone();
         self.state.replace_retained_on_checkpoint = false;
         self.state.last_checkpoint_epoch = Some(epoch);
         Ok(crate::OperatorStateSnapshot {
             inline_metadata: inline_metadata.into_iter().collect(),
-            segments: prepared.bytes,
+            segments: retained_segments,
         })
     }
 
@@ -1078,7 +1081,7 @@ impl StreamOperator for WindowAggregateOperator {
         let metadata = parse_snapshot_metadata(snapshot)?;
         let inventory = validate_snapshot_metadata(&metadata, &self.compiled, snapshot)?;
         let decoded = self.decode_snapshot_segments(snapshot, &metadata)?;
-        self.install_restored_state(metadata, inventory, decoded);
+        self.install_restored_state(metadata, inventory, snapshot.segments.clone(), decoded);
         Ok(())
     }
 
@@ -1171,6 +1174,37 @@ impl WindowAggregateOperator {
         StateInventory::new(retained)
     }
 
+    fn next_snapshot_segments(
+        &self,
+        inventory: &StateInventory,
+        new_segments: BTreeMap<String, crate::StateSegment>,
+    ) -> Result<BTreeMap<String, crate::StateSegment>> {
+        let mut retained = if self.state.replace_retained_on_checkpoint {
+            BTreeMap::new()
+        } else {
+            self.state.retained_segments.clone()
+        };
+        for (segment_id, segment) in new_segments {
+            if retained.insert(segment_id, segment).is_some() {
+                return Err(checkpoint_mismatch(
+                    "window checkpoint produced a duplicate segment ID".into(),
+                ));
+            }
+        }
+        let expected_ids = inventory
+            .segments()
+            .iter()
+            .map(|descriptor| descriptor.handle.segment_id())
+            .collect::<Vec<_>>();
+        let actual_ids = retained.keys().map(String::as_str).collect::<Vec<_>>();
+        if expected_ids != actual_ids {
+            return Err(checkpoint_mismatch(
+                "window checkpoint segment data does not match its inventory".into(),
+            ));
+        }
+        Ok(retained)
+    }
+
     fn validate_process_input(
         &self,
         ingress: &str,
@@ -1235,6 +1269,7 @@ impl WindowAggregateOperator {
         &mut self,
         metadata: WindowSnapshotMetadata,
         inventory: StateInventory,
+        retained_segments: BTreeMap<String, crate::StateSegment>,
         decoded: BTreeMap<WindowKey, AccumulatorRow>,
     ) {
         self.state = WindowState {
@@ -1244,6 +1279,7 @@ impl WindowAggregateOperator {
             ended: metadata.ended,
             metrics: metadata.metrics,
             retained_inventory: inventory,
+            retained_segments,
             last_checkpoint_epoch: Some(metadata.epoch),
             pipeline_fingerprint: metadata.pipeline_fingerprint,
             operator_id: metadata.operator_id,
@@ -3577,6 +3613,64 @@ mod tests {
             )) as ArrayRef,
         )])
         .unwrap()
+    }
+
+    fn checkpoint_segment_operator() -> WindowAggregateOperator {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+            Field::new("amount", DataType::Int64, false),
+        ]));
+        let spec = WindowSpec::tumbling("event_time", Duration::from_secs(60))
+            .unwrap()
+            .aggregate(AggregateFunction::Sum, "amount", "total")
+            .unwrap();
+        WindowAggregateOperator::new("window", schema, spec).unwrap()
+    }
+
+    #[test]
+    fn checkpoint_segment_assembly_rejects_duplicate_and_missing_retained_data() {
+        let mut operator = checkpoint_segment_operator();
+        operator.state.operator_id = Some("window".into());
+        let segment_id = "delta-00000000000000000001-00000000";
+        let segment = crate::StateSegment::new(vec![1, 2, 3]);
+        operator
+            .state
+            .retained_segments
+            .insert(segment_id.into(), segment.clone());
+        let duplicate = operator
+            .next_snapshot_segments(
+                &StateInventory::default(),
+                BTreeMap::from([(segment_id.into(), segment.clone())]),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            duplicate,
+            CalcFlowError::CheckpointMismatch { message }
+                if message == "window checkpoint produced a duplicate segment ID"
+        ));
+
+        operator.state.retained_segments.clear();
+        let descriptor = operator
+            .snapshot_segment_descriptor(
+                crate::Epoch::INITIAL,
+                segment_id,
+                SegmentKind::Delta,
+                &segment,
+            )
+            .unwrap();
+        let inventory = StateInventory::new(vec![descriptor]).unwrap();
+        let missing = operator
+            .next_snapshot_segments(&inventory, BTreeMap::new())
+            .unwrap_err();
+        assert!(matches!(
+            missing,
+            CalcFlowError::CheckpointMismatch { message }
+                if message == "window checkpoint segment data does not match its inventory"
+        ));
     }
 
     #[test]

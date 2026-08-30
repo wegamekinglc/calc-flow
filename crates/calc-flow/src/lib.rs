@@ -84,8 +84,8 @@ pub use operator::{
     RollingOutputSpec, RollingSpec, RollingValuePolicy, STREAM_JOIN_MAX_SAFE_JSON_INTEGER,
     STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1, SortDirection, SqlOperator, StateSegment,
     StreamCollector, StreamJoinOperator, StreamJoinSideStatus, StreamJoinSpec, StreamJoinStatus,
-    StreamJoinType, StreamOperator, StreamOperatorContext, StreamOperatorFactory, UnionOperator,
-    WindowAggregateOperator, WindowGeometry, WindowSpec,
+    StreamJoinType, StreamOperator, StreamOperatorContext, StreamOperatorFactory,
+    StreamOperatorLifecycle, UnionOperator, WindowAggregateOperator, WindowGeometry, WindowSpec,
 };
 pub use pipeline::{
     BatchExecutionPlan, DeliveryGuarantee, Edge, EdgeBudget, ExecutionOptions, NodeTiming,

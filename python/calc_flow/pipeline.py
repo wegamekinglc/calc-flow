@@ -13,8 +13,10 @@ from uuid import uuid4
 
 from calc_flow import _native
 from calc_flow.capabilities import (
+    ProviderArrayRules,
     ProviderOptionsSchema,
     RuntimeCapabilities,
+    _StatelessProviderLifecycle,
     runtime_capabilities,
 )
 from calc_flow.store import _copy_json_value, _run_blocking
@@ -89,6 +91,38 @@ def _updated_project(project_json: str, update: Any) -> str:
     update(project)
     project["data_sources"] = _data_sources(project)
     return _canonical(project)
+
+
+def _validate_stateless_lifecycle_values(values: Mapping[str, object]) -> None:
+    for field_name, value in values.items():
+        if type(value) is not bool:
+            raise TypeError(
+                f"{field_name} must be an exact bool; found {type(value).__name__}"
+            )
+    if not values["microbatch_invariant"]:
+        raise ValueError("stateless stream providers must be micro-batch invariant")
+
+
+def _registered_batch_provider(
+    registrations: Sequence[dict[str, Any]],
+    provider: str,
+    name: str,
+    version: str,
+) -> dict[str, Any]:
+    matches = [
+        registration
+        for registration in registrations
+        if registration["kind"] == "provider"
+        and registration["provider"] == provider
+        and registration["name"] == name
+        and registration["version"] == version
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            "stateless stream registration requires one existing batch "
+            f"provider {provider}:{name}@{version}"
+        )
+    return matches[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +228,52 @@ class Runtime:
             if accepts_context:
                 registration["accepts_context"] = True
             self._registrations.append(registration)
+
+    def _register_stateless_stream_provider(
+        self,
+        provider: str,
+        name: str,
+        version: str,
+        callback: Any,
+        *,
+        microbatch_invariant: bool,
+        deterministic: bool,
+        replay_safe: bool,
+        supports_static_inputs: bool,
+        array_rules: ProviderArrayRules,
+    ) -> None:
+        _validate_stateless_lifecycle_values(
+            {
+                "microbatch_invariant": microbatch_invariant,
+                "deterministic": deterministic,
+                "replay_safe": replay_safe,
+                "supports_static_inputs": supports_static_inputs,
+            }
+        )
+        if not isinstance(array_rules, ProviderArrayRules):
+            raise TypeError(
+                "array_rules must be a ProviderArrayRules; "
+                f"found {type(array_rules).__name__}"
+            )
+        with self._registration_lock:
+            registration = _registered_batch_provider(
+                self._registrations, provider, name, version
+            )
+            self._inner._register_stateless_stream_provider(
+                provider,
+                name,
+                version,
+                callback,
+                microbatch_invariant=microbatch_invariant,
+                deterministic=deterministic,
+                replay_safe=replay_safe,
+            )
+            registration["stream_lifecycle"] = _StatelessProviderLifecycle(
+                deterministic=deterministic,
+                replay_safe=replay_safe,
+                supports_static_inputs=supports_static_inputs,
+                array_rules=array_rules,
+            )
 
     def register_scalar_udf(
         self,

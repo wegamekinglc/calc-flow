@@ -12,6 +12,54 @@ use crate::{
 
 use super::OperatorMetadata;
 
+/// Lifecycle proof exposed by an external stream operator.
+///
+/// External operators default to [`Self::Unproven`]. A trusted provider may
+/// opt into the stateless lifecycle only when every callback invocation is
+/// independent of micro-batch boundaries and the operator owns no checkpoint
+/// state. Determinism and replay safety remain separate because best-effort
+/// and at-least-once plans may use a stateless nondeterministic provider while
+/// exactly-once plans must reject it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum StreamOperatorLifecycle {
+    /// No stream lifecycle proof is available.
+    #[default]
+    Unproven,
+    /// The operator owns no state across callback invocations.
+    Stateless {
+        /// Splitting or combining input micro-batches does not change rows.
+        microbatch_invariant: bool,
+        /// Repeating one callback with the same inputs produces the same output.
+        deterministic: bool,
+        /// Replaying an input prefix is safe for downstream delivery.
+        replay_safe: bool,
+    },
+}
+
+impl StreamOperatorLifecycle {
+    pub(crate) const fn is_proven_stateless(self) -> bool {
+        matches!(
+            self,
+            Self::Stateless {
+                microbatch_invariant: true,
+                ..
+            }
+        )
+    }
+
+    pub(crate) const fn is_exactly_once_safe(self) -> bool {
+        matches!(
+            self,
+            Self::Stateless {
+                microbatch_invariant: true,
+                deterministic: true,
+                replay_safe: true,
+            }
+        )
+    }
+}
+
 /// One immutable checkpoint state segment with its content digest.
 ///
 /// Segments are shared by allocation: an operator that carries an unchanged
@@ -376,6 +424,14 @@ fn checked_metric_sum(left: u64, right: u64, field: &str) -> Result<u64> {
 /// see barriers, and their watermarks arrive as typed `EventTime` values.
 #[async_trait]
 pub trait StreamOperator: OperatorMetadata {
+    /// Returns the external operator's stream lifecycle proof.
+    ///
+    /// Built-in operators are classified by the compiler. External operators
+    /// must override this method to enter a checkpointed continuous job.
+    fn lifecycle(&self) -> StreamOperatorLifecycle {
+        StreamOperatorLifecycle::Unproven
+    }
+
     /// Observes one accepted ingress progress transition before runtime-owned
     /// control forwarding. The default keeps existing operators unchanged.
     ///

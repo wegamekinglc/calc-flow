@@ -196,6 +196,39 @@ impl PyRuntime {
         Ok(())
     }
 
+    /// Registers a trusted stateless stream factory and retains its callback.
+    pub(crate) fn register_stream_provider_factory(
+        &self,
+        provider: &str,
+        name: &str,
+        version: &str,
+        factory: &Arc<dyn calc_flow::StreamOperatorFactory>,
+        root: Arc<PythonRoot>,
+    ) -> PyResult<()> {
+        let providers = {
+            let state = self.state.read();
+            let state = state
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err(CLEARED_RUNTIME_MESSAGE))?;
+            Arc::clone(&state.providers)
+        };
+        providers
+            .register_stream(provider, name, version, Arc::clone(factory))
+            .map_err(crate::error::to_py_err)?;
+        let mut state = self.state.write();
+        let state = state
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err(CLEARED_RUNTIME_MESSAGE))?;
+        if !state
+            .roots
+            .iter()
+            .any(|existing| Arc::ptr_eq(existing, &root))
+        {
+            state.roots.push(root);
+        }
+        Ok(())
+    }
+
     #[allow(
         dead_code,
         reason = "Task 19 registers Python scalar UDFs through this GC-safe seam"
@@ -311,6 +344,47 @@ impl PyRuntime {
                 accepts_context.0,
             ));
         self.register_provider_factory(provider, name, version, &factory, root)
+    }
+
+    #[pyo3(
+        signature = (provider, name, version, callback, *, microbatch_invariant, deterministic, replay_safe),
+        text_signature = "($self, provider, name, version, callback, *, microbatch_invariant, deterministic, replay_safe)"
+    )]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the private binding carries the complete stateless stream proof"
+    )]
+    fn _register_stateless_stream_provider(
+        &self,
+        py: Python<'_>,
+        provider: &str,
+        name: &str,
+        version: &str,
+        callback: Py<PyAny>,
+        microbatch_invariant: bool,
+        deterministic: bool,
+        replay_safe: bool,
+    ) -> PyResult<()> {
+        if !callback.bind(py).is_callable() {
+            return Err(PyTypeError::new_err("provider callback must be callable"));
+        }
+        if !microbatch_invariant {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "stateless stream providers must be micro-batch invariant",
+            ));
+        }
+        let root = Arc::new(PythonRoot::new(callback));
+        let factory: Arc<dyn calc_flow::StreamOperatorFactory> = Arc::new(
+            crate::provider::PythonOperatorFactory::new_stateless_stream(
+                Arc::clone(&root),
+                provider,
+                name,
+                version,
+                deterministic,
+                replay_safe,
+            ),
+        );
+        self.register_stream_provider_factory(provider, name, version, &factory, root)
     }
 
     #[pyo3(

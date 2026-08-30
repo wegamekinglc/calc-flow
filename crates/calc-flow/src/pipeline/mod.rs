@@ -190,6 +190,9 @@ impl PipelineBuilder {
             NodeOperator::StreamJoin(_) => {
                 OperatorCheckpointCapability::CheckpointedStateful { state_version: 1 }
             }
+            NodeOperator::Stream(operator) if operator.lifecycle().is_proven_stateless() => {
+                OperatorCheckpointCapability::Stateless
+            }
             NodeOperator::Batch(_) | NodeOperator::Stream(_) => {
                 OperatorCheckpointCapability::Unproven
             }

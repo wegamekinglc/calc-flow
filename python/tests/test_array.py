@@ -22,9 +22,14 @@ import pytest
 import calc_flow.array as array_module
 from calc_flow import (
     Batch,
+    CalcFlowError,
+    CapabilityRule,
+    DeliveryGuarantee,
     PipelineBuilder,
+    ProviderArrayRules,
     ProviderError,
     Runtime,
+    StreamRequirements,
     register_jax,
     register_numpy,
 )
@@ -2114,9 +2119,74 @@ def test_provider_registration_validates_public_arguments() -> None:
 
     with pytest.raises(TypeError, match="callable"):
         runtime.register_provider("test", "identity", "1", object())
+    runtime.register_provider("test", "identity", "1", lambda *_: None)
     with pytest.raises(Exception, match="duplicate provider"):
         runtime.register_provider("test", "identity", "1", lambda *_: None)
-        runtime.register_provider("test", "identity", "1", lambda *_: None)
+
+
+@pytest.mark.parametrize(
+    ("backend", "register"),
+    [("numpy", register_numpy), ("jax", register_jax)],
+)
+def test_stateless_array_provider_stream_factory_accepts_only_elementwise_work(
+    backend: str,
+    register: Callable[[Runtime], None],
+) -> None:
+    runtime = Runtime()
+    register(runtime)
+
+    safe = _external(f"{backend}_stream", backend, "x * 2 + 1")
+    plan = safe.compile_stream(runtime=runtime)
+    assert plan.source_binding_ids == ("input",)
+    assert plan.sink_binding_ids == ("output",)
+
+    for expression in ("sum(x)", "transpose(x)", "reshape(x, (-1,))", "2"):
+        with pytest.raises(CalcFlowError, match="row-axis-independent|input rows"):
+            _external(f"{backend}_unsafe", backend, expression).compile_stream(
+                runtime=runtime
+            )
+
+
+def test_exactly_once_rejects_nondeterministic_stateless_provider() -> None:
+    class Callback:
+        def validate_stream(self, _options: object) -> None:
+            return None
+
+        def __call__(self, batch: Batch, _options: object) -> Batch:
+            return batch
+
+    callback = Callback()
+    runtime = Runtime()
+    runtime.register_provider("test", "nondeterministic", "1", callback)
+    runtime._register_stateless_stream_provider(
+        "test",
+        "nondeterministic",
+        "1",
+        callback,
+        microbatch_invariant=True,
+        deterministic=False,
+        replay_safe=False,
+        supports_static_inputs=False,
+        array_rules=ProviderArrayRules(
+            supported_dtypes=("float64",),
+            safe_dtype_rule=CapabilityRule("array_api_safe_dtype", "1"),
+            shape_rules=(CapabilityRule("elementwise_broadcast", "1"),),
+        ),
+    )
+
+    builder = PipelineBuilder("nondeterministic").external(
+        "calc",
+        "test",
+        "nondeterministic",
+        "1",
+        {},
+    )
+    builder.compile_stream(runtime=runtime)
+    with pytest.raises(CalcFlowError, match="exactly-once"):
+        builder.compile_stream(
+            runtime=runtime,
+            requirements=StreamRequirements({"output": DeliveryGuarantee.EXACTLY_ONCE}),
+        )
 
 
 def test_registration_does_not_mutate_options() -> None:

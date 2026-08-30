@@ -21,6 +21,34 @@ engine or Studio capabilities.
   checkpoint/recovery continue to use the existing group-final lifecycle and
   state layout version 1.
 
+- 2026-08-29: Keep incremental window checkpoints self-contained across
+  epochs by carrying every retained immutable state segment named by the
+  snapshot inventory. Restart recovery no longer depends on an earlier
+  process retaining those segment bytes in memory.
+
+- 2026-08-29: Add stateless external stream providers (SCE-12 / DAL-144).
+  Rust gains the public `StreamOperatorLifecycle` proof: external
+  `StreamOperator` implementations default to `Unproven`, while trusted
+  factories may declare a stateless lifecycle with separate micro-batch
+  invariance, determinism, and replay-safety claims. Stream compilation
+  revalidates that proof for operators classified as stateless, and any plan
+  requesting exactly-once output also rejects such a provider when it is
+  nondeterministic or replay-unsafe. Checkpointed-stateful operators remain
+  eligible through their versioned checkpoint capability. An unproven
+  operator may still produce an ordinary stream plan, preserving the existing
+  two-stage contract, but a runner configured with checkpoints rejects that
+  plan during admission before opening connectors; exactly-once requires a
+  checkpoint runtime and therefore cannot admit the unproven operator. The
+  Python stateless bridge invokes its trusted callback once for each accepted
+  data micro-batch on a blocking worker, converts callback failures to provider
+  errors, and emits only after a post-callback cancellation check and output
+  validation. An already running `spawn_blocking` callback is not
+  preempted; cancellation observed after a successful callback discards its
+  result without emitting it. NumPy and JAX `expression@1` opt into this
+  lifecycle only for the conservative row-axis-independent subset: the
+  expression must depend on `x` and contain neither a function call nor matrix
+  multiplication. Their `table_matmul@1` registrations remain batch-only;
+  static-input matrix multiplication is deferred to SCE-13.
 - 2026-08-28: Add the native cross-section operator for complete-group
   rank, percentile, z-score, and demean across Rust, Python, and the
   regenerated contracts. `CrossSectionOperator` evaluates exact-time or
