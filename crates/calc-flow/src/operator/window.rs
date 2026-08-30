@@ -3615,6 +3615,64 @@ mod tests {
         .unwrap()
     }
 
+    fn checkpoint_segment_operator() -> WindowAggregateOperator {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+            Field::new("amount", DataType::Int64, false),
+        ]));
+        let spec = WindowSpec::tumbling("event_time", Duration::from_secs(60))
+            .unwrap()
+            .aggregate(AggregateFunction::Sum, "amount", "total")
+            .unwrap();
+        WindowAggregateOperator::new("window", schema, spec).unwrap()
+    }
+
+    #[test]
+    fn checkpoint_segment_assembly_rejects_duplicate_and_missing_retained_data() {
+        let mut operator = checkpoint_segment_operator();
+        operator.state.operator_id = Some("window".into());
+        let segment_id = "delta-00000000000000000001-00000000";
+        let segment = crate::StateSegment::new(vec![1, 2, 3]);
+        operator
+            .state
+            .retained_segments
+            .insert(segment_id.into(), segment.clone());
+        let duplicate = operator
+            .next_snapshot_segments(
+                &StateInventory::default(),
+                BTreeMap::from([(segment_id.into(), segment.clone())]),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            duplicate,
+            CalcFlowError::CheckpointMismatch { message }
+                if message == "window checkpoint produced a duplicate segment ID"
+        ));
+
+        operator.state.retained_segments.clear();
+        let descriptor = operator
+            .snapshot_segment_descriptor(
+                crate::Epoch::INITIAL,
+                segment_id,
+                SegmentKind::Delta,
+                &segment,
+            )
+            .unwrap();
+        let inventory = StateInventory::new(vec![descriptor]).unwrap();
+        let missing = operator
+            .next_snapshot_segments(&inventory, BTreeMap::new())
+            .unwrap_err();
+        assert!(matches!(
+            missing,
+            CalcFlowError::CheckpointMismatch { message }
+                if message == "window checkpoint segment data does not match its inventory"
+        ));
+    }
+
     #[test]
     fn output_chunking_preserves_rows_and_uses_consecutive_sequences() {
         let record = output_record(5);
