@@ -9,12 +9,36 @@ permissions:
   contents: read
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  # Never cancel default-branch runs: a cancelled latest run renders the
-  # README CI badge as failing even when every job was healthy.
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
+  cancel-in-progress: true
 jobs:
+  changes:
+    name: Classify changes
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - name: Classify changed paths
+        id: classify
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: >-
+          python scripts/classify_ci_changes.py
+          --base "$BASE_SHA" --head "$HEAD_SHA"
+          --github-output "$GITHUB_OUTPUT"
+
   process-tree:
     name: Windows process-tree cleanup
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
@@ -39,6 +63,8 @@ jobs:
   # RUST_TEST_THREADS is no longer forced to one here.
   rust-tests:
     name: Rust tests
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: windows-latest
     timeout-minutes: 60
     env:
@@ -60,6 +86,8 @@ jobs:
         run: python scripts/run_rust_tests.py --python-stress-runs 1
   python-tests:
     name: Python tests
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: windows-latest
     timeout-minutes: 45
     env:
@@ -91,6 +119,8 @@ jobs:
   # cmake build that no cfg lint justifies paying for here.
   clippy:
     name: Clippy (Windows cfg parity)
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -108,3 +138,31 @@ jobs:
           cargo clippy -p calc-flow-connectors --all-targets
           --no-default-features --features file,clickhouse,http,websocket,postgresql
           -- -D warnings
+  windows-gate:
+    name: Windows CI gate
+    if: always()
+    needs:
+      - changes
+      - process-tree
+      - rust-tests
+      - python-tests
+      - clippy
+    runs-on: ubuntu-latest
+    env:
+      DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+      CHANGES_RESULT: ${{ needs.changes.result }}
+      PROCESS_TREE_RESULT: ${{ needs.process-tree.result }}
+      RUST_TESTS_RESULT: ${{ needs.rust-tests.result }}
+      PYTHON_TESTS_RESULT: ${{ needs.python-tests.result }}
+      CLIPPY_RESULT: ${{ needs.clippy.result }}
+    steps:
+      - name: Require the selected CI path to pass
+        run: |
+          test "$CHANGES_RESULT" = success
+          if [ "$DOCS_ONLY" = true ]; then
+            exit 0
+          fi
+          test "$PROCESS_TREE_RESULT" = success
+          test "$RUST_TESTS_RESULT" = success
+          test "$PYTHON_TESTS_RESULT" = success
+          test "$CLIPPY_RESULT" = success
