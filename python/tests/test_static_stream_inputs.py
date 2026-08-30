@@ -37,7 +37,7 @@ class _Source:
         return SourceCapabilities(
             ReplayPositioning.UNSUPPORTED,
             SourceDeliveryCapability.LOSSY,
-            max_batch_rows=1,
+            max_batch_rows=2,
             max_batch_bytes=1024,
             native_watermarks=NativeWatermarkCapability.NEVER_EMITS,
         )
