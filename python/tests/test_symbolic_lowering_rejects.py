@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from calc_flow import ConfigError, Runtime
+from calc_flow import ConfigError, Runtime, register_jax, register_numpy
 from calc_flow.errors import CompileError
 from calc_flow.symbolic import (
     FeatureSet,
@@ -222,3 +222,159 @@ def test_attach_columns_requires_registered_matrix_provider() -> None:
         program.compile_batch(Runtime())
 
     assert "provider numpy:symbolic_matrix@1 is unavailable" in _reject_message(excinfo)
+
+
+def test_symbolic_matrix_rejects_mixed_provider_backends() -> None:
+    quotes = _plain()
+    weights = parameter(
+        "weights", kind="array", backend="numpy", dtype="float64", shape=(2, 1)
+    )
+    numpy_matrix = linalg.from_columns(quotes, columns=("x", "y"), backend="numpy")
+    jax_matrix = linalg.from_columns(quotes, columns=("x", "y"), backend="jax")
+    from calc_flow.symbolic import table
+
+    program = Program(
+        "mixed-matrix-backends",
+        inputs=(quotes, weights),
+        outputs=(
+            (
+                "signals",
+                table.attach_columns(
+                    quotes,
+                    linalg.matmul(numpy_matrix + jax_matrix, weights),
+                    names=("score",),
+                ),
+            ),
+        ),
+    )
+    runtime = Runtime()
+    register_numpy(runtime)
+    register_jax(runtime)
+
+    with pytest.raises(CompileError, match="implicit cross-backend conversion"):
+        program.compile_batch(runtime)
+
+
+def test_symbolic_matrix_rejects_mixed_column_selections() -> None:
+    quotes = _plain()
+    weights = parameter(
+        "weights", kind="array", backend="numpy", dtype="float64", shape=(1, 1)
+    )
+    x_matrix = linalg.from_columns(quotes, columns=("x",), backend="numpy")
+    y_matrix = linalg.from_columns(quotes, columns=("y",), backend="numpy")
+    from calc_flow.symbolic import table
+
+    program = Program(
+        "mixed-matrix-columns",
+        inputs=(quotes, weights),
+        outputs=(
+            (
+                "signals",
+                table.attach_columns(
+                    quotes,
+                    linalg.matmul(x_matrix + y_matrix, weights),
+                    names=("score",),
+                ),
+            ),
+        ),
+    )
+    runtime = Runtime()
+    register_numpy(runtime)
+
+    with pytest.raises(CompileError, match="one ordered column selection"):
+        program.compile_batch(runtime)
+
+
+def test_symbolic_matrix_rejects_undeclared_parameter_with_same_name() -> None:
+    quotes = _plain()
+    first = parameter(
+        "weights", kind="array", backend="numpy", dtype="float64", shape=(2, 1)
+    )
+    second = parameter(
+        "weights", kind="array", backend="numpy", dtype="float32", shape=(1, 1)
+    )
+    matrix = linalg.from_columns(quotes, columns=("x", "y"), backend="numpy")
+    from calc_flow.symbolic import table
+
+    program = Program(
+        "distinct-matrix-parameters",
+        inputs=(quotes, first),
+        outputs=(
+            (
+                "signals",
+                table.attach_columns(
+                    quotes,
+                    linalg.matmul(matrix, first) + second,
+                    names=("score",),
+                ),
+            ),
+        ),
+    )
+    runtime = Runtime()
+    register_numpy(runtime)
+
+    with pytest.raises(
+        CompileError, match="referenced by program outputs but not declared"
+    ):
+        program.compile_batch(runtime)
+
+
+def test_symbolic_matrix_rejects_non_weights_static_parameter() -> None:
+    quotes = _plain()
+    coefficients = parameter(
+        "coefficients",
+        kind="array",
+        backend="numpy",
+        dtype="float64",
+        shape=(2, 1),
+    )
+    matrix = linalg.from_columns(quotes, columns=("x", "y"), backend="numpy")
+    from calc_flow.symbolic import table
+
+    program = Program(
+        "named-matrix-parameter",
+        inputs=(quotes, coefficients),
+        outputs=(
+            (
+                "signals",
+                table.attach_columns(
+                    quotes,
+                    linalg.matmul(matrix, coefficients),
+                    names=("score",),
+                ),
+            ),
+        ),
+    )
+    runtime = Runtime()
+    register_numpy(runtime)
+
+    with pytest.raises(
+        CompileError,
+        match="requires the static array parameter name 'weights'",
+    ):
+        program.compile_batch(runtime)
+
+
+def test_symbolic_matrix_rejects_missing_static_parameter() -> None:
+    quotes = table_input(
+        "quotes",
+        schema=[Field("x", "float64", nullable=False)],
+    )
+    matrix = linalg.from_columns(quotes, columns=("x",), backend="numpy")
+    from calc_flow.symbolic import table
+
+    program = Program(
+        "missing-matrix-parameter",
+        inputs=(quotes,),
+        outputs=(
+            (
+                "signals",
+                table.attach_columns(quotes, matrix + 1.0, names=("score",)),
+            ),
+        ),
+    )
+    runtime = Runtime()
+    register_numpy(runtime)
+
+    with pytest.raises(CompileError, match="requires one static array parameter"):
+        program.compile_batch(runtime)

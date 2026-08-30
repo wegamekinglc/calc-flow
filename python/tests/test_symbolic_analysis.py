@@ -1471,6 +1471,78 @@ def test_array_true_division_and_weak_scalars_follow_provider_dtypes() -> None:
     assert "output jax_division array backend jax dtype float32" in explanation
 
 
+def test_array_unary_and_binary_dtypes_use_provider_or_fail_closed() -> None:
+    values = table_input(
+        "values",
+        schema=[Field("value", "float32", nullable=False)],
+    )
+    supported = linalg.from_columns(
+        values,
+        columns=("value",),
+        backend="numpy",
+    )
+    unsupported = linalg.from_columns(
+        values,
+        columns=("value",),
+        backend="unavailable",
+    )
+    program = Program(
+        "provider-array-dtype-proof",
+        inputs=(values,),
+        outputs=(
+            ("negated", -supported),
+            ("unsupported_negated", -unsupported),
+            ("unsupported_added", unsupported + unsupported),
+        ),
+    )
+
+    result = program.analyze(Runtime(), mode="batch")
+    paths = _issue_paths(result)
+
+    assert "outputs.unsupported_negated.neg.value.dtype" in paths
+    assert "outputs.unsupported_added.add.right.dtype" in paths
+    assert "output negated array backend numpy dtype float32" in program.explain(
+        Runtime(), mode="batch"
+    )
+
+
+def test_matmul_keeps_known_dtype_when_other_operand_is_unresolved() -> None:
+    values = table_input(
+        "values",
+        schema=[Field("value", "float64", nullable=False)],
+    )
+    numbers = linalg.from_columns(
+        values,
+        columns=("value",),
+        backend="numpy",
+    )
+    unresolved = ~numbers
+    weights = parameter(
+        "weights",
+        kind="array",
+        backend="numpy",
+        dtype="float64",
+        shape=(1, 1),
+    )
+    program = Program(
+        "partial-matmul-dtype-proof",
+        inputs=(values, weights),
+        outputs=(
+            ("left_unresolved", linalg.matmul(unresolved, weights)),
+            ("right_unresolved", linalg.matmul(numbers, unresolved)),
+        ),
+    )
+
+    result = program.analyze(Runtime(), mode="batch")
+    explanation = program.explain(Runtime(), mode="batch")
+    paths = _issue_paths(result)
+
+    assert "outputs.left_unresolved.matmul.left.not.value.dtype" in paths
+    assert "outputs.right_unresolved.matmul.right.shape[0]" in paths
+    assert "output left_unresolved array backend numpy dtype float64" in explanation
+    assert "output right_unresolved array backend numpy dtype float64" in explanation
+
+
 def test_stream_ordering_checks_field_existence_and_nullability() -> None:
     quotes = table_input(
         "quotes",

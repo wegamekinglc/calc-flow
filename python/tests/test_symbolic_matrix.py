@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -14,6 +15,7 @@ import calc_flow.array as array_module
 from calc_flow import (
     Batch,
     CompileError,
+    ConfigError,
     Cursor,
     Data,
     DisabledWatermarks,
@@ -84,6 +86,107 @@ class _CollectSink:
 
     async def close(self) -> None:
         return None
+
+
+def _symbolic_matrix_project(options: dict[str, object]) -> str:
+    return json.dumps(
+        {
+            "data_sources": [
+                {
+                    "data": [],
+                    "format": "inline_json",
+                    "id": "source_1",
+                    "input": "input",
+                },
+                {
+                    "data": [],
+                    "format": "inline_json",
+                    "id": "source_2",
+                    "input": "weights",
+                },
+            ],
+            "format_version": 3,
+            "id": "symbolic-matrix-provider-defense",
+            "name": "symbolic-matrix-provider-defense",
+            "runtime": {"mode": "batch", "options": {}},
+            "graph": {
+                "edges": [],
+                "name": "symbolic-matrix-provider-defense",
+                "nodes": [
+                    {
+                        "id": "matrix",
+                        "input_ports": [
+                            {"kind": "table", "name": "input", "required": True},
+                            {"kind": "array", "name": "weights", "required": True},
+                        ],
+                        "operator": {
+                            "kind": "external",
+                            "name": "symbolic_matrix",
+                            "options": options,
+                            "provider": "numpy",
+                            "version": "1",
+                        },
+                        "output_ports": [
+                            {"kind": "table", "name": "output", "required": True}
+                        ],
+                    }
+                ],
+            },
+        }
+    )
+
+
+def _invalid_symbolic_matrix_options(case: str) -> dict[str, object]:
+    options: dict[str, object] = {
+        "columns": ["x"],
+        "expression": {
+            "left": {"op": "input"},
+            "op": "matmul",
+            "right": {"op": "weights"},
+        },
+        "names": ["score"],
+    }
+    if case == "option-keys":
+        options.pop("names")
+    elif case == "columns-container":
+        options["columns"] = "x"
+    elif case == "columns-empty":
+        options["columns"] = []
+    elif case == "columns-type":
+        options["columns"] = [1]
+    elif case == "columns-empty-name":
+        options["columns"] = [""]
+    elif case == "columns-duplicate":
+        options["columns"] = ["x", "x"]
+    elif case == "tree-not-mapping":
+        options["expression"] = None
+    elif case == "tree-operation":
+        options["expression"] = {"op": "unsupported"}
+    elif case == "leaf-shape":
+        options["expression"] = {"extra": True, "op": "input"}
+    elif case == "literal-shape":
+        options["expression"] = {"op": "literal"}
+    elif case == "literal-type":
+        options["expression"] = {"op": "literal", "value": "secret"}
+    elif case == "unary-shape":
+        options["expression"] = {
+            "extra": True,
+            "op": "neg",
+            "value": {"op": "input"},
+        }
+    elif case == "binary-shape":
+        options["expression"] = {
+            "extra": True,
+            "left": {"op": "input"},
+            "op": "add",
+            "right": {"op": "weights"},
+        }
+    else:
+        expression: dict[str, object] = {"op": "input"}
+        for _ in range(25):
+            expression = {"op": "neg", "value": expression}
+        options["expression"] = expression
+    return options
 
 
 def test_symbolic_matrix_batch_attaches_selected_columns_in_order() -> None:
@@ -845,6 +948,157 @@ def test_symbolic_matrix_rejects_wrong_provider_row_count(
                 "input": Batch.from_pyarrow(
                     pa.table({"x": pa.array([1.0, 2.0], type=pa.float64())})
                 ),
+                "weights": Batch.from_array(
+                    np.ones((1, 1), dtype=np.float64), backend="numpy"
+                ),
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    (
+        ("option-keys", "expected columns, expression, and names"),
+        ("columns-container", "columns: expected unique non-empty strings"),
+        ("columns-empty", "columns: expected unique non-empty strings"),
+        ("columns-type", "columns: expected unique non-empty strings"),
+        ("columns-empty-name", "columns: expected unique non-empty strings"),
+        ("columns-duplicate", "columns: expected unique non-empty strings"),
+        ("tree-not-mapping", "node must be a mapping"),
+        ("tree-operation", "unsupported node 'unsupported'"),
+        ("leaf-shape", "unsupported node 'input'"),
+        ("literal-shape", "unsupported node 'literal'"),
+        ("literal-type", "literal must be finite"),
+        ("unary-shape", "unsupported node 'neg'"),
+        ("binary-shape", "unsupported node 'add'"),
+        ("tree-depth", "depth limit exceeded"),
+    ),
+)
+def test_symbolic_matrix_public_compile_rejects_malformed_provider_options(
+    case: str,
+    message: str,
+) -> None:
+    runtime = Runtime()
+    register_numpy(runtime)
+
+    with pytest.raises(ConfigError, match=message):
+        runtime.compile_batch_project(
+            _symbolic_matrix_project(_invalid_symbolic_matrix_options(case))
+        )
+
+
+def test_symbolic_matrix_public_execution_rejects_unresolved_output_dtype() -> None:
+    runtime = Runtime()
+    register_numpy(runtime)
+    plan = runtime.compile_batch_project(
+        _symbolic_matrix_project(
+            {
+                "columns": ["x"],
+                "expression": {"op": "literal", "value": True},
+                "names": ["score"],
+            }
+        )
+    )
+
+    with pytest.raises(Exception, match="output.dtype: unresolved dtype"):
+        plan.execute(
+            {
+                "input": Batch.from_pyarrow(pa.table({"x": [1.0, 2.0]})),
+                "weights": Batch.from_array(
+                    np.ones((1, 1), dtype=np.float64), backend="numpy"
+                ),
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    (
+        ("input-kind", r'input" \(matrix.input\) expects a Table batch'),
+        ("weights-backend", "weights.backend: expected numpy"),
+    ),
+)
+def test_symbolic_matrix_public_execution_rejects_malformed_inputs(
+    case: str,
+    message: str,
+) -> None:
+    runtime = Runtime()
+    register_numpy(runtime)
+    plan = runtime.compile_batch_project(
+        _symbolic_matrix_project(
+            {
+                "columns": ["x"],
+                "expression": {
+                    "left": {"op": "input"},
+                    "op": "matmul",
+                    "right": {"op": "weights"},
+                },
+                "names": ["score"],
+            }
+        )
+    )
+    table_batch = Batch.from_pyarrow(pa.table({"x": [1.0, 2.0]}))
+    array_batch = Batch.from_array(np.ones((1, 1), dtype=np.float64), backend="numpy")
+    if case == "input-kind":
+        inputs = {"input": array_batch, "weights": array_batch}
+    else:
+        jnp = pytest.importorskip("jax.numpy")
+        inputs = {
+            "input": table_batch,
+            "weights": Batch.from_array(jnp.ones((1, 1)), backend="jax"),
+        }
+
+    with pytest.raises(Exception, match=message):
+        plan.execute(inputs)
+
+
+@pytest.mark.parametrize(
+    ("shape", "message"),
+    (
+        ((2,), "output.rank: expected rank two; received 1"),
+        ((2, 2), "output.width: expected 1, received 2"),
+    ),
+)
+def test_symbolic_matrix_public_execution_rejects_provider_output_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    shape: tuple[int, ...],
+    message: str,
+) -> None:
+    source = table_input(
+        "input",
+        schema=[Field("x", "float64", nullable=True)],
+    )
+    weights = parameter(
+        "weights",
+        kind="array",
+        backend="numpy",
+        dtype="float64",
+        shape=(1, 1),
+    )
+    matrix = linalg.from_columns(source, columns=("x",), backend="numpy")
+    program = Program(
+        "symbolic-matrix-provider-shape",
+        inputs=(source, weights),
+        outputs=(
+            (
+                "signals",
+                table.attach_columns(
+                    source,
+                    linalg.matmul(matrix, weights),
+                    names=("score",),
+                ),
+            ),
+        ),
+    )
+    runtime = Runtime()
+    register_numpy(runtime)
+    plan = program.compile_batch(runtime)
+    monkeypatch.setattr(np, "matmul", lambda _left, _right: np.ones(shape))
+
+    with pytest.raises(Exception, match=message):
+        plan.execute(
+            {
+                "input": Batch.from_pyarrow(pa.table({"x": [1.0, 2.0]})),
                 "weights": Batch.from_array(
                     np.ones((1, 1), dtype=np.float64), backend="numpy"
                 ),

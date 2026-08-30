@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import calc_flow
+import calc_flow.array as array_module
 from calc_flow import (
     CalcFlowError,
     OperatorCapability,
@@ -487,6 +488,70 @@ def test_compound_registration_exposes_a_real_partial_success() -> None:
         "expression",
         "table_matmul",
     )
+
+
+def test_register_numpy_rejects_invalid_matrix_array_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = Runtime()
+    monkeypatch.setattr(
+        array_module,
+        "_NUMPY_MATRIX_STREAM_ARRAY_RULES",
+        object(),
+    )
+
+    with pytest.raises(
+        TypeError,
+        match="array_rules must be a ProviderArrayRules; found object",
+    ):
+        register_numpy(runtime)
+
+    assert tuple(provider.name for provider in runtime.capabilities().providers) == (
+        "expression",
+        "symbolic_matrix",
+        "table_matmul",
+    )
+
+
+def test_register_numpy_rejects_non_mapping_matrix_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def register_as_non_mapping(
+        runtime: Runtime,
+        provider: str,
+        name: str,
+        version: str,
+        callback: object,
+        **options: object,
+    ) -> None:
+        options_schema = options.get("options_schema")
+        assert options_schema is None or isinstance(
+            options_schema, ProviderOptionsSchema
+        )
+        runtime.register_provider(
+            provider,
+            name,
+            version,
+            callback,
+            options_schema=options_schema,
+            accepts_context=bool(options.get("accepts_context", False)),
+        )
+
+    monkeypatch.setattr(Runtime, "_register_mapping_provider", register_as_non_mapping)
+    runtime = Runtime()
+
+    with pytest.raises(
+        ValueError,
+        match="requires an existing mapping provider numpy:symbolic_matrix@1",
+    ):
+        register_numpy(runtime)
+
+    symbolic_matrix = next(
+        provider
+        for provider in runtime.capabilities().providers
+        if provider.name == "symbolic_matrix"
+    )
+    assert symbolic_matrix.modes == ("batch",)
 
 
 def test_capability_values_are_top_level_public_exports() -> None:
