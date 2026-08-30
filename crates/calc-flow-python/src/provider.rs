@@ -55,21 +55,38 @@ impl TestPlacementGate {
 
         self.placement_calls.fetch_add(1, Ordering::AcqRel);
         let actual_thread = std::thread::current().id();
+        self.notify_entered(actual_thread)?;
+        self.ensure_blocking_worker(actual_thread)?;
+        self.wait_for_release()?;
+        self.inject_failure()
+    }
+
+    fn notify_entered(&self, actual_thread: std::thread::ThreadId) -> Result<(), String> {
         self.entered
             .lock()
             .map_err(|_| "placement gate entered lock was poisoned".to_owned())?
             .take()
             .ok_or_else(|| "placement gate entered more than once".to_owned())?
             .send(actual_thread)
-            .map_err(|_| "placement gate observer was dropped".to_owned())?;
+            .map_err(|_| "placement gate observer was dropped".to_owned())
+    }
+
+    fn ensure_blocking_worker(&self, actual_thread: std::thread::ThreadId) -> Result<(), String> {
         if actual_thread == self.runtime_thread {
             return Err("static placement ran on the Tokio runtime thread".into());
         }
+        Ok(())
+    }
+
+    fn wait_for_release(&self) -> Result<(), String> {
         self.release
             .lock()
             .map_err(|_| "placement gate release lock was poisoned".to_owned())?
             .recv()
-            .map_err(|_| "placement gate release sender was dropped".to_owned())?;
+            .map_err(|_| "placement gate release sender was dropped".to_owned())
+    }
+
+    fn inject_failure(&self) -> Result<(), String> {
         if self.fail_after_release {
             return Err("injected static placement failure".into());
         }
@@ -428,6 +445,60 @@ struct StreamMappingInputs {
     unplaced: BatchMap,
 }
 
+struct StreamMappingWork {
+    callback: Arc<PythonRoot>,
+    batches: BatchMap,
+    unplaced: BatchMap,
+    input_contracts: Vec<PortContract>,
+    output_contracts: Vec<PortContract>,
+    output_ports: Vec<calc_flow::Port>,
+    options_json: String,
+    #[cfg(test)]
+    placement_gate: Option<Arc<TestPlacementGate>>,
+}
+
+impl StreamMappingWork {
+    fn spawn(self) -> tokio::task::JoinHandle<Result<(BatchMap, BatchMap), String>> {
+        tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            self.enter_placement_gate()?;
+            Python::attach(|py| self.call(py)).map_err(|error| error.to_string())
+        })
+    }
+
+    #[cfg(test)]
+    fn enter_placement_gate(&self) -> Result<(), String> {
+        if self.unplaced.is_empty() {
+            return Ok(());
+        }
+        if let Some(gate) = &self.placement_gate {
+            gate.enter()?;
+        }
+        Ok(())
+    }
+
+    fn call(self, py: Python<'_>) -> PyResult<(BatchMap, BatchMap)> {
+        let mut batches = self.batches;
+        let mut cache_entries = BatchMap::new();
+        for (name, latched) in self.unplaced {
+            let (placed, cached) = place_static_input(py, &name, &latched)?;
+            batches.insert(name.clone(), placed);
+            cache_entries.insert(name, cached);
+        }
+        call_python_operator_mapping(
+            py,
+            &self.callback,
+            &batches,
+            &self.input_contracts,
+            &self.output_contracts,
+            &self.output_ports,
+            &self.options_json,
+            None,
+        )
+        .map(|result| (result, cache_entries))
+    }
+}
+
 impl PythonOperator {
     fn provider_error(&self, message: impl Into<String>) -> calc_flow::CalcFlowError {
         calc_flow::CalcFlowError::ExternalProvider {
@@ -438,6 +509,47 @@ impl PythonOperator {
         }
     }
 
+    fn stream_mapping_contracts(
+        &self,
+    ) -> calc_flow::Result<(Vec<PortContract>, Vec<PortContract>)> {
+        let PythonProviderMode::Mapping { inputs, outputs } = &self.mode else {
+            return Err(self.provider_error("stream mapping mode is unavailable"));
+        };
+        Ok((inputs.clone(), outputs.clone()))
+    }
+
+    fn stream_mapping_worker(
+        &self,
+        batches: BatchMap,
+        unplaced: BatchMap,
+        input_contracts: Vec<PortContract>,
+        output_contracts: Vec<PortContract>,
+    ) -> tokio::task::JoinHandle<Result<(BatchMap, BatchMap), String>> {
+        StreamMappingWork {
+            callback: Arc::clone(&self.callback),
+            batches,
+            unplaced,
+            input_contracts,
+            output_contracts,
+            output_ports: self.outputs.clone(),
+            options_json: self.options_json.clone(),
+            #[cfg(test)]
+            placement_gate: self.placement_gate.clone(),
+        }
+        .spawn()
+    }
+
+    fn commit_static_inputs(&mut self, cache_entries: BatchMap) {
+        if cache_entries.is_empty() {
+            return;
+        }
+        self.placed_static_inputs.extend(cache_entries);
+        #[cfg(test)]
+        if let Some(gate) = &self.placement_gate {
+            gate.record_cache_commit();
+        }
+    }
+
     async fn process_stream_mapping(
         &mut self,
         ingress: &str,
@@ -445,15 +557,7 @@ impl PythonOperator {
         context: &calc_flow::StreamOperatorContext<'_>,
         output: &mut dyn calc_flow::StreamCollector,
     ) -> calc_flow::Result<()> {
-        let PythonProviderMode::Mapping {
-            inputs: input_contracts,
-            outputs: output_contracts,
-        } = &self.mode
-        else {
-            return Err(self.provider_error("stream mapping mode is unavailable"));
-        };
-        let input_contracts = input_contracts.clone();
-        let output_contracts = output_contracts.clone();
+        let (input_contracts, output_contracts) = self.stream_mapping_contracts()?;
         let StreamMappingInputs { batches, unplaced } = stream_mapping_inputs(
             ingress,
             batch,
@@ -462,71 +566,14 @@ impl PythonOperator {
             &self.placed_static_inputs,
         )
         .map_err(|message| self.provider_error(message))?;
-        let callback = Arc::clone(&self.callback);
-        let options_json = self.options_json.clone();
-        let output_ports = self.outputs.clone();
-        #[cfg(test)]
-        let commit_gate = self.placement_gate.clone();
-        let worker = if unplaced.is_empty() {
-            tokio::task::spawn_blocking(move || {
-                Python::attach(|py| {
-                    call_python_operator_mapping(
-                        py,
-                        &callback,
-                        &batches,
-                        &input_contracts,
-                        &output_contracts,
-                        &output_ports,
-                        &options_json,
-                        None,
-                    )
-                    .map(|result| (result, BatchMap::new()))
-                })
-                .map_err(|error| error.to_string())
-            })
-        } else {
-            #[cfg(test)]
-            let worker_gate = self.placement_gate.clone();
-            tokio::task::spawn_blocking(move || {
-                #[cfg(test)]
-                if let Some(gate) = worker_gate {
-                    gate.enter()?;
-                }
-                Python::attach(|py| {
-                    let mut batches = batches;
-                    let mut cache_entries = BatchMap::new();
-                    for (name, latched) in unplaced {
-                        let (placed, cached) = place_static_input(py, &name, &latched)?;
-                        batches.insert(name.clone(), placed);
-                        cache_entries.insert(name, cached);
-                    }
-                    call_python_operator_mapping(
-                        py,
-                        &callback,
-                        &batches,
-                        &input_contracts,
-                        &output_contracts,
-                        &output_ports,
-                        &options_json,
-                        None,
-                    )
-                    .map(|result| (result, cache_entries))
-                })
-                .map_err(|error| error.to_string())
-            })
-        };
+        let worker =
+            self.stream_mapping_worker(batches, unplaced, input_contracts, output_contracts);
         let (result, cache_entries) = worker
             .await
             .map_err(|_| self.provider_error("stream callback worker terminated"))?
             .map_err(|message| self.provider_error(message))?;
         context.check_cancelled()?;
-        if !cache_entries.is_empty() {
-            self.placed_static_inputs.extend(cache_entries);
-            #[cfg(test)]
-            if let Some(gate) = commit_gate {
-                gate.record_cache_commit();
-            }
-        }
+        self.commit_static_inputs(cache_entries);
         for (port, batch) in result {
             output.emit(&port, batch).await?;
         }

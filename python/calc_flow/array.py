@@ -881,42 +881,64 @@ def _symbolic_result_dtype(
     import numpy as np
 
     matrix = operation == "matmul"
-    left_value = (
-        _symbolic_typed_operand(backend, left, matrix=matrix)
-        if isinstance(left, str)
-        else left
-    )
-    right_value = (
-        _symbolic_typed_operand(backend, right, matrix=matrix)
-        if isinstance(right, str)
-        else right
-    )
-    typed_values = tuple(
-        value for value in (left_value, right_value) if hasattr(value, "dtype")
-    )
-    if len(typed_values) == 2:
-        if backend == "numpy":
-            namespace = np
-        else:
-            import jax.numpy as jnp
-
-            namespace = jnp
-        common = namespace.result_type(
-            typed_values[0].dtype,
-            typed_values[1].dtype,
-        )
-        if not all(
-            namespace.can_cast(value.dtype, common, casting="safe")
-            for value in typed_values
-        ):
-            raise TypeError("the provider has no safe common dtype")
-    if operation in _SYMBOLIC_UNARY:
-        result = _SYMBOLIC_UNARY[operation](left_value)
-    elif operation == "matmul":
-        result = operator.matmul(left_value, right_value)
-    else:
-        result = _SYMBOLIC_BINARY[operation](left_value, right_value)
+    left_value = _symbolic_operand(backend, left, matrix=matrix)
+    right_value = _symbolic_operand(backend, right, matrix=matrix)
+    _validate_symbolic_common_dtype(backend, left_value, right_value)
+    result = _apply_symbolic_primitive(operation, left_value, right_value)
     return np.dtype(result.dtype).name
+
+
+def _symbolic_operand(
+    backend: str,
+    value: str | bool | int | float | None,
+    *,
+    matrix: bool,
+) -> object:
+    if isinstance(value, str):
+        return _symbolic_typed_operand(backend, value, matrix=matrix)
+    return value
+
+
+def _symbolic_dtype_namespace(backend: str) -> object:
+    if backend == "numpy":
+        import numpy as np
+
+        return np
+    import jax.numpy as jnp
+
+    return jnp
+
+
+def _validate_symbolic_common_dtype(
+    backend: str,
+    left: object,
+    right: object,
+) -> None:
+    typed_values = tuple(value for value in (left, right) if hasattr(value, "dtype"))
+    if len(typed_values) != 2:
+        return
+    namespace = _symbolic_dtype_namespace(backend)
+    common = namespace.result_type(
+        typed_values[0].dtype,
+        typed_values[1].dtype,
+    )
+    if not all(
+        namespace.can_cast(value.dtype, common, casting="safe")
+        for value in typed_values
+    ):
+        raise TypeError("the provider has no safe common dtype")
+
+
+def _apply_symbolic_primitive(
+    operation: str,
+    left: object,
+    right: object,
+) -> object:
+    if operation in _SYMBOLIC_UNARY:
+        return _SYMBOLIC_UNARY[operation](left)
+    if operation == "matmul":
+        return operator.matmul(left, right)
+    return _SYMBOLIC_BINARY[operation](left, right)
 
 
 def _raise_invalid_symbolic_node(node: Mapping[str, object]) -> Never:

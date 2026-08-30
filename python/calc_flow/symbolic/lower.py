@@ -1078,8 +1078,12 @@ def _merge_matrix_expression(
     )
 
 
-def _matrix_expression(node: Node, path: str, /) -> _MatrixExpression:
-    operation = node.op.name
+def _matrix_leaf_expression(
+    node: Node,
+    path: str,
+    operation: str,
+    /,
+) -> _MatrixExpression | None:
     if operation == "from_columns":
         return _MatrixExpression(
             _cstr(node.attr("backend")),
@@ -1118,19 +1122,40 @@ def _matrix_expression(node: Node, path: str, /) -> _MatrixExpression:
             True,
             {"op": "literal", "value": _matrix_literal(node, path)},
         )
-    if operation not in _MATRIX_PRIMITIVES:
-        _reject_primitive(path, node)
-    if operation in ("neg", "not"):
-        value = _matrix_expression(node.args[0], f"{path}.{operation}.value")
-        return _MatrixExpression(
-            value.backend,
-            value.columns,
-            value.source_digests,
-            value.parameter,
-            value.matmul_count,
-            value.matmul_rhs_is_weights,
-            {"op": operation, "value": value.tree},
-        )
+    return None
+
+
+def _matrix_unary_expression(
+    node: Node,
+    path: str,
+    operation: str,
+    /,
+) -> _MatrixExpression:
+    value = _matrix_expression(node.args[0], f"{path}.{operation}.value")
+    return _MatrixExpression(
+        value.backend,
+        value.columns,
+        value.source_digests,
+        value.parameter,
+        value.matmul_count,
+        value.matmul_rhs_is_weights,
+        {"op": operation, "value": value.tree},
+    )
+
+
+def _matrix_rhs_is_weights(node: Node, operation: str, /) -> bool:
+    return operation != "matmul" or (
+        node.args[1].op.name == "parameter"
+        and _cstr(node.args[1].attr("name")) == "weights"
+    )
+
+
+def _matrix_binary_expression(
+    node: Node,
+    path: str,
+    operation: str,
+    /,
+) -> _MatrixExpression:
     left = _matrix_expression(node.args[0], f"{path}.{operation}.left")
     right = _matrix_expression(node.args[1], f"{path}.{operation}.right")
     backend, columns, parameter = _merge_matrix_expression(left, right, path)
@@ -1142,15 +1167,21 @@ def _matrix_expression(node: Node, path: str, /) -> _MatrixExpression:
         left.matmul_count + right.matmul_count + (operation == "matmul"),
         left.matmul_rhs_is_weights
         and right.matmul_rhs_is_weights
-        and (
-            operation != "matmul"
-            or (
-                node.args[1].op.name == "parameter"
-                and _cstr(node.args[1].attr("name")) == "weights"
-            )
-        ),
+        and _matrix_rhs_is_weights(node, operation),
         {"left": left.tree, "op": operation, "right": right.tree},
     )
+
+
+def _matrix_expression(node: Node, path: str, /) -> _MatrixExpression:
+    operation = node.op.name
+    leaf = _matrix_leaf_expression(node, path, operation)
+    if leaf is not None:
+        return leaf
+    if operation not in _MATRIX_PRIMITIVES:
+        _reject_primitive(path, node)
+    if operation in ("neg", "not"):
+        return _matrix_unary_expression(node, path, operation)
+    return _matrix_binary_expression(node, path, operation)
 
 
 def _static_array_declaration(node: Node, /) -> dict[str, object]:
